@@ -1,9 +1,8 @@
 # Mondrian
 
-![Mondrian Logo](docs/assets/logo.svg)
+![Mondrian Logo](/crates/mondrian-app/assets/app-ico.png)
 
-> **专业级非线性视频编辑器 · AI 增强生产力工具**  
-> _对标 Adobe Premiere Pro · Final Cut Pro · 剪映_
+> **专业级非线性视频编辑器 · AI 增强生产力工具**
 
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)](https://rustup.rs)
@@ -23,9 +22,7 @@
 
 ### 核心价值
 
-Mondrian = 工业级非线编能力 + AI Agent 导演模式 + 可复用资产生态
-
-我们不做 AI 模型，我们做**最好的 AI 原生视频创作基础设施**。
+Mondrian = 工业级非线编能力 + AI 融合生态 + 可复用资产生态
 
 ---
 
@@ -81,7 +78,7 @@ Mondrian = 工业级非线编能力 + AI Agent 导演模式 + 可复用资产生
 ### 环境要求
 
 - Rust 1.75+
-- FFmpeg 6.x（动态链接）
+- FFmpeg 7.x（动态链接）
 - Vulkan / Metal / DirectX 12 驱动
 - Windows 11 / macOS 13+ / Ubuntu 22.04+
 
