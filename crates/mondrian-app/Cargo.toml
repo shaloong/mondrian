@@ -1,0 +1,48 @@
+[package]
+name        = "mondrian-app"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+
+[[bin]]
+name = "mondrian"
+path = "src/main.rs"
+
+[dependencies]
+mondrian-core     = { workspace = true }
+mondrian-media    = { workspace = true }
+mondrian-timeline = { workspace = true }
+mondrian-renderer = { workspace = true }
+mondrian-assets   = { workspace = true }
+mondrian-ai       = { workspace = true }
+mondrian-effects  = { workspace = true }
+mondrian-export   = { workspace = true }
+
+# UI（Phase 1: egui）
+egui      = "0.29"
+eframe    = { version = "0.29", features = ["wgpu"] }
+egui-wgpu = "0.29"
+rfd       = "0.14"
+image     = { workspace = true }
+usvg = "0.45"
+resvg = "0.45"
+tiny-skia = "0.11"
+
+# 异步
+tokio     = { workspace = true }
+# 日志
+tracing           = { workspace = true }
+tracing-subscriber = { workspace = true }
+# 错误
+anyhow    = { workspace = true }
+# 序列化
+serde     = { workspace = true }
+serde_json = { workspace = true }
+# 并发
+parking_lot = { workspace = true }
+zip = "0.6"
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
+image = { workspace = true, features = ["ico"] }

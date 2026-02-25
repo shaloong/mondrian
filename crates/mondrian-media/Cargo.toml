@@ -1,0 +1,49 @@
+[package]
+name        = "mondrian-media"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+
+[dependencies]
+mondrian-core = { workspace = true }
+
+# FFmpeg 绑定（需要系统安装 FFmpeg 7.x+）
+ffmpeg-next = "7"
+
+# 音频
+cpal    = "0.15"    # 跨平台音频输出
+rubato  = "0.15"    # 高质量重采样
+
+# 异步
+tokio   = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+
+# 并发
+rayon          = { workspace = true }
+parking_lot    = { workspace = true }
+crossbeam-channel = { workspace = true }
+dashmap        = { workspace = true }
+
+# 错误处理
+thiserror  = { workspace = true }
+anyhow     = { workspace = true }
+
+# 序列化
+serde      = { workspace = true }
+serde_json = { workspace = true }
+
+# 日志
+tracing    = { workspace = true }
+
+# 文件
+walkdir    = { workspace = true }
+tempfile   = { workspace = true }
+
+# LRU 缓存
+lru = "0.12"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+tempfile  = "3"

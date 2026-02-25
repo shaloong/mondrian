@@ -1,0 +1,1091 @@
+use crate::{
+    app::AppState,
+    ui::theme::{self, palette},
+};
+use egui::{Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2};
+use mondrian_core::types::{ClipId, Rational, TimeCode, TrackId};
+use std::collections::HashSet;
+
+// ─── 常量 ───────────────────────────────────
+const TRACK_HEIGHT: f32 = 40.0;
+const RULER_HEIGHT: f32 = 24.0;
+const TRACK_LABEL_W: f32 = 80.0;
+const MIN_PIXELS_PER_FRAME: f32 = 0.02;
+const MAX_PIXELS_PER_FRAME: f32 = 64.0;
+const DRAG_SNAP_PIXELS: f32 = 10.0;
+
+// ─── TimelinePanel ──────────────────────────
+
+#[derive(Default)]
+pub struct TimelinePanel {
+    /// 水平缩放：每帧占多少像素
+    pixels_per_frame: f32,
+    /// 水平滚动偏移（帧数）
+    scroll_offset_frames: f64,
+    clip_drag: Option<ClipDragState>,
+    clip_drag_moved: bool,
+    selected_clips: HashSet<ClipSelection>,
+    track_area_bounds: Option<Rect>,
+    marquee_anchor: Option<Pos2>,
+    marquee_current: Option<Pos2>,
+    marquee_additive: bool,
+    active_tool: TimelineTool,
+    snap_enabled: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum TimelineTool {
+    #[default]
+    Select,
+    Blade,
+}
+
+#[derive(Clone, Copy)]
+struct ClipDragState {
+    clip_id: ClipId,
+    is_video_track: bool,
+    pointer_offset_frames: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ClipSelection {
+    track_id: mondrian_core::types::TrackId,
+    is_video_track: bool,
+    clip_id: ClipId,
+}
+
+#[derive(Clone, Copy)]
+struct ClipVisual {
+    selection: ClipSelection,
+    rect: Rect,
+}
+
+impl TimelinePanel {
+    pub fn show(&mut self, ui: &mut Ui, state: &mut AppState) {
+        // 初始化默认缩放
+        if self.pixels_per_frame == 0.0 {
+            self.pixels_per_frame = 4.0;
+            self.snap_enabled = true;
+        }
+
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                self.draw_timeline_tools_toolbar(ui, state);
+            });
+
+            ui.separator();
+
+            if state.sequence.is_none() {
+                ui.centered_and_justified(|ui| {
+                    ui.label(
+                        egui::RichText::new("暂无项目 — 文件 > 新建项目")
+                            .color(palette::text_muted()),
+                    );
+                });
+                return;
+            }
+
+            // ── 水平滚动容器（标尺+轨道同轴）────
+            egui::ScrollArea::horizontal().id_salt("timeline_hscroll").show_viewport(
+                ui,
+                |ui, viewport| {
+                    let content_w = self.timeline_content_width(state).max(viewport.width());
+                    ui.set_min_width(content_w);
+
+                    self.scroll_offset_frames =
+                        (viewport.left().max(0.0) / self.pixels_per_frame) as f64;
+
+                    // ── 时间标尺 ─────────────────────
+                    let ruler_resp = self.draw_ruler(ui, state);
+                    if let Some(clicked_frame) = ruler_resp {
+                        state.seek(clicked_frame);
+                    }
+
+                    // ── 轨道区域（仅垂直滚动）────────
+                    egui::ScrollArea::vertical().id_salt("timeline_vscroll").show(ui, |ui| {
+                        if !ui.ctx().wants_keyboard_input() {
+                            if ui.input(|i| {
+                                i.key_pressed(egui::Key::I)
+                                    && !i.modifiers.command
+                                    && !i.modifiers.alt
+                            }) {
+                                state.mark_in_at_current_frame();
+                            }
+
+                            if ui.input(|i| {
+                                i.key_pressed(egui::Key::O)
+                                    && !i.modifiers.command
+                                    && !i.modifiers.alt
+                            }) {
+                                state.mark_out_at_current_frame();
+                            }
+
+                            if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::B)) {
+                                let _ = state.split_at_playhead();
+                            }
+                        }
+
+                        let dropped = self.draw_tracks(ui, state);
+                        if ui.input(|i| i.pointer.any_released()) && !dropped {
+                            state.clear_dragging_asset();
+                        }
+
+                        if ui.input(|i| {
+                            i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)
+                        }) {
+                            let ripple = ui.input(|i| i.modifiers.shift);
+                            self.delete_selected_clips(state, ripple);
+                        }
+
+                        if ui.input(|i| i.pointer.any_released()) {
+                            if self.clip_drag.take().is_some() {
+                                let pointer = ui.input(|i| i.pointer.interact_pos());
+                                let dropped_outside = match (pointer, self.track_area_bounds) {
+                                    (Some(p), Some(bounds)) => !bounds.contains(p),
+                                    _ => false,
+                                };
+
+                                if dropped_outside && self.clip_drag_moved {
+                                    self.delete_selected_clips(state, false);
+                                } else if self.clip_drag_moved {
+                                    let _ = state.save_project();
+                                }
+                            }
+                            self.clip_drag_moved = false;
+                        }
+                    });
+                },
+            );
+        });
+    }
+
+    fn timeline_content_width(&self, state: &AppState) -> f32 {
+        let Some(seq) = state.sequence.as_ref() else {
+            return TRACK_LABEL_W + 1200.0;
+        };
+
+        let fps = seq.settings.frame_rate.to_f64().round() as i64;
+        let right_padding_frames = (fps.max(1) * 20).max(240);
+        let max_frame =
+            seq.total_duration().frame.max(state.current_frame()).max(240) + right_padding_frames;
+
+        TRACK_LABEL_W + max_frame as f32 * self.pixels_per_frame
+    }
+
+    fn draw_timeline_tools_toolbar(&mut self, ui: &mut Ui, state: &mut AppState) {
+        ui.horizontal(|ui| {
+            if theme::icon_toggle_button(
+                ui,
+                [24.0, 22.0],
+                theme::UiIcon::Cursor,
+                self.active_tool == TimelineTool::Select,
+            )
+            .clicked()
+            {
+                self.active_tool = TimelineTool::Select;
+            }
+            if theme::icon_toggle_button(
+                ui,
+                [24.0, 22.0],
+                theme::UiIcon::Scissors,
+                self.active_tool == TimelineTool::Blade,
+            )
+            .clicked()
+            {
+                self.active_tool = TimelineTool::Blade;
+            }
+            let _ = theme::icon_toggle_button(
+                ui,
+                [24.0, 22.0],
+                theme::UiIcon::Magnet,
+                self.snap_enabled,
+            )
+            .on_hover_text("自动吸附")
+            .clicked()
+            .then(|| self.snap_enabled = !self.snap_enabled);
+            ui.separator();
+
+            if ui.button("标记入点 (I)").clicked() {
+                state.mark_in_at_current_frame();
+            }
+            if ui.button("标记出点 (O)").clicked() {
+                state.mark_out_at_current_frame();
+            }
+
+            if ui.button("分割 (Ctrl+B)").clicked() {
+                let _ = state.split_at_playhead();
+            }
+
+            ui.separator();
+            let out_label = state
+                .out_point_frame()
+                .map(|f| f.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            ui.label(format!("In:{}  Out:{}", state.in_point_frame(), out_label));
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add(
+                    egui::Slider::new(
+                        &mut self.pixels_per_frame,
+                        MIN_PIXELS_PER_FRAME..=MAX_PIXELS_PER_FRAME,
+                    )
+                    .logarithmic(true)
+                    .show_value(false),
+                );
+                ui.label("缩放:");
+            });
+        });
+    }
+
+    // ─── 时间标尺 ─────────────────────────────
+    /// 返回 Some(frame) 若用户点击或拖拽了标尺
+    fn draw_ruler(&self, ui: &mut Ui, state: &AppState) -> Option<i64> {
+        let available_w = ui.available_width() - TRACK_LABEL_W;
+        let (rect, resp) = ui.allocate_exact_size(
+            Vec2::new(ui.available_width(), RULER_HEIGHT),
+            Sense::click_and_drag(), // 支持拖拽以实现标尺 scrub
+        );
+
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 0.0, palette::bg_surface());
+
+        if let Some(out_point) = state.out_point_frame() {
+            let in_point = state.in_point_frame().max(0);
+            let out_point = out_point.max(in_point);
+            let x0 = rect.left() + TRACK_LABEL_W + in_point as f32 * self.pixels_per_frame;
+            let x1 = rect.left() + TRACK_LABEL_W + (out_point + 1) as f32 * self.pixels_per_frame;
+            let range_rect = Rect::from_min_max(
+                Pos2::new(x0.max(rect.left() + TRACK_LABEL_W), rect.top()),
+                Pos2::new(x1.min(rect.right()), rect.bottom()),
+            );
+            if range_rect.min.x < range_rect.max.x {
+                painter.rect_filled(
+                    range_rect,
+                    0.0,
+                    palette::interaction_highlight().gamma_multiply(0.28),
+                );
+            }
+        }
+
+        let fps = state
+            .sequence
+            .as_ref()
+            .map(|s| s.settings.frame_rate)
+            .unwrap_or(Rational::new(24, 1));
+        let ruler_scale = choose_ruler_scale(self.pixels_per_frame, fps);
+
+        let start_frame = self.scroll_offset_frames as i64;
+        let end_frame = start_frame
+            + (available_w / self.pixels_per_frame) as i64
+            + ruler_scale.major_step_frames;
+
+        // 次刻度（更细分辨率）
+        if ruler_scale.minor_step_frames < ruler_scale.major_step_frames {
+            let mut f =
+                (start_frame / ruler_scale.minor_step_frames) * ruler_scale.minor_step_frames;
+            while f <= end_frame {
+                if f % ruler_scale.major_step_frames != 0 {
+                    let x = rect.left() + TRACK_LABEL_W + f as f32 * self.pixels_per_frame;
+                    if x >= rect.left() + TRACK_LABEL_W && x <= rect.right() {
+                        painter.line_segment(
+                            [
+                                Pos2::new(x, rect.bottom() - 6.0),
+                                Pos2::new(x, rect.bottom()),
+                            ],
+                            Stroke::new(1.0, palette::border_subtle().gamma_multiply(0.75)),
+                        );
+                    }
+                }
+                f += ruler_scale.minor_step_frames;
+            }
+        }
+
+        // 主刻度 + 标签（按缩放自动切换帧/秒/分钟）
+        let mut f = (start_frame / ruler_scale.major_step_frames) * ruler_scale.major_step_frames;
+        while f <= end_frame {
+            let x = rect.left() + TRACK_LABEL_W + f as f32 * self.pixels_per_frame;
+            if x >= rect.left() + TRACK_LABEL_W && x <= rect.right() {
+                painter.line_segment(
+                    [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
+                    Stroke::new(1.0, palette::border_subtle()),
+                );
+                painter.text(
+                    Pos2::new(x + 2.0, rect.top() + 4.0),
+                    egui::Align2::LEFT_TOP,
+                    format_ruler_label(f, fps, ruler_scale.granularity),
+                    egui::FontId::monospace(10.0),
+                    palette::text_muted(),
+                );
+            }
+            f += ruler_scale.major_step_frames;
+        }
+
+        // 播放头
+        let playhead_x =
+            rect.left() + TRACK_LABEL_W + state.current_frame() as f32 * self.pixels_per_frame;
+        painter.line_segment(
+            [
+                Pos2::new(playhead_x, rect.top()),
+                Pos2::new(playhead_x, rect.bottom()),
+            ],
+            Stroke::new(2.0, palette::timeline_playhead()),
+        );
+
+        // 点击或拖拽标尺跳转（scrub）
+        if resp.clicked() || resp.dragged() || resp.drag_stopped() {
+            if let Some(pos) = resp.interact_pointer_pos() {
+                let clicked_frame =
+                    ((pos.x - rect.left() - TRACK_LABEL_W) / self.pixels_per_frame) as i64;
+                return Some(clicked_frame.max(0));
+            }
+        }
+        None
+    }
+
+    // ─── 轨道列表 ─────────────────────────────
+    fn draw_tracks(&mut self, ui: &mut Ui, state: &mut AppState) -> bool {
+        let seq = match &state.sequence {
+            Some(s) => s,
+            None => return false,
+        };
+
+        let video_tracks = seq.video_tracks.clone();
+        let audio_tracks = seq.audio_tracks.clone();
+        let mut dropped = false;
+        let mut first_track_top: Option<f32> = None;
+        let mut last_track_bottom: Option<f32> = None;
+        let mut content_left: Option<f32> = None;
+        let mut visible_clips: Vec<ClipVisual> = Vec::new();
+        let audio_track_ids: Vec<TrackId> = audio_tracks.iter().map(|t| t.id).collect();
+        let mut linked_audio_target_track_id: Option<TrackId> = None;
+
+        for track_index in (0..video_tracks.len()).rev() {
+            let track = &video_tracks[track_index];
+            dropped |= self.draw_track_row(
+                ui,
+                state,
+                track,
+                track_index,
+                palette::timeline_clip_video(),
+                true,
+                &mut first_track_top,
+                &mut last_track_bottom,
+                &mut content_left,
+                &mut visible_clips,
+                &audio_track_ids,
+                &mut linked_audio_target_track_id,
+            );
+        }
+        for (track_index, track) in audio_tracks.iter().enumerate() {
+            dropped |= self.draw_track_row(
+                ui,
+                state,
+                track,
+                track_index,
+                palette::timeline_clip_audio(),
+                false,
+                &mut first_track_top,
+                &mut last_track_bottom,
+                &mut content_left,
+                &mut visible_clips,
+                &audio_track_ids,
+                &mut linked_audio_target_track_id,
+            );
+        }
+
+        if let (Some(top), Some(bottom), Some(left)) =
+            (first_track_top, last_track_bottom, content_left)
+        {
+            self.track_area_bounds = Some(Rect::from_min_max(
+                Pos2::new(left, top),
+                Pos2::new(ui.max_rect().right(), bottom),
+            ));
+
+            let playhead_x = left + state.current_frame() as f32 * self.pixels_per_frame;
+            ui.painter().line_segment(
+                [Pos2::new(playhead_x, top), Pos2::new(playhead_x, bottom)],
+                Stroke::new(1.8, palette::timeline_playhead()),
+            );
+
+            if let (Some(pos), Some(dragging)) = (
+                ui.input(|i| i.pointer.interact_pos()),
+                state.dragging_asset(),
+            ) {
+                if ((dragging.kind == mondrian_assets::AssetKind::Video
+                    && pos.y <= top + TRACK_HEIGHT * video_tracks.len() as f32)
+                    || (dragging.kind == mondrian_assets::AssetKind::Audio
+                        && pos.y > top + TRACK_HEIGHT * video_tracks.len() as f32))
+                    && pos.x >= left
+                    && pos.y >= top
+                    && pos.y <= bottom
+                {
+                    ui.painter().line_segment(
+                        [Pos2::new(pos.x, top), Pos2::new(pos.x, bottom)],
+                        Stroke::new(1.0, palette::interaction_highlight()),
+                    );
+                }
+            }
+
+            self.handle_marquee(ui, state, &visible_clips);
+        }
+
+        if first_track_top.is_none() || last_track_bottom.is_none() || content_left.is_none() {
+            self.track_area_bounds = None;
+            self.clear_marquee();
+        }
+
+        dropped
+    }
+
+    fn draw_track_row(
+        &mut self,
+        ui: &mut Ui,
+        state: &mut AppState,
+        track: &mondrian_timeline::track::Track,
+        track_index: usize,
+        clip_color: Color32,
+        is_video_track: bool,
+        first_track_top: &mut Option<f32>,
+        last_track_bottom: &mut Option<f32>,
+        content_left: &mut Option<f32>,
+        visible_clips: &mut Vec<ClipVisual>,
+        audio_track_ids: &[TrackId],
+        linked_audio_target_track_id: &mut Option<TrackId>,
+    ) -> bool {
+        let available_w = ui.available_width();
+        let (rect, resp) = ui.allocate_exact_size(
+            Vec2::new(available_w, TRACK_HEIGHT),
+            Sense::click_and_drag(),
+        );
+
+        if first_track_top.is_none() {
+            *first_track_top = Some(rect.top());
+        }
+        *last_track_bottom = Some(rect.bottom());
+        if content_left.is_none() {
+            *content_left = Some(rect.left() + TRACK_LABEL_W);
+        }
+
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 0.0, palette::bg_surface());
+
+        let label_rect = Rect::from_min_size(rect.min, Vec2::new(TRACK_LABEL_W, TRACK_HEIGHT));
+        painter.rect_filled(label_rect, 0.0, palette::bg_base());
+
+        let icon_size = Vec2::new(14.0, 14.0);
+        let lock_rect = Rect::from_center_size(
+            Pos2::new(label_rect.right() - 10.0, label_rect.center().y),
+            icon_size,
+        );
+        let mode_rect = Rect::from_center_size(
+            Pos2::new(label_rect.right() - 28.0, label_rect.center().y),
+            icon_size,
+        );
+        let lock_resp = ui.interact(
+            lock_rect,
+            ui.make_persistent_id(("track_lock", track.id, is_video_track)),
+            Sense::click(),
+        );
+        if lock_resp.clicked() {
+            let _ = state.set_track_locked(track.id, is_video_track, !track.is_locked);
+        }
+        let mode_resp = ui.interact(
+            mode_rect,
+            ui.make_persistent_id(("track_mode", track.id, is_video_track)),
+            Sense::click(),
+        );
+        if mode_resp.clicked() {
+            if is_video_track {
+                let _ = state.set_track_visible(track.id, true, !track.is_visible);
+            } else {
+                let _ = state.set_track_muted(track.id, false, !track.is_muted);
+            }
+        }
+
+        painter.text(
+            Pos2::new(label_rect.left() + 6.0, label_rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            &track.name,
+            egui::FontId::proportional(12.0),
+            palette::text_primary(),
+        );
+        let mode_icon = if is_video_track {
+            if track.is_visible {
+                theme::UiIcon::Eye
+            } else {
+                theme::UiIcon::EyeOff
+            }
+        } else if track.is_muted {
+            theme::UiIcon::Mute
+        } else {
+            theme::UiIcon::Speaker
+        };
+        let lock_icon = if track.is_locked {
+            theme::UiIcon::Lock
+        } else {
+            theme::UiIcon::Unlock
+        };
+        theme::draw_icon(ui.painter(), mode_rect, mode_icon, palette::text_primary());
+        theme::draw_icon(ui.painter(), lock_rect, lock_icon, palette::text_primary());
+
+        for clip in &track.clips {
+            let clip_x =
+                rect.left() + TRACK_LABEL_W + clip.position.frame as f32 * self.pixels_per_frame;
+            let clip_w = clip.duration.frame as f32 * self.pixels_per_frame;
+            if clip_x + clip_w < rect.left() + TRACK_LABEL_W || clip_x > rect.right() {
+                continue;
+            }
+
+            let clip_rect = Rect::from_min_size(
+                Pos2::new(clip_x.max(rect.left() + TRACK_LABEL_W), rect.top() + 2.0),
+                Vec2::new(clip_w, TRACK_HEIGHT - 4.0),
+            );
+            let selection = ClipSelection {
+                track_id: track.id,
+                is_video_track,
+                clip_id: clip.id,
+            };
+            visible_clips.push(ClipVisual { selection, rect: clip_rect });
+
+            painter.rect_filled(clip_rect, 3.0, clip_color);
+            painter.rect_stroke(
+                clip_rect,
+                3.0,
+                Stroke::new(1.0, palette::border_emphasis().gamma_multiply(0.5)),
+            );
+            if self.selected_clips.contains(&selection) {
+                painter.rect_stroke(
+                    clip_rect.shrink(0.5),
+                    3.0,
+                    Stroke::new(2.0, palette::interaction_highlight()),
+                );
+            }
+
+            if clip_w > 24.0 {
+                painter.text(
+                    clip_rect.left_center() + Vec2::new(4.0, 0.0),
+                    egui::Align2::LEFT_CENTER,
+                    clip.label.as_deref().unwrap_or("clip"),
+                    egui::FontId::proportional(11.0),
+                    palette::text_primary(),
+                );
+            }
+
+            if state.dragging_asset().is_none() {
+                let clip_resp = ui.interact(
+                    clip_rect,
+                    ui.make_persistent_id(("timeline_clip_drag", track.id, clip.id)),
+                    Sense::click_and_drag(),
+                );
+
+                if self.active_tool == TimelineTool::Blade {
+                    if clip_resp.clicked() {
+                        let split_frame = clip_resp
+                            .interact_pointer_pos()
+                            .map(|pointer| {
+                                ((pointer.x - rect.left() - TRACK_LABEL_W) / self.pixels_per_frame)
+                                    .round() as i64
+                            })
+                            .unwrap_or(state.current_frame())
+                            .max(0);
+
+                        match state.split_clip_at_frame(
+                            track.id,
+                            is_video_track,
+                            clip.id,
+                            split_frame,
+                        ) {
+                            Ok(true) => {}
+                            Ok(false) => {}
+                            Err(_) => {}
+                        }
+                    }
+                    continue;
+                }
+
+                if clip_resp.clicked() {
+                    let shift_pressed = ui.input(|i| i.modifiers.shift);
+                    if shift_pressed {
+                        if !self.selected_clips.insert(selection) {
+                            self.selected_clips.remove(&selection);
+                        }
+                    } else {
+                        self.selected_clips.clear();
+                        self.selected_clips.insert(selection);
+                    }
+                }
+
+                if clip_resp.drag_started() {
+                    let shift_pressed = ui.input(|i| i.modifiers.shift);
+                    if !shift_pressed {
+                        self.selected_clips.clear();
+                    }
+                    self.selected_clips.insert(selection);
+
+                    if let Some(pointer) = clip_resp.interact_pointer_pos() {
+                        let pointer_frame = ((pointer.x - rect.left() - TRACK_LABEL_W)
+                            / self.pixels_per_frame)
+                            .round() as i64;
+                        self.clip_drag = Some(ClipDragState {
+                            clip_id: clip.id,
+                            is_video_track,
+                            pointer_offset_frames: pointer_frame - clip.position.frame,
+                        });
+                    }
+                }
+
+                clip_resp.context_menu(|ui| {
+                    if !self.selected_clips.contains(&selection) {
+                        self.selected_clips.clear();
+                        self.selected_clips.insert(selection);
+                    }
+                    if ui.button("删除片段").clicked() {
+                        self.delete_selected_clips(state, false);
+                        ui.close_menu();
+                    }
+                    if ui.button("波纹删除片段").clicked() {
+                        self.delete_selected_clips(state, true);
+                        ui.close_menu();
+                    }
+                    if ui.button("清除选择").clicked() {
+                        self.selected_clips.clear();
+                        ui.close_menu();
+                    }
+                });
+
+                if let Some(drag) = self.clip_drag {
+                    if drag.clip_id == clip.id && drag.is_video_track == is_video_track {
+                        if let Some(pointer) = ui.input(|i| i.pointer.interact_pos()) {
+                            let pointer_frame = ((pointer.x - rect.left() - TRACK_LABEL_W)
+                                / self.pixels_per_frame)
+                                .round() as i64;
+                            let raw_target = (pointer_frame - drag.pointer_offset_frames).max(0);
+                            let snap_points = state
+                                .sequence
+                                .as_ref()
+                                .map(|seq| seq.snap_points())
+                                .unwrap_or_default();
+                            let target_frame = snap_frame(
+                                raw_target,
+                                &snap_points,
+                                self.pixels_per_frame,
+                                DRAG_SNAP_PIXELS,
+                            );
+                            let target_frame = if self.snap_enabled {
+                                target_frame
+                            } else {
+                                raw_target
+                            };
+
+                            if let Err(err) = state.move_clip_to_track(
+                                track.id,
+                                drag.is_video_track,
+                                drag.clip_id,
+                                target_frame,
+                            ) {
+                                let _ = err;
+                            } else {
+                                self.clip_drag_moved = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut dropped_here = false;
+        let dragging_asset = state.dragging_asset().cloned();
+        let can_drop_here = dragging_asset
+            .as_ref()
+            .map(|asset| {
+                (is_video_track && asset.kind == mondrian_assets::AssetKind::Video)
+                    || (!is_video_track && asset.kind == mondrian_assets::AssetKind::Audio)
+            })
+            .unwrap_or(false);
+        let pointer_pos = ui.input(|i| i.pointer.interact_pos());
+        let pointer_in_row = pointer_pos.map(|p| rect.contains(p)).unwrap_or(false);
+
+        if is_video_track && can_drop_here && pointer_in_row {
+            if let Some(asset) = dragging_asset.as_ref() {
+                if asset.kind == mondrian_assets::AssetKind::Video && asset.has_linked_audio {
+                    *linked_audio_target_track_id = audio_track_ids.get(track_index).copied();
+                }
+            }
+        }
+
+        let linked_audio_row_highlight = !is_video_track
+            && dragging_asset
+                .as_ref()
+                .map(|asset| {
+                    asset.kind == mondrian_assets::AssetKind::Video && asset.has_linked_audio
+                })
+                .unwrap_or(false)
+            && linked_audio_target_track_id.map(|id| id == track.id).unwrap_or(false);
+
+        if linked_audio_row_highlight {
+            painter.rect_stroke(
+                rect.shrink(1.0),
+                2.0,
+                Stroke::new(1.5, palette::interaction_highlight()),
+            );
+        }
+
+        if can_drop_here && pointer_in_row {
+            painter.rect_stroke(
+                rect.shrink(1.0),
+                2.0,
+                Stroke::new(1.5, palette::interaction_highlight()),
+            );
+
+            if let (Some(dragging), Some(pos), Some(seq)) = (
+                dragging_asset.as_ref(),
+                pointer_pos,
+                state.sequence.as_ref(),
+            ) {
+                let ghost_frame =
+                    (((pos.x - rect.left() - TRACK_LABEL_W) / self.pixels_per_frame) as i64).max(0);
+                let ghost_frames = ((dragging.duration.as_secs_f64()
+                    * seq.settings.frame_rate.to_f64())
+                .ceil() as i64)
+                    .max(1);
+                let ghost_x =
+                    rect.left() + TRACK_LABEL_W + ghost_frame as f32 * self.pixels_per_frame;
+                let ghost_w = (ghost_frames as f32 * self.pixels_per_frame).max(8.0);
+                let ghost_rect = Rect::from_min_size(
+                    Pos2::new(ghost_x.max(rect.left() + TRACK_LABEL_W), rect.top() + 4.0),
+                    Vec2::new(ghost_w, TRACK_HEIGHT - 8.0),
+                );
+                painter.rect_filled(ghost_rect, 3.0, clip_color.gamma_multiply(0.35));
+                painter.rect_stroke(
+                    ghost_rect,
+                    3.0,
+                    Stroke::new(1.0, palette::interaction_highlight()),
+                );
+                painter.text(
+                    ghost_rect.left_center() + Vec2::new(4.0, 0.0),
+                    egui::Align2::LEFT_CENTER,
+                    format!("{} (预放置)", dragging.name),
+                    egui::FontId::proportional(10.0),
+                    palette::text_primary(),
+                );
+
+                if is_video_track && dragging.has_linked_audio {
+                    if let Some(audio_track_id) = audio_track_ids.get(track_index).copied() {
+                        *linked_audio_target_track_id = Some(audio_track_id);
+                    }
+                }
+            }
+
+            if ui.input(|i| i.pointer.any_released()) {
+                if let Some(pos) = pointer_pos {
+                    let drop_frame =
+                        ((pos.x - rect.left() - TRACK_LABEL_W) / self.pixels_per_frame) as i64;
+                    let drop_frame = drop_frame.max(0);
+                    let drop_result = if is_video_track {
+                        state.drop_dragging_asset_to_video_track(track.id, drop_frame)
+                    } else {
+                        state.drop_dragging_asset_to_audio_track(track.id, drop_frame)
+                    };
+                    match drop_result {
+                        Ok(_) => {
+                            dropped_here = true;
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
+        } else if linked_audio_row_highlight {
+            if let (Some(dragging), Some(pos), Some(seq)) = (
+                dragging_asset.as_ref(),
+                pointer_pos,
+                state.sequence.as_ref(),
+            ) {
+                let ghost_frame =
+                    (((pos.x - rect.left() - TRACK_LABEL_W) / self.pixels_per_frame) as i64).max(0);
+                let ghost_frames = ((dragging.duration.as_secs_f64()
+                    * seq.settings.frame_rate.to_f64())
+                .ceil() as i64)
+                    .max(1);
+                let ghost_x =
+                    rect.left() + TRACK_LABEL_W + ghost_frame as f32 * self.pixels_per_frame;
+                let ghost_w = (ghost_frames as f32 * self.pixels_per_frame).max(8.0);
+                let ghost_rect = Rect::from_min_size(
+                    Pos2::new(ghost_x.max(rect.left() + TRACK_LABEL_W), rect.top() + 4.0),
+                    Vec2::new(ghost_w, TRACK_HEIGHT - 8.0),
+                );
+                painter.rect_filled(
+                    ghost_rect,
+                    3.0,
+                    palette::timeline_clip_audio().gamma_multiply(0.35),
+                );
+                painter.rect_stroke(
+                    ghost_rect,
+                    3.0,
+                    Stroke::new(1.0, palette::interaction_highlight()),
+                );
+            }
+        }
+
+        resp.context_menu(|ui| {
+            if ui.button("新增视频轨道").clicked() {
+                let _ = state.add_video_track();
+                ui.close_menu();
+            }
+
+            if ui.button("新增音频轨道").clicked() {
+                let _ = state.add_audio_track();
+                ui.close_menu();
+            }
+
+            ui.separator();
+            if ui.button("删除已选片段").clicked() {
+                self.delete_selected_clips(state, false);
+                ui.close_menu();
+            }
+            if ui.button("波纹删除已选片段").clicked() {
+                self.delete_selected_clips(state, true);
+                ui.close_menu();
+            }
+
+            ui.separator();
+            let remove_label = if is_video_track {
+                "删除当前视频轨"
+            } else {
+                "删除当前音频轨"
+            };
+            if ui.button(remove_label).clicked() {
+                let _ = state.remove_track(track.id, is_video_track);
+                ui.close_menu();
+            }
+        });
+
+        dropped_here
+    }
+
+    fn handle_marquee(&mut self, ui: &mut Ui, state: &AppState, visible_clips: &[ClipVisual]) {
+        if state.dragging_asset().is_some() || self.clip_drag.is_some() {
+            self.clear_marquee();
+            return;
+        }
+
+        let Some(bounds) = self.track_area_bounds else {
+            self.clear_marquee();
+            return;
+        };
+
+        let pointer_pos = ui.input(|i| i.pointer.interact_pos());
+        let primary_pressed = ui.input(|i| i.pointer.primary_pressed());
+        let primary_down = ui.input(|i| i.pointer.primary_down());
+        let primary_released = ui.input(|i| i.pointer.primary_released());
+
+        if primary_pressed {
+            if let Some(pos) = pointer_pos {
+                let in_bounds = bounds.contains(pos) && pos.x >= bounds.left();
+                let on_clip = visible_clips.iter().any(|v| v.rect.contains(pos));
+                if in_bounds && !on_clip {
+                    self.marquee_anchor = Some(pos);
+                    self.marquee_current = Some(pos);
+                    self.marquee_additive = ui.input(|i| i.modifiers.shift);
+                    if !self.marquee_additive {
+                        self.selected_clips.clear();
+                    }
+                }
+            }
+        }
+
+        if primary_down {
+            if self.marquee_anchor.is_some() {
+                if let Some(pos) = pointer_pos {
+                    self.marquee_current = Some(pos);
+                }
+            }
+        }
+
+        if let (Some(anchor), Some(current)) = (self.marquee_anchor, self.marquee_current) {
+            let rect = Rect::from_two_pos(anchor, current).intersect(bounds);
+            if rect.width() > 2.0 && rect.height() > 2.0 {
+                ui.painter().rect_filled(
+                    rect,
+                    2.0,
+                    palette::interaction_highlight().gamma_multiply(0.16),
+                );
+                ui.painter().rect_stroke(
+                    rect,
+                    2.0,
+                    Stroke::new(1.2, palette::interaction_highlight()),
+                );
+            }
+        }
+
+        if primary_released {
+            if let (Some(anchor), Some(current)) = (self.marquee_anchor, self.marquee_current) {
+                let rect = Rect::from_two_pos(anchor, current).intersect(bounds);
+                if rect.width() > 2.0 && rect.height() > 2.0 {
+                    let picks = visible_clips
+                        .iter()
+                        .filter(|v| v.rect.intersects(rect))
+                        .map(|v| v.selection)
+                        .collect::<Vec<_>>();
+
+                    if self.marquee_additive {
+                        for sel in picks {
+                            self.selected_clips.insert(sel);
+                        }
+                    } else {
+                        self.selected_clips = picks.into_iter().collect();
+                    }
+                }
+            }
+            self.clear_marquee();
+        }
+    }
+
+    fn clear_marquee(&mut self) {
+        self.marquee_anchor = None;
+        self.marquee_current = None;
+        self.marquee_additive = false;
+    }
+
+    fn delete_selected_clips(&mut self, state: &mut AppState, ripple: bool) {
+        if self.selected_clips.is_empty() {
+            return;
+        }
+
+        let selections: Vec<(mondrian_core::types::TrackId, bool, ClipId)> = self
+            .selected_clips
+            .iter()
+            .map(|s| (s.track_id, s.is_video_track, s.clip_id))
+            .collect();
+
+        match state.remove_clips_bulk(&selections, ripple) {
+            Ok(_) => {
+                self.selected_clips.clear();
+            }
+            Err(_) => {}
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+enum RulerGranularity {
+    Frame,
+    Second,
+    Minute,
+}
+
+#[derive(Copy, Clone)]
+struct RulerScale {
+    major_step_frames: i64,
+    minor_step_frames: i64,
+    granularity: RulerGranularity,
+}
+
+fn choose_ruler_scale(pixels_per_frame: f32, fps: Rational) -> RulerScale {
+    let fps_nominal = fps.to_f64().round().max(1.0) as i64;
+    let pixels_per_second = pixels_per_frame * fps_nominal as f32;
+
+    let (granularity, mut candidates): (RulerGranularity, Vec<i64>) = if pixels_per_second >= 120.0
+    {
+        (
+            RulerGranularity::Frame,
+            vec![
+                1,
+                2,
+                5,
+                10,
+                15,
+                (fps_nominal / 2).max(1),
+                fps_nominal,
+                fps_nominal * 2,
+                fps_nominal * 5,
+            ],
+        )
+    } else if pixels_per_second >= 12.0 {
+        (
+            RulerGranularity::Second,
+            vec![1, 2, 5, 10, 15, 30].into_iter().map(|s| s * fps_nominal).collect(),
+        )
+    } else {
+        (
+            RulerGranularity::Minute,
+            vec![1, 2, 5, 10, 15, 30, 60]
+                .into_iter()
+                .map(|m| m * 60 * fps_nominal)
+                .collect(),
+        )
+    };
+
+    candidates.sort_unstable();
+    candidates.dedup();
+
+    let min_major_pixels = 72.0;
+    let major_step = candidates
+        .iter()
+        .copied()
+        .find(|&step| pixels_per_frame * step as f32 >= min_major_pixels)
+        .unwrap_or_else(|| candidates.last().copied().unwrap_or(1));
+
+    let minor_step = choose_minor_step(major_step, pixels_per_frame);
+
+    RulerScale {
+        major_step_frames: major_step,
+        minor_step_frames: minor_step,
+        granularity,
+    }
+}
+
+fn choose_minor_step(major_step_frames: i64, pixels_per_frame: f32) -> i64 {
+    let min_minor_pixels = 8.0;
+    for div in [10, 5, 4, 3, 2] {
+        if major_step_frames % div == 0 {
+            let minor = major_step_frames / div;
+            if pixels_per_frame * minor as f32 >= min_minor_pixels {
+                return minor.max(1);
+            }
+        }
+    }
+    major_step_frames.max(1)
+}
+
+fn format_ruler_label(frame: i64, fps: Rational, granularity: RulerGranularity) -> String {
+    let fps_nominal = fps.to_f64().round().max(1.0) as i64;
+    let total_seconds = frame.div_euclid(fps_nominal);
+    let frame_in_second = frame.rem_euclid(fps_nominal);
+
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+
+    match granularity {
+        RulerGranularity::Frame => {
+            format!("{hours:02}:{minutes:02}:{seconds:02}:{frame_in_second:02}")
+        }
+        RulerGranularity::Second => format!("{hours:02}:{minutes:02}:{seconds:02}"),
+        RulerGranularity::Minute => format!("{hours:02}:{minutes:02}"),
+    }
+}
+
+fn snap_frame(
+    target_frame: i64,
+    snap_points: &[TimeCode],
+    pixels_per_frame: f32,
+    snap_pixels: f32,
+) -> i64 {
+    if pixels_per_frame <= 0.0 {
+        return target_frame;
+    }
+
+    let threshold_frames = (snap_pixels / pixels_per_frame).max(1.0).round() as i64;
+    let mut best = target_frame;
+    let mut best_dist = i64::MAX;
+
+    for point in snap_points {
+        let dist = (point.frame - target_frame).abs();
+        if dist <= threshold_frames && dist < best_dist {
+            best_dist = dist;
+            best = point.frame;
+        }
+    }
+
+    best.max(0)
+}

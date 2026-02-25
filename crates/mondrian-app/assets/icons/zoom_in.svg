@@ -1,0 +1,7 @@
+<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="24.000000" height="24.000000" fill="none">
+	<rect id="Icon/zoom_in" width="24.000000" height="24.000000" x="0.000000" y="0.000000" />
+	<circle id="椭圆 4" cx="11" cy="11" r="8" stroke="rgb(0,0,0)" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.000000" />
+	<line id="直线 5" x1="0" x2="6.15182924" y1="0" y2="0" stroke="rgb(0,0,0)" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.000000" transform="matrix(-0.707107,-0.707107,0.707107,-0.707107,21,21)" />
+	<line id="直线 6" x1="0" x2="6" y1="0" y2="0" stroke="rgb(0,0,0)" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.000000" transform="matrix(0,1,-1,0,11,8)" />
+	<line id="直线 7" x1="8" x2="14" y1="11" y2="11" stroke="rgb(0,0,0)" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.000000" />
+</svg>

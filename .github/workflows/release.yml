@@ -1,0 +1,94 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+env:
+  CARGO_TERM_COLOR: always
+  BIN_NAME: mondrian
+
+jobs:
+  build-release:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: mondrian-windows-x86_64.zip
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: mondrian-macos-x86_64.tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: mondrian-macos-aarch64.tar.gz
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: mondrian-linux-x86_64.tar.gz
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      # 依赖安装（与 ci.yml 相同）
+      - name: 安装 FFmpeg (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg libavcodec-dev libavformat-dev \
+            libavfilter-dev libavdevice-dev libswscale-dev libswresample-dev pkg-config
+
+      - name: 安装 FFmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg pkg-config
+
+      - name: cargo build --release
+        run: cargo build --release --target ${{ matrix.target }} -p mondrian-app
+
+      # ── 打包 ──────────────────────────────────
+      - name: 打包 (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          $bin = "target/${{ matrix.target }}/release/${{ env.BIN_NAME }}.exe"
+          Compress-Archive -Path $bin -DestinationPath ${{ matrix.artifact }}
+
+      - name: 打包 (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          BIN="target/${{ matrix.target }}/release/${{ env.BIN_NAME }}"
+          tar -czf ${{ matrix.artifact }} "$BIN"
+
+      - name: 上传制品
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
+  # 在所有平台构建完成后发布 GitHub Release
+  create-release:
+    needs: build-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载所有制品
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+
+      - name: 发布 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**/*
+          generate_release_notes: true

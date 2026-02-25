@@ -1,0 +1,48 @@
+# Rust build artifacts
+/target/
+**/target/
+
+# IDE
+.idea/
+.vscode/settings.json
+*.iml
+.markdownlint.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# FFmpeg 编译产物
+/vendor/ffmpeg/build/
+
+# 测试临时媒体文件
+/tests/fixtures/large/
+*.mp4
+*.mov
+*.mkv
+*.wav
+*.aac
+!tests/fixtures/small/*.mp4
+
+# AI API 密钥 / 环境变量
+.env
+.env.local
+secrets/
+
+# 渲染缓存 / 代理文件
+/cache/
+/proxy/
+*.proxy
+
+# 日志
+*.log
+logs/
+
+# 导出产物
+/output/
+
+# Benchmark 结果
+/criterion/
+
+# 程序文件
+.mondrian

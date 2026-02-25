@@ -1,0 +1,24 @@
+[package]
+name        = "mondrian-renderer"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+
+[dependencies]
+mondrian-core     = { workspace = true }
+mondrian-media    = { workspace = true }
+mondrian-timeline = { workspace = true }
+
+wgpu       = { workspace = true }
+bytemuck   = { workspace = true }
+glam       = { workspace = true }
+
+tokio      = { workspace = true }
+async-trait = { workspace = true }
+tracing    = { workspace = true }
+thiserror  = { workspace = true }
+anyhow     = { workspace = true }
+serde      = { workspace = true }
+lru        = "0.12"
+parking_lot = { workspace = true }

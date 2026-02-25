@@ -1,0 +1,29 @@
+[package]
+name        = "mondrian-core"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+
+[dependencies]
+# 序列化
+serde      = { workspace = true }
+serde_json = { workspace = true }
+# ID
+uuid       = { workspace = true }
+# 时间
+chrono     = { workspace = true }
+# 错误
+thiserror  = { workspace = true }
+anyhow     = { workspace = true }
+# 日志
+tracing    = { workspace = true }
+# 并发
+crossbeam-channel = { workspace = true }
+parking_lot       = { workspace = true }
+dashmap           = { workspace = true }
+# 数学
+glam       = { workspace = true }
+
+[dev-dependencies]
+proptest   = "1"

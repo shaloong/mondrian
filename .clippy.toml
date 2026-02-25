@@ -1,0 +1,13 @@
+# Clippy 全局配置
+# 运行: cargo clippy --workspace -- -W clippy::all -W clippy::pedantic
+
+[lints.clippy]
+# 性能
+clone_on_ref_ptr         = "warn"
+large_futures            = "warn"
+large_stack_arrays       = "warn"
+# 正确性
+await_holding_lock       = "deny"
+missing_panics_doc       = "warn"
+# 风格
+must_use_candidate       = "warn"

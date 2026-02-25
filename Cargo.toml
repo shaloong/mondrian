@@ -1,0 +1,90 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mondrian-core",
+    "crates/mondrian-media",
+    "crates/mondrian-timeline",
+    "crates/mondrian-renderer",
+    "crates/mondrian-assets",
+    "crates/mondrian-ai",
+    "crates/mondrian-effects",
+    "crates/mondrian-export",
+    "crates/mondrian-app",
+]
+
+[workspace.package]
+version       = "0.1.0"
+edition       = "2021"
+authors       = ["Mondrian Team <team@mondrian.dev>"]
+license       = "MIT OR Apache-2.0"
+repository    = "https://github.com/mondrian-studio/mondrian"
+rust-version  = "1.75"
+
+# ── 全局共享依赖（各 crate 通过 workspace = true 引用）──────────────────────────
+[workspace.dependencies]
+# ---- 内部 crate ----
+mondrian-core     = { path = "crates/mondrian-core" }
+mondrian-media    = { path = "crates/mondrian-media" }
+mondrian-timeline = { path = "crates/mondrian-timeline" }
+mondrian-renderer = { path = "crates/mondrian-renderer" }
+mondrian-assets   = { path = "crates/mondrian-assets" }
+mondrian-ai       = { path = "crates/mondrian-ai" }
+mondrian-effects  = { path = "crates/mondrian-effects" }
+mondrian-export   = { path = "crates/mondrian-export" }
+
+# ---- 异步运行时 ----
+tokio            = { version = "1",    features = ["full"] }
+async-trait      = "0.1"
+futures          = "0.3"
+
+# ---- 错误处理 ----
+anyhow           = "1"
+thiserror        = "1"
+
+# ---- 序列化 ----
+serde            = { version = "1",    features = ["derive"] }
+serde_json       = "1"
+toml             = "0.8"
+
+# ---- 日志 / 追踪 ----
+tracing          = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# ---- GPU 渲染 ----
+wgpu             = "22.1"
+bytemuck         = { version = "1",    features = ["derive"] }
+glam             = { version = "0.27", features = ["serde"] }
+
+# ---- 并发 / 消息 ----
+crossbeam-channel = "0.5"
+parking_lot       = "0.12"
+rayon             = "1"
+dashmap           = "6"
+
+# ---- ID / 时间 ----
+uuid             = { version = "1",    features = ["v4", "serde"] }
+chrono           = { version = "0.4",  features = ["serde"] }
+
+# ---- 网络 / AI API ----
+reqwest          = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+url              = "2"
+
+# ---- 文件 / 路径 ----
+walkdir          = "2"
+tempfile         = "3"
+
+# ---- 图像 ----
+image            = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+[profile.dev]
+opt-level = 1          # 适度优化，加快媒体解码调试体验
+
+[profile.release]
+opt-level     = 3
+lto           = "thin"
+codegen-units = 1
+strip         = "symbols"
+
+[profile.bench]
+inherits  = "release"
+debug     = true

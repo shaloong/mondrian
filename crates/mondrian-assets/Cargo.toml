@@ -1,0 +1,31 @@
+[package]
+name        = "mondrian-assets"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+
+[dependencies]
+mondrian-core = { workspace = true }
+mondrian-media = { workspace = true }
+
+serde      = { workspace = true }
+serde_json = { workspace = true }
+uuid       = { workspace = true }
+chrono     = { workspace = true }
+thiserror  = { workspace = true }
+anyhow     = { workspace = true }
+tracing    = { workspace = true }
+walkdir    = { workspace = true }
+tokio      = { workspace = true }
+parking_lot = { workspace = true }
+dashmap    = { workspace = true }
+
+# SQLite
+rusqlite   = { version = "0.31", features = ["bundled"] }
+# 文件系统监听
+notify     = "6"
+# 目录
+dirs       = "5"
+# 图像缩略图
+image      = { workspace = true }

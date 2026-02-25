@@ -1,0 +1,33 @@
+[package]
+name        = "mondrian-ai"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+
+[dependencies]
+mondrian-core   = { workspace = true }
+mondrian-assets = { workspace = true }
+
+# HTTP
+reqwest     = { workspace = true }
+url         = { workspace = true }
+# 异步
+tokio       = { workspace = true }
+async-trait = { workspace = true }
+futures     = { workspace = true }
+# 序列化
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+# 错误
+thiserror   = { workspace = true }
+anyhow      = { workspace = true }
+# 日志
+tracing     = { workspace = true }
+# YAML 工作流定义
+serde_yaml  = "0.9"
+# 模板引擎（工作流变量替换）
+tera        = "1"
+# 并发
+dashmap     = { workspace = true }
+tokio-stream = "0.1"
