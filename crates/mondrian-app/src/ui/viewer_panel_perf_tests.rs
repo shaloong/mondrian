@@ -118,21 +118,18 @@ fn render_frame(canvas: &mut [u8], width: u32, height: u32, layers: &[Vec<u8>], 
     }
 }
 
-#[test]
-#[ignore = "development performance simulation test; run manually"]
-fn preview_1080p24_simulated_perf() -> anyhow::Result<()> {
-    let _guard = perf_lock().lock().expect("preview perf lock poisoned");
-
-    let width = 1920u32;
-    let height = 1080u32;
-    let target_fps = env_f64("MONDRIAN_PREVIEW_SIM_TARGET_FPS", 24.0).clamp(1.0, 240.0);
+fn run_preview_simulation(
+    scenario: &'static str,
+    width: u32,
+    height: u32,
+    target_fps: f64,
+    sim_frames: usize,
+    layer_count: usize,
+    first_frame_threshold_ms: u128,
+    fps_min_threshold: f64,
+    fps_max_threshold: f64,
+) -> anyhow::Result<PreviewPerfSimReport> {
     let frame_budget_ms = 1000.0 / target_fps;
-    let sim_frames = env_usize("MONDRIAN_PREVIEW_SIM_FRAMES", 96).clamp(24, 600);
-    let layer_count = env_usize("MONDRIAN_PREVIEW_SIM_LAYERS", 2).clamp(1, 6);
-
-    let first_frame_threshold_ms = env_u128("MONDRIAN_PREVIEW_SIM_TTFF_MS", 2_000);
-    let fps_min_threshold = env_f64("MONDRIAN_PREVIEW_SIM_FPS_MIN", 20.0);
-    let fps_max_threshold = env_f64("MONDRIAN_PREVIEW_SIM_FPS_MAX", 24.0).max(fps_min_threshold);
 
     let mut layers = Vec::with_capacity(layer_count);
     for i in 0..layer_count {
@@ -179,8 +176,8 @@ fn preview_1080p24_simulated_perf() -> anyhow::Result<()> {
         && achieved_fps + FPS_EPSILON >= fps_min_threshold
         && achieved_fps <= fps_max_threshold + FPS_EPSILON;
 
-    let report = PreviewPerfSimReport {
-        scenario: "preview-1080p24-simulated",
+    Ok(PreviewPerfSimReport {
+        scenario,
         resolution: (width, height),
         target_fps,
         simulated_frames: sim_frames,
@@ -197,13 +194,37 @@ fn preview_1080p24_simulated_perf() -> anyhow::Result<()> {
         fps_min_threshold,
         fps_max_threshold,
         passed,
-    };
+    })
+}
+
+fn run_and_report_scenario(
+    scenario: &'static str,
+    width: u32,
+    height: u32,
+    target_fps: f64,
+    sim_frames: usize,
+    layer_count: usize,
+    first_frame_threshold_ms: u128,
+    fps_min_threshold: f64,
+    fps_max_threshold: f64,
+) -> anyhow::Result<()> {
+    let report = run_preview_simulation(
+        scenario,
+        width,
+        height,
+        target_fps,
+        sim_frames,
+        layer_count,
+        first_frame_threshold_ms,
+        fps_min_threshold,
+        fps_max_threshold,
+    )?;
 
     let report_json = serde_json::to_string(&report)?;
     eprintln!("MONDRIAN_PREVIEW_SIM_JSON={report_json}");
     write_report_if_needed(&report_json);
 
-    if !passed {
+    if !report.passed {
         anyhow::bail!(
             "preview simulation perf test failed; report: {}",
             report_json
@@ -211,4 +232,61 @@ fn preview_1080p24_simulated_perf() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[test]
+#[ignore = "development performance simulation test; run manually"]
+fn preview_1080p24_simulated_perf() -> anyhow::Result<()> {
+    let _guard = perf_lock().lock().expect("preview perf lock poisoned");
+
+    let width = 1920u32;
+    let height = 1080u32;
+    let target_fps = env_f64("MONDRIAN_PREVIEW_SIM_TARGET_FPS", 24.0).clamp(1.0, 240.0);
+    let sim_frames = env_usize("MONDRIAN_PREVIEW_SIM_FRAMES", 96).clamp(24, 600);
+    let layer_count = env_usize("MONDRIAN_PREVIEW_SIM_LAYERS", 2).clamp(1, 6);
+
+    let first_frame_threshold_ms = env_u128("MONDRIAN_PREVIEW_SIM_TTFF_MS", 2_000);
+    let fps_min_threshold = env_f64("MONDRIAN_PREVIEW_SIM_FPS_MIN", 20.0);
+    let fps_max_threshold = env_f64("MONDRIAN_PREVIEW_SIM_FPS_MAX", 24.0).max(fps_min_threshold);
+
+    run_and_report_scenario(
+        "preview-1080p24-simulated",
+        width,
+        height,
+        target_fps,
+        sim_frames,
+        layer_count,
+        first_frame_threshold_ms,
+        fps_min_threshold,
+        fps_max_threshold,
+    )
+}
+
+#[test]
+#[ignore = "development performance simulation test; run manually"]
+fn preview_4k60_simulated_perf() -> anyhow::Result<()> {
+    let _guard = perf_lock().lock().expect("preview perf lock poisoned");
+
+    let width = env_u128("MONDRIAN_PREVIEW_SIM_4K_WIDTH", 3840).clamp(640, 7680) as u32;
+    let height = env_u128("MONDRIAN_PREVIEW_SIM_4K_HEIGHT", 2160).clamp(360, 4320) as u32;
+    let target_fps = env_f64("MONDRIAN_PREVIEW_SIM_4K_TARGET_FPS", 60.0).clamp(1.0, 240.0);
+    let sim_frames = env_usize("MONDRIAN_PREVIEW_SIM_4K_FRAMES", 120).clamp(30, 900);
+    let layer_count = env_usize("MONDRIAN_PREVIEW_SIM_4K_LAYERS", 2).clamp(1, 8);
+
+    let first_frame_threshold_ms = env_u128("MONDRIAN_PREVIEW_SIM_4K_TTFF_MS", 3_000);
+    let fps_min_threshold = env_f64("MONDRIAN_PREVIEW_SIM_4K_FPS_MIN", 30.0);
+    let fps_max_threshold =
+        env_f64("MONDRIAN_PREVIEW_SIM_4K_FPS_MAX", target_fps).max(fps_min_threshold);
+
+    run_and_report_scenario(
+        "preview-4k60-simulated",
+        width,
+        height,
+        target_fps,
+        sim_frames,
+        layer_count,
+        first_frame_threshold_ms,
+        fps_min_threshold,
+        fps_max_threshold,
+    )
 }

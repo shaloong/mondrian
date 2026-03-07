@@ -247,6 +247,10 @@ cargo test -p mondrian-app perf_project_lifecycle_smoke -- --ignored --nocapture
 # 1080p24 预览模拟测试（TTFF/FPS）
 $env:MONDRIAN_PREVIEW_SIM_OUTPUT='target/perf/preview-1080p24.jsonl'
 cargo test -p mondrian-app preview_1080p24_simulated_perf -- --ignored --nocapture
+
+# 4K60 预览模拟测试（高负载性能优化）
+$env:MONDRIAN_PREVIEW_SIM_OUTPUT='target/perf/preview-4k60.jsonl'
+cargo test -p mondrian-app preview_4k60_simulated_perf -- --ignored --nocapture
 ```
 
 两项测试都会输出 JSON，便于脚本或 AI 自动分析异常样本。

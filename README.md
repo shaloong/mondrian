@@ -117,6 +117,9 @@ $env:MONDRIAN_PERF_OUTPUT='target/perf/project-lifecycle.jsonl'; cargo test -p m
 # 1080p24 预览模拟性能测试（TTFF<=2s，稳定 FPS 20-24）
 $env:MONDRIAN_PREVIEW_SIM_OUTPUT='target/perf/preview-1080p24.jsonl'; cargo test -p mondrian-app preview_1080p24_simulated_perf -- --ignored --nocapture
 
+# 4K60 预览模拟性能测试（用于更高负载优化）
+$env:MONDRIAN_PREVIEW_SIM_OUTPUT='target/perf/preview-4k60.jsonl'; cargo test -p mondrian-app preview_4k60_simulated_perf -- --ignored --nocapture
+
 # Benchmark
 cargo bench -p mondrian-renderer
 ```
@@ -138,6 +141,17 @@ cargo bench -p mondrian-renderer
 - `MONDRIAN_PREVIEW_SIM_FRAMES`：模拟帧数（默认 `96`）
 - `MONDRIAN_PREVIEW_SIM_LAYERS`：模拟合成图层数（默认 `2`）
 - `MONDRIAN_PREVIEW_SIM_OUTPUT`：可选，写入 JSONL 报告路径
+
+4K60 预览模拟测试关键环境变量：
+
+- `MONDRIAN_PREVIEW_SIM_4K_WIDTH`：模拟宽度（默认 `3840`）
+- `MONDRIAN_PREVIEW_SIM_4K_HEIGHT`：模拟高度（默认 `2160`）
+- `MONDRIAN_PREVIEW_SIM_4K_TARGET_FPS`：目标 FPS（默认 `60`）
+- `MONDRIAN_PREVIEW_SIM_4K_TTFF_MS`：首帧显示上限（默认 `3000`）
+- `MONDRIAN_PREVIEW_SIM_4K_FPS_MIN`：最低 FPS 门槛（默认 `30`）
+- `MONDRIAN_PREVIEW_SIM_4K_FPS_MAX`：最高 FPS 门槛（默认 `60`）
+- `MONDRIAN_PREVIEW_SIM_4K_FRAMES`：模拟帧数（默认 `120`）
+- `MONDRIAN_PREVIEW_SIM_4K_LAYERS`：模拟图层数（默认 `2`）
 
 ---
 
