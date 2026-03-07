@@ -1207,10 +1207,19 @@ impl ViewerPanel {
             direction.signum()
         };
 
+        let mut layer_request_cache: HashMap<i64, Arc<Vec<LayerDecodeRequest>>> = HashMap::new();
+
         let prefill_active = is_playing && self.playback_prefill_active();
 
-        let active_layer_count =
-            self.build_layer_decode_requests(seq, lib, state, current_frame).len();
+        let active_layer_count = self
+            .build_layer_decode_requests_cached(
+                seq,
+                lib,
+                state,
+                current_frame,
+                &mut layer_request_cache,
+            )
+            .len();
         let mut budget = prefetch_budget(active_layer_count, is_playing);
 
         if is_playing {
@@ -1230,6 +1239,7 @@ impl ViewerPanel {
                 target_width,
                 target_height,
                 target_frames,
+                &mut layer_request_cache,
             );
 
             if self.playback_prefetch_buffering {
@@ -1265,6 +1275,7 @@ impl ViewerPanel {
                 target_width,
                 target_height,
                 budget.frames_ahead,
+                &mut layer_request_cache,
             )
         {
             return;
@@ -1309,9 +1320,15 @@ impl ViewerPanel {
             if timeline_frame < 0 {
                 continue;
             }
-            let layers = self.build_layer_decode_requests(seq, lib, state, timeline_frame);
+            let layers = self.build_layer_decode_requests_cached(
+                seq,
+                lib,
+                state,
+                timeline_frame,
+                &mut layer_request_cache,
+            );
 
-            for layer in layers {
+            for layer in layers.iter() {
                 let cache_key = LayerFrameCacheKey {
                     asset_id: layer.frame_key.0,
                     source_frame: layer.frame_key.1,
@@ -1424,6 +1441,23 @@ impl ViewerPanel {
         layers
     }
 
+    fn build_layer_decode_requests_cached(
+        &mut self,
+        seq: &mondrian_timeline::sequence::Sequence,
+        lib: &mondrian_assets::AssetLibrary,
+        state: &AppState,
+        timeline_frame: i64,
+        request_cache: &mut HashMap<i64, Arc<Vec<LayerDecodeRequest>>>,
+    ) -> Arc<Vec<LayerDecodeRequest>> {
+        if let Some(cached) = request_cache.get(&timeline_frame) {
+            return Arc::clone(cached);
+        }
+
+        let layers = Arc::new(self.build_layer_decode_requests(seq, lib, state, timeline_frame));
+        request_cache.insert(timeline_frame, Arc::clone(&layers));
+        layers
+    }
+
     fn idle_prefetch_coverage_ready(
         &mut self,
         seq: &mondrian_timeline::sequence::Sequence,
@@ -1433,6 +1467,7 @@ impl ViewerPanel {
         target_width: u32,
         target_height: u32,
         frames_ahead: i64,
+        layer_request_cache: &mut HashMap<i64, Arc<Vec<LayerDecodeRequest>>>,
     ) -> bool {
         let offsets = prefetch_offsets(
             frames_ahead,
@@ -1453,8 +1488,14 @@ impl ViewerPanel {
                 continue;
             }
 
-            let layers = self.build_layer_decode_requests(seq, lib, state, timeline_frame);
-            for layer in layers {
+            let layers = self.build_layer_decode_requests_cached(
+                seq,
+                lib,
+                state,
+                timeline_frame,
+                layer_request_cache,
+            );
+            for layer in layers.iter() {
                 total += 1;
                 let key = LayerFrameCacheKey {
                     asset_id: layer.frame_key.0,
@@ -1489,6 +1530,7 @@ impl ViewerPanel {
         target_width: u32,
         target_height: u32,
         target_frames: i64,
+        layer_request_cache: &mut HashMap<i64, Arc<Vec<LayerDecodeRequest>>>,
     ) -> i64 {
         let mut ready_frames = 0i64;
 
@@ -1498,7 +1540,13 @@ impl ViewerPanel {
                 break;
             }
 
-            let layers = self.build_layer_decode_requests(seq, lib, state, timeline_frame);
+            let layers = self.build_layer_decode_requests_cached(
+                seq,
+                lib,
+                state,
+                timeline_frame,
+                layer_request_cache,
+            );
             if layers.is_empty() {
                 break;
             }
@@ -2013,7 +2061,7 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
     let (tx, rx) = mpsc::channel::<(usize, Result<RgbaFrame, String>)>();
 
     let max_workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).max(1);
-    let worker_count = max_workers.min(request.layers.len()).min(4);
+    let worker_count = max_workers.min(request.layers.len()).min(preview_decode_worker_cap());
     let playback_mode = request.playback_mode;
     let layer_cache_enabled = request.layer_cache_enabled;
     let decode_generation = request.generation;
@@ -2788,6 +2836,18 @@ fn preview_diag_enabled() -> bool {
         std::env::var("MONDRIAN_PREVIEW_DIAG")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(cfg!(debug_assertions))
+    })
+}
+
+fn preview_decode_worker_cap() -> usize {
+    static WORKER_CAP: OnceLock<usize> = OnceLock::new();
+    *WORKER_CAP.get_or_init(|| {
+        std::env::var("MONDRIAN_PREVIEW_DECODE_WORKERS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|v| *v > 0)
+            .map(|v| v.clamp(1, 16))
+            .unwrap_or(6)
     })
 }
 

@@ -273,5 +273,7 @@ cargo test -p mondrian-app preview_8k60_simulated_perf -- --ignored --nocapture
 - 并行路径增加最小分块粒度，降低任务切分和线程调度开销。
 - 移除混合循环中的冗余 alpha 通道重复写入，减少 8K 场景内存写压力。
 - 图层帧缓存改为 `HashMap + 队列` 结构，`get/contains` 从线性查找降为 O(1)，降低高并发预取下的缓存查询开销。
+- 预取调度阶段增加图层请求结果复用，避免同一帧在覆盖率评估/就绪评估/预取提交中重复构建请求。
+- 图层解码 worker 上限改为可配置（`MONDRIAN_PREVIEW_DECODE_WORKERS`，默认 6），便于按机器核心数调优高负载场景吞吐。
 
 该优化主要降低 1080p 预览时的 CPU 开销，并提升播放稳定帧率。
