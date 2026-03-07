@@ -190,3 +190,5 @@ project.mondrian (ZIP 容器)
 ├── ai_history.json   AI 生成历史（Prompt + 结果）
 └── thumbnails/       素材缩略图缓存
 ```
+
+项目保存阶段对 `library/index.db` 采用流式写入 ZIP（`std::io::copy`），避免一次性读取整库到内存，降低大项目保存时的内存峰值与阻塞时长。

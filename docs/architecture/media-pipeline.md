@@ -275,5 +275,8 @@ cargo test -p mondrian-app preview_8k60_simulated_perf -- --ignored --nocapture
 - 图层帧缓存改为 `HashMap + 队列` 结构，`get/contains` 从线性查找降为 O(1)，降低高并发预取下的缓存查询开销。
 - 预取调度阶段增加图层请求结果复用，避免同一帧在覆盖率评估/就绪评估/预取提交中重复构建请求。
 - 图层解码 worker 上限改为可配置（`MONDRIAN_PREVIEW_DECODE_WORKERS`，默认 6），便于按机器核心数调优高负载场景吞吐。
+- 多图层解码调度改为持久 `Rayon` 线程池执行，移除每次请求创建/回收线程的开销，降低播放抖动和尾延迟。
+- 解码超时预算统一为 `MONDRIAN_DECODE_TIMEOUT_BUDGET_MS`（兼容 `MONDRIAN_PREVIEW_DECODE_TIMEOUT_MS`），UI stall reset 默认使用 `budget + MONDRIAN_DECODE_STALL_GRACE_MS`，避免两端阈值错位导致重复重置。
+- 超时诊断新增结构化字段日志：`MONDRIAN_DECODE_TIMEOUT_JSON=...` 与 `MONDRIAN_DECODE_STALL_JSON=...`，便于脚本/AI 直接解析根因样本。
 
 该优化主要降低 1080p 预览时的 CPU 开销，并提升播放稳定帧率。

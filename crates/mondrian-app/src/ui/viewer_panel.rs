@@ -1046,6 +1046,7 @@ impl ViewerPanel {
         };
 
         let timeout_ms = decode_stall_timeout_ms();
+        let decode_budget_ms = decode_timeout_budget_ms();
         if timeout_ms == 0 {
             return;
         }
@@ -1056,6 +1057,13 @@ impl ViewerPanel {
                 tracing::warn!(
                     "[preview-diag] decode stalled: {}ms in_flight={} queued={} forcing reset",
                     timeout_ms,
+                    self.decode_in_flight,
+                    self.queued_request.is_some()
+                );
+                tracing::warn!(
+                    "MONDRIAN_DECODE_STALL_JSON={{\"stall_timeout_ms\":{},\"decode_budget_ms\":{},\"in_flight\":{},\"queued\":{},\"reason\":\"ui decode stall reset\"}}",
+                    timeout_ms,
+                    decode_budget_ms,
                     self.decode_in_flight,
                     self.queued_request.is_some()
                 );
@@ -2055,76 +2063,48 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
         return Err(last_error.unwrap_or_else(|| anyhow::anyhow!("无可用图层可解码")));
     }
 
-    let queue: Arc<Mutex<VecDeque<(usize, LayerDecodeRequest)>>> = Arc::new(Mutex::new(
-        request.layers.iter().cloned().enumerate().collect(),
-    ));
-    let (tx, rx) = mpsc::channel::<(usize, Result<RgbaFrame, String>)>();
-
-    let max_workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).max(1);
-    let worker_count = max_workers.min(request.layers.len()).min(preview_decode_worker_cap());
     let playback_mode = request.playback_mode;
     let layer_cache_enabled = request.layer_cache_enabled;
     let decode_generation = request.generation;
     let latest_generation = Arc::clone(&request.latest_generation);
-    let mut workers = Vec::with_capacity(worker_count);
+    let layer_cache = Arc::clone(&request.layer_cache);
+    let decoder_pool = Arc::clone(&request.decoder_pool);
 
-    for _ in 0..worker_count {
-        let queue = Arc::clone(&queue);
-        let tx = tx.clone();
-        let layer_cache = Arc::clone(&request.layer_cache);
-        let decoder_pool = Arc::clone(&request.decoder_pool);
-        let latest_generation = Arc::clone(&latest_generation);
-        workers.push(std::thread::spawn(move || loop {
-            if decode_generation != latest_generation.load(Ordering::Relaxed) {
-                break;
-            }
+    let layer_outputs = preview_decode_pool().install(|| {
+        request
+            .layers
+            .par_iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, layer)| {
+                if decode_generation != latest_generation.load(Ordering::Relaxed) {
+                    return (
+                        index,
+                        Err("decode cancelled by newer generation".to_string()),
+                    );
+                }
 
-            let job = {
-                let mut guard = match queue.lock() {
-                    Ok(g) => g,
-                    Err(_) => break,
-                };
-                guard.pop_front()
-            };
-
-            let Some((index, layer)) = job else {
-                break;
-            };
-
-            if decode_generation != latest_generation.load(Ordering::Relaxed) {
-                break;
-            }
-
-            let decoded = decode_layer_rgba(
-                &layer,
-                width,
-                height,
-                playback_mode,
-                layer_cache_enabled,
-                &layer_cache,
-                &decoder_pool,
-            )
-            .map_err(|e| e.to_string());
-            if tx.send((index, decoded)).is_err() {
-                break;
-            }
-        }));
-    }
-    drop(tx);
+                let decoded = decode_layer_rgba(
+                    &layer,
+                    width,
+                    height,
+                    playback_mode,
+                    layer_cache_enabled,
+                    &layer_cache,
+                    &decoder_pool,
+                )
+                .map_err(|e| e.to_string());
+                (index, decoded)
+            })
+            .collect::<Vec<_>>()
+    });
 
     let mut layer_results: Vec<Option<Result<RgbaFrame, String>>> =
         vec![None; request.layers.len()];
-    for _ in 0..request.layers.len() {
-        let Ok((index, decoded)) = rx.recv() else {
-            break;
-        };
+    for (index, decoded) in layer_outputs {
         if index < layer_results.len() {
             layer_results[index] = Some(decoded);
         }
-    }
-
-    for worker in workers {
-        let _ = worker.join();
     }
 
     let mut rgba_layers_for_gpu: Vec<CpuRgbaLayer> = Vec::with_capacity(request.layers.len());
@@ -2851,6 +2831,17 @@ fn preview_decode_worker_cap() -> usize {
     })
 }
 
+fn preview_decode_pool() -> &'static rayon::ThreadPool {
+    static DECODE_POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+    DECODE_POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(preview_decode_worker_cap())
+            .thread_name(|idx| format!("preview-decode-{}", idx))
+            .build()
+            .expect("failed to build preview decode rayon pool")
+    })
+}
+
 fn preview_diag_slow_threshold_ms() -> u64 {
     static THRESHOLD: OnceLock<u64> = OnceLock::new();
     *THRESHOLD.get_or_init(|| {
@@ -2888,8 +2879,32 @@ fn decode_stall_timeout_ms() -> u64 {
         std::env::var("MONDRIAN_DECODE_STALL_TIMEOUT_MS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
+            .or_else(|| {
+                let budget = decode_timeout_budget_ms();
+                let grace = std::env::var("MONDRIAN_DECODE_STALL_GRACE_MS")
+                    .ok()
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .unwrap_or(300);
+                Some(budget.saturating_add(grace))
+            })
             .filter(|value| *value >= 150)
             .unwrap_or(1200)
+    })
+}
+
+fn decode_timeout_budget_ms() -> u64 {
+    static BUDGET_MS: OnceLock<u64> = OnceLock::new();
+    *BUDGET_MS.get_or_init(|| {
+        std::env::var("MONDRIAN_DECODE_TIMEOUT_BUDGET_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .or_else(|| {
+                std::env::var("MONDRIAN_PREVIEW_DECODE_TIMEOUT_MS")
+                    .ok()
+                    .and_then(|value| value.parse::<u64>().ok())
+            })
+            .filter(|value| *value >= 100)
+            .unwrap_or(2500)
     })
 }
 

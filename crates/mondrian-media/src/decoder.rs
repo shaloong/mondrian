@@ -273,7 +273,7 @@ impl DecoderPool {
             .map(Arc::new)
         });
 
-        let decode_timeout_ms = preview_decode_timeout_ms();
+        let decode_timeout_ms = decode_timeout_budget_ms();
         let decode_result: Result<Arc<RgbaFrame>> = if decode_timeout_ms == 0 {
             decode_task.await.map_err(|e| mondrian_core::MondrianError::DecodeFailed {
                 asset_id: asset_id.to_string(),
@@ -292,6 +292,15 @@ impl DecoderPool {
                 }
                 _ = &mut timeout => {
                     decode_task.abort();
+                    tracing::warn!(
+                        "MONDRIAN_DECODE_TIMEOUT_JSON={{\"asset_id\":\"{}\",\"frame\":{},\"secs\":{:.3},\"budget_ms\":{},\"target_width\":{},\"target_height\":{},\"reason\":\"decode timeout\"}}",
+                        asset_id,
+                        frame_num,
+                        secs,
+                        decode_timeout_ms,
+                        target_width,
+                        target_height
+                    );
                     Err(mondrian_core::MondrianError::DecodeFailed {
                         asset_id: asset_id.to_string(),
                         reason: format!(
@@ -639,12 +648,17 @@ fn num_cpus() -> usize {
     std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4)
 }
 
-fn preview_decode_timeout_ms() -> u64 {
+fn decode_timeout_budget_ms() -> u64 {
     static TIMEOUT_MS: OnceLock<u64> = OnceLock::new();
     *TIMEOUT_MS.get_or_init(|| {
-        std::env::var("MONDRIAN_PREVIEW_DECODE_TIMEOUT_MS")
+        std::env::var("MONDRIAN_DECODE_TIMEOUT_BUDGET_MS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
+            .or_else(|| {
+                std::env::var("MONDRIAN_PREVIEW_DECODE_TIMEOUT_MS")
+                    .ok()
+                    .and_then(|value| value.parse::<u64>().ok())
+            })
             .filter(|value| *value >= 100)
             .unwrap_or(2500)
     })

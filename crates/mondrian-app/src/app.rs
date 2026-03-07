@@ -435,9 +435,7 @@ impl AppState {
 
         writer.start_file("library/index.db", options)?;
         let mut db_file = fs::File::open(db_path)?;
-        let mut db_buf = Vec::new();
-        db_file.read_to_end(&mut db_buf)?;
-        writer.write_all(&db_buf)?;
+        std::io::copy(&mut db_file, &mut writer)?;
 
         writer.finish()?;
 
