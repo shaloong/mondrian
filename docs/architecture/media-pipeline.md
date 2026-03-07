@@ -271,5 +271,6 @@ cargo test -p mondrian-app preview_8k60_simulated_perf -- --ignored --nocapture
 - `alpha_blend` 增加 opacity LUT 与更紧凑的像素循环，减少每像素重复算术开销。
 - `alpha_blend` LUT 改为全局预计算表，避免每帧重复构建。
 - 并行路径增加最小分块粒度，降低任务切分和线程调度开销。
+- 移除混合循环中的冗余 alpha 通道重复写入，减少 8K 场景内存写压力。
 
 该优化主要降低 1080p 预览时的 CPU 开销，并提升播放稳定帧率。

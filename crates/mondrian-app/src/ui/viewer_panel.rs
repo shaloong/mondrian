@@ -3049,6 +3049,7 @@ fn blend_row_with_table(
     }
 }
 
+#[inline]
 fn blend_channel_u8(src: u32, dst: u32, alpha: u32, inv_alpha: u32) -> u8 {
     let value = src * alpha + dst * inv_alpha + 127;
     ((value + (value >> 8)) >> 8) as u8
