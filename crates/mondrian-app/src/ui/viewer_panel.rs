@@ -3,6 +3,7 @@ use crate::{
     ui::theme::{self, palette},
 };
 use egui::{Color32, Pos2, Rect, Sense, Ui, Vec2};
+
 use mondrian_core::types::{AssetId, Rational, TimeCode};
 use mondrian_media::cache::FrameCacheConfig;
 use mondrian_media::{DecoderPool, FrameCache, RgbaFrame};
@@ -647,6 +648,8 @@ impl ViewerPanel {
             }
         });
 
+        state.set_playback_buffering(self.playback_buffering_requested(is_playing));
+
         self.was_playing_last_frame = is_playing;
         self.last_timeline_frame = Some(current_frame);
 
@@ -681,6 +684,19 @@ impl ViewerPanel {
             self.invalidate_pending_decode();
             ctx.request_repaint();
         }
+    }
+
+    fn playback_buffering_requested(&self, is_playing: bool) -> bool {
+        if !is_playing {
+            return false;
+        }
+
+        // 仅在播放中且预取处于 buffering 模式时请求短暂停留，
+        // 避免刚进入播放时的瞬时状态误触发。
+        self.playback_prefetch_buffering
+            && (self.preview_texture.is_none()
+                || self.decode_in_flight
+                || self.queued_request.is_some())
     }
 
     fn draw_dev_metrics_overlay(

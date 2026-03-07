@@ -219,6 +219,8 @@ pub struct AppState {
     /// 当 advance_playback_clock 到达 playback_end 时置 true，
     /// seek() / stop() 时清除，play() 据此决定是否回到 in_point。
     pub playback_reached_end: bool,
+    /// 播放时由 Viewer 面板上报：当前是否处于短暂停留缓冲状态。
+    pub playback_buffering: bool,
 
     // 素材库
     pub asset_library: Option<Arc<AssetLibrary>>,
@@ -302,6 +304,7 @@ impl AppState {
             cmd_history: mondrian_timeline::command::CommandHistory::new(200),
             playback: PlaybackState::default(),
             playback_reached_end: false,
+            playback_buffering: false,
             asset_library: None,
             dragging_asset: None,
             render_queue: RenderQueue::new(),
@@ -580,6 +583,7 @@ impl AppState {
         self.project_out_point = None;
         self.asset_library = None;
         self.playback = PlaybackState::Stopped;
+        self.playback_buffering = false;
         self.dragging_asset = None;
         self.cmd_history = mondrian_timeline::command::CommandHistory::new(200);
         self.proxy_mode_assets.clear();
@@ -908,6 +912,7 @@ impl AppState {
             frames = 0;
         }
         self.playback_reached_end = false;
+        self.playback_buffering = false;
 
         self.playback = PlaybackState::Playing { timecode_frames: frames };
         self.sync_audio_clock_to_frame(frames);
@@ -916,6 +921,7 @@ impl AppState {
 
     pub fn pause(&mut self) {
         let frames = self.current_frame();
+        self.playback_buffering = false;
         self.playback = PlaybackState::Paused { timecode_frames: frames };
         self.sync_audio_clock_to_frame(frames);
         self.reset_audio_render_pipeline(self.audio_clock.now_seconds().max(0.0));
@@ -927,6 +933,7 @@ impl AppState {
     pub fn stop(&mut self) {
         self.playback = PlaybackState::Stopped;
         self.playback_reached_end = false;
+        self.playback_buffering = false;
         self.av_drift_ms = 0.0;
         self.reset_audio_render_pipeline(0.0);
         if let Some(output) = &self.audio_output {
@@ -938,6 +945,7 @@ impl AppState {
         // 任何手动跳帧操作都清除「自然到达终点」标志，
         // 这样下一次 play() 不会误跳回 in_point。
         self.playback_reached_end = false;
+        self.playback_buffering = false;
         self.playback = match &self.playback {
             PlaybackState::Playing { .. } => PlaybackState::Playing { timecode_frames: frame },
             _ => PlaybackState::Paused { timecode_frames: frame },
@@ -951,6 +959,14 @@ impl AppState {
 
     pub fn set_playback_frame_running(&mut self, frame: i64) {
         self.playback = PlaybackState::Playing { timecode_frames: frame.max(0) };
+    }
+
+    pub fn set_playback_buffering(&mut self, buffering: bool) {
+        self.playback_buffering = buffering;
+    }
+
+    pub fn is_playback_buffering(&self) -> bool {
+        self.playback_buffering
     }
 
     pub fn pump_audio_output(&mut self) {
@@ -2048,6 +2064,7 @@ pub struct MondrianApp {
     new_project_draft: NewProjectDraft,
     playback_last_tick: Option<std::time::Instant>,
     playback_subframe_accum: f64,
+    playback_buffering_last_frame: bool,
     app_config_path: PathBuf,
     shortcuts: ShortcutPreferences,
     media_cache_auto_cleanup: bool,
@@ -2089,6 +2106,7 @@ impl MondrianApp {
             new_project_draft: NewProjectDraft::default(),
             playback_last_tick: None,
             playback_subframe_accum: 0.0,
+            playback_buffering_last_frame: false,
             app_config_path: app_preferences_path(),
             shortcuts: ShortcutPreferences::default(),
             media_cache_auto_cleanup: default_media_cache_auto_cleanup(),
@@ -2502,6 +2520,7 @@ impl MondrianApp {
     /// 因此下次 `play()` 将从 in_point 重新开始（经典循环行为）。
     fn end_playback_at(&mut self, end_frame: i64) {
         self.state.playback_reached_end = true;
+        self.state.playback_buffering = false;
         self.state.playback = PlaybackState::Paused { timecode_frames: end_frame };
         self.state.sync_audio_clock_to_frame(end_frame);
         self.state
@@ -2511,16 +2530,41 @@ impl MondrianApp {
         }
         self.playback_last_tick = None;
         self.playback_subframe_accum = 0.0;
+        self.playback_buffering_last_frame = false;
     }
 
     fn advance_playback_clock(&mut self) {
-        self.state.pump_audio_output();
-
         if !self.state.is_playing() {
             self.playback_last_tick = None;
             self.playback_subframe_accum = 0.0;
+            self.playback_buffering_last_frame = false;
             return;
         }
+
+        if self.state.is_playback_buffering() {
+            if !self.playback_buffering_last_frame {
+                self.state.sync_audio_clock_to_frame(self.state.current_frame());
+                self.state
+                    .reset_audio_render_pipeline(self.state.audio_clock.now_seconds().max(0.0));
+                if let Some(output) = &self.state.audio_output {
+                    output.clear();
+                }
+            }
+
+            self.playback_last_tick = None;
+            self.playback_subframe_accum = 0.0;
+            self.playback_buffering_last_frame = true;
+            return;
+        }
+
+        if self.playback_buffering_last_frame {
+            self.state.sync_audio_clock_to_frame(self.state.current_frame());
+            self.state
+                .reset_audio_render_pipeline(self.state.audio_clock.now_seconds().max(0.0));
+        }
+        self.playback_buffering_last_frame = false;
+
+        self.state.pump_audio_output();
 
         let now = std::time::Instant::now();
         let previous = self.playback_last_tick.replace(now).unwrap_or(now);
