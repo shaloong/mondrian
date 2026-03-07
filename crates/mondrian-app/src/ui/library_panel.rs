@@ -266,8 +266,7 @@ impl LibraryPanel {
                         ui.add_sized(
                             [name_w, 18.0],
                             egui::Label::new(
-                                egui::RichText::new(display_name)
-                                    .color(palette::text_primary()),
+                                egui::RichText::new(display_name).color(palette::text_primary()),
                             )
                             .truncate(),
                         );
@@ -355,7 +354,8 @@ impl LibraryPanel {
                     asset_name.clone(),
                     asset.kind.clone(),
                     asset.media_info.duration,
-                    matches!(asset.kind, mondrian_assets::AssetKind::Video) && asset.media_info.has_audio,
+                    matches!(asset.kind, mondrian_assets::AssetKind::Video)
+                        && asset.media_info.has_audio,
                 );
                 let lane = match asset.kind {
                     mondrian_assets::AssetKind::Video => "视频轨",

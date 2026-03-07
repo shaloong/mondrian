@@ -31,17 +31,17 @@ impl EncoderBackend {
 
     pub fn ffmpeg_codec_name(&self) -> &'static str {
         match self {
-            Self::NvencH264         => "h264_nvenc",
-            Self::NvencH265         => "hevc_nvenc",
-            Self::AmfH264           => "h264_amf",
-            Self::AmfH265           => "hevc_amf",
-            Self::QsvH264           => "h264_qsv",
-            Self::QsvH265           => "hevc_qsv",
-            Self::VideoToolboxH264  => "h264_videotoolbox",
-            Self::VideoToolboxH265  => "hevc_videotoolbox",
+            Self::NvencH264 => "h264_nvenc",
+            Self::NvencH265 => "hevc_nvenc",
+            Self::AmfH264 => "h264_amf",
+            Self::AmfH265 => "hevc_amf",
+            Self::QsvH264 => "h264_qsv",
+            Self::QsvH265 => "hevc_qsv",
+            Self::VideoToolboxH264 => "h264_videotoolbox",
+            Self::VideoToolboxH265 => "hevc_videotoolbox",
             Self::VideoToolboxProRes => "prores_videotoolbox",
-            Self::SoftwareX264      => "libx264",
-            Self::SoftwareX265      => "libx265",
+            Self::SoftwareX264 => "libx264",
+            Self::SoftwareX265 => "libx265",
         }
     }
 }

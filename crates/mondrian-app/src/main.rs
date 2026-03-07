@@ -50,11 +50,7 @@ fn load_icon() -> egui::IconData {
         Ok(img) => {
             let rgba = img.into_rgba8();
             let (width, height) = rgba.dimensions();
-            egui::IconData {
-                rgba: rgba.into_raw(),
-                width,
-                height,
-            }
+            egui::IconData { rgba: rgba.into_raw(), width, height }
         }
         Err(err) => {
             tracing::warn!("加载窗口图标失败: {err}");

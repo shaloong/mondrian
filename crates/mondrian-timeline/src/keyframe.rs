@@ -66,12 +66,12 @@ impl Interpolatable for [f32; 4] {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Keyframe<T> {
-    pub time:         TimeCode,
-    pub value:        T,
+    pub time: TimeCode,
+    pub value: T,
     pub interpolation: InterpolationType,
     /// 贝塞尔控制点（时间偏移, 值偏移）— 仅 Bezier 有效
-    pub control_in:   Option<Vec2>,
-    pub control_out:  Option<Vec2>,
+    pub control_in: Option<Vec2>,
+    pub control_out: Option<Vec2>,
 }
 
 // ─── 关键帧轨道 ───────────────────────────────────────────────────────────────
@@ -104,9 +104,7 @@ impl<T: Interpolatable + Serialize + for<'de> Deserialize<'de>> KeyframeTrack<T>
         }
 
         // 二分查找相邻关键帧
-        let idx = self.keyframes
-            .partition_point(|kf| kf.time <= time)
-            .saturating_sub(1);
+        let idx = self.keyframes.partition_point(|kf| kf.time <= time).saturating_sub(1);
 
         let kf_a = &self.keyframes[idx];
         let kf_b = &self.keyframes[idx + 1];
@@ -168,7 +166,9 @@ impl<T: Interpolatable + Serialize + for<'de> Deserialize<'de>> KeyframeTrack<T>
 /// 将时间码归一化为 [0, 1] 范围
 fn normalize_time(t: TimeCode, start: TimeCode, end: TimeCode) -> f32 {
     let total = (end.frame - start.frame) as f32;
-    if total <= 0.0 { return 0.0; }
+    if total <= 0.0 {
+        return 0.0;
+    }
     (t.frame - start.frame) as f32 / total
 }
 
@@ -214,14 +214,18 @@ mod tests {
     fn linear_interpolation() {
         let mut track = KeyframeTrack::<f32>::constant(0.0);
         track.set_keyframe(Keyframe {
-            time: tc(0), value: 0.0,
+            time: tc(0),
+            value: 0.0,
             interpolation: InterpolationType::Linear,
-            control_in: None, control_out: None,
+            control_in: None,
+            control_out: None,
         });
         track.set_keyframe(Keyframe {
-            time: tc(100), value: 100.0,
+            time: tc(100),
+            value: 100.0,
             interpolation: InterpolationType::Linear,
-            control_in: None, control_out: None,
+            control_in: None,
+            control_out: None,
         });
 
         let mid = track.evaluate(tc(50));
@@ -232,14 +236,18 @@ mod tests {
     fn hold_interpolation() {
         let mut track = KeyframeTrack::<f32>::constant(0.0);
         track.set_keyframe(Keyframe {
-            time: tc(0), value: 10.0,
+            time: tc(0),
+            value: 10.0,
             interpolation: InterpolationType::Hold,
-            control_in: None, control_out: None,
+            control_in: None,
+            control_out: None,
         });
         track.set_keyframe(Keyframe {
-            time: tc(50), value: 50.0,
+            time: tc(50),
+            value: 50.0,
             interpolation: InterpolationType::Hold,
-            control_in: None, control_out: None,
+            control_in: None,
+            control_out: None,
         });
 
         // Hold：在 tc(0)~tc(50) 之间，值应保持 10.0

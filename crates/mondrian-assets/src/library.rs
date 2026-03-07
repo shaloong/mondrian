@@ -311,16 +311,6 @@ fn is_audio_only_extension(path: &Path) -> bool {
 
     matches!(
         ext.to_ascii_lowercase().as_str(),
-        "mp3"
-            | "wav"
-            | "flac"
-            | "aac"
-            | "m4a"
-            | "ogg"
-            | "opus"
-            | "wma"
-            | "aiff"
-            | "aif"
-            | "alac"
+        "mp3" | "wav" | "flac" | "aac" | "m4a" | "ogg" | "opus" | "wma" | "aiff" | "aif" | "alac"
     )
 }

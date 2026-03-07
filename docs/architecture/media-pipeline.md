@@ -261,7 +261,7 @@ cargo test -p mondrian-app preview_8k60_simulated_perf -- --ignored --nocapture
 
 ### 预览合成优化说明（2026-03）
 
-`mondrian-app` 预览 CPU 合成路径已做两项关键优化：
+`mondrian-app` 预览 CPU 合成路径已做多项关键优化：
 
 - 多图层合成阶段去除 `RGBA` 数据的重复 `clone`，减少每帧内存拷贝。
 - `alpha_blend` 改为整数定点计算，并对“整帧不透明图层”走快速拷贝路径。
@@ -272,5 +272,6 @@ cargo test -p mondrian-app preview_8k60_simulated_perf -- --ignored --nocapture
 - `alpha_blend` LUT 改为全局预计算表，避免每帧重复构建。
 - 并行路径增加最小分块粒度，降低任务切分和线程调度开销。
 - 移除混合循环中的冗余 alpha 通道重复写入，减少 8K 场景内存写压力。
+- 图层帧缓存改为 `HashMap + 队列` 结构，`get/contains` 从线性查找降为 O(1)，降低高并发预取下的缓存查询开销。
 
 该优化主要降低 1080p 预览时的 CPU 开销，并提升播放稳定帧率。

@@ -40,7 +40,7 @@ struct DecodeRequest {
     target_width: u32,
     target_height: u32,
     layer_cache_enabled: bool,
-    layer_cache: Arc<Mutex<VecDeque<(LayerFrameCacheKey, RgbaFrame)>>>,
+    layer_cache: SharedLayerFrameCache,
     decoder_pool: Arc<DecoderPool>,
     generation: u64,
     latest_generation: Arc<AtomicU64>,
@@ -88,6 +88,14 @@ struct LayerFrameCacheKey {
     target_width: u32,
     target_height: u32,
 }
+
+#[derive(Default)]
+struct LayerFrameCache {
+    entries: HashMap<LayerFrameCacheKey, RgbaFrame>,
+    order: VecDeque<LayerFrameCacheKey>,
+}
+
+type SharedLayerFrameCache = Arc<Mutex<LayerFrameCache>>;
 
 #[derive(Debug, Clone)]
 struct CachedAssetPreview {
@@ -192,7 +200,7 @@ pub struct ViewerPanel {
     decode_in_flight_signature: Option<CompositeFrameSignature>,
     queued_request: Option<DecodeRequest>,
     texture_cache: VecDeque<(CompositeFrameSignature, egui::TextureHandle)>,
-    layer_frame_cache: Arc<Mutex<VecDeque<(LayerFrameCacheKey, RgbaFrame)>>>,
+    layer_frame_cache: SharedLayerFrameCache,
     preview_scale_mode: PreviewScaleMode,
     next_decode_generation: u64,
     latest_decode_generation: Arc<AtomicU64>,
@@ -275,7 +283,7 @@ impl Default for ViewerPanel {
             decode_in_flight_signature: None,
             queued_request: None,
             texture_cache: VecDeque::new(),
-            layer_frame_cache: Arc::new(Mutex::new(VecDeque::new())),
+            layer_frame_cache: Arc::new(Mutex::new(LayerFrameCache::default())),
             preview_scale_mode: PreviewScaleMode::default(),
             next_decode_generation: 1,
             latest_decode_generation: Arc::new(AtomicU64::new(0)),
@@ -1687,16 +1695,12 @@ impl ViewerPanel {
     pub fn set_layer_cache_enabled(&mut self, enabled: bool) {
         self.layer_cache_enabled = enabled;
         if !enabled {
-            if let Ok(mut guard) = self.layer_frame_cache.lock() {
-                guard.clear();
-            }
+            layer_cache_clear(&self.layer_frame_cache);
         }
     }
 
     pub fn clear_layer_cache(&mut self) {
-        if let Ok(mut guard) = self.layer_frame_cache.lock() {
-            guard.clear();
-        }
+        layer_cache_clear(&self.layer_frame_cache);
     }
 
     pub fn preferences_snapshot(&self) -> ViewerPreferences {
@@ -1748,9 +1752,7 @@ impl ViewerPanel {
         std::fs::create_dir_all(&cache_dir)?;
 
         self.texture_cache.clear();
-        if let Ok(mut guard) = self.layer_frame_cache.lock() {
-            guard.clear();
-        }
+        layer_cache_clear(&self.layer_frame_cache);
         self.clear_prefetch_in_flight();
         self.decoder_pool.clear_all_caches();
 
@@ -2255,7 +2257,7 @@ fn decode_layer_rgba(
     height: u32,
     playback_mode: bool,
     layer_cache_enabled: bool,
-    layer_cache: &Arc<Mutex<VecDeque<(LayerFrameCacheKey, RgbaFrame)>>>,
+    layer_cache: &SharedLayerFrameCache,
     decoder_pool: &Arc<DecoderPool>,
 ) -> anyhow::Result<RgbaFrame> {
     let started_at = Instant::now();
@@ -2660,39 +2662,30 @@ fn with_layer_decode_runtime<T>(f: impl FnOnce(&tokio::runtime::Runtime) -> T) -
 }
 
 fn layer_cache_get(
-    layer_cache: &Arc<Mutex<VecDeque<(LayerFrameCacheKey, RgbaFrame)>>>,
+    layer_cache: &SharedLayerFrameCache,
     key: &LayerFrameCacheKey,
 ) -> Option<RgbaFrame> {
-    let mut guard = match layer_cache.lock() {
+    let guard = match layer_cache.lock() {
         Ok(g) => g,
         Err(_) => return None,
     };
-
-    if let Some(index) = guard.iter().position(|(entry_key, _)| entry_key == key) {
-        if let Some((entry_key, frame)) = guard.remove(index) {
-            let cloned = frame.clone();
-            guard.push_front((entry_key, frame));
-            return Some(cloned);
-        }
-    }
-
-    None
+    guard.entries.get(key).cloned()
 }
 
 fn layer_cache_get_with_tolerance(
-    layer_cache: &Arc<Mutex<VecDeque<(LayerFrameCacheKey, RgbaFrame)>>>,
+    layer_cache: &SharedLayerFrameCache,
     key: &LayerFrameCacheKey,
     tolerance_frames: i64,
 ) -> Option<RgbaFrame> {
-    let mut guard = match layer_cache.lock() {
+    let guard = match layer_cache.lock() {
         Ok(g) => g,
         Err(_) => return None,
     };
 
-    let mut best_index: Option<usize> = None;
+    let mut best_key: Option<LayerFrameCacheKey> = None;
     let mut best_distance = i64::MAX;
 
-    for (index, (entry_key, _)) in guard.iter().enumerate() {
+    for entry_key in guard.entries.keys() {
         if entry_key.asset_id != key.asset_id
             || entry_key.target_width != key.target_width
             || entry_key.target_height != key.target_height
@@ -2703,42 +2696,25 @@ fn layer_cache_get_with_tolerance(
         let distance = (entry_key.source_frame - key.source_frame).abs();
         if distance <= tolerance_frames && distance < best_distance {
             best_distance = distance;
-            best_index = Some(index);
+            best_key = Some(entry_key.clone());
             if distance == 0 {
                 break;
             }
         }
     }
 
-    let Some(index) = best_index else {
-        return None;
-    };
-
-    if let Some((entry_key, frame)) = guard.remove(index) {
-        let cloned = frame.clone();
-        guard.push_front((entry_key, frame));
-        return Some(cloned);
-    }
-
-    None
+    best_key.and_then(|entry_key| guard.entries.get(&entry_key).cloned())
 }
 
-fn layer_cache_contains(
-    layer_cache: &Arc<Mutex<VecDeque<(LayerFrameCacheKey, RgbaFrame)>>>,
-    key: &LayerFrameCacheKey,
-) -> bool {
+fn layer_cache_contains(layer_cache: &SharedLayerFrameCache, key: &LayerFrameCacheKey) -> bool {
     let guard = match layer_cache.lock() {
         Ok(g) => g,
         Err(_) => return false,
     };
-    guard.iter().any(|(entry_key, _)| entry_key == key)
+    guard.entries.contains_key(key)
 }
 
-fn layer_cache_put(
-    layer_cache: &Arc<Mutex<VecDeque<(LayerFrameCacheKey, RgbaFrame)>>>,
-    key: LayerFrameCacheKey,
-    frame: RgbaFrame,
-) {
+fn layer_cache_put(layer_cache: &SharedLayerFrameCache, key: LayerFrameCacheKey, frame: RgbaFrame) {
     // 扩大图层帧缓存至 256 帧：
     // 预取 + scrub 场景下 96 帧容量不足，大 seek 后旧缓存无法复用，
     // 增大容量可显著减少 seek 后的重复解码次数。
@@ -2749,13 +2725,24 @@ fn layer_cache_put(
         Err(_) => return,
     };
 
-    if let Some(index) = guard.iter().position(|(entry_key, _)| *entry_key == key) {
-        guard.remove(index);
+    if !guard.entries.contains_key(&key) {
+        guard.order.push_front(key.clone());
     }
 
-    guard.push_front((key, frame));
-    while guard.len() > LAYER_CACHE_CAPACITY {
-        guard.pop_back();
+    guard.entries.insert(key, frame);
+    while guard.entries.len() > LAYER_CACHE_CAPACITY {
+        if let Some(oldest) = guard.order.pop_back() {
+            guard.entries.remove(&oldest);
+        } else {
+            break;
+        }
+    }
+}
+
+fn layer_cache_clear(layer_cache: &SharedLayerFrameCache) {
+    if let Ok(mut guard) = layer_cache.lock() {
+        guard.entries.clear();
+        guard.order.clear();
     }
 }
 

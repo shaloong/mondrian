@@ -271,11 +271,7 @@ impl MediaInfo {
                 info.audio_streams.len(),
             );
         } else {
-            tracing::info!(
-                "[media-probe] done: {}ms path={:?}",
-                elapsed_ms,
-                path
-            );
+            tracing::info!("[media-probe] done: {}ms path={:?}", elapsed_ms, path);
         }
 
         Ok(info)

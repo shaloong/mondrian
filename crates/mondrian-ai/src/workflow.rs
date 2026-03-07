@@ -6,32 +6,32 @@ use std::collections::HashMap;
 /// 工作流定义（从 YAML 文件加载）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowDef {
-    pub name:        String,
-    pub version:     String,
+    pub name: String,
+    pub version: String,
     pub description: Option<String>,
-    pub inputs:      HashMap<String, InputDef>,
-    pub steps:       Vec<StepDef>,
+    pub inputs: HashMap<String, InputDef>,
+    pub steps: Vec<StepDef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InputDef {
     #[serde(rename = "type")]
-    pub input_type: String,     // "string" / "number" / "enum"
-    pub label:      Option<String>,
-    pub default:    Option<serde_json::Value>,
-    pub options:    Option<Vec<String>>,
+    pub input_type: String, // "string" / "number" / "enum"
+    pub label: Option<String>,
+    pub default: Option<serde_json::Value>,
+    pub options: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepDef {
-    pub id:        String,
-    pub name:      String,
-    pub action:    String,      // "generate_image" / "generate_video" / ...
-    pub provider:  Option<String>,
-    pub condition: Option<String>,  // Tera 模板表达式
-    pub params:    HashMap<String, serde_json::Value>,
-    pub output:    Option<String>,  // 输出变量名
-    pub on_error:  Option<ErrorPolicy>,
+    pub id: String,
+    pub name: String,
+    pub action: String, // "generate_image" / "generate_video" / ...
+    pub provider: Option<String>,
+    pub condition: Option<String>, // Tera 模板表达式
+    pub params: HashMap<String, serde_json::Value>,
+    pub output: Option<String>, // 输出变量名
+    pub on_error: Option<ErrorPolicy>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,8 +44,8 @@ pub enum ErrorPolicy {
 impl WorkflowDef {
     /// 从 YAML 字符串解析工作流定义
     pub fn from_yaml(yaml: &str) -> mondrian_core::Result<Self> {
-        serde_yaml::from_str(yaml).map_err(|e| {
-            mondrian_core::MondrianError::WorkflowParseFailed { reason: e.to_string() }
+        serde_yaml::from_str(yaml).map_err(|e| mondrian_core::MondrianError::WorkflowParseFailed {
+            reason: e.to_string(),
         })
     }
 }
@@ -56,8 +56,8 @@ pub type WorkflowInputs = HashMap<String, serde_json::Value>;
 /// 工作流执行上下文（步骤间传递数据）
 #[derive(Debug, Default)]
 pub struct WorkflowContext {
-    pub inputs:  WorkflowInputs,
-    outputs:     HashMap<String, serde_json::Value>,
+    pub inputs: WorkflowInputs,
+    outputs: HashMap<String, serde_json::Value>,
 }
 
 impl WorkflowContext {
@@ -76,6 +76,6 @@ impl WorkflowContext {
 
 /// 工作流执行结果
 pub struct WorkflowResult {
-    pub context:   WorkflowContext,
+    pub context: WorkflowContext,
     pub step_count: usize,
 }

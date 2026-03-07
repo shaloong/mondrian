@@ -1,7 +1,7 @@
 //! Command 模式撤销/重做系统
 
-use mondrian_core::Result;
 use crate::sequence::Sequence;
+use mondrian_core::Result;
 
 /// 可撤销命令 Trait
 pub trait Command: Send + Sync + std::fmt::Debug {
@@ -33,9 +33,7 @@ impl CommandHistory {
     }
 
     /// 执行命令并推入撤销栈
-    pub fn execute(&mut self, mut cmd: Box<dyn Command>, seq: &mut Sequence)
-        -> Result<()>
-    {
+    pub fn execute(&mut self, mut cmd: Box<dyn Command>, seq: &mut Sequence) -> Result<()> {
         cmd.execute(seq)?;
         self.undo_stack.push(cmd);
         self.redo_stack.clear(); // 新命令后清空重做栈
@@ -71,8 +69,12 @@ impl CommandHistory {
         }
     }
 
-    pub fn can_undo(&self) -> bool { !self.undo_stack.is_empty() }
-    pub fn can_redo(&self) -> bool { !self.redo_stack.is_empty() }
+    pub fn can_undo(&self) -> bool {
+        !self.undo_stack.is_empty()
+    }
+    pub fn can_redo(&self) -> bool {
+        !self.redo_stack.is_empty()
+    }
 
     pub fn undo_description(&self) -> Option<&str> {
         self.undo_stack.last().map(|c| c.description())

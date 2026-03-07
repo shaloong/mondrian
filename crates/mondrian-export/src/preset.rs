@@ -3,18 +3,28 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Resolution { pub width: u32, pub height: u32 }
+pub struct Resolution {
+    pub width: u32,
+    pub height: u32,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Container { Mp4, Mov, Mkv, Gif, Mxf, Webm }
+pub enum Container {
+    Mp4,
+    Mov,
+    Mkv,
+    Gif,
+    Mxf,
+    Webm,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum VideoCodecConfig {
     H264 { crf: u8, bitrate_kbps: Option<u32> },
     H265 { crf: u8, bitrate_kbps: Option<u32> },
-    Av1  { crf: u8 },
+    Av1 { crf: u8 },
     ProRes { variant: String },
-    Gif  { colors: u16, dither: bool },
+    Gif { colors: u16, dither: bool },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,11 +36,11 @@ pub enum AudioCodecConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportPreset {
-    pub name:        String,
-    pub container:   Container,
-    pub video:       VideoCodecConfig,
-    pub audio:       AudioCodecConfig,
-    pub resolution:  Option<Resolution>,
+    pub name: String,
+    pub container: Container,
+    pub video: VideoCodecConfig,
+    pub audio: AudioCodecConfig,
+    pub resolution: Option<Resolution>,
 }
 
 impl ExportPreset {
@@ -68,8 +78,8 @@ impl ExportPreset {
 /// 导出配置（预设 + 自定义覆盖）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportConfig {
-    pub preset:      ExportPreset,
+    pub preset: ExportPreset,
     pub output_path: std::path::PathBuf,
-    pub in_point:    Option<String>,   // TODO: TimeCode
-    pub out_point:   Option<String>,
+    pub in_point: Option<String>, // TODO: TimeCode
+    pub out_point: Option<String>,
 }

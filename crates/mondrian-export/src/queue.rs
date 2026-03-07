@@ -20,24 +20,24 @@ pub enum JobStatus {
 
 #[derive(Debug, Clone)]
 pub struct RenderJob {
-    pub id:           JobId,
-    pub config:       ExportConfig,
-    pub status:       JobStatus,
-    pub progress:     f32,
-    pub created_at:   DateTime<Utc>,
-    pub started_at:   Option<DateTime<Utc>>,
+    pub id: JobId,
+    pub config: ExportConfig,
+    pub status: JobStatus,
+    pub progress: f32,
+    pub created_at: DateTime<Utc>,
+    pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
 }
 
 impl RenderJob {
     pub fn new(config: ExportConfig) -> Self {
         Self {
-            id:           JobId::new(),
+            id: JobId::new(),
             config,
-            status:       JobStatus::Pending,
-            progress:     0.0,
-            created_at:   Utc::now(),
-            started_at:   None,
+            status: JobStatus::Pending,
+            progress: 0.0,
+            created_at: Utc::now(),
+            started_at: None,
             completed_at: None,
         }
     }
@@ -71,9 +71,9 @@ impl RenderQueue {
     }
 
     pub fn clear_completed(&self) {
-        self.jobs.lock().retain(|j| {
-            !matches!(j.status, JobStatus::Completed | JobStatus::Cancelled)
-        });
+        self.jobs
+            .lock()
+            .retain(|j| !matches!(j.status, JobStatus::Completed | JobStatus::Cancelled));
     }
 }
 

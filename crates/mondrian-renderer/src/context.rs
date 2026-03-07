@@ -5,8 +5,8 @@ use std::sync::Arc;
 use wgpu;
 
 pub struct GpuContext {
-    pub device:  Arc<wgpu::Device>,
-    pub queue:   Arc<wgpu::Queue>,
+    pub device: Arc<wgpu::Device>,
+    pub queue: Arc<wgpu::Queue>,
     pub adapter: wgpu::Adapter,
 }
 
@@ -34,13 +34,11 @@ impl GpuContext {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor::default(), None)
             .await
-            .map_err(|e| mondrian_core::MondrianError::GpuInitFailed {
-                reason: e.to_string(),
-            })?;
+            .map_err(|e| mondrian_core::MondrianError::GpuInitFailed { reason: e.to_string() })?;
 
         Ok(Arc::new(Self {
             device: Arc::new(device),
-            queue:  Arc::new(queue),
+            queue: Arc::new(queue),
             adapter,
         }))
     }

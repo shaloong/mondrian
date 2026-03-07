@@ -14,52 +14,52 @@ pub enum TrackType {
 /// 时间线轨道
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Track {
-    pub id:        TrackId,
-    pub name:      String,
+    pub id: TrackId,
+    pub name: String,
     pub track_type: TrackType,
     /// 轨道高度（UI 像素）
-    pub height:    f32,
-    pub is_muted:  bool,
+    pub height: f32,
+    pub is_muted: bool,
     pub is_locked: bool,
-    pub is_solo:   bool,
+    pub is_solo: bool,
     pub is_visible: bool,
     pub blend_mode: BlendMode,
     /// 轨道不透明度关键帧（仅视频轨有效）
-    pub opacity:   KeyframeTrack<f32>,
+    pub opacity: KeyframeTrack<f32>,
     /// 按位置排序的 Clip 列表
-    pub clips:     Vec<Clip>,
+    pub clips: Vec<Clip>,
 }
 
 impl Track {
     pub fn new_video(name: impl Into<String>) -> Self {
         Self {
-            id:         TrackId::new(),
-            name:       name.into(),
+            id: TrackId::new(),
+            name: name.into(),
             track_type: TrackType::Video,
-            height:     80.0,
-            is_muted:   false,
-            is_locked:  false,
-            is_solo:    false,
+            height: 80.0,
+            is_muted: false,
+            is_locked: false,
+            is_solo: false,
             is_visible: true,
             blend_mode: BlendMode::Normal,
-            opacity:    KeyframeTrack::constant(1.0),
-            clips:      vec![],
+            opacity: KeyframeTrack::constant(1.0),
+            clips: vec![],
         }
     }
 
     pub fn new_audio(name: impl Into<String>) -> Self {
         Self {
-            id:         TrackId::new(),
-            name:       name.into(),
+            id: TrackId::new(),
+            name: name.into(),
             track_type: TrackType::Audio,
-            height:     50.0,
-            is_muted:   false,
-            is_locked:  false,
-            is_solo:    false,
+            height: 50.0,
+            is_muted: false,
+            is_locked: false,
+            is_solo: false,
             is_visible: true,
             blend_mode: BlendMode::Normal,
-            opacity:    KeyframeTrack::constant(1.0),
-            clips:      vec![],
+            opacity: KeyframeTrack::constant(1.0),
+            clips: vec![],
         }
     }
 
@@ -91,9 +91,8 @@ impl Track {
 
     /// 吸附点列表（所有 Clip 的 in/out 点 + 每个 Clip 的关键帧时间）
     pub fn snap_points(&self) -> Vec<TimeCode> {
-        let mut pts: Vec<TimeCode> = self.clips.iter()
-            .flat_map(|c| [c.position, c.end_position()])
-            .collect();
+        let mut pts: Vec<TimeCode> =
+            self.clips.iter().flat_map(|c| [c.position, c.end_position()]).collect();
         pts.sort_unstable();
         pts.dedup();
         pts

@@ -135,7 +135,8 @@ impl ProxyGenerator {
         }
 
         let output_path = self.proxy_path(&source_path);
-        let tmp_output_path = output_path.with_extension(format!("{}.part", self.output_extension()));
+        let tmp_output_path =
+            output_path.with_extension(format!("{}.part", self.output_extension()));
 
         // 确保输出目录存在
         if let Some(parent) = output_path.parent() {

@@ -325,9 +325,9 @@ impl AudioMixer {
 impl RealtimeAudioOutput {
     pub fn try_new(sample_rate: u32, channels: u8) -> Result<Self> {
         let host = cpal::default_host();
-        let device = host.default_output_device().ok_or_else(|| MondrianError::Other(
-            anyhow::anyhow!("未找到默认音频输出设备"),
-        ))?;
+        let device = host
+            .default_output_device()
+            .ok_or_else(|| MondrianError::Other(anyhow::anyhow!("未找到默认音频输出设备")))?;
 
         let config = cpal::StreamConfig {
             channels: channels.max(1) as u16,
@@ -339,9 +339,9 @@ impl RealtimeAudioOutput {
         let queue_for_cb = Arc::clone(&queue);
         let err_fn = |err| tracing::error!("音频输出流错误: {}", err);
 
-        let default_config = device.default_output_config().map_err(|e| MondrianError::Other(
-            anyhow::anyhow!("读取默认输出配置失败: {e}"),
-        ))?;
+        let default_config = device
+            .default_output_config()
+            .map_err(|e| MondrianError::Other(anyhow::anyhow!("读取默认输出配置失败: {e}")))?;
 
         let stream = match default_config.sample_format() {
             cpal::SampleFormat::F32 => build_f32_stream(&device, &config, queue_for_cb, err_fn)
@@ -361,7 +361,9 @@ impl RealtimeAudioOutput {
                         err_fn,
                         None,
                     )
-                    .map_err(|e| MondrianError::Other(anyhow::anyhow!("创建 I16 输出流失败: {e}")))?
+                    .map_err(|e| {
+                        MondrianError::Other(anyhow::anyhow!("创建 I16 输出流失败: {e}"))
+                    })?
             }
             cpal::SampleFormat::U16 => {
                 let queue_for_cb = Arc::clone(&queue);
@@ -378,7 +380,9 @@ impl RealtimeAudioOutput {
                         err_fn,
                         None,
                     )
-                    .map_err(|e| MondrianError::Other(anyhow::anyhow!("创建 U16 输出流失败: {e}")))?
+                    .map_err(|e| {
+                        MondrianError::Other(anyhow::anyhow!("创建 U16 输出流失败: {e}"))
+                    })?
             }
             _ => {
                 return Err(MondrianError::Other(anyhow::anyhow!(
@@ -391,12 +395,7 @@ impl RealtimeAudioOutput {
             .play()
             .map_err(|e| MondrianError::Other(anyhow::anyhow!("启动音频输出流失败: {e}")))?;
 
-        Ok(Self {
-            sample_rate,
-            channels,
-            queue,
-            _stream: stream,
-        })
+        Ok(Self { sample_rate, channels, queue, _stream: stream })
     }
 
     pub fn enqueue(&self, buffer: &AudioBuffer) {
@@ -441,9 +440,7 @@ impl AudioSourceCache {
             self.channels,
         )?);
 
-        self.decoded
-            .lock()
-            .insert(path.to_path_buf(), Arc::clone(&decoded));
+        self.decoded.lock().insert(path.to_path_buf(), Arc::clone(&decoded));
         Ok(decoded)
     }
 
@@ -475,7 +472,11 @@ fn build_f32_stream(
     )
 }
 
-fn decode_audio_file_with_ffmpeg_cli(path: &Path, sample_rate: u32, channels: u8) -> Result<AudioBuffer> {
+fn decode_audio_file_with_ffmpeg_cli(
+    path: &Path,
+    sample_rate: u32,
+    channels: u8,
+) -> Result<AudioBuffer> {
     let output = Command::new("ffmpeg")
         .arg("-v")
         .arg("error")
