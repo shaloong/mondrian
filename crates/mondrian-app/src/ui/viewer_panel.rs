@@ -905,7 +905,7 @@ impl ViewerPanel {
             return;
         };
         self.decoded_commit_queue.clear();
-        self.apply_decode_result(ctx, commit.result, commit.allow_stale);
+        self.apply_decode_result(ctx, commit.result, commit.allow_stale, is_playing);
     }
 
     fn can_commit_texture_now(&self, min_interval_ms: u64) -> bool {
@@ -923,6 +923,7 @@ impl ViewerPanel {
         ctx: &egui::Context,
         result: DecodeResult,
         allow_stale: bool,
+        is_playing: bool,
     ) {
         if !allow_stale
             && result.generation != self.latest_decode_generation.load(Ordering::Relaxed)
@@ -944,16 +945,28 @@ impl ViewerPanel {
                         [frame.width as usize, frame.height as usize],
                         &frame.data,
                     );
-                    self.preview_texture = Some(ctx.load_texture(
-                        format!(
-                            "preview-composited-{}",
-                            composite_signature_hash(&result.signature)
-                        ),
-                        image,
-                        egui::TextureOptions::LINEAR,
-                    ));
-                    if let Some(texture) = self.preview_texture.clone() {
-                        self.cache_put(result.signature.clone(), texture);
+                    if is_playing {
+                        if let Some(texture) = self.preview_texture.as_mut() {
+                            texture.set(image, egui::TextureOptions::LINEAR);
+                        } else {
+                            self.preview_texture = Some(ctx.load_texture(
+                                "preview-live-stream",
+                                image,
+                                egui::TextureOptions::LINEAR,
+                            ));
+                        }
+                    } else {
+                        self.preview_texture = Some(ctx.load_texture(
+                            format!(
+                                "preview-composited-{}",
+                                composite_signature_hash(&result.signature)
+                            ),
+                            image,
+                            egui::TextureOptions::LINEAR,
+                        ));
+                        if let Some(texture) = self.preview_texture.clone() {
+                            self.cache_put(result.signature.clone(), texture);
+                        }
                     }
                     self.preview_signature = Some(result.signature);
                     self.preview_error = None;
@@ -2155,6 +2168,10 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
         canvas
     };
 
+    if first_layer.opacity >= 0.999 && first_layer.width == width && first_layer.height == height {
+        initialize_canvas_alpha_opaque(&mut canvas);
+    }
+
     for layer in layers_iter {
         alpha_blend_layer(
             &mut canvas,
@@ -2923,7 +2940,7 @@ fn alpha_blend_layer(
         return;
     }
 
-    let alpha_lut = build_alpha_lut(opacity_u8);
+    let alpha_table = alpha_blend_table();
 
     let dst_stride = dst_w as usize * 4;
     let src_stride = src_w as usize * 4;
@@ -2933,12 +2950,15 @@ fn alpha_blend_layer(
             .par_chunks_mut(dst_stride)
             .take(height)
             .zip(src_rgba.par_chunks(src_stride).take(height))
-            .for_each(|(dst_row, src_row)| blend_row_with_lut(dst_row, src_row, width, &alpha_lut));
+            .with_min_len(blend_parallel_min_rows())
+            .for_each(|(dst_row, src_row)| {
+                blend_row_with_table(dst_row, src_row, width, opacity_u8, alpha_table)
+            });
     } else {
         for y in 0..height {
             let dst_row = &mut dst_rgba[y * dst_stride..(y + 1) * dst_stride];
             let src_row = &src_rgba[y * src_stride..(y + 1) * src_stride];
-            blend_row_with_lut(dst_row, src_row, width, &alpha_lut);
+            blend_row_with_table(dst_row, src_row, width, opacity_u8, alpha_table);
         }
     }
 }
@@ -2946,7 +2966,10 @@ fn alpha_blend_layer(
 fn initialize_canvas_alpha_opaque(canvas: &mut [u8]) {
     let pixels = canvas.len() / 4;
     if pixels >= 1_000_000 {
-        canvas.par_chunks_mut(4).for_each(|px| px[3] = 255);
+        canvas
+            .par_chunks_mut(4)
+            .with_min_len(alpha_init_parallel_min_chunk_pixels())
+            .for_each(|px| px[3] = 255);
     } else {
         for px in canvas.chunks_exact_mut(4) {
             px[3] = 255;
@@ -2959,23 +2982,45 @@ fn should_parallel_blend(width: usize, height: usize) -> bool {
     pixels >= 1_000_000
 }
 
-fn build_alpha_lut(opacity_u8: u32) -> [u8; 256] {
-    let mut lut = [0u8; 256];
-    for src_alpha in 0u32..=255 {
-        lut[src_alpha as usize] = ((src_alpha * opacity_u8 + 127) / 255) as u8;
-    }
-    lut
+fn blend_parallel_min_rows() -> usize {
+    16
 }
 
-fn blend_row_with_lut(dst_row: &mut [u8], src_row: &[u8], width: usize, alpha_lut: &[u8; 256]) {
+fn alpha_init_parallel_min_chunk_pixels() -> usize {
+    8_192
+}
+
+fn alpha_blend_table() -> &'static [u8; 65_536] {
+    static TABLE: OnceLock<Box<[u8; 65_536]>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut table = Box::new([0u8; 65_536]);
+        for opacity in 0u32..=255 {
+            let base = (opacity as usize) << 8;
+            for src_alpha in 0u32..=255 {
+                table[base | src_alpha as usize] = ((src_alpha * opacity + 127) / 255) as u8;
+            }
+        }
+        table
+    })
+}
+
+fn blend_row_with_table(
+    dst_row: &mut [u8],
+    src_row: &[u8],
+    width: usize,
+    opacity_u8: u32,
+    alpha_table: &[u8; 65_536],
+) {
     let pixel_bytes = width.saturating_mul(4);
     if dst_row.len() < pixel_bytes || src_row.len() < pixel_bytes {
         return;
     }
 
+    let opacity_key = (opacity_u8.min(255) as usize) << 8;
+
     for (dst_px, src_px) in dst_row.chunks_exact_mut(4).zip(src_row.chunks_exact(4)).take(width) {
         // Integer alpha blend keeps math branch-light on CPU hot path.
-        let alpha = alpha_lut[src_px[3] as usize] as u32;
+        let alpha = alpha_table[opacity_key | src_px[3] as usize] as u32;
         if alpha == 0 {
             continue;
         }
@@ -3001,7 +3046,6 @@ fn blend_row_with_lut(dst_row: &mut [u8], src_row: &[u8], width: usize, alpha_lu
         dst_px[0] = blend_channel_u8(src_r, dst_r, alpha, inv_alpha);
         dst_px[1] = blend_channel_u8(src_g, dst_g, alpha, inv_alpha);
         dst_px[2] = blend_channel_u8(src_b, dst_b, alpha, inv_alpha);
-        dst_px[3] = 255;
     }
 }
 

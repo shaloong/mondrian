@@ -265,5 +265,7 @@ cargo test -p mondrian-app preview_4k60_simulated_perf -- --ignored --nocapture
 - 大分辨率下 `alpha_blend` 按行并行执行（Rayon），提升多核 CPU 利用率。
 - 单图层且全尺寸高不透明场景直接返回解码帧，减少一次额外合成开销。
 - `alpha_blend` 增加 opacity LUT 与更紧凑的像素循环，减少每像素重复算术开销。
+- `alpha_blend` LUT 改为全局预计算表，避免每帧重复构建。
+- 并行路径增加最小分块粒度，降低任务切分和线程调度开销。
 
 该优化主要降低 1080p 预览时的 CPU 开销，并提升播放稳定帧率。
