@@ -2923,6 +2923,8 @@ fn alpha_blend_layer(
         return;
     }
 
+    let alpha_lut = build_alpha_lut(opacity_u8);
+
     let dst_stride = dst_w as usize * 4;
     let src_stride = src_w as usize * 4;
 
@@ -2931,12 +2933,12 @@ fn alpha_blend_layer(
             .par_chunks_mut(dst_stride)
             .take(height)
             .zip(src_rgba.par_chunks(src_stride).take(height))
-            .for_each(|(dst_row, src_row)| blend_row(dst_row, src_row, width, opacity_u8));
+            .for_each(|(dst_row, src_row)| blend_row_with_lut(dst_row, src_row, width, &alpha_lut));
     } else {
         for y in 0..height {
             let dst_row = &mut dst_rgba[y * dst_stride..(y + 1) * dst_stride];
             let src_row = &src_rgba[y * src_stride..(y + 1) * src_stride];
-            blend_row(dst_row, src_row, width, opacity_u8);
+            blend_row_with_lut(dst_row, src_row, width, &alpha_lut);
         }
     }
 }
@@ -2957,36 +2959,55 @@ fn should_parallel_blend(width: usize, height: usize) -> bool {
     pixels >= 1_000_000
 }
 
-fn blend_row(dst_row: &mut [u8], src_row: &[u8], width: usize, opacity_u8: u32) {
+fn build_alpha_lut(opacity_u8: u32) -> [u8; 256] {
+    let mut lut = [0u8; 256];
+    for src_alpha in 0u32..=255 {
+        lut[src_alpha as usize] = ((src_alpha * opacity_u8 + 127) / 255) as u8;
+    }
+    lut
+}
+
+fn blend_row_with_lut(dst_row: &mut [u8], src_row: &[u8], width: usize, alpha_lut: &[u8; 256]) {
     let pixel_bytes = width.saturating_mul(4);
     if dst_row.len() < pixel_bytes || src_row.len() < pixel_bytes {
         return;
     }
 
-    for x in 0..width {
-        let i = x * 4;
-
+    for (dst_px, src_px) in dst_row.chunks_exact_mut(4).zip(src_row.chunks_exact(4)).take(width) {
         // Integer alpha blend keeps math branch-light on CPU hot path.
-        let src_alpha = src_row[i + 3] as u32;
-        let alpha = (src_alpha * opacity_u8 + 127) / 255;
+        let alpha = alpha_lut[src_px[3] as usize] as u32;
         if alpha == 0 {
             continue;
         }
+
+        if alpha >= 255 {
+            dst_px[0] = src_px[0];
+            dst_px[1] = src_px[1];
+            dst_px[2] = src_px[2];
+            dst_px[3] = 255;
+            continue;
+        }
+
         let inv_alpha = 255 - alpha;
 
-        let src_r = src_row[i] as u32;
-        let src_g = src_row[i + 1] as u32;
-        let src_b = src_row[i + 2] as u32;
+        let src_r = src_px[0] as u32;
+        let src_g = src_px[1] as u32;
+        let src_b = src_px[2] as u32;
 
-        let dst_r = dst_row[i] as u32;
-        let dst_g = dst_row[i + 1] as u32;
-        let dst_b = dst_row[i + 2] as u32;
+        let dst_r = dst_px[0] as u32;
+        let dst_g = dst_px[1] as u32;
+        let dst_b = dst_px[2] as u32;
 
-        dst_row[i] = ((src_r * alpha + dst_r * inv_alpha + 127) / 255) as u8;
-        dst_row[i + 1] = ((src_g * alpha + dst_g * inv_alpha + 127) / 255) as u8;
-        dst_row[i + 2] = ((src_b * alpha + dst_b * inv_alpha + 127) / 255) as u8;
-        dst_row[i + 3] = 255;
+        dst_px[0] = blend_channel_u8(src_r, dst_r, alpha, inv_alpha);
+        dst_px[1] = blend_channel_u8(src_g, dst_g, alpha, inv_alpha);
+        dst_px[2] = blend_channel_u8(src_b, dst_b, alpha, inv_alpha);
+        dst_px[3] = 255;
     }
+}
+
+fn blend_channel_u8(src: u32, dst: u32, alpha: u32, inv_alpha: u32) -> u8 {
+    let value = src * alpha + dst * inv_alpha + 127;
+    ((value + (value >> 8)) >> 8) as u8
 }
 
 /// 将矩形按指定宽高比居中裁剪（letterbox / pillarbox）

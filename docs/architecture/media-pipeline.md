@@ -264,5 +264,6 @@ cargo test -p mondrian-app preview_4k60_simulated_perf -- --ignored --nocapture
 - 合成缓冲区改为按需初始化 alpha，避免每帧无条件清屏带来的 4K 内存带宽开销。
 - 大分辨率下 `alpha_blend` 按行并行执行（Rayon），提升多核 CPU 利用率。
 - 单图层且全尺寸高不透明场景直接返回解码帧，减少一次额外合成开销。
+- `alpha_blend` 增加 opacity LUT 与更紧凑的像素循环，减少每像素重复算术开销。
 
 该优化主要降低 1080p 预览时的 CPU 开销，并提升播放稳定帧率。
