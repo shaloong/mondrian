@@ -1961,15 +1961,19 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
             ) {
                 Ok(frame) => {
                     let blend_started_at = Instant::now();
-                    alpha_blend_layer(
-                        &mut canvas,
-                        width,
-                        height,
-                        &frame.data,
-                        frame.width,
-                        frame.height,
-                        layer.opacity,
-                    );
+                    if layer.opacity >= 0.999 && frame.width == width && frame.height == height {
+                        copy_rgba_opaque_layer(&mut canvas, &frame.data);
+                    } else {
+                        alpha_blend_layer(
+                            &mut canvas,
+                            width,
+                            height,
+                            &frame.data,
+                            frame.width,
+                            frame.height,
+                            layer.opacity,
+                        );
+                    }
                     composite_ns =
                         composite_ns.saturating_add(blend_started_at.elapsed().as_nanos() as u64);
                     decoded_layers += 1;
@@ -2072,10 +2076,11 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
     for (index, layer) in request.layers.iter().enumerate() {
         match layer_results.get_mut(index).and_then(Option::take) {
             Some(Ok(frame)) => {
+                let RgbaFrame { width, height, data } = frame;
                 rgba_layers_for_gpu.push(CpuRgbaLayer {
-                    width: frame.width,
-                    height: frame.height,
-                    data: frame.data.clone(),
+                    width,
+                    height,
+                    data,
                     opacity: layer.opacity,
                 });
                 decoded_layers += 1;
@@ -2132,16 +2137,22 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
     }
 
     let cpu_composite_started_at = Instant::now();
+    let mut first_layer = true;
     for layer in &rgba_layers_for_gpu {
-        alpha_blend_layer(
-            &mut canvas,
-            width,
-            height,
-            &layer.data,
-            layer.width,
-            layer.height,
-            layer.opacity,
-        );
+        if first_layer && layer.opacity >= 0.999 && layer.width == width && layer.height == height {
+            copy_rgba_opaque_layer(&mut canvas, &layer.data);
+        } else {
+            alpha_blend_layer(
+                &mut canvas,
+                width,
+                height,
+                &layer.data,
+                layer.width,
+                layer.height,
+                layer.opacity,
+            );
+        }
+        first_layer = false;
     }
 
     record_preview_perf_composite_ns(cpu_composite_started_at.elapsed().as_nanos() as u64, false);
@@ -2894,29 +2905,48 @@ fn alpha_blend_layer(
 ) {
     let width = dst_w.min(src_w) as usize;
     let height = dst_h.min(src_h) as usize;
-    let opacity = opacity.clamp(0.0, 1.0);
+    let opacity_u8 = (opacity.clamp(0.0, 1.0) * 255.0).round() as u32;
+
+    if opacity_u8 == 0 {
+        return;
+    }
 
     for y in 0..height {
         for x in 0..width {
             let di = (y * dst_w as usize + x) * 4;
             let si = (y * src_w as usize + x) * 4;
 
-            let src_a = (src_rgba[si + 3] as f32 / 255.0) * opacity;
-            let inv_a = 1.0 - src_a;
+            // Integer alpha blend keeps math branch-light on CPU hot path.
+            let src_alpha = src_rgba[si + 3] as u32;
+            let alpha = (src_alpha * opacity_u8 + 127) / 255;
+            if alpha == 0 {
+                continue;
+            }
+            let inv_alpha = 255 - alpha;
 
-            let src_r = src_rgba[si] as f32;
-            let src_g = src_rgba[si + 1] as f32;
-            let src_b = src_rgba[si + 2] as f32;
+            let src_r = src_rgba[si] as u32;
+            let src_g = src_rgba[si + 1] as u32;
+            let src_b = src_rgba[si + 2] as u32;
 
-            let dst_r = dst_rgba[di] as f32;
-            let dst_g = dst_rgba[di + 1] as f32;
-            let dst_b = dst_rgba[di + 2] as f32;
+            let dst_r = dst_rgba[di] as u32;
+            let dst_g = dst_rgba[di + 1] as u32;
+            let dst_b = dst_rgba[di + 2] as u32;
 
-            dst_rgba[di] = (src_r * src_a + dst_r * inv_a).round().clamp(0.0, 255.0) as u8;
-            dst_rgba[di + 1] = (src_g * src_a + dst_g * inv_a).round().clamp(0.0, 255.0) as u8;
-            dst_rgba[di + 2] = (src_b * src_a + dst_b * inv_a).round().clamp(0.0, 255.0) as u8;
+            dst_rgba[di] = ((src_r * alpha + dst_r * inv_alpha + 127) / 255) as u8;
+            dst_rgba[di + 1] = ((src_g * alpha + dst_g * inv_alpha + 127) / 255) as u8;
+            dst_rgba[di + 2] = ((src_b * alpha + dst_b * inv_alpha + 127) / 255) as u8;
             dst_rgba[di + 3] = 255;
         }
+    }
+}
+
+fn copy_rgba_opaque_layer(dst_rgba: &mut [u8], src_rgba: &[u8]) {
+    let len = dst_rgba.len().min(src_rgba.len());
+    dst_rgba[..len].copy_from_slice(&src_rgba[..len]);
+
+    // Enforce opaque alpha in destination to keep consistent with blend path.
+    for px in dst_rgba[..len].chunks_exact_mut(4) {
+        px[3] = 255;
     }
 }
 

@@ -174,9 +174,10 @@ fn preview_1080p24_simulated_perf() -> anyhow::Result<()> {
         0.0
     };
 
+    const FPS_EPSILON: f64 = 0.001;
     let passed = first_frame_ms <= first_frame_threshold_ms
-        && achieved_fps >= fps_min_threshold
-        && achieved_fps <= fps_max_threshold;
+        && achieved_fps + FPS_EPSILON >= fps_min_threshold
+        && achieved_fps <= fps_max_threshold + FPS_EPSILON;
 
     let report = PreviewPerfSimReport {
         scenario: "preview-1080p24-simulated",

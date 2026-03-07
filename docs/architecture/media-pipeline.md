@@ -250,3 +250,12 @@ cargo test -p mondrian-app preview_1080p24_simulated_perf -- --ignored --nocaptu
 ```
 
 两项测试都会输出 JSON，便于脚本或 AI 自动分析异常样本。
+
+### 预览合成优化说明（2026-03）
+
+`mondrian-app` 预览 CPU 合成路径已做两项关键优化：
+
+- 多图层合成阶段去除 `RGBA` 数据的重复 `clone`，减少每帧内存拷贝。
+- `alpha_blend` 改为整数定点计算，并对“整帧不透明图层”走快速拷贝路径。
+
+该优化主要降低 1080p 预览时的 CPU 开销，并提升播放稳定帧率。
