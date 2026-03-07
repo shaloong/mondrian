@@ -236,21 +236,50 @@ fn run_and_report_scenario(
 
 #[test]
 #[ignore = "development performance simulation test; run manually"]
-fn preview_1080p24_simulated_perf() -> anyhow::Result<()> {
+fn preview_1080p2997_simulated_perf() -> anyhow::Result<()> {
     let _guard = perf_lock().lock().expect("preview perf lock poisoned");
 
     let width = 1920u32;
     let height = 1080u32;
-    let target_fps = env_f64("MONDRIAN_PREVIEW_SIM_TARGET_FPS", 24.0).clamp(1.0, 240.0);
+    let target_fps = env_f64("MONDRIAN_PREVIEW_SIM_TARGET_FPS", 29.97).clamp(1.0, 240.0);
     let sim_frames = env_usize("MONDRIAN_PREVIEW_SIM_FRAMES", 96).clamp(24, 600);
     let layer_count = env_usize("MONDRIAN_PREVIEW_SIM_LAYERS", 2).clamp(1, 6);
 
     let first_frame_threshold_ms = env_u128("MONDRIAN_PREVIEW_SIM_TTFF_MS", 2_000);
-    let fps_min_threshold = env_f64("MONDRIAN_PREVIEW_SIM_FPS_MIN", 20.0);
-    let fps_max_threshold = env_f64("MONDRIAN_PREVIEW_SIM_FPS_MAX", 24.0).max(fps_min_threshold);
+    let fps_min_threshold = env_f64("MONDRIAN_PREVIEW_SIM_FPS_MIN", 27.0);
+    let fps_max_threshold = env_f64("MONDRIAN_PREVIEW_SIM_FPS_MAX", 30.0).max(fps_min_threshold);
 
     run_and_report_scenario(
-        "preview-1080p24-simulated",
+        "preview-1080p2997-simulated",
+        width,
+        height,
+        target_fps,
+        sim_frames,
+        layer_count,
+        first_frame_threshold_ms,
+        fps_min_threshold,
+        fps_max_threshold,
+    )
+}
+
+#[test]
+#[ignore = "development performance simulation test; run manually"]
+fn preview_8k60_simulated_perf() -> anyhow::Result<()> {
+    let _guard = perf_lock().lock().expect("preview perf lock poisoned");
+
+    let width = env_u128("MONDRIAN_PREVIEW_SIM_8K_WIDTH", 7680).clamp(1280, 15360) as u32;
+    let height = env_u128("MONDRIAN_PREVIEW_SIM_8K_HEIGHT", 4320).clamp(720, 8640) as u32;
+    let target_fps = env_f64("MONDRIAN_PREVIEW_SIM_8K_TARGET_FPS", 60.0).clamp(1.0, 240.0);
+    let sim_frames = env_usize("MONDRIAN_PREVIEW_SIM_8K_FRAMES", 120).clamp(8, 900);
+    let layer_count = env_usize("MONDRIAN_PREVIEW_SIM_8K_LAYERS", 2).clamp(1, 6);
+
+    let first_frame_threshold_ms = env_u128("MONDRIAN_PREVIEW_SIM_8K_TTFF_MS", 4_000);
+    let fps_min_threshold = env_f64("MONDRIAN_PREVIEW_SIM_8K_FPS_MIN", 20.0);
+    let fps_max_threshold =
+        env_f64("MONDRIAN_PREVIEW_SIM_8K_FPS_MAX", target_fps).max(fps_min_threshold);
+
+    run_and_report_scenario(
+        "preview-8k60-simulated",
         width,
         height,
         target_fps,

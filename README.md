@@ -114,11 +114,14 @@ cargo test -p mondrian-timeline
 # 性能烟雾测试（项目创建/打开/保存，输出 AI 可解析 JSON）
 $env:MONDRIAN_PERF_OUTPUT='target/perf/project-lifecycle.jsonl'; cargo test -p mondrian-app perf_project_lifecycle_smoke -- --ignored --nocapture
 
-# 1080p24 预览模拟性能测试（TTFF<=2s，稳定 FPS 20-24）
-$env:MONDRIAN_PREVIEW_SIM_OUTPUT='target/perf/preview-1080p24.jsonl'; cargo test -p mondrian-app preview_1080p24_simulated_perf -- --ignored --nocapture
+# 1080p29.97 预览模拟性能测试（广播常见帧率）
+$env:MONDRIAN_PREVIEW_SIM_OUTPUT='target/perf/preview-1080p2997.jsonl'; cargo test -p mondrian-app preview_1080p2997_simulated_perf -- --ignored --nocapture
 
 # 4K60 预览模拟性能测试（用于更高负载优化）
 $env:MONDRIAN_PREVIEW_SIM_OUTPUT='target/perf/preview-4k60.jsonl'; cargo test -p mondrian-app preview_4k60_simulated_perf -- --ignored --nocapture
+
+# 8K60 预览模拟性能测试（极限负载优化）
+$env:MONDRIAN_PREVIEW_SIM_OUTPUT='target/perf/preview-8k60.jsonl'; cargo test -p mondrian-app preview_8k60_simulated_perf -- --ignored --nocapture
 
 # Benchmark
 cargo bench -p mondrian-renderer
@@ -133,11 +136,11 @@ cargo bench -p mondrian-renderer
 - `MONDRIAN_PERF_SAVE_ITERS`：保存项目采样次数（默认 `5`）
 - `MONDRIAN_PERF_OUTPUT`：可选，写入 JSONL 报告路径（每行一条 JSON）
 
-1080p24 预览模拟测试关键环境变量：
+1080p29.97 预览模拟测试关键环境变量：
 
 - `MONDRIAN_PREVIEW_SIM_TTFF_MS`：首帧显示上限（毫秒，默认 `2000`）
-- `MONDRIAN_PREVIEW_SIM_FPS_MIN`：稳定播放最低 FPS（默认 `20`）
-- `MONDRIAN_PREVIEW_SIM_FPS_MAX`：稳定播放最高 FPS（默认 `24`）
+- `MONDRIAN_PREVIEW_SIM_FPS_MIN`：稳定播放最低 FPS（默认 `27`）
+- `MONDRIAN_PREVIEW_SIM_FPS_MAX`：稳定播放最高 FPS（默认 `30`）
 - `MONDRIAN_PREVIEW_SIM_FRAMES`：模拟帧数（默认 `96`）
 - `MONDRIAN_PREVIEW_SIM_LAYERS`：模拟合成图层数（默认 `2`）
 - `MONDRIAN_PREVIEW_SIM_OUTPUT`：可选，写入 JSONL 报告路径
@@ -152,6 +155,17 @@ cargo bench -p mondrian-renderer
 - `MONDRIAN_PREVIEW_SIM_4K_FPS_MAX`：最高 FPS 门槛（默认 `60`）
 - `MONDRIAN_PREVIEW_SIM_4K_FRAMES`：模拟帧数（默认 `120`）
 - `MONDRIAN_PREVIEW_SIM_4K_LAYERS`：模拟图层数（默认 `2`）
+
+8K60 预览模拟测试关键环境变量：
+
+- `MONDRIAN_PREVIEW_SIM_8K_WIDTH`：模拟宽度（默认 `7680`）
+- `MONDRIAN_PREVIEW_SIM_8K_HEIGHT`：模拟高度（默认 `4320`）
+- `MONDRIAN_PREVIEW_SIM_8K_TARGET_FPS`：目标 FPS（默认 `60`）
+- `MONDRIAN_PREVIEW_SIM_8K_TTFF_MS`：首帧显示上限（默认 `4000`）
+- `MONDRIAN_PREVIEW_SIM_8K_FPS_MIN`：最低 FPS 门槛（默认 `20`）
+- `MONDRIAN_PREVIEW_SIM_8K_FPS_MAX`：最高 FPS 门槛（默认 `60`）
+- `MONDRIAN_PREVIEW_SIM_8K_FRAMES`：模拟帧数（默认 `120`）
+- `MONDRIAN_PREVIEW_SIM_8K_LAYERS`：模拟图层数（默认 `2`）
 
 ---
 
