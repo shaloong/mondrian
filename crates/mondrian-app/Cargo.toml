@@ -41,6 +41,7 @@ serde     = { workspace = true }
 serde_json = { workspace = true }
 # 并发
 parking_lot = { workspace = true }
+rayon = { workspace = true }
 zip = "0.6"
 
 [target.'cfg(windows)'.build-dependencies]

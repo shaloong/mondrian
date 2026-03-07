@@ -2950,6 +2950,7 @@ dependencies = [
  "mondrian-renderer",
  "mondrian-timeline",
  "parking_lot",
+ "rayon",
  "resvg",
  "rfd",
  "serde",
