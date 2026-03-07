@@ -2996,3 +2996,7 @@ fn draw_empty_canvas_meta(
         palette::text_muted().gamma_multiply(0.6),
     );
 }
+
+#[cfg(test)]
+#[path = "viewer_panel_perf_tests.rs"]
+mod perf_tests;

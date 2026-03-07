@@ -78,7 +78,7 @@ perf/xxx       性能优化分支
 $env:MONDRIAN_PERF_OUTPUT='target/perf/project-lifecycle.jsonl'
 $env:MONDRIAN_PERF_OPEN_MS='3500'
 $env:MONDRIAN_PERF_SAVE_MS='2500'
-cargo test -p mondrian-app perf_project_lifecycle_smoke -- --nocapture
+cargo test -p mondrian-app perf_project_lifecycle_smoke -- --ignored --nocapture
 ```
 
 - 失败时测试会直接报错并附带 JSON 报告。

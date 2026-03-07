@@ -2924,6 +2924,7 @@ mod perf_tests {
     }
 
     #[test]
+    #[ignore = "development performance smoke test; run manually"]
     fn perf_project_lifecycle_smoke() -> anyhow::Result<()> {
         let _guard = perf_lock().lock().expect("perf lock poisoned");
 

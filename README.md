@@ -29,21 +29,9 @@ Mondrian = 工业级非线编能力 + AI 融合生态 + 可复用资产生态
 ## 🏗️ 系统架构概览
 
 ```text
-# 性能烟雾测试（项目创建/打开/保存，输出 AI 可解析 JSON）
-$env:MONDRIAN_PERF_OUTPUT='target/perf/project-lifecycle.jsonl'; cargo test -p mondrian-app perf_project_lifecycle_smoke -- --nocapture
-
-# Benchmark（适合长期基线）
-cargo bench -p mondrian-renderer
+┌─────────────────────────────────────────────────────────────┐
+│                   mondrian-app  (UI 层)                     │
 │              egui → 迁移至 CXX-Qt (v0.3+)                   │
-
-性能烟雾测试支持通过环境变量调整阈值：
-
-- `MONDRIAN_PERF_CREATE_MS`：创建项目最大耗时（毫秒，默认 `8000`）
-- `MONDRIAN_PERF_OPEN_MS`：打开项目最大耗时（毫秒，默认 `6000`）
-- `MONDRIAN_PERF_SAVE_MS`：保存项目最大耗时（毫秒，默认 `6000`）
-- `MONDRIAN_PERF_OPEN_ITERS`：打开项目采样次数（默认 `3`）
-- `MONDRIAN_PERF_SAVE_ITERS`：保存项目采样次数（默认 `5`）
-- `MONDRIAN_PERF_OUTPUT`：可选，写入 JSONL 报告路径（每行一条 JSON）
 └──────────────────────────┬──────────────────────────────────┘
                            │ 事件总线 / 命令模式
      ┌─────────────────────┼─────────────────────────┐
@@ -96,7 +84,7 @@ cargo bench -p mondrian-renderer
 
 ### 构建
 
-````bash
+```bash
 # 克隆仓库
 git clone https://github.com/mondrian-studio/mondrian
 cd mondrian
@@ -112,7 +100,7 @@ cargo build --release
 
 # 运行主程序
 cargo run -p mondrian-app
-```text
+```
 
 ### 测试
 
@@ -123,9 +111,33 @@ cargo test --workspace
 # 运行特定模块
 cargo test -p mondrian-timeline
 
+# 性能烟雾测试（项目创建/打开/保存，输出 AI 可解析 JSON）
+$env:MONDRIAN_PERF_OUTPUT='target/perf/project-lifecycle.jsonl'; cargo test -p mondrian-app perf_project_lifecycle_smoke -- --ignored --nocapture
+
+# 1080p24 预览模拟性能测试（TTFF<=2s，稳定 FPS 20-24）
+$env:MONDRIAN_PREVIEW_SIM_OUTPUT='target/perf/preview-1080p24.jsonl'; cargo test -p mondrian-app preview_1080p24_simulated_perf -- --ignored --nocapture
+
 # Benchmark
 cargo bench -p mondrian-renderer
-````
+```
+
+性能烟雾测试支持通过环境变量调整阈值：
+
+- `MONDRIAN_PERF_CREATE_MS`：创建项目最大耗时（毫秒，默认 `8000`）
+- `MONDRIAN_PERF_OPEN_MS`：打开项目最大耗时（毫秒，默认 `6000`）
+- `MONDRIAN_PERF_SAVE_MS`：保存项目最大耗时（毫秒，默认 `6000`）
+- `MONDRIAN_PERF_OPEN_ITERS`：打开项目采样次数（默认 `3`）
+- `MONDRIAN_PERF_SAVE_ITERS`：保存项目采样次数（默认 `5`）
+- `MONDRIAN_PERF_OUTPUT`：可选，写入 JSONL 报告路径（每行一条 JSON）
+
+1080p24 预览模拟测试关键环境变量：
+
+- `MONDRIAN_PREVIEW_SIM_TTFF_MS`：首帧显示上限（毫秒，默认 `2000`）
+- `MONDRIAN_PREVIEW_SIM_FPS_MIN`：稳定播放最低 FPS（默认 `20`）
+- `MONDRIAN_PREVIEW_SIM_FPS_MAX`：稳定播放最高 FPS（默认 `24`）
+- `MONDRIAN_PREVIEW_SIM_FRAMES`：模拟帧数（默认 `96`）
+- `MONDRIAN_PREVIEW_SIM_LAYERS`：模拟合成图层数（默认 `2`）
+- `MONDRIAN_PREVIEW_SIM_OUTPUT`：可选，写入 JSONL 报告路径
 
 ---
 

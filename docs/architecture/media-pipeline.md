@@ -234,3 +234,19 @@ impl AudioMixer {
 | 时间线响应延迟   | Seek 后首帧 < 100ms          |
 | 代理文件生成     | 1小时 4K → 720p 代理 < 5分钟 |
 | 帧缓存命中率     | 顺序播放 > 95%               |
+
+### 开发态性能验证（开发专用）
+
+为避免影响常规 `cargo test`，性能测试默认标记为 `#[ignore]`，仅在需要性能回归排查时手动执行：
+
+```powershell
+# 项目创建/打开/保存性能烟雾测试
+$env:MONDRIAN_PERF_OUTPUT='target/perf/project-lifecycle.jsonl'
+cargo test -p mondrian-app perf_project_lifecycle_smoke -- --ignored --nocapture
+
+# 1080p24 预览模拟测试（TTFF/FPS）
+$env:MONDRIAN_PREVIEW_SIM_OUTPUT='target/perf/preview-1080p24.jsonl'
+cargo test -p mondrian-app preview_1080p24_simulated_perf -- --ignored --nocapture
+```
+
+两项测试都会输出 JSON，便于脚本或 AI 自动分析异常样本。
