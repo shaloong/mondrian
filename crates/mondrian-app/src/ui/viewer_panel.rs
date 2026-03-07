@@ -1936,9 +1936,7 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
     let pixel_count = (width as usize) * (height as usize);
 
     let mut canvas = vec![0u8; pixel_count * 4];
-    for i in 0..pixel_count {
-        canvas[i * 4 + 3] = 255;
-    }
+    let mut canvas_alpha_initialized = false;
 
     let mut decoded_layers = 0usize;
     let mut last_error: Option<anyhow::Error> = None;
@@ -1963,7 +1961,12 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
                     let blend_started_at = Instant::now();
                     if layer.opacity >= 0.999 && frame.width == width && frame.height == height {
                         copy_rgba_opaque_layer(&mut canvas, &frame.data);
+                        canvas_alpha_initialized = true;
                     } else {
+                        if !canvas_alpha_initialized {
+                            initialize_canvas_alpha_opaque(&mut canvas);
+                            canvas_alpha_initialized = true;
+                        }
                         alpha_blend_layer(
                             &mut canvas,
                             width,
@@ -2141,7 +2144,12 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
     for layer in &rgba_layers_for_gpu {
         if first_layer && layer.opacity >= 0.999 && layer.width == width && layer.height == height {
             copy_rgba_opaque_layer(&mut canvas, &layer.data);
+            canvas_alpha_initialized = true;
         } else {
+            if !canvas_alpha_initialized {
+                initialize_canvas_alpha_opaque(&mut canvas);
+                canvas_alpha_initialized = true;
+            }
             alpha_blend_layer(
                 &mut canvas,
                 width,
@@ -2946,6 +2954,12 @@ fn copy_rgba_opaque_layer(dst_rgba: &mut [u8], src_rgba: &[u8]) {
 
     // Enforce opaque alpha in destination to keep consistent with blend path.
     for px in dst_rgba[..len].chunks_exact_mut(4) {
+        px[3] = 255;
+    }
+}
+
+fn initialize_canvas_alpha_opaque(canvas: &mut [u8]) {
+    for px in canvas.chunks_exact_mut(4) {
         px[3] = 255;
     }
 }

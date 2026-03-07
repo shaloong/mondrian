@@ -2,7 +2,7 @@
 
 ## 1. 架构概览
 
-```text
+```
 输入媒体文件
     │
     ▼
@@ -69,7 +69,7 @@ pub struct AudioStreamInfo {
     pub channel_layout: ChannelLayout,
     pub bit_depth: u16,
 }
-```text
+```
 
 ---
 
@@ -139,7 +139,7 @@ impl DecoderContext {
         self
     }
 }
-```text
+```
 
 ### 硬解帧传输
 
@@ -261,5 +261,6 @@ cargo test -p mondrian-app preview_4k60_simulated_perf -- --ignored --nocapture
 
 - 多图层合成阶段去除 `RGBA` 数据的重复 `clone`，减少每帧内存拷贝。
 - `alpha_blend` 改为整数定点计算，并对“整帧不透明图层”走快速拷贝路径。
+- 合成缓冲区改为按需初始化 alpha，避免每帧无条件清屏带来的 4K 内存带宽开销。
 
 该优化主要降低 1080p 预览时的 CPU 开销，并提升播放稳定帧率。
