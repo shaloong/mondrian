@@ -79,9 +79,9 @@ impl AssetLibrary {
         })?;
 
         let info = MediaInfo::probe(&canonical_path)?;
-        let kind = if info.has_audio && is_audio_only_extension(&canonical_path) {
-            AssetKind::Audio
-        } else if info.has_audio && !has_meaningful_video_stream(&info) {
+        let force_audio = info.has_audio
+            && (is_audio_only_extension(&canonical_path) || !has_meaningful_video_stream(&info));
+        let kind = if force_audio {
             AssetKind::Audio
         } else if info.has_video {
             AssetKind::Video

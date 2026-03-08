@@ -26,17 +26,12 @@ const PREVIEW_HIT_TOLERANCE_SECS: f64 = 0.025;
 const PREVIEW_CACHE_TOLERANCE_SECS: f64 = 0.050;
 const PREVIEW_MAX_SELECT_DISTANCE_SECS: f64 = 0.100;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PreviewDecodeBackend {
+    #[default]
     Auto,
     Software,
     GpuAssist,
-}
-
-impl Default for PreviewDecodeBackend {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 impl PreviewDecodeBackend {
@@ -92,7 +87,7 @@ pub fn decode_video_frame_at_time_rgba_scaled(
 }
 
 thread_local! {
-    static PREVIEW_DECODE_SESSION: RefCell<Option<PreviewDecodeSession>> = RefCell::new(None);
+    static PREVIEW_DECODE_SESSION: RefCell<Option<PreviewDecodeSession>> = const { RefCell::new(None) };
 }
 
 struct PreviewDecodeSession {
@@ -613,9 +608,7 @@ fn preview_cache_get(
         }
     }
 
-    let Some(index) = best_index else {
-        return None;
-    };
+    let index = best_index?;
     if best_distance > tolerance_pts.max(1) {
         return None;
     }
@@ -840,7 +833,7 @@ fn receive_decoded_video_frame(
     decoder: &mut ffmpeg::decoder::Video,
 ) -> Result<Option<DecodedVideoFrame>> {
     let mut decoded = ffmpeg::util::frame::video::Video::empty();
-    while decoder.receive_frame(&mut decoded).is_ok() {
+    if decoder.receive_frame(&mut decoded).is_ok() {
         let mut pts = decoded.pts();
         if pts.is_none() {
             let best_effort = unsafe { (*decoded.as_ptr()).best_effort_timestamp };

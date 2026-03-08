@@ -1,13 +1,6 @@
 # Clippy 全局配置
-# 运行: cargo clippy --workspace -- -W clippy::all -W clippy::pedantic
+# 说明: 该文件仅用于 Clippy 支持的配置项（阈值、MSRV 等），
+# 不能在这里声明 lint level（如 warn/deny）。
 
-[lints.clippy]
-# 性能
-clone_on_ref_ptr         = "warn"
-large_futures            = "warn"
-large_stack_arrays       = "warn"
-# 正确性
-await_holding_lock       = "deny"
-missing_panics_doc       = "warn"
-# 风格
-must_use_candidate       = "warn"
+msrv = "1.75"
+too-many-arguments-threshold = 13

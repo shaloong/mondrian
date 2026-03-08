@@ -1529,7 +1529,7 @@ impl ViewerPanel {
                 };
 
                 let in_cache = layer_cache_get(&self.layer_frame_cache, &key).is_some();
-                let in_flight = self.prefetch_tasks.get(&key).is_some();
+                let in_flight = self.prefetch_tasks.contains_key(&key);
                 if in_cache || in_flight {
                     ready += 1;
                 }
@@ -1585,7 +1585,7 @@ impl ViewerPanel {
 
                 let in_cache =
                     self.layer_cache_enabled && layer_cache_contains(&self.layer_frame_cache, &key);
-                let in_flight = self.prefetch_tasks.get(&key).is_some();
+                let in_flight = self.prefetch_tasks.contains_key(&key);
                 in_cache || in_flight
             });
 
@@ -1864,11 +1864,9 @@ pub fn run_media_cache_maintenance_for_dir(
         let now = std::time::SystemTime::now();
         for entry in &entries {
             if let Ok(age) = now.duration_since(entry.modified) {
-                if age > max_age {
-                    if std::fs::remove_file(&entry.path).is_ok() {
-                        stats.deleted_files += 1;
-                        stats.deleted_bytes = stats.deleted_bytes.saturating_add(entry.size);
-                    }
+                if age > max_age && std::fs::remove_file(&entry.path).is_ok() {
+                    stats.deleted_files += 1;
+                    stats.deleted_bytes = stats.deleted_bytes.saturating_add(entry.size);
                 }
             }
         }
@@ -2693,7 +2691,7 @@ fn maybe_report_preview_perf() {
 
 fn with_layer_decode_runtime<T>(f: impl FnOnce(&tokio::runtime::Runtime) -> T) -> Option<T> {
     thread_local! {
-        static LAYER_DECODE_RUNTIME: RefCell<Option<tokio::runtime::Runtime>> = RefCell::new(None);
+        static LAYER_DECODE_RUNTIME: RefCell<Option<tokio::runtime::Runtime>> = const { RefCell::new(None) };
     }
 
     LAYER_DECODE_RUNTIME.with(|slot| {

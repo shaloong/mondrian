@@ -82,6 +82,10 @@ pub struct AudioStreamInfo {
 - 最大并发解码器数 = `min(CPU核心数 - 2, 8)`
 - LRU 淘汰策略：最久未使用的 context 关闭
 
+实现对齐说明：
+- 预览解码线程数当前按 `(CPU核数 - 1).clamp(1, 8)` 计算，并允许通过 `MONDRIAN_PREVIEW_DECODE_THREADS` 覆盖。
+- 预览解码后端 `PreviewDecodeBackend` 默认值为 `Auto`，通过全局原子状态切换。
+
 ### 关键 API
 
 ```rust

@@ -786,11 +786,8 @@ impl TimelinePanel {
                     } else {
                         state.drop_dragging_asset_to_audio_track(track.id, drop_frame)
                     };
-                    match drop_result {
-                        Ok(_) => {
-                            dropped_here = true;
-                        }
-                        Err(_) => {}
+                    if drop_result.is_ok() {
+                        dropped_here = true;
                     }
                 }
             }
@@ -893,11 +890,9 @@ impl TimelinePanel {
             }
         }
 
-        if primary_down {
-            if self.marquee_anchor.is_some() {
-                if let Some(pos) = pointer_pos {
-                    self.marquee_current = Some(pos);
-                }
+        if primary_down && self.marquee_anchor.is_some() {
+            if let Some(pos) = pointer_pos {
+                self.marquee_current = Some(pos);
             }
         }
 
@@ -957,11 +952,8 @@ impl TimelinePanel {
             .map(|s| (s.track_id, s.is_video_track, s.clip_id))
             .collect();
 
-        match state.remove_clips_bulk(&selections, ripple) {
-            Ok(_) => {
-                self.selected_clips.clear();
-            }
-            Err(_) => {}
+        if state.remove_clips_bulk(&selections, ripple).is_ok() {
+            self.selected_clips.clear();
         }
     }
 }

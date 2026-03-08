@@ -227,7 +227,7 @@ impl MediaInfo {
                         ffmpeg::codec::context::Context::from_parameters(params.clone())
                     {
                         if let Ok(decoder) = context.decoder().audio() {
-                            sample_rate = decoder.rate() as u32;
+                            sample_rate = decoder.rate();
                             channels = decoder.channels() as u8;
                             channel_layout = map_channel_layout(channels);
                             bit_depth = 16;
