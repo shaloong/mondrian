@@ -636,7 +636,7 @@ impl DecoderPool {
 }
 
 fn preview_decode_worker_threads() -> usize {
-    let max_threads = (num_cpus() - 1).max(1).min(8);
+    let max_threads = (num_cpus() - 1).clamp(1, 8);
     std::env::var("MONDRIAN_PREVIEW_DECODE_THREADS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())

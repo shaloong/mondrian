@@ -1,6 +1,6 @@
 # Mondrian
 
-![Mondrian Logo](/crates/mondrian-app/assets/app-ico.png)
+<img src="/crates/mondrian-app/assets/app-ico.png" alt="Mondrian Logo" width="180" />
 
 > **专业级非线性视频编辑器 · AI 增强生产力工具**
 

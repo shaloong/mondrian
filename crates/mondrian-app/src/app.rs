@@ -39,17 +39,16 @@ mod preferences;
 //  PlaybackState
 // ─────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum PlaybackState {
+    #[default]
     Stopped,
-    Playing { timecode_frames: i64 },
-    Paused { timecode_frames: i64 },
-}
-
-impl Default for PlaybackState {
-    fn default() -> Self {
-        Self::Stopped
-    }
+    Playing {
+        timecode_frames: i64,
+    },
+    Paused {
+        timecode_frames: i64,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -61,16 +60,11 @@ pub struct DraggingAsset {
     pub has_linked_audio: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ClipOverlapMode {
+    #[default]
     Overwrite,
     Insert,
-}
-
-impl Default for ClipOverlapMode {
-    fn default() -> Self {
-        Self::Overwrite
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,18 +85,13 @@ struct NewProjectDraft {
     fps_den: i64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum PreferencesTab {
+    #[default]
     General,
     Media,
     Shortcuts,
     Developer,
-}
-
-impl Default for PreferencesTab {
-    fn default() -> Self {
-        Self::General
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1574,23 +1563,21 @@ impl AppState {
                         linked.position = TimeCode::new(new_start, time_base);
                     }
                 }
-            } else {
-                if target_track_index < seq.video_tracks.len() {
-                    if !move_existing_clip_to_track_index(
-                        seq,
-                        true,
-                        linked_id,
-                        target_track_index,
-                        new_start,
-                        time_base,
-                    ) {
-                        if let Some(linked) = find_clip_mut(seq, linked_id) {
-                            linked.position = TimeCode::new(new_start, time_base);
-                        }
+            } else if target_track_index < seq.video_tracks.len() {
+                if !move_existing_clip_to_track_index(
+                    seq,
+                    true,
+                    linked_id,
+                    target_track_index,
+                    new_start,
+                    time_base,
+                ) {
+                    if let Some(linked) = find_clip_mut(seq, linked_id) {
+                        linked.position = TimeCode::new(new_start, time_base);
                     }
-                } else if let Some(linked) = find_clip_mut(seq, linked_id) {
-                    linked.position = TimeCode::new(new_start, time_base);
                 }
+            } else if let Some(linked) = find_clip_mut(seq, linked_id) {
+                linked.position = TimeCode::new(new_start, time_base);
             }
         }
 
@@ -1614,6 +1601,12 @@ impl AppState {
         }
 
         Ok(())
+    }
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

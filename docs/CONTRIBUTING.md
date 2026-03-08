@@ -31,7 +31,7 @@ cargo build
 ## 代码规范
 
 - 运行 `cargo fmt` 格式化代码
-- 运行 `cargo clippy --workspace` 检查代码质量
+- 运行 `cargo clippy --workspace --all-targets --all-features -- -D warnings` 检查代码质量（与 CI 一致）
 - 所有公共 API 必须有文档注释（`///`）
 - 错误处理用 `thiserror` 定义，禁止 `unwrap()`（测试代码除外）
 - 异步函数用 Tokio，同步 CPU 密集用 `rayon`

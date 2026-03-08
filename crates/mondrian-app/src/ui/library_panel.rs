@@ -69,7 +69,7 @@ impl LibraryPanel {
             return;
         };
 
-        match library.import_media_file(&path) {
+        match library.import_media_file(path) {
             Ok(asset_id) => {
                 let mut proxy_task_started = false;
                 if state.auto_proxy_enabled {
