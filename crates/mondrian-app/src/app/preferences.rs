@@ -12,7 +12,6 @@ pub(super) fn load_app_preferences(app: &mut MondrianApp) {
     };
 
     app.show_library = preferences.show_library;
-    app.show_ai = preferences.show_ai;
     app.theme = preferences.theme;
     app.state.auto_proxy_enabled = preferences.auto_proxy_enabled;
     app.show_dev_metrics = if cfg!(debug_assertions) {
@@ -29,7 +28,6 @@ pub(super) fn load_app_preferences(app: &mut MondrianApp) {
     app.media_cache_max_age_days = preferences.media_cache_max_age_days.max(1);
     app.show_video_metrics = preferences.show_video_metrics;
     app.show_audio_metrics = preferences.show_audio_metrics;
-    app.show_preview_perf_metrics = preferences.show_preview_perf_metrics;
     app.viewer_panel.apply_preferences(&preferences.viewer);
     app.last_saved_preferences = Some(preferences);
 }
@@ -39,7 +37,6 @@ pub(super) fn capture_preferences(app: &MondrianApp) -> AppPreferences {
         version: 1,
         theme: app.theme,
         show_library: app.show_library,
-        show_ai: app.show_ai,
         auto_proxy_enabled: app.state.auto_proxy_enabled,
         show_dev_metrics: if cfg!(debug_assertions) {
             app.show_dev_metrics
@@ -54,7 +51,6 @@ pub(super) fn capture_preferences(app: &MondrianApp) -> AppPreferences {
         media_cache_max_age_days: app.media_cache_max_age_days.max(1),
         show_video_metrics: app.show_video_metrics,
         show_audio_metrics: app.show_audio_metrics,
-        show_preview_perf_metrics: app.show_preview_perf_metrics,
         viewer: app.viewer_panel.preferences_snapshot(),
     }
 }
@@ -351,9 +347,6 @@ pub(super) fn draw_preferences_window(app: &mut MondrianApp, ctx: &egui::Context
                                 app.state
                                     .set_status_hint(format!("应用主题已切换为 {label}"), false);
                             }
-                            ui.label(
-                                "主题为应用级设置，行为与 VS Code 类似：\n- 跟随系统：自动匹配系统深浅色\n- 深色/浅色：强制固定主题",
-                            );
                         }
                         PreferencesTab::Media => {
                             ui.heading("媒体");
@@ -545,18 +538,13 @@ pub(super) fn draw_preferences_window(app: &mut MondrianApp, ctx: &egui::Context
                                 );
                                 let _ = crate::ui::theme::checkmark_toggle(
                                     ui,
-                                    &mut app.show_preview_perf_metrics,
-                                    "显示 Perf1s 分段指标",
-                                );
-                                let _ = crate::ui::theme::checkmark_toggle(
-                                    ui,
                                     &mut app.show_audio_metrics,
                                     "显示音频指标",
                                 );
                             });
 
                             ui.add_space(8.0);
-                            ui.label("提示：Perf1s 可帮助判断瓶颈在解码、合成还是上传。建议仅在调优时开启。");
+                            ui.label("提示：Perf1s 分段指标默认显示，用于判断瓶颈在解码、合成还是上传。");
 
                             ui.add_space(10.0);
                             ui.separator();

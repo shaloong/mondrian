@@ -1,4 +1,3 @@
-pub mod ai_panel;
 pub mod export_panel;
 pub mod fonts;
 pub mod library_panel;

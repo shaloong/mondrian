@@ -25,7 +25,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::shortcuts::{ShortcutAction, ShortcutBinding, ShortcutKey, ShortcutPreferences};
 use crate::ui::{
-    ai_panel::AiPanel,
     export_panel::ExportPanel,
     library_panel::LibraryPanel,
     timeline_panel::TimelinePanel,
@@ -101,7 +100,6 @@ struct AppPreferences {
     #[serde(default = "default_app_theme")]
     theme: crate::ui::theme::Theme,
     show_library: bool,
-    show_ai: bool,
     auto_proxy_enabled: bool,
     show_dev_metrics: bool,
     av_clock_role: ClockRole,
@@ -118,8 +116,6 @@ struct AppPreferences {
     show_video_metrics: bool,
     #[serde(default = "default_show_audio_metrics")]
     show_audio_metrics: bool,
-    #[serde(default = "default_show_preview_perf_metrics")]
-    show_preview_perf_metrics: bool,
     viewer: ViewerPreferences,
 }
 
@@ -129,7 +125,6 @@ impl Default for AppPreferences {
             version: 1,
             theme: default_app_theme(),
             show_library: true,
-            show_ai: false,
             auto_proxy_enabled: false,
             show_dev_metrics: false,
             av_clock_role: ClockRole::AudioMaster,
@@ -140,7 +135,6 @@ impl Default for AppPreferences {
             media_cache_max_age_days: default_media_cache_max_age_days(),
             show_video_metrics: default_show_video_metrics(),
             show_audio_metrics: default_show_audio_metrics(),
-            show_preview_perf_metrics: default_show_preview_perf_metrics(),
             viewer: ViewerPreferences::default(),
         }
     }
@@ -179,10 +173,6 @@ const fn default_show_video_metrics() -> bool {
 }
 
 const fn default_show_audio_metrics() -> bool {
-    true
-}
-
-const fn default_show_preview_perf_metrics() -> bool {
     true
 }
 
@@ -2243,12 +2233,10 @@ pub struct MondrianApp {
     timeline_panel: TimelinePanel,
     viewer_panel: ViewerPanel,
     library_panel: LibraryPanel,
-    ai_panel: AiPanel,
     export_panel: ExportPanel,
 
     // 面板可见性
     show_library: bool,
-    show_ai: bool,
     show_export: bool,
     show_dev_metrics: bool,
     show_preferences_dialog: bool,
@@ -2268,7 +2256,6 @@ pub struct MondrianApp {
     media_cache_max_age_days: u32,
     show_video_metrics: bool,
     show_audio_metrics: bool,
-    show_preview_perf_metrics: bool,
     last_saved_preferences: Option<AppPreferences>,
     persist_error_reported: bool,
     last_cache_maintenance_at: Option<std::time::Instant>,
@@ -2287,10 +2274,8 @@ impl MondrianApp {
             timeline_panel: TimelinePanel::default(),
             viewer_panel: ViewerPanel::default(),
             library_panel: LibraryPanel::default(),
-            ai_panel: AiPanel::default(),
             export_panel: ExportPanel::default(),
             show_library: true,
-            show_ai: false,
             show_export: false,
             show_dev_metrics: false,
             show_preferences_dialog: false,
@@ -2310,7 +2295,6 @@ impl MondrianApp {
             media_cache_max_age_days: default_media_cache_max_age_days(),
             show_video_metrics: default_show_video_metrics(),
             show_audio_metrics: default_show_audio_metrics(),
-            show_preview_perf_metrics: default_show_preview_perf_metrics(),
             last_saved_preferences: None,
             persist_error_reported: false,
             last_cache_maintenance_at: None,
@@ -2450,29 +2434,6 @@ impl eframe::App for MondrianApp {
             }
         }
 
-        // ── 右侧：AI 面板 ──
-        if self.show_ai {
-            let ai_started_at = std::time::Instant::now();
-            egui::SidePanel::right("ai_panel")
-                .default_width(320.0)
-                .width_range(240.0..=520.0)
-                .frame(
-                    egui::Frame::none()
-                        .fill(crate::ui::theme::palette::bg_base())
-                        .stroke(egui::Stroke::new(
-                            1.0,
-                            crate::ui::theme::palette::border_subtle(),
-                        ))
-                        .inner_margin(egui::Margin::symmetric(8.0, 6.0)),
-                )
-                .show(ctx, |ui| {
-                    self.ai_panel.show(ui, &mut self.state);
-                });
-            if ui_diag_enabled() {
-                log_ui_stage_slow("ai_panel", ai_started_at.elapsed());
-            }
-        }
-
         // ── 中央：预览窗口 ──
         let viewer_started_at = std::time::Instant::now();
         egui::CentralPanel::default()
@@ -2488,7 +2449,7 @@ impl eframe::App for MondrianApp {
                     self.show_dev_metrics,
                     self.show_video_metrics,
                     self.show_audio_metrics,
-                    self.show_preview_perf_metrics,
+                    true,
                 );
             });
         if ui_diag_enabled() {
@@ -2929,7 +2890,6 @@ impl MondrianApp {
 
             ui.menu_button("视图", |ui| {
                 let _ = crate::ui::theme::checkmark_toggle(ui, &mut self.show_library, "素材库");
-                let _ = crate::ui::theme::checkmark_toggle(ui, &mut self.show_ai, "AI 工作流");
                 if cfg!(debug_assertions) {
                     let _ = crate::ui::theme::checkmark_toggle(
                         ui,
