@@ -1,0 +1,53 @@
+[licenses]
+version = 2
+# 允许的许可证列表（与 workspace 声明一致）
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "MIT OR Apache-2.0",
+    "Apache-2.0 OR MIT",
+    "BSD-3-Clause",     # wgpu
+    "BSD-2-Clause",     # 部分传递依赖
+    "CC0-1.0",          # 部分 zero-cost 依赖
+    "WTFPL",            # tempfile 在某些配置下使用
+    "Zlib",             # 部分媒体处理依赖
+]
+
+# 不允许未知/未声明许可证的包
+confidence = [
+    { source = "top", target = 0.8 },
+]
+
+[[licenses.clarify]]
+name = "ffmpeg-next"
+expression = "LGPL-2.1+"
+notes = "ffmpeg-next 链接 FFmpeg LGPL 动态库，属于 LGPL 许可"
+
+[[licenses.clarify]]
+name = "resvg"
+expression = "MPL-2.0 OR Apache-2.0"
+notes = "resvg 采用 MPL-2.0 或 Apache-2.0 双许可"
+
+# ─────────────────────────────────────────────────────────────────────────────
+[bans]
+# 多版本检测级别
+wildcards = "deny"
+highlight = "all"
+skip = [
+    # 某些传递依赖尚未统一，可逐步清理
+]
+
+# 不允许指定被禁止的依赖
+[[bans.deny]]
+name = "安全工作流外的危险依赖"
+creeks = []
+
+# ─────────────────────────────────────────────────────────────────────────────
+[advisories]
+version = 2
+# 遇到已知漏洞时 CI 失败（仅限未忽略项）
+ignore = [
+    # 示例（发现问题后用 cargo deny check advisories --json | jq 找到 ID 后填入）:
+    # "RUSTSEC-0000-0000",
+]
+query = true

@@ -4,81 +4,127 @@ on:
   push:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+    # 允许手动触发进行预验证
+    inputs:
+      dry_run:
+        description: "Dry run（不发布，仅构建）"
+        required: false
+        default: "false"
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
   BIN_NAME: mondrian
+  # 启用包级别 LTO，提升发布构建质量
+  CARGO_PROFILE_RELEASE_LTO: "thin"
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
 
 jobs:
-  build-release:
+  # ─────────────────────────────────────────────────────────────────────────
+  # 构建矩阵：每个 Job 构建一个目标平台
+  # ─────────────────────────────────────────────────────────────────────────
+  build:
     name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact: mondrian-windows-x86_64.zip
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            artifact: mondrian-macos-x86_64.tar.gz
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            artifact: mondrian-macos-aarch64.tar.gz
+          # Linux x86_64（原生）
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact: mondrian-linux-x86_64.tar.gz
+            ext: tar.gz
+            ffmpeg: |
+              sudo apt-get update
+              sudo apt-get install -y --no-install-recommends \
+                ffmpeg libavcodec-dev libavformat-dev libavfilter-dev \
+                libavdevice-dev libswscale-dev libswresample-dev pkg-config
+
+          # macOS ARM64（原生，macos-latest = Apple Silicon）
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            ext: tar.gz
+            ffmpeg: |
+              brew install ffmpeg pkg-config
+
+          # Windows x86_64（原生）
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: zip
+            ffmpeg: |
+              choco install ffmpeg -y --no-progress
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: 安装 Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: master
           targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
 
-      # 依赖安装（与 ci.yml 相同）
-      - name: 安装 FFmpeg (Linux)
-        if: runner.os == 'Linux'
+      # 安装 FFmpeg（各平台独立安装命令通过矩阵 ffmpeg 字段传入）
+      - name: 安装 FFmpeg
+        run: ${{ matrix.ffmpeg }}
+
+      - name: 记录依赖版本（调试用）
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg libavcodec-dev libavformat-dev \
-            libavfilter-dev libavdevice-dev libswscale-dev libswresample-dev pkg-config
+          echo "=== 工具链版本 ==="
+          rustc --version
+          cargo --version
+          echo "=== FFmpeg 版本 ==="
+          ${{ runner.os == 'Windows' && 'ffmpeg -version | Select-Object -First 1' || 'ffmpeg -version | head -1' }}
 
-      - name: 安装 FFmpeg (macOS)
-        if: runner.os == 'macOS'
-        run: brew install ffmpeg pkg-config
+      - name: 构建发布版本
+        run: |
+          cargo build --release --target ${{ matrix.target }} -p mondrian-app
 
-      - name: cargo build --release
-        run: cargo build --release --target ${{ matrix.target }} -p mondrian-app
+      - name: 验证二进制文件
+        run: |
+          $BIN = "target/${{ matrix.target }}/release/${{ env.BIN_NAME }}.exe"
+          if (Test-Path $BIN) {
+            $SIZE = (Get-Item $BIN).Length / 1MB
+            echo "Binary size: $([math]::Round($SIZE, 1)) MB"
+          } else {
+            Write-Error "Binary not found: $BIN"
+          }
 
-      # ── 打包 ──────────────────────────────────
+      # ── 打包 ──────────────────────────────────────────────────────────────
       - name: 打包 (Windows)
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          $bin = "target/${{ matrix.target }}/release/${{ env.BIN_NAME }}.exe"
-          Compress-Archive -Path $bin -DestinationPath ${{ matrix.artifact }}
+          $bin = "target\${{ matrix.target }}\release\${{ env.BIN_NAME }}.exe"
+          Compress-Archive -Path $bin -DestinationPath "${{ env.BIN_NAME }}-${{ matrix.target }}.${{ matrix.ext }}"
 
       - name: 打包 (Unix)
         if: runner.os != 'Windows'
         run: |
           BIN="target/${{ matrix.target }}/release/${{ env.BIN_NAME }}"
-          tar -czf ${{ matrix.artifact }} "$BIN"
+          FILE="${{ env.BIN_NAME }}-${{ matrix.target }}.${{ matrix.ext }}"
+          tar -czf "$FILE" "$BIN"
 
       - name: 上传制品
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}
+          name: ${{ env.BIN_NAME }}-${{ matrix.target }}.${{ matrix.ext }}
+          path: ${{ env.BIN_NAME }}-${{ matrix.target }}.${{ matrix.ext }}
+          retention-days: 30
 
-  # 在所有平台构建完成后发布 GitHub Release
-  create-release:
-    needs: build-release
+  # ─────────────────────────────────────────────────────────────────────────
+  # 发布 GitHub Release（在所有平台构建完成后执行）
+  # ─────────────────────────────────────────────────────────────────────────
+  release:
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
     steps:
       - uses: actions/checkout@v4
 
@@ -87,8 +133,15 @@ jobs:
         with:
           path: dist/
 
-      - name: 发布 GitHub Release
+      - name: 列出制品
+        run: ls -lh dist/
+
+      - name: 发布 / 上传 Release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/**/*
           generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

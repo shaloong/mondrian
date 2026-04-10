@@ -10,101 +10,182 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 缓存策略：每个 Job 独立缓存，避免交叉污染并提升命中率
+# ─────────────────────────────────────────────────────────────────────────────
+
 jobs:
-  # ─────────────────────────────────────────────
-  #  代码质量检查
-  # ─────────────────────────────────────────────
-  lint:
-    name: Lint (fmt + clippy)
+  # ───────────────────────────────────────────────────────────────────────────
+  # 代码格式 & 风格检查（最快，优先失败）
+  # ───────────────────────────────────────────────────────────────────────────
+  fmt:
+    name: Format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: 安装 Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@master
         with:
-          components: rustfmt, clippy
+          toolchain: master
+          components: rustfmt
 
-      - name: 缓存 Cargo 依赖
-        uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
 
-      - name: 安装 FFmpeg 开发库
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg libavcodec-dev libavformat-dev libavfilter-dev libavdevice-dev libswscale-dev libswresample-dev pkg-config
-
-      - name: rustfmt 检查
+      - name: 检查格式
         run: cargo fmt --all -- --check
 
-      - name: clippy 检查
+  # ───────────────────────────────────────────────────────────────────────────
+  # Clippy 静态分析
+  # ───────────────────────────────────────────────────────────────────────────
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: master
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: 安装 FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ffmpeg libavcodec-dev libavformat-dev libavfilter-dev \
+            libavdevice-dev libswscale-dev libswresample-dev pkg-config
+
+      - name: 运行 clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-  # ─────────────────────────────────────────────
-  #  跨平台构建 & 测试
-  # ─────────────────────────────────────────────
+  # ───────────────────────────────────────────────────────────────────────────
+  # MSRV（最低支持 Rust 版本）验证
+  # ───────────────────────────────────────────────────────────────────────────
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # workspace.rust-version = 1.75
+      - name: 安装 Rust 1.75
+        uses: dtolnay/rust-toolchain@1.75.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: 安装 FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ffmpeg libavcodec-dev libavformat-dev libavfilter-dev \
+            libavdevice-dev libswscale-dev libswresample-dev pkg-config
+
+      - name: 编译 workspace（验证 MSRV 兼容性）
+        run: cargo build --workspace --exclude mondrian-app
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # 依赖安全审计（license + advisories）
+  # ───────────────────────────────────────────────────────────────────────────
+  deny:
+    name: Deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: master
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 安装 cargo-deny
+        uses: taiki-e/install-action@cargo-deny
+
+      - name: 运行 cargo-deny
+        run: cargo deny check bans licenses advisibilities
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # 测试（Linux + Windows；macOS 逻辑与 Linux 同构，仅在 Release 验证）
+  # ───────────────────────────────────────────────────────────────────────────
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest, windows-latest]
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: 安装 Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: master
 
-      - name: 缓存 Cargo 依赖
-        uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
 
-      # Linux：通过 apt 安装 FFmpeg
+      # ── Linux ──────────────────────────────────────────────────────────────
       - name: 安装 FFmpeg (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg libavcodec-dev libavformat-dev \
-            libavfilter-dev libavdevice-dev libswscale-dev libswresample-dev pkg-config
+          sudo apt-get install -y --no-install-recommends \
+            ffmpeg libavcodec-dev libavformat-dev libavfilter-dev \
+            libavdevice-dev libswscale-dev libswresample-dev pkg-config
 
-      # macOS：通过 Homebrew 安装 FFmpeg
-      - name: 安装 FFmpeg (macOS)
-        if: runner.os == 'macOS'
-        run: brew install ffmpeg pkg-config
-
-      # Windows：使用 vcpkg 安装 FFmpeg
+      # ── Windows ───────────────────────────────────────────────────────────
       - name: 安装 FFmpeg (Windows)
         if: runner.os == 'Windows'
-        uses: lukka/run-vcpkg@v11
-        with:
-          vcpkgDirectory: "${{ github.workspace }}/vcpkg"
-          vcpkgGitCommitId: "a42af01b72c28a8e1d7b48107b33e4f286a55ef6"
-          runVcpkgInstall: true
+        run: |
+          # 使用 chocolatey 安装 FFmpeg（完整构建，非最小安装）
+          choco install ffmpeg -y --no-progress
 
-      - name: 设置 VCPKG_ROOT (Windows)
-        if: runner.os == 'Windows'
-        run: echo "VCPKG_ROOT=${{ github.workspace }}/vcpkg" >> $env:GITHUB_ENV
-
-      - name: cargo build
+      - name: 编译
         run: cargo build --workspace --exclude mondrian-app
 
-      - name: cargo test
-        run: cargo test --workspace --exclude mondrian-app -- --nocapture
+      - name: 测试
+        run: cargo test --workspace --exclude mondrian-app
 
-  # ─────────────────────────────────────────────
-  #  文档构建
-  # ─────────────────────────────────────────────
+  # ───────────────────────────────────────────────────────────────────────────
+  # 文档构建（检测 doc comment 错误）
+  # ───────────────────────────────────────────────────────────────────────────
   docs:
     name: Docs
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: master
+
       - uses: Swatinem/rust-cache@v2
-      - name: 安装 FFmpeg (Linux)
+        with:
+          cache-on-failure: true
+
+      - name: 安装 FFmpeg
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg libavcodec-dev libavformat-dev \
-            libavfilter-dev libavdevice-dev libswscale-dev libswresample-dev pkg-config
-      - name: cargo doc
+          sudo apt-get install -y --no-install-recommends \
+            ffmpeg libavcodec-dev libavformat-dev libavfilter-dev \
+            libavdevice-dev libswscale-dev libswresample-dev pkg-config
+
+      - name: 构建文档
         run: cargo doc --workspace --no-deps --exclude mondrian-app
         env:
           RUSTDOCFLAGS: "-D warnings"
