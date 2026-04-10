@@ -97,6 +97,8 @@ enum PreferencesTab {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct AppPreferences {
     version: u32,
+    #[serde(default = "default_app_theme")]
+    theme: crate::ui::theme::Theme,
     show_library: bool,
     show_ai: bool,
     auto_proxy_enabled: bool,
@@ -124,6 +126,7 @@ impl Default for AppPreferences {
     fn default() -> Self {
         Self {
             version: 1,
+            theme: default_app_theme(),
             show_library: true,
             show_ai: false,
             auto_proxy_enabled: false,
@@ -156,6 +159,10 @@ impl Default for NewProjectDraft {
 
 const fn default_media_cache_auto_cleanup() -> bool {
     false
+}
+
+const fn default_app_theme() -> crate::ui::theme::Theme {
+    crate::ui::theme::Theme::System
 }
 
 const fn default_media_cache_max_size_gb() -> u32 {
@@ -2050,6 +2057,7 @@ pub struct MondrianApp {
     show_export: bool,
     show_dev_metrics: bool,
     show_preferences_dialog: bool,
+    theme: crate::ui::theme::Theme,
     preferences_tab: PreferencesTab,
     capturing_shortcut: Option<ShortcutAction>,
     show_new_project_dialog: bool,
@@ -2076,7 +2084,6 @@ pub struct MondrianApp {
 impl MondrianApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         crate::ui::fonts::configure_fonts(&cc.egui_ctx);
-        crate::ui::theme::apply_theme(&cc.egui_ctx, crate::ui::theme::Theme::Dark);
 
         let state = AppState::new();
 
@@ -2092,6 +2099,7 @@ impl MondrianApp {
             show_export: false,
             show_dev_metrics: false,
             show_preferences_dialog: false,
+            theme: default_app_theme(),
             preferences_tab: PreferencesTab::default(),
             capturing_shortcut: None,
             show_new_project_dialog: false,
@@ -2116,6 +2124,9 @@ impl MondrianApp {
         };
 
         app.load_app_preferences();
+        crate::ui::theme::apply_theme(&cc.egui_ctx, app.theme);
+        cc.egui_ctx
+            .send_viewport_cmd(egui::ViewportCommand::SetTheme(app.theme.to_system_theme()));
         app
     }
 }
@@ -2132,8 +2143,10 @@ impl eframe::App for MondrianApp {
         let is_playing = self.state.is_playing();
 
         let theme_started_at = std::time::Instant::now();
-        crate::ui::theme::apply_theme(ctx, crate::ui::theme::Theme::Dark);
-        ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(egui::SystemTheme::Dark));
+        crate::ui::theme::apply_theme(ctx, self.theme);
+        ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(
+            self.theme.to_system_theme(),
+        ));
         if ui_diag_enabled() {
             log_ui_stage_slow("apply_theme", theme_started_at.elapsed());
         }

@@ -1,6 +1,6 @@
 use crate::{
     app::AppState,
-    ui::theme::{self, palette},
+    ui::theme::{self, palette, tokens, typography},
 };
 use egui::{Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use mondrian_core::types::{ClipId, Rational, TimeCode, TrackId};
@@ -176,7 +176,7 @@ impl TimelinePanel {
         ui.horizontal(|ui| {
             if theme::icon_toggle_button(
                 ui,
-                [24.0, 22.0],
+                tokens::timeline_toolbar_button_size(),
                 theme::UiIcon::Cursor,
                 self.active_tool == TimelineTool::Select,
             )
@@ -186,7 +186,7 @@ impl TimelinePanel {
             }
             if theme::icon_toggle_button(
                 ui,
-                [24.0, 22.0],
+                tokens::timeline_toolbar_button_size(),
                 theme::UiIcon::Scissors,
                 self.active_tool == TimelineTool::Blade,
             )
@@ -196,7 +196,7 @@ impl TimelinePanel {
             }
             let _ = theme::icon_toggle_button(
                 ui,
-                [24.0, 22.0],
+                tokens::timeline_toolbar_button_size(),
                 theme::UiIcon::Magnet,
                 self.snap_enabled,
             )
@@ -313,7 +313,7 @@ impl TimelinePanel {
                     Pos2::new(x + 2.0, rect.top() + 4.0),
                     egui::Align2::LEFT_TOP,
                     format_ruler_label(f, fps, ruler_scale.granularity),
-                    egui::FontId::monospace(10.0),
+                    typography::mono_small(),
                     palette::text_muted(),
                 );
             }
@@ -506,7 +506,7 @@ impl TimelinePanel {
             Pos2::new(label_rect.left() + 6.0, label_rect.center().y),
             egui::Align2::LEFT_CENTER,
             &track.name,
-            egui::FontId::proportional(12.0),
+            typography::body(),
             palette::text_primary(),
         );
         let mode_icon = if is_video_track {
@@ -547,16 +547,16 @@ impl TimelinePanel {
             };
             visible_clips.push(ClipVisual { selection, rect: clip_rect });
 
-            painter.rect_filled(clip_rect, 3.0, clip_color);
+            painter.rect_filled(clip_rect, tokens::timeline_clip_radius(), clip_color);
             painter.rect_stroke(
                 clip_rect,
-                3.0,
+                tokens::timeline_clip_radius(),
                 Stroke::new(1.0, palette::border_emphasis().gamma_multiply(0.5)),
             );
             if self.selected_clips.contains(&selection) {
                 painter.rect_stroke(
                     clip_rect.shrink(0.5),
-                    3.0,
+                    tokens::timeline_clip_radius(),
                     Stroke::new(2.0, palette::interaction_highlight()),
                 );
             }
@@ -566,7 +566,7 @@ impl TimelinePanel {
                     clip_rect.left_center() + Vec2::new(4.0, 0.0),
                     egui::Align2::LEFT_CENTER,
                     clip.label.as_deref().unwrap_or("clip"),
-                    egui::FontId::proportional(11.0),
+                    typography::body_small(),
                     palette::text_primary(),
                 );
             }
@@ -755,17 +755,21 @@ impl TimelinePanel {
                     Pos2::new(ghost_x.max(rect.left() + TRACK_LABEL_W), rect.top() + 4.0),
                     Vec2::new(ghost_w, TRACK_HEIGHT - 8.0),
                 );
-                painter.rect_filled(ghost_rect, 3.0, clip_color.gamma_multiply(0.35));
+                painter.rect_filled(
+                    ghost_rect,
+                    tokens::timeline_clip_radius(),
+                    clip_color.gamma_multiply(0.35),
+                );
                 painter.rect_stroke(
                     ghost_rect,
-                    3.0,
+                    tokens::timeline_clip_radius(),
                     Stroke::new(1.0, palette::interaction_highlight()),
                 );
                 painter.text(
                     ghost_rect.left_center() + Vec2::new(4.0, 0.0),
                     egui::Align2::LEFT_CENTER,
                     format!("{} (预放置)", dragging.name),
-                    egui::FontId::proportional(10.0),
+                    typography::body_small(),
                     palette::text_primary(),
                 );
 
@@ -812,12 +816,12 @@ impl TimelinePanel {
                 );
                 painter.rect_filled(
                     ghost_rect,
-                    3.0,
+                    tokens::timeline_clip_radius(),
                     palette::timeline_clip_audio().gamma_multiply(0.35),
                 );
                 painter.rect_stroke(
                     ghost_rect,
-                    3.0,
+                    tokens::timeline_clip_radius(),
                     Stroke::new(1.0, palette::interaction_highlight()),
                 );
             }

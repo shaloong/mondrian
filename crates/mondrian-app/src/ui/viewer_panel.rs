@@ -1,8 +1,8 @@
 use crate::{
     app::AppState,
-    ui::theme::{self, palette},
+    ui::theme::{self, palette, typography},
 };
-use egui::{Color32, Pos2, Rect, Sense, Ui, Vec2};
+use egui::{Pos2, Rect, Sense, Ui, Vec2};
 
 use mondrian_core::types::{AssetId, Rational, TimeCode};
 use mondrian_media::cache::FrameCacheConfig;
@@ -500,7 +500,7 @@ impl ViewerPanel {
             let painter = ui.painter_at(canvas_rect);
 
             // 背景
-            painter.rect_filled(canvas_rect, 0.0, Color32::BLACK);
+            painter.rect_filled(canvas_rect, 0.0, palette::canvas_bg());
 
             // 若无序列，显示提示
             if state.sequence.is_none() {
@@ -607,7 +607,7 @@ impl ViewerPanel {
                                 texture.id(),
                                 canvas_rect,
                                 Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
-                                Color32::WHITE,
+                                palette::image_tint(),
                             );
                         } else {
                             draw_checkerboard(&painter, canvas_rect);
@@ -619,7 +619,7 @@ impl ViewerPanel {
                                 canvas_rect.center_bottom() + Vec2::new(0.0, -14.0),
                                 egui::Align2::CENTER_BOTTOM,
                                 format!("预览解码失败：{}", err),
-                                egui::FontId::proportional(12.0),
+                                typography::body(),
                                 palette::status_error(),
                             );
                         }
@@ -2022,6 +2022,7 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
 
     let mut decoded_layers = 0usize;
     let mut last_error: Option<anyhow::Error> = None;
+    let mut rgba_layers_for_gpu: Vec<CpuRgbaLayer> = Vec::with_capacity(request.layers.len());
 
     if request.layers.is_empty() {
         return Err(anyhow::anyhow!("无可用图层可解码"));
@@ -2039,30 +2040,14 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
             &request.decoder_pool,
         ) {
             Ok(frame) => {
-                let mut composite_ns: u64 = 0;
-                let blend_started_at = Instant::now();
-                let out =
-                    if layer.opacity >= 0.999 && frame.width == width && frame.height == height {
-                        frame
-                    } else {
-                        let mut canvas = vec![0u8; (width as usize) * (height as usize) * 4];
-                        initialize_canvas_alpha_opaque(&mut canvas);
-                        alpha_blend_layer(
-                            &mut canvas,
-                            width,
-                            height,
-                            &frame.data,
-                            frame.width,
-                            frame.height,
-                            layer.opacity,
-                        );
-                        RgbaFrame { width, height, data: canvas }
-                    };
-                composite_ns =
-                    composite_ns.saturating_add(blend_started_at.elapsed().as_nanos() as u64);
-                record_preview_perf_composite_ns(composite_ns, false);
-                record_preview_perf_decode_total(decode_started_at.elapsed());
-                return Ok(out);
+                let RgbaFrame { width, height, data } = frame;
+                rgba_layers_for_gpu.push(CpuRgbaLayer {
+                    width,
+                    height,
+                    data,
+                    opacity: layer.opacity,
+                });
+                decoded_layers = 1;
             }
             Err(err) => {
                 last_error = Some(anyhow::anyhow!(
@@ -2073,82 +2058,78 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
                 ));
             }
         }
+    } else {
+        let playback_mode = request.playback_mode;
+        let layer_cache_enabled = request.layer_cache_enabled;
+        let decode_generation = request.generation;
+        let latest_generation = Arc::clone(&request.latest_generation);
+        let layer_cache = Arc::clone(&request.layer_cache);
+        let decoder_pool = Arc::clone(&request.decoder_pool);
 
-        return Err(last_error.unwrap_or_else(|| anyhow::anyhow!("无可用图层可解码")));
-    }
+        let layer_outputs = preview_decode_pool().install(|| {
+            request
+                .layers
+                .par_iter()
+                .cloned()
+                .enumerate()
+                .map(|(index, layer)| {
+                    if decode_generation != latest_generation.load(Ordering::Relaxed) {
+                        return (
+                            index,
+                            Err("decode cancelled by newer generation".to_string()),
+                        );
+                    }
 
-    let playback_mode = request.playback_mode;
-    let layer_cache_enabled = request.layer_cache_enabled;
-    let decode_generation = request.generation;
-    let latest_generation = Arc::clone(&request.latest_generation);
-    let layer_cache = Arc::clone(&request.layer_cache);
-    let decoder_pool = Arc::clone(&request.decoder_pool);
+                    let decoded = decode_layer_rgba(
+                        &layer,
+                        width,
+                        height,
+                        playback_mode,
+                        layer_cache_enabled,
+                        &layer_cache,
+                        &decoder_pool,
+                    )
+                    .map_err(|e| e.to_string());
+                    (index, decoded)
+                })
+                .collect::<Vec<_>>()
+        });
 
-    let layer_outputs = preview_decode_pool().install(|| {
-        request
-            .layers
-            .par_iter()
-            .cloned()
-            .enumerate()
-            .map(|(index, layer)| {
-                if decode_generation != latest_generation.load(Ordering::Relaxed) {
-                    return (
-                        index,
-                        Err("decode cancelled by newer generation".to_string()),
-                    );
-                }
-
-                let decoded = decode_layer_rgba(
-                    &layer,
-                    width,
-                    height,
-                    playback_mode,
-                    layer_cache_enabled,
-                    &layer_cache,
-                    &decoder_pool,
-                )
-                .map_err(|e| e.to_string());
-                (index, decoded)
-            })
-            .collect::<Vec<_>>()
-    });
-
-    let mut layer_results: Vec<Option<Result<RgbaFrame, String>>> =
-        vec![None; request.layers.len()];
-    for (index, decoded) in layer_outputs {
-        if index < layer_results.len() {
-            layer_results[index] = Some(decoded);
+        let mut layer_results: Vec<Option<Result<RgbaFrame, String>>> =
+            vec![None; request.layers.len()];
+        for (index, decoded) in layer_outputs {
+            if index < layer_results.len() {
+                layer_results[index] = Some(decoded);
+            }
         }
-    }
 
-    let mut rgba_layers_for_gpu: Vec<CpuRgbaLayer> = Vec::with_capacity(request.layers.len());
-
-    for (index, layer) in request.layers.iter().enumerate() {
-        match layer_results.get_mut(index).and_then(Option::take) {
-            Some(Ok(frame)) => {
-                let RgbaFrame { width, height, data } = frame;
-                rgba_layers_for_gpu.push(CpuRgbaLayer {
-                    width,
-                    height,
-                    data,
-                    opacity: layer.opacity,
-                });
-                decoded_layers += 1;
-            }
-            Some(Err(err)) => {
-                last_error = Some(anyhow::anyhow!(
-                    "{}@{} 解码失败: {}",
-                    layer.frame_key.0,
-                    layer.frame_key.1,
-                    err
-                ));
-            }
-            None => {
-                last_error = Some(anyhow::anyhow!(
-                    "{}@{} 解码失败: worker 未返回结果",
-                    layer.frame_key.0,
-                    layer.frame_key.1
-                ));
+        for (index, layer) in request.layers.iter().enumerate() {
+            match layer_results.get_mut(index).and_then(Option::take) {
+                Some(Ok(frame)) => {
+                    let RgbaFrame { width, height, data } = frame;
+                    rgba_layers_for_gpu.push(CpuRgbaLayer {
+                        width,
+                        height,
+                        data,
+                        opacity: layer.opacity,
+                    });
+                    decoded_layers += 1;
+                }
+                Some(Err(err)) => {
+                    last_error = Some(anyhow::anyhow!(
+                        "{}@{} 解码失败: {}",
+                        layer.frame_key.0,
+                        layer.frame_key.1,
+                        err
+                    ));
+                }
+                None => {
+                    last_error = Some(anyhow::anyhow!(
+                        "{}@{} 解码失败: worker 未返回结果",
+                        layer.frame_key.0,
+                        layer.frame_key.1
+                    ));
+                }
             }
         }
     }
@@ -2157,33 +2138,9 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
         return Err(last_error.unwrap_or_else(|| anyhow::anyhow!("无可用图层可解码")));
     }
 
-    if gpu_compositor_enabled() {
-        if let Some(gpu_compositor) = global_gpu_compositor() {
-            let gpu_composite_started_at = Instant::now();
-            let gpu_result = {
-                let mut guard = match gpu_compositor.lock() {
-                    Ok(g) => g,
-                    Err(poisoned) => poisoned.into_inner(),
-                };
-                guard.composite_rgba_layers(width, height, &rgba_layers_for_gpu)
-            };
-
-            match gpu_result {
-                Ok(gpu_rgba) => {
-                    record_gpu_compositor_result(true);
-                    record_preview_perf_composite_ns(
-                        gpu_composite_started_at.elapsed().as_nanos() as u64,
-                        true,
-                    );
-                    record_preview_perf_decode_total(decode_started_at.elapsed());
-                    return Ok(RgbaFrame { width, height, data: gpu_rgba });
-                }
-                Err(err) => {
-                    record_gpu_compositor_result(false);
-                    tracing::warn!("GPU 合成失败，回退 CPU 路径: {}", err);
-                }
-            }
-        }
+    if let Some(gpu_rgba) = try_gpu_composite_rgba_layers(width, height, &rgba_layers_for_gpu) {
+        record_preview_perf_decode_total(decode_started_at.elapsed());
+        return Ok(RgbaFrame { width, height, data: gpu_rgba });
     }
 
     let cpu_composite_started_at = Instant::now();
@@ -2232,6 +2189,42 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
     record_preview_perf_decode_total(decode_started_at.elapsed());
 
     Ok(RgbaFrame { width, height, data: canvas })
+}
+
+fn try_gpu_composite_rgba_layers(
+    width: u32,
+    height: u32,
+    rgba_layers_for_gpu: &[CpuRgbaLayer],
+) -> Option<Vec<u8>> {
+    if !gpu_compositor_enabled() {
+        return None;
+    }
+
+    let gpu_compositor = global_gpu_compositor()?;
+    let gpu_composite_started_at = Instant::now();
+    let gpu_result = {
+        let mut guard = match gpu_compositor.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.composite_rgba_layers(width, height, rgba_layers_for_gpu)
+    };
+
+    match gpu_result {
+        Ok(gpu_rgba) => {
+            record_gpu_compositor_result(true);
+            record_preview_perf_composite_ns(
+                gpu_composite_started_at.elapsed().as_nanos() as u64,
+                true,
+            );
+            Some(gpu_rgba)
+        }
+        Err(err) => {
+            record_gpu_compositor_result(false);
+            tracing::warn!("GPU 合成失败，回退 CPU 路径: {}", err);
+            None
+        }
+    }
 }
 
 fn global_gpu_compositor() -> Option<&'static Mutex<FrameCompositor>> {
@@ -3196,14 +3189,14 @@ fn draw_empty_canvas_meta(
         rect.center() + Vec2::new(0.0, -8.0),
         egui::Align2::CENTER_CENTER,
         tc,
-        egui::FontId::monospace(24.0),
+        typography::mono_large(),
         palette::text_muted().gamma_multiply(0.6),
     );
     painter.text(
         rect.center() + Vec2::new(0.0, 12.0),
         egui::Align2::CENTER_CENTER,
         resolution,
-        egui::FontId::proportional(12.0),
+        typography::body(),
         palette::text_muted().gamma_multiply(0.6),
     );
 }

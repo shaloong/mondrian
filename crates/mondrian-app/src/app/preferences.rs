@@ -13,6 +13,7 @@ pub(super) fn load_app_preferences(app: &mut MondrianApp) {
 
     app.show_library = preferences.show_library;
     app.show_ai = preferences.show_ai;
+    app.theme = preferences.theme;
     app.state.auto_proxy_enabled = preferences.auto_proxy_enabled;
     app.show_dev_metrics = if cfg!(debug_assertions) {
         preferences.show_dev_metrics
@@ -36,6 +37,7 @@ pub(super) fn load_app_preferences(app: &mut MondrianApp) {
 pub(super) fn capture_preferences(app: &MondrianApp) -> AppPreferences {
     AppPreferences {
         version: 1,
+        theme: app.theme,
         show_library: app.show_library,
         show_ai: app.show_ai,
         auto_proxy_enabled: app.state.auto_proxy_enabled,
@@ -332,7 +334,26 @@ pub(super) fn draw_preferences_window(app: &mut MondrianApp, ctx: &egui::Context
                     match app.preferences_tab {
                         PreferencesTab::General => {
                             ui.heading("常规");
-                            ui.label("软件级配置入口，后续会持续扩展。\n当前可在“媒体”和“快捷键”分页进行设置。\n");
+                            ui.add_space(8.0);
+                            ui.label("主题");
+                            let previous_theme = app.theme;
+                            ui.horizontal(|ui| {
+                                for theme_option in crate::ui::theme::Theme::ALL {
+                                    ui.radio_value(
+                                        &mut app.theme,
+                                        theme_option,
+                                        theme_option.display_name(),
+                                    );
+                                }
+                            });
+                            if app.theme != previous_theme {
+                                let label = app.theme.display_name();
+                                app.state
+                                    .set_status_hint(format!("应用主题已切换为 {label}"), false);
+                            }
+                            ui.label(
+                                "主题为应用级设置，行为与 VS Code 类似：\n- 跟随系统：自动匹配系统深浅色\n- 深色/浅色：强制固定主题",
+                            );
                         }
                         PreferencesTab::Media => {
                             ui.heading("媒体");

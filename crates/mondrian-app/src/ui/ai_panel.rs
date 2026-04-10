@@ -1,6 +1,6 @@
 use crate::{
     app::AppState,
-    ui::theme::{self, palette},
+    ui::theme::{self, palette, typography},
 };
 use egui::Ui;
 
@@ -29,7 +29,7 @@ impl AiPanel {
                 .show(ui, |ui| {
                     ui.add(
                         egui::TextEdit::multiline(&mut self.workflow_yaml)
-                            .font(egui::FontId::monospace(12.0))
+                            .font(typography::body())
                             .desired_rows(12)
                             .desired_width(f32::INFINITY)
                             .code_editor(),

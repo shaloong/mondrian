@@ -166,6 +166,23 @@ pub struct AssetId(Uuid);
 
 新建类型模式（newtype）防止 ID 混淆。
 
+### 4.4 应用级主题系统（Dark / Light / System）
+
+`mondrian-app` 的主题是应用级配置，不进入项目文件。主题策略与 VS Code 一致，支持：
+
+- `System`：跟随操作系统深浅色。
+- `Dark`：强制深色。
+- `Light`：强制浅色。
+
+实现约定：
+
+- 主题模式持久化在应用配置（`AppPreferences.theme`）。
+- 每帧调用 `ui::theme::apply_theme`，将主题偏好映射到 egui 的 `ThemePreference`。
+- 通过统一 token 表（色板 + 度量）驱动 `Visuals`、字体、间距、圆角等样式，禁止业务面板散落硬编码主题值。
+- 支持插件覆写入口：插件可注册 token override，在不改业务面板代码的前提下覆写颜色与样式度量。
+
+这使得后续新增品牌主题、A/B 视觉实验、插件化主题包时，仅需扩展 token 与 override 注册，不需要重写各个 UI 面板。
+
 ---
 
 ## 5. 并发模型

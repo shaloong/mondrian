@@ -1,5 +1,5 @@
 use crate::app::AppState;
-use crate::ui::theme::{self, palette};
+use crate::ui::theme::{self, palette, tokens};
 use egui::Ui;
 use mondrian_export::{
     preset::{ExportConfig, ExportPreset, VideoCodecConfig},
@@ -59,7 +59,7 @@ impl ExportPanel {
             ui.separator();
             egui::Grid::new("preset_details")
                 .num_columns(2)
-                .spacing([12.0, 4.0])
+                .spacing(tokens::export_grid_spacing())
                 .show(ui, |ui| {
                     let vc = &preset.video;
                     let resolution_text = preset

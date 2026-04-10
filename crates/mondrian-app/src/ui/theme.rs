@@ -1,15 +1,334 @@
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Theme {
+    #[default]
+    System,
     Dark,
+    Light,
+}
+
+impl Theme {
+    pub const ALL: [Self; 3] = [Self::System, Self::Dark, Self::Light];
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::System => "跟随系统",
+            Self::Dark => "深色",
+            Self::Light => "浅色",
+        }
+    }
+
+    pub fn to_system_theme(self) -> egui::SystemTheme {
+        match self {
+            Self::System => egui::SystemTheme::SystemDefault,
+            Self::Dark => egui::SystemTheme::Dark,
+            Self::Light => egui::SystemTheme::Light,
+        }
+    }
+
+    fn to_egui_preference(self) -> egui::ThemePreference {
+        match self {
+            Self::System => egui::ThemePreference::System,
+            Self::Dark => egui::ThemePreference::Dark,
+            Self::Light => egui::ThemePreference::Light,
+        }
+    }
+
+    fn resolve(self, ctx: &egui::Context) -> egui::Theme {
+        match self {
+            Self::Dark => egui::Theme::Dark,
+            Self::Light => egui::Theme::Light,
+            Self::System => ctx.system_theme().unwrap_or(egui::Theme::Dark),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ThemeTokens {
+    pub palette: PaletteTokens,
+    pub metrics: MetricsTokens,
+}
+
+impl ThemeTokens {
+    fn for_theme(theme: egui::Theme) -> Self {
+        match theme {
+            egui::Theme::Dark => Self {
+                palette: PaletteTokens::dark(),
+                metrics: MetricsTokens::default(),
+            },
+            egui::Theme::Light => Self {
+                palette: PaletteTokens::light(),
+                metrics: MetricsTokens::default(),
+            },
+        }
+    }
+
+    pub fn palette_mut(&mut self) -> &mut PaletteTokens {
+        &mut self.palette
+    }
+
+    pub fn metrics_mut(&mut self) -> &mut MetricsTokens {
+        &mut self.metrics
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PaletteTokens {
+    pub bg_base: egui::Color32,
+    pub bg_surface: egui::Color32,
+    pub bg_surface_hover: egui::Color32,
+    pub bg_surface_active: egui::Color32,
+    pub border_subtle: egui::Color32,
+    pub border_emphasis: egui::Color32,
+    pub text_primary: egui::Color32,
+    pub text_muted: egui::Color32,
+    pub status_warning: egui::Color32,
+    pub status_success: egui::Color32,
+    pub interaction_highlight: egui::Color32,
+    pub status_error: egui::Color32,
+    pub timeline_clip_video: egui::Color32,
+    pub timeline_clip_audio: egui::Color32,
+    pub timeline_playhead: egui::Color32,
+    pub canvas_bg: egui::Color32,
+    pub image_tint: egui::Color32,
+}
+
+impl PaletteTokens {
+    fn dark() -> Self {
+        Self {
+            bg_base: egui::Color32::from_rgb(0x12, 0x12, 0x12),
+            bg_surface: egui::Color32::from_rgb(0x2A, 0x2A, 0x2C),
+            bg_surface_hover: egui::Color32::from_rgb(0x33, 0x33, 0x36),
+            bg_surface_active: egui::Color32::from_rgb(0x3A, 0x3A, 0x3C),
+            border_subtle: egui::Color32::from_rgb(0x76, 0x76, 0x80),
+            border_emphasis: egui::Color32::from_rgb(0x76, 0x76, 0x80),
+            text_primary: egui::Color32::from_rgb(0xF2, 0xF2, 0xF2),
+            text_muted: egui::Color32::from_rgb(0x76, 0x76, 0x80),
+            status_warning: egui::Color32::from_rgb(0xD6, 0xAA, 0x43),
+            status_success: egui::Color32::from_rgb(0x73, 0xD1, 0x8F),
+            interaction_highlight: egui::Color32::from_rgb(0x00, 0x6E, 0xFF),
+            status_error: egui::Color32::from_rgb(0xE3, 0x6D, 0x6D),
+            timeline_clip_video: egui::Color32::from_rgb(0x4D, 0x72, 0x9D),
+            timeline_clip_audio: egui::Color32::from_rgb(0x4E, 0x8A, 0x6A),
+            timeline_playhead: egui::Color32::from_rgb(0xE0, 0x67, 0x67),
+            canvas_bg: egui::Color32::BLACK,
+            image_tint: egui::Color32::WHITE,
+        }
+    }
+
+    fn light() -> Self {
+        Self {
+            bg_base: egui::Color32::from_rgb(0xF5, 0xF5, 0xF7),
+            bg_surface: egui::Color32::from_rgb(0xFF, 0xFF, 0xFF),
+            bg_surface_hover: egui::Color32::from_rgb(0xF0, 0xF2, 0xF5),
+            bg_surface_active: egui::Color32::from_rgb(0xE8, 0xEC, 0xF2),
+            border_subtle: egui::Color32::from_rgb(0xC9, 0xCF, 0xD8),
+            border_emphasis: egui::Color32::from_rgb(0xA6, 0xB2, 0xC2),
+            text_primary: egui::Color32::from_rgb(0x1E, 0x23, 0x2C),
+            text_muted: egui::Color32::from_rgb(0x5A, 0x67, 0x7A),
+            status_warning: egui::Color32::from_rgb(0xB5, 0x78, 0x08),
+            status_success: egui::Color32::from_rgb(0x1D, 0x89, 0x48),
+            interaction_highlight: egui::Color32::from_rgb(0x00, 0x5F, 0xD9),
+            status_error: egui::Color32::from_rgb(0xC1, 0x3C, 0x3C),
+            timeline_clip_video: egui::Color32::from_rgb(0x80, 0x9F, 0xC4),
+            timeline_clip_audio: egui::Color32::from_rgb(0x86, 0xB2, 0x95),
+            timeline_playhead: egui::Color32::from_rgb(0xC0, 0x54, 0x54),
+            canvas_bg: egui::Color32::from_rgb(0x14, 0x14, 0x14),
+            image_tint: egui::Color32::WHITE,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MetricsTokens {
+    pub item_spacing: egui::Vec2,
+    pub button_padding: egui::Vec2,
+    pub interact_height: f32,
+    pub menu_rounding: f32,
+    pub window_rounding: f32,
+    pub icon_size: f32,
+    pub icon_raster_min_size: f32,
+    pub icon_text_inset_x: f32,
+    pub icon_text_inset_y: f32,
+    pub checkmark_stroke_width: f32,
+    pub checkmark_start_x: f32,
+    pub drop_overlay_radius: f32,
+    pub drop_overlay_stroke_width: f32,
+    pub font_small: f32,
+    pub font_body: f32,
+    pub font_large: f32,
+    pub font_mono_small: f32,
+    pub font_mono_large: f32,
+    pub list_row_radius: f32,
+    pub list_compact_spacing_x: f32,
+    pub list_row_height: f32,
+    pub export_grid_spacing: [f32; 2],
+    pub timeline_toolbar_button_size: [f32; 2],
+    pub timeline_clip_radius: f32,
+}
+
+impl Default for MetricsTokens {
+    fn default() -> Self {
+        Self {
+            item_spacing: egui::vec2(7.0, 7.0),
+            button_padding: egui::vec2(10.0, 5.0),
+            interact_height: 23.0,
+            menu_rounding: 3.0,
+            window_rounding: 4.0,
+            icon_size: 14.0,
+            icon_raster_min_size: 12.0,
+            icon_text_inset_x: 6.0,
+            icon_text_inset_y: 7.0,
+            checkmark_stroke_width: 1.35,
+            checkmark_start_x: 7.0,
+            drop_overlay_radius: 4.0,
+            drop_overlay_stroke_width: 1.5,
+            font_small: 10.0,
+            font_body: 12.0,
+            font_large: 14.0,
+            font_mono_small: 10.0,
+            font_mono_large: 24.0,
+            list_row_radius: 3.0,
+            list_compact_spacing_x: 4.0,
+            list_row_height: 36.0,
+            export_grid_spacing: [12.0, 4.0],
+            timeline_toolbar_button_size: [24.0, 22.0],
+            timeline_clip_radius: 3.0,
+        }
+    }
+}
+
+pub trait ThemeTokenOverride: Send + Sync {
+    fn override_tokens(&self, preference: Theme, resolved: egui::Theme, tokens: &mut ThemeTokens);
+}
+
+fn token_overrides() -> &'static RwLock<Vec<Arc<dyn ThemeTokenOverride>>> {
+    static TOKEN_OVERRIDES: OnceLock<RwLock<Vec<Arc<dyn ThemeTokenOverride>>>> = OnceLock::new();
+    TOKEN_OVERRIDES.get_or_init(|| RwLock::new(Vec::new()))
+}
+
+fn active_tokens() -> &'static RwLock<ThemeTokens> {
+    static ACTIVE_TOKENS: OnceLock<RwLock<ThemeTokens>> = OnceLock::new();
+    ACTIVE_TOKENS.get_or_init(|| RwLock::new(ThemeTokens::for_theme(egui::Theme::Dark)))
+}
+
+fn with_active_tokens<R>(f: impl FnOnce(&ThemeTokens) -> R) -> R {
+    let lock = active_tokens();
+    match lock.read() {
+        Ok(tokens) => f(&tokens),
+        Err(_) => f(&ThemeTokens::for_theme(egui::Theme::Dark)),
+    }
+}
+
+fn set_active_tokens(tokens: ThemeTokens) {
+    let lock = active_tokens();
+    if let Ok(mut guard) = lock.write() {
+        *guard = tokens;
+    }
+}
+
+fn resolve_tokens(preference: Theme, resolved: egui::Theme) -> ThemeTokens {
+    let mut tokens = ThemeTokens::for_theme(resolved);
+    if let Ok(overrides) = token_overrides().read() {
+        for override_provider in overrides.iter() {
+            override_provider.override_tokens(preference, resolved, &mut tokens);
+        }
+    }
+    tokens
+}
+
+fn build_visuals(theme: egui::Theme, tokens: &ThemeTokens) -> egui::Visuals {
+    let mut visuals = match theme {
+        egui::Theme::Dark => egui::Visuals::dark(),
+        egui::Theme::Light => egui::Visuals::light(),
+    };
+    let p = &tokens.palette;
+    let m = &tokens.metrics;
+
+    visuals.dark_mode = matches!(theme, egui::Theme::Dark);
+    visuals.override_text_color = Some(p.text_primary);
+    visuals.panel_fill = p.bg_base;
+    visuals.window_fill = p.bg_surface;
+    visuals.faint_bg_color = p.bg_surface;
+    visuals.extreme_bg_color = p.bg_base;
+    visuals.code_bg_color = p.bg_surface;
+
+    visuals.widgets.noninteractive.bg_fill = p.bg_base;
+    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, p.border_subtle);
+    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, p.text_muted);
+
+    visuals.widgets.inactive.bg_fill = p.bg_surface;
+    visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, p.border_subtle);
+    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, p.text_primary);
+
+    visuals.widgets.hovered.bg_fill = p.bg_surface;
+    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, p.border_emphasis);
+    visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, p.text_primary);
+
+    visuals.widgets.active.bg_fill = p.bg_surface_active;
+    visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, p.text_primary);
+    visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, p.text_primary);
+
+    visuals.widgets.open.bg_fill = p.bg_surface;
+    visuals.widgets.open.bg_stroke = egui::Stroke::new(1.0, p.border_emphasis);
+    visuals.widgets.open.fg_stroke = egui::Stroke::new(1.0, p.text_primary);
+
+    visuals.selection.bg_fill = p.bg_surface_active;
+    visuals.selection.stroke = egui::Stroke::new(1.0, p.text_primary);
+    visuals.window_stroke = egui::Stroke::new(1.0, p.border_subtle);
+    visuals.hyperlink_color = p.interaction_highlight;
+    visuals.menu_rounding = m.menu_rounding.into();
+    visuals.window_rounding = m.window_rounding.into();
+    visuals
+}
+
+fn apply_style(ctx: &egui::Context, tokens: &ThemeTokens) {
+    let mut style = (*ctx.style()).clone();
+    style.spacing.item_spacing = tokens.metrics.item_spacing;
+    style.spacing.button_padding = tokens.metrics.button_padding;
+    style.spacing.interact_size.y = tokens.metrics.interact_height;
+    style.visuals.window_fill = tokens.palette.bg_surface;
+    style.visuals.panel_fill = tokens.palette.bg_base;
+    ctx.set_style(style);
+}
+
+pub fn register_theme_override(override_provider: Arc<dyn ThemeTokenOverride>) {
+    if let Ok(mut providers) = token_overrides().write() {
+        providers.push(override_provider);
+    }
+}
+
+pub fn clear_theme_overrides() {
+    if let Ok(mut providers) = token_overrides().write() {
+        providers.clear();
+    }
 }
 
 pub fn apply_theme(ctx: &egui::Context, theme: Theme) {
-    match theme {
-        Theme::Dark => apply_dark_theme(ctx),
-    }
+    ctx.set_theme(theme.to_egui_preference());
+
+    let dark_tokens = resolve_tokens(theme, egui::Theme::Dark);
+    let light_tokens = resolve_tokens(theme, egui::Theme::Light);
+    ctx.set_visuals_of(
+        egui::Theme::Dark,
+        build_visuals(egui::Theme::Dark, &dark_tokens),
+    );
+    ctx.set_visuals_of(
+        egui::Theme::Light,
+        build_visuals(egui::Theme::Light, &light_tokens),
+    );
+
+    let resolved = theme.resolve(ctx);
+    let active = match resolved {
+        egui::Theme::Dark => dark_tokens,
+        egui::Theme::Light => light_tokens,
+    };
+    apply_style(ctx, &active);
+    set_active_tokens(active);
 }
 
 pub fn with_minimal_dropdown<R>(
@@ -108,14 +427,18 @@ pub enum UiIcon {
 }
 
 pub fn icon(ui: &mut egui::Ui, kind: UiIcon, color: egui::Color32) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+    let icon_size = tokens::icon_size();
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(icon_size, icon_size), egui::Sense::hover());
     draw_icon(ui.painter(), rect, kind, color);
     response
 }
 
 pub fn icon_button(ui: &mut egui::Ui, size: [f32; 2], kind: UiIcon) -> egui::Response {
     let response = ui.add_sized(size, egui::Button::new(""));
-    let icon_rect = egui::Rect::from_center_size(response.rect.center(), egui::vec2(14.0, 14.0));
+    let icon_size = tokens::icon_size();
+    let icon_rect =
+        egui::Rect::from_center_size(response.rect.center(), egui::vec2(icon_size, icon_size));
     draw_icon(ui.painter(), icon_rect, kind, ui.visuals().text_color());
     response
 }
@@ -127,7 +450,9 @@ pub fn icon_toggle_button(
     selected: bool,
 ) -> egui::Response {
     let response = ui.add_sized(size, egui::Button::new("").selected(selected));
-    let icon_rect = egui::Rect::from_center_size(response.rect.center(), egui::vec2(14.0, 14.0));
+    let icon_size = tokens::icon_size();
+    let icon_rect =
+        egui::Rect::from_center_size(response.rect.center(), egui::vec2(icon_size, icon_size));
     let icon_color = ui.visuals().text_color();
     draw_icon(ui.painter(), icon_rect, kind, icon_color);
     response
@@ -139,16 +464,22 @@ pub fn icon_text_button(
     text: impl Into<String>,
 ) -> egui::Response {
     let response = ui.button(format!("    {}", text.into()));
+    let icon_size = tokens::icon_size();
+    let inset_x = tokens::icon_text_inset_x();
+    let inset_y = tokens::icon_text_inset_y();
     let icon_rect = egui::Rect::from_min_size(
-        egui::pos2(response.rect.left() + 6.0, response.rect.center().y - 7.0),
-        egui::vec2(14.0, 14.0),
+        egui::pos2(
+            response.rect.left() + inset_x,
+            response.rect.center().y - inset_y,
+        ),
+        egui::vec2(icon_size, icon_size),
     );
     draw_icon(ui.painter(), icon_rect, kind, ui.visuals().text_color());
     response
 }
 
 pub fn draw_icon(painter: &egui::Painter, rect: egui::Rect, kind: UiIcon, color: egui::Color32) {
-    let side = rect.width().max(rect.height()).round().max(12.0) as u32;
+    let side = rect.width().max(rect.height()).round().max(tokens::icon_raster_min_size()) as u32;
     let texture = icon_texture(painter.ctx(), kind, side);
     painter.image(
         texture.id(),
@@ -232,8 +563,8 @@ fn icon_svg_bytes(kind: UiIcon) -> &'static [u8] {
 
 fn draw_checkmark_glyph(painter: &egui::Painter, rect: egui::Rect) {
     let center_y = rect.center().y - 0.5;
-    let start_x = rect.left() + 7.0;
-    let stroke = egui::Stroke::new(1.35, palette::text_primary());
+    let start_x = rect.left() + tokens::checkmark_start_x();
+    let stroke = egui::Stroke::new(tokens::checkmark_stroke_width(), palette::text_primary());
 
     painter.line_segment(
         [
@@ -252,142 +583,183 @@ fn draw_checkmark_glyph(painter: &egui::Painter, rect: egui::Rect) {
 }
 
 pub fn draw_drop_overlay(painter: &egui::Painter, rect: egui::Rect, message: &str) {
-    painter.rect_filled(rect, 4.0, palette::drop_overlay_fill());
+    let radius = tokens::drop_overlay_radius();
+    painter.rect_filled(rect, radius, palette::drop_overlay_fill());
     painter.rect_stroke(
         rect.shrink(2.0),
-        4.0,
-        egui::Stroke::new(1.5, palette::drop_overlay_stroke()),
+        radius,
+        egui::Stroke::new(
+            tokens::drop_overlay_stroke_width(),
+            palette::drop_overlay_stroke(),
+        ),
     );
     painter.text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
         message,
-        egui::FontId::proportional(14.0),
+        typography::body_large(),
         palette::drop_overlay_text(),
     );
 }
 
-fn apply_dark_theme(ctx: &egui::Context) {
-    let mut visuals = egui::Visuals::dark();
-    visuals.dark_mode = true;
+pub mod typography {
+    pub fn body() -> egui::FontId {
+        super::with_active_tokens(|tokens| egui::FontId::proportional(tokens.metrics.font_body))
+    }
 
-    visuals.override_text_color = Some(palette::text_primary());
-    visuals.panel_fill = palette::bg_base();
-    visuals.window_fill = palette::bg_surface();
-    visuals.faint_bg_color = palette::bg_surface();
-    visuals.extreme_bg_color = palette::bg_base();
-    visuals.code_bg_color = palette::bg_surface();
+    pub fn body_small() -> egui::FontId {
+        super::with_active_tokens(|tokens| egui::FontId::proportional(tokens.metrics.font_small))
+    }
 
-    visuals.widgets.noninteractive.bg_fill = palette::bg_base();
-    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, palette::border_subtle());
-    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, palette::text_muted());
+    pub fn body_large() -> egui::FontId {
+        super::with_active_tokens(|tokens| egui::FontId::proportional(tokens.metrics.font_large))
+    }
 
-    visuals.widgets.inactive.bg_fill = palette::bg_surface();
-    visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, palette::border_subtle());
-    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, palette::text_primary());
+    pub fn mono_small() -> egui::FontId {
+        super::with_active_tokens(|tokens| egui::FontId::monospace(tokens.metrics.font_mono_small))
+    }
 
-    visuals.widgets.hovered.bg_fill = palette::bg_surface();
-    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, palette::border_emphasis());
-    visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, palette::text_primary());
+    pub fn mono_large() -> egui::FontId {
+        super::with_active_tokens(|tokens| egui::FontId::monospace(tokens.metrics.font_mono_large))
+    }
+}
 
-    visuals.widgets.active.bg_fill = palette::bg_surface_active();
-    visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, palette::text_primary());
-    visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, palette::text_primary());
+pub mod tokens {
+    pub fn icon_size() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.icon_size)
+    }
 
-    visuals.widgets.open.bg_fill = palette::bg_surface();
-    visuals.widgets.open.bg_stroke = egui::Stroke::new(1.0, palette::border_emphasis());
-    visuals.widgets.open.fg_stroke = egui::Stroke::new(1.0, palette::text_primary());
+    pub fn icon_raster_min_size() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.icon_raster_min_size)
+    }
 
-    visuals.selection.bg_fill = palette::bg_surface_active();
-    visuals.selection.stroke = egui::Stroke::new(1.0, palette::text_primary());
-    visuals.window_stroke = egui::Stroke::new(1.0, palette::border_subtle());
-    visuals.hyperlink_color = palette::text_primary();
-    visuals.menu_rounding = 3.0.into();
-    visuals.window_rounding = 4.0.into();
+    pub fn icon_text_inset_x() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.icon_text_inset_x)
+    }
 
-    ctx.set_visuals(visuals);
+    pub fn icon_text_inset_y() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.icon_text_inset_y)
+    }
 
-    let mut style = (*ctx.style()).clone();
-    style.spacing.item_spacing = egui::vec2(7.0, 7.0);
-    style.spacing.button_padding = egui::vec2(10.0, 5.0);
-    style.spacing.interact_size.y = 23.0;
-    style.visuals.window_fill = palette::bg_surface();
-    style.visuals.panel_fill = palette::bg_base();
-    ctx.set_style(style);
+    pub fn checkmark_stroke_width() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.checkmark_stroke_width)
+    }
+
+    pub fn checkmark_start_x() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.checkmark_start_x)
+    }
+
+    pub fn drop_overlay_radius() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.drop_overlay_radius)
+    }
+
+    pub fn drop_overlay_stroke_width() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.drop_overlay_stroke_width)
+    }
+
+    pub fn list_row_radius() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.list_row_radius)
+    }
+
+    pub fn list_compact_spacing_x() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.list_compact_spacing_x)
+    }
+
+    pub fn list_row_height() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.list_row_height)
+    }
+
+    pub fn export_grid_spacing() -> [f32; 2] {
+        super::with_active_tokens(|tokens| tokens.metrics.export_grid_spacing)
+    }
+
+    pub fn timeline_toolbar_button_size() -> [f32; 2] {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_toolbar_button_size)
+    }
+
+    pub fn timeline_clip_radius() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_clip_radius)
+    }
 }
 
 pub mod palette {
-    use egui::Color32;
-
-    pub fn bg_base() -> Color32 {
-        Color32::from_rgb(0x12, 0x12, 0x12)
+    pub fn bg_base() -> egui::Color32 {
+        super::with_active_tokens(|tokens| tokens.palette.bg_base)
     }
 
-    pub fn bg_surface() -> Color32 {
-        Color32::from_rgb(0x2A, 0x2A, 0x2C)
+    pub fn bg_surface() -> egui::Color32 {
+        super::with_active_tokens(|tokens| tokens.palette.bg_surface)
     }
 
-    pub fn bg_surface_hover() -> Color32 {
-        Color32::from_rgb(0x33, 0x33, 0x36)
+    pub fn bg_surface_hover() -> egui::Color32 {
+        super::with_active_tokens(|tokens| tokens.palette.bg_surface_hover)
     }
 
-    pub fn bg_surface_active() -> Color32 {
-        Color32::from_rgb(0x3A, 0x3A, 0x3C)
+    pub fn bg_surface_active() -> egui::Color32 {
+        super::with_active_tokens(|tokens| tokens.palette.bg_surface_active)
     }
 
-    pub fn border_subtle() -> Color32 {
-        Color32::from_rgb(0x76, 0x76, 0x80)
+    pub fn border_subtle() -> egui::Color32 {
+        super::with_active_tokens(|tokens| tokens.palette.border_subtle)
     }
 
-    pub fn border_emphasis() -> Color32 {
-        Color32::from_rgb(0x76, 0x76, 0x80)
+    pub fn border_emphasis() -> egui::Color32 {
+        super::with_active_tokens(|tokens| tokens.palette.border_emphasis)
     }
 
-    pub fn text_primary() -> Color32 {
-        Color32::from_rgb(0xF2, 0xF2, 0xF2)
+    pub fn text_primary() -> egui::Color32 {
+        super::with_active_tokens(|tokens| tokens.palette.text_primary)
     }
 
-    pub fn text_muted() -> Color32 {
-        Color32::from_rgb(0x76, 0x76, 0x80)
+    pub fn text_muted() -> egui::Color32 {
+        super::with_active_tokens(|tokens| tokens.palette.text_muted)
     }
 
-    pub fn status_warning() -> Color32 {
-        Color32::from_rgb(0xD6, 0xAA, 0x43)
+    pub fn status_warning() -> egui::Color32 {
+        super::with_active_tokens(|tokens| tokens.palette.status_warning)
     }
 
-    pub fn status_success() -> Color32 {
-        Color32::from_rgb(0x73, 0xD1, 0x8F)
+    pub fn status_success() -> egui::Color32 {
+        super::with_active_tokens(|tokens| tokens.palette.status_success)
     }
 
-    pub fn interaction_highlight() -> Color32 {
-        Color32::from_rgb(0x00, 0x6E, 0xFF)
+    pub fn interaction_highlight() -> egui::Color32 {
+        super::with_active_tokens(|tokens| tokens.palette.interaction_highlight)
     }
 
-    pub fn status_error() -> Color32 {
-        Color32::from_rgb(0xE3, 0x6D, 0x6D)
+    pub fn status_error() -> egui::Color32 {
+        super::with_active_tokens(|tokens| tokens.palette.status_error)
     }
 
-    pub fn drop_overlay_fill() -> Color32 {
+    pub fn drop_overlay_fill() -> egui::Color32 {
         bg_surface().gamma_multiply(0.78)
     }
 
-    pub fn drop_overlay_stroke() -> Color32 {
+    pub fn drop_overlay_stroke() -> egui::Color32 {
         interaction_highlight()
     }
 
-    pub fn drop_overlay_text() -> Color32 {
+    pub fn drop_overlay_text() -> egui::Color32 {
         interaction_highlight()
     }
 
-    pub fn timeline_clip_video() -> Color32 {
-        Color32::from_rgb(0x4D, 0x72, 0x9D)
+    pub fn timeline_clip_video() -> egui::Color32 {
+        super::with_active_tokens(|tokens| tokens.palette.timeline_clip_video)
     }
 
-    pub fn timeline_clip_audio() -> Color32 {
-        Color32::from_rgb(0x4E, 0x8A, 0x6A)
+    pub fn timeline_clip_audio() -> egui::Color32 {
+        super::with_active_tokens(|tokens| tokens.palette.timeline_clip_audio)
     }
 
-    pub fn timeline_playhead() -> Color32 {
-        Color32::from_rgb(0xE0, 0x67, 0x67)
+    pub fn timeline_playhead() -> egui::Color32 {
+        super::with_active_tokens(|tokens| tokens.palette.timeline_playhead)
+    }
+
+    pub fn canvas_bg() -> egui::Color32 {
+        super::with_active_tokens(|tokens| tokens.palette.canvas_bg)
+    }
+
+    pub fn image_tint() -> egui::Color32 {
+        super::with_active_tokens(|tokens| tokens.palette.image_tint)
     }
 }

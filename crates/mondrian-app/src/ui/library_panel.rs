@@ -1,6 +1,6 @@
 use crate::{
     app::AppState,
-    ui::theme::{self, palette},
+    ui::theme::{self, palette, tokens, typography},
 };
 use egui::{Ui, Vec2};
 use rfd::FileDialog;
@@ -188,12 +188,13 @@ impl LibraryPanel {
                 Vec2::new(ui.available_width(), fill_h),
                 egui::Sense::click(),
             );
-            ui.painter().rect_filled(empty_rect, 3.0, palette::bg_surface());
+            ui.painter()
+                .rect_filled(empty_rect, tokens::list_row_radius(), palette::bg_surface());
             ui.painter().text(
                 empty_rect.center(),
                 egui::Align2::CENTER_CENTER,
                 "导入媒体以开始",
-                egui::FontId::proportional(14.0),
+                typography::body_large(),
                 palette::text_muted(),
             );
             if empty_resp.double_clicked() {
@@ -209,18 +210,22 @@ impl LibraryPanel {
             let has_proxy = proxy_generator.proxy_exists(asset.path.as_path());
             let proxy_mode = state.is_asset_proxy_mode(asset.id);
             let (row_rect, row_response) = ui.allocate_exact_size(
-                Vec2::new(ui.available_width(), 36.0),
+                Vec2::new(ui.available_width(), tokens::list_row_height()),
                 egui::Sense::click_and_drag(),
             );
             let is_editing = self.editing_asset == Some(asset.id);
 
             if row_response.hovered() {
-                ui.painter().rect_filled(row_rect, 3.0, palette::bg_surface_hover());
+                ui.painter().rect_filled(
+                    row_rect,
+                    tokens::list_row_radius(),
+                    palette::bg_surface_hover(),
+                );
             }
 
             ui.allocate_new_ui(egui::UiBuilder::new().max_rect(row_rect), |ui| {
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.spacing_mut().item_spacing.x = tokens::list_compact_spacing_x();
                     let icon_col_w = 20.0;
 
                     let kind_icon = match asset.kind {
