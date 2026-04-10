@@ -4,6 +4,7 @@ use crate::{
 };
 use egui::{Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use mondrian_core::types::{ClipId, Rational, TimeCode, TrackId};
+use mondrian_timeline::sequence::Sequence;
 use std::collections::HashSet;
 
 // ─── TimelinePanel ──────────────────────────
@@ -16,6 +17,7 @@ pub struct TimelinePanel {
     scroll_offset_frames: f64,
     clip_drag: Option<ClipDragState>,
     clip_drag_moved: bool,
+    clip_drag_before_sequence: Option<Sequence>,
     selected_clips: HashSet<ClipSelection>,
     track_area_bounds: Option<Rect>,
     marquee_anchor: Option<Pos2>,
@@ -23,6 +25,7 @@ pub struct TimelinePanel {
     marquee_additive: bool,
     active_tool: TimelineTool,
     snap_enabled: bool,
+    snap_grid_mode: SnapGridMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -30,6 +33,39 @@ enum TimelineTool {
     #[default]
     Select,
     Blade,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum SnapGridMode {
+    Frame,
+    HalfSecond,
+    #[default]
+    OneSecond,
+    TwoSeconds,
+    FiveSeconds,
+}
+
+impl SnapGridMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Frame => "按帧",
+            Self::HalfSecond => "0.5 秒",
+            Self::OneSecond => "1 秒",
+            Self::TwoSeconds => "2 秒",
+            Self::FiveSeconds => "5 秒",
+        }
+    }
+
+    fn step_frames(self, fps: Rational) -> i64 {
+        let nominal_fps = fps.to_f64().round().max(1.0) as i64;
+        match self {
+            Self::Frame => 1,
+            Self::HalfSecond => (nominal_fps / 2).max(1),
+            Self::OneSecond => nominal_fps.max(1),
+            Self::TwoSeconds => (nominal_fps * 2).max(1),
+            Self::FiveSeconds => (nominal_fps * 5).max(1),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -115,6 +151,22 @@ impl TimelinePanel {
                             if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::B)) {
                                 let _ = state.split_at_playhead();
                             }
+
+                            if ui.input(|i| {
+                                i.modifiers.command
+                                    && !i.modifiers.shift
+                                    && i.key_pressed(egui::Key::Z)
+                            }) {
+                                let _ = state.undo_timeline();
+                            }
+
+                            if ui.input(|i| {
+                                i.modifiers.command
+                                    && ((i.modifiers.shift && i.key_pressed(egui::Key::Z))
+                                        || i.key_pressed(egui::Key::Y))
+                            }) {
+                                let _ = state.redo_timeline();
+                            }
                         }
 
                         let dropped = self.draw_tracks(ui, state);
@@ -140,9 +192,14 @@ impl TimelinePanel {
                                 if dropped_outside && self.clip_drag_moved {
                                     self.delete_selected_clips(state, false);
                                 } else if self.clip_drag_moved {
-                                    let _ = state.save_project();
+                                    if let Some(before) = self.clip_drag_before_sequence.take() {
+                                        state.record_timeline_edit_snapshot("移动片段", before);
+                                    } else {
+                                        let _ = state.save_project();
+                                    }
                                 }
                             }
+                            self.clip_drag_before_sequence = None;
                             self.clip_drag_moved = false;
                         }
                     });
@@ -202,6 +259,23 @@ impl TimelinePanel {
             .on_hover_text("自动吸附")
             .clicked()
             .then(|| self.snap_enabled = !self.snap_enabled);
+
+            if self.snap_enabled {
+                let selected = self.snap_grid_mode.label();
+                egui::ComboBox::from_id_salt("timeline_snap_grid_mode")
+                    .selected_text(selected)
+                    .show_ui(ui, |ui| {
+                        for mode in [
+                            SnapGridMode::Frame,
+                            SnapGridMode::HalfSecond,
+                            SnapGridMode::OneSecond,
+                            SnapGridMode::TwoSeconds,
+                            SnapGridMode::FiveSeconds,
+                        ] {
+                            ui.selectable_value(&mut self.snap_grid_mode, mode, mode.label());
+                        }
+                    });
+            }
             ui.separator();
 
             if ui.button("标记入点 (I)").clicked() {
@@ -652,6 +726,7 @@ impl TimelinePanel {
                         self.selected_clips.clear();
                     }
                     self.selected_clips.insert(selection);
+                    self.clip_drag_before_sequence = state.sequence.clone();
 
                     if let Some(pointer) = clip_resp.interact_pointer_pos() {
                         let pointer_frame = ((pointer.x - rect.left() - track_label_w)
@@ -691,16 +766,22 @@ impl TimelinePanel {
                                 / self.pixels_per_frame)
                                 .round() as i64;
                             let raw_target = (pointer_frame - drag.pointer_offset_frames).max(0);
-                            let snap_points = state
+                            let (snap_points, grid_step_frames) = state
                                 .sequence
                                 .as_ref()
-                                .map(|seq| seq.snap_points())
-                                .unwrap_or_default();
+                                .map(|seq| {
+                                    (
+                                        seq.snap_points(),
+                                        self.snap_grid_mode.step_frames(seq.settings.frame_rate),
+                                    )
+                                })
+                                .unwrap_or_else(|| (Vec::new(), 1));
                             let target_frame = snap_frame(
                                 raw_target,
                                 &snap_points,
                                 self.pixels_per_frame,
                                 tokens::timeline_drag_snap_pixels(),
+                                grid_step_frames,
                             );
                             let target_frame = if self.snap_enabled {
                                 target_frame
@@ -824,16 +905,43 @@ impl TimelinePanel {
 
             if ui.input(|i| i.pointer.any_released()) {
                 if let Some(pos) = pointer_pos {
-                    let drop_frame =
+                    let raw_drop_frame =
                         ((pos.x - rect.left() - track_label_w) / self.pixels_per_frame) as i64;
-                    let drop_frame = drop_frame.max(0);
+                    let raw_drop_frame = raw_drop_frame.max(0);
+                    let drop_frame = if self.snap_enabled {
+                        let (snap_points, grid_step_frames) = state
+                            .sequence
+                            .as_ref()
+                            .map(|seq| {
+                                (
+                                    seq.snap_points(),
+                                    self.snap_grid_mode.step_frames(seq.settings.frame_rate),
+                                )
+                            })
+                            .unwrap_or_else(|| (Vec::new(), 1));
+
+                        snap_frame(
+                            raw_drop_frame,
+                            &snap_points,
+                            self.pixels_per_frame,
+                            tokens::timeline_drag_snap_pixels(),
+                            grid_step_frames,
+                        )
+                    } else {
+                        raw_drop_frame
+                    };
                     let drop_result = if is_video_track {
                         state.drop_dragging_asset_to_video_track(track.id, drop_frame)
                     } else {
                         state.drop_dragging_asset_to_audio_track(track.id, drop_frame)
                     };
-                    if drop_result.is_ok() {
-                        dropped_here = true;
+                    match drop_result {
+                        Ok(_) => {
+                            dropped_here = true;
+                        }
+                        Err(err) => {
+                            state.set_status_hint(format!("放置素材失败：{err}"), true);
+                        }
                     }
                 }
             }
@@ -1117,6 +1225,7 @@ fn snap_frame(
     snap_points: &[TimeCode],
     pixels_per_frame: f32,
     snap_pixels: f32,
+    grid_step_frames: i64,
 ) -> i64 {
     if pixels_per_frame <= 0.0 {
         return target_frame;
@@ -1134,5 +1243,47 @@ fn snap_frame(
         }
     }
 
+    if grid_step_frames > 0 {
+        let lower = target_frame.div_euclid(grid_step_frames) * grid_step_frames;
+        let upper = lower + grid_step_frames;
+        for candidate in [lower, upper] {
+            let dist = (candidate - target_frame).abs();
+            if dist <= threshold_frames && dist < best_dist {
+                best_dist = dist;
+                best = candidate;
+            }
+        }
+    }
+
     best.max(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snap_frame_uses_grid_when_clip_points_far() {
+        let target = 23;
+        let snapped = snap_frame(
+            target,
+            &[],
+            4.0, // 4px/frame
+            10.0,
+            25, // 1s @25fps
+        );
+
+        // 距离 25 帧仅 2 帧，落在吸附阈值内
+        assert_eq!(snapped, 25);
+    }
+
+    #[test]
+    fn snap_frame_prefers_clip_edge_when_closer_than_grid() {
+        let tb = Rational::new(1, 25);
+        let target = 41;
+        let points = [TimeCode::new(40, tb)];
+        let snapped = snap_frame(target, &points, 4.0, 10.0, 25);
+
+        assert_eq!(snapped, 40);
+    }
 }
