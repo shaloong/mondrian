@@ -25,12 +25,12 @@ impl AiPanel {
             ui.label("工作流 DSL (YAML):");
             egui::ScrollArea::vertical()
                 .id_salt("workflow_yaml_scroll")
-                .max_height(240.0)
+                .max_height(theme::tokens::ai_workflow_editor_max_height())
                 .show(ui, |ui| {
                     ui.add(
                         egui::TextEdit::multiline(&mut self.workflow_yaml)
                             .font(typography::body())
-                            .desired_rows(12)
+                            .desired_rows(theme::tokens::ai_workflow_editor_rows())
                             .desired_width(f32::INFINITY)
                             .code_editor(),
                     );
@@ -65,7 +65,7 @@ impl AiPanel {
             egui::ScrollArea::vertical()
                 .id_salt("workflow_log_scroll")
                 .stick_to_bottom(true)
-                .max_height(180.0)
+                .max_height(theme::tokens::ai_workflow_log_max_height())
                 .show(ui, |ui| {
                     for line in &self.log_lines {
                         let color = if line.starts_with("[错误]") {

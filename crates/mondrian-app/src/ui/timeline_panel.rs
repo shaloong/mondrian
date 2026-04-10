@@ -6,14 +6,6 @@ use egui::{Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use mondrian_core::types::{ClipId, Rational, TimeCode, TrackId};
 use std::collections::HashSet;
 
-// ─── 常量 ───────────────────────────────────
-const TRACK_HEIGHT: f32 = 40.0;
-const RULER_HEIGHT: f32 = 24.0;
-const TRACK_LABEL_W: f32 = 80.0;
-const MIN_PIXELS_PER_FRAME: f32 = 0.02;
-const MAX_PIXELS_PER_FRAME: f32 = 64.0;
-const DRAG_SNAP_PIXELS: f32 = 10.0;
-
 // ─── TimelinePanel ──────────────────────────
 
 #[derive(Default)]
@@ -160,16 +152,23 @@ impl TimelinePanel {
     }
 
     fn timeline_content_width(&self, state: &AppState) -> f32 {
+        let track_label_w = tokens::timeline_track_label_width();
         let Some(seq) = state.sequence.as_ref() else {
-            return TRACK_LABEL_W + 1200.0;
+            return track_label_w + 1200.0;
         };
 
         let fps = seq.settings.frame_rate.to_f64().round() as i64;
-        let right_padding_frames = (fps.max(1) * 20).max(240);
-        let max_frame =
-            seq.total_duration().frame.max(state.current_frame()).max(240) + right_padding_frames;
+        let right_padding_frames = (fps.max(1)
+            * tokens::timeline_right_padding_frames_multiplier())
+        .max(tokens::timeline_right_padding_frames_min());
+        let max_frame = seq
+            .total_duration()
+            .frame
+            .max(state.current_frame())
+            .max(tokens::timeline_right_padding_frames_min())
+            + right_padding_frames;
 
-        TRACK_LABEL_W + max_frame as f32 * self.pixels_per_frame
+        track_label_w + max_frame as f32 * self.pixels_per_frame
     }
 
     fn draw_timeline_tools_toolbar(&mut self, ui: &mut Ui, state: &mut AppState) {
@@ -227,7 +226,8 @@ impl TimelinePanel {
                 ui.add(
                     egui::Slider::new(
                         &mut self.pixels_per_frame,
-                        MIN_PIXELS_PER_FRAME..=MAX_PIXELS_PER_FRAME,
+                        tokens::timeline_min_pixels_per_frame()
+                            ..=tokens::timeline_max_pixels_per_frame(),
                     )
                     .logarithmic(true)
                     .show_value(false),
@@ -240,9 +240,10 @@ impl TimelinePanel {
     // ─── 时间标尺 ─────────────────────────────
     /// 返回 Some(frame) 若用户点击或拖拽了标尺
     fn draw_ruler(&self, ui: &mut Ui, state: &AppState) -> Option<i64> {
-        let available_w = ui.available_width() - TRACK_LABEL_W;
+        let track_label_w = tokens::timeline_track_label_width();
+        let available_w = ui.available_width() - track_label_w;
         let (rect, resp) = ui.allocate_exact_size(
-            Vec2::new(ui.available_width(), RULER_HEIGHT),
+            Vec2::new(ui.available_width(), tokens::timeline_ruler_height()),
             Sense::click_and_drag(), // 支持拖拽以实现标尺 scrub
         );
 
@@ -252,10 +253,10 @@ impl TimelinePanel {
         if let Some(out_point) = state.out_point_frame() {
             let in_point = state.in_point_frame().max(0);
             let out_point = out_point.max(in_point);
-            let x0 = rect.left() + TRACK_LABEL_W + in_point as f32 * self.pixels_per_frame;
-            let x1 = rect.left() + TRACK_LABEL_W + (out_point + 1) as f32 * self.pixels_per_frame;
+            let x0 = rect.left() + track_label_w + in_point as f32 * self.pixels_per_frame;
+            let x1 = rect.left() + track_label_w + (out_point + 1) as f32 * self.pixels_per_frame;
             let range_rect = Rect::from_min_max(
-                Pos2::new(x0.max(rect.left() + TRACK_LABEL_W), rect.top()),
+                Pos2::new(x0.max(rect.left() + track_label_w), rect.top()),
                 Pos2::new(x1.min(rect.right()), rect.bottom()),
             );
             if range_rect.min.x < range_rect.max.x {
@@ -285,11 +286,14 @@ impl TimelinePanel {
                 (start_frame / ruler_scale.minor_step_frames) * ruler_scale.minor_step_frames;
             while f <= end_frame {
                 if f % ruler_scale.major_step_frames != 0 {
-                    let x = rect.left() + TRACK_LABEL_W + f as f32 * self.pixels_per_frame;
-                    if x >= rect.left() + TRACK_LABEL_W && x <= rect.right() {
+                    let x = rect.left() + track_label_w + f as f32 * self.pixels_per_frame;
+                    if x >= rect.left() + track_label_w && x <= rect.right() {
                         painter.line_segment(
                             [
-                                Pos2::new(x, rect.bottom() - 6.0),
+                                Pos2::new(
+                                    x,
+                                    rect.bottom() - tokens::timeline_ruler_minor_tick_height(),
+                                ),
                                 Pos2::new(x, rect.bottom()),
                             ],
                             Stroke::new(1.0, palette::border_subtle().gamma_multiply(0.75)),
@@ -303,14 +307,17 @@ impl TimelinePanel {
         // 主刻度 + 标签（按缩放自动切换帧/秒/分钟）
         let mut f = (start_frame / ruler_scale.major_step_frames) * ruler_scale.major_step_frames;
         while f <= end_frame {
-            let x = rect.left() + TRACK_LABEL_W + f as f32 * self.pixels_per_frame;
-            if x >= rect.left() + TRACK_LABEL_W && x <= rect.right() {
+            let x = rect.left() + track_label_w + f as f32 * self.pixels_per_frame;
+            if x >= rect.left() + track_label_w && x <= rect.right() {
                 painter.line_segment(
                     [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
                     Stroke::new(1.0, palette::border_subtle()),
                 );
                 painter.text(
-                    Pos2::new(x + 2.0, rect.top() + 4.0),
+                    Pos2::new(
+                        x + tokens::timeline_ruler_label_inset_x(),
+                        rect.top() + tokens::timeline_ruler_label_inset_y(),
+                    ),
                     egui::Align2::LEFT_TOP,
                     format_ruler_label(f, fps, ruler_scale.granularity),
                     typography::mono_small(),
@@ -322,20 +329,23 @@ impl TimelinePanel {
 
         // 播放头
         let playhead_x =
-            rect.left() + TRACK_LABEL_W + state.current_frame() as f32 * self.pixels_per_frame;
+            rect.left() + track_label_w + state.current_frame() as f32 * self.pixels_per_frame;
         painter.line_segment(
             [
                 Pos2::new(playhead_x, rect.top()),
                 Pos2::new(playhead_x, rect.bottom()),
             ],
-            Stroke::new(2.0, palette::timeline_playhead()),
+            Stroke::new(
+                tokens::timeline_playhead_stroke_width(),
+                palette::timeline_playhead(),
+            ),
         );
 
         // 点击或拖拽标尺跳转（scrub）
         if resp.clicked() || resp.dragged() || resp.drag_stopped() {
             if let Some(pos) = resp.interact_pointer_pos() {
                 let clicked_frame =
-                    ((pos.x - rect.left() - TRACK_LABEL_W) / self.pixels_per_frame) as i64;
+                    ((pos.x - rect.left() - track_label_w) / self.pixels_per_frame) as i64;
                 return Some(clicked_frame.max(0));
             }
         }
@@ -358,6 +368,7 @@ impl TimelinePanel {
         let mut visible_clips: Vec<ClipVisual> = Vec::new();
         let audio_track_ids: Vec<TrackId> = audio_tracks.iter().map(|t| t.id).collect();
         let mut linked_audio_target_track_id: Option<TrackId> = None;
+        let track_height = tokens::timeline_track_height();
 
         for track_index in (0..video_tracks.len()).rev() {
             let track = &video_tracks[track_index];
@@ -412,9 +423,9 @@ impl TimelinePanel {
                 state.dragging_asset(),
             ) {
                 if ((dragging.kind == mondrian_assets::AssetKind::Video
-                    && pos.y <= top + TRACK_HEIGHT * video_tracks.len() as f32)
+                    && pos.y <= top + track_height * video_tracks.len() as f32)
                     || (dragging.kind == mondrian_assets::AssetKind::Audio
-                        && pos.y > top + TRACK_HEIGHT * video_tracks.len() as f32))
+                        && pos.y > top + track_height * video_tracks.len() as f32))
                     && pos.x >= left
                     && pos.y >= top
                     && pos.y <= bottom
@@ -453,8 +464,12 @@ impl TimelinePanel {
         linked_audio_target_track_id: &mut Option<TrackId>,
     ) -> bool {
         let available_w = ui.available_width();
+        let track_height = tokens::timeline_track_height();
+        let track_label_w = tokens::timeline_track_label_width();
+        let clip_top_inset = tokens::timeline_clip_top_inset();
+        let clip_bottom_inset = tokens::timeline_clip_bottom_inset();
         let (rect, resp) = ui.allocate_exact_size(
-            Vec2::new(available_w, TRACK_HEIGHT),
+            Vec2::new(available_w, track_height),
             Sense::click_and_drag(),
         );
 
@@ -463,22 +478,31 @@ impl TimelinePanel {
         }
         *last_track_bottom = Some(rect.bottom());
         if content_left.is_none() {
-            *content_left = Some(rect.left() + TRACK_LABEL_W);
+            *content_left = Some(rect.left() + track_label_w);
         }
 
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, palette::bg_surface());
 
-        let label_rect = Rect::from_min_size(rect.min, Vec2::new(TRACK_LABEL_W, TRACK_HEIGHT));
+        let label_rect = Rect::from_min_size(rect.min, Vec2::new(track_label_w, track_height));
         painter.rect_filled(label_rect, 0.0, palette::bg_base());
 
-        let icon_size = Vec2::new(14.0, 14.0);
+        let icon_size = Vec2::new(
+            tokens::timeline_track_icon_size(),
+            tokens::timeline_track_icon_size(),
+        );
         let lock_rect = Rect::from_center_size(
-            Pos2::new(label_rect.right() - 10.0, label_rect.center().y),
+            Pos2::new(
+                label_rect.right() - tokens::timeline_track_lock_offset_x(),
+                label_rect.center().y,
+            ),
             icon_size,
         );
         let mode_rect = Rect::from_center_size(
-            Pos2::new(label_rect.right() - 28.0, label_rect.center().y),
+            Pos2::new(
+                label_rect.right() - tokens::timeline_track_mode_offset_x(),
+                label_rect.center().y,
+            ),
             icon_size,
         );
         let lock_resp = ui.interact(
@@ -503,7 +527,10 @@ impl TimelinePanel {
         }
 
         painter.text(
-            Pos2::new(label_rect.left() + 6.0, label_rect.center().y),
+            Pos2::new(
+                label_rect.left() + tokens::timeline_track_label_text_inset_x(),
+                label_rect.center().y,
+            ),
             egui::Align2::LEFT_CENTER,
             &track.name,
             typography::body(),
@@ -530,15 +557,18 @@ impl TimelinePanel {
 
         for clip in &track.clips {
             let clip_x =
-                rect.left() + TRACK_LABEL_W + clip.position.frame as f32 * self.pixels_per_frame;
+                rect.left() + track_label_w + clip.position.frame as f32 * self.pixels_per_frame;
             let clip_w = clip.duration.frame as f32 * self.pixels_per_frame;
-            if clip_x + clip_w < rect.left() + TRACK_LABEL_W || clip_x > rect.right() {
+            if clip_x + clip_w < rect.left() + track_label_w || clip_x > rect.right() {
                 continue;
             }
 
             let clip_rect = Rect::from_min_size(
-                Pos2::new(clip_x.max(rect.left() + TRACK_LABEL_W), rect.top() + 2.0),
-                Vec2::new(clip_w, TRACK_HEIGHT - 4.0),
+                Pos2::new(
+                    clip_x.max(rect.left() + track_label_w),
+                    rect.top() + clip_top_inset,
+                ),
+                Vec2::new(clip_w, track_height - clip_bottom_inset),
             );
             let selection = ClipSelection {
                 track_id: track.id,
@@ -561,9 +591,10 @@ impl TimelinePanel {
                 );
             }
 
-            if clip_w > 24.0 {
+            if clip_w > tokens::timeline_clip_label_min_width() {
                 painter.text(
-                    clip_rect.left_center() + Vec2::new(4.0, 0.0),
+                    clip_rect.left_center()
+                        + Vec2::new(tokens::timeline_clip_label_padding_x(), 0.0),
                     egui::Align2::LEFT_CENTER,
                     clip.label.as_deref().unwrap_or("clip"),
                     typography::body_small(),
@@ -583,7 +614,7 @@ impl TimelinePanel {
                         let split_frame = clip_resp
                             .interact_pointer_pos()
                             .map(|pointer| {
-                                ((pointer.x - rect.left() - TRACK_LABEL_W) / self.pixels_per_frame)
+                                ((pointer.x - rect.left() - track_label_w) / self.pixels_per_frame)
                                     .round() as i64
                             })
                             .unwrap_or(state.current_frame())
@@ -623,7 +654,7 @@ impl TimelinePanel {
                     self.selected_clips.insert(selection);
 
                     if let Some(pointer) = clip_resp.interact_pointer_pos() {
-                        let pointer_frame = ((pointer.x - rect.left() - TRACK_LABEL_W)
+                        let pointer_frame = ((pointer.x - rect.left() - track_label_w)
                             / self.pixels_per_frame)
                             .round() as i64;
                         self.clip_drag = Some(ClipDragState {
@@ -656,7 +687,7 @@ impl TimelinePanel {
                 if let Some(drag) = self.clip_drag {
                     if drag.clip_id == clip.id && drag.is_video_track == is_video_track {
                         if let Some(pointer) = ui.input(|i| i.pointer.interact_pos()) {
-                            let pointer_frame = ((pointer.x - rect.left() - TRACK_LABEL_W)
+                            let pointer_frame = ((pointer.x - rect.left() - track_label_w)
                                 / self.pixels_per_frame)
                                 .round() as i64;
                             let raw_target = (pointer_frame - drag.pointer_offset_frames).max(0);
@@ -669,7 +700,7 @@ impl TimelinePanel {
                                 raw_target,
                                 &snap_points,
                                 self.pixels_per_frame,
-                                DRAG_SNAP_PIXELS,
+                                tokens::timeline_drag_snap_pixels(),
                             );
                             let target_frame = if self.snap_enabled {
                                 target_frame
@@ -743,17 +774,24 @@ impl TimelinePanel {
                 state.sequence.as_ref(),
             ) {
                 let ghost_frame =
-                    (((pos.x - rect.left() - TRACK_LABEL_W) / self.pixels_per_frame) as i64).max(0);
+                    (((pos.x - rect.left() - track_label_w) / self.pixels_per_frame) as i64).max(0);
                 let ghost_frames = ((dragging.duration.as_secs_f64()
                     * seq.settings.frame_rate.to_f64())
                 .ceil() as i64)
                     .max(1);
                 let ghost_x =
-                    rect.left() + TRACK_LABEL_W + ghost_frame as f32 * self.pixels_per_frame;
-                let ghost_w = (ghost_frames as f32 * self.pixels_per_frame).max(8.0);
+                    rect.left() + track_label_w + ghost_frame as f32 * self.pixels_per_frame;
+                let ghost_w = (ghost_frames as f32 * self.pixels_per_frame)
+                    .max(tokens::timeline_clip_ghost_min_width());
                 let ghost_rect = Rect::from_min_size(
-                    Pos2::new(ghost_x.max(rect.left() + TRACK_LABEL_W), rect.top() + 4.0),
-                    Vec2::new(ghost_w, TRACK_HEIGHT - 8.0),
+                    Pos2::new(
+                        ghost_x.max(rect.left() + track_label_w),
+                        rect.top() + tokens::timeline_clip_ghost_padding_y(),
+                    ),
+                    Vec2::new(
+                        ghost_w,
+                        track_height - tokens::timeline_clip_ghost_padding_y() * 2.0,
+                    ),
                 );
                 painter.rect_filled(
                     ghost_rect,
@@ -763,10 +801,14 @@ impl TimelinePanel {
                 painter.rect_stroke(
                     ghost_rect,
                     tokens::timeline_clip_radius(),
-                    Stroke::new(1.0, palette::interaction_highlight()),
+                    Stroke::new(
+                        tokens::timeline_linked_audio_highlight_width(),
+                        palette::interaction_highlight(),
+                    ),
                 );
                 painter.text(
-                    ghost_rect.left_center() + Vec2::new(4.0, 0.0),
+                    ghost_rect.left_center()
+                        + Vec2::new(tokens::timeline_clip_ghost_padding_x(), 0.0),
                     egui::Align2::LEFT_CENTER,
                     format!("{} (预放置)", dragging.name),
                     typography::body_small(),
@@ -783,7 +825,7 @@ impl TimelinePanel {
             if ui.input(|i| i.pointer.any_released()) {
                 if let Some(pos) = pointer_pos {
                     let drop_frame =
-                        ((pos.x - rect.left() - TRACK_LABEL_W) / self.pixels_per_frame) as i64;
+                        ((pos.x - rect.left() - track_label_w) / self.pixels_per_frame) as i64;
                     let drop_frame = drop_frame.max(0);
                     let drop_result = if is_video_track {
                         state.drop_dragging_asset_to_video_track(track.id, drop_frame)
@@ -802,17 +844,23 @@ impl TimelinePanel {
                 state.sequence.as_ref(),
             ) {
                 let ghost_frame =
-                    (((pos.x - rect.left() - TRACK_LABEL_W) / self.pixels_per_frame) as i64).max(0);
+                    (((pos.x - rect.left() - track_label_w) / self.pixels_per_frame) as i64).max(0);
                 let ghost_frames = ((dragging.duration.as_secs_f64()
                     * seq.settings.frame_rate.to_f64())
                 .ceil() as i64)
                     .max(1);
                 let ghost_x =
-                    rect.left() + TRACK_LABEL_W + ghost_frame as f32 * self.pixels_per_frame;
+                    rect.left() + track_label_w + ghost_frame as f32 * self.pixels_per_frame;
                 let ghost_w = (ghost_frames as f32 * self.pixels_per_frame).max(8.0);
                 let ghost_rect = Rect::from_min_size(
-                    Pos2::new(ghost_x.max(rect.left() + TRACK_LABEL_W), rect.top() + 4.0),
-                    Vec2::new(ghost_w, TRACK_HEIGHT - 8.0),
+                    Pos2::new(
+                        ghost_x.max(rect.left() + track_label_w),
+                        rect.top() + tokens::timeline_clip_ghost_padding_y(),
+                    ),
+                    Vec2::new(
+                        ghost_w,
+                        track_height - tokens::timeline_clip_ghost_padding_y() * 2.0,
+                    ),
                 );
                 painter.rect_filled(
                     ghost_rect,
@@ -822,7 +870,10 @@ impl TimelinePanel {
                 painter.rect_stroke(
                     ghost_rect,
                     tokens::timeline_clip_radius(),
-                    Stroke::new(1.0, palette::interaction_highlight()),
+                    Stroke::new(
+                        tokens::timeline_linked_audio_highlight_width(),
+                        palette::interaction_highlight(),
+                    ),
                 );
             }
         }

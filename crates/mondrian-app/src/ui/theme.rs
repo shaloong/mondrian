@@ -39,11 +39,15 @@ impl Theme {
     }
 
     fn resolve(self, ctx: &egui::Context) -> egui::Theme {
-        match self {
-            Self::Dark => egui::Theme::Dark,
-            Self::Light => egui::Theme::Light,
-            Self::System => ctx.system_theme().unwrap_or(egui::Theme::Dark),
-        }
+        resolve_egui_theme(self, ctx.system_theme())
+    }
+}
+
+fn resolve_egui_theme(preference: Theme, system_theme: Option<egui::Theme>) -> egui::Theme {
+    match preference {
+        Theme::Dark => egui::Theme::Dark,
+        Theme::Light => egui::Theme::Light,
+        Theme::System => system_theme.unwrap_or(egui::Theme::Dark),
     }
 }
 
@@ -166,9 +170,50 @@ pub struct MetricsTokens {
     pub list_row_radius: f32,
     pub list_compact_spacing_x: f32,
     pub list_row_height: f32,
+    pub list_min_height: f32,
+    pub list_empty_height: f32,
+    pub list_icon_column_width: f32,
+    pub list_row_content_height: f32,
+    pub list_row_edit_min_width: f32,
+    pub list_row_edit_padding: f32,
+    pub list_row_name_min_width: f32,
+    pub list_proxy_tag_width: f32,
+    pub list_proxy_tag_font_size: f32,
     pub export_grid_spacing: [f32; 2],
+    pub ai_workflow_editor_max_height: f32,
+    pub ai_workflow_log_max_height: f32,
+    pub ai_workflow_editor_rows: usize,
     pub timeline_toolbar_button_size: [f32; 2],
     pub timeline_clip_radius: f32,
+    pub timeline_track_height: f32,
+    pub timeline_ruler_height: f32,
+    pub timeline_track_label_width: f32,
+    pub timeline_min_pixels_per_frame: f32,
+    pub timeline_max_pixels_per_frame: f32,
+    pub timeline_drag_snap_pixels: f32,
+    pub timeline_default_pixels_per_frame: f32,
+    pub timeline_right_padding_frames_min: i64,
+    pub timeline_right_padding_frames_multiplier: i64,
+    pub timeline_ruler_minor_tick_height: f32,
+    pub timeline_ruler_major_tick_height: f32,
+    pub timeline_ruler_label_inset_x: f32,
+    pub timeline_ruler_label_inset_y: f32,
+    pub timeline_track_label_text_inset_x: f32,
+    pub timeline_track_icon_size: f32,
+    pub timeline_track_lock_offset_x: f32,
+    pub timeline_track_mode_offset_x: f32,
+    pub timeline_clip_top_inset: f32,
+    pub timeline_clip_bottom_inset: f32,
+    pub timeline_clip_label_padding_x: f32,
+    pub timeline_clip_label_min_width: f32,
+    pub timeline_clip_ghost_min_width: f32,
+    pub timeline_clip_ghost_padding_x: f32,
+    pub timeline_clip_ghost_padding_y: f32,
+    pub timeline_selection_stroke_width: f32,
+    pub timeline_drop_stroke_width: f32,
+    pub timeline_linked_audio_highlight_width: f32,
+    pub timeline_playhead_stroke_width: f32,
+    pub timeline_playhead_secondary_stroke_width: f32,
 }
 
 impl Default for MetricsTokens {
@@ -195,9 +240,50 @@ impl Default for MetricsTokens {
             list_row_radius: 3.0,
             list_compact_spacing_x: 4.0,
             list_row_height: 36.0,
+            list_min_height: 120.0,
+            list_empty_height: 160.0,
+            list_icon_column_width: 20.0,
+            list_row_content_height: 18.0,
+            list_row_edit_min_width: 80.0,
+            list_row_edit_padding: 12.0,
+            list_row_name_min_width: 32.0,
+            list_proxy_tag_width: 34.0,
+            list_proxy_tag_font_size: 11.0,
             export_grid_spacing: [12.0, 4.0],
+            ai_workflow_editor_max_height: 240.0,
+            ai_workflow_log_max_height: 180.0,
+            ai_workflow_editor_rows: 12,
             timeline_toolbar_button_size: [24.0, 22.0],
             timeline_clip_radius: 3.0,
+            timeline_track_height: 40.0,
+            timeline_ruler_height: 24.0,
+            timeline_track_label_width: 80.0,
+            timeline_min_pixels_per_frame: 0.02,
+            timeline_max_pixels_per_frame: 64.0,
+            timeline_drag_snap_pixels: 10.0,
+            timeline_default_pixels_per_frame: 4.0,
+            timeline_right_padding_frames_min: 240,
+            timeline_right_padding_frames_multiplier: 20,
+            timeline_ruler_minor_tick_height: 6.0,
+            timeline_ruler_major_tick_height: 4.0,
+            timeline_ruler_label_inset_x: 2.0,
+            timeline_ruler_label_inset_y: 4.0,
+            timeline_track_label_text_inset_x: 6.0,
+            timeline_track_icon_size: 14.0,
+            timeline_track_lock_offset_x: 10.0,
+            timeline_track_mode_offset_x: 28.0,
+            timeline_clip_top_inset: 2.0,
+            timeline_clip_bottom_inset: 4.0,
+            timeline_clip_label_padding_x: 4.0,
+            timeline_clip_label_min_width: 24.0,
+            timeline_clip_ghost_min_width: 8.0,
+            timeline_clip_ghost_padding_x: 4.0,
+            timeline_clip_ghost_padding_y: 4.0,
+            timeline_selection_stroke_width: 2.0,
+            timeline_drop_stroke_width: 1.5,
+            timeline_linked_audio_highlight_width: 1.5,
+            timeline_playhead_stroke_width: 2.0,
+            timeline_playhead_secondary_stroke_width: 1.8,
         }
     }
 }
@@ -669,6 +755,54 @@ pub mod tokens {
         super::with_active_tokens(|tokens| tokens.metrics.list_row_height)
     }
 
+    pub fn list_min_height() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.list_min_height)
+    }
+
+    pub fn list_empty_height() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.list_empty_height)
+    }
+
+    pub fn list_icon_column_width() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.list_icon_column_width)
+    }
+
+    pub fn list_row_content_height() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.list_row_content_height)
+    }
+
+    pub fn list_row_edit_min_width() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.list_row_edit_min_width)
+    }
+
+    pub fn list_row_edit_padding() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.list_row_edit_padding)
+    }
+
+    pub fn list_proxy_tag_width() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.list_proxy_tag_width)
+    }
+
+    pub fn list_proxy_tag_font_size() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.list_proxy_tag_font_size)
+    }
+
+    pub fn list_row_name_min_width() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.list_row_name_min_width)
+    }
+
+    pub fn ai_workflow_editor_max_height() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.ai_workflow_editor_max_height)
+    }
+
+    pub fn ai_workflow_log_max_height() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.ai_workflow_log_max_height)
+    }
+
+    pub fn ai_workflow_editor_rows() -> usize {
+        super::with_active_tokens(|tokens| tokens.metrics.ai_workflow_editor_rows)
+    }
+
     pub fn export_grid_spacing() -> [f32; 2] {
         super::with_active_tokens(|tokens| tokens.metrics.export_grid_spacing)
     }
@@ -679,6 +813,194 @@ pub mod tokens {
 
     pub fn timeline_clip_radius() -> f32 {
         super::with_active_tokens(|tokens| tokens.metrics.timeline_clip_radius)
+    }
+
+    pub fn timeline_track_height() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_track_height)
+    }
+
+    pub fn timeline_ruler_height() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_ruler_height)
+    }
+
+    pub fn timeline_track_label_width() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_track_label_width)
+    }
+
+    pub fn timeline_min_pixels_per_frame() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_min_pixels_per_frame)
+    }
+
+    pub fn timeline_max_pixels_per_frame() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_max_pixels_per_frame)
+    }
+
+    pub fn timeline_drag_snap_pixels() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_drag_snap_pixels)
+    }
+
+    pub fn timeline_default_pixels_per_frame() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_default_pixels_per_frame)
+    }
+
+    pub fn timeline_right_padding_frames_min() -> i64 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_right_padding_frames_min)
+    }
+
+    pub fn timeline_right_padding_frames_multiplier() -> i64 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_right_padding_frames_multiplier)
+    }
+
+    pub fn timeline_ruler_minor_tick_height() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_ruler_minor_tick_height)
+    }
+
+    pub fn timeline_ruler_major_tick_height() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_ruler_major_tick_height)
+    }
+
+    pub fn timeline_ruler_label_inset_x() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_ruler_label_inset_x)
+    }
+
+    pub fn timeline_ruler_label_inset_y() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_ruler_label_inset_y)
+    }
+
+    pub fn timeline_track_label_text_inset_x() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_track_label_text_inset_x)
+    }
+
+    pub fn timeline_track_icon_size() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_track_icon_size)
+    }
+
+    pub fn timeline_track_lock_offset_x() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_track_lock_offset_x)
+    }
+
+    pub fn timeline_track_mode_offset_x() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_track_mode_offset_x)
+    }
+
+    pub fn timeline_clip_top_inset() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_clip_top_inset)
+    }
+
+    pub fn timeline_clip_bottom_inset() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_clip_bottom_inset)
+    }
+
+    pub fn timeline_clip_label_padding_x() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_clip_label_padding_x)
+    }
+
+    pub fn timeline_clip_label_min_width() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_clip_label_min_width)
+    }
+
+    pub fn timeline_clip_ghost_min_width() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_clip_ghost_min_width)
+    }
+
+    pub fn timeline_clip_ghost_padding_x() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_clip_ghost_padding_x)
+    }
+
+    pub fn timeline_clip_ghost_padding_y() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_clip_ghost_padding_y)
+    }
+
+    pub fn timeline_selection_stroke_width() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_selection_stroke_width)
+    }
+
+    pub fn timeline_drop_stroke_width() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_drop_stroke_width)
+    }
+
+    pub fn timeline_linked_audio_highlight_width() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_linked_audio_highlight_width)
+    }
+
+    pub fn timeline_playhead_stroke_width() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_playhead_stroke_width)
+    }
+
+    pub fn timeline_playhead_secondary_stroke_width() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_playhead_secondary_stroke_width)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().expect("test lock poisoned")
+    }
+
+    #[test]
+    fn theme_labels_and_system_mapping_are_stable() {
+        let _guard = test_lock();
+
+        assert_eq!(Theme::System.display_name(), "跟随系统");
+        assert_eq!(Theme::Dark.display_name(), "深色");
+        assert_eq!(Theme::Light.display_name(), "浅色");
+        assert_eq!(
+            Theme::System.to_system_theme(),
+            egui::SystemTheme::SystemDefault
+        );
+        assert_eq!(Theme::Dark.to_system_theme(), egui::SystemTheme::Dark);
+        assert_eq!(Theme::Light.to_system_theme(), egui::SystemTheme::Light);
+    }
+
+    #[test]
+    fn system_theme_falls_back_to_dark_when_system_theme_is_missing() {
+        let _guard = test_lock();
+
+        assert_eq!(resolve_egui_theme(Theme::System, None), egui::Theme::Dark);
+        assert_eq!(
+            resolve_egui_theme(Theme::System, Some(egui::Theme::Light)),
+            egui::Theme::Light
+        );
+        assert_eq!(
+            resolve_egui_theme(Theme::System, Some(egui::Theme::Dark)),
+            egui::Theme::Dark
+        );
+    }
+
+    #[test]
+    fn token_override_updates_active_tokens_after_apply_theme() {
+        let _guard = test_lock();
+
+        clear_theme_overrides();
+
+        struct TestOverride;
+
+        impl ThemeTokenOverride for TestOverride {
+            fn override_tokens(
+                &self,
+                _preference: Theme,
+                _resolved: egui::Theme,
+                tokens: &mut ThemeTokens,
+            ) {
+                tokens.palette.bg_base = egui::Color32::from_rgb(1, 2, 3);
+                tokens.metrics.font_body = 19.0;
+            }
+        }
+
+        register_theme_override(Arc::new(TestOverride));
+
+        let ctx = egui::Context::default();
+        apply_theme(&ctx, Theme::Dark);
+
+        assert_eq!(palette::bg_base(), egui::Color32::from_rgb(1, 2, 3));
+        assert_eq!(typography::body().size, 19.0);
+
+        clear_theme_overrides();
     }
 }
 

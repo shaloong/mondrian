@@ -31,7 +31,7 @@ impl LibraryPanel {
 
             ui.separator();
 
-            let list_h = ui.available_height().max(120.0);
+                let list_h = ui.available_height().max(tokens::list_min_height());
             egui::ScrollArea::vertical().id_salt("library_scroll").max_height(list_h).show(
                 ui,
                 |ui| {
@@ -183,7 +183,7 @@ impl LibraryPanel {
         }
 
         if assets.is_empty() {
-            let fill_h = ui.available_height().max(160.0);
+            let fill_h = ui.available_height().max(tokens::list_empty_height());
             let (empty_rect, empty_resp) = ui.allocate_exact_size(
                 Vec2::new(ui.available_width(), fill_h),
                 egui::Sense::click(),
@@ -226,14 +226,14 @@ impl LibraryPanel {
             ui.allocate_new_ui(egui::UiBuilder::new().max_rect(row_rect), |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = tokens::list_compact_spacing_x();
-                    let icon_col_w = 20.0;
+                    let icon_col_w = tokens::list_icon_column_width();
 
                     let kind_icon = match asset.kind {
                         mondrian_assets::AssetKind::Video => theme::UiIcon::Video,
                         mondrian_assets::AssetKind::Audio => theme::UiIcon::Audio,
                     };
                     ui.allocate_ui_with_layout(
-                        Vec2::new(icon_col_w, 18.0),
+                        Vec2::new(icon_col_w, tokens::list_row_content_height()),
                         egui::Layout::left_to_right(egui::Align::Center),
                         |ui| {
                             let _ = theme::icon(ui, kind_icon, palette::text_muted());
@@ -241,9 +241,12 @@ impl LibraryPanel {
                     );
 
                     if is_editing {
-                        let edit_w = (row_rect.width() - icon_col_w - 12.0).max(80.0);
+                        let edit_w = (row_rect.width()
+                            - icon_col_w
+                            - tokens::list_row_edit_padding())
+                            .max(tokens::list_row_edit_min_width());
                         let edit_resp = ui.add_sized(
-                            [edit_w, 20.0],
+                            [edit_w, tokens::list_row_content_height()],
                             egui::TextEdit::singleline(&mut self.editing_name),
                         );
                         let submit =
@@ -265,11 +268,19 @@ impl LibraryPanel {
                             self.editing_name.clear();
                         }
                     } else {
-                        let proxy_tag_w = if proxy_mode { 34.0 } else { 0.0 };
-                        let name_w = (row_rect.width() - icon_col_w - proxy_tag_w - 16.0).max(32.0);
+                        let proxy_tag_w = if proxy_mode {
+                            tokens::list_proxy_tag_width()
+                        } else {
+                            0.0
+                        };
+                        let name_w = (row_rect.width()
+                            - icon_col_w
+                            - proxy_tag_w
+                            - tokens::list_row_edit_padding() * 0.5)
+                            .max(tokens::list_row_name_min_width());
                         let display_name = asset_name.trim_start();
                         ui.add_sized(
-                            [name_w, 18.0],
+                            [name_w, tokens::list_row_content_height()],
                             egui::Label::new(
                                 egui::RichText::new(display_name).color(palette::text_primary()),
                             )
@@ -278,11 +289,11 @@ impl LibraryPanel {
 
                         if proxy_mode {
                             ui.add_sized(
-                                [proxy_tag_w, 18.0],
+                                [proxy_tag_w, tokens::list_row_content_height()],
                                 egui::Label::new(
                                     egui::RichText::new("代理")
                                         .color(palette::interaction_highlight())
-                                        .size(11.0),
+                                        .size(tokens::list_proxy_tag_font_size()),
                                 ),
                             );
                         }
