@@ -4,6 +4,7 @@ use crate::{
 };
 use egui::{Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use mondrian_core::types::{ClipId, Rational, TimeCode, TrackId};
+use mondrian_timeline::clip::TrimEdge;
 use mondrian_timeline::sequence::Sequence;
 use std::collections::HashSet;
 
@@ -296,6 +297,16 @@ impl TimelinePanel {
 
             if ui.button("分割 (Ctrl+B)").clicked() {
                 let _ = state.split_at_playhead();
+            }
+
+            let has_selection = !self.selected_clips.is_empty();
+            if ui.add_enabled(has_selection, egui::Button::new("修剪入点到播放头")).clicked()
+            {
+                self.trim_selected_clips_to_playhead(state, TrimEdge::In);
+            }
+            if ui.add_enabled(has_selection, egui::Button::new("修剪出点到播放头")).clicked()
+            {
+                self.trim_selected_clips_to_playhead(state, TrimEdge::Out);
             }
 
             ui.separator();
@@ -778,6 +789,14 @@ impl TimelinePanel {
                         self.delete_selected_clips(state, true);
                         ui.close_menu();
                     }
+                    if ui.button("修剪入点到播放头").clicked() {
+                        self.trim_selected_clips_to_playhead(state, TrimEdge::In);
+                        ui.close_menu();
+                    }
+                    if ui.button("修剪出点到播放头").clicked() {
+                        self.trim_selected_clips_to_playhead(state, TrimEdge::Out);
+                        ui.close_menu();
+                    }
                     let all_disabled = self.selected_clips_all_disabled(state);
                     let toggle_label = if all_disabled {
                         "启用片段"
@@ -1041,6 +1060,14 @@ impl TimelinePanel {
                 self.delete_selected_clips(state, true);
                 ui.close_menu();
             }
+            if ui.button("修剪已选入点到播放头").clicked() {
+                self.trim_selected_clips_to_playhead(state, TrimEdge::In);
+                ui.close_menu();
+            }
+            if ui.button("修剪已选出点到播放头").clicked() {
+                self.trim_selected_clips_to_playhead(state, TrimEdge::Out);
+                ui.close_menu();
+            }
             let all_disabled = self.selected_clips_all_disabled(state);
             let toggle_label = if all_disabled {
                 "启用已选片段"
@@ -1162,6 +1189,23 @@ impl TimelinePanel {
 
         if state.remove_clips_bulk(&selections, ripple).is_ok() {
             self.selected_clips.clear();
+        }
+    }
+
+    fn trim_selected_clips_to_playhead(&mut self, state: &mut AppState, edge: TrimEdge) {
+        if self.selected_clips.is_empty() {
+            return;
+        }
+
+        let clip_ids: Vec<ClipId> = self.selected_clips.iter().map(|sel| sel.clip_id).collect();
+        let target_frame = match edge {
+            TrimEdge::In => state.current_frame(),
+            // 出点为右开区间，播放头所在帧应被保留，所以 +1
+            TrimEdge::Out => state.current_frame().saturating_add(1),
+        };
+
+        if let Err(err) = state.trim_clips_bulk_to_frame(&clip_ids, edge, target_frame) {
+            state.set_status_hint(format!("修剪片段失败：{err}"), true);
         }
     }
 

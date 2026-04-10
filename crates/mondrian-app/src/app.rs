@@ -17,7 +17,7 @@ use mondrian_media::audio::{
     AudioBuffer, AudioClock, AudioMixer, AudioSourceCache, AudioSyncController, AudioTrackConfig,
     AudioTrackData, ClockRole, RealtimeAudioOutput,
 };
-use mondrian_timeline::clip::Clip;
+use mondrian_timeline::clip::{Clip, TrimEdge};
 use mondrian_timeline::command::SequenceSnapshotCommand;
 use mondrian_timeline::sequence::Sequence;
 use rfd::FileDialog;
@@ -1717,6 +1717,81 @@ impl AppState {
         let _ = self.save_project_file();
     }
 
+    pub fn trim_clips_bulk_to_frame(
+        &mut self,
+        clip_ids: &[ClipId],
+        edge: TrimEdge,
+        target_frame: i64,
+    ) -> mondrian_core::Result<usize> {
+        if clip_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let (sequence_id, before, after, changed_count) = {
+            let seq = self.sequence.as_mut().ok_or_else(|| {
+                mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "trim_clips_bulk_to_frame".to_string(),
+                    reason: "当前无序列".to_string(),
+                }
+            })?;
+
+            let before = seq.clone();
+            let mut processed = HashSet::<ClipId>::new();
+            let mut changed_count = 0usize;
+
+            for clip_id in clip_ids {
+                if !processed.insert(*clip_id) {
+                    continue;
+                }
+
+                let linked = find_clip(seq, *clip_id).and_then(|clip| clip.linked_clip);
+                match trim_clip_edge_internal(seq, *clip_id, edge, target_frame) {
+                    Ok(true) => {
+                        changed_count += 1;
+                    }
+                    Ok(false) => {}
+                    Err(mondrian_core::MondrianError::ClipNotFound { .. }) => continue,
+                    Err(err) => return Err(err),
+                }
+
+                if let Some(linked_id) = linked {
+                    if !processed.insert(linked_id) {
+                        continue;
+                    }
+                    match trim_clip_edge_internal(seq, linked_id, edge, target_frame) {
+                        Ok(true) => {
+                            changed_count += 1;
+                            if let Some(primary) = find_clip_mut(seq, *clip_id) {
+                                primary.linked_clip = Some(linked_id);
+                            }
+                            if let Some(linked_clip) = find_clip_mut(seq, linked_id) {
+                                linked_clip.linked_clip = Some(*clip_id);
+                            }
+                        }
+                        Ok(false) => {}
+                        Err(mondrian_core::MondrianError::ClipNotFound { .. }) => {}
+                        Err(err) => return Err(err),
+                    }
+                }
+            }
+
+            if changed_count == 0 {
+                return Ok(0);
+            }
+
+            (seq.id, before, seq.clone(), changed_count)
+        };
+
+        let action = match edge {
+            TrimEdge::In => "修剪入点",
+            TrimEdge::Out => "修剪出点",
+        };
+        self.record_sequence_snapshot_command(action, before, after);
+        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
+        let _ = self.save_project_file();
+        Ok(changed_count)
+    }
+
     pub fn split_clip_at_frame(
         &mut self,
         track_id: TrackId,
@@ -2386,6 +2461,89 @@ fn split_clip_in_track(
         right_clip_id: right_id,
         original_linked: track.clips[index].linked_clip,
     })
+}
+
+fn trim_clip_edge_internal(
+    seq: &mut Sequence,
+    clip_id: ClipId,
+    edge: TrimEdge,
+    target_frame: i64,
+) -> mondrian_core::Result<bool> {
+    for track in &mut seq.video_tracks {
+        if let Some(index) = track.clips.iter().position(|clip| clip.id == clip_id) {
+            if track.is_locked {
+                return Err(mondrian_core::MondrianError::TrackLocked {
+                    track_id: track.id.to_string(),
+                });
+            }
+            return trim_clip_in_track(track, index, edge, target_frame);
+        }
+    }
+
+    for track in &mut seq.audio_tracks {
+        if let Some(index) = track.clips.iter().position(|clip| clip.id == clip_id) {
+            if track.is_locked {
+                return Err(mondrian_core::MondrianError::TrackLocked {
+                    track_id: track.id.to_string(),
+                });
+            }
+            return trim_clip_in_track(track, index, edge, target_frame);
+        }
+    }
+
+    Err(mondrian_core::MondrianError::ClipNotFound { clip_id: clip_id.to_string() })
+}
+
+fn trim_clip_in_track(
+    track: &mut mondrian_timeline::track::Track,
+    index: usize,
+    edge: TrimEdge,
+    target_frame: i64,
+) -> mondrian_core::Result<bool> {
+    let Some(original) = track.clips.get(index).cloned() else {
+        return Ok(false);
+    };
+    let start = original.position.frame;
+    let end = original.end_position().frame;
+    if end <= start {
+        return Ok(false);
+    }
+
+    let mut updated = original.clone();
+    match edge {
+        TrimEdge::In => {
+            let new_start = target_frame.max(start).min(end - 1);
+            if new_start == start {
+                return Ok(false);
+            }
+            let new_in = original
+                .timeline_to_source_time(TimeCode::new(new_start, original.position.time_base));
+            updated.position = TimeCode::new(new_start, original.position.time_base);
+            updated.duration = TimeCode::new(end - new_start, original.duration.time_base);
+            updated.source_in = new_in;
+        }
+        TrimEdge::Out => {
+            let new_end = target_frame.max(start + 1).min(end);
+            if new_end == end {
+                return Ok(false);
+            }
+            let new_out = original
+                .timeline_to_source_time(TimeCode::new(new_end, original.position.time_base));
+            updated.duration = TimeCode::new(new_end - start, original.duration.time_base);
+            updated.source_out = new_out;
+        }
+    }
+
+    if updated.duration.frame <= 0 {
+        return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+            step_id: "trim_clip".to_string(),
+            reason: "修剪后片段时长无效".to_string(),
+        });
+    }
+
+    track.clips[index] = updated;
+    track.clips.sort_by_key(|clip| clip.position.frame);
+    Ok(true)
 }
 
 fn ensure_audio_track_index(seq: &mut Sequence, index: usize) {
@@ -3922,6 +4080,84 @@ mod timeline_edit_tests {
         assert_eq!(clips.len(), 1);
         assert_eq!(clips[0].id, clip_b_id);
         assert_eq!(clips[0].position.frame, 5);
+    }
+
+    #[test]
+    fn trim_in_is_undoable() {
+        let mut state = create_state_with_sequence();
+        let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
+        let clip = Clip::new(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(20, tb));
+        let clip_id = clip.id;
+
+        state.sequence.as_mut().expect("sequence should exist").video_tracks[0]
+            .add_clip(clip)
+            .expect("add clip");
+
+        let changed = state
+            .trim_clips_bulk_to_frame(&[clip_id], TrimEdge::In, 15)
+            .expect("trim in should succeed");
+        assert_eq!(changed, 1);
+
+        let trimmed = state.sequence.as_ref().expect("sequence should exist").video_tracks[0]
+            .clips
+            .iter()
+            .find(|clip| clip.id == clip_id)
+            .expect("clip should exist");
+        assert_eq!(trimmed.position.frame, 15);
+        assert_eq!(trimmed.duration.frame, 15);
+        assert_eq!(trimmed.source_in.frame, 5);
+        assert_eq!(state.cmd_history.undo_description(), Some("修剪入点"));
+
+        assert!(state.undo_timeline().expect("undo should succeed"));
+        let restored = state.sequence.as_ref().expect("sequence should exist").video_tracks[0]
+            .clips
+            .iter()
+            .find(|clip| clip.id == clip_id)
+            .expect("clip should exist after undo");
+        assert_eq!(restored.position.frame, 10);
+        assert_eq!(restored.duration.frame, 20);
+        assert_eq!(restored.source_in.frame, 0);
+    }
+
+    #[test]
+    fn trim_out_updates_linked_clip() {
+        let mut state = create_state_with_sequence();
+        let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
+
+        let mut video = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(30, tb));
+        let mut audio = Clip::new(video.asset_id, TimeCode::new(0, tb), TimeCode::new(30, tb));
+        let video_id = video.id;
+        let audio_id = audio.id;
+        video.linked_clip = Some(audio_id);
+        audio.linked_clip = Some(video_id);
+
+        {
+            let seq = state.sequence.as_mut().expect("sequence should exist");
+            seq.video_tracks[0].add_clip(video).expect("add video");
+            seq.audio_tracks[0].add_clip(audio).expect("add audio");
+        }
+
+        let changed = state
+            .trim_clips_bulk_to_frame(&[video_id], TrimEdge::Out, 21)
+            .expect("trim out should succeed");
+        assert_eq!(changed, 2);
+
+        let seq = state.sequence.as_ref().expect("sequence should exist");
+        let video_after = seq.video_tracks[0]
+            .clips
+            .iter()
+            .find(|clip| clip.id == video_id)
+            .expect("video should exist");
+        let audio_after = seq.audio_tracks[0]
+            .clips
+            .iter()
+            .find(|clip| clip.id == audio_id)
+            .expect("audio should exist");
+
+        assert_eq!(video_after.duration.frame, 21);
+        assert_eq!(audio_after.duration.frame, 21);
+        assert_eq!(video_after.source_out.frame, 21);
+        assert_eq!(audio_after.source_out.frame, 21);
     }
 }
 
