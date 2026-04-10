@@ -26,6 +26,8 @@ pub(super) fn load_app_preferences(app: &mut MondrianApp) {
     app.media_cache_auto_cleanup = preferences.media_cache_auto_cleanup;
     app.media_cache_max_size_gb = preferences.media_cache_max_size_gb.max(1);
     app.media_cache_max_age_days = preferences.media_cache_max_age_days.max(1);
+    app.auto_save_enabled = preferences.auto_save_enabled;
+    app.auto_save_interval_secs = preferences.auto_save_interval_secs.max(10);
     app.show_video_metrics = preferences.show_video_metrics;
     app.show_audio_metrics = preferences.show_audio_metrics;
     app.viewer_panel.apply_preferences(&preferences.viewer);
@@ -49,9 +51,48 @@ pub(super) fn capture_preferences(app: &MondrianApp) -> AppPreferences {
         media_cache_auto_cleanup: app.media_cache_auto_cleanup,
         media_cache_max_size_gb: app.media_cache_max_size_gb.max(1),
         media_cache_max_age_days: app.media_cache_max_age_days.max(1),
+        auto_save_enabled: app.auto_save_enabled,
+        auto_save_interval_secs: app.auto_save_interval_secs.max(10),
         show_video_metrics: app.show_video_metrics,
         show_audio_metrics: app.show_audio_metrics,
         viewer: app.viewer_panel.preferences_snapshot(),
+    }
+}
+
+pub(super) fn run_project_autosave_if_needed(app: &mut MondrianApp) {
+    if !app.auto_save_enabled {
+        app.last_auto_save_at = None;
+        app.auto_save_error_reported = false;
+        return;
+    }
+
+    if !app.state.has_open_project() {
+        app.last_auto_save_at = None;
+        app.auto_save_error_reported = false;
+        return;
+    }
+
+    let interval = Duration::from_secs(app.auto_save_interval_secs.max(10) as u64);
+    let now = std::time::Instant::now();
+    if let Some(last) = app.last_auto_save_at {
+        if now.saturating_duration_since(last) < interval {
+            return;
+        }
+    }
+
+    app.last_auto_save_at = Some(now);
+    match app.state.write_autosave_snapshot() {
+        Ok(path) => {
+            app.auto_save_error_reported = false;
+            tracing::debug!("自动保存完成: {}", path.display());
+        }
+        Err(err) => {
+            tracing::error!("自动保存失败: {err}");
+            if !app.auto_save_error_reported {
+                app.state.set_status_hint(format!("自动保存失败：{err}"), true);
+                app.auto_save_error_reported = true;
+            }
+        }
     }
 }
 
@@ -153,7 +194,12 @@ pub(super) fn process_global_shortcuts(app: &mut MondrianApp, ctx: &egui::Contex
             }
         }
         Some(ShortcutAction::SaveProjectAs) => save_project_as_dialog(app),
-        Some(ShortcutAction::CloseProject) => app.state.close_project(),
+        Some(ShortcutAction::CloseProject) => {
+            app.state.close_project();
+            app.last_auto_save_at = None;
+            app.auto_save_error_reported = false;
+            app.crash_recovery_candidates = discover_crash_recovery_candidates();
+        }
         Some(ShortcutAction::QuitApp) => {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
@@ -347,6 +393,27 @@ pub(super) fn draw_preferences_window(app: &mut MondrianApp, ctx: &egui::Context
                                 app.state
                                     .set_status_hint(format!("应用主题已切换为 {label}"), false);
                             }
+
+                            ui.add_space(12.0);
+                            ui.separator();
+                            ui.add_space(8.0);
+                            ui.heading("项目安全");
+                            let _ = crate::ui::theme::checkmark_toggle(
+                                ui,
+                                &mut app.auto_save_enabled,
+                                "启用自动保存",
+                            );
+                            ui.add_enabled_ui(app.auto_save_enabled, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label("自动保存间隔（秒）");
+                                    ui.add(
+                                        egui::DragValue::new(&mut app.auto_save_interval_secs)
+                                            .range(10..=3600)
+                                            .speed(1),
+                                    );
+                                });
+                            });
+                            ui.label("自动保存写入临时恢复点，异常退出后可在启动界面恢复。");
                         }
                         PreferencesTab::Media => {
                             ui.heading("媒体");

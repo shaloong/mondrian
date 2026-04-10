@@ -76,6 +76,13 @@ struct ProjectFile {
     pub proxy_mode_assets: Vec<AssetId>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AutosaveManifest {
+    project_file: PathBuf,
+    autosave_file: PathBuf,
+    saved_at_unix_ms: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct NewProjectDraft {
     name: String,
@@ -116,6 +123,10 @@ struct AppPreferences {
     show_video_metrics: bool,
     #[serde(default = "default_show_audio_metrics")]
     show_audio_metrics: bool,
+    #[serde(default = "default_auto_save_enabled")]
+    auto_save_enabled: bool,
+    #[serde(default = "default_auto_save_interval_secs")]
+    auto_save_interval_secs: u32,
     viewer: ViewerPreferences,
 }
 
@@ -135,6 +146,8 @@ impl Default for AppPreferences {
             media_cache_max_age_days: default_media_cache_max_age_days(),
             show_video_metrics: default_show_video_metrics(),
             show_audio_metrics: default_show_audio_metrics(),
+            auto_save_enabled: default_auto_save_enabled(),
+            auto_save_interval_secs: default_auto_save_interval_secs(),
             viewer: ViewerPreferences::default(),
         }
     }
@@ -174,6 +187,21 @@ const fn default_show_video_metrics() -> bool {
 
 const fn default_show_audio_metrics() -> bool {
     true
+}
+
+const fn default_auto_save_enabled() -> bool {
+    true
+}
+
+const fn default_auto_save_interval_secs() -> u32 {
+    60
+}
+
+#[derive(Debug, Clone)]
+struct CrashRecoveryCandidate {
+    project_file: PathBuf,
+    autosave_file: PathBuf,
+    saved_at_unix_ms: u64,
 }
 
 // ─────────────────────────────────────────────
@@ -403,8 +431,16 @@ impl AppState {
     }
 
     fn save_project_container(&self, project_data: &ProjectFile) -> anyhow::Result<()> {
-        let started_at = std::time::Instant::now();
         let project_file = self.project_file_path()?.to_path_buf();
+        self.save_project_container_to(project_data, project_file.as_path())
+    }
+
+    fn save_project_container_to(
+        &self,
+        project_data: &ProjectFile,
+        target_file: &Path,
+    ) -> anyhow::Result<()> {
+        let started_at = std::time::Instant::now();
         let runtime_library_root = self.runtime_library_root()?;
         let db_path = runtime_library_root.join("index.db");
 
@@ -412,11 +448,17 @@ impl AppState {
             anyhow::bail!("素材库数据库不存在：{}", db_path.display());
         }
 
-        if let Some(parent) = project_file.parent() {
+        if let Some(parent) = target_file.parent() {
             fs::create_dir_all(parent)?;
         }
 
-        let tmp_path = project_file.with_extension(format!("{}.tmp", PROJECT_EXTENSION));
+        let tmp_extension = target_file
+            .extension()
+            .and_then(|v| v.to_str())
+            .map(|ext| format!("{ext}.tmp"))
+            .unwrap_or_else(|| "tmp".to_string());
+        let tmp_path = target_file.with_extension(tmp_extension);
+
         let tmp_file = fs::File::create(&tmp_path)?;
         let mut writer = zip::ZipWriter::new(tmp_file);
         let options = zip::write::FileOptions::default()
@@ -433,10 +475,10 @@ impl AppState {
 
         writer.finish()?;
 
-        if project_file.exists() {
-            fs::remove_file(&project_file)?;
+        if target_file.exists() {
+            fs::remove_file(target_file)?;
         }
-        fs::rename(tmp_path, project_file)?;
+        fs::rename(&tmp_path, target_file)?;
 
         if ui_diag_enabled() {
             let elapsed_ms = started_at.elapsed().as_millis() as u64;
@@ -447,11 +489,99 @@ impl AppState {
         Ok(())
     }
 
+    fn current_project_data(&self) -> Option<ProjectFile> {
+        let sequence = self.sequence.as_ref()?;
+        let mut proxy_mode_assets: Vec<AssetId> = self.proxy_mode_assets.iter().copied().collect();
+        proxy_mode_assets.sort_by_key(|id| id.to_string());
+        Some(ProjectFile {
+            name: sequence.name.clone(),
+            sequence: sequence.clone(),
+            in_point_frame: self.project_in_point,
+            out_point_frame: self.project_out_point,
+            proxy_mode_assets,
+        })
+    }
+
+    fn autosave_root(&self) -> anyhow::Result<PathBuf> {
+        let runtime_root = self
+            .project_runtime_dir
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("项目运行目录未初始化"))?;
+        Ok(runtime_root.join("autosave"))
+    }
+
+    fn autosave_archive_path(runtime_root: &Path) -> PathBuf {
+        runtime_root.join("autosave").join("project.autosave.mdp")
+    }
+
+    fn autosave_manifest_path(runtime_root: &Path) -> PathBuf {
+        runtime_root.join("autosave").join("manifest.json")
+    }
+
+    pub fn autosave_path_for_project(project_file: &Path) -> PathBuf {
+        let runtime_root = Self::project_runtime_root(project_file);
+        Self::autosave_archive_path(runtime_root.as_path())
+    }
+
+    pub fn write_autosave_snapshot(&self) -> anyhow::Result<PathBuf> {
+        let project_file = self.project_file_path()?.to_path_buf();
+        let data = self
+            .current_project_data()
+            .ok_or_else(|| anyhow::anyhow!("当前无可自动保存的项目"))?;
+
+        let autosave_root = self.autosave_root()?;
+        fs::create_dir_all(&autosave_root)?;
+        let autosave_file = autosave_root.join("project.autosave.mdp");
+        self.save_project_container_to(&data, autosave_file.as_path())?;
+
+        let runtime_root = self
+            .project_runtime_dir
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("项目运行目录未初始化"))?;
+        let manifest = AutosaveManifest {
+            project_file,
+            autosave_file: autosave_file.clone(),
+            saved_at_unix_ms: unix_now_ms(),
+        };
+        write_json_atomic(
+            Self::autosave_manifest_path(runtime_root).as_path(),
+            &manifest,
+        )?;
+        Ok(autosave_file)
+    }
+
+    pub fn open_project_from_autosave(&mut self, project_file: PathBuf) -> anyhow::Result<()> {
+        let autosave_file = Self::autosave_path_for_project(project_file.as_path());
+        if !autosave_file.exists() {
+            anyhow::bail!("未找到自动保存文件：{}", autosave_file.display());
+        }
+
+        let staged = std::env::temp_dir().join(format!(
+            "mondrian-autosave-recover-{}-{}.mdp",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        fs::copy(&autosave_file, &staged)?;
+
+        let open_result = self.open_project_archive(project_file.clone(), staged.as_path());
+        let _ = fs::remove_file(&staged);
+        open_result?;
+
+        self.save_project_file()?;
+        let autosave_root = Self::project_runtime_root(project_file.as_path()).join("autosave");
+        let _ = fs::remove_dir_all(autosave_root);
+        Ok(())
+    }
+
     pub fn has_open_project(&self) -> bool {
         self.sequence.is_some() && self.current_project_path.is_some()
     }
 
-    pub fn open_project_file(&mut self, project_file: PathBuf) -> anyhow::Result<()> {
+    fn open_project_archive(
+        &mut self,
+        project_file: PathBuf,
+        archive_file: &Path,
+    ) -> anyhow::Result<()> {
         if let Some(prev_runtime) = self.project_runtime_dir.as_ref() {
             let _ = fs::remove_dir_all(prev_runtime);
         }
@@ -461,7 +591,7 @@ impl AppState {
             let _ = fs::remove_dir_all(&runtime_root);
         }
 
-        let saved = Self::load_project_container(&project_file, &runtime_root)?;
+        let saved = Self::load_project_container(archive_file, &runtime_root)?;
 
         self.sequence = Some(saved.sequence);
         self.current_project_path = Some(project_file.clone());
@@ -482,20 +612,13 @@ impl AppState {
         Ok(())
     }
 
+    pub fn open_project_file(&mut self, project_file: PathBuf) -> anyhow::Result<()> {
+        self.open_project_archive(project_file.clone(), project_file.as_path())
+    }
+
     pub fn save_project_file(&self) -> anyhow::Result<()> {
-        let Some(sequence) = self.sequence.as_ref() else {
+        let Some(data) = self.current_project_data() else {
             return Ok(());
-        };
-
-        let mut proxy_mode_assets: Vec<AssetId> = self.proxy_mode_assets.iter().copied().collect();
-        proxy_mode_assets.sort_by_key(|id| id.to_string());
-
-        let data = ProjectFile {
-            name: sequence.name.clone(),
-            sequence: sequence.clone(),
-            in_point_frame: self.project_in_point,
-            out_point_frame: self.project_out_point,
-            proxy_mode_assets,
         };
 
         self.save_project_container(&data)?;
@@ -2470,6 +2593,11 @@ pub struct MondrianApp {
     media_cache_auto_cleanup: bool,
     media_cache_max_size_gb: u32,
     media_cache_max_age_days: u32,
+    auto_save_enabled: bool,
+    auto_save_interval_secs: u32,
+    last_auto_save_at: Option<std::time::Instant>,
+    auto_save_error_reported: bool,
+    crash_recovery_candidates: Vec<CrashRecoveryCandidate>,
     show_video_metrics: bool,
     show_audio_metrics: bool,
     last_saved_preferences: Option<AppPreferences>,
@@ -2509,6 +2637,11 @@ impl MondrianApp {
             media_cache_auto_cleanup: default_media_cache_auto_cleanup(),
             media_cache_max_size_gb: default_media_cache_max_size_gb(),
             media_cache_max_age_days: default_media_cache_max_age_days(),
+            auto_save_enabled: default_auto_save_enabled(),
+            auto_save_interval_secs: default_auto_save_interval_secs(),
+            last_auto_save_at: None,
+            auto_save_error_reported: false,
+            crash_recovery_candidates: discover_crash_recovery_candidates(),
             show_video_metrics: default_show_video_metrics(),
             show_audio_metrics: default_show_audio_metrics(),
             last_saved_preferences: None,
@@ -2558,6 +2691,15 @@ impl eframe::App for MondrianApp {
             log_ui_stage_slow(
                 "run_cache_maintenance_if_needed",
                 cache_maintenance_started_at.elapsed(),
+            );
+        }
+
+        let auto_save_started_at = std::time::Instant::now();
+        self.run_project_autosave_if_needed();
+        if ui_diag_enabled() {
+            log_ui_stage_slow(
+                "run_project_autosave_if_needed",
+                auto_save_started_at.elapsed(),
             );
         }
 
@@ -2757,6 +2899,10 @@ impl eframe::App for MondrianApp {
                                 self.show_library = true;
                                 self.show_new_project_dialog = false;
                                 self.show_project_bootstrap_dialog = false;
+                                self.last_auto_save_at = None;
+                                self.auto_save_error_reported = false;
+                                self.crash_recovery_candidates =
+                                    discover_crash_recovery_candidates();
                             }
                         }
                     }
@@ -2774,13 +2920,14 @@ impl eframe::App for MondrianApp {
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .collapsible(false)
                 .resizable(false)
-                .default_size([360.0, 140.0])
+                .default_size([520.0, 220.0])
                 .show(ctx, |ui| {
                     ui.label(format!(
                         "开始前需要先打开一个项目文件，或新建一个项目。\n项目后缀：.{}",
                         PROJECT_EXTENSION
                     ));
                     ui.add_space(8.0);
+                    let mut recover_index: Option<usize> = None;
 
                     ui.horizontal(|ui| {
                         if ui.button("打开项目...").clicked() {
@@ -2793,6 +2940,53 @@ impl eframe::App for MondrianApp {
                             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                         }
                     });
+
+                    if !self.crash_recovery_candidates.is_empty() {
+                        ui.add_space(10.0);
+                        ui.separator();
+                        ui.add_space(6.0);
+                        ui.label("检测到可恢复的自动保存：");
+
+                        let max_items = 3usize;
+                        for (idx, candidate) in
+                            self.crash_recovery_candidates.iter().take(max_items).enumerate()
+                        {
+                            let project_name = candidate
+                                .project_file
+                                .file_name()
+                                .and_then(|v| v.to_str())
+                                .unwrap_or("未知项目");
+                            let age_secs = ((unix_now_ms()
+                                .saturating_sub(candidate.saved_at_unix_ms))
+                                / 1000) as u64;
+                            let age_label = if age_secs < 60 {
+                                format!("{age_secs}s 前")
+                            } else if age_secs < 3600 {
+                                format!("{}m 前", age_secs / 60)
+                            } else {
+                                format!("{}h 前", age_secs / 3600)
+                            };
+                            let label = format!("恢复 {project_name}（{age_label}）");
+                            let clicked = ui
+                                .button(label)
+                                .on_hover_text(candidate.autosave_file.display().to_string())
+                                .clicked();
+                            if clicked {
+                                recover_index = Some(idx);
+                            }
+                        }
+
+                        if self.crash_recovery_candidates.len() > max_items {
+                            ui.label(format!(
+                                "还有 {} 个恢复点可用",
+                                self.crash_recovery_candidates.len() - max_items
+                            ));
+                        }
+                    }
+
+                    if let Some(idx) = recover_index {
+                        self.recover_project_from_candidate(idx);
+                    }
                 });
         }
 
@@ -2871,6 +3065,10 @@ impl MondrianApp {
 
     fn run_cache_maintenance_if_needed(&mut self) {
         preferences::run_cache_maintenance_if_needed(self);
+    }
+
+    fn run_project_autosave_if_needed(&mut self) {
+        preferences::run_project_autosave_if_needed(self);
     }
 
     fn trigger_import_media(&mut self) {
@@ -3025,11 +3223,39 @@ impl MondrianApp {
             Ok(()) => {
                 self.show_project_bootstrap_dialog = false;
                 self.show_library = true;
+                self.last_auto_save_at = None;
+                self.auto_save_error_reported = false;
+                self.crash_recovery_candidates = discover_crash_recovery_candidates();
                 self.state.set_status_hint("项目已打开", false);
             }
             Err(err) => {
                 self.state.set_status_hint(format!("打开项目失败：{err}"), true);
                 tracing::error!("打开项目失败: {err}");
+            }
+        }
+    }
+
+    fn recover_project_from_candidate(&mut self, index: usize) {
+        let Some(candidate) = self.crash_recovery_candidates.get(index).cloned() else {
+            return;
+        };
+
+        match self.state.open_project_from_autosave(candidate.project_file.clone()) {
+            Ok(()) => {
+                self.show_project_bootstrap_dialog = false;
+                self.show_library = true;
+                self.last_auto_save_at = None;
+                self.auto_save_error_reported = false;
+                self.crash_recovery_candidates = discover_crash_recovery_candidates();
+                self.state.set_status_hint(
+                    format!("已从自动保存恢复：{}", candidate.project_file.display()),
+                    false,
+                );
+            }
+            Err(err) => {
+                self.state.set_status_hint(format!("恢复自动保存失败：{err}"), true);
+                tracing::error!("恢复自动保存失败: {err}");
+                self.crash_recovery_candidates = discover_crash_recovery_candidates();
             }
         }
     }
@@ -3065,6 +3291,9 @@ impl MondrianApp {
                 let close_label = format!("关闭项目    {}", self.shortcuts.close_project_label());
                 if ui.button(close_label).clicked() {
                     self.state.close_project();
+                    self.last_auto_save_at = None;
+                    self.auto_save_error_reported = false;
+                    self.crash_recovery_candidates = discover_crash_recovery_candidates();
                     ui.close_menu();
                 }
                 ui.separator();
@@ -3250,6 +3479,68 @@ fn ensure_project_extension(path: PathBuf) -> PathBuf {
     } else {
         path.with_extension(PROJECT_EXTENSION)
     }
+}
+
+fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let json = serde_json::to_vec_pretty(value)?;
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, json)?;
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+fn unix_now_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(d) => d.as_millis() as u64,
+        Err(_) => 0,
+    }
+}
+
+fn discover_crash_recovery_candidates() -> Vec<CrashRecoveryCandidate> {
+    let root = std::env::temp_dir().join("mondrian-runtime");
+    let mut manifests = Vec::<CrashRecoveryCandidate>::new();
+
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(_) => return manifests,
+    };
+
+    for entry in entries.flatten() {
+        let runtime_root = entry.path();
+        let manifest_path = AppState::autosave_manifest_path(runtime_root.as_path());
+        if !manifest_path.exists() {
+            continue;
+        }
+
+        let bytes = match fs::read(&manifest_path) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let manifest = match serde_json::from_slice::<AutosaveManifest>(&bytes) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        if !manifest.autosave_file.exists() {
+            continue;
+        }
+
+        manifests.push(CrashRecoveryCandidate {
+            project_file: manifest.project_file,
+            autosave_file: manifest.autosave_file,
+            saved_at_unix_ms: manifest.saved_at_unix_ms,
+        });
+    }
+
+    manifests.sort_by_key(|m| std::cmp::Reverse(m.saved_at_unix_ms));
+    let mut dedup = HashSet::<PathBuf>::new();
+    manifests.retain(|candidate| dedup.insert(candidate.project_file.clone()));
+    manifests
 }
 
 fn collect_files_by_name(
