@@ -31,7 +31,7 @@ impl LibraryPanel {
 
             ui.separator();
 
-                let list_h = ui.available_height().max(tokens::list_min_height());
+            let list_h = ui.available_height().max(tokens::list_min_height());
             egui::ScrollArea::vertical().id_salt("library_scroll").max_height(list_h).show(
                 ui,
                 |ui| {
@@ -241,10 +241,9 @@ impl LibraryPanel {
                     );
 
                     if is_editing {
-                        let edit_w = (row_rect.width()
-                            - icon_col_w
-                            - tokens::list_row_edit_padding())
-                            .max(tokens::list_row_edit_min_width());
+                        let edit_w =
+                            (row_rect.width() - icon_col_w - tokens::list_row_edit_padding())
+                                .max(tokens::list_row_edit_min_width());
                         let edit_resp = ui.add_sized(
                             [edit_w, tokens::list_row_content_height()],
                             egui::TextEdit::singleline(&mut self.editing_name),
