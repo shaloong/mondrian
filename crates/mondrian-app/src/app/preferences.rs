@@ -28,6 +28,8 @@ pub(super) fn load_app_preferences(app: &mut MondrianApp) {
     app.media_cache_max_age_days = preferences.media_cache_max_age_days.max(1);
     app.auto_save_enabled = preferences.auto_save_enabled;
     app.auto_save_interval_secs = preferences.auto_save_interval_secs.max(10);
+    app.auto_save_max_recovery_points = preferences.auto_save_max_recovery_points.max(1);
+    app.auto_save_retention_days = preferences.auto_save_retention_days.max(1);
     app.show_video_metrics = preferences.show_video_metrics;
     app.show_audio_metrics = preferences.show_audio_metrics;
     app.viewer_panel.apply_preferences(&preferences.viewer);
@@ -53,6 +55,8 @@ pub(super) fn capture_preferences(app: &MondrianApp) -> AppPreferences {
         media_cache_max_age_days: app.media_cache_max_age_days.max(1),
         auto_save_enabled: app.auto_save_enabled,
         auto_save_interval_secs: app.auto_save_interval_secs.max(10),
+        auto_save_max_recovery_points: app.auto_save_max_recovery_points.max(1),
+        auto_save_retention_days: app.auto_save_retention_days.max(1),
         show_video_metrics: app.show_video_metrics,
         show_audio_metrics: app.show_audio_metrics,
         viewer: app.viewer_panel.preferences_snapshot(),
@@ -81,7 +85,10 @@ pub(super) fn run_project_autosave_if_needed(app: &mut MondrianApp) {
     }
 
     app.last_auto_save_at = Some(now);
-    match app.state.write_autosave_snapshot() {
+    match app.state.write_autosave_snapshot(
+        app.auto_save_max_recovery_points.max(1) as usize,
+        app.auto_save_retention_days.max(1),
+    ) {
         Ok(path) => {
             app.auto_save_error_reported = false;
             tracing::debug!("自动保存完成: {}", path.display());
@@ -409,6 +416,24 @@ pub(super) fn draw_preferences_window(app: &mut MondrianApp, ctx: &egui::Context
                                     ui.add(
                                         egui::DragValue::new(&mut app.auto_save_interval_secs)
                                             .range(10..=3600)
+                                            .speed(1),
+                                    );
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("最多保留恢复点");
+                                    ui.add(
+                                        egui::DragValue::new(
+                                            &mut app.auto_save_max_recovery_points,
+                                        )
+                                        .range(1..=100)
+                                        .speed(1),
+                                    );
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("恢复点保留天数");
+                                    ui.add(
+                                        egui::DragValue::new(&mut app.auto_save_retention_days)
+                                            .range(1..=365)
                                             .speed(1),
                                     );
                                 });

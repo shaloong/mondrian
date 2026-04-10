@@ -79,8 +79,43 @@ struct ProjectFile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AutosaveManifest {
     project_file: PathBuf,
-    autosave_file: PathBuf,
+    #[serde(default)]
+    snapshots: Vec<AutosaveSnapshotEntry>,
+    #[serde(default)]
+    autosave_file: Option<PathBuf>,
+    #[serde(default)]
+    saved_at_unix_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AutosaveSnapshotEntry {
+    file: PathBuf,
     saved_at_unix_ms: u64,
+}
+
+impl AutosaveManifest {
+    fn normalize_legacy_fields(&mut self) {
+        if self.snapshots.is_empty() {
+            if let Some(file) = self.autosave_file.clone() {
+                self.snapshots.push(AutosaveSnapshotEntry {
+                    file,
+                    saved_at_unix_ms: self.saved_at_unix_ms.unwrap_or(0),
+                });
+            }
+        }
+
+        self.snapshots.retain(|s| s.file.exists());
+        self.snapshots.sort_by_key(|s| std::cmp::Reverse(s.saved_at_unix_ms));
+        self.snapshots.dedup_by_key(|s| s.file.clone());
+
+        if let Some(latest) = self.snapshots.first() {
+            self.autosave_file = Some(latest.file.clone());
+            self.saved_at_unix_ms = Some(latest.saved_at_unix_ms);
+        } else {
+            self.autosave_file = None;
+            self.saved_at_unix_ms = None;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -127,6 +162,10 @@ struct AppPreferences {
     auto_save_enabled: bool,
     #[serde(default = "default_auto_save_interval_secs")]
     auto_save_interval_secs: u32,
+    #[serde(default = "default_auto_save_max_recovery_points")]
+    auto_save_max_recovery_points: u32,
+    #[serde(default = "default_auto_save_retention_days")]
+    auto_save_retention_days: u32,
     viewer: ViewerPreferences,
 }
 
@@ -148,6 +187,8 @@ impl Default for AppPreferences {
             show_audio_metrics: default_show_audio_metrics(),
             auto_save_enabled: default_auto_save_enabled(),
             auto_save_interval_secs: default_auto_save_interval_secs(),
+            auto_save_max_recovery_points: default_auto_save_max_recovery_points(),
+            auto_save_retention_days: default_auto_save_retention_days(),
             viewer: ViewerPreferences::default(),
         }
     }
@@ -197,11 +238,20 @@ const fn default_auto_save_interval_secs() -> u32 {
     60
 }
 
+const fn default_auto_save_max_recovery_points() -> u32 {
+    10
+}
+
+const fn default_auto_save_retention_days() -> u32 {
+    7
+}
+
 #[derive(Debug, Clone)]
 struct CrashRecoveryCandidate {
     project_file: PathBuf,
     autosave_file: PathBuf,
     saved_at_unix_ms: u64,
+    total_snapshots: usize,
 }
 
 // ─────────────────────────────────────────────
@@ -510,7 +560,7 @@ impl AppState {
         Ok(runtime_root.join("autosave"))
     }
 
-    fn autosave_archive_path(runtime_root: &Path) -> PathBuf {
+    fn legacy_autosave_archive_path(runtime_root: &Path) -> PathBuf {
         runtime_root.join("autosave").join("project.autosave.mdp")
     }
 
@@ -518,12 +568,41 @@ impl AppState {
         runtime_root.join("autosave").join("manifest.json")
     }
 
-    pub fn autosave_path_for_project(project_file: &Path) -> PathBuf {
-        let runtime_root = Self::project_runtime_root(project_file);
-        Self::autosave_archive_path(runtime_root.as_path())
+    fn load_autosave_manifest(
+        runtime_root: &Path,
+        project_file: &Path,
+    ) -> anyhow::Result<AutosaveManifest> {
+        let manifest_path = Self::autosave_manifest_path(runtime_root);
+        if !manifest_path.exists() {
+            let legacy_file = Self::legacy_autosave_archive_path(runtime_root);
+            let mut manifest = AutosaveManifest {
+                project_file: project_file.to_path_buf(),
+                snapshots: Vec::new(),
+                autosave_file: if legacy_file.exists() {
+                    Some(legacy_file)
+                } else {
+                    None
+                },
+                saved_at_unix_ms: Some(0),
+            };
+            manifest.normalize_legacy_fields();
+            return Ok(manifest);
+        }
+
+        let bytes = fs::read(&manifest_path)?;
+        let mut manifest = serde_json::from_slice::<AutosaveManifest>(&bytes)?;
+        if manifest.project_file.as_os_str().is_empty() {
+            manifest.project_file = project_file.to_path_buf();
+        }
+        manifest.normalize_legacy_fields();
+        Ok(manifest)
     }
 
-    pub fn write_autosave_snapshot(&self) -> anyhow::Result<PathBuf> {
+    pub fn write_autosave_snapshot(
+        &self,
+        max_recovery_points: usize,
+        retention_days: u32,
+    ) -> anyhow::Result<PathBuf> {
         let project_file = self.project_file_path()?.to_path_buf();
         let data = self
             .current_project_data()
@@ -531,18 +610,35 @@ impl AppState {
 
         let autosave_root = self.autosave_root()?;
         fs::create_dir_all(&autosave_root)?;
-        let autosave_file = autosave_root.join("project.autosave.mdp");
-        self.save_project_container_to(&data, autosave_file.as_path())?;
 
         let runtime_root = self
             .project_runtime_dir
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("项目运行目录未初始化"))?;
-        let manifest = AutosaveManifest {
-            project_file,
-            autosave_file: autosave_file.clone(),
-            saved_at_unix_ms: unix_now_ms(),
-        };
+        let mut manifest = Self::load_autosave_manifest(runtime_root, project_file.as_path())
+            .unwrap_or(AutosaveManifest {
+                project_file: project_file.clone(),
+                snapshots: Vec::new(),
+                autosave_file: None,
+                saved_at_unix_ms: None,
+            });
+
+        let saved_at = unix_now_ms();
+        let autosave_file = autosave_root.join(format!("project-{saved_at}.autosave.mdp"));
+        self.save_project_container_to(&data, autosave_file.as_path())?;
+
+        manifest.project_file = project_file;
+        manifest.snapshots.push(AutosaveSnapshotEntry {
+            file: autosave_file.clone(),
+            saved_at_unix_ms: saved_at,
+        });
+        apply_autosave_retention(
+            &mut manifest,
+            max_recovery_points.max(1),
+            retention_days.max(1),
+        );
+        manifest.normalize_legacy_fields();
+
         write_json_atomic(
             Self::autosave_manifest_path(runtime_root).as_path(),
             &manifest,
@@ -550,8 +646,11 @@ impl AppState {
         Ok(autosave_file)
     }
 
-    pub fn open_project_from_autosave(&mut self, project_file: PathBuf) -> anyhow::Result<()> {
-        let autosave_file = Self::autosave_path_for_project(project_file.as_path());
+    pub fn open_project_from_autosave_snapshot(
+        &mut self,
+        project_file: PathBuf,
+        autosave_file: PathBuf,
+    ) -> anyhow::Result<()> {
         if !autosave_file.exists() {
             anyhow::bail!("未找到自动保存文件：{}", autosave_file.display());
         }
@@ -571,6 +670,23 @@ impl AppState {
         let autosave_root = Self::project_runtime_root(project_file.as_path()).join("autosave");
         let _ = fs::remove_dir_all(autosave_root);
         Ok(())
+    }
+
+    pub fn open_project_from_autosave(&mut self, project_file: PathBuf) -> anyhow::Result<()> {
+        let candidate = discover_crash_recovery_candidates()
+            .into_iter()
+            .find(|c| c.project_file == project_file)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "未找到自动保存文件：{}",
+                    Self::legacy_autosave_archive_path(
+                        Self::project_runtime_root(project_file.as_path()).as_path()
+                    )
+                    .display()
+                )
+            })?;
+
+        self.open_project_from_autosave_snapshot(project_file, candidate.autosave_file)
     }
 
     pub fn has_open_project(&self) -> bool {
@@ -2595,6 +2711,8 @@ pub struct MondrianApp {
     media_cache_max_age_days: u32,
     auto_save_enabled: bool,
     auto_save_interval_secs: u32,
+    auto_save_max_recovery_points: u32,
+    auto_save_retention_days: u32,
     last_auto_save_at: Option<std::time::Instant>,
     auto_save_error_reported: bool,
     crash_recovery_candidates: Vec<CrashRecoveryCandidate>,
@@ -2639,6 +2757,8 @@ impl MondrianApp {
             media_cache_max_age_days: default_media_cache_max_age_days(),
             auto_save_enabled: default_auto_save_enabled(),
             auto_save_interval_secs: default_auto_save_interval_secs(),
+            auto_save_max_recovery_points: default_auto_save_max_recovery_points(),
+            auto_save_retention_days: default_auto_save_retention_days(),
             last_auto_save_at: None,
             auto_save_error_reported: false,
             crash_recovery_candidates: discover_crash_recovery_candidates(),
@@ -2974,6 +3094,9 @@ impl eframe::App for MondrianApp {
                             if clicked {
                                 recover_index = Some(idx);
                             }
+                            if candidate.total_snapshots > 1 {
+                                ui.small(format!("该项目可恢复点：{}", candidate.total_snapshots));
+                            }
                         }
 
                         if self.crash_recovery_candidates.len() > max_items {
@@ -3240,7 +3363,10 @@ impl MondrianApp {
             return;
         };
 
-        match self.state.open_project_from_autosave(candidate.project_file.clone()) {
+        match self.state.open_project_from_autosave_snapshot(
+            candidate.project_file.clone(),
+            candidate.autosave_file.clone(),
+        ) {
             Ok(()) => {
                 self.show_project_bootstrap_dialog = false;
                 self.show_library = true;
@@ -3501,13 +3627,52 @@ fn unix_now_ms() -> u64 {
     }
 }
 
+fn apply_autosave_retention(
+    manifest: &mut AutosaveManifest,
+    max_recovery_points: usize,
+    retention_days: u32,
+) {
+    manifest.normalize_legacy_fields();
+    let now_ms = unix_now_ms();
+    let retention_ms = (retention_days as u64)
+        .saturating_mul(24)
+        .saturating_mul(60)
+        .saturating_mul(60)
+        .saturating_mul(1000);
+    let cutoff_ms = now_ms.saturating_sub(retention_ms);
+
+    let mut dropped_files: Vec<PathBuf> = Vec::new();
+    let mut retained = Vec::<AutosaveSnapshotEntry>::new();
+    for snapshot in &manifest.snapshots {
+        if snapshot.saved_at_unix_ms < cutoff_ms {
+            dropped_files.push(snapshot.file.clone());
+        } else {
+            retained.push(snapshot.clone());
+        }
+    }
+
+    retained.sort_by_key(|s| std::cmp::Reverse(s.saved_at_unix_ms));
+    if retained.len() > max_recovery_points {
+        for snapshot in retained.drain(max_recovery_points..) {
+            dropped_files.push(snapshot.file);
+        }
+    }
+
+    for file in dropped_files {
+        let _ = fs::remove_file(file);
+    }
+
+    manifest.snapshots = retained;
+    manifest.normalize_legacy_fields();
+}
+
 fn discover_crash_recovery_candidates() -> Vec<CrashRecoveryCandidate> {
     let root = std::env::temp_dir().join("mondrian-runtime");
-    let mut manifests = Vec::<CrashRecoveryCandidate>::new();
+    let mut candidates = Vec::<CrashRecoveryCandidate>::new();
 
     let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
-        Err(_) => return manifests,
+        Err(_) => return candidates,
     };
 
     for entry in entries.flatten() {
@@ -3521,26 +3686,28 @@ fn discover_crash_recovery_candidates() -> Vec<CrashRecoveryCandidate> {
             Ok(v) => v,
             Err(_) => continue,
         };
-        let manifest = match serde_json::from_slice::<AutosaveManifest>(&bytes) {
+        let mut manifest = match serde_json::from_slice::<AutosaveManifest>(&bytes) {
             Ok(v) => v,
             Err(_) => continue,
         };
-
-        if !manifest.autosave_file.exists() {
+        manifest.normalize_legacy_fields();
+        let total = manifest.snapshots.len();
+        if total == 0 {
             continue;
         }
 
-        manifests.push(CrashRecoveryCandidate {
-            project_file: manifest.project_file,
-            autosave_file: manifest.autosave_file,
-            saved_at_unix_ms: manifest.saved_at_unix_ms,
-        });
+        for snapshot in manifest.snapshots {
+            candidates.push(CrashRecoveryCandidate {
+                project_file: manifest.project_file.clone(),
+                autosave_file: snapshot.file,
+                saved_at_unix_ms: snapshot.saved_at_unix_ms,
+                total_snapshots: total,
+            });
+        }
     }
 
-    manifests.sort_by_key(|m| std::cmp::Reverse(m.saved_at_unix_ms));
-    let mut dedup = HashSet::<PathBuf>::new();
-    manifests.retain(|candidate| dedup.insert(candidate.project_file.clone()));
-    manifests
+    candidates.sort_by_key(|m| std::cmp::Reverse(m.saved_at_unix_ms));
+    candidates
 }
 
 fn collect_files_by_name(
@@ -3728,6 +3895,100 @@ mod timeline_edit_tests {
         assert_eq!(clips.len(), 1);
         assert_eq!(clips[0].id, clip_b_id);
         assert_eq!(clips[0].position.frame, 5);
+    }
+}
+
+#[cfg(test)]
+mod autosave_tests {
+    use super::*;
+
+    #[test]
+    fn autosave_retention_trims_by_count() {
+        let root = std::env::temp_dir().join(format!(
+            "mondrian_autosave_retention_count_{}_{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        fs::create_dir_all(&root).expect("create temp root");
+
+        let now = unix_now_ms();
+        let f1 = root.join("s1.mdp");
+        let f2 = root.join("s2.mdp");
+        let f3 = root.join("s3.mdp");
+        fs::write(&f1, b"a").expect("write f1");
+        fs::write(&f2, b"b").expect("write f2");
+        fs::write(&f3, b"c").expect("write f3");
+
+        let mut manifest = AutosaveManifest {
+            project_file: root.join("project.mdp"),
+            snapshots: vec![
+                AutosaveSnapshotEntry {
+                    file: f1.clone(),
+                    saved_at_unix_ms: now.saturating_sub(3),
+                },
+                AutosaveSnapshotEntry {
+                    file: f2.clone(),
+                    saved_at_unix_ms: now.saturating_sub(2),
+                },
+                AutosaveSnapshotEntry {
+                    file: f3.clone(),
+                    saved_at_unix_ms: now.saturating_sub(1),
+                },
+            ],
+            autosave_file: None,
+            saved_at_unix_ms: None,
+        };
+
+        apply_autosave_retention(&mut manifest, 2, 365);
+        assert_eq!(manifest.snapshots.len(), 2);
+        assert!(manifest.snapshots.iter().any(|s| s.file == f3));
+        assert!(manifest.snapshots.iter().any(|s| s.file == f2));
+        assert!(!f1.exists(), "oldest snapshot should be removed from disk");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn autosave_retention_trims_by_age() {
+        let root = std::env::temp_dir().join(format!(
+            "mondrian_autosave_retention_age_{}_{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        fs::create_dir_all(&root).expect("create temp root");
+
+        let now = unix_now_ms();
+        let recent = root.join("recent.mdp");
+        let old = root.join("old.mdp");
+        fs::write(&recent, b"r").expect("write recent");
+        fs::write(&old, b"o").expect("write old");
+
+        let one_day_ms = 24_u64 * 60 * 60 * 1000;
+        let mut manifest = AutosaveManifest {
+            project_file: root.join("project.mdp"),
+            snapshots: vec![
+                AutosaveSnapshotEntry {
+                    file: recent.clone(),
+                    saved_at_unix_ms: now.saturating_sub(one_day_ms / 2),
+                },
+                AutosaveSnapshotEntry {
+                    file: old.clone(),
+                    saved_at_unix_ms: now.saturating_sub(one_day_ms * 3),
+                },
+            ],
+            autosave_file: None,
+            saved_at_unix_ms: None,
+        };
+
+        apply_autosave_retention(&mut manifest, 10, 1);
+        assert_eq!(manifest.snapshots.len(), 1);
+        assert_eq!(manifest.snapshots[0].file, recent);
+        assert!(
+            !old.exists(),
+            "expired snapshot should be removed from disk"
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 }
 
