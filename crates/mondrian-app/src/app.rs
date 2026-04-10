@@ -1091,6 +1091,52 @@ impl AppState {
         Ok(())
     }
 
+    pub fn relink_offline_assets_in_directory(
+        &mut self,
+        directory: &Path,
+    ) -> mondrian_core::Result<usize> {
+        let library = self.asset_library.as_ref().ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "relink_offline_assets_in_directory".to_string(),
+                reason: "素材库未连接".to_string(),
+            }
+        })?;
+
+        let assets = library.list_assets()?;
+        let offline_assets: Vec<_> =
+            assets.into_iter().filter(|asset| !asset.path.exists()).collect();
+        if offline_assets.is_empty() {
+            return Ok(0);
+        }
+
+        let mut filename_index = HashMap::<String, Vec<PathBuf>>::new();
+        collect_files_by_name(directory, &mut filename_index)?;
+
+        let mut relinked = 0usize;
+        for asset in offline_assets {
+            let Some(name) = asset.path.file_name().and_then(|v| v.to_str()) else {
+                continue;
+            };
+            let key = name.to_ascii_lowercase();
+            let Some(candidates) = filename_index.get(&key) else {
+                continue;
+            };
+
+            for candidate in candidates {
+                if library.relink_asset(asset.id, candidate).is_ok() {
+                    relinked += 1;
+                    break;
+                }
+            }
+        }
+
+        if relinked > 0 {
+            let _ = self.save_project_file();
+        }
+
+        Ok(relinked)
+    }
+
     /// 创建新序列并替换当前序列
     pub fn new_sequence(&mut self, name: &str) {
         self.sequence = Some(Sequence::new(name));
@@ -3204,6 +3250,36 @@ fn ensure_project_extension(path: PathBuf) -> PathBuf {
     } else {
         path.with_extension(PROJECT_EXTENSION)
     }
+}
+
+fn collect_files_by_name(
+    root: &Path,
+    index: &mut HashMap<String, Vec<PathBuf>>,
+) -> mondrian_core::Result<()> {
+    if !root.exists() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let path = entry.path();
+
+        if file_type.is_dir() {
+            collect_files_by_name(path.as_path(), index)?;
+            continue;
+        }
+
+        if !file_type.is_file() {
+            continue;
+        }
+
+        if let Some(name) = path.file_name().and_then(|v| v.to_str()) {
+            index.entry(name.to_ascii_lowercase()).or_default().push(path);
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

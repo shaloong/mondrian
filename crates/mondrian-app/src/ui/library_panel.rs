@@ -27,6 +27,9 @@ impl LibraryPanel {
             ui.horizontal(|ui| {
                 let _ = theme::icon(ui, theme::UiIcon::Search, palette::text_muted());
                 ui.text_edit_singleline(&mut self.search_query);
+                if ui.button("批量重连目录").clicked() {
+                    self.batch_relink_offline_assets(state);
+                }
             });
 
             ui.separator();
@@ -61,6 +64,23 @@ impl LibraryPanel {
         };
 
         self.import_from_path(state, &path);
+    }
+
+    fn batch_relink_offline_assets(&mut self, state: &mut AppState) {
+        let Some(dir) = FileDialog::new().pick_folder() else {
+            return;
+        };
+        match state.relink_offline_assets_in_directory(dir.as_path()) {
+            Ok(count) if count > 0 => {
+                state.set_status_hint(format!("批量重连完成：{} 个素材", count), false);
+            }
+            Ok(_) => {
+                state.set_status_hint("未找到可重连的离线素材", false);
+            }
+            Err(err) => {
+                state.set_status_hint(format!("批量重连失败：{err}"), true);
+            }
+        }
     }
 
     fn import_from_path(&mut self, state: &mut AppState, path: &Path) {
