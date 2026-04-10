@@ -2941,7 +2941,6 @@ dependencies = [
  "egui",
  "egui-wgpu",
  "image",
- "mondrian-ai",
  "mondrian-assets",
  "mondrian-core",
  "mondrian-effects",

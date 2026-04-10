@@ -15,7 +15,6 @@ mondrian-media    = { workspace = true }
 mondrian-timeline = { workspace = true }
 mondrian-renderer = { workspace = true }
 mondrian-assets   = { workspace = true }
-mondrian-ai       = { workspace = true }
 mondrian-effects  = { workspace = true }
 mondrian-export   = { workspace = true }
 
