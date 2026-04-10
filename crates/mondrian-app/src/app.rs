@@ -3710,6 +3710,33 @@ fn discover_crash_recovery_candidates() -> Vec<CrashRecoveryCandidate> {
     candidates
 }
 
+fn clear_all_crash_recovery_points() -> anyhow::Result<usize> {
+    let root = std::env::temp_dir().join("mondrian-runtime");
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(_) => return Ok(0),
+    };
+
+    let mut removed_files = 0usize;
+    for entry in entries {
+        let entry = match entry {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let autosave_dir = entry.path().join("autosave");
+        if !autosave_dir.exists() {
+            continue;
+        }
+
+        if let Ok(files) = fs::read_dir(&autosave_dir) {
+            removed_files += files.filter_map(Result::ok).count();
+        }
+        let _ = fs::remove_dir_all(&autosave_dir);
+    }
+
+    Ok(removed_files)
+}
+
 fn collect_files_by_name(
     root: &Path,
     index: &mut HashMap<String, Vec<PathBuf>>,

@@ -439,6 +439,27 @@ pub(super) fn draw_preferences_window(app: &mut MondrianApp, ctx: &egui::Context
                                 });
                             });
                             ui.label("自动保存写入临时恢复点，异常退出后可在启动界面恢复。");
+                            ui.label(format!(
+                                "当前可恢复点数量：{}",
+                                app.crash_recovery_candidates.len()
+                            ));
+
+                            if ui.button("清理所有恢复点").clicked() {
+                                match clear_all_crash_recovery_points() {
+                                    Ok(removed) => {
+                                        app.crash_recovery_candidates =
+                                            discover_crash_recovery_candidates();
+                                        app.state.set_status_hint(
+                                            format!("已清理恢复点文件：{} 个", removed),
+                                            false,
+                                        );
+                                    }
+                                    Err(err) => {
+                                        app.state
+                                            .set_status_hint(format!("清理恢复点失败：{err}"), true);
+                                    }
+                                }
+                            }
                         }
                         PreferencesTab::Media => {
                             ui.heading("媒体");
