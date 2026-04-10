@@ -209,6 +209,7 @@ impl LibraryPanel {
                 mondrian_media::ProxyGenerator::new(mondrian_media::ProxyConfig::default());
             let has_proxy = proxy_generator.proxy_exists(asset.path.as_path());
             let proxy_mode = state.is_asset_proxy_mode(asset.id);
+            let is_offline = !asset.path.exists();
             let (row_rect, row_response) = ui.allocate_exact_size(
                 Vec2::new(ui.available_width(), tokens::list_row_height()),
                 egui::Sense::click_and_drag(),
@@ -272,9 +273,15 @@ impl LibraryPanel {
                         } else {
                             0.0
                         };
+                        let offline_tag_w = if is_offline {
+                            tokens::list_proxy_tag_width()
+                        } else {
+                            0.0
+                        };
                         let name_w = (row_rect.width()
                             - icon_col_w
                             - proxy_tag_w
+                            - offline_tag_w
                             - tokens::list_row_edit_padding() * 0.5)
                             .max(tokens::list_row_name_min_width());
                         let display_name = asset_name.trim_start();
@@ -292,6 +299,17 @@ impl LibraryPanel {
                                 egui::Label::new(
                                     egui::RichText::new("代理")
                                         .color(palette::interaction_highlight())
+                                        .size(tokens::list_proxy_tag_font_size()),
+                                ),
+                            );
+                        }
+
+                        if is_offline {
+                            ui.add_sized(
+                                [offline_tag_w, tokens::list_row_content_height()],
+                                egui::Label::new(
+                                    egui::RichText::new("离线")
+                                        .color(palette::status_warning())
                                         .size(tokens::list_proxy_tag_font_size()),
                                 ),
                             );
@@ -325,6 +343,27 @@ impl LibraryPanel {
                             state.set_status_hint(format!("已关闭代理模式：{}", asset_name), false);
                         }
 
+                        ui.close_menu();
+                    }
+
+                    ui.separator();
+                }
+
+                if is_offline {
+                    if ui.button("重新链接素材…").clicked() {
+                        if let Some(path) = FileDialog::new().pick_file() {
+                            match state.relink_asset(asset.id, &path) {
+                                Ok(()) => {
+                                    state.set_status_hint(
+                                        format!("已重新链接：{} -> {}", asset_name, path.display()),
+                                        false,
+                                    );
+                                }
+                                Err(err) => {
+                                    state.set_status_hint(format!("重连失败：{err}"), true);
+                                }
+                            }
+                        }
                         ui.close_menu();
                     }
 

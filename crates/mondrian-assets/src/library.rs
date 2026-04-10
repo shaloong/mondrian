@@ -79,17 +79,7 @@ impl AssetLibrary {
         })?;
 
         let info = MediaInfo::probe(&canonical_path)?;
-        let force_audio = info.has_audio
-            && (is_audio_only_extension(&canonical_path) || !has_meaningful_video_stream(&info));
-        let kind = if force_audio {
-            AssetKind::Audio
-        } else if info.has_video {
-            AssetKind::Video
-        } else if info.has_audio {
-            AssetKind::Audio
-        } else {
-            return Err(MondrianError::UnsupportedFormat { format: info.container.clone() });
-        };
+        let kind = detect_asset_kind(&info, &canonical_path)?;
 
         let name = canonical_path
             .file_name()
@@ -138,6 +128,56 @@ impl AssetLibrary {
         .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
 
         Ok(id)
+    }
+
+    pub fn relink_asset(&self, asset_id: AssetId, path: &Path) -> Result<()> {
+        let canonical_path = path.canonicalize().map_err(|e| MondrianError::MediaOpen {
+            path: path.display().to_string(),
+            reason: e.to_string(),
+        })?;
+
+        let info = MediaInfo::probe(&canonical_path)?;
+        let kind = detect_asset_kind(&info, &canonical_path)?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let metadata_json = serde_json::to_string(&info)?;
+        let path_str = canonical_path.to_string_lossy().to_string();
+
+        let db = self.db.lock();
+        let existing_kind = db
+            .query_row(
+                "SELECT asset_type FROM assets WHERE id = ?1 LIMIT 1",
+                rusqlite::params![asset_id.0.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
+
+        let Some(existing_kind) = existing_kind else {
+            return Err(MondrianError::AssetNotFound { asset_id: asset_id.to_string() });
+        };
+
+        let existing_kind = AssetKind::from_str(existing_kind.as_str());
+        if existing_kind != kind {
+            return Err(MondrianError::AssetDbError {
+                reason: format!(
+                    "重连类型不匹配：资产类型为 {:?}，新文件识别为 {:?}",
+                    existing_kind, kind
+                ),
+            });
+        }
+
+        let changed = db
+            .execute(
+                "UPDATE assets SET path = ?1, metadata = ?2, updated_at = ?3 WHERE id = ?4",
+                rusqlite::params![path_str, metadata_json, now, asset_id.0.to_string()],
+            )
+            .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
+
+        if changed == 0 {
+            return Err(MondrianError::AssetNotFound { asset_id: asset_id.to_string() });
+        }
+
+        Ok(())
     }
 
     pub fn list_assets(&self) -> Result<Vec<AssetRecord>> {
@@ -313,4 +353,19 @@ fn is_audio_only_extension(path: &Path) -> bool {
         ext.to_ascii_lowercase().as_str(),
         "mp3" | "wav" | "flac" | "aac" | "m4a" | "ogg" | "opus" | "wma" | "aiff" | "aif" | "alac"
     )
+}
+
+fn detect_asset_kind(info: &MediaInfo, path: &Path) -> Result<AssetKind> {
+    let force_audio =
+        info.has_audio && (is_audio_only_extension(path) || !has_meaningful_video_stream(info));
+    if force_audio {
+        return Ok(AssetKind::Audio);
+    }
+    if info.has_video {
+        return Ok(AssetKind::Video);
+    }
+    if info.has_audio {
+        return Ok(AssetKind::Audio);
+    }
+    Err(MondrianError::UnsupportedFormat { format: info.container.clone() })
 }

@@ -1,5 +1,5 @@
 use crate::{
-    app::AppState,
+    app::{AppState, ClipOverlapMode},
     ui::theme::{self, palette, tokens, typography},
 };
 use egui::{Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2};
@@ -275,6 +275,15 @@ impl TimelinePanel {
                             ui.selectable_value(&mut self.snap_grid_mode, mode, mode.label());
                         }
                     });
+            }
+
+            ui.separator();
+            ui.label("重叠:");
+            let mut overlap_mode = state.clip_overlap_mode();
+            ui.selectable_value(&mut overlap_mode, ClipOverlapMode::Overwrite, "覆盖");
+            ui.selectable_value(&mut overlap_mode, ClipOverlapMode::Insert, "插入");
+            if overlap_mode != state.clip_overlap_mode() {
+                state.set_clip_overlap_mode(overlap_mode);
             }
             ui.separator();
 
@@ -651,7 +660,12 @@ impl TimelinePanel {
             };
             visible_clips.push(ClipVisual { selection, rect: clip_rect });
 
-            painter.rect_filled(clip_rect, tokens::timeline_clip_radius(), clip_color);
+            let clip_fill = if clip.is_disabled {
+                clip_color.gamma_multiply(0.35)
+            } else {
+                clip_color
+            };
+            painter.rect_filled(clip_rect, tokens::timeline_clip_radius(), clip_fill);
             painter.rect_stroke(
                 clip_rect,
                 tokens::timeline_clip_radius(),
@@ -673,6 +687,17 @@ impl TimelinePanel {
                     clip.label.as_deref().unwrap_or("clip"),
                     typography::body_small(),
                     palette::text_primary(),
+                );
+            }
+
+            if clip.is_disabled {
+                painter.text(
+                    clip_rect.right_center()
+                        - Vec2::new(tokens::timeline_clip_label_padding_x(), 0.0),
+                    egui::Align2::RIGHT_CENTER,
+                    "禁用",
+                    typography::body_small(),
+                    palette::text_muted(),
                 );
             }
 
@@ -751,6 +776,16 @@ impl TimelinePanel {
                     }
                     if ui.button("波纹删除片段").clicked() {
                         self.delete_selected_clips(state, true);
+                        ui.close_menu();
+                    }
+                    let all_disabled = self.selected_clips_all_disabled(state);
+                    let toggle_label = if all_disabled {
+                        "启用片段"
+                    } else {
+                        "禁用片段"
+                    };
+                    if ui.button(toggle_label).clicked() {
+                        self.set_selected_clips_disabled(state, !all_disabled);
                         ui.close_menu();
                     }
                     if ui.button("清除选择").clicked() {
@@ -1006,6 +1041,16 @@ impl TimelinePanel {
                 self.delete_selected_clips(state, true);
                 ui.close_menu();
             }
+            let all_disabled = self.selected_clips_all_disabled(state);
+            let toggle_label = if all_disabled {
+                "启用已选片段"
+            } else {
+                "禁用已选片段"
+            };
+            if ui.button(toggle_label).clicked() {
+                self.set_selected_clips_disabled(state, !all_disabled);
+                ui.close_menu();
+            }
 
             ui.separator();
             let remove_label = if is_video_track {
@@ -1118,6 +1163,55 @@ impl TimelinePanel {
         if state.remove_clips_bulk(&selections, ripple).is_ok() {
             self.selected_clips.clear();
         }
+    }
+
+    fn selected_clips_all_disabled(&self, state: &AppState) -> bool {
+        let Some(seq) = state.sequence.as_ref() else {
+            return false;
+        };
+
+        let mut has_any = false;
+        for sel in &self.selected_clips {
+            if let Some(disabled) = clip_disabled_state(seq, *sel) {
+                has_any = true;
+                if !disabled {
+                    return false;
+                }
+            }
+        }
+        has_any
+    }
+
+    fn set_selected_clips_disabled(&mut self, state: &mut AppState, disabled: bool) {
+        if self.selected_clips.is_empty() {
+            return;
+        }
+
+        let selections: Vec<(TrackId, bool, ClipId)> = self
+            .selected_clips
+            .iter()
+            .map(|s| (s.track_id, s.is_video_track, s.clip_id))
+            .collect();
+
+        if let Err(err) = state.set_clips_disabled_bulk(&selections, disabled) {
+            state.set_status_hint(format!("更新片段状态失败：{err}"), true);
+        }
+    }
+}
+
+fn clip_disabled_state(seq: &Sequence, sel: ClipSelection) -> Option<bool> {
+    if sel.is_video_track {
+        seq.video_tracks
+            .iter()
+            .find(|track| track.id == sel.track_id)
+            .and_then(|track| track.clips.iter().find(|clip| clip.id == sel.clip_id))
+            .map(|clip| clip.is_disabled)
+    } else {
+        seq.audio_tracks
+            .iter()
+            .find(|track| track.id == sel.track_id)
+            .and_then(|track| track.clips.iter().find(|clip| clip.id == sel.clip_id))
+            .map(|clip| clip.is_disabled)
     }
 }
 

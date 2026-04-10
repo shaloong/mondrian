@@ -5,6 +5,8 @@ use mondrian_export::{
     preset::{ExportConfig, ExportPreset, VideoCodecConfig},
     queue::RenderJob,
 };
+use rfd::FileDialog;
+use std::path::PathBuf;
 
 /// 导出弹窗面板
 #[derive(Default)]
@@ -105,13 +107,35 @@ impl ExportPanel {
 
             ui.separator();
 
+            // ── 输入源（首版：自动选择时间线首个可用视频素材） ──
+            let export_input = state.default_export_input_path();
+            ui.label("输入源:");
+            match &export_input {
+                Some(path) => {
+                    ui.monospace(path.display().to_string());
+                }
+                None => {
+                    ui.horizontal(|ui| {
+                        let _ = theme::icon(ui, theme::UiIcon::Warning, palette::status_warning());
+                        ui.colored_label(
+                            palette::status_warning(),
+                            "未找到可导出的视频素材（请先将视频放入时间线）",
+                        );
+                    });
+                }
+            }
+
+            ui.separator();
+
             // ── 输出路径 ──────────────────────
             ui.label("输出文件:");
             ui.horizontal(|ui| {
                 ui.text_edit_singleline(&mut self.output_path);
                 if ui.button("浏览…").clicked() {
-                    // TODO: 调用原生文件选择对话框（rfd crate）
-                    self.output_path = "output.mp4".to_owned();
+                    let default_name = default_output_filename(preset);
+                    if let Some(path) = FileDialog::new().set_file_name(&default_name).save_file() {
+                        self.output_path = path.display().to_string();
+                    }
                 }
             });
 
@@ -131,9 +155,15 @@ impl ExportPanel {
             // ── 操作按钮 ──────────────────────
             ui.separator();
             ui.horizontal(|ui| {
-                let can_export = !self.output_path.is_empty() && state.sequence.is_some();
+                let can_export = !self.output_path.is_empty()
+                    && state.sequence.is_some()
+                    && export_input.is_some();
                 if ui.add_enabled(can_export, egui::Button::new("加入导出队列")).clicked() {
-                    self.enqueue(state, preset.clone());
+                    if let Some(input_path) = export_input.clone() {
+                        self.enqueue(state, preset.clone(), input_path);
+                    } else {
+                        self.status_msg = Some(("导出失败：未找到可用输入源".to_owned(), true));
+                    }
                 }
             });
 
@@ -149,10 +179,11 @@ impl ExportPanel {
         });
     }
 
-    fn enqueue(&mut self, state: &mut AppState, preset: ExportPreset) {
-        let path = std::path::PathBuf::from(&self.output_path);
+    fn enqueue(&mut self, state: &mut AppState, preset: ExportPreset, input_path: PathBuf) {
+        let path = PathBuf::from(&self.output_path);
         let config = ExportConfig {
             preset,
+            input_path,
             output_path: path,
             in_point: None,
             out_point: None,
@@ -177,4 +208,16 @@ fn builtin_presets() -> Vec<(String, ExportPreset)> {
         ),
         ("代理文件 720p".to_owned(), ExportPreset::proxy_720p()),
     ]
+}
+
+fn default_output_filename(preset: &ExportPreset) -> String {
+    let ext = match preset.container {
+        mondrian_export::preset::Container::Mp4 => "mp4",
+        mondrian_export::preset::Container::Mov => "mov",
+        mondrian_export::preset::Container::Mkv => "mkv",
+        mondrian_export::preset::Container::Gif => "gif",
+        mondrian_export::preset::Container::Mxf => "mxf",
+        mondrian_export::preset::Container::Webm => "webm",
+    };
+    format!("mondrian-export.{}", ext)
 }

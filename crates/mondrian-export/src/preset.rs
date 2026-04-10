@@ -79,6 +79,8 @@ impl ExportPreset {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportConfig {
     pub preset: ExportPreset,
+    /// 导出输入源（首版：单文件输入；后续可扩展为时间线渲染输入）
+    pub input_path: std::path::PathBuf,
     pub output_path: std::path::PathBuf,
     pub in_point: Option<String>, // TODO: TimeCode
     pub out_point: Option<String>,

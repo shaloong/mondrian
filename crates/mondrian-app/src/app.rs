@@ -215,6 +215,9 @@ pub struct AppState {
     // 正在拖拽的素材（从素材库拖向时间线）
     pub dragging_asset: Option<DraggingAsset>,
 
+    // 时间线片段冲突策略（覆盖/插入）
+    pub clip_overlap_mode: ClipOverlapMode,
+
     // 渲染导出队列
     pub render_queue: Arc<RenderQueue>,
 
@@ -294,6 +297,7 @@ impl AppState {
             playback_buffering: false,
             asset_library: None,
             dragging_asset: None,
+            clip_overlap_mode: ClipOverlapMode::Overwrite,
             render_queue: RenderQueue::new(),
             status_hint: None,
             auto_proxy_enabled: false,
@@ -791,6 +795,82 @@ impl AppState {
         Ok(())
     }
 
+    pub fn clip_overlap_mode(&self) -> ClipOverlapMode {
+        self.clip_overlap_mode
+    }
+
+    pub fn set_clip_overlap_mode(&mut self, mode: ClipOverlapMode) {
+        self.clip_overlap_mode = mode;
+    }
+
+    pub fn set_clips_disabled_bulk(
+        &mut self,
+        selections: &[(TrackId, bool, ClipId)],
+        disabled: bool,
+    ) -> mondrian_core::Result<usize> {
+        if selections.is_empty() {
+            return Ok(0);
+        }
+
+        let (sequence_id, before, after, changed_count) = {
+            let seq = self.sequence.as_mut().ok_or_else(|| {
+                mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "set_clips_disabled_bulk".to_string(),
+                    reason: "当前无项目".to_string(),
+                }
+            })?;
+
+            let before = seq.clone();
+            let mut clip_ids: HashSet<ClipId> = selections.iter().map(|(_, _, id)| *id).collect();
+            let selected_clip_ids: Vec<ClipId> = clip_ids.iter().copied().collect();
+
+            for clip_id in selected_clip_ids {
+                if let Some(linked_id) = find_clip(seq, clip_id).and_then(|clip| clip.linked_clip) {
+                    clip_ids.insert(linked_id);
+                }
+            }
+
+            if clip_ids.is_empty() {
+                return Ok(0);
+            }
+
+            for clip_id in &clip_ids {
+                if let Some((track_id, _is_video, is_locked)) = find_clip_track_lock(seq, *clip_id)
+                {
+                    if is_locked {
+                        return Err(mondrian_core::MondrianError::TrackLocked {
+                            track_id: track_id.to_string(),
+                        });
+                    }
+                }
+            }
+
+            let mut changed_count = 0usize;
+            for clip_id in clip_ids {
+                if set_clip_disabled(seq, clip_id, disabled) {
+                    changed_count += 1;
+                }
+            }
+
+            if changed_count == 0 {
+                return Ok(0);
+            }
+
+            (seq.id, before, seq.clone(), changed_count)
+        };
+
+        let action = if disabled {
+            "禁用片段"
+        } else {
+            "启用片段"
+        };
+        self.record_sequence_snapshot_command(action, before, after);
+        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
+        let _ = self.save_project_file();
+
+        Ok(changed_count)
+    }
+
     pub fn remove_clip(
         &mut self,
         track_id: TrackId,
@@ -993,6 +1073,22 @@ impl AppState {
         }
 
         Ok(removed_count)
+    }
+
+    pub fn relink_asset(
+        &mut self,
+        asset_id: AssetId,
+        new_path: &Path,
+    ) -> mondrian_core::Result<()> {
+        let library = self.asset_library.as_ref().ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "relink_asset".to_string(),
+                reason: "素材库未连接".to_string(),
+            }
+        })?;
+        library.relink_asset(asset_id, new_path)?;
+        let _ = self.save_project_file();
+        Ok(())
     }
 
     /// 创建新序列并替换当前序列
@@ -1242,6 +1338,38 @@ impl AppState {
         self.project_out_point.map(|f| f.max(0)).filter(|&f| f >= self.in_point_frame())
     }
 
+    pub fn default_export_input_path(&self) -> Option<PathBuf> {
+        let seq = self.sequence.as_ref()?;
+        let library = self.asset_library.as_ref()?;
+
+        let mut candidates: Vec<(i64, AssetId)> = Vec::new();
+        for track in &seq.video_tracks {
+            for clip in &track.clips {
+                if clip.is_disabled {
+                    continue;
+                }
+                candidates.push((clip.position.frame, clip.asset_id));
+            }
+        }
+
+        candidates.sort_by_key(|(frame, _)| *frame);
+        candidates.dedup_by_key(|(_, asset_id)| *asset_id);
+
+        for (_, asset_id) in candidates {
+            match library.get_asset(asset_id) {
+                Ok(Some(asset)) if matches!(asset.kind, mondrian_assets::AssetKind::Video) => {
+                    return Some(asset.path);
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    tracing::debug!("读取导出输入素材失败 {}: {}", asset_id, err);
+                }
+            }
+        }
+
+        None
+    }
+
     pub fn last_content_frame(&self) -> i64 {
         let Some(seq) = self.sequence.as_ref() else {
             return 0;
@@ -1487,6 +1615,7 @@ impl AppState {
         track_id: mondrian_core::types::TrackId,
         timeline_frame: i64,
     ) -> mondrian_core::Result<ClipId> {
+        let overlap_mode = self.clip_overlap_mode;
         let dragging =
             self.dragging_asset.clone().ok_or(mondrian_core::MondrianError::Cancelled)?;
 
@@ -1539,7 +1668,7 @@ impl AppState {
                 mondrian_core::MondrianError::TrackNotFound { track_id: track_id.to_string() }
             })?;
             track.add_clip(clip)?;
-            resolve_track_conflicts(track, clip_id, ClipOverlapMode::Overwrite);
+            resolve_track_conflicts(track, clip_id, overlap_mode);
 
             if let Some(audio_clip) = linked_audio_clip.take() {
                 let audio_clip_id = audio_clip.id;
@@ -1552,7 +1681,7 @@ impl AppState {
                 ensure_audio_track_index(seq, target_video_index);
                 if let Some(audio_track) = seq.audio_tracks.get_mut(target_video_index) {
                     audio_track.add_clip(audio_clip)?;
-                    resolve_track_conflicts(audio_track, audio_clip_id, ClipOverlapMode::Overwrite);
+                    resolve_track_conflicts(audio_track, audio_clip_id, overlap_mode);
                 }
             }
 
@@ -1572,6 +1701,7 @@ impl AppState {
         track_id: mondrian_core::types::TrackId,
         timeline_frame: i64,
     ) -> mondrian_core::Result<ClipId> {
+        let overlap_mode = self.clip_overlap_mode;
         let dragging =
             self.dragging_asset.clone().ok_or(mondrian_core::MondrianError::Cancelled)?;
 
@@ -1607,7 +1737,7 @@ impl AppState {
                 mondrian_core::MondrianError::TrackNotFound { track_id: track_id.to_string() }
             })?;
             track.add_clip(clip)?;
-            resolve_track_conflicts(track, clip_id, ClipOverlapMode::Overwrite);
+            resolve_track_conflicts(track, clip_id, overlap_mode);
 
             (seq.id, clip_id, start_frame, before, seq.clone())
         };
@@ -1637,6 +1767,7 @@ impl AppState {
         clip_id: ClipId,
         timeline_frame: i64,
     ) -> mondrian_core::Result<()> {
+        let overlap_mode = self.clip_overlap_mode;
         let seq = self.sequence.as_mut().ok_or_else(|| {
             mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "move_clip".to_string(),
@@ -1775,14 +1906,14 @@ impl AppState {
 
         if is_video_track {
             if let Some(track) = seq.video_track_mut(target_track_id) {
-                resolve_track_conflicts(track, clip_id, ClipOverlapMode::Overwrite);
+                resolve_track_conflicts(track, clip_id, overlap_mode);
             }
         } else if let Some(track) = seq.audio_track_mut(target_track_id) {
-            resolve_track_conflicts(track, clip_id, ClipOverlapMode::Overwrite);
+            resolve_track_conflicts(track, clip_id, overlap_mode);
         }
 
         if let Some(linked_id) = linked_clip_id {
-            apply_conflict_policy_for_existing_clip(seq, linked_id, ClipOverlapMode::Overwrite);
+            apply_conflict_policy_for_existing_clip(seq, linked_id, overlap_mode);
         }
 
         for track in &mut seq.video_tracks {
@@ -2206,6 +2337,45 @@ fn apply_conflict_policy_for_existing_clip(
             return;
         }
     }
+}
+
+fn find_clip(seq: &Sequence, clip_id: ClipId) -> Option<&Clip> {
+    for track in &seq.video_tracks {
+        if let Some(clip) = track.clips.iter().find(|c| c.id == clip_id) {
+            return Some(clip);
+        }
+    }
+    for track in &seq.audio_tracks {
+        if let Some(clip) = track.clips.iter().find(|c| c.id == clip_id) {
+            return Some(clip);
+        }
+    }
+    None
+}
+
+fn find_clip_track_lock(seq: &Sequence, clip_id: ClipId) -> Option<(TrackId, bool, bool)> {
+    for track in &seq.video_tracks {
+        if track.clips.iter().any(|c| c.id == clip_id) {
+            return Some((track.id, true, track.is_locked));
+        }
+    }
+    for track in &seq.audio_tracks {
+        if track.clips.iter().any(|c| c.id == clip_id) {
+            return Some((track.id, false, track.is_locked));
+        }
+    }
+    None
+}
+
+fn set_clip_disabled(seq: &mut Sequence, clip_id: ClipId, disabled: bool) -> bool {
+    if let Some(clip) = find_clip_mut(seq, clip_id) {
+        if clip.is_disabled == disabled {
+            return false;
+        }
+        clip.is_disabled = disabled;
+        return true;
+    }
+    false
 }
 
 fn find_clip_mut(seq: &mut Sequence, clip_id: ClipId) -> Option<&mut Clip> {
@@ -3054,6 +3224,15 @@ mod timeline_edit_tests {
         )
     }
 
+    fn video_clip_is_disabled(state: &AppState, clip_id: ClipId) -> bool {
+        state
+            .sequence
+            .as_ref()
+            .and_then(|seq| seq.video_tracks[0].clips.iter().find(|clip| clip.id == clip_id))
+            .map(|clip| clip.is_disabled)
+            .unwrap_or(false)
+    }
+
     #[test]
     fn split_at_playhead_records_single_undo_step() {
         let mut state = create_state_with_sequence();
@@ -3102,6 +3281,86 @@ mod timeline_edit_tests {
 
         assert!(state.redo_timeline().expect("redo should succeed"));
         assert!(state.sequence.as_ref().expect("sequence should exist").video_tracks[0].is_locked);
+    }
+
+    #[test]
+    fn set_clip_disabled_is_undoable() {
+        let mut state = create_state_with_sequence();
+        let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
+        let track_id = state.sequence.as_ref().expect("sequence should exist").video_tracks[0].id;
+
+        let clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(30, tb));
+        let clip_id = clip.id;
+        state.sequence.as_mut().expect("sequence should exist").video_tracks[0]
+            .add_clip(clip)
+            .expect("add clip");
+
+        state
+            .set_clips_disabled_bulk(&[(track_id, true, clip_id)], true)
+            .expect("disable clip should succeed");
+        assert!(video_clip_is_disabled(&state, clip_id));
+        assert_eq!(state.cmd_history.undo_description(), Some("禁用片段"));
+
+        assert!(state.undo_timeline().expect("undo should succeed"));
+        assert!(!video_clip_is_disabled(&state, clip_id));
+
+        assert!(state.redo_timeline().expect("redo should succeed"));
+        assert!(video_clip_is_disabled(&state, clip_id));
+    }
+
+    #[test]
+    fn move_clip_conflict_respects_insert_mode() {
+        let mut state = create_state_with_sequence();
+        let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
+        let track_id = state.sequence.as_ref().expect("sequence should exist").video_tracks[0].id;
+
+        let clip_a = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+        let clip_b = Clip::new(AssetId::new(), TimeCode::new(20, tb), TimeCode::new(10, tb));
+        let clip_b_id = clip_b.id;
+
+        {
+            let seq = state.sequence.as_mut().expect("sequence should exist");
+            seq.video_tracks[0].add_clip(clip_a).expect("add clip a");
+            seq.video_tracks[0].add_clip(clip_b).expect("add clip b");
+        }
+
+        state.set_clip_overlap_mode(ClipOverlapMode::Insert);
+        state
+            .move_clip_in_track(track_id, true, clip_b_id, 5)
+            .expect("move should succeed");
+
+        let clips = &state.sequence.as_ref().expect("sequence should exist").video_tracks[0].clips;
+        assert_eq!(clips.len(), 2);
+        assert_eq!(clips[0].position.frame, 0);
+        assert_eq!(clips[1].id, clip_b_id);
+        assert_eq!(clips[1].position.frame, 10);
+    }
+
+    #[test]
+    fn move_clip_conflict_respects_overwrite_mode() {
+        let mut state = create_state_with_sequence();
+        let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
+        let track_id = state.sequence.as_ref().expect("sequence should exist").video_tracks[0].id;
+
+        let clip_a = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+        let clip_b = Clip::new(AssetId::new(), TimeCode::new(20, tb), TimeCode::new(10, tb));
+        let clip_b_id = clip_b.id;
+
+        {
+            let seq = state.sequence.as_mut().expect("sequence should exist");
+            seq.video_tracks[0].add_clip(clip_a).expect("add clip a");
+            seq.video_tracks[0].add_clip(clip_b).expect("add clip b");
+        }
+
+        state.set_clip_overlap_mode(ClipOverlapMode::Overwrite);
+        state
+            .move_clip_in_track(track_id, true, clip_b_id, 5)
+            .expect("move should succeed");
+
+        let clips = &state.sequence.as_ref().expect("sequence should exist").video_tracks[0].clips;
+        assert_eq!(clips.len(), 1);
+        assert_eq!(clips[0].id, clip_b_id);
+        assert_eq!(clips[0].position.frame, 5);
     }
 }
 
