@@ -153,13 +153,35 @@ impl TimelinePanel {
                                 let _ = state.split_at_playhead();
                             }
 
-                            if ui.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::ArrowLeft))
-                            {
+                            if ui.input(|i| {
+                                i.modifiers.alt
+                                    && i.modifiers.shift
+                                    && i.key_pressed(egui::Key::ArrowLeft)
+                            }) {
+                                self.slide_selected_clips_by_frames(state, -1);
+                            }
+
+                            if ui.input(|i| {
+                                i.modifiers.alt
+                                    && i.modifiers.shift
+                                    && i.key_pressed(egui::Key::ArrowRight)
+                            }) {
+                                self.slide_selected_clips_by_frames(state, 1);
+                            }
+
+                            if ui.input(|i| {
+                                i.modifiers.alt
+                                    && !i.modifiers.shift
+                                    && i.key_pressed(egui::Key::ArrowLeft)
+                            }) {
                                 self.slip_selected_clips_by_frames(state, -1);
                             }
 
-                            if ui.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::ArrowRight))
-                            {
+                            if ui.input(|i| {
+                                i.modifiers.alt
+                                    && !i.modifiers.shift
+                                    && i.key_pressed(egui::Key::ArrowRight)
+                            }) {
                                 self.slip_selected_clips_by_frames(state, 1);
                             }
 
@@ -330,6 +352,12 @@ impl TimelinePanel {
             }
             if ui.add_enabled(has_selection, egui::Button::new("滑移 +1 帧")).clicked() {
                 self.slip_selected_clips_by_frames(state, 1);
+            }
+            if ui.add_enabled(has_selection, egui::Button::new("滑动 -1 帧")).clicked() {
+                self.slide_selected_clips_by_frames(state, -1);
+            }
+            if ui.add_enabled(has_selection, egui::Button::new("滑动 +1 帧")).clicked() {
+                self.slide_selected_clips_by_frames(state, 1);
             }
 
             ui.separator();
@@ -832,6 +860,14 @@ impl TimelinePanel {
                         self.slip_selected_clips_by_frames(state, 1);
                         ui.close_menu();
                     }
+                    if ui.button("滑动 -1 帧").clicked() {
+                        self.slide_selected_clips_by_frames(state, -1);
+                        ui.close_menu();
+                    }
+                    if ui.button("滑动 +1 帧").clicked() {
+                        self.slide_selected_clips_by_frames(state, 1);
+                        ui.close_menu();
+                    }
                     let all_disabled = self.selected_clips_all_disabled(state);
                     let toggle_label = if all_disabled {
                         "启用片段"
@@ -1115,6 +1151,14 @@ impl TimelinePanel {
                 self.slip_selected_clips_by_frames(state, 1);
                 ui.close_menu();
             }
+            if ui.button("滑动已选 -1 帧").clicked() {
+                self.slide_selected_clips_by_frames(state, -1);
+                ui.close_menu();
+            }
+            if ui.button("滑动已选 +1 帧").clicked() {
+                self.slide_selected_clips_by_frames(state, 1);
+                ui.close_menu();
+            }
             let all_disabled = self.selected_clips_all_disabled(state);
             let toggle_label = if all_disabled {
                 "启用已选片段"
@@ -1285,6 +1329,17 @@ impl TimelinePanel {
         let clip_ids: Vec<ClipId> = self.selected_clips.iter().map(|sel| sel.clip_id).collect();
         if let Err(err) = state.slip_clips_bulk_by_frames(&clip_ids, delta_frames) {
             state.set_status_hint(format!("滑移片段失败：{err}"), true);
+        }
+    }
+
+    fn slide_selected_clips_by_frames(&mut self, state: &mut AppState, delta_frames: i64) {
+        if self.selected_clips.is_empty() || delta_frames == 0 {
+            return;
+        }
+
+        let clip_ids: Vec<ClipId> = self.selected_clips.iter().map(|sel| sel.clip_id).collect();
+        if let Err(err) = state.slide_clips_bulk_by_frames(&clip_ids, delta_frames) {
+            state.set_status_hint(format!("滑动片段失败：{err}"), true);
         }
     }
 

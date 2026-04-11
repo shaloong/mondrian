@@ -1898,6 +1898,76 @@ impl AppState {
         Ok(changed_count)
     }
 
+    pub fn slide_clips_bulk_by_frames(
+        &mut self,
+        clip_ids: &[ClipId],
+        delta_frames: i64,
+    ) -> mondrian_core::Result<usize> {
+        if clip_ids.is_empty() || delta_frames == 0 {
+            return Ok(0);
+        }
+
+        let (sequence_id, before, after, changed_count) = {
+            let seq = self.sequence.as_mut().ok_or_else(|| {
+                mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "slide_clips_bulk_by_frames".to_string(),
+                    reason: "当前无序列".to_string(),
+                }
+            })?;
+
+            let before = seq.clone();
+            let mut processed = HashSet::<ClipId>::new();
+            let mut changed_count = 0usize;
+
+            for clip_id in clip_ids {
+                if !processed.insert(*clip_id) {
+                    continue;
+                }
+
+                let linked = find_clip(seq, *clip_id).and_then(|clip| clip.linked_clip);
+                match slide_clip_internal(seq, *clip_id, delta_frames) {
+                    Ok(true) => {
+                        changed_count += 1;
+                    }
+                    Ok(false) => {}
+                    Err(mondrian_core::MondrianError::ClipNotFound { .. }) => continue,
+                    Err(err) => return Err(err),
+                }
+
+                if let Some(linked_id) = linked {
+                    if !processed.insert(linked_id) {
+                        continue;
+                    }
+                    match slide_clip_internal(seq, linked_id, delta_frames) {
+                        Ok(true) => {
+                            changed_count += 1;
+                            if let Some(primary) = find_clip_mut(seq, *clip_id) {
+                                primary.linked_clip = Some(linked_id);
+                            }
+                            if let Some(linked_clip) = find_clip_mut(seq, linked_id) {
+                                linked_clip.linked_clip = Some(*clip_id);
+                            }
+                        }
+                        Ok(false) => {}
+                        Err(mondrian_core::MondrianError::ClipNotFound { .. }) => {}
+                        Err(err) => return Err(err),
+                    }
+                }
+            }
+
+            if changed_count == 0 {
+                return Ok(0);
+            }
+
+            (seq.id, before, seq.clone(), changed_count)
+        };
+
+        self.record_sequence_snapshot_command("滑动片段", before, after);
+        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
+        let _ = self.save_project_file();
+        Ok(changed_count)
+    }
+
     pub fn split_clip_at_frame(
         &mut self,
         track_id: TrackId,
@@ -2808,6 +2878,114 @@ fn estimate_asset_total_source_frames(library: &AssetLibrary, clip: &Clip) -> Op
     }
 
     Some((duration_secs / frame_duration_secs).ceil() as i64)
+}
+
+fn slide_clip_internal(
+    seq: &mut Sequence,
+    clip_id: ClipId,
+    delta_frames: i64,
+) -> mondrian_core::Result<bool> {
+    for track in &mut seq.video_tracks {
+        if let Some(index) = track.clips.iter().position(|clip| clip.id == clip_id) {
+            if track.is_locked {
+                return Err(mondrian_core::MondrianError::TrackLocked {
+                    track_id: track.id.to_string(),
+                });
+            }
+            return slide_clip_in_track(track, index, delta_frames);
+        }
+    }
+
+    for track in &mut seq.audio_tracks {
+        if let Some(index) = track.clips.iter().position(|clip| clip.id == clip_id) {
+            if track.is_locked {
+                return Err(mondrian_core::MondrianError::TrackLocked {
+                    track_id: track.id.to_string(),
+                });
+            }
+            return slide_clip_in_track(track, index, delta_frames);
+        }
+    }
+
+    Err(mondrian_core::MondrianError::ClipNotFound { clip_id: clip_id.to_string() })
+}
+
+fn slide_clip_in_track(
+    track: &mut mondrian_timeline::track::Track,
+    clip_index: usize,
+    delta_frames: i64,
+) -> mondrian_core::Result<bool> {
+    if clip_index == 0 || clip_index + 1 >= track.clips.len() {
+        return Ok(false);
+    }
+
+    let left_original = track.clips[clip_index - 1].clone();
+    let center_original = track.clips[clip_index].clone();
+    let right_original = track.clips[clip_index + 1].clone();
+
+    let center_start = center_original.position.frame;
+    let center_end = center_original.end_position().frame;
+    let left_end = left_original.end_position().frame;
+    let right_start = right_original.position.frame;
+
+    if left_end != center_start || center_end != right_start {
+        return Ok(false);
+    }
+
+    let min_start_from_left = left_original.position.frame + 1;
+    let min_start_from_right_source = right_original
+        .position
+        .frame
+        .saturating_sub(center_original.duration.frame)
+        .saturating_sub(right_original.source_in.frame);
+    let min_start = min_start_from_left.max(min_start_from_right_source);
+    let max_start = right_original.end_position().frame - center_original.duration.frame - 1;
+    if min_start > max_start {
+        return Ok(false);
+    }
+
+    let proposed_start = center_start.saturating_add(delta_frames);
+    let new_center_start = proposed_start.clamp(min_start, max_start);
+    if new_center_start == center_start {
+        return Ok(false);
+    }
+
+    let new_center_end = new_center_start + center_original.duration.frame;
+    let new_left_duration = new_center_start - left_original.position.frame;
+    let new_right_duration = right_original.end_position().frame - new_center_end;
+    if new_left_duration <= 0 || new_right_duration <= 0 {
+        return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+            step_id: "slide_clip".to_string(),
+            reason: "滑动后片段时长无效".to_string(),
+        });
+    }
+
+    let new_left_source_out = left_original.timeline_to_source_time(TimeCode::new(
+        new_center_start,
+        left_original.position.time_base,
+    ));
+    let new_right_source_in = right_original.timeline_to_source_time(TimeCode::new(
+        new_center_end,
+        right_original.position.time_base,
+    ));
+
+    let mut left_updated = left_original;
+    left_updated.duration = TimeCode::new(new_left_duration, left_updated.duration.time_base);
+    left_updated.source_out = new_left_source_out;
+
+    let mut center_updated = center_original;
+    center_updated.position = TimeCode::new(new_center_start, center_updated.position.time_base);
+
+    let mut right_updated = right_original;
+    right_updated.position = TimeCode::new(new_center_end, right_updated.position.time_base);
+    right_updated.duration = TimeCode::new(new_right_duration, right_updated.duration.time_base);
+    right_updated.source_in = new_right_source_in;
+
+    track.clips[clip_index - 1] = left_updated;
+    track.clips[clip_index] = center_updated;
+    track.clips[clip_index + 1] = right_updated;
+    track.clips.sort_by_key(|clip| clip.position.frame);
+    Ok(true)
 }
 
 fn trim_clip_edge_internal(
@@ -4608,6 +4786,49 @@ mod timeline_edit_tests {
 
         state.asset_library = None;
         let _ = std::fs::remove_dir_all(&library_root);
+    }
+
+    #[test]
+    fn slide_clip_updates_neighbors_and_is_undoable() {
+        let mut state = create_state_with_sequence();
+        let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
+
+        let left = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+        let center = Clip::new(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(10, tb));
+        let center_id = center.id;
+        let right = Clip::new(AssetId::new(), TimeCode::new(20, tb), TimeCode::new(10, tb));
+
+        {
+            let seq = state.sequence.as_mut().expect("sequence should exist");
+            seq.video_tracks[0].add_clip(left).expect("add left");
+            seq.video_tracks[0].add_clip(center).expect("add center");
+            seq.video_tracks[0].add_clip(right).expect("add right");
+        }
+
+        let changed =
+            state.slide_clips_bulk_by_frames(&[center_id], 3).expect("slide should succeed");
+        assert_eq!(changed, 1);
+        assert_eq!(state.cmd_history.undo_description(), Some("滑动片段"));
+
+        let seq = state.sequence.as_ref().expect("sequence should exist");
+        let clips = &seq.video_tracks[0].clips;
+        assert_eq!(clips.len(), 3);
+        assert_eq!(clips[0].position.frame, 0);
+        assert_eq!(clips[0].duration.frame, 13);
+        assert_eq!(clips[1].id, center_id);
+        assert_eq!(clips[1].position.frame, 13);
+        assert_eq!(clips[1].duration.frame, 10);
+        assert_eq!(clips[2].position.frame, 23);
+        assert_eq!(clips[2].duration.frame, 7);
+        assert_eq!(clips[2].source_in.frame, 3);
+
+        assert!(state.undo_timeline().expect("undo should succeed"));
+        let seq_undo = state.sequence.as_ref().expect("sequence should exist");
+        let clips_undo = &seq_undo.video_tracks[0].clips;
+        assert_eq!(clips_undo[0].duration.frame, 10);
+        assert_eq!(clips_undo[1].position.frame, 10);
+        assert_eq!(clips_undo[2].position.frame, 20);
+        assert_eq!(clips_undo[2].source_in.frame, 0);
     }
 }
 
