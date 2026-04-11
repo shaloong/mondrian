@@ -1,14 +1,17 @@
 //! 后台渲染队列
 
-use crate::preset::{AudioCodecConfig, Container, ExportConfig, VideoCodecConfig};
+use crate::preset::{
+    AudioCodecConfig, Container, ExportConfig, ExportInput, TimelineExportInput, VideoCodecConfig,
+};
 use chrono::{DateTime, Utc};
-use mondrian_core::types::JobId;
+use mondrian_core::types::{JobId, TimeCode};
+use mondrian_media::decode_video_frame_at_time_rgba_scaled;
 use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
@@ -77,13 +80,6 @@ impl ExportExecutor for FfmpegExportExecutor {
             return JobExecutionResult::Cancelled;
         }
 
-        if !job.config.input_path.exists() {
-            return JobExecutionResult::Failed(format!(
-                "导出输入不存在：{}",
-                job.config.input_path.display()
-            ));
-        }
-
         if let Some(parent) = job.config.output_path.parent() {
             if let Err(err) = std::fs::create_dir_all(parent) {
                 return JobExecutionResult::Failed(format!(
@@ -94,54 +90,415 @@ impl ExportExecutor for FfmpegExportExecutor {
             }
         }
 
-        report(JobStatus::Encoding, 0.02);
-
-        let duration_ms = probe_duration_ms(
-            job.config.input_path.as_path(),
-            job.config.in_point.as_deref(),
-            job.config.out_point.as_deref(),
-        )
-        .unwrap_or(0);
-
-        let mut cmd = Command::new("ffmpeg");
-        cmd.arg("-y")
-            .arg("-hide_banner")
-            .arg("-progress")
-            .arg("pipe:2")
-            .arg("-nostats")
-            .arg("-loglevel")
-            .arg("error");
-
-        if let Some(in_point) = &job.config.in_point {
-            cmd.arg("-ss").arg(in_point);
+        match &job.config.input {
+            ExportInput::File { input_path, in_point, out_point } => execute_file_export(
+                job,
+                input_path,
+                in_point.as_deref(),
+                out_point.as_deref(),
+                cancel,
+                report,
+            ),
+            ExportInput::Timeline(timeline) => {
+                execute_timeline_export(job, timeline, cancel, report)
+            }
         }
-        cmd.arg("-i").arg(&job.config.input_path);
-        if let Some(out_point) = &job.config.out_point {
-            cmd.arg("-to").arg(out_point);
-        }
+    }
+}
 
-        if let Some(filter) = build_video_filter(&job.config) {
-            cmd.arg("-vf").arg(filter);
-        }
+#[derive(Debug, Clone, Copy)]
+struct TimelineRenderRange {
+    start_frame: i64,
+    total_frames: u64,
+    fps_num: i64,
+    fps_den: i64,
+}
 
-        apply_video_codec_args(&mut cmd, &job.config.preset.video);
-        apply_audio_codec_args(&mut cmd, &job.config.preset.audio);
+fn execute_file_export(
+    job: &RenderJob,
+    input_path: &Path,
+    in_point: Option<&str>,
+    out_point: Option<&str>,
+    cancel: &AtomicBool,
+    report: &mut dyn FnMut(JobStatus, f32),
+) -> JobExecutionResult {
+    if !input_path.exists() {
+        return JobExecutionResult::Failed(format!("导出输入不存在：{}", input_path.display()));
+    }
+
+    report(JobStatus::Encoding, 0.02);
+
+    let duration_ms = probe_duration_ms(input_path, in_point, out_point).unwrap_or(0);
+
+    let mut cmd = Command::new("ffmpeg");
+    cmd.arg("-y")
+        .arg("-hide_banner")
+        .arg("-progress")
+        .arg("pipe:2")
+        .arg("-nostats")
+        .arg("-loglevel")
+        .arg("error");
+
+    if let Some(in_point) = in_point {
+        cmd.arg("-ss").arg(in_point);
+    }
+    cmd.arg("-i").arg(input_path);
+    if let Some(out_point) = out_point {
+        cmd.arg("-to").arg(out_point);
+    }
+
+    if let Some(filter) = build_video_filter(&job.config) {
+        cmd.arg("-vf").arg(filter);
+    }
+
+    apply_video_codec_args(&mut cmd, &job.config.preset.video);
+    apply_audio_codec_args(&mut cmd, &job.config.preset.audio);
+    cmd.arg("-f")
+        .arg(container_format(&job.config.preset.container))
+        .arg(&job.config.output_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+
+    let child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(err) => {
+            return JobExecutionResult::Failed(format!("无法启动 ffmpeg: {}", err));
+        }
+    };
+
+    monitor_ffmpeg_child(child, duration_ms, cancel, report)
+}
+
+fn execute_timeline_export(
+    job: &RenderJob,
+    timeline: &TimelineExportInput,
+    cancel: &AtomicBool,
+    report: &mut dyn FnMut(JobStatus, f32),
+) -> JobExecutionResult {
+    if cancel.load(Ordering::Relaxed) {
+        return JobExecutionResult::Cancelled;
+    }
+
+    for (asset_id, path) in &timeline.asset_paths {
+        if !path.exists() {
+            return JobExecutionResult::Failed(format!(
+                "时间线素材离线：asset={} path={}",
+                asset_id,
+                path.display()
+            ));
+        }
+    }
+
+    let range = compute_timeline_render_range(timeline);
+    if range.total_frames == 0 {
+        return JobExecutionResult::Failed("时间线导出范围为空".to_string());
+    }
+
+    let (width, height) = timeline_output_resolution(job, timeline);
+    let mut cmd = Command::new("ffmpeg");
+    cmd.arg("-y")
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-f")
+        .arg("rawvideo")
+        .arg("-pix_fmt")
+        .arg("rgba")
+        .arg("-s")
+        .arg(format!("{width}x{height}"))
+        .arg("-r")
+        .arg(format!("{}/{}", range.fps_num, range.fps_den))
+        .arg("-i")
+        .arg("pipe:0");
+
+    let include_audio = !matches!(job.config.preset.container, Container::Gif);
+    if include_audio {
+        let sample_rate = timeline.sequence.settings.audio_sample_rate.max(8_000);
         cmd.arg("-f")
-            .arg(container_format(&job.config.preset.container))
-            .arg(&job.config.output_path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
+            .arg("lavfi")
+            .arg("-i")
+            .arg(format!(
+                "anullsrc=channel_layout=stereo:sample_rate={sample_rate}"
+            ))
+            .arg("-map")
+            .arg("0:v:0")
+            .arg("-map")
+            .arg("1:a:0")
+            .arg("-shortest");
+    } else {
+        cmd.arg("-an");
+    }
 
-        let child = match cmd.spawn() {
-            Ok(child) => child,
+    apply_video_codec_args(&mut cmd, &job.config.preset.video);
+    if include_audio {
+        apply_audio_codec_args(&mut cmd, &job.config.preset.audio);
+    }
+    cmd.arg("-f")
+        .arg(container_format(&job.config.preset.container))
+        .arg(&job.config.output_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(err) => {
+            return JobExecutionResult::Failed(format!("无法启动 ffmpeg: {}", err));
+        }
+    };
+
+    let Some(stdin) = child.stdin.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return JobExecutionResult::Failed("ffmpeg stdin 管道不可用".to_string());
+    };
+
+    match write_timeline_frames(stdin, timeline, range, width, height, cancel, report) {
+        JobExecutionResult::Completed => {}
+        JobExecutionResult::Cancelled => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return JobExecutionResult::Cancelled;
+        }
+        JobExecutionResult::Failed(reason) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return JobExecutionResult::Failed(reason);
+        }
+    }
+
+    if cancel.load(Ordering::Relaxed) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return JobExecutionResult::Cancelled;
+    }
+
+    report(JobStatus::Encoding, 0.98);
+    match child.wait_with_output() {
+        Ok(output) if output.status.success() => JobExecutionResult::Completed,
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let reason = stderr
+                .lines()
+                .rev()
+                .find(|line| !line.trim().is_empty())
+                .map(|line| line.trim().to_string())
+                .unwrap_or_else(|| format!("ffmpeg 退出码：{}", output.status));
+            JobExecutionResult::Failed(format!("时间线编码失败：{reason}"))
+        }
+        Err(err) => JobExecutionResult::Failed(format!("等待 ffmpeg 结束失败: {}", err)),
+    }
+}
+
+fn write_timeline_frames(
+    stdin: ChildStdin,
+    timeline: &TimelineExportInput,
+    range: TimelineRenderRange,
+    width: u32,
+    height: u32,
+    cancel: &AtomicBool,
+    report: &mut dyn FnMut(JobStatus, f32),
+) -> JobExecutionResult {
+    let mut writer = BufWriter::new(stdin);
+    let total = range.total_frames.max(1);
+
+    for index in 0..total {
+        if cancel.load(Ordering::Relaxed) {
+            return JobExecutionResult::Cancelled;
+        }
+
+        let timeline_frame = range.start_frame + index as i64;
+        let rgba = match render_timeline_frame(timeline, timeline_frame, width, height) {
+            Ok(frame) => frame,
             Err(err) => {
-                return JobExecutionResult::Failed(format!("无法启动 ffmpeg: {}", err));
+                return JobExecutionResult::Failed(format!(
+                    "渲染时间线帧失败（frame={}）: {}",
+                    timeline_frame, err
+                ));
             }
         };
 
-        monitor_ffmpeg_child(child, duration_ms, cancel, report)
+        if let Err(err) = writer.write_all(&rgba) {
+            return JobExecutionResult::Failed(format!("写入编码管道失败: {}", err));
+        }
+
+        let rendered = index + 1;
+        let ratio = rendered as f32 / total as f32;
+        let progress = (0.03 + 0.9 * ratio).clamp(0.03, 0.95);
+        report(
+            JobStatus::Rendering { frame: rendered, total_frames: total },
+            progress,
+        );
     }
+
+    if let Err(err) = writer.flush() {
+        return JobExecutionResult::Failed(format!("刷新编码管道失败: {}", err));
+    }
+
+    JobExecutionResult::Completed
+}
+
+fn render_timeline_frame(
+    timeline: &TimelineExportInput,
+    timeline_frame: i64,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, String> {
+    let mut canvas = vec![0u8; width as usize * height as usize * 4];
+    initialize_canvas_alpha_opaque(&mut canvas);
+
+    let timecode = TimeCode::new(timeline_frame.max(0), timeline.sequence.time_base());
+    let active_clips = timeline.sequence.active_clips_at(timecode);
+
+    for active in active_clips {
+        let Some(path) = timeline.asset_paths.get(&active.clip.asset_id) else {
+            continue;
+        };
+        let opacity = active.opacity.clamp(0.0, 1.0);
+        if opacity <= 0.0 {
+            continue;
+        }
+
+        let decoded = decode_video_frame_at_time_rgba_scaled(
+            path.as_path(),
+            active.source_time.to_secs().max(0.0),
+            Some(width),
+            Some(height),
+        )
+        .map_err(|err| {
+            format!(
+                "asset={} path={} err={}",
+                active.clip.asset_id,
+                path.display(),
+                err
+            )
+        })?;
+
+        blend_rgba_layer_centered(
+            &mut canvas,
+            width,
+            height,
+            &decoded.data,
+            decoded.width,
+            decoded.height,
+            opacity,
+        );
+    }
+
+    Ok(canvas)
+}
+
+fn compute_timeline_render_range(timeline: &TimelineExportInput) -> TimelineRenderRange {
+    let sequence = &timeline.sequence;
+    let start = timeline.in_point_frame.unwrap_or(0).max(0);
+    let sequence_end_exclusive = sequence.total_duration().frame.max(1);
+    let max_end_exclusive = sequence_end_exclusive.max(start.saturating_add(1));
+
+    let requested_end_exclusive = timeline
+        .out_point_frame
+        .map(|frame| frame.saturating_add(1))
+        .unwrap_or(sequence_end_exclusive);
+    let end_exclusive = requested_end_exclusive.max(start.saturating_add(1)).min(max_end_exclusive);
+    let total_frames = end_exclusive.saturating_sub(start) as u64;
+
+    let fps_num = sequence.settings.frame_rate.num.max(1);
+    let fps_den = sequence.settings.frame_rate.den.max(1);
+    TimelineRenderRange { start_frame: start, total_frames, fps_num, fps_den }
+}
+
+fn timeline_output_resolution(job: &RenderJob, timeline: &TimelineExportInput) -> (u32, u32) {
+    if let Some(resolution) = &job.config.preset.resolution {
+        return (
+            normalize_output_dimension(resolution.width),
+            normalize_output_dimension(resolution.height),
+        );
+    }
+
+    (
+        normalize_output_dimension(timeline.sequence.settings.resolution.width),
+        normalize_output_dimension(timeline.sequence.settings.resolution.height),
+    )
+}
+
+fn normalize_output_dimension(value: u32) -> u32 {
+    let mut dim = value.max(1);
+    if dim > 1 && dim % 2 == 1 {
+        dim = dim.saturating_sub(1);
+    }
+    dim.max(1)
+}
+
+fn initialize_canvas_alpha_opaque(canvas: &mut [u8]) {
+    for px in canvas.chunks_exact_mut(4) {
+        px[3] = 255;
+    }
+}
+
+fn blend_rgba_layer_centered(
+    dst_rgba: &mut [u8],
+    dst_w: u32,
+    dst_h: u32,
+    src_rgba: &[u8],
+    src_w: u32,
+    src_h: u32,
+    opacity: f32,
+) {
+    if dst_w == 0 || dst_h == 0 || src_w == 0 || src_h == 0 {
+        return;
+    }
+
+    let copy_w = dst_w.min(src_w) as usize;
+    let copy_h = dst_h.min(src_h) as usize;
+    if copy_w == 0 || copy_h == 0 {
+        return;
+    }
+
+    let dst_x = ((dst_w as i64 - copy_w as i64) / 2).max(0) as usize;
+    let dst_y = ((dst_h as i64 - copy_h as i64) / 2).max(0) as usize;
+    let src_x = ((src_w as i64 - copy_w as i64) / 2).max(0) as usize;
+    let src_y = ((src_h as i64 - copy_h as i64) / 2).max(0) as usize;
+
+    let dst_stride = dst_w as usize * 4;
+    let src_stride = src_w as usize * 4;
+    let opacity_scale = opacity.clamp(0.0, 1.0);
+    if opacity_scale <= 0.0 {
+        return;
+    }
+
+    for row in 0..copy_h {
+        let dst_row_offset = (dst_y + row) * dst_stride + dst_x * 4;
+        let src_row_offset = (src_y + row) * src_stride + src_x * 4;
+        let dst_row = &mut dst_rgba[dst_row_offset..dst_row_offset + copy_w * 4];
+        let src_row = &src_rgba[src_row_offset..src_row_offset + copy_w * 4];
+
+        for (dst_px, src_px) in dst_row.chunks_exact_mut(4).zip(src_row.chunks_exact(4)) {
+            let src_alpha = src_px[3] as f32 / 255.0;
+            let alpha = (src_alpha * opacity_scale * 255.0).round().clamp(0.0, 255.0) as u32;
+            if alpha == 0 {
+                continue;
+            }
+            if alpha >= 255 {
+                dst_px[0] = src_px[0];
+                dst_px[1] = src_px[1];
+                dst_px[2] = src_px[2];
+                dst_px[3] = 255;
+                continue;
+            }
+
+            let inv_alpha = 255 - alpha;
+            dst_px[0] = blend_channel_u8(src_px[0] as u32, dst_px[0] as u32, alpha, inv_alpha);
+            dst_px[1] = blend_channel_u8(src_px[1] as u32, dst_px[1] as u32, alpha, inv_alpha);
+            dst_px[2] = blend_channel_u8(src_px[2] as u32, dst_px[2] as u32, alpha, inv_alpha);
+            dst_px[3] = 255;
+        }
+    }
+}
+
+#[inline]
+fn blend_channel_u8(src: u32, dst: u32, alpha: u32, inv_alpha: u32) -> u8 {
+    let value = src * alpha + dst * inv_alpha + 127;
+    ((value + (value >> 8)) >> 8) as u8
 }
 
 /// 异步后台渲染队列
@@ -612,6 +969,9 @@ fn parse_time_spec_millis(raw: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mondrian_core::types::{AssetId, TimeCode};
+    use mondrian_timeline::clip::Clip;
+    use mondrian_timeline::sequence::Sequence;
     use std::path::PathBuf;
     use std::sync::atomic::AtomicUsize;
 
@@ -651,10 +1011,12 @@ mod tests {
     fn dummy_config(output_name: &str) -> ExportConfig {
         ExportConfig {
             preset: crate::preset::ExportPreset::youtube_1080p(),
-            input_path: PathBuf::from("dummy-input.mp4"),
+            input: ExportInput::File {
+                input_path: PathBuf::from("dummy-input.mp4"),
+                in_point: None,
+                out_point: None,
+            },
             output_path: PathBuf::from(output_name),
-            in_point: None,
-            out_point: None,
         }
     }
 
@@ -721,5 +1083,46 @@ mod tests {
 
         assert!(done, "first should complete and second should cancel");
         assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn timeline_render_range_respects_marked_in_out() {
+        let mut seq = Sequence::new("range-test");
+        let tb = seq.time_base();
+        let clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(200, tb));
+        seq.video_tracks[0].add_clip(clip).expect("add clip");
+
+        let timeline = TimelineExportInput {
+            sequence: seq,
+            asset_paths: HashMap::new(),
+            in_point_frame: Some(40),
+            out_point_frame: Some(99),
+        };
+
+        let range = compute_timeline_render_range(&timeline);
+        assert_eq!(range.start_frame, 40);
+        assert_eq!(range.total_frames, 60);
+    }
+
+    #[test]
+    fn blend_rgba_layer_centered_places_layer_in_canvas_center() {
+        let mut dst = vec![0u8; 4 * 4 * 4];
+        initialize_canvas_alpha_opaque(&mut dst);
+        let src = vec![
+            10, 20, 30, 255, 10, 20, 30, 255, 10, 20, 30, 255, 10, 20, 30, 255,
+        ];
+
+        blend_rgba_layer_centered(&mut dst, 4, 4, &src, 2, 2, 1.0);
+
+        let pixel_at = |x: usize, y: usize| -> [u8; 4] {
+            let i = (y * 4 + x) * 4;
+            [dst[i], dst[i + 1], dst[i + 2], dst[i + 3]]
+        };
+
+        assert_eq!(pixel_at(1, 1), [10, 20, 30, 255]);
+        assert_eq!(pixel_at(2, 1), [10, 20, 30, 255]);
+        assert_eq!(pixel_at(1, 2), [10, 20, 30, 255]);
+        assert_eq!(pixel_at(2, 2), [10, 20, 30, 255]);
+        assert_eq!(pixel_at(0, 0), [0, 0, 0, 255]);
     }
 }

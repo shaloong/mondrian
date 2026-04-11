@@ -7,5 +7,5 @@ pub mod preset;
 pub mod queue;
 
 pub use encoder::EncoderBackend;
-pub use preset::{ExportConfig, ExportPreset};
+pub use preset::{ExportConfig, ExportInput, ExportPreset, TimelineExportInput};
 pub use queue::{JobStatus, RenderJob, RenderQueue};

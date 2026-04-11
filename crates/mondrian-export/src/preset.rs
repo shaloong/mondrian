@@ -1,6 +1,10 @@
 //! 导出格式预设
 
+use mondrian_core::types::AssetId;
+use mondrian_timeline::sequence::Sequence;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Resolution {
@@ -79,9 +83,26 @@ impl ExportPreset {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportConfig {
     pub preset: ExportPreset,
-    /// 导出输入源（首版：单文件输入；后续可扩展为时间线渲染输入）
-    pub input_path: std::path::PathBuf,
+    pub input: ExportInput,
     pub output_path: std::path::PathBuf,
-    pub in_point: Option<String>, // TODO: TimeCode
-    pub out_point: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ExportInput {
+    /// 直接转码单文件输入（兼容旧流程）
+    File {
+        input_path: PathBuf,
+        in_point: Option<String>, // TODO: TimeCode
+        out_point: Option<String>,
+    },
+    /// 从时间线逐帧渲染后再编码输出
+    Timeline(TimelineExportInput),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimelineExportInput {
+    pub sequence: Sequence,
+    pub asset_paths: HashMap<AssetId, PathBuf>,
+    pub in_point_frame: Option<i64>,
+    pub out_point_frame: Option<i64>,
 }

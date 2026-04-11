@@ -2,10 +2,11 @@ use crate::app::AppState;
 use crate::ui::theme::{self, palette, tokens};
 use egui::Ui;
 use mondrian_export::{
-    preset::{ExportConfig, ExportPreset, VideoCodecConfig},
+    preset::{ExportConfig, ExportInput, ExportPreset, TimelineExportInput, VideoCodecConfig},
     queue::RenderJob,
 };
 use rfd::FileDialog;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 /// 导出弹窗面板
@@ -107,22 +108,30 @@ impl ExportPanel {
 
             ui.separator();
 
-            // ── 输入源（首版：自动选择时间线首个可用视频素材） ──
-            let export_input = state.default_export_input_path();
+            // ── 输入源（时间线逐帧渲染） ──
             ui.label("输入源:");
-            match &export_input {
-                Some(path) => {
-                    ui.monospace(path.display().to_string());
-                }
-                None => {
-                    ui.horizontal(|ui| {
-                        let _ = theme::icon(ui, theme::UiIcon::Warning, palette::status_warning());
-                        ui.colored_label(
-                            palette::status_warning(),
-                            "未找到可导出的视频素材（请先将视频放入时间线）",
-                        );
-                    });
-                }
+            if let Some(sequence) = state.sequence.as_ref() {
+                let video_clips =
+                    sequence.video_tracks.iter().map(|t| t.clips.len()).sum::<usize>();
+                let audio_clips =
+                    sequence.audio_tracks.iter().map(|t| t.clips.len()).sum::<usize>();
+                let frame_range = match state.out_point_frame() {
+                    Some(out) => format!(
+                        "{} - {}",
+                        state.in_point_frame(),
+                        out.max(state.in_point_frame())
+                    ),
+                    None => format!("{} - End", state.in_point_frame()),
+                };
+                ui.label(format!(
+                    "时间线渲染（V{} / A{}，范围 {}）",
+                    video_clips, audio_clips, frame_range
+                ));
+            } else {
+                ui.horizontal(|ui| {
+                    let _ = theme::icon(ui, theme::UiIcon::Warning, palette::status_warning());
+                    ui.colored_label(palette::status_warning(), "当前无可导出的序列");
+                });
             }
 
             ui.separator();
@@ -155,15 +164,9 @@ impl ExportPanel {
             // ── 操作按钮 ──────────────────────
             ui.separator();
             ui.horizontal(|ui| {
-                let can_export = !self.output_path.is_empty()
-                    && state.sequence.is_some()
-                    && export_input.is_some();
+                let can_export = !self.output_path.is_empty() && state.sequence.is_some();
                 if ui.add_enabled(can_export, egui::Button::new("加入导出队列")).clicked() {
-                    if let Some(input_path) = export_input.clone() {
-                        self.enqueue(state, preset.clone(), input_path);
-                    } else {
-                        self.status_msg = Some(("导出失败：未找到可用输入源".to_owned(), true));
-                    }
+                    self.enqueue(state, preset.clone());
                 }
             });
 
@@ -179,20 +182,72 @@ impl ExportPanel {
         });
     }
 
-    fn enqueue(&mut self, state: &mut AppState, preset: ExportPreset, input_path: PathBuf) {
+    fn enqueue(&mut self, state: &mut AppState, preset: ExportPreset) {
+        let Some(sequence) = state.sequence.clone() else {
+            self.status_msg = Some(("导出失败：当前无序列".to_owned(), true));
+            return;
+        };
+
+        let asset_paths = match collect_timeline_asset_paths(state, &sequence) {
+            Ok(paths) => paths,
+            Err(err) => {
+                self.status_msg = Some((format!("导出失败：{err}"), true));
+                return;
+            }
+        };
+
         let path = PathBuf::from(&self.output_path);
         let config = ExportConfig {
             preset,
-            input_path,
+            input: ExportInput::Timeline(TimelineExportInput {
+                sequence,
+                asset_paths,
+                in_point_frame: state.project_in_point,
+                out_point_frame: state.project_out_point,
+            }),
             output_path: path,
-            in_point: None,
-            out_point: None,
         };
         let job = RenderJob::new(config);
         state.render_queue.enqueue(job);
         self.status_msg = Some(("已加入导出队列".to_owned(), false));
         tracing::info!("导出任务已加入队列: {}", self.output_path);
     }
+}
+
+fn collect_timeline_asset_paths(
+    state: &AppState,
+    sequence: &mondrian_timeline::sequence::Sequence,
+) -> Result<HashMap<mondrian_core::types::AssetId, PathBuf>, String> {
+    let library = state.asset_library.as_ref().ok_or_else(|| "素材库未连接".to_string())?;
+
+    let mut asset_ids = HashSet::new();
+    for track in &sequence.video_tracks {
+        for clip in &track.clips {
+            if clip.is_disabled {
+                continue;
+            }
+            asset_ids.insert(clip.asset_id);
+        }
+    }
+
+    let mut paths = HashMap::new();
+    for asset_id in asset_ids {
+        let asset = library
+            .get_asset(asset_id)
+            .map_err(|err| format!("读取素材 {} 失败: {}", asset_id, err))?
+            .ok_or_else(|| format!("素材不存在: {}", asset_id))?;
+
+        if !matches!(asset.kind, mondrian_assets::AssetKind::Video) {
+            continue;
+        }
+
+        if !asset.path.exists() {
+            return Err(format!("素材离线: {}", asset.path.display()));
+        }
+        paths.insert(asset_id, asset.path);
+    }
+
+    Ok(paths)
 }
 
 /// 内置预设列表（名称 + ExportPreset）
