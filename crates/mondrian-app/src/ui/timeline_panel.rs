@@ -153,6 +153,16 @@ impl TimelinePanel {
                                 let _ = state.split_at_playhead();
                             }
 
+                            if ui.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::ArrowLeft))
+                            {
+                                self.slip_selected_clips_by_frames(state, -1);
+                            }
+
+                            if ui.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::ArrowRight))
+                            {
+                                self.slip_selected_clips_by_frames(state, 1);
+                            }
+
                             if ui.input(|i| {
                                 i.modifiers.command
                                     && !i.modifiers.shift
@@ -300,6 +310,7 @@ impl TimelinePanel {
             }
 
             let has_selection = !self.selected_clips.is_empty();
+            let has_single_selection = self.selected_clips.len() == 1;
             if ui.add_enabled(has_selection, egui::Button::new("修剪入点到播放头")).clicked()
             {
                 self.trim_selected_clips_to_playhead(state, TrimEdge::In);
@@ -307,6 +318,18 @@ impl TimelinePanel {
             if ui.add_enabled(has_selection, egui::Button::new("修剪出点到播放头")).clicked()
             {
                 self.trim_selected_clips_to_playhead(state, TrimEdge::Out);
+            }
+            if ui
+                .add_enabled(has_single_selection, egui::Button::new("滚动切点到播放头"))
+                .clicked()
+            {
+                self.roll_selected_cut_to_playhead(state);
+            }
+            if ui.add_enabled(has_selection, egui::Button::new("滑移 -1 帧")).clicked() {
+                self.slip_selected_clips_by_frames(state, -1);
+            }
+            if ui.add_enabled(has_selection, egui::Button::new("滑移 +1 帧")).clicked() {
+                self.slip_selected_clips_by_frames(state, 1);
             }
 
             ui.separator();
@@ -797,6 +820,18 @@ impl TimelinePanel {
                         self.trim_selected_clips_to_playhead(state, TrimEdge::Out);
                         ui.close_menu();
                     }
+                    if ui.button("滚动切点到播放头").clicked() {
+                        self.roll_selected_cut_to_playhead(state);
+                        ui.close_menu();
+                    }
+                    if ui.button("滑移 -1 帧").clicked() {
+                        self.slip_selected_clips_by_frames(state, -1);
+                        ui.close_menu();
+                    }
+                    if ui.button("滑移 +1 帧").clicked() {
+                        self.slip_selected_clips_by_frames(state, 1);
+                        ui.close_menu();
+                    }
                     let all_disabled = self.selected_clips_all_disabled(state);
                     let toggle_label = if all_disabled {
                         "启用片段"
@@ -1068,6 +1103,18 @@ impl TimelinePanel {
                 self.trim_selected_clips_to_playhead(state, TrimEdge::Out);
                 ui.close_menu();
             }
+            if ui.button("滚动已选切点到播放头").clicked() {
+                self.roll_selected_cut_to_playhead(state);
+                ui.close_menu();
+            }
+            if ui.button("滑移已选 -1 帧").clicked() {
+                self.slip_selected_clips_by_frames(state, -1);
+                ui.close_menu();
+            }
+            if ui.button("滑移已选 +1 帧").clicked() {
+                self.slip_selected_clips_by_frames(state, 1);
+                ui.close_menu();
+            }
             let all_disabled = self.selected_clips_all_disabled(state);
             let toggle_label = if all_disabled {
                 "启用已选片段"
@@ -1206,6 +1253,38 @@ impl TimelinePanel {
 
         if let Err(err) = state.trim_clips_bulk_to_frame(&clip_ids, edge, target_frame) {
             state.set_status_hint(format!("修剪片段失败：{err}"), true);
+        }
+    }
+
+    fn roll_selected_cut_to_playhead(&mut self, state: &mut AppState) {
+        if self.selected_clips.len() != 1 {
+            return;
+        }
+
+        let clip_id = match self.selected_clips.iter().next() {
+            Some(selection) => selection.clip_id,
+            None => return,
+        };
+
+        match state.roll_cut_to_frame(clip_id, state.current_frame()) {
+            Ok(true) => {}
+            Ok(false) => {
+                state.set_status_hint("未找到可滚动切点，或播放头不在可滚动范围", true);
+            }
+            Err(err) => {
+                state.set_status_hint(format!("滚动修剪失败：{err}"), true);
+            }
+        }
+    }
+
+    fn slip_selected_clips_by_frames(&mut self, state: &mut AppState, delta_frames: i64) {
+        if self.selected_clips.is_empty() || delta_frames == 0 {
+            return;
+        }
+
+        let clip_ids: Vec<ClipId> = self.selected_clips.iter().map(|sel| sel.clip_id).collect();
+        if let Err(err) = state.slip_clips_bulk_by_frames(&clip_ids, delta_frames) {
+            state.set_status_hint(format!("滑移片段失败：{err}"), true);
         }
     }
 

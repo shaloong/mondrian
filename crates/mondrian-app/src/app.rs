@@ -1792,6 +1792,112 @@ impl AppState {
         Ok(changed_count)
     }
 
+    pub fn roll_cut_to_frame(
+        &mut self,
+        clip_id: ClipId,
+        target_frame: i64,
+    ) -> mondrian_core::Result<bool> {
+        let (sequence_id, before, after, changed) = {
+            let seq = self.sequence.as_mut().ok_or_else(|| {
+                mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "roll_cut_to_frame".to_string(),
+                    reason: "当前无序列".to_string(),
+                }
+            })?;
+
+            let before = seq.clone();
+            let changed = roll_cut_for_clip_internal(seq, clip_id, target_frame)?;
+            if !changed {
+                return Ok(false);
+            }
+            (seq.id, before, seq.clone(), changed)
+        };
+
+        if changed {
+            self.record_sequence_snapshot_command("滚动修剪", before, after);
+            self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
+            let _ = self.save_project_file();
+        }
+        Ok(changed)
+    }
+
+    pub fn slip_clips_bulk_by_frames(
+        &mut self,
+        clip_ids: &[ClipId],
+        delta_frames: i64,
+    ) -> mondrian_core::Result<usize> {
+        if clip_ids.is_empty() || delta_frames == 0 {
+            return Ok(0);
+        }
+
+        let library = self.asset_library.clone().ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "slip_clips_bulk_by_frames".to_string(),
+                reason: "素材库未连接".to_string(),
+            }
+        })?;
+
+        let (sequence_id, before, after, changed_count) = {
+            let seq = self.sequence.as_mut().ok_or_else(|| {
+                mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "slip_clips_bulk_by_frames".to_string(),
+                    reason: "当前无序列".to_string(),
+                }
+            })?;
+
+            let before = seq.clone();
+            let mut processed = HashSet::<ClipId>::new();
+            let mut changed_count = 0usize;
+
+            for clip_id in clip_ids {
+                if !processed.insert(*clip_id) {
+                    continue;
+                }
+
+                let linked = find_clip(seq, *clip_id).and_then(|clip| clip.linked_clip);
+                match slip_clip_internal(seq, library.as_ref(), *clip_id, delta_frames) {
+                    Ok(true) => {
+                        changed_count += 1;
+                    }
+                    Ok(false) => {}
+                    Err(mondrian_core::MondrianError::ClipNotFound { .. }) => continue,
+                    Err(err) => return Err(err),
+                }
+
+                if let Some(linked_id) = linked {
+                    if !processed.insert(linked_id) {
+                        continue;
+                    }
+                    match slip_clip_internal(seq, library.as_ref(), linked_id, delta_frames) {
+                        Ok(true) => {
+                            changed_count += 1;
+                            if let Some(primary) = find_clip_mut(seq, *clip_id) {
+                                primary.linked_clip = Some(linked_id);
+                            }
+                            if let Some(linked_clip) = find_clip_mut(seq, linked_id) {
+                                linked_clip.linked_clip = Some(*clip_id);
+                            }
+                        }
+                        Ok(false) => {}
+                        Err(mondrian_core::MondrianError::ClipNotFound { .. }) => {}
+                        Err(err) => return Err(err),
+                    }
+                }
+            }
+
+            if changed_count == 0 {
+                return Ok(0);
+            }
+
+            (seq.id, before, seq.clone(), changed_count)
+        };
+
+        self.record_sequence_snapshot_command("滑移片段", before, after);
+        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
+        let _ = self.save_project_file();
+        Ok(changed_count)
+    }
+
     pub fn split_clip_at_frame(
         &mut self,
         track_id: TrackId,
@@ -2461,6 +2567,247 @@ fn split_clip_in_track(
         right_clip_id: right_id,
         original_linked: track.clips[index].linked_clip,
     })
+}
+
+#[derive(Clone, Copy)]
+struct RollBoundary {
+    left_index: usize,
+    right_index: usize,
+    current_cut_frame: i64,
+    min_frame: i64,
+    max_frame: i64,
+}
+
+fn roll_cut_for_clip_internal(
+    seq: &mut Sequence,
+    clip_id: ClipId,
+    target_frame: i64,
+) -> mondrian_core::Result<bool> {
+    for track in &mut seq.video_tracks {
+        if let Some(index) = track.clips.iter().position(|clip| clip.id == clip_id) {
+            if track.is_locked {
+                return Err(mondrian_core::MondrianError::TrackLocked {
+                    track_id: track.id.to_string(),
+                });
+            }
+            return roll_cut_in_track(track, index, target_frame);
+        }
+    }
+
+    for track in &mut seq.audio_tracks {
+        if let Some(index) = track.clips.iter().position(|clip| clip.id == clip_id) {
+            if track.is_locked {
+                return Err(mondrian_core::MondrianError::TrackLocked {
+                    track_id: track.id.to_string(),
+                });
+            }
+            return roll_cut_in_track(track, index, target_frame);
+        }
+    }
+
+    Err(mondrian_core::MondrianError::ClipNotFound { clip_id: clip_id.to_string() })
+}
+
+fn roll_cut_in_track(
+    track: &mut mondrian_timeline::track::Track,
+    clip_index: usize,
+    target_frame: i64,
+) -> mondrian_core::Result<bool> {
+    let Some(current_clip) = track.clips.get(clip_index).cloned() else {
+        return Ok(false);
+    };
+
+    let mut boundaries = Vec::with_capacity(2);
+
+    if clip_index > 0 {
+        let left = &track.clips[clip_index - 1];
+        let right = &current_clip;
+        if left.end_position().frame == right.position.frame {
+            let min_frame_from_source_in =
+                right.position.frame.saturating_sub(right.source_in.frame);
+            let min_frame = (left.position.frame + 1).max(min_frame_from_source_in);
+            let max_frame = right.end_position().frame - 1;
+            if min_frame <= max_frame {
+                boundaries.push(RollBoundary {
+                    left_index: clip_index - 1,
+                    right_index: clip_index,
+                    current_cut_frame: right.position.frame,
+                    min_frame,
+                    max_frame,
+                });
+            }
+        }
+    }
+
+    if clip_index + 1 < track.clips.len() {
+        let left = &current_clip;
+        let right = &track.clips[clip_index + 1];
+        if left.end_position().frame == right.position.frame {
+            let min_frame_from_source_in =
+                right.position.frame.saturating_sub(right.source_in.frame);
+            let min_frame = (left.position.frame + 1).max(min_frame_from_source_in);
+            let max_frame = right.end_position().frame - 1;
+            if min_frame <= max_frame {
+                boundaries.push(RollBoundary {
+                    left_index: clip_index,
+                    right_index: clip_index + 1,
+                    current_cut_frame: left.end_position().frame,
+                    min_frame,
+                    max_frame,
+                });
+            }
+        }
+    }
+
+    let Some(boundary) = boundaries
+        .into_iter()
+        .min_by_key(|candidate| (target_frame as i128 - candidate.current_cut_frame as i128).abs())
+    else {
+        return Ok(false);
+    };
+
+    let new_cut_frame = target_frame.clamp(boundary.min_frame, boundary.max_frame);
+    if new_cut_frame == boundary.current_cut_frame {
+        return Ok(false);
+    }
+
+    let left_original = track.clips[boundary.left_index].clone();
+    let right_original = track.clips[boundary.right_index].clone();
+
+    let new_left_duration = new_cut_frame - left_original.position.frame;
+    let new_right_duration = right_original.end_position().frame - new_cut_frame;
+    if new_left_duration <= 0 || new_right_duration <= 0 {
+        return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+            step_id: "roll_cut".to_string(),
+            reason: "滚动修剪后片段时长无效".to_string(),
+        });
+    }
+
+    let new_left_source_out = left_original.timeline_to_source_time(TimeCode::new(
+        new_cut_frame,
+        left_original.position.time_base,
+    ));
+    let new_right_source_in = right_original.timeline_to_source_time(TimeCode::new(
+        new_cut_frame,
+        right_original.position.time_base,
+    ));
+
+    let mut left_updated = left_original;
+    left_updated.duration = TimeCode::new(new_left_duration, left_updated.duration.time_base);
+    left_updated.source_out = new_left_source_out;
+
+    let mut right_updated = right_original;
+    right_updated.position = TimeCode::new(new_cut_frame, right_updated.position.time_base);
+    right_updated.duration = TimeCode::new(new_right_duration, right_updated.duration.time_base);
+    right_updated.source_in = new_right_source_in;
+
+    track.clips[boundary.left_index] = left_updated;
+    track.clips[boundary.right_index] = right_updated;
+    track.clips.sort_by_key(|clip| clip.position.frame);
+    Ok(true)
+}
+
+fn slip_clip_internal(
+    seq: &mut Sequence,
+    library: &AssetLibrary,
+    clip_id: ClipId,
+    delta_frames: i64,
+) -> mondrian_core::Result<bool> {
+    for track in &mut seq.video_tracks {
+        if let Some(index) = track.clips.iter().position(|clip| clip.id == clip_id) {
+            if track.is_locked {
+                return Err(mondrian_core::MondrianError::TrackLocked {
+                    track_id: track.id.to_string(),
+                });
+            }
+            let estimated_total_source_frames =
+                estimate_asset_total_source_frames(library, &track.clips[index]);
+            return slip_clip_in_track(track, index, delta_frames, estimated_total_source_frames);
+        }
+    }
+
+    for track in &mut seq.audio_tracks {
+        if let Some(index) = track.clips.iter().position(|clip| clip.id == clip_id) {
+            if track.is_locked {
+                return Err(mondrian_core::MondrianError::TrackLocked {
+                    track_id: track.id.to_string(),
+                });
+            }
+            let estimated_total_source_frames =
+                estimate_asset_total_source_frames(library, &track.clips[index]);
+            return slip_clip_in_track(track, index, delta_frames, estimated_total_source_frames);
+        }
+    }
+
+    Err(mondrian_core::MondrianError::ClipNotFound { clip_id: clip_id.to_string() })
+}
+
+fn slip_clip_in_track(
+    track: &mut mondrian_timeline::track::Track,
+    clip_index: usize,
+    delta_frames: i64,
+    estimated_total_source_frames: Option<i64>,
+) -> mondrian_core::Result<bool> {
+    let Some(original) = track.clips.get(clip_index).cloned() else {
+        return Ok(false);
+    };
+
+    let source_span = original.source_out.frame - original.source_in.frame;
+    if source_span <= 0 {
+        return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+            step_id: "slip_clip".to_string(),
+            reason: "片段源时间范围无效".to_string(),
+        });
+    }
+
+    let max_source_in = if let Some(total_frames) = estimated_total_source_frames {
+        total_frames.saturating_sub(source_span).max(0)
+    } else {
+        i64::MAX.saturating_sub(source_span)
+    };
+
+    let old_source_in = original.source_in.frame;
+    let proposed = old_source_in.saturating_add(delta_frames);
+    let new_source_in = proposed.clamp(0, max_source_in);
+    if new_source_in == old_source_in {
+        return Ok(false);
+    }
+
+    let new_source_out = new_source_in.saturating_add(source_span);
+    let mut updated = original;
+    updated.source_in = TimeCode::new(new_source_in, updated.source_in.time_base);
+    updated.source_out = TimeCode::new(new_source_out, updated.source_out.time_base);
+    track.clips[clip_index] = updated;
+    Ok(true)
+}
+
+fn estimate_asset_total_source_frames(library: &AssetLibrary, clip: &Clip) -> Option<i64> {
+    let asset = match library.get_asset(clip.asset_id) {
+        Ok(Some(asset)) => asset,
+        Ok(None) => return None,
+        Err(err) => {
+            tracing::debug!("读取素材时长失败 {}: {}", clip.asset_id, err);
+            return None;
+        }
+    };
+
+    let frames_from_stream =
+        asset.media_info.estimated_frames().map(|v| v as i64).filter(|v| *v > 0);
+    if frames_from_stream.is_some() {
+        return frames_from_stream;
+    }
+
+    let duration_secs = asset.media_info.duration.as_secs_f64();
+    if duration_secs <= 0.0 {
+        return None;
+    }
+
+    let frame_duration_secs = clip.position.time_base.to_f64();
+    if frame_duration_secs <= f64::EPSILON {
+        return None;
+    }
+
+    Some((duration_secs / frame_duration_secs).ceil() as i64)
 }
 
 fn trim_clip_edge_internal(
@@ -4158,6 +4505,109 @@ mod timeline_edit_tests {
         assert_eq!(audio_after.duration.frame, 21);
         assert_eq!(video_after.source_out.frame, 21);
         assert_eq!(audio_after.source_out.frame, 21);
+    }
+
+    #[test]
+    fn roll_cut_to_frame_is_undoable() {
+        let mut state = create_state_with_sequence();
+        let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
+
+        let clip_a = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(20, tb));
+        let clip_a_id = clip_a.id;
+        let clip_b = Clip::new(AssetId::new(), TimeCode::new(20, tb), TimeCode::new(20, tb));
+        let clip_b_id = clip_b.id;
+
+        {
+            let seq = state.sequence.as_mut().expect("sequence should exist");
+            seq.video_tracks[0].add_clip(clip_a).expect("add clip a");
+            seq.video_tracks[0].add_clip(clip_b).expect("add clip b");
+        }
+
+        let changed = state.roll_cut_to_frame(clip_a_id, 25).expect("roll cut should succeed");
+        assert!(changed);
+        assert_eq!(state.cmd_history.undo_description(), Some("滚动修剪"));
+
+        let seq = state.sequence.as_ref().expect("sequence should exist");
+        let clip_a_after = seq.video_tracks[0]
+            .clips
+            .iter()
+            .find(|clip| clip.id == clip_a_id)
+            .expect("clip a should exist");
+        let clip_b_after = seq.video_tracks[0]
+            .clips
+            .iter()
+            .find(|clip| clip.id == clip_b_id)
+            .expect("clip b should exist");
+
+        assert_eq!(clip_a_after.duration.frame, 25);
+        assert_eq!(clip_b_after.position.frame, 25);
+        assert_eq!(clip_b_after.duration.frame, 15);
+        assert_eq!(clip_b_after.source_in.frame, 5);
+
+        assert!(state.undo_timeline().expect("undo should succeed"));
+        let seq_undo = state.sequence.as_ref().expect("sequence should exist");
+        let clip_a_undo = seq_undo.video_tracks[0]
+            .clips
+            .iter()
+            .find(|clip| clip.id == clip_a_id)
+            .expect("clip a should exist after undo");
+        let clip_b_undo = seq_undo.video_tracks[0]
+            .clips
+            .iter()
+            .find(|clip| clip.id == clip_b_id)
+            .expect("clip b should exist after undo");
+        assert_eq!(clip_a_undo.duration.frame, 20);
+        assert_eq!(clip_b_undo.position.frame, 20);
+        assert_eq!(clip_b_undo.source_in.frame, 0);
+    }
+
+    #[test]
+    fn slip_clip_negative_delta_is_clamped_and_undoable() {
+        let mut state = create_state_with_sequence();
+        let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
+        let library_root = std::env::temp_dir().join(format!(
+            "mondrian_timeline_slip_test_{}_{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        std::fs::create_dir_all(&library_root).expect("create temp library root");
+        state.asset_library = Some(AssetLibrary::open(library_root.clone()).expect("open library"));
+
+        let mut clip = Clip::new(AssetId::new(), TimeCode::new(8, tb), TimeCode::new(20, tb));
+        clip.source_in = TimeCode::new(10, tb);
+        clip.source_out = TimeCode::new(30, tb);
+        let clip_id = clip.id;
+        state.sequence.as_mut().expect("sequence should exist").video_tracks[0]
+            .add_clip(clip)
+            .expect("add clip");
+
+        let changed =
+            state.slip_clips_bulk_by_frames(&[clip_id], -15).expect("slip should succeed");
+        assert_eq!(changed, 1);
+        assert_eq!(state.cmd_history.undo_description(), Some("滑移片段"));
+
+        let seq = state.sequence.as_ref().expect("sequence should exist");
+        let slipped = seq.video_tracks[0]
+            .clips
+            .iter()
+            .find(|clip| clip.id == clip_id)
+            .expect("clip should exist");
+        assert_eq!(slipped.position.frame, 8);
+        assert_eq!(slipped.duration.frame, 20);
+        assert_eq!(slipped.source_in.frame, 0);
+        assert_eq!(slipped.source_out.frame, 20);
+
+        assert!(state.undo_timeline().expect("undo should succeed"));
+        let restored = state.sequence.as_ref().expect("sequence should exist").video_tracks[0]
+            .clips
+            .iter()
+            .find(|clip| clip.id == clip_id)
+            .expect("clip should exist after undo");
+        assert_eq!(restored.source_in.frame, 10);
+        assert_eq!(restored.source_out.frame, 30);
+
+        state.asset_library = None;
+        let _ = std::fs::remove_dir_all(&library_root);
     }
 }
 
