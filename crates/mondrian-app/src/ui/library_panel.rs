@@ -350,7 +350,7 @@ impl LibraryPanel {
                 let name_w = (info_rect.width() - duration_w - 6.0).max(30.0);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
-                    let name_resp = ui.add_sized(
+                    ui.add_sized(
                         [name_w, row_h],
                         egui::Label::new(
                             egui::RichText::new(asset_name.trim_start())
@@ -358,7 +358,6 @@ impl LibraryPanel {
                         )
                         .truncate(),
                     );
-                    let _ = name_resp.on_hover_text(asset_name.as_str());
 
                     ui.allocate_ui_with_layout(
                         Vec2::new(duration_w, row_h),
