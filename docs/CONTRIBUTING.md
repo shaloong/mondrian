@@ -79,8 +79,11 @@ $env:MONDRIAN_PERF_OUTPUT='target/perf/project-lifecycle.jsonl'
 $env:MONDRIAN_PERF_OPEN_MS='3500'
 $env:MONDRIAN_PERF_SAVE_MS='2500'
 cargo test -p mondrian-app perf_project_lifecycle_smoke -- --ignored --nocapture
+
+$env:MONDRIAN_EXPORT_SIM_OUTPUT='target/perf/export-4k60.jsonl'
+cargo test -p mondrian-export export_4k60_simulated_perf -- --ignored --nocapture
 ```
 
 - 失败时测试会直接报错并附带 JSON 报告。
-- 成功时也会打印 `MONDRIAN_PERF_JSON=...`，可被日志系统或 AI 工具抓取。
+- 成功时也会打印 `MONDRIAN_PERF_JSON=...` 或 `MONDRIAN_EXPORT_SIM_JSON=...`，可被日志系统或 AI 工具抓取。
 - 本地开发可放宽阈值，CI 建议使用更严格阈值并固定机器规格。

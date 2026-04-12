@@ -662,6 +662,18 @@ fn write_timeline_frames(
     report: &mut dyn FnMut(JobStatus, f32),
 ) -> JobExecutionResult {
     let mut writer = BufWriter::new(stdin);
+    write_timeline_frames_to_writer(&mut writer, timeline, range, width, height, cancel, report)
+}
+
+fn write_timeline_frames_to_writer<W: Write>(
+    writer: &mut W,
+    timeline: &TimelineExportInput,
+    range: TimelineRenderRange,
+    width: u32,
+    height: u32,
+    cancel: &AtomicBool,
+    report: &mut dyn FnMut(JobStatus, f32),
+) -> JobExecutionResult {
     let total = range.total_frames.max(1);
     let mut canvas = vec![0u8; width as usize * height as usize * 4];
 
@@ -721,7 +733,9 @@ fn render_timeline_frame_into(
     }
 
     let mut layers: Vec<(Arc<DecodedVideoLayer>, f32)> = Vec::with_capacity(active_clips.len());
-    let mut decode_cache = HashMap::<(AssetId, i64), Arc<DecodedVideoLayer>>::new();
+    let mut decode_cache = (active_clips.len() > 1).then(|| {
+        HashMap::<(AssetId, i64), Arc<DecodedVideoLayer>>::with_capacity(active_clips.len())
+    });
 
     for active in active_clips {
         let Some(path) = timeline.asset_paths.get(&active.clip.asset_id) else {
@@ -733,32 +747,62 @@ fn render_timeline_frame_into(
         }
 
         let source_frame = active.source_time.frame.max(0);
-        let decoded = if let Some(hit) = decode_cache.get(&(active.clip.asset_id, source_frame)) {
-            Arc::clone(hit)
+        let decoded = if let Some(cache) = decode_cache.as_mut() {
+            if let Some(hit) = cache.get(&(active.clip.asset_id, source_frame)) {
+                Arc::clone(hit)
+            } else {
+                let decoded = decode_video_layer_scaled(
+                    active.clip.asset_id,
+                    path.as_path(),
+                    active.source_time.to_secs().max(0.0),
+                    width,
+                    height,
+                )?;
+                cache.insert((active.clip.asset_id, source_frame), Arc::clone(&decoded));
+                decoded
+            }
         } else {
-            let decoded = decode_video_frame_at_time_rgba_scaled(
+            decode_video_layer_scaled(
+                active.clip.asset_id,
                 path.as_path(),
                 active.source_time.to_secs().max(0.0),
-                Some(width),
-                Some(height),
-            )
-            .map_err(|err| {
-                format!(
-                    "asset={} path={} err={}",
-                    active.clip.asset_id,
-                    path.display(),
-                    err
-                )
-            })?;
-            let decoded = Arc::new(DecodedVideoLayer {
-                width: decoded.width,
-                height: decoded.height,
-                data: decoded.data,
-            });
-            decode_cache.insert((active.clip.asset_id, source_frame), Arc::clone(&decoded));
-            decoded
+                width,
+                height,
+            )?
         };
         layers.push((decoded, opacity));
+    }
+
+    compose_decoded_layers_into_canvas(canvas, width, height, &layers);
+    Ok(())
+}
+
+fn decode_video_layer_scaled(
+    asset_id: AssetId,
+    path: &Path,
+    source_secs: f64,
+    width: u32,
+    height: u32,
+) -> Result<Arc<DecodedVideoLayer>, String> {
+    let decoded =
+        decode_video_frame_at_time_rgba_scaled(path, source_secs, Some(width), Some(height))
+            .map_err(|err| format!("asset={} path={} err={}", asset_id, path.display(), err))?;
+    Ok(Arc::new(DecodedVideoLayer {
+        width: decoded.width,
+        height: decoded.height,
+        data: decoded.data,
+    }))
+}
+
+fn compose_decoded_layers_into_canvas(
+    canvas: &mut Vec<u8>,
+    width: u32,
+    height: u32,
+    layers: &[(Arc<DecodedVideoLayer>, f32)],
+) {
+    if layers.is_empty() {
+        clear_canvas_black_opaque(canvas);
+        return;
     }
 
     if layers.len() == 1 {
@@ -766,7 +810,7 @@ fn render_timeline_frame_into(
         if *opacity >= 0.999 && layer.width == width && layer.height == height {
             canvas.copy_from_slice(&layer.data);
             force_canvas_alpha_opaque(canvas);
-            return Ok(());
+            return;
         }
     }
 
@@ -779,11 +823,9 @@ fn render_timeline_frame_into(
             &layer.data,
             layer.width,
             layer.height,
-            opacity,
+            *opacity,
         );
     }
-
-    Ok(())
 }
 
 fn compute_timeline_render_range(timeline: &TimelineExportInput) -> TimelineRenderRange {
@@ -1557,6 +1599,25 @@ mod tests {
     }
 
     #[test]
+    fn compose_decoded_layers_into_canvas_single_layer_passthrough_forces_alpha() {
+        let layer = Arc::new(DecodedVideoLayer {
+            width: 2,
+            height: 2,
+            data: vec![12, 34, 56, 0, 12, 34, 56, 77, 12, 34, 56, 128, 12, 34, 56, 200],
+        });
+        let mut canvas = vec![0u8; 2 * 2 * 4];
+
+        compose_decoded_layers_into_canvas(&mut canvas, 2, 2, &[(layer, 1.0)]);
+
+        for px in canvas.chunks_exact(4) {
+            assert_eq!(px[0], 12);
+            assert_eq!(px[1], 34);
+            assert_eq!(px[2], 56);
+            assert_eq!(px[3], 255);
+        }
+    }
+
+    #[test]
     fn blend_rgba_layer_centered_places_layer_in_canvas_center() {
         let mut dst = vec![0u8; 4 * 4 * 4];
         clear_canvas_black_opaque(&mut dst);
@@ -1578,3 +1639,7 @@ mod tests {
         assert_eq!(pixel_at(0, 0), [0, 0, 0, 255]);
     }
 }
+
+#[cfg(test)]
+#[path = "queue_perf_tests.rs"]
+mod perf_tests;

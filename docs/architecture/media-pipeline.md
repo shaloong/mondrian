@@ -259,9 +259,21 @@ cargo test -p mondrian-app preview_4k60_simulated_perf -- --ignored --nocapture
 # 8K60 预览模拟测试（极限负载性能优化）
 $env:MONDRIAN_PREVIEW_SIM_OUTPUT='target/perf/preview-8k60.jsonl'
 cargo test -p mondrian-app preview_8k60_simulated_perf -- --ignored --nocapture
+
+# 1080p29.97 导出渲染模拟测试（时间线导出前半段）
+$env:MONDRIAN_EXPORT_SIM_OUTPUT='target/perf/export-1080p2997.jsonl'
+cargo test -p mondrian-export export_1080p2997_simulated_perf -- --ignored --nocapture
+
+# 4K60 导出渲染模拟测试（高负载）
+$env:MONDRIAN_EXPORT_SIM_OUTPUT='target/perf/export-4k60.jsonl'
+cargo test -p mondrian-export export_4k60_simulated_perf -- --ignored --nocapture
+
+# 4K60 单层直通导出模拟测试（验证快路径）
+$env:MONDRIAN_EXPORT_SIM_OUTPUT='target/perf/export-pass-through-4k60.jsonl'
+cargo test -p mondrian-export export_4k60_single_layer_passthrough_simulated_perf -- --ignored --nocapture
 ```
 
-两项测试都会输出 JSON，便于脚本或 AI 自动分析异常样本。
+这些测试都会输出 JSON，便于脚本或 AI 自动分析异常样本。
 
 ### 预览合成优化说明（2026-03）
 

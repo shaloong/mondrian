@@ -1729,7 +1729,7 @@ impl ViewerPanel {
         if include_preview_perf {
             if let Some(snapshot) = preview_perf_snapshot() {
                 return format!(
-                    "{} | Perf1s f(d/c:{}/{}) ms(d/l/c/u:{:.1}/{:.1}/{:.1}/{:.1}) share(l/c/u:{}/{}/{}) hit:{}% comp_gpu:{}",
+                    "{} | Perf1s f(d/c:{}/{}) ms(d/l/c/u:{:.1}/{:.1}/{:.1}/{:.1}) share(l/c/u:{}/{}/{}) hit:{}% pass:{}% comp_gpu:{}",
                     base,
                     snapshot.decode_frames,
                     snapshot.commit_frames,
@@ -1741,6 +1741,7 @@ impl ViewerPanel {
                     snapshot.comp_share_pct,
                     snapshot.upload_share_pct,
                     snapshot.hit_rate_pct,
+                    snapshot.passthrough_rate_pct,
                     if snapshot.gpu_comp_on { "on" } else { "off" }
                 );
             }
@@ -2141,6 +2142,7 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
     if rgba_layers_for_gpu.len() == 1 {
         let only_layer = rgba_layers_for_gpu.pop().expect("single layer should exist");
         if only_layer.opacity >= 0.999 && only_layer.width == width && only_layer.height == height {
+            record_preview_perf_passthrough_frame();
             record_preview_perf_decode_total(decode_started_at.elapsed());
             return Ok(RgbaFrame { width, height, data: only_layer.data });
         }
@@ -2423,6 +2425,7 @@ fn decode_layer_rgba(
 struct PreviewPerfStats {
     decode_frames: AtomicU64,
     committed_frames: AtomicU64,
+    passthrough_frames: AtomicU64,
     layer_cache_hits: AtomicU64,
     layer_cache_misses: AtomicU64,
     decode_total_ns: AtomicU64,
@@ -2439,6 +2442,7 @@ struct PreviewPerfStats {
     last_comp_share_pct: AtomicU64,
     last_upload_share_pct: AtomicU64,
     last_hit_rate_pct: AtomicU64,
+    last_passthrough_rate_pct: AtomicU64,
     last_gpu_comp_on: AtomicBool,
     last_decode_frames: AtomicU64,
     last_commit_frames: AtomicU64,
@@ -2454,6 +2458,7 @@ struct PreviewPerfSnapshot {
     comp_share_pct: u64,
     upload_share_pct: u64,
     hit_rate_pct: u64,
+    passthrough_rate_pct: u64,
     gpu_comp_on: bool,
     decode_frames: u64,
     commit_frames: u64,
@@ -2511,10 +2516,19 @@ fn preview_perf_snapshot() -> Option<PreviewPerfSnapshot> {
         comp_share_pct: stats.last_comp_share_pct.load(Ordering::Relaxed),
         upload_share_pct: stats.last_upload_share_pct.load(Ordering::Relaxed),
         hit_rate_pct: stats.last_hit_rate_pct.load(Ordering::Relaxed),
+        passthrough_rate_pct: stats.last_passthrough_rate_pct.load(Ordering::Relaxed),
         gpu_comp_on: stats.last_gpu_comp_on.load(Ordering::Relaxed),
         decode_frames,
         commit_frames,
     })
+}
+
+fn record_preview_perf_passthrough_frame() {
+    if !preview_perf_enabled() {
+        return;
+    }
+    preview_perf_stats().passthrough_frames.fetch_add(1, Ordering::Relaxed);
+    maybe_report_preview_perf();
 }
 
 fn record_preview_perf_layer_decode(elapsed: Duration, cache_hit: bool) {
@@ -2588,6 +2602,7 @@ fn maybe_report_preview_perf() {
 
     let decode_frames = stats.decode_frames.swap(0, Ordering::Relaxed);
     let committed_frames = stats.committed_frames.swap(0, Ordering::Relaxed);
+    let passthrough_frames = stats.passthrough_frames.swap(0, Ordering::Relaxed);
     let cache_hits = stats.layer_cache_hits.swap(0, Ordering::Relaxed);
     let cache_misses = stats.layer_cache_misses.swap(0, Ordering::Relaxed);
     let decode_total_ns = stats.decode_total_ns.swap(0, Ordering::Relaxed);
@@ -2639,6 +2654,11 @@ fn maybe_report_preview_perf() {
     } else {
         0.0
     };
+    let passthrough_rate = if decode_frames > 0 {
+        passthrough_frames as f64 * 100.0 / decode_frames as f64
+    } else {
+        0.0
+    };
 
     stats.last_avg_decode_x100.store(
         (avg_decode_ms * 100.0).round().max(0.0) as u64,
@@ -2671,12 +2691,16 @@ fn maybe_report_preview_perf() {
     stats
         .last_hit_rate_pct
         .store(hit_rate.round().clamp(0.0, 100.0) as u64, Ordering::Relaxed);
+    stats.last_passthrough_rate_pct.store(
+        passthrough_rate.round().clamp(0.0, 100.0) as u64,
+        Ordering::Relaxed,
+    );
     stats.last_gpu_comp_on.store(composite_gpu_ns > 0, Ordering::Relaxed);
     stats.last_decode_frames.store(decode_frames, Ordering::Relaxed);
     stats.last_commit_frames.store(committed_frames, Ordering::Relaxed);
 
     tracing::info!(
-        "[preview-perf] frames(dec/commit)={}/{} avg_ms(dec/layer/comp/upload)={:.2}/{:.2}/{:.2}/{:.2} share(layer/comp/upload)={:.0}%/{:.0}%/{:.0}% layer_hit={:.0}% gpu_comp={}",
+        "[preview-perf] frames(dec/commit)={}/{} avg_ms(dec/layer/comp/upload)={:.2}/{:.2}/{:.2}/{:.2} share(layer/comp/upload)={:.0}%/{:.0}%/{:.0}% layer_hit={:.0}% pass={:.0}% gpu_comp={}",
         decode_frames,
         committed_frames,
         avg_decode_ms,
@@ -2687,6 +2711,7 @@ fn maybe_report_preview_perf() {
         composite_pct,
         upload_pct,
         hit_rate,
+        passthrough_rate,
         if composite_gpu_ns > 0 { "on" } else { "off" }
     );
 }
