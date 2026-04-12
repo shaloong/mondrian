@@ -187,6 +187,7 @@ cargo bench -p mondrian-renderer
 | [素材资产系统](docs/architecture/asset-system.md)   | 跨项目复用架构    |
 | [效果系统](docs/architecture/effects-system.md)     | LUT / 滤镜 / 转场 |
 | [导出系统](docs/architecture/export-system.md)      | 渲染队列设计      |
+| [设计准则](docs/DESIGN_GUIDELINES.md)               | UI/UX 设计基线    |
 | [技术栈选型](docs/TECH_STACK.md)                    | 选型理由与对比    |
 | [路线图](docs/ROADMAP.md)                           | 版本规划          |
 | [贡献指南](docs/CONTRIBUTING.md)                    | 开发规范          |
