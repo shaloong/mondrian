@@ -10,6 +10,13 @@ pub struct ExportValidationExpectations {
     pub expected_duration_secs: Option<f64>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct MediaStreamSummary {
+    pub has_video: bool,
+    pub has_audio: bool,
+    pub duration_secs: Option<f64>,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ExpectedVideoConstraints {
     pub width: Option<u32>,
@@ -52,6 +59,11 @@ pub fn validate_export_output(
 
     let report = ffprobe_report(output_path)?;
     validate_report(&report, expectations)
+}
+
+pub fn probe_media_summary(path: &Path) -> Result<MediaStreamSummary, String> {
+    let report = ffprobe_report(path)?;
+    Ok(summarize_report(&report))
 }
 
 fn ffprobe_report(path: &Path) -> Result<FfprobeReport, String> {
@@ -168,6 +180,30 @@ fn validate_report(
     }
 
     Ok(())
+}
+
+fn summarize_report(report: &FfprobeReport) -> MediaStreamSummary {
+    let has_video = report
+        .streams
+        .iter()
+        .any(|stream| stream.codec_type.as_deref() == Some("video"));
+    let has_audio = report
+        .streams
+        .iter()
+        .any(|stream| stream.codec_type.as_deref() == Some("audio"));
+    let duration_secs = report
+        .format
+        .as_ref()
+        .and_then(|format| format.duration.as_deref())
+        .and_then(parse_secs_f64)
+        .or_else(|| {
+            report
+                .streams
+                .iter()
+                .find_map(|stream| stream.duration.as_deref().and_then(parse_secs_f64))
+        });
+
+    MediaStreamSummary { has_video, has_audio, duration_secs }
 }
 
 fn parse_ratio_f64(raw: &str) -> Option<f64> {
@@ -301,5 +337,19 @@ mod tests {
         );
         assert_eq!(parse_ratio_f64("24"), Some(24.0));
         assert_eq!(parse_ratio_f64("0/0"), None);
+    }
+
+    #[test]
+    fn summarize_report_detects_streams_and_duration() {
+        let report = base_report();
+        let summary = summarize_report(&report);
+        assert_eq!(
+            summary,
+            MediaStreamSummary {
+                has_video: true,
+                has_audio: true,
+                duration_secs: Some(10.0),
+            }
+        );
     }
 }

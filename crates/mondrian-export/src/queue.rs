@@ -4,7 +4,8 @@ use crate::preset::{
     AudioCodecConfig, Container, ExportConfig, ExportInput, TimelineExportInput, VideoCodecConfig,
 };
 use crate::validator::{
-    validate_export_output, ExpectedVideoConstraints, ExportValidationExpectations,
+    probe_media_summary, validate_export_output, ExpectedVideoConstraints,
+    ExportValidationExpectations,
 };
 use chrono::{DateTime, Utc};
 use mondrian_core::types::{JobId, TimeCode};
@@ -145,6 +146,7 @@ fn execute_file_export(
         return JobExecutionResult::Failed(format!("导出输入不存在：{}", input_path.display()));
     }
 
+    let source_summary = probe_media_summary(input_path).ok();
     report(JobStatus::Encoding, 0.02);
 
     let duration_ms = probe_duration_ms(input_path, in_point, out_point).unwrap_or(0);
@@ -190,7 +192,7 @@ fn execute_file_export(
         JobExecutionResult::Completed => {
             let expectations = ExportValidationExpectations {
                 require_video_stream: true,
-                require_audio_stream: false,
+                require_audio_stream: source_summary.map(|s| s.has_audio).unwrap_or(false),
                 expected_video: job.config.preset.resolution.as_ref().map(|resolution| {
                     ExpectedVideoConstraints {
                         width: Some(normalize_output_dimension(resolution.width)),
