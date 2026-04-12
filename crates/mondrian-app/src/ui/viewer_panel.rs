@@ -358,10 +358,12 @@ impl ViewerPanel {
         }
 
         ui.vertical(|ui| {
-            let controls_height = ui.spacing().interact_size.y + 14.0;
-            let canvas_height = (ui.available_height() - controls_height).max(120.0);
-            let (canvas_rect, _) =
-                ui.allocate_exact_size(Vec2::new(ui.available_width(), canvas_height), Sense::hover());
+            let controls_height = ui.spacing().interact_size.y + 12.0;
+            let canvas_slot_height = (ui.available_height() - controls_height).max(120.0);
+            let (canvas_slot_rect, _) = ui.allocate_exact_size(
+                Vec2::new(ui.available_width(), canvas_slot_height),
+                Sense::hover(),
+            );
 
             // ── 视频画布 ─────────────────────
             let aspect = state
@@ -370,7 +372,11 @@ impl ViewerPanel {
                 .map(|s| s.settings.resolution.aspect_ratio())
                 .unwrap_or(16.0 / 9.0)
                 .max(0.01);
-            let canvas_rect = fit_aspect(canvas_rect, aspect);
+            let fitted = fit_aspect(canvas_slot_rect, aspect);
+            let canvas_rect = Rect::from_min_size(
+                Pos2::new(fitted.left(), canvas_slot_rect.top()),
+                fitted.size(),
+            );
 
             let painter = ui.painter_at(canvas_rect);
 
@@ -522,9 +528,20 @@ impl ViewerPanel {
                 );
             }
 
-            ui.add_space(4.0);
-            ui.separator();
-            self.draw_transport_bar(ui, state, current_frame, is_playing);
+            let controls_rect = Rect::from_min_size(
+                Pos2::new(canvas_slot_rect.left(), canvas_rect.bottom() + 4.0),
+                Vec2::new(canvas_slot_rect.width(), controls_height.max(24.0)),
+            );
+            ui.painter().line_segment(
+                [
+                    Pos2::new(controls_rect.left(), controls_rect.top()),
+                    Pos2::new(controls_rect.right(), controls_rect.top()),
+                ],
+                egui::Stroke::new(1.0, palette::border_subtle().gamma_multiply(0.6)),
+            );
+            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(controls_rect), |ui| {
+                self.draw_transport_bar(ui, state, current_frame, is_playing);
+            });
         });
 
         state.set_playback_buffering(self.playback_buffering_requested(is_playing));

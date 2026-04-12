@@ -319,13 +319,6 @@ impl TimelinePanel {
                 state.set_clip_overlap_mode(overlap_mode);
             }
             ui.separator();
-            ui.label(
-                egui::RichText::new(
-                    "精修动作请用右键菜单 / 快捷键（I、O、Ctrl+B、Alt+←/→、Alt+Shift+←/→）",
-                )
-                .size(tokens::list_proxy_tag_font_size())
-                .color(palette::text_muted()),
-            );
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add(

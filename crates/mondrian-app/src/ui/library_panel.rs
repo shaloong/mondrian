@@ -9,7 +9,7 @@ use rfd::FileDialog;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
 #[derive(Clone)]
@@ -31,6 +31,7 @@ pub struct LibraryPanel {
     search_query: String,
     editing_asset: Option<AssetId>,
     editing_name: String,
+    selected_asset: Option<AssetId>,
     accept_next_external_drop: bool,
     thumbnail_cache: HashMap<AssetId, ThumbnailCacheEntry>,
     thumbnail_failures: HashMap<AssetId, ThumbnailFailureEntry>,
@@ -48,9 +49,6 @@ impl LibraryPanel {
             ui.horizontal(|ui| {
                 let _ = theme::icon(ui, theme::UiIcon::Search, palette::text_muted());
                 ui.text_edit_singleline(&mut self.search_query);
-                if ui.button("批量重连目录").clicked() {
-                    self.batch_relink_offline_assets(state);
-                }
             });
 
             ui.separator();
@@ -85,23 +83,6 @@ impl LibraryPanel {
         };
 
         self.import_from_path(state, &path);
-    }
-
-    fn batch_relink_offline_assets(&mut self, state: &mut AppState) {
-        let Some(dir) = FileDialog::new().pick_folder() else {
-            return;
-        };
-        match state.relink_offline_assets_in_directory(dir.as_path()) {
-            Ok(count) if count > 0 => {
-                state.set_status_hint(format!("批量重连完成：{} 个素材", count), false);
-            }
-            Ok(_) => {
-                state.set_status_hint("未找到可重连的离线素材", false);
-            }
-            Err(err) => {
-                state.set_status_hint(format!("批量重连失败：{err}"), true);
-            }
-        }
     }
 
     fn import_from_path(&mut self, state: &mut AppState, path: &Path) {
@@ -249,7 +230,7 @@ impl LibraryPanel {
         const GRID_SPACING_X: f32 = 8.0;
         const GRID_SPACING_Y: f32 = 10.0;
         const CARD_MIN_WIDTH: f32 = 150.0;
-        const CARD_MIN_HEIGHT: f32 = 178.0;
+        const CARD_MIN_HEIGHT: f32 = 152.0;
         const THUMB_ASPECT: f32 = 16.0 / 9.0;
 
         let available_w = ui.available_width().max(CARD_MIN_WIDTH);
@@ -259,7 +240,7 @@ impl LibraryPanel {
         let total_spacing = GRID_SPACING_X * cols.saturating_sub(1) as f32;
         let card_w = ((available_w - total_spacing) / cols as f32).max(CARD_MIN_WIDTH);
         let thumb_h = (card_w / THUMB_ASPECT).round();
-        let card_h = (thumb_h + 70.0).max(CARD_MIN_HEIGHT);
+        let card_h = (thumb_h + 38.0).max(CARD_MIN_HEIGHT);
 
         for row in assets.chunks(cols) {
             ui.horizontal(|ui| {
@@ -300,99 +281,103 @@ impl LibraryPanel {
         let proxy_mode = state.is_asset_proxy_mode(asset.id);
         let is_offline = !asset.path.exists();
         let is_editing = self.editing_asset == Some(asset.id);
+        let is_selected = self.selected_asset == Some(asset.id);
 
         let (card_rect, card_response) =
             ui.allocate_exact_size(Vec2::new(card_w, card_h), Sense::click_and_drag());
 
-        let bg = if card_response.hovered() {
-            palette::bg_surface_hover()
-        } else {
-            palette::bg_surface()
-        };
-        ui.painter().rect_filled(card_rect, tokens::list_row_radius(), bg);
-        ui.painter().rect_stroke(
-            card_rect,
-            tokens::list_row_radius(),
-            Stroke::new(1.0, palette::border_subtle()),
-        );
+        if is_selected {
+            ui.painter().rect_filled(
+                card_rect,
+                tokens::list_row_radius(),
+                palette::bg_surface_hover(),
+            );
+            ui.painter().rect_stroke(
+                card_rect,
+                tokens::list_row_radius(),
+                Stroke::new(1.0, palette::interaction_highlight().gamma_multiply(0.7)),
+            );
+        } else if card_response.hovered() {
+            ui.painter().rect_stroke(
+                card_rect,
+                tokens::list_row_radius(),
+                Stroke::new(1.0, palette::border_subtle().gamma_multiply(0.6)),
+            );
+        }
 
         let thumb_rect = Rect::from_min_size(
-            card_rect.min + Vec2::new(6.0, 6.0),
-            Vec2::new((card_w - 12.0).max(10.0), thumb_h.max(20.0)),
+            card_rect.min + Vec2::new(4.0, 4.0),
+            Vec2::new((card_w - 8.0).max(10.0), thumb_h.max(20.0)),
         );
         self.draw_thumbnail(ui, asset, is_offline, thumb_rect);
+        self.draw_thumbnail_badges(ui, thumb_rect, asset.kind.clone(), proxy_mode, is_offline);
 
         let info_rect = Rect::from_min_max(
-            Pos2::new(card_rect.left() + 6.0, thumb_rect.bottom() + 6.0),
-            Pos2::new(card_rect.right() - 6.0, card_rect.bottom() - 6.0),
+            Pos2::new(card_rect.left() + 4.0, thumb_rect.bottom() + 4.0),
+            Pos2::new(card_rect.right() - 4.0, card_rect.bottom() - 4.0),
         );
+        let duration_text = format_duration_hhmmss(asset.media_info.duration);
 
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(info_rect), |ui| {
             ui.set_min_width(info_rect.width());
             ui.set_max_width(info_rect.width());
-            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                if is_editing {
-                    let edit_resp = ui.add_sized(
-                        [info_rect.width(), tokens::list_row_content_height()],
-                        egui::TextEdit::singleline(&mut self.editing_name),
-                    );
-                    let submit =
-                        edit_resp.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    if submit {
-                        match library.rename_asset(asset.id, &self.editing_name) {
-                            Ok(_) => {
-                                let _ = state.save_project_file();
-                                state.set_status_hint(
-                                    format!("已重命名为：{}", self.editing_name.trim()),
-                                    false,
-                                );
-                            }
-                            Err(err) => {
-                                state.set_status_hint(format!("重命名失败：{err}"), true);
-                            }
+            if is_editing {
+                let edit_resp = ui.add_sized(
+                    [info_rect.width(), tokens::list_row_content_height()],
+                    egui::TextEdit::singleline(&mut self.editing_name),
+                );
+                let submit =
+                    edit_resp.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if submit {
+                    match library.rename_asset(asset.id, &self.editing_name) {
+                        Ok(_) => {
+                            let _ = state.save_project_file();
+                            state.set_status_hint(
+                                format!("已重命名为：{}", self.editing_name.trim()),
+                                false,
+                            );
                         }
-                        self.editing_asset = None;
-                        self.editing_name.clear();
+                        Err(err) => {
+                            state.set_status_hint(format!("重命名失败：{err}"), true);
+                        }
                     }
-                } else {
-                    ui.add_sized(
-                        [info_rect.width(), tokens::list_row_content_height()],
+                    self.editing_asset = None;
+                    self.editing_name.clear();
+                }
+            } else {
+                let row_h = tokens::list_row_content_height();
+                let duration_w = 58.0;
+                let name_w = (info_rect.width() - duration_w - 6.0).max(30.0);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    let name_resp = ui.add_sized(
+                        [name_w, row_h],
                         egui::Label::new(
                             egui::RichText::new(asset_name.trim_start())
                                 .color(palette::text_primary()),
                         )
                         .truncate(),
                     );
-                }
+                    let _ = name_resp.on_hover_text(asset_name.as_str());
 
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    let kind_text = match asset.kind {
-                        AssetKind::Video => "视频",
-                        AssetKind::Audio => "音频",
-                    };
-                    ui.label(
-                        egui::RichText::new(kind_text)
-                            .size(tokens::list_proxy_tag_font_size())
-                            .color(palette::text_muted()),
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(duration_w, row_h),
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            ui.label(
+                                egui::RichText::new(duration_text.as_str())
+                                    .size(tokens::list_proxy_tag_font_size())
+                                    .color(palette::text_muted()),
+                            );
+                        },
                     );
-                    if proxy_mode {
-                        ui.label(
-                            egui::RichText::new("代理")
-                                .size(tokens::list_proxy_tag_font_size())
-                                .color(palette::interaction_highlight()),
-                        );
-                    }
-                    if is_offline {
-                        ui.label(
-                            egui::RichText::new("离线")
-                                .size(tokens::list_proxy_tag_font_size())
-                                .color(palette::status_warning()),
-                        );
-                    }
                 });
-            });
+            }
         });
+
+        if card_response.clicked() {
+            self.selected_asset = Some(asset.id);
+        }
 
         card_response.context_menu(|ui| {
             if matches!(asset.kind, AssetKind::Video) {
@@ -440,7 +425,6 @@ impl LibraryPanel {
                     }
                     ui.close_menu();
                 }
-
                 ui.separator();
             }
 
@@ -455,6 +439,7 @@ impl LibraryPanel {
                         let _ = state.save_project_file();
                         self.thumbnail_cache.remove(&asset.id);
                         self.thumbnail_failures.remove(&asset.id);
+                        self.selected_asset = self.selected_asset.filter(|id| *id != asset.id);
                         state.set_status_hint(
                             format!(
                                 "已删除：{}（时间轴移除 {} 个片段）",
@@ -477,6 +462,7 @@ impl LibraryPanel {
         }
 
         if card_response.drag_started() && !is_editing {
+            self.selected_asset = Some(asset.id);
             state.begin_drag_asset(
                 asset.id,
                 asset_name.clone(),
@@ -492,16 +478,84 @@ impl LibraryPanel {
         }
     }
 
+    fn draw_thumbnail_badges(
+        &self,
+        ui: &Ui,
+        rect: Rect,
+        kind: AssetKind,
+        proxy_mode: bool,
+        is_offline: bool,
+    ) {
+        let kind_text = match kind {
+            AssetKind::Video => "VIDEO",
+            AssetKind::Audio => "AUDIO",
+        };
+        self.draw_thumbnail_badge(
+            ui,
+            rect.right_bottom() - Vec2::new(6.0, 6.0),
+            kind_text,
+            true,
+            palette::bg_base().gamma_multiply(0.78),
+            palette::text_primary(),
+        );
+
+        if is_offline {
+            self.draw_thumbnail_badge(
+                ui,
+                rect.left_bottom() + Vec2::new(6.0, -6.0),
+                "OFFLINE",
+                false,
+                palette::status_warning().gamma_multiply(0.20),
+                palette::status_warning(),
+            );
+        } else if proxy_mode {
+            self.draw_thumbnail_badge(
+                ui,
+                rect.left_bottom() + Vec2::new(6.0, -6.0),
+                "PROXY",
+                false,
+                palette::interaction_highlight().gamma_multiply(0.18),
+                palette::interaction_highlight(),
+            );
+        }
+    }
+
+    fn draw_thumbnail_badge(
+        &self,
+        ui: &Ui,
+        anchor: Pos2,
+        text: &str,
+        align_right: bool,
+        bg: egui::Color32,
+        fg: egui::Color32,
+    ) {
+        let w = 10.0 + text.chars().count() as f32 * 6.6;
+        let h = 16.0;
+        let rect = if align_right {
+            Rect::from_min_size(Pos2::new(anchor.x - w, anchor.y - h), Vec2::new(w, h))
+        } else {
+            Rect::from_min_size(Pos2::new(anchor.x, anchor.y - h), Vec2::new(w, h))
+        };
+        ui.painter().rect_filled(rect, 3.0, bg);
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            text,
+            typography::body_small(),
+            fg,
+        );
+    }
+
     fn draw_thumbnail(&mut self, ui: &mut Ui, asset: &AssetRecord, is_offline: bool, rect: Rect) {
         ui.painter().rect_filled(rect, 4.0, palette::canvas_bg());
 
         if is_offline {
-            self.draw_thumbnail_placeholder(ui, rect, theme::UiIcon::Warning, "素材离线");
+            self.draw_thumbnail_placeholder(ui, rect, theme::UiIcon::Warning);
             return;
         }
 
         if matches!(asset.kind, AssetKind::Audio) {
-            self.draw_thumbnail_placeholder(ui, rect, theme::UiIcon::Audio, "音频素材");
+            self.draw_thumbnail_placeholder(ui, rect, theme::UiIcon::Audio);
             return;
         }
 
@@ -513,23 +567,13 @@ impl LibraryPanel {
                 palette::image_tint(),
             );
         } else {
-            self.draw_thumbnail_placeholder(ui, rect, theme::UiIcon::Video, "视频素材");
+            self.draw_thumbnail_placeholder(ui, rect, theme::UiIcon::Video);
         }
     }
 
-    fn draw_thumbnail_placeholder(&self, ui: &Ui, rect: Rect, icon: theme::UiIcon, label: &str) {
-        let icon_rect = Rect::from_center_size(
-            rect.center_top() + Vec2::new(0.0, rect.height() * 0.35),
-            Vec2::splat(20.0),
-        );
+    fn draw_thumbnail_placeholder(&self, ui: &Ui, rect: Rect, icon: theme::UiIcon) {
+        let icon_rect = Rect::from_center_size(rect.center(), Vec2::splat(20.0));
         theme::draw_icon(ui.painter(), icon_rect, icon, palette::text_muted());
-        ui.painter().text(
-            rect.center_bottom() + Vec2::new(0.0, -10.0),
-            egui::Align2::CENTER_BOTTOM,
-            label,
-            typography::body_small(),
-            palette::text_muted(),
-        );
     }
 
     fn video_thumbnail_texture(
@@ -597,5 +641,17 @@ impl LibraryPanel {
         let alive: std::collections::HashSet<AssetId> = assets.iter().map(|a| a.id).collect();
         self.thumbnail_cache.retain(|id, _| alive.contains(id));
         self.thumbnail_failures.retain(|id, _| alive.contains(id));
+    }
+}
+
+fn format_duration_hhmmss(duration: Duration) -> String {
+    let secs = duration.as_secs();
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    if h > 0 {
+        format!("{h:02}:{m:02}:{s:02}")
+    } else {
+        format!("{m:02}:{s:02}")
     }
 }
