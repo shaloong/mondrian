@@ -3,6 +3,9 @@
 use crate::preset::{
     AudioCodecConfig, Container, ExportConfig, ExportInput, TimelineExportInput, VideoCodecConfig,
 };
+use crate::validator::{
+    validate_export_output, ExpectedVideoConstraints, ExportValidationExpectations,
+};
 use chrono::{DateTime, Utc};
 use mondrian_core::types::{JobId, TimeCode};
 use mondrian_media::audio::{
@@ -183,7 +186,32 @@ fn execute_file_export(
         }
     };
 
-    monitor_ffmpeg_child(child, duration_ms, cancel, report)
+    match monitor_ffmpeg_child(child, duration_ms, cancel, report) {
+        JobExecutionResult::Completed => {
+            let expectations = ExportValidationExpectations {
+                require_video_stream: true,
+                require_audio_stream: false,
+                expected_video: job.config.preset.resolution.as_ref().map(|resolution| {
+                    ExpectedVideoConstraints {
+                        width: Some(normalize_output_dimension(resolution.width)),
+                        height: Some(normalize_output_dimension(resolution.height)),
+                        fps_num: None,
+                        fps_den: None,
+                    }
+                }),
+                expected_duration_secs: if duration_ms > 0 {
+                    Some(duration_ms as f64 / 1000.0)
+                } else {
+                    None
+                },
+            };
+            match validate_export_output(job.config.output_path.as_path(), &expectations) {
+                Ok(()) => JobExecutionResult::Completed,
+                Err(err) => JobExecutionResult::Failed(format!("导出结果校验失败: {err}")),
+            }
+        }
+        other => other,
+    }
 }
 
 fn execute_timeline_export(
@@ -223,6 +251,19 @@ fn execute_timeline_export(
         }
 
         let (width, height) = timeline_output_resolution(job, timeline);
+        let validation_expectations = ExportValidationExpectations {
+            require_video_stream: true,
+            require_audio_stream: !matches!(&audio_input, TimelineAudioInput::Disabled),
+            expected_video: Some(ExpectedVideoConstraints {
+                width: Some(width),
+                height: Some(height),
+                fps_num: Some(range.fps_num),
+                fps_den: Some(range.fps_den),
+            }),
+            expected_duration_secs: Some(
+                range.total_frames as f64 * range.fps_den as f64 / range.fps_num.max(1) as f64,
+            ),
+        };
         let mut cmd = Command::new("ffmpeg");
         cmd.arg("-y")
             .arg("-hide_banner")
@@ -275,7 +316,7 @@ fn execute_timeline_export(
         }
 
         apply_video_codec_args(&mut cmd, &job.config.preset.video);
-        if !matches!(audio_input, TimelineAudioInput::Disabled) {
+        if !matches!(&audio_input, TimelineAudioInput::Disabled) {
             apply_audio_codec_args(&mut cmd, &job.config.preset.audio);
         }
         cmd.arg("-f")
@@ -320,7 +361,15 @@ fn execute_timeline_export(
 
         report(JobStatus::Encoding, 0.98);
         match child.wait_with_output() {
-            Ok(output) if output.status.success() => JobExecutionResult::Completed,
+            Ok(output) if output.status.success() => {
+                match validate_export_output(
+                    job.config.output_path.as_path(),
+                    &validation_expectations,
+                ) {
+                    Ok(()) => JobExecutionResult::Completed,
+                    Err(err) => JobExecutionResult::Failed(format!("导出结果校验失败: {err}")),
+                }
+            }
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let reason = stderr

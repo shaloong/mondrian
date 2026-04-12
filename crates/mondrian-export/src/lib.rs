@@ -5,6 +5,7 @@
 pub mod encoder;
 pub mod preset;
 pub mod queue;
+pub mod validator;
 
 pub use encoder::EncoderBackend;
 pub use preset::{ExportConfig, ExportInput, ExportPreset, TimelineExportInput};
