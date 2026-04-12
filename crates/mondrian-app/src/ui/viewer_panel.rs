@@ -1,6 +1,6 @@
 use crate::{
     app::AppState,
-    ui::theme::{self, palette, typography},
+    ui::theme::{self, palette, tokens, typography},
 };
 use egui::{Pos2, Rect, Sense, Ui, Vec2};
 
@@ -358,137 +358,12 @@ impl ViewerPanel {
         }
 
         ui.vertical(|ui| {
-            ui.horizontal(|ui| {
-                let total_w = ui.available_width();
-                let left_w = 150.0;
-                let right_w = 120.0;
-                let center_w = (total_w - left_w - right_w).max(120.0);
-
-                let fps = state
-                    .sequence
-                    .as_ref()
-                    .map(|s| s.settings.frame_rate)
-                    .unwrap_or(Rational::new(24, 1));
-                let tc = TimeCode::new(
-                    current_frame,
-                    Rational::new(fps.den.max(1), fps.num.max(1)),
-                );
-                ui.allocate_ui_with_layout(
-                    Vec2::new(left_w, ui.spacing().interact_size.y),
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| {
-                        ui.monospace(tc.to_smpte());
-                    },
-                );
-
-                ui.allocate_ui_with_layout(
-                    Vec2::new(center_w, ui.spacing().interact_size.y),
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| {
-                        let btn_w = 34.0;
-                        let btn_h = 22.0;
-                        let gap = 6.0;
-                        let group_w = btn_w * 5.0 + gap * 4.0;
-                        let left_pad = ((center_w - group_w) * 0.5).max(0.0);
-
-                        ui.add_space(left_pad);
-                        ui.spacing_mut().item_spacing.x = gap;
-
-                        if theme::icon_button(ui, [btn_w, btn_h], theme::UiIcon::JumpStart)
-                            .clicked()
-                        {
-                            state.jump_to_start_frame();
-                        }
-                        if theme::icon_button(ui, [btn_w, btn_h], theme::UiIcon::StepBack)
-                            .clicked()
-                        {
-                            state.step_prev_frame();
-                        }
-
-                        if theme::icon_button(
-                            ui,
-                            [btn_w, btn_h],
-                            if is_playing {
-                                theme::UiIcon::Pause
-                            } else {
-                                theme::UiIcon::Play
-                            },
-                        )
-                        .clicked()
-                        {
-                            if is_playing {
-                                state.pause();
-                            } else {
-                                state.play();
-                            }
-                        }
-
-                        if theme::icon_button(ui, [btn_w, btn_h], theme::UiIcon::StepForward)
-                            .clicked()
-                        {
-                            state.step_next_frame();
-                        }
-                        if theme::icon_button(ui, [btn_w, btn_h], theme::UiIcon::JumpEnd)
-                            .clicked()
-                        {
-                            state.jump_to_end_frame();
-                        }
-                    },
-                );
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.allocate_ui_with_layout(
-                        Vec2::new(right_w, ui.spacing().interact_size.y),
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                    // 分辨率预设快捷切换（仅显示，暂未连接逻辑）
-                    let combo_id = ui.make_persistent_id("viewer_res");
-                    let combo_open = ui.memory(|m| {
-                        m.is_popup_open(combo_id) || m.is_popup_open(combo_id.with("popup"))
-                    });
-
-                    theme::with_minimal_dropdown(ui, combo_open, |ui| {
-                        egui::ComboBox::from_id_salt("viewer_res")
-                            .selected_text(
-                                egui::RichText::new(self.preview_scale_mode.label()).color(
-                                    if combo_open {
-                                        palette::text_primary()
-                                    } else {
-                                        palette::text_muted()
-                                    },
-                                ),
-                            )
-                            .show_ui(ui, |ui| {
-                                theme::checkmark_selectable_value(
-                                    ui,
-                                    &mut self.preview_scale_mode,
-                                    PreviewScaleMode::Full,
-                                    PreviewScaleMode::Full.label(),
-                                );
-                                theme::checkmark_selectable_value(
-                                    ui,
-                                    &mut self.preview_scale_mode,
-                                    PreviewScaleMode::Half,
-                                    PreviewScaleMode::Half.label(),
-                                );
-                                theme::checkmark_selectable_value(
-                                    ui,
-                                    &mut self.preview_scale_mode,
-                                    PreviewScaleMode::Quarter,
-                                    PreviewScaleMode::Quarter.label(),
-                                );
-                            });
-                    });
-                        },
-                    );
-                });
-            });
-
-            ui.separator();
+            let controls_height = ui.spacing().interact_size.y + 14.0;
+            let canvas_height = (ui.available_height() - controls_height).max(120.0);
+            let (canvas_rect, _) =
+                ui.allocate_exact_size(Vec2::new(ui.available_width(), canvas_height), Sense::hover());
 
             // ── 视频画布 ─────────────────────
-            let available = ui.available_size();
-            let (canvas_rect, _) = ui.allocate_exact_size(available, Sense::hover());
             let aspect = state
                 .sequence
                 .as_ref()
@@ -646,6 +521,10 @@ impl ViewerPanel {
                     show_preview_perf_metrics,
                 );
             }
+
+            ui.add_space(4.0);
+            ui.separator();
+            self.draw_transport_bar(ui, state, current_frame, is_playing);
         });
 
         state.set_playback_buffering(self.playback_buffering_requested(is_playing));
@@ -755,6 +634,162 @@ impl ViewerPanel {
                 );
             },
         );
+    }
+
+    fn draw_transport_bar(
+        &mut self,
+        ui: &mut Ui,
+        state: &mut AppState,
+        current_frame: i64,
+        is_playing: bool,
+    ) {
+        ui.horizontal(|ui| {
+            let total_w = ui.available_width();
+            let left_w = 170.0;
+            let right_w = 240.0;
+            let center_w = (total_w - left_w - right_w).max(120.0);
+
+            let fps = state
+                .sequence
+                .as_ref()
+                .map(|s| s.settings.frame_rate)
+                .unwrap_or(Rational::new(24, 1));
+            let tc = TimeCode::new(current_frame, Rational::new(fps.den.max(1), fps.num.max(1)));
+
+            ui.allocate_ui_with_layout(
+                Vec2::new(left_w, ui.spacing().interact_size.y),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.monospace(tc.to_smpte());
+                },
+            );
+
+            ui.allocate_ui_with_layout(
+                Vec2::new(center_w, ui.spacing().interact_size.y),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    let btn_w = 34.0;
+                    let btn_h = 22.0;
+                    let mark_w = 30.0;
+                    let gap = 6.0;
+                    let group_w = mark_w * 2.0 + btn_w * 5.0 + gap * 6.0;
+                    let left_pad = ((center_w - group_w) * 0.5).max(0.0);
+
+                    ui.add_space(left_pad);
+                    ui.spacing_mut().item_spacing.x = gap;
+
+                    if ui
+                        .add_sized([mark_w, btn_h], egui::Button::new("I"))
+                        .on_hover_text("标记入点 (I)")
+                        .clicked()
+                    {
+                        state.mark_in_at_current_frame();
+                    }
+                    if ui
+                        .add_sized([mark_w, btn_h], egui::Button::new("O"))
+                        .on_hover_text("标记出点 (O)")
+                        .clicked()
+                    {
+                        state.mark_out_at_current_frame();
+                    }
+
+                    if theme::icon_button(ui, [btn_w, btn_h], theme::UiIcon::JumpStart).clicked() {
+                        state.jump_to_start_frame();
+                    }
+                    if theme::icon_button(ui, [btn_w, btn_h], theme::UiIcon::StepBack).clicked() {
+                        state.step_prev_frame();
+                    }
+
+                    if theme::icon_button(
+                        ui,
+                        [btn_w, btn_h],
+                        if is_playing {
+                            theme::UiIcon::Pause
+                        } else {
+                            theme::UiIcon::Play
+                        },
+                    )
+                    .clicked()
+                    {
+                        if is_playing {
+                            state.pause();
+                        } else {
+                            state.play();
+                        }
+                    }
+
+                    if theme::icon_button(ui, [btn_w, btn_h], theme::UiIcon::StepForward).clicked()
+                    {
+                        state.step_next_frame();
+                    }
+                    if theme::icon_button(ui, [btn_w, btn_h], theme::UiIcon::JumpEnd).clicked() {
+                        state.jump_to_end_frame();
+                    }
+                },
+            );
+
+            ui.allocate_ui_with_layout(
+                Vec2::new(right_w, ui.spacing().interact_size.y),
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    let combo_id = ui.make_persistent_id("viewer_res");
+                    let combo_open = ui.memory(|m| {
+                        m.is_popup_open(combo_id) || m.is_popup_open(combo_id.with("popup"))
+                    });
+
+                    theme::with_minimal_dropdown(ui, combo_open, |ui| {
+                        egui::ComboBox::from_id_salt("viewer_res")
+                            .selected_text(
+                                egui::RichText::new(self.preview_scale_mode.label()).color(
+                                    if combo_open {
+                                        palette::text_primary()
+                                    } else {
+                                        palette::text_muted()
+                                    },
+                                ),
+                            )
+                            .show_ui(ui, |ui| {
+                                theme::checkmark_selectable_value(
+                                    ui,
+                                    &mut self.preview_scale_mode,
+                                    PreviewScaleMode::Full,
+                                    PreviewScaleMode::Full.label(),
+                                );
+                                theme::checkmark_selectable_value(
+                                    ui,
+                                    &mut self.preview_scale_mode,
+                                    PreviewScaleMode::Half,
+                                    PreviewScaleMode::Half.label(),
+                                );
+                                theme::checkmark_selectable_value(
+                                    ui,
+                                    &mut self.preview_scale_mode,
+                                    PreviewScaleMode::Quarter,
+                                    PreviewScaleMode::Quarter.label(),
+                                );
+                            });
+                    });
+
+                    let resolution_fps_text = state
+                        .sequence
+                        .as_ref()
+                        .map(|s| {
+                            format!(
+                                "{}x{} @ {:.2}fps",
+                                s.settings.resolution.width,
+                                s.settings.resolution.height,
+                                s.settings.frame_rate.to_f64()
+                            )
+                        })
+                        .unwrap_or_else(|| "--x-- @ --fps".to_string());
+                    ui.label(
+                        egui::RichText::new(resolution_fps_text)
+                            .size(tokens::list_proxy_tag_font_size())
+                            .color(palette::text_muted()),
+                    );
+                },
+            );
+        });
     }
 
     fn request_decode(&mut self, request: DecodeRequest, is_playing: bool) {

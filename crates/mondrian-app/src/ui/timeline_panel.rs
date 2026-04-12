@@ -319,53 +319,13 @@ impl TimelinePanel {
                 state.set_clip_overlap_mode(overlap_mode);
             }
             ui.separator();
-
-            if ui.button("标记入点 (I)").clicked() {
-                state.mark_in_at_current_frame();
-            }
-            if ui.button("标记出点 (O)").clicked() {
-                state.mark_out_at_current_frame();
-            }
-
-            if ui.button("分割 (Ctrl+B)").clicked() {
-                let _ = state.split_at_playhead();
-            }
-
-            let has_selection = !self.selected_clips.is_empty();
-            let has_single_selection = self.selected_clips.len() == 1;
-            if ui.add_enabled(has_selection, egui::Button::new("修剪入点到播放头")).clicked()
-            {
-                self.trim_selected_clips_to_playhead(state, TrimEdge::In);
-            }
-            if ui.add_enabled(has_selection, egui::Button::new("修剪出点到播放头")).clicked()
-            {
-                self.trim_selected_clips_to_playhead(state, TrimEdge::Out);
-            }
-            if ui
-                .add_enabled(has_single_selection, egui::Button::new("滚动切点到播放头"))
-                .clicked()
-            {
-                self.roll_selected_cut_to_playhead(state);
-            }
-            if ui.add_enabled(has_selection, egui::Button::new("滑移 -1 帧")).clicked() {
-                self.slip_selected_clips_by_frames(state, -1);
-            }
-            if ui.add_enabled(has_selection, egui::Button::new("滑移 +1 帧")).clicked() {
-                self.slip_selected_clips_by_frames(state, 1);
-            }
-            if ui.add_enabled(has_selection, egui::Button::new("滑动 -1 帧")).clicked() {
-                self.slide_selected_clips_by_frames(state, -1);
-            }
-            if ui.add_enabled(has_selection, egui::Button::new("滑动 +1 帧")).clicked() {
-                self.slide_selected_clips_by_frames(state, 1);
-            }
-
-            ui.separator();
-            let out_label = state
-                .out_point_frame()
-                .map(|f| f.to_string())
-                .unwrap_or_else(|| "-".to_string());
-            ui.label(format!("In:{}  Out:{}", state.in_point_frame(), out_label));
+            ui.label(
+                egui::RichText::new(
+                    "精修动作请用右键菜单 / 快捷键（I、O、Ctrl+B、Alt+←/→、Alt+Shift+←/→）",
+                )
+                .size(tokens::list_proxy_tag_font_size())
+                .color(palette::text_muted()),
+            );
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add(
@@ -852,22 +812,6 @@ impl TimelinePanel {
                         self.roll_selected_cut_to_playhead(state);
                         ui.close_menu();
                     }
-                    if ui.button("滑移 -1 帧").clicked() {
-                        self.slip_selected_clips_by_frames(state, -1);
-                        ui.close_menu();
-                    }
-                    if ui.button("滑移 +1 帧").clicked() {
-                        self.slip_selected_clips_by_frames(state, 1);
-                        ui.close_menu();
-                    }
-                    if ui.button("滑动 -1 帧").clicked() {
-                        self.slide_selected_clips_by_frames(state, -1);
-                        ui.close_menu();
-                    }
-                    if ui.button("滑动 +1 帧").clicked() {
-                        self.slide_selected_clips_by_frames(state, 1);
-                        ui.close_menu();
-                    }
                     let all_disabled = self.selected_clips_all_disabled(state);
                     let toggle_label = if all_disabled {
                         "启用片段"
@@ -1141,22 +1085,6 @@ impl TimelinePanel {
             }
             if ui.button("滚动已选切点到播放头").clicked() {
                 self.roll_selected_cut_to_playhead(state);
-                ui.close_menu();
-            }
-            if ui.button("滑移已选 -1 帧").clicked() {
-                self.slip_selected_clips_by_frames(state, -1);
-                ui.close_menu();
-            }
-            if ui.button("滑移已选 +1 帧").clicked() {
-                self.slip_selected_clips_by_frames(state, 1);
-                ui.close_menu();
-            }
-            if ui.button("滑动已选 -1 帧").clicked() {
-                self.slide_selected_clips_by_frames(state, -1);
-                ui.close_menu();
-            }
-            if ui.button("滑动已选 +1 帧").clicked() {
-                self.slide_selected_clips_by_frames(state, 1);
                 ui.close_menu();
             }
             let all_disabled = self.selected_clips_all_disabled(state);
