@@ -124,18 +124,18 @@ impl Sequence {
     }
 
     pub fn add_video_track(&mut self) -> TrackId {
-        let name = format!("V{}", self.video_tracks.len() + 1);
-        let track = Track::new_video(name);
+        let track = Track::new_video("");
         let id = track.id;
         self.video_tracks.push(track);
+        self.normalize_track_names();
         id
     }
 
     pub fn add_audio_track(&mut self) -> TrackId {
-        let name = format!("A{}", self.audio_tracks.len() + 1);
-        let track = Track::new_audio(name);
+        let track = Track::new_audio("");
         let id = track.id;
         self.audio_tracks.push(track);
+        self.normalize_track_names();
         id
     }
 
@@ -149,6 +149,7 @@ impl Sequence {
 
         if let Some(index) = self.video_tracks.iter().position(|track| track.id == id) {
             self.video_tracks.remove(index);
+            self.normalize_track_names();
             Ok(())
         } else {
             Err(mondrian_core::MondrianError::TrackNotFound { track_id: id.to_string() })
@@ -165,10 +166,54 @@ impl Sequence {
 
         if let Some(index) = self.audio_tracks.iter().position(|track| track.id == id) {
             self.audio_tracks.remove(index);
+            self.normalize_track_names();
             Ok(())
         } else {
             Err(mondrian_core::MondrianError::TrackNotFound { track_id: id.to_string() })
         }
+    }
+
+    pub fn move_video_track(&mut self, id: TrackId, new_index: usize) -> mondrian_core::Result<()> {
+        move_track_in_list(&mut self.video_tracks, id, new_index)?;
+        self.normalize_track_names();
+        Ok(())
+    }
+
+    pub fn move_audio_track(&mut self, id: TrackId, new_index: usize) -> mondrian_core::Result<()> {
+        move_track_in_list(&mut self.audio_tracks, id, new_index)?;
+        self.normalize_track_names();
+        Ok(())
+    }
+
+    pub fn normalize_track_names(&mut self) {
+        renumber_tracks(&mut self.video_tracks, "V");
+        renumber_tracks(&mut self.audio_tracks, "A");
+    }
+}
+
+fn move_track_in_list(
+    tracks: &mut Vec<Track>,
+    id: TrackId,
+    new_index: usize,
+) -> mondrian_core::Result<()> {
+    let current_index = tracks
+        .iter()
+        .position(|track| track.id == id)
+        .ok_or_else(|| mondrian_core::MondrianError::TrackNotFound { track_id: id.to_string() })?;
+
+    let clamped_index = new_index.min(tracks.len().saturating_sub(1));
+    if current_index == clamped_index {
+        return Ok(());
+    }
+
+    let track = tracks.remove(current_index);
+    tracks.insert(clamped_index, track);
+    Ok(())
+}
+
+fn renumber_tracks(tracks: &mut [Track], prefix: &str) {
+    for (index, track) in tracks.iter_mut().enumerate() {
+        track.name = format!("{prefix}{}", index + 1);
     }
 }
 
@@ -230,5 +275,37 @@ mod tests {
         let active = seq.active_clips_at(TimeCode::new(10, tb));
         assert_eq!(active.len(), 1);
         assert!((active[0].opacity - 0.7).abs() < 0.01);
+    }
+
+    #[test]
+    fn removing_track_renumbers_remaining_tracks() {
+        let mut seq = Sequence::new("Track Names");
+        let removed_id = seq.video_tracks[1].id;
+        let last_id = seq.video_tracks[2].id;
+
+        seq.remove_video_track(removed_id).expect("remove middle video track");
+
+        assert_eq!(seq.video_tracks.len(), 2);
+        assert_eq!(seq.video_tracks[0].name, "V1");
+        assert_eq!(seq.video_tracks[1].name, "V2");
+        assert_eq!(seq.video_tracks[1].id, last_id);
+    }
+
+    #[test]
+    fn moving_track_preserves_track_identity_and_clips() {
+        let mut seq = Sequence::new("Track Move");
+        let tb = seq.time_base();
+        let moved_id = seq.video_tracks[2].id;
+        let clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+        let clip_id = clip.id;
+        seq.video_tracks[2].add_clip(clip).expect("add clip to track");
+
+        seq.move_video_track(moved_id, 0).expect("move track to top");
+
+        assert_eq!(seq.video_tracks[0].id, moved_id);
+        assert_eq!(seq.video_tracks[0].name, "V1");
+        assert_eq!(seq.video_tracks[0].clips[0].id, clip_id);
+        assert_eq!(seq.video_tracks[1].name, "V2");
+        assert_eq!(seq.video_tracks[2].name, "V3");
     }
 }

@@ -745,6 +745,7 @@ impl AppState {
             if seq.audio_tracks.is_empty() {
                 seq.audio_tracks.push(mondrian_timeline::track::Track::new_audio("A1"));
             }
+            seq.normalize_track_names();
         }
     }
 
@@ -921,10 +922,37 @@ impl AppState {
             } else {
                 seq.remove_audio_track(track_id)?;
             }
+            clear_broken_links(seq);
             before
         };
 
         self.record_timeline_edit_snapshot("删除轨道", before);
+        Ok(())
+    }
+
+    pub fn move_track(
+        &mut self,
+        track_id: TrackId,
+        is_video: bool,
+        new_index: usize,
+    ) -> mondrian_core::Result<()> {
+        let before = {
+            let seq = self.sequence.as_mut().ok_or_else(|| {
+                mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "move_track".to_string(),
+                    reason: "当前无项目".to_string(),
+                }
+            })?;
+            let before = seq.clone();
+            if is_video {
+                seq.move_video_track(track_id, new_index)?;
+            } else {
+                seq.move_audio_track(track_id, new_index)?;
+            }
+            before
+        };
+
+        self.record_timeline_edit_snapshot("移动轨道", before);
         Ok(())
     }
 
@@ -5063,6 +5091,69 @@ mod timeline_edit_tests {
         assert_eq!(audio_after.duration.frame, 21);
         assert_eq!(video_after.source_out.frame, 21);
         assert_eq!(audio_after.source_out.frame, 21);
+    }
+
+    #[test]
+    fn removing_track_renumbers_tracks_and_clears_broken_links() {
+        let mut state = create_state_with_sequence();
+        let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
+
+        let mut video = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(20, tb));
+        let mut audio = Clip::new(video.asset_id, TimeCode::new(0, tb), TimeCode::new(20, tb));
+        let video_id = video.id;
+        let audio_id = audio.id;
+        video.linked_clip = Some(audio_id);
+        audio.linked_clip = Some(video_id);
+
+        {
+            let seq = state.sequence.as_mut().expect("sequence should exist");
+            seq.video_tracks[1].add_clip(video).expect("add video");
+            seq.audio_tracks[1].add_clip(audio).expect("add audio");
+        }
+
+        let removed_track_id =
+            state.sequence.as_ref().expect("sequence should exist").video_tracks[1].id;
+        state.remove_track(removed_track_id, true).expect("remove track");
+
+        let seq = state.sequence.as_ref().expect("sequence should exist");
+        assert_eq!(seq.video_tracks.len(), 2);
+        assert_eq!(seq.video_tracks[0].name, "V1");
+        assert_eq!(seq.video_tracks[1].name, "V2");
+
+        let audio_after = seq.audio_tracks[1]
+            .clips
+            .iter()
+            .find(|clip| clip.id == audio_id)
+            .expect("audio clip should remain");
+        assert_eq!(audio_after.linked_clip, None);
+    }
+
+    #[test]
+    fn moving_track_is_undoable_and_preserves_clips() {
+        let mut state = create_state_with_sequence();
+        let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
+        let moved_track_id =
+            state.sequence.as_ref().expect("sequence should exist").video_tracks[2].id;
+        let clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+        let clip_id = clip.id;
+        state.sequence.as_mut().expect("sequence should exist").video_tracks[2]
+            .add_clip(clip)
+            .expect("add clip");
+
+        state.move_track(moved_track_id, true, 0).expect("move track");
+
+        let seq = state.sequence.as_ref().expect("sequence should exist");
+        assert_eq!(seq.video_tracks[0].id, moved_track_id);
+        assert_eq!(seq.video_tracks[0].name, "V1");
+        assert_eq!(seq.video_tracks[0].clips[0].id, clip_id);
+        assert_eq!(seq.video_tracks[1].name, "V2");
+        assert_eq!(seq.video_tracks[2].name, "V3");
+        assert_eq!(state.cmd_history.undo_description(), Some("移动轨道"));
+
+        assert!(state.undo_timeline().expect("undo should succeed"));
+        let seq_undo = state.sequence.as_ref().expect("sequence should exist after undo");
+        assert_eq!(seq_undo.video_tracks[2].id, moved_track_id);
+        assert_eq!(seq_undo.video_tracks[2].clips[0].id, clip_id);
     }
 
     #[test]
