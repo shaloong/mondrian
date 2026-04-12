@@ -221,7 +221,7 @@ fn collect_timeline_asset_paths(
     let library = state.asset_library.as_ref().ok_or_else(|| "素材库未连接".to_string())?;
 
     let mut asset_ids = HashSet::new();
-    for track in &sequence.video_tracks {
+    for track in sequence.video_tracks.iter().chain(sequence.audio_tracks.iter()) {
         for clip in &track.clips {
             if clip.is_disabled {
                 continue;
@@ -236,10 +236,6 @@ fn collect_timeline_asset_paths(
             .get_asset(asset_id)
             .map_err(|err| format!("读取素材 {} 失败: {}", asset_id, err))?
             .ok_or_else(|| format!("素材不存在: {}", asset_id))?;
-
-        if !matches!(asset.kind, mondrian_assets::AssetKind::Video) {
-            continue;
-        }
 
         if !asset.path.exists() {
             return Err(format!("素材离线: {}", asset.path.display()));

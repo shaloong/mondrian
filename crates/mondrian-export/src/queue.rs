@@ -5,12 +5,15 @@ use crate::preset::{
 };
 use chrono::{DateTime, Utc};
 use mondrian_core::types::{JobId, TimeCode};
+use mondrian_media::audio::{
+    AudioBuffer, AudioMixer, AudioSourceCache, AudioTrackConfig, AudioTrackData,
+};
 use mondrian_media::decode_video_frame_at_time_rgba_scaled;
 use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
@@ -114,6 +117,19 @@ struct TimelineRenderRange {
     fps_den: i64,
 }
 
+enum TimelineAudioInput {
+    PcmFile {
+        path: PathBuf,
+        sample_rate: u32,
+        channels: u8,
+    },
+    Silent {
+        sample_rate: u32,
+        channels: u8,
+    },
+    Disabled,
+}
+
 fn execute_file_export(
     job: &RenderJob,
     input_path: &Path,
@@ -176,119 +192,406 @@ fn execute_timeline_export(
     cancel: &AtomicBool,
     report: &mut dyn FnMut(JobStatus, f32),
 ) -> JobExecutionResult {
-    if cancel.load(Ordering::Relaxed) {
-        return JobExecutionResult::Cancelled;
-    }
-
-    for (asset_id, path) in &timeline.asset_paths {
-        if !path.exists() {
-            return JobExecutionResult::Failed(format!(
-                "时间线素材离线：asset={} path={}",
-                asset_id,
-                path.display()
-            ));
+    let mut temp_audio_path_to_cleanup: Option<PathBuf> = None;
+    let result = (|| {
+        if cancel.load(Ordering::Relaxed) {
+            return JobExecutionResult::Cancelled;
         }
-    }
 
-    let range = compute_timeline_render_range(timeline);
-    if range.total_frames == 0 {
-        return JobExecutionResult::Failed("时间线导出范围为空".to_string());
-    }
+        for (asset_id, path) in &timeline.asset_paths {
+            if !path.exists() {
+                return JobExecutionResult::Failed(format!(
+                    "时间线素材离线：asset={} path={}",
+                    asset_id,
+                    path.display()
+                ));
+            }
+        }
 
-    let (width, height) = timeline_output_resolution(job, timeline);
-    let mut cmd = Command::new("ffmpeg");
-    cmd.arg("-y")
-        .arg("-hide_banner")
-        .arg("-loglevel")
-        .arg("error")
-        .arg("-f")
-        .arg("rawvideo")
-        .arg("-pix_fmt")
-        .arg("rgba")
-        .arg("-s")
-        .arg(format!("{width}x{height}"))
-        .arg("-r")
-        .arg(format!("{}/{}", range.fps_num, range.fps_den))
-        .arg("-i")
-        .arg("pipe:0");
+        let range = compute_timeline_render_range(timeline);
+        if range.total_frames == 0 {
+            return JobExecutionResult::Failed("时间线导出范围为空".to_string());
+        }
 
-    let include_audio = !matches!(job.config.preset.container, Container::Gif);
-    if include_audio {
-        let sample_rate = timeline.sequence.settings.audio_sample_rate.max(8_000);
-        cmd.arg("-f")
-            .arg("lavfi")
+        let audio_input = prepare_timeline_audio_input(job, timeline, range, cancel, report);
+        let audio_input = match audio_input {
+            Ok(input) => input,
+            Err(outcome) => return outcome,
+        };
+        if let TimelineAudioInput::PcmFile { path, .. } = &audio_input {
+            temp_audio_path_to_cleanup = Some(path.clone());
+        }
+
+        let (width, height) = timeline_output_resolution(job, timeline);
+        let mut cmd = Command::new("ffmpeg");
+        cmd.arg("-y")
+            .arg("-hide_banner")
+            .arg("-loglevel")
+            .arg("error")
+            .arg("-f")
+            .arg("rawvideo")
+            .arg("-pix_fmt")
+            .arg("rgba")
+            .arg("-s")
+            .arg(format!("{width}x{height}"))
+            .arg("-r")
+            .arg(format!("{}/{}", range.fps_num, range.fps_den))
             .arg("-i")
-            .arg(format!(
-                "anullsrc=channel_layout=stereo:sample_rate={sample_rate}"
-            ))
-            .arg("-map")
-            .arg("0:v:0")
-            .arg("-map")
-            .arg("1:a:0")
-            .arg("-shortest");
-    } else {
-        cmd.arg("-an");
-    }
+            .arg("pipe:0");
 
-    apply_video_codec_args(&mut cmd, &job.config.preset.video);
-    if include_audio {
-        apply_audio_codec_args(&mut cmd, &job.config.preset.audio);
-    }
-    cmd.arg("-f")
-        .arg(container_format(&job.config.preset.container))
-        .arg(&job.config.output_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-
-    let mut child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(err) => {
-            return JobExecutionResult::Failed(format!("无法启动 ffmpeg: {}", err));
+        match &audio_input {
+            TimelineAudioInput::PcmFile { path, sample_rate, channels } => {
+                cmd.arg("-f")
+                    .arg("f32le")
+                    .arg("-ar")
+                    .arg(sample_rate.to_string())
+                    .arg("-ac")
+                    .arg(channels.to_string())
+                    .arg("-i")
+                    .arg(path)
+                    .arg("-map")
+                    .arg("0:v:0")
+                    .arg("-map")
+                    .arg("1:a:0")
+                    .arg("-shortest");
+            }
+            TimelineAudioInput::Silent { sample_rate, channels } => {
+                let channel_layout = if *channels <= 1 { "mono" } else { "stereo" };
+                cmd.arg("-f")
+                    .arg("lavfi")
+                    .arg("-i")
+                    .arg(format!(
+                        "anullsrc=channel_layout={channel_layout}:sample_rate={sample_rate}"
+                    ))
+                    .arg("-map")
+                    .arg("0:v:0")
+                    .arg("-map")
+                    .arg("1:a:0")
+                    .arg("-shortest");
+            }
+            TimelineAudioInput::Disabled => {
+                cmd.arg("-an");
+            }
         }
-    };
 
-    let Some(stdin) = child.stdin.take() else {
-        let _ = child.kill();
-        let _ = child.wait();
-        return JobExecutionResult::Failed("ffmpeg stdin 管道不可用".to_string());
-    };
+        apply_video_codec_args(&mut cmd, &job.config.preset.video);
+        if !matches!(audio_input, TimelineAudioInput::Disabled) {
+            apply_audio_codec_args(&mut cmd, &job.config.preset.audio);
+        }
+        cmd.arg("-f")
+            .arg(container_format(&job.config.preset.container))
+            .arg(&job.config.output_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
 
-    match write_timeline_frames(stdin, timeline, range, width, height, cancel, report) {
-        JobExecutionResult::Completed => {}
-        JobExecutionResult::Cancelled => {
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(err) => {
+                return JobExecutionResult::Failed(format!("无法启动 ffmpeg: {}", err));
+            }
+        };
+
+        let Some(stdin) = child.stdin.take() else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return JobExecutionResult::Failed("ffmpeg stdin 管道不可用".to_string());
+        };
+
+        match write_timeline_frames(stdin, timeline, range, width, height, cancel, report) {
+            JobExecutionResult::Completed => {}
+            JobExecutionResult::Cancelled => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return JobExecutionResult::Cancelled;
+            }
+            JobExecutionResult::Failed(reason) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return JobExecutionResult::Failed(reason);
+            }
+        }
+
+        if cancel.load(Ordering::Relaxed) {
             let _ = child.kill();
             let _ = child.wait();
             return JobExecutionResult::Cancelled;
         }
-        JobExecutionResult::Failed(reason) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return JobExecutionResult::Failed(reason);
+
+        report(JobStatus::Encoding, 0.98);
+        match child.wait_with_output() {
+            Ok(output) if output.status.success() => JobExecutionResult::Completed,
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let reason = stderr
+                    .lines()
+                    .rev()
+                    .find(|line| !line.trim().is_empty())
+                    .map(|line| line.trim().to_string())
+                    .unwrap_or_else(|| format!("ffmpeg 退出码：{}", output.status));
+                JobExecutionResult::Failed(format!("时间线编码失败：{reason}"))
+            }
+            Err(err) => JobExecutionResult::Failed(format!("等待 ffmpeg 结束失败: {}", err)),
+        }
+    })();
+
+    if let Some(path) = temp_audio_path_to_cleanup {
+        let _ = std::fs::remove_file(path);
+    }
+    result
+}
+
+fn prepare_timeline_audio_input(
+    job: &RenderJob,
+    timeline: &TimelineExportInput,
+    range: TimelineRenderRange,
+    cancel: &AtomicBool,
+    report: &mut dyn FnMut(JobStatus, f32),
+) -> Result<TimelineAudioInput, JobExecutionResult> {
+    if matches!(job.config.preset.container, Container::Gif) {
+        return Ok(TimelineAudioInput::Disabled);
+    }
+
+    let sample_rate = timeline.sequence.settings.audio_sample_rate.max(8_000);
+    let channels = timeline.sequence.settings.audio_channels.clamp(1, 2);
+    if !timeline_has_audio_content(timeline, range) {
+        return Ok(TimelineAudioInput::Silent { sample_rate, channels });
+    }
+
+    let temp_path = std::env::temp_dir().join(format!(
+        "mondrian-export-audio-{}-{}.f32",
+        job.id,
+        Utc::now().timestamp_millis()
+    ));
+
+    match render_timeline_audio_to_pcm_f32(
+        temp_path.as_path(),
+        timeline,
+        range,
+        sample_rate,
+        channels,
+        cancel,
+        report,
+    ) {
+        JobExecutionResult::Completed => {
+            Ok(TimelineAudioInput::PcmFile { path: temp_path, sample_rate, channels })
+        }
+        JobExecutionResult::Cancelled => Err(JobExecutionResult::Cancelled),
+        JobExecutionResult::Failed(reason) => Err(JobExecutionResult::Failed(reason)),
+    }
+}
+
+fn timeline_has_audio_content(timeline: &TimelineExportInput, range: TimelineRenderRange) -> bool {
+    let seq = &timeline.sequence;
+    let has_solo = seq.audio_tracks.iter().any(|t| t.is_solo && !t.is_muted);
+    let start = range.start_frame;
+    let end_exclusive = start.saturating_add(range.total_frames as i64);
+
+    for track in &seq.audio_tracks {
+        if track.is_muted || (has_solo && !track.is_solo) {
+            continue;
+        }
+        for clip in &track.clips {
+            if clip.is_disabled {
+                continue;
+            }
+            if !timeline.asset_paths.contains_key(&clip.asset_id) {
+                continue;
+            }
+
+            let clip_start = clip.position.frame;
+            let clip_end = clip.end_position().frame;
+            if clip_end > start && clip_start < end_exclusive {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn render_timeline_audio_to_pcm_f32(
+    output_path: &Path,
+    timeline: &TimelineExportInput,
+    range: TimelineRenderRange,
+    sample_rate: u32,
+    channels: u8,
+    cancel: &AtomicBool,
+    report: &mut dyn FnMut(JobStatus, f32),
+) -> JobExecutionResult {
+    let file = match std::fs::File::create(output_path) {
+        Ok(file) => file,
+        Err(err) => {
+            return JobExecutionResult::Failed(format!(
+                "创建临时音频文件失败 {}: {}",
+                output_path.display(),
+                err
+            ));
+        }
+    };
+    let mut writer = BufWriter::new(file);
+    let cache = AudioSourceCache::new(sample_rate, channels);
+    let mixer = AudioMixer::new(sample_rate, channels);
+
+    let total_samples = timeline_total_audio_samples(range, sample_rate);
+    if total_samples == 0 {
+        return JobExecutionResult::Completed;
+    }
+
+    let chunk_frames_target = (sample_rate as usize / 5).clamp(1024, 16_384);
+    let timeline_start_secs =
+        range.start_frame.max(0) as f64 * range.fps_den as f64 / range.fps_num.max(1) as f64;
+
+    let mut rendered_samples = 0usize;
+    let mut sample_bytes = Vec::<u8>::with_capacity(chunk_frames_target * channels as usize * 4);
+
+    while rendered_samples < total_samples {
+        if cancel.load(Ordering::Relaxed) {
+            return JobExecutionResult::Cancelled;
+        }
+
+        let remaining = total_samples - rendered_samples;
+        let chunk_frames = remaining.min(chunk_frames_target).max(1);
+        let chunk_start_secs = timeline_start_secs + rendered_samples as f64 / sample_rate as f64;
+        let chunk = match render_timeline_audio_chunk(
+            timeline,
+            &cache,
+            &mixer,
+            chunk_start_secs,
+            chunk_frames,
+            sample_rate,
+            channels,
+        ) {
+            Ok(buffer) => buffer,
+            Err(err) => return JobExecutionResult::Failed(err),
+        };
+
+        sample_bytes.clear();
+        sample_bytes.reserve(chunk.samples.len() * 4);
+        for sample in &chunk.samples {
+            sample_bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        if let Err(err) = writer.write_all(&sample_bytes) {
+            return JobExecutionResult::Failed(format!("写入临时音频文件失败: {}", err));
+        }
+
+        rendered_samples += chunk_frames;
+        let ratio = rendered_samples as f32 / total_samples as f32;
+        let progress = (0.02 + 0.14 * ratio).clamp(0.02, 0.16);
+        report(JobStatus::Encoding, progress);
+    }
+
+    if let Err(err) = writer.flush() {
+        return JobExecutionResult::Failed(format!("刷新临时音频文件失败: {}", err));
+    }
+    JobExecutionResult::Completed
+}
+
+fn timeline_total_audio_samples(range: TimelineRenderRange, sample_rate: u32) -> usize {
+    if range.total_frames == 0 || sample_rate == 0 {
+        return 0;
+    }
+    let seconds = range.total_frames as f64 * range.fps_den as f64 / range.fps_num.max(1) as f64;
+    (seconds * sample_rate as f64).round().max(0.0) as usize
+}
+
+fn render_timeline_audio_chunk(
+    timeline: &TimelineExportInput,
+    cache: &AudioSourceCache,
+    mixer: &AudioMixer,
+    window_start_secs: f64,
+    chunk_frames: usize,
+    sample_rate: u32,
+    channels: u8,
+) -> Result<AudioBuffer, String> {
+    let seq = &timeline.sequence;
+    let chunk_duration_secs = chunk_frames as f64 / sample_rate.max(1) as f64;
+    let window_end_secs = window_start_secs + chunk_duration_secs;
+    let has_solo = seq.audio_tracks.iter().any(|t| t.is_solo && !t.is_muted);
+    let mut tracks = Vec::<AudioTrackData>::new();
+
+    for track in &seq.audio_tracks {
+        if track.is_muted || (has_solo && !track.is_solo) {
+            continue;
+        }
+
+        for clip in &track.clips {
+            if clip.is_disabled {
+                continue;
+            }
+
+            let Some(path) = timeline.asset_paths.get(&clip.asset_id) else {
+                continue;
+            };
+            let clip_start_secs = clip.position.to_secs();
+            let clip_end_secs = clip.end_position().to_secs();
+            let overlap_start = window_start_secs.max(clip_start_secs);
+            let overlap_end = window_end_secs.min(clip_end_secs);
+            if overlap_end <= overlap_start {
+                continue;
+            }
+
+            let decoded = cache.get_or_decode(path.as_path()).map_err(|err| {
+                format!(
+                    "解码音频失败 asset={} path={} err={}",
+                    clip.asset_id,
+                    path.display(),
+                    err
+                )
+            })?;
+
+            let overlap_tc = TimeCode::from_secs(overlap_start, seq.settings.frame_rate);
+            let source_start_secs = clip.timeline_to_source_time(overlap_tc).to_secs().max(0.0);
+            let source_start_frame = (source_start_secs * sample_rate as f64).floor() as usize;
+            let segment_frames =
+                ((overlap_end - overlap_start) * sample_rate as f64).ceil().max(1.0) as usize;
+            let segment = decoded.slice_frames(source_start_frame, segment_frames);
+            if segment.samples.is_empty() {
+                continue;
+            }
+
+            let place_offset = ((overlap_start - window_start_secs) * sample_rate as f64)
+                .round()
+                .max(0.0) as usize;
+            let mut placed = AudioBuffer::silent(sample_rate, channels, chunk_frames);
+            let max_place_frames = chunk_frames.saturating_sub(place_offset);
+            let copy_frames = segment.frame_count().min(max_place_frames);
+
+            let dst_channels = channels as usize;
+            let src_channels = segment.channels as usize;
+            for frame in 0..copy_frames {
+                let dst_base = (place_offset + frame) * dst_channels;
+                let src_base = frame * src_channels;
+                for ch in 0..dst_channels {
+                    let src_ch = ch.min(src_channels.saturating_sub(1));
+                    let sample = segment.samples.get(src_base + src_ch).copied().unwrap_or(0.0);
+                    placed.samples[dst_base + ch] = sample;
+                }
+            }
+
+            tracks.push(AudioTrackData {
+                buffer: placed,
+                config: AudioTrackConfig {
+                    volume: 1.0,
+                    pan: 0.0,
+                    is_muted: false,
+                    is_solo: false,
+                },
+            });
         }
     }
 
-    if cancel.load(Ordering::Relaxed) {
-        let _ = child.kill();
-        let _ = child.wait();
-        return JobExecutionResult::Cancelled;
+    if tracks.is_empty() {
+        return Ok(AudioBuffer::silent(sample_rate, channels, chunk_frames));
     }
 
-    report(JobStatus::Encoding, 0.98);
-    match child.wait_with_output() {
-        Ok(output) if output.status.success() => JobExecutionResult::Completed,
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let reason = stderr
-                .lines()
-                .rev()
-                .find(|line| !line.trim().is_empty())
-                .map(|line| line.trim().to_string())
-                .unwrap_or_else(|| format!("ffmpeg 退出码：{}", output.status));
-            JobExecutionResult::Failed(format!("时间线编码失败：{reason}"))
-        }
-        Err(err) => JobExecutionResult::Failed(format!("等待 ffmpeg 结束失败: {}", err)),
+    let mut mixed = mixer.mix(&tracks);
+    let mixed_frames = mixed.frame_count();
+    if mixed_frames < chunk_frames {
+        mixed.samples.resize(chunk_frames * channels as usize, 0.0);
+    } else if mixed_frames > chunk_frames {
+        mixed.samples.truncate(chunk_frames.saturating_mul(channels as usize));
     }
+    Ok(mixed)
 }
 
 fn write_timeline_frames(
@@ -325,7 +628,7 @@ fn write_timeline_frames(
 
         let rendered = index + 1;
         let ratio = rendered as f32 / total as f32;
-        let progress = (0.03 + 0.9 * ratio).clamp(0.03, 0.95);
+        let progress = (0.18 + 0.72 * ratio).clamp(0.18, 0.92);
         report(
             JobStatus::Rendering { frame: rendered, total_frames: total },
             progress,
@@ -1102,6 +1405,38 @@ mod tests {
         let range = compute_timeline_render_range(&timeline);
         assert_eq!(range.start_frame, 40);
         assert_eq!(range.total_frames, 60);
+    }
+
+    #[test]
+    fn timeline_has_audio_content_detects_overlap() {
+        let mut seq = Sequence::new("audio-range-test");
+        let tb = seq.time_base();
+        let asset_id = AssetId::new();
+        let clip = Clip::new(asset_id, TimeCode::new(25, tb), TimeCode::new(20, tb));
+        seq.audio_tracks[0].add_clip(clip).expect("add audio clip");
+
+        let mut asset_paths = HashMap::new();
+        asset_paths.insert(asset_id, PathBuf::from("dummy-audio.wav"));
+        let timeline = TimelineExportInput {
+            sequence: seq,
+            asset_paths,
+            in_point_frame: Some(30),
+            out_point_frame: Some(40),
+        };
+
+        let range = compute_timeline_render_range(&timeline);
+        assert!(timeline_has_audio_content(&timeline, range));
+    }
+
+    #[test]
+    fn timeline_total_audio_samples_matches_frame_duration() {
+        let range = TimelineRenderRange {
+            start_frame: 0,
+            total_frames: 50,
+            fps_num: 25,
+            fps_den: 1,
+        };
+        assert_eq!(timeline_total_audio_samples(range, 48_000), 96_000);
     }
 
     #[test]
