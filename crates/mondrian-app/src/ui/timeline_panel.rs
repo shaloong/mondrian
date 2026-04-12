@@ -753,7 +753,8 @@ impl TimelinePanel {
 
                 if clip_resp.drag_started() {
                     let shift_pressed = ui.input(|i| i.modifiers.shift);
-                    if !shift_pressed {
+                    let already_selected = self.selected_clips.contains(&selection);
+                    if !shift_pressed && !already_selected {
                         self.selected_clips.clear();
                     }
                     self.selected_clips.insert(selection);

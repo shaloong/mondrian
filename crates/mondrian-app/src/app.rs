@@ -2220,6 +2220,7 @@ impl AppState {
                     resolve_track_conflicts(audio_track, audio_clip_id, overlap_mode);
                 }
             }
+            clear_broken_links(seq);
 
             (seq.id, clip_id, start_frame, before, seq.clone())
         };
@@ -2286,6 +2287,7 @@ impl AppState {
             })?;
             track.add_clip(clip)?;
             resolve_track_conflicts(track, clip_id, overlap_mode);
+            clear_broken_links(seq);
 
             (seq.id, clip_id, start_frame, before, seq.clone())
         };
@@ -2509,6 +2511,7 @@ impl AppState {
         for track in &mut seq.audio_tracks {
             track.clips.sort_by_key(|c| c.position.frame);
         }
+        clear_broken_links(seq);
 
         Ok(())
     }
@@ -3380,6 +3383,145 @@ fn resolve_track_overlaps(track: &mut mondrian_timeline::track::Track) {
     }
 }
 
+fn merge_ranges(mut ranges: Vec<(i64, i64)>) -> Vec<(i64, i64)> {
+    ranges.retain(|(start, end)| end > start);
+    if ranges.is_empty() {
+        return ranges;
+    }
+    ranges.sort_by_key(|(start, _)| *start);
+
+    let mut merged = Vec::with_capacity(ranges.len());
+    for (start, end) in ranges {
+        if let Some((_, last_end)) = merged.last_mut() {
+            if start <= *last_end {
+                *last_end = (*last_end).max(end);
+                continue;
+            }
+        }
+        merged.push((start, end));
+    }
+    merged
+}
+
+fn subtract_overwrite_range_from_clip(
+    clip: Clip,
+    overlap_start: i64,
+    overlap_end: i64,
+) -> Vec<Clip> {
+    if overlap_end <= overlap_start {
+        return vec![clip];
+    }
+
+    let clip_start = clip.position.frame;
+    let clip_end = clip.end_position().frame;
+    let cut_start = overlap_start.max(clip_start);
+    let cut_end = overlap_end.min(clip_end);
+    if cut_end <= cut_start {
+        return vec![clip];
+    }
+    if cut_start <= clip_start && cut_end >= clip_end {
+        return Vec::new();
+    }
+
+    if cut_start <= clip_start {
+        let mut right = clip;
+        let new_start = cut_end.max(clip_start);
+        let new_source_in =
+            right.timeline_to_source_time(TimeCode::new(new_start, right.position.time_base));
+        right.position = TimeCode::new(new_start, right.position.time_base);
+        right.duration = TimeCode::new((clip_end - new_start).max(0), right.duration.time_base);
+        right.source_in = new_source_in;
+        return if right.duration.frame > 0 {
+            vec![right]
+        } else {
+            Vec::new()
+        };
+    }
+
+    if cut_end >= clip_end {
+        let mut left = clip;
+        let new_end = cut_start.min(clip_end);
+        let new_source_out =
+            left.timeline_to_source_time(TimeCode::new(new_end, left.position.time_base));
+        left.duration = TimeCode::new((new_end - clip_start).max(0), left.duration.time_base);
+        left.source_out = new_source_out;
+        return if left.duration.frame > 0 {
+            vec![left]
+        } else {
+            Vec::new()
+        };
+    }
+
+    let mut left = clip.clone();
+    let left_new_end = cut_start;
+    let left_new_source_out =
+        left.timeline_to_source_time(TimeCode::new(left_new_end, left.position.time_base));
+    left.duration = TimeCode::new((left_new_end - clip_start).max(0), left.duration.time_base);
+    left.source_out = left_new_source_out;
+
+    let mut right = clip;
+    let right_new_start = cut_end;
+    let right_new_source_in =
+        right.timeline_to_source_time(TimeCode::new(right_new_start, right.position.time_base));
+    right.id = ClipId::new();
+    right.position = TimeCode::new(right_new_start, right.position.time_base);
+    right.duration = TimeCode::new(
+        (clip_end - right_new_start).max(0),
+        right.duration.time_base,
+    );
+    right.source_in = right_new_source_in;
+    right.linked_clip = None;
+
+    let mut result = Vec::with_capacity(2);
+    if left.duration.frame > 0 {
+        result.push(left);
+    }
+    if right.duration.frame > 0 {
+        result.push(right);
+    }
+    result
+}
+
+fn apply_overwrite_conflicts(
+    track: &mut mondrian_timeline::track::Track,
+    focus_ids: &HashSet<ClipId>,
+    focus_ranges: Vec<(i64, i64)>,
+) {
+    let merged_ranges = merge_ranges(focus_ranges);
+    if merged_ranges.is_empty() {
+        track.clips.sort_by_key(|c| c.position.frame);
+        return;
+    }
+
+    let mut resolved = Vec::<Clip>::with_capacity(track.clips.len());
+    for clip in std::mem::take(&mut track.clips) {
+        if focus_ids.contains(&clip.id) {
+            resolved.push(clip);
+            continue;
+        }
+
+        let mut segments = vec![clip];
+        for (range_start, range_end) in &merged_ranges {
+            if segments.is_empty() {
+                break;
+            }
+            let mut next_segments = Vec::with_capacity(segments.len());
+            for segment in segments {
+                next_segments.extend(subtract_overwrite_range_from_clip(
+                    segment,
+                    *range_start,
+                    *range_end,
+                ));
+            }
+            segments = next_segments;
+        }
+        resolved.extend(segments);
+    }
+
+    track.clips = resolved;
+    track.clips.sort_by_key(|c| c.position.frame);
+}
+
 fn resolve_track_conflicts(
     track: &mut mondrian_timeline::track::Track,
     focus_clip_id: ClipId,
@@ -3392,19 +3534,12 @@ fn resolve_track_conflicts(
                 track.clips.sort_by_key(|c| c.position.frame);
                 return;
             };
-
-            let focus_start = focus.position.frame;
-            let focus_end = focus.end_position().frame;
-            track.clips.retain(|clip| {
-                if clip.id == focus_clip_id {
-                    true
-                } else {
-                    let start = clip.position.frame;
-                    let end = clip.end_position().frame;
-                    end <= focus_start || start >= focus_end
-                }
-            });
-            track.clips.sort_by_key(|c| c.position.frame);
+            let focus_ids = HashSet::from([focus_clip_id]);
+            apply_overwrite_conflicts(
+                track,
+                &focus_ids,
+                vec![(focus.position.frame, focus.end_position().frame)],
+            );
         }
     }
 }
@@ -3430,18 +3565,7 @@ fn apply_track_conflicts_for_focus_group(
                 track.clips.sort_by_key(|c| c.position.frame);
                 return;
             }
-
-            track.clips.retain(|clip| {
-                if focus_ids.contains(&clip.id) {
-                    return true;
-                }
-                let start = clip.position.frame;
-                let end = clip.end_position().frame;
-                focus_ranges
-                    .iter()
-                    .all(|(focus_start, focus_end)| end <= *focus_start || start >= *focus_end)
-            });
-            track.clips.sort_by_key(|c| c.position.frame);
+            apply_overwrite_conflicts(track, focus_ids, focus_ranges);
         }
     }
 }
@@ -4756,6 +4880,7 @@ mod timeline_edit_tests {
         let track_id = state.sequence.as_ref().expect("sequence should exist").video_tracks[0].id;
 
         let clip_a = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+        let clip_a_id = clip_a.id;
         let clip_b = Clip::new(AssetId::new(), TimeCode::new(20, tb), TimeCode::new(10, tb));
         let clip_b_id = clip_b.id;
 
@@ -4770,9 +4895,58 @@ mod timeline_edit_tests {
             .expect("move should succeed");
 
         let clips = &state.sequence.as_ref().expect("sequence should exist").video_tracks[0].clips;
-        assert_eq!(clips.len(), 1);
-        assert_eq!(clips[0].id, clip_b_id);
-        assert_eq!(clips[0].position.frame, 5);
+        assert_eq!(clips.len(), 2);
+        let kept_a = clips.iter().find(|clip| clip.id == clip_a_id).expect("clip a should exist");
+        let moved_b = clips.iter().find(|clip| clip.id == clip_b_id).expect("clip b should exist");
+        assert_eq!(kept_a.position.frame, 0);
+        assert_eq!(kept_a.duration.frame, 5);
+        assert_eq!(moved_b.position.frame, 5);
+    }
+
+    #[test]
+    fn overwrite_only_removes_intersection_and_keeps_both_sides() {
+        let mut state = create_state_with_sequence();
+        let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
+        let track_id = state.sequence.as_ref().expect("sequence should exist").video_tracks[0].id;
+
+        let clip_a = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(20, tb));
+        let clip_a_id = clip_a.id;
+        let clip_b = Clip::new(AssetId::new(), TimeCode::new(40, tb), TimeCode::new(4, tb));
+        let clip_b_id = clip_b.id;
+
+        {
+            let seq = state.sequence.as_mut().expect("sequence should exist");
+            seq.video_tracks[0].add_clip(clip_a).expect("add clip a");
+            seq.video_tracks[0].add_clip(clip_b).expect("add clip b");
+        }
+
+        state
+            .move_clip_in_track_with_mode(track_id, true, clip_b_id, 8, ClipOverlapMode::Overwrite)
+            .expect("move should succeed");
+
+        let clips = &state.sequence.as_ref().expect("sequence should exist").video_tracks[0].clips;
+        assert_eq!(clips.len(), 3);
+
+        let left = clips.iter().find(|clip| clip.id == clip_a_id).expect("left part should exist");
+        let moved =
+            clips.iter().find(|clip| clip.id == clip_b_id).expect("moved clip should exist");
+        let right = clips
+            .iter()
+            .find(|clip| clip.id != clip_a_id && clip.id != clip_b_id)
+            .expect("right part should exist");
+
+        assert_eq!(left.position.frame, 0);
+        assert_eq!(left.duration.frame, 8);
+        assert_eq!(left.source_in.frame, 0);
+        assert_eq!(left.source_out.frame, 8);
+
+        assert_eq!(moved.position.frame, 8);
+        assert_eq!(moved.duration.frame, 4);
+
+        assert_eq!(right.position.frame, 12);
+        assert_eq!(right.duration.frame, 8);
+        assert_eq!(right.source_in.frame, 12);
+        assert_eq!(right.source_out.frame, 20);
     }
 
     #[test]
