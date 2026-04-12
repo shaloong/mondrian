@@ -29,6 +29,8 @@ pub struct TimelinePanel {
     snap_enabled: bool,
     active_snap_guide_frame: Option<i64>,
     active_insert_guide_frame: Option<i64>,
+    track_drag: Option<TrackDragState>,
+    track_drag_target: Option<TrackDragTarget>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -71,6 +73,19 @@ struct ClipDragAnchor {
     start_frame: i64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TrackDragState {
+    track_id: TrackId,
+    is_video_track: bool,
+    source_index: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TrackDragTarget {
+    is_video_track: bool,
+    target_index: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct ClipSelection {
     track_id: mondrian_core::types::TrackId,
@@ -81,6 +96,14 @@ struct ClipSelection {
 #[derive(Clone, Copy)]
 struct ClipVisual {
     selection: ClipSelection,
+    rect: Rect,
+}
+
+#[derive(Clone, Copy)]
+struct TrackRowVisual {
+    track_id: TrackId,
+    is_video_track: bool,
+    track_index: usize,
     rect: Rect,
 }
 
@@ -212,6 +235,25 @@ impl TimelinePanel {
                         }
 
                         if ui.input(|i| i.pointer.any_released()) {
+                            if let Some(track_drag) = self.track_drag.take() {
+                                if let Some(target) = self.track_drag_target.take() {
+                                    if track_drag.is_video_track == target.is_video_track
+                                        && track_drag.source_index != target.target_index
+                                    {
+                                        if let Err(err) = state.move_track(
+                                            track_drag.track_id,
+                                            track_drag.is_video_track,
+                                            target.target_index,
+                                        ) {
+                                            state.set_status_hint(
+                                                format!("移动轨道失败：{err}"),
+                                                true,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+
                             if self.clip_drag.take().is_some() {
                                 let pointer = ui.input(|i| i.pointer.interact_pos());
                                 let dropped_outside = match (pointer, self.track_area_bounds) {
@@ -232,6 +274,7 @@ impl TimelinePanel {
                             self.clip_drag_anchors.clear();
                             self.clip_drag_before_sequence = None;
                             self.clip_drag_moved = false;
+                            self.track_drag_target = None;
                         }
                     });
                 },
@@ -436,6 +479,7 @@ impl TimelinePanel {
         let mut last_track_bottom: Option<f32> = None;
         let mut content_left: Option<f32> = None;
         let mut visible_clips: Vec<ClipVisual> = Vec::new();
+        let mut track_rows: Vec<TrackRowVisual> = Vec::new();
         let audio_track_ids: Vec<TrackId> = audio_tracks.iter().map(|t| t.id).collect();
         let mut linked_audio_target_track_id: Option<TrackId> = None;
         let track_height = tokens::timeline_track_height();
@@ -453,6 +497,7 @@ impl TimelinePanel {
                 &mut last_track_bottom,
                 &mut content_left,
                 &mut visible_clips,
+                &mut track_rows,
                 &audio_track_ids,
                 &mut linked_audio_target_track_id,
             );
@@ -469,10 +514,18 @@ impl TimelinePanel {
                 &mut last_track_bottom,
                 &mut content_left,
                 &mut visible_clips,
+                &mut track_rows,
                 &audio_track_ids,
                 &mut linked_audio_target_track_id,
             );
         }
+
+        self.track_drag_target = match (self.track_drag, ui.input(|i| i.pointer.interact_pos())) {
+            (Some(track_drag), Some(pointer)) => {
+                choose_track_drag_target(pointer, &track_rows, track_drag)
+            }
+            _ => None,
+        };
 
         if let (Some(top), Some(bottom), Some(left)) =
             (first_track_top, last_track_bottom, content_left)
@@ -505,6 +558,19 @@ impl TimelinePanel {
                         palette::status_warning(),
                     ),
                 );
+            }
+
+            if let Some(track_target) = self.track_drag_target {
+                if let Some(target_row) = track_rows.iter().find(|row| {
+                    row.is_video_track == track_target.is_video_track
+                        && row.track_index == track_target.target_index
+                }) {
+                    ui.painter().rect_stroke(
+                        target_row.rect.shrink(1.0),
+                        2.0,
+                        Stroke::new(2.0, palette::interaction_highlight()),
+                    );
+                }
             }
 
             if let (Some(pos), Some(dragging)) = (
@@ -549,6 +615,7 @@ impl TimelinePanel {
         last_track_bottom: &mut Option<f32>,
         content_left: &mut Option<f32>,
         visible_clips: &mut Vec<ClipVisual>,
+        track_rows: &mut Vec<TrackRowVisual>,
         audio_track_ids: &[TrackId],
         linked_audio_target_track_id: &mut Option<TrackId>,
     ) -> bool {
@@ -594,6 +661,35 @@ impl TimelinePanel {
             ),
             icon_size,
         );
+        let header_drag_rect = Rect::from_min_max(
+            label_rect.min,
+            Pos2::new(mode_rect.left() - 4.0, label_rect.max.y),
+        );
+        track_rows.push(TrackRowVisual {
+            track_id: track.id,
+            is_video_track,
+            track_index,
+            rect,
+        });
+
+        let track_drag_resp = ui.interact(
+            header_drag_rect,
+            ui.make_persistent_id(("track_reorder", track.id, is_video_track)),
+            Sense::click_and_drag(),
+        );
+        if track_drag_resp.drag_started()
+            && self.clip_drag.is_none()
+            && state.dragging_asset().is_none()
+        {
+            self.track_drag = Some(TrackDragState {
+                track_id: track.id,
+                is_video_track,
+                source_index: track_index,
+            });
+            self.track_drag_target =
+                Some(TrackDragTarget { is_video_track, target_index: track_index });
+            self.clear_marquee();
+        }
         let lock_resp = ui.interact(
             lock_rect,
             ui.make_persistent_id(("track_lock", track.id, is_video_track)),
@@ -643,6 +739,18 @@ impl TimelinePanel {
         };
         theme::draw_icon(ui.painter(), mode_rect, mode_icon, palette::text_primary());
         theme::draw_icon(ui.painter(), lock_rect, lock_icon, palette::text_primary());
+
+        if self
+            .track_drag
+            .map(|drag| drag.track_id == track.id && drag.is_video_track == is_video_track)
+            .unwrap_or(false)
+        {
+            painter.rect_stroke(
+                rect.shrink(1.0),
+                2.0,
+                Stroke::new(1.5, palette::status_warning()),
+            );
+        }
 
         for clip in &track.clips {
             let clip_x =
@@ -707,7 +815,7 @@ impl TimelinePanel {
                 );
             }
 
-            if state.dragging_asset().is_none() {
+            if state.dragging_asset().is_none() && self.track_drag.is_none() {
                 let clip_resp = ui.interact(
                     clip_rect,
                     ui.make_persistent_id(("timeline_clip_drag", track.id, clip.id)),
@@ -880,7 +988,11 @@ impl TimelinePanel {
         }
 
         let mut dropped_here = false;
-        let dragging_asset = state.dragging_asset().cloned();
+        let dragging_asset = if self.track_drag.is_none() {
+            state.dragging_asset().cloned()
+        } else {
+            None
+        };
         let can_drop_here = dragging_asset
             .as_ref()
             .map(|asset| {
@@ -1118,7 +1230,8 @@ impl TimelinePanel {
     }
 
     fn handle_marquee(&mut self, ui: &mut Ui, state: &AppState, visible_clips: &[ClipVisual]) {
-        if state.dragging_asset().is_some() || self.clip_drag.is_some() {
+        if state.dragging_asset().is_some() || self.clip_drag.is_some() || self.track_drag.is_some()
+        {
             self.clear_marquee();
             return;
         }
@@ -1372,6 +1485,44 @@ impl TimelinePanel {
     }
 }
 
+fn choose_track_drag_target(
+    pointer: Pos2,
+    rows: &[TrackRowVisual],
+    drag: TrackDragState,
+) -> Option<TrackDragTarget> {
+    let mut same_type_rows = rows
+        .iter()
+        .filter(|row| row.is_video_track == drag.is_video_track)
+        .collect::<Vec<_>>();
+    if same_type_rows.is_empty() {
+        return None;
+    }
+
+    let top = same_type_rows.iter().map(|row| row.rect.top()).fold(f32::INFINITY, f32::min);
+    let bottom = same_type_rows
+        .iter()
+        .map(|row| row.rect.bottom())
+        .fold(f32::NEG_INFINITY, f32::max);
+    if pointer.y < top || pointer.y > bottom {
+        return None;
+    }
+
+    same_type_rows.sort_by(|a, b| {
+        let a_dist = (a.rect.center().y - pointer.y).abs();
+        let b_dist = (b.rect.center().y - pointer.y).abs();
+        a_dist
+            .partial_cmp(&b_dist)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.track_index.cmp(&b.track_index))
+    });
+
+    let target_row = same_type_rows[0];
+    Some(TrackDragTarget {
+        is_video_track: drag.is_video_track,
+        target_index: target_row.track_index,
+    })
+}
+
 fn clip_disabled_state(seq: &Sequence, sel: ClipSelection) -> Option<bool> {
     if sel.is_video_track {
         seq.video_tracks
@@ -1600,6 +1751,21 @@ fn decide_snap_target(
 mod tests {
     use super::*;
 
+    fn track_row(
+        track_id: TrackId,
+        is_video_track: bool,
+        track_index: usize,
+        top: f32,
+    ) -> TrackRowVisual {
+        let rect = Rect::from_min_size(Pos2::new(0.0, top), Vec2::new(120.0, 40.0));
+        TrackRowVisual {
+            track_id,
+            is_video_track,
+            track_index,
+            rect,
+        }
+    }
+
     #[test]
     fn snap_stays_free_when_no_candidate_in_threshold() {
         let decision = decide_snap_target(
@@ -1659,5 +1825,40 @@ mod tests {
         let decision = decide_snap_target(-3, &[], 4.0, 10.0);
         assert_eq!(decision.frame, 0);
         assert!(!decision.snapped);
+    }
+
+    #[test]
+    fn track_drag_target_uses_current_row_order_for_video_tracks() {
+        let rows = vec![
+            track_row(TrackId::new(), true, 2, 0.0),
+            track_row(TrackId::new(), true, 1, 40.0),
+            track_row(TrackId::new(), true, 0, 80.0),
+        ];
+        let drag = TrackDragState {
+            track_id: rows[2].track_id,
+            is_video_track: true,
+            source_index: 0,
+        };
+
+        let target =
+            choose_track_drag_target(Pos2::new(20.0, 12.0), &rows, drag).expect("target row");
+        assert_eq!(target.target_index, 2);
+    }
+
+    #[test]
+    fn track_drag_target_ignores_other_media_section() {
+        let rows = vec![
+            track_row(TrackId::new(), true, 1, 0.0),
+            track_row(TrackId::new(), true, 0, 40.0),
+            track_row(TrackId::new(), false, 0, 80.0),
+        ];
+        let drag = TrackDragState {
+            track_id: rows[0].track_id,
+            is_video_track: true,
+            source_index: 1,
+        };
+
+        let target = choose_track_drag_target(Pos2::new(20.0, 96.0), &rows, drag);
+        assert!(target.is_none());
     }
 }

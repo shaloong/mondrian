@@ -5157,6 +5157,109 @@ mod timeline_edit_tests {
     }
 
     #[test]
+    fn dropping_linked_clip_creates_missing_audio_track_at_target_index() {
+        let mut state = create_state_with_sequence();
+        let removed_audio_id =
+            state.sequence.as_ref().expect("sequence should exist").audio_tracks[2].id;
+        state
+            .sequence
+            .as_mut()
+            .expect("sequence should exist")
+            .remove_audio_track(removed_audio_id)
+            .expect("remove third audio track");
+        state.ensure_minimum_tracks();
+
+        let target_track_id =
+            state.sequence.as_ref().expect("sequence should exist").video_tracks[2].id;
+        let asset_id = AssetId::new();
+        state.begin_drag_asset(
+            asset_id,
+            "AV Clip".to_string(),
+            AssetKind::Video,
+            Duration::from_secs(2),
+            true,
+        );
+
+        let video_clip_id = state
+            .drop_dragging_asset_to_video_track(target_track_id, 0)
+            .expect("drop linked clip");
+
+        let seq = state.sequence.as_ref().expect("sequence should exist");
+        assert_eq!(seq.audio_tracks.len(), 3);
+        let video_clip = seq.video_tracks[2]
+            .clips
+            .iter()
+            .find(|clip| clip.id == video_clip_id)
+            .expect("video clip should exist");
+        let audio_clip = seq.audio_tracks[2]
+            .clips
+            .iter()
+            .find(|clip| clip.linked_clip == Some(video_clip_id))
+            .expect("linked audio clip should exist");
+        assert_eq!(video_clip.linked_clip, Some(audio_clip.id));
+        assert_eq!(audio_clip.asset_id, asset_id);
+    }
+
+    #[test]
+    fn dropping_linked_clip_after_video_reorder_uses_current_track_index() {
+        let mut state = create_state_with_sequence();
+        let moved_video_track_id =
+            state.sequence.as_ref().expect("sequence should exist").video_tracks[2].id;
+        state.move_track(moved_video_track_id, true, 0).expect("move track before drop");
+
+        state.begin_drag_asset(
+            AssetId::new(),
+            "Moved Track AV".to_string(),
+            AssetKind::Video,
+            Duration::from_secs(1),
+            true,
+        );
+        let video_clip_id = state
+            .drop_dragging_asset_to_video_track(moved_video_track_id, 0)
+            .expect("drop linked clip");
+
+        let seq = state.sequence.as_ref().expect("sequence should exist");
+        assert_eq!(seq.video_tracks[0].id, moved_video_track_id);
+        assert!(seq.video_tracks[0].clips.iter().any(|clip| clip.id == video_clip_id));
+        assert!(seq.audio_tracks[0]
+            .clips
+            .iter()
+            .any(|clip| clip.linked_clip == Some(video_clip_id)));
+    }
+
+    #[test]
+    fn moving_video_track_keeps_existing_linked_audio_on_its_audio_track() {
+        let mut state = create_state_with_sequence();
+        let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
+
+        let mut video = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(15, tb));
+        let mut audio = Clip::new(video.asset_id, TimeCode::new(0, tb), TimeCode::new(15, tb));
+        let video_id = video.id;
+        let audio_id = audio.id;
+        video.linked_clip = Some(audio_id);
+        audio.linked_clip = Some(video_id);
+
+        {
+            let seq = state.sequence.as_mut().expect("sequence should exist");
+            seq.video_tracks[2].add_clip(video).expect("add video");
+            seq.audio_tracks[2].add_clip(audio).expect("add audio");
+        }
+
+        let moved_video_track_id =
+            state.sequence.as_ref().expect("sequence should exist").video_tracks[2].id;
+        state.move_track(moved_video_track_id, true, 0).expect("move video track");
+
+        let seq = state.sequence.as_ref().expect("sequence should exist");
+        assert!(seq.video_tracks[0].clips.iter().any(|clip| clip.id == video_id));
+        let audio_after = seq.audio_tracks[2]
+            .clips
+            .iter()
+            .find(|clip| clip.id == audio_id)
+            .expect("audio clip should stay on original audio track");
+        assert_eq!(audio_after.linked_clip, Some(video_id));
+    }
+
+    #[test]
     fn roll_cut_to_frame_is_undoable() {
         let mut state = create_state_with_sequence();
         let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
