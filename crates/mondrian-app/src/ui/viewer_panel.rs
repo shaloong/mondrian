@@ -2138,6 +2138,15 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
         return Err(last_error.unwrap_or_else(|| anyhow::anyhow!("无可用图层可解码")));
     }
 
+    if rgba_layers_for_gpu.len() == 1 {
+        let only_layer = rgba_layers_for_gpu.pop().expect("single layer should exist");
+        if only_layer.opacity >= 0.999 && only_layer.width == width && only_layer.height == height {
+            record_preview_perf_decode_total(decode_started_at.elapsed());
+            return Ok(RgbaFrame { width, height, data: only_layer.data });
+        }
+        rgba_layers_for_gpu.push(only_layer);
+    }
+
     if let Some(gpu_rgba) = try_gpu_composite_rgba_layers(width, height, &rgba_layers_for_gpu) {
         record_preview_perf_decode_total(decode_started_at.elapsed());
         return Ok(RgbaFrame { width, height, data: gpu_rgba });

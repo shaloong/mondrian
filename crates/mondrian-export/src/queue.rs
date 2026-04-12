@@ -8,7 +8,7 @@ use crate::validator::{
     ExportValidationExpectations,
 };
 use chrono::{DateTime, Utc};
-use mondrian_core::types::{JobId, TimeCode};
+use mondrian_core::types::{AssetId, JobId, TimeCode};
 use mondrian_media::audio::{
     AudioBuffer, AudioMixer, AudioSourceCache, AudioTrackConfig, AudioTrackData,
 };
@@ -132,6 +132,13 @@ enum TimelineAudioInput {
         channels: u8,
     },
     Disabled,
+}
+
+#[derive(Clone)]
+struct DecodedVideoLayer {
+    width: u32,
+    height: u32,
+    data: Vec<u8>,
 }
 
 fn execute_file_export(
@@ -656,6 +663,7 @@ fn write_timeline_frames(
 ) -> JobExecutionResult {
     let mut writer = BufWriter::new(stdin);
     let total = range.total_frames.max(1);
+    let mut canvas = vec![0u8; width as usize * height as usize * 4];
 
     for index in 0..total {
         if cancel.load(Ordering::Relaxed) {
@@ -663,17 +671,17 @@ fn write_timeline_frames(
         }
 
         let timeline_frame = range.start_frame + index as i64;
-        let rgba = match render_timeline_frame(timeline, timeline_frame, width, height) {
-            Ok(frame) => frame,
+        match render_timeline_frame_into(timeline, timeline_frame, width, height, &mut canvas) {
+            Ok(()) => {}
             Err(err) => {
                 return JobExecutionResult::Failed(format!(
                     "渲染时间线帧失败（frame={}）: {}",
                     timeline_frame, err
                 ));
             }
-        };
+        }
 
-        if let Err(err) = writer.write_all(&rgba) {
+        if let Err(err) = writer.write_all(&canvas) {
             return JobExecutionResult::Failed(format!("写入编码管道失败: {}", err));
         }
 
@@ -693,17 +701,27 @@ fn write_timeline_frames(
     JobExecutionResult::Completed
 }
 
-fn render_timeline_frame(
+fn render_timeline_frame_into(
     timeline: &TimelineExportInput,
     timeline_frame: i64,
     width: u32,
     height: u32,
-) -> Result<Vec<u8>, String> {
-    let mut canvas = vec![0u8; width as usize * height as usize * 4];
-    initialize_canvas_alpha_opaque(&mut canvas);
+    canvas: &mut Vec<u8>,
+) -> Result<(), String> {
+    let required_len = width as usize * height as usize * 4;
+    if canvas.len() != required_len {
+        canvas.resize(required_len, 0);
+    }
 
     let timecode = TimeCode::new(timeline_frame.max(0), timeline.sequence.time_base());
     let active_clips = timeline.sequence.active_clips_at(timecode);
+    if active_clips.is_empty() {
+        clear_canvas_black_opaque(canvas);
+        return Ok(());
+    }
+
+    let mut layers: Vec<(Arc<DecodedVideoLayer>, f32)> = Vec::with_capacity(active_clips.len());
+    let mut decode_cache = HashMap::<(AssetId, i64), Arc<DecodedVideoLayer>>::new();
 
     for active in active_clips {
         let Some(path) = timeline.asset_paths.get(&active.clip.asset_id) else {
@@ -714,33 +732,58 @@ fn render_timeline_frame(
             continue;
         }
 
-        let decoded = decode_video_frame_at_time_rgba_scaled(
-            path.as_path(),
-            active.source_time.to_secs().max(0.0),
-            Some(width),
-            Some(height),
-        )
-        .map_err(|err| {
-            format!(
-                "asset={} path={} err={}",
-                active.clip.asset_id,
-                path.display(),
-                err
+        let source_frame = active.source_time.frame.max(0);
+        let decoded = if let Some(hit) = decode_cache.get(&(active.clip.asset_id, source_frame)) {
+            Arc::clone(hit)
+        } else {
+            let decoded = decode_video_frame_at_time_rgba_scaled(
+                path.as_path(),
+                active.source_time.to_secs().max(0.0),
+                Some(width),
+                Some(height),
             )
-        })?;
+            .map_err(|err| {
+                format!(
+                    "asset={} path={} err={}",
+                    active.clip.asset_id,
+                    path.display(),
+                    err
+                )
+            })?;
+            let decoded = Arc::new(DecodedVideoLayer {
+                width: decoded.width,
+                height: decoded.height,
+                data: decoded.data,
+            });
+            decode_cache.insert((active.clip.asset_id, source_frame), Arc::clone(&decoded));
+            decoded
+        };
+        layers.push((decoded, opacity));
+    }
 
+    if layers.len() == 1 {
+        let (layer, opacity) = &layers[0];
+        if *opacity >= 0.999 && layer.width == width && layer.height == height {
+            canvas.copy_from_slice(&layer.data);
+            force_canvas_alpha_opaque(canvas);
+            return Ok(());
+        }
+    }
+
+    clear_canvas_black_opaque(canvas);
+    for (layer, opacity) in layers {
         blend_rgba_layer_centered(
-            &mut canvas,
+            canvas,
             width,
             height,
-            &decoded.data,
-            decoded.width,
-            decoded.height,
+            &layer.data,
+            layer.width,
+            layer.height,
             opacity,
         );
     }
 
-    Ok(canvas)
+    Ok(())
 }
 
 fn compute_timeline_render_range(timeline: &TimelineExportInput) -> TimelineRenderRange {
@@ -783,7 +826,12 @@ fn normalize_output_dimension(value: u32) -> u32 {
     dim.max(1)
 }
 
-fn initialize_canvas_alpha_opaque(canvas: &mut [u8]) {
+fn clear_canvas_black_opaque(canvas: &mut [u8]) {
+    canvas.fill(0);
+    force_canvas_alpha_opaque(canvas);
+}
+
+fn force_canvas_alpha_opaque(canvas: &mut [u8]) {
     for px in canvas.chunks_exact_mut(4) {
         px[3] = 255;
     }
@@ -1491,9 +1539,27 @@ mod tests {
     }
 
     #[test]
+    fn render_timeline_frame_into_clears_canvas_when_no_layers() {
+        let seq = Sequence::new("empty");
+        let timeline = TimelineExportInput {
+            sequence: seq,
+            asset_paths: HashMap::new(),
+            in_point_frame: Some(0),
+            out_point_frame: Some(10),
+        };
+
+        let mut canvas = vec![77u8; 4 * 2 * 4];
+        render_timeline_frame_into(&timeline, 0, 4, 2, &mut canvas).expect("render should pass");
+
+        for px in canvas.chunks_exact(4) {
+            assert_eq!(px, &[0, 0, 0, 255]);
+        }
+    }
+
+    #[test]
     fn blend_rgba_layer_centered_places_layer_in_canvas_center() {
         let mut dst = vec![0u8; 4 * 4 * 4];
-        initialize_canvas_alpha_opaque(&mut dst);
+        clear_canvas_black_opaque(&mut dst);
         let src = vec![
             10, 20, 30, 255, 10, 20, 30, 255, 10, 20, 30, 255, 10, 20, 30, 255,
         ];
