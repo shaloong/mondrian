@@ -3,10 +3,10 @@ use crate::{
     ui::theme::{self, palette, tokens, typography},
 };
 use egui::{Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2};
-use mondrian_core::types::{ClipId, Rational, TimeCode, TrackId};
+use mondrian_core::types::{ClipId, Rational, TrackId};
 use mondrian_timeline::clip::TrimEdge;
 use mondrian_timeline::sequence::Sequence;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 // ─── TimelinePanel ──────────────────────────
 
@@ -26,7 +26,7 @@ pub struct TimelinePanel {
     marquee_additive: bool,
     active_tool: TimelineTool,
     snap_enabled: bool,
-    snap_grid_mode: SnapGridMode,
+    active_snap_guide_frame: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -36,37 +36,24 @@ enum TimelineTool {
     Blade,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum SnapGridMode {
-    Frame,
-    HalfSecond,
-    #[default]
-    OneSecond,
-    TwoSeconds,
-    FiveSeconds,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum SnapPriority {
+    Playhead,
+    AdjacentClipEdge,
+    Marker,
+    InOutPoint,
 }
 
-impl SnapGridMode {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Frame => "按帧",
-            Self::HalfSecond => "0.5 秒",
-            Self::OneSecond => "1 秒",
-            Self::TwoSeconds => "2 秒",
-            Self::FiveSeconds => "5 秒",
-        }
-    }
+#[derive(Debug, Clone, Copy)]
+struct SnapCandidate {
+    frame: i64,
+    priority: SnapPriority,
+}
 
-    fn step_frames(self, fps: Rational) -> i64 {
-        let nominal_fps = fps.to_f64().round().max(1.0) as i64;
-        match self {
-            Self::Frame => 1,
-            Self::HalfSecond => (nominal_fps / 2).max(1),
-            Self::OneSecond => nominal_fps.max(1),
-            Self::TwoSeconds => (nominal_fps * 2).max(1),
-            Self::FiveSeconds => (nominal_fps * 5).max(1),
-        }
-    }
+#[derive(Debug, Clone, Copy)]
+struct SnapDecision {
+    frame: i64,
+    snapped: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -96,6 +83,7 @@ impl TimelinePanel {
             self.pixels_per_frame = 4.0;
             self.snap_enabled = true;
         }
+        self.active_snap_guide_frame = None;
 
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
@@ -292,23 +280,6 @@ impl TimelinePanel {
             .on_hover_text("自动吸附")
             .clicked()
             .then(|| self.snap_enabled = !self.snap_enabled);
-
-            if self.snap_enabled {
-                let selected = self.snap_grid_mode.label();
-                egui::ComboBox::from_id_salt("timeline_snap_grid_mode")
-                    .selected_text(selected)
-                    .show_ui(ui, |ui| {
-                        for mode in [
-                            SnapGridMode::Frame,
-                            SnapGridMode::HalfSecond,
-                            SnapGridMode::OneSecond,
-                            SnapGridMode::TwoSeconds,
-                            SnapGridMode::FiveSeconds,
-                        ] {
-                            ui.selectable_value(&mut self.snap_grid_mode, mode, mode.label());
-                        }
-                    });
-            }
 
             ui.separator();
             ui.label("重叠:");
@@ -515,6 +486,14 @@ impl TimelinePanel {
                 [Pos2::new(playhead_x, top), Pos2::new(playhead_x, bottom)],
                 Stroke::new(1.8, palette::timeline_playhead()),
             );
+
+            if let Some(snap_frame) = self.active_snap_guide_frame {
+                let snap_x = left + snap_frame as f32 * self.pixels_per_frame;
+                ui.painter().line_segment(
+                    [Pos2::new(snap_x, top), Pos2::new(snap_x, bottom)],
+                    Stroke::new(1.4, palette::interaction_highlight()),
+                );
+            }
 
             if let (Some(pos), Some(dragging)) = (
                 ui.input(|i| i.pointer.interact_pos()),
@@ -828,28 +807,11 @@ impl TimelinePanel {
                                 / self.pixels_per_frame)
                                 .round() as i64;
                             let raw_target = (pointer_frame - drag.pointer_offset_frames).max(0);
-                            let (snap_points, grid_step_frames) = state
-                                .sequence
-                                .as_ref()
-                                .map(|seq| {
-                                    (
-                                        seq.snap_points(),
-                                        self.snap_grid_mode.step_frames(seq.settings.frame_rate),
-                                    )
-                                })
-                                .unwrap_or_else(|| (Vec::new(), 1));
-                            let target_frame = snap_frame(
+                            let target_frame = self.resolve_snap_target_frame(
+                                state,
                                 raw_target,
-                                &snap_points,
-                                self.pixels_per_frame,
-                                tokens::timeline_drag_snap_pixels(),
-                                grid_step_frames,
+                                Some(drag.clip_id),
                             );
-                            let target_frame = if self.snap_enabled {
-                                target_frame
-                            } else {
-                                raw_target
-                            };
 
                             if let Err(err) = state.move_clip_to_track(
                                 track.id,
@@ -916,8 +878,9 @@ impl TimelinePanel {
                 pointer_pos,
                 state.sequence.as_ref(),
             ) {
-                let ghost_frame =
+                let raw_ghost_frame =
                     (((pos.x - rect.left() - track_label_w) / self.pixels_per_frame) as i64).max(0);
+                let ghost_frame = self.resolve_snap_target_frame(state, raw_ghost_frame, None);
                 let ghost_frames = ((dragging.duration.as_secs_f64()
                     * seq.settings.frame_rate.to_f64())
                 .ceil() as i64)
@@ -970,28 +933,7 @@ impl TimelinePanel {
                     let raw_drop_frame =
                         ((pos.x - rect.left() - track_label_w) / self.pixels_per_frame) as i64;
                     let raw_drop_frame = raw_drop_frame.max(0);
-                    let drop_frame = if self.snap_enabled {
-                        let (snap_points, grid_step_frames) = state
-                            .sequence
-                            .as_ref()
-                            .map(|seq| {
-                                (
-                                    seq.snap_points(),
-                                    self.snap_grid_mode.step_frames(seq.settings.frame_rate),
-                                )
-                            })
-                            .unwrap_or_else(|| (Vec::new(), 1));
-
-                        snap_frame(
-                            raw_drop_frame,
-                            &snap_points,
-                            self.pixels_per_frame,
-                            tokens::timeline_drag_snap_pixels(),
-                            grid_step_frames,
-                        )
-                    } else {
-                        raw_drop_frame
-                    };
+                    let drop_frame = self.resolve_snap_target_frame(state, raw_drop_frame, None);
                     let drop_result = if is_video_track {
                         state.drop_dragging_asset_to_video_track(track.id, drop_frame)
                     } else {
@@ -1013,8 +955,9 @@ impl TimelinePanel {
                 pointer_pos,
                 state.sequence.as_ref(),
             ) {
-                let ghost_frame =
+                let raw_ghost_frame =
                     (((pos.x - rect.left() - track_label_w) / self.pixels_per_frame) as i64).max(0);
+                let ghost_frame = self.resolve_snap_target_frame(state, raw_ghost_frame, None);
                 let ghost_frames = ((dragging.duration.as_secs_f64()
                     * seq.settings.frame_rate.to_f64())
                 .ceil() as i64)
@@ -1264,6 +1207,34 @@ impl TimelinePanel {
         }
     }
 
+    fn resolve_snap_target_frame(
+        &mut self,
+        state: &AppState,
+        raw_target_frame: i64,
+        exclude_clip_id: Option<ClipId>,
+    ) -> i64 {
+        let raw_target_frame = raw_target_frame.max(0);
+        if !self.snap_enabled || self.pixels_per_frame <= 0.0 {
+            return raw_target_frame;
+        }
+
+        let Some(seq) = state.sequence.as_ref() else {
+            return raw_target_frame;
+        };
+
+        let candidates = collect_snap_candidates(seq, state, exclude_clip_id);
+        let decision = decide_snap_target(
+            raw_target_frame,
+            &candidates,
+            self.pixels_per_frame,
+            tokens::timeline_drag_snap_pixels(),
+        );
+        if decision.snapped {
+            self.active_snap_guide_frame = Some(decision.frame);
+        }
+        decision.frame
+    }
+
     fn selected_clips_all_disabled(&self, state: &AppState) -> bool {
         let Some(seq) = state.sequence.as_ref() else {
             return false;
@@ -1413,42 +1384,101 @@ fn format_ruler_label(frame: i64, fps: Rational, granularity: RulerGranularity) 
     }
 }
 
-fn snap_frame(
-    target_frame: i64,
-    snap_points: &[TimeCode],
-    pixels_per_frame: f32,
-    snap_pixels: f32,
-    grid_step_frames: i64,
-) -> i64 {
-    if pixels_per_frame <= 0.0 {
-        return target_frame;
-    }
-
-    let threshold_frames = (snap_pixels / pixels_per_frame).max(1.0).round() as i64;
-    let mut best = target_frame;
-    let mut best_dist = i64::MAX;
-
-    for point in snap_points {
-        let dist = (point.frame - target_frame).abs();
-        if dist <= threshold_frames && dist < best_dist {
-            best_dist = dist;
-            best = point.frame;
-        }
-    }
-
-    if grid_step_frames > 0 {
-        let lower = target_frame.div_euclid(grid_step_frames) * grid_step_frames;
-        let upper = lower + grid_step_frames;
-        for candidate in [lower, upper] {
-            let dist = (candidate - target_frame).abs();
-            if dist <= threshold_frames && dist < best_dist {
-                best_dist = dist;
-                best = candidate;
+fn collect_snap_candidates(
+    seq: &Sequence,
+    state: &AppState,
+    exclude_clip_id: Option<ClipId>,
+) -> Vec<SnapCandidate> {
+    let mut by_frame: HashMap<i64, SnapPriority> = HashMap::new();
+    let mut register = |frame: i64, priority: SnapPriority| {
+        let frame = frame.max(0);
+        match by_frame.get_mut(&frame) {
+            Some(existing) if priority < *existing => *existing = priority,
+            Some(_) => {}
+            None => {
+                by_frame.insert(frame, priority);
             }
         }
+    };
+
+    register(seq.playhead.frame, SnapPriority::Playhead);
+
+    for clip in seq
+        .video_tracks
+        .iter()
+        .chain(seq.audio_tracks.iter())
+        .flat_map(|track| track.clips.iter())
+    {
+        if exclude_clip_id.is_some_and(|exclude| clip.id == exclude) {
+            continue;
+        }
+        register(clip.position.frame, SnapPriority::AdjacentClipEdge);
+        register(clip.end_position().frame, SnapPriority::AdjacentClipEdge);
     }
 
-    best.max(0)
+    for marker_frame in collect_marker_snap_frames(state) {
+        register(marker_frame, SnapPriority::Marker);
+    }
+
+    let in_point = state.in_point_frame().max(0);
+    let out_point = state.out_point_frame();
+    if in_point > 0 || out_point.is_some() {
+        register(in_point, SnapPriority::InOutPoint);
+        if let Some(out) = out_point {
+            register(out, SnapPriority::InOutPoint);
+        }
+    }
+
+    by_frame
+        .into_iter()
+        .map(|(frame, priority)| SnapCandidate { frame, priority })
+        .collect()
+}
+
+fn collect_marker_snap_frames(_state: &AppState) -> Vec<i64> {
+    // 当前项目模型尚未持久化 marker；这里预留吸附入口，后续接入 marker 数据即可生效。
+    Vec::new()
+}
+
+fn decide_snap_target(
+    target_frame: i64,
+    candidates: &[SnapCandidate],
+    pixels_per_frame: f32,
+    snap_pixels: f32,
+) -> SnapDecision {
+    let target_frame = target_frame.max(0);
+    if pixels_per_frame <= 0.0 || candidates.is_empty() {
+        return SnapDecision { frame: target_frame, snapped: false };
+    }
+
+    let threshold_frames = (snap_pixels / pixels_per_frame).ceil().max(1.0) as i64;
+    let mut best: Option<(SnapCandidate, i64)> = None;
+
+    for candidate in candidates {
+        let distance = (candidate.frame - target_frame).abs();
+        if distance > threshold_frames {
+            continue;
+        }
+
+        let should_replace = match best {
+            None => true,
+            Some((current, current_distance)) => {
+                candidate.priority < current.priority
+                    || (candidate.priority == current.priority && distance < current_distance)
+                    || (candidate.priority == current.priority
+                        && distance == current_distance
+                        && candidate.frame < current.frame)
+            }
+        };
+        if should_replace {
+            best = Some((*candidate, distance));
+        }
+    }
+
+    match best {
+        Some((candidate, _)) => SnapDecision { frame: candidate.frame.max(0), snapped: true },
+        None => SnapDecision { frame: target_frame, snapped: false },
+    }
 }
 
 #[cfg(test)]
@@ -1456,27 +1486,63 @@ mod tests {
     use super::*;
 
     #[test]
-    fn snap_frame_uses_grid_when_clip_points_far() {
-        let target = 23;
-        let snapped = snap_frame(
-            target,
-            &[],
-            4.0, // 4px/frame
+    fn snap_stays_free_when_no_candidate_in_threshold() {
+        let decision = decide_snap_target(
+            120,
+            &[SnapCandidate { frame: 140, priority: SnapPriority::Playhead }],
+            4.0,
             10.0,
-            25, // 1s @25fps
         );
 
-        // 距离 25 帧仅 2 帧，落在吸附阈值内
-        assert_eq!(snapped, 25);
+        assert_eq!(decision.frame, 120);
+        assert!(!decision.snapped);
     }
 
     #[test]
-    fn snap_frame_prefers_clip_edge_when_closer_than_grid() {
-        let tb = Rational::new(1, 25);
-        let target = 41;
-        let points = [TimeCode::new(40, tb)];
-        let snapped = snap_frame(target, &points, 4.0, 10.0, 25);
+    fn snap_prefers_priority_over_distance_within_threshold() {
+        let decision = decide_snap_target(
+            100,
+            &[
+                SnapCandidate {
+                    frame: 99,
+                    priority: SnapPriority::AdjacentClipEdge,
+                },
+                SnapCandidate { frame: 107, priority: SnapPriority::Playhead },
+            ],
+            1.0,
+            10.0,
+        );
 
-        assert_eq!(snapped, 40);
+        assert_eq!(decision.frame, 107);
+        assert!(decision.snapped);
+    }
+
+    #[test]
+    fn snap_prefers_nearest_when_priority_same() {
+        let decision = decide_snap_target(
+            100,
+            &[
+                SnapCandidate {
+                    frame: 96,
+                    priority: SnapPriority::AdjacentClipEdge,
+                },
+                SnapCandidate {
+                    frame: 103,
+                    priority: SnapPriority::AdjacentClipEdge,
+                },
+            ],
+            2.0,
+            8.0,
+        );
+
+        assert_eq!(decision.frame, 103);
+        assert!(decision.snapped);
+    }
+
+    #[test]
+    fn snap_clamps_negative_target_to_zero() {
+        let decision = decide_snap_target(-3, &[], 4.0, 10.0);
+        assert_eq!(decision.frame, 0);
+        assert!(!decision.snapped);
     }
 }

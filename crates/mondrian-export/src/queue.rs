@@ -1603,7 +1603,9 @@ mod tests {
         let layer = Arc::new(DecodedVideoLayer {
             width: 2,
             height: 2,
-            data: vec![12, 34, 56, 0, 12, 34, 56, 77, 12, 34, 56, 128, 12, 34, 56, 200],
+            data: vec![
+                12, 34, 56, 0, 12, 34, 56, 77, 12, 34, 56, 128, 12, 34, 56, 200,
+            ],
         });
         let mut canvas = vec![0u8; 2 * 2 * 4];
 
