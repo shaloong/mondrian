@@ -1758,12 +1758,7 @@ mod tests {
         top: f32,
     ) -> TrackRowVisual {
         let rect = Rect::from_min_size(Pos2::new(0.0, top), Vec2::new(120.0, 40.0));
-        TrackRowVisual {
-            track_id,
-            is_video_track,
-            track_index,
-            rect,
-        }
+        TrackRowVisual { track_id, is_video_track, track_index, rect }
     }
 
     #[test]

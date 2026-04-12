@@ -151,6 +151,7 @@ impl PaletteTokens {
 pub struct MetricsTokens {
     pub item_spacing: egui::Vec2,
     pub button_padding: egui::Vec2,
+    pub button_rounding: f32,
     pub interact_height: f32,
     pub menu_rounding: f32,
     pub window_rounding: f32,
@@ -222,6 +223,7 @@ impl Default for MetricsTokens {
         Self {
             item_spacing: egui::vec2(7.0, 7.0),
             button_padding: egui::vec2(10.0, 5.0),
+            button_rounding: 4.0,
             interact_height: 23.0,
             menu_rounding: 3.0,
             window_rounding: 4.0,
@@ -348,22 +350,27 @@ fn build_visuals(theme: egui::Theme, tokens: &ThemeTokens) -> egui::Visuals {
     visuals.widgets.noninteractive.bg_fill = p.bg_base;
     visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, p.border_subtle);
     visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, p.text_muted);
+    visuals.widgets.noninteractive.rounding = egui::Rounding::same(m.button_rounding);
 
     visuals.widgets.inactive.bg_fill = p.bg_surface;
     visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, p.border_subtle);
     visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, p.text_primary);
+    visuals.widgets.inactive.rounding = egui::Rounding::same(m.button_rounding);
 
     visuals.widgets.hovered.bg_fill = p.bg_surface;
     visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, p.border_emphasis);
     visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, p.text_primary);
+    visuals.widgets.hovered.rounding = egui::Rounding::same(m.button_rounding);
 
     visuals.widgets.active.bg_fill = p.bg_surface_active;
     visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, p.text_primary);
     visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, p.text_primary);
+    visuals.widgets.active.rounding = egui::Rounding::same(m.button_rounding);
 
     visuals.widgets.open.bg_fill = p.bg_surface;
     visuals.widgets.open.bg_stroke = egui::Stroke::new(1.0, p.border_emphasis);
     visuals.widgets.open.fg_stroke = egui::Stroke::new(1.0, p.text_primary);
+    visuals.widgets.open.rounding = egui::Rounding::same(m.button_rounding);
 
     visuals.selection.bg_fill = p.bg_surface_active;
     visuals.selection.stroke = egui::Stroke::new(1.0, p.text_primary);
@@ -631,12 +638,12 @@ fn icon_svg_bytes(kind: UiIcon) -> &'static [u8] {
         UiIcon::Audio => include_bytes!("../../assets/icons/music.svg"),
         UiIcon::Warning => include_bytes!("../../assets/icons/info.svg"),
         UiIcon::Info => include_bytes!("../../assets/icons/info.svg"),
-        UiIcon::Play => include_bytes!("../../assets/icons/play.svg"),
-        UiIcon::Pause => include_bytes!("../../assets/icons/pause.svg"),
-        UiIcon::StepBack => include_bytes!("../../assets/icons/left_frame.svg"),
-        UiIcon::StepForward => include_bytes!("../../assets/icons/right_frame.svg"),
-        UiIcon::JumpStart => include_bytes!("../../assets/icons/home_Frame.svg"),
-        UiIcon::JumpEnd => include_bytes!("../../assets/icons/end_frame.svg"),
+        UiIcon::Play => include_bytes!("../../assets/icons/play_fill.svg"),
+        UiIcon::Pause => include_bytes!("../../assets/icons/pause_fill.svg"),
+        UiIcon::StepBack => include_bytes!("../../assets/icons/left_frame_fill.svg"),
+        UiIcon::StepForward => include_bytes!("../../assets/icons/right_frame_fill.svg"),
+        UiIcon::JumpStart => include_bytes!("../../assets/icons/home_frame_fill.svg"),
+        UiIcon::JumpEnd => include_bytes!("../../assets/icons/end_frame_fill.svg"),
         UiIcon::Cursor => include_bytes!("../../assets/icons/cursor.svg"),
         UiIcon::Scissors => include_bytes!("../../assets/icons/cut.svg"),
         UiIcon::Magnet => include_bytes!("../../assets/icons/magnet.svg"),
@@ -743,6 +750,10 @@ pub mod tokens {
 
     pub fn drop_overlay_stroke_width() -> f32 {
         super::with_active_tokens(|tokens| tokens.metrics.drop_overlay_stroke_width)
+    }
+
+    pub fn button_rounding() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.button_rounding)
     }
 
     pub fn list_row_radius() -> f32 {
@@ -1007,6 +1018,23 @@ mod tests {
         assert_eq!(typography::body().size, 19.0);
 
         clear_theme_overrides();
+    }
+
+    #[test]
+    fn visuals_use_button_rounding_token_for_all_widget_states() {
+        let _guard = test_lock();
+
+        let mut tokens = ThemeTokens::for_theme(egui::Theme::Dark);
+        tokens.metrics.button_rounding = 4.0;
+
+        let visuals = build_visuals(egui::Theme::Dark, &tokens);
+        let expected = egui::Rounding::same(4.0);
+
+        assert_eq!(visuals.widgets.noninteractive.rounding, expected);
+        assert_eq!(visuals.widgets.inactive.rounding, expected);
+        assert_eq!(visuals.widgets.hovered.rounding, expected);
+        assert_eq!(visuals.widgets.active.rounding, expected);
+        assert_eq!(visuals.widgets.open.rounding, expected);
     }
 }
 

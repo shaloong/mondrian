@@ -1,9 +1,7 @@
 //! 效果节点抽象
 
 use mondrian_core::{
-    automation::{
-        PropertyBag, PropertyDescriptor, PropertyHost, PropertyMutation, PropertyValue,
-    },
+    automation::{PropertyBag, PropertyDescriptor, PropertyHost, PropertyMutation, PropertyValue},
     types::{Color, EffectId, TimeCode},
     Result,
 };
