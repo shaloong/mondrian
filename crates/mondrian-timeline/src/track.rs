@@ -1,7 +1,14 @@
 //! 轨道定义
 
 use crate::{clip::Clip, keyframe::KeyframeTrack};
-use mondrian_core::types::*;
+use mondrian_core::{
+    automation::{
+        AnimatedProperty, PropertyBag, PropertyDescriptor, PropertyHost, PropertyMutation,
+        PropertyValue,
+    },
+    types::*,
+    MondrianError, Result,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,6 +38,8 @@ pub struct Track {
 }
 
 impl Track {
+    pub const OPACITY_PATH: &'static str = "track.opacity";
+
     pub fn new_video(name: impl Into<String>) -> Self {
         Self {
             id: TrackId::new(),
@@ -96,5 +105,63 @@ impl Track {
         pts.sort_unstable();
         pts.dedup();
         pts
+    }
+
+    pub fn to_property_bag(&self) -> PropertyBag {
+        let mut properties = PropertyBag::default();
+        properties.upsert(AnimatedProperty {
+            descriptor: PropertyDescriptor::new(
+                Self::OPACITY_PATH,
+                "轨道不透明度",
+                PropertyValue::Float(*self.opacity.static_value()),
+            ),
+            track: self.opacity.map(|value| PropertyValue::Float(*value)),
+        });
+        properties
+    }
+}
+
+impl PropertyHost for Track {
+    fn property_bag(&self) -> Result<PropertyBag> {
+        Ok(self.to_property_bag())
+    }
+
+    fn apply_property_mutation(&mut self, mutation: PropertyMutation) -> Result<()> {
+        let path = match &mutation {
+            PropertyMutation::DefineProperty(descriptor) => descriptor.path.as_str(),
+            PropertyMutation::SetStaticValue { path, .. } => path.as_str(),
+            PropertyMutation::SetKeyframe { path, .. } => path.as_str(),
+            PropertyMutation::RemoveKeyframe { path, .. } => path.as_str(),
+            PropertyMutation::RemoveProperty { path } => path.as_str(),
+        };
+
+        if path != Self::OPACITY_PATH {
+            return Err(MondrianError::WorkflowStepFailed {
+                step_id: "track_apply_property_mutation".to_string(),
+                reason: format!("Track 不支持属性路径: {path}"),
+            });
+        }
+        if matches!(mutation, PropertyMutation::RemoveProperty { .. }) {
+            return Err(MondrianError::WorkflowStepFailed {
+                step_id: "track_apply_property_mutation".to_string(),
+                reason: "内建 track.opacity 属性不可移除".to_string(),
+            });
+        }
+
+        let mut properties = self.to_property_bag();
+        properties.apply_mutation(mutation)?;
+        let property = properties.property(Self::OPACITY_PATH).ok_or_else(|| {
+            MondrianError::WorkflowStepFailed {
+                step_id: "track_apply_property_mutation".to_string(),
+                reason: "缺少 track.opacity 属性".to_string(),
+            }
+        })?;
+        self.opacity = property.track.try_map(|value| {
+            value.as_f32().ok_or_else(|| MondrianError::WorkflowStepFailed {
+                step_id: "track_apply_property_mutation".to_string(),
+                reason: "track.opacity 需要 float 值".to_string(),
+            })
+        })?;
+        Ok(())
     }
 }

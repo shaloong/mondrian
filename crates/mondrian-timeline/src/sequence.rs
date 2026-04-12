@@ -27,8 +27,6 @@ impl Default for SequenceSettings {
 }
 
 /// Mondrian 时间线序列
-///
-/// 一个项目可以有多个序列（对标 PR 的多个序列）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Sequence {
     pub id: SequenceId,
@@ -40,7 +38,6 @@ pub struct Sequence {
 }
 
 impl Sequence {
-    /// 创建新序列
     pub fn new(name: impl Into<String>) -> Self {
         let settings = SequenceSettings::default();
         let tb = Rational::new(settings.frame_rate.den, settings.frame_rate.num);
@@ -62,12 +59,10 @@ impl Sequence {
         }
     }
 
-    /// 时间基（= 1 / fps）
     pub fn time_base(&self) -> Rational {
         Rational::new(self.settings.frame_rate.den, self.settings.frame_rate.num)
     }
 
-    /// 计算时间线总时长（最后一个 Clip 的 end_position）
     pub fn total_duration(&self) -> TimeCode {
         let tb = self.time_base();
         let mut max_frame = 0i64;
@@ -80,19 +75,20 @@ impl Sequence {
         TimeCode::new(max_frame, tb)
     }
 
-    /// 获取指定时间码处所有活跃 Clip（从底层到顶层排列）
     pub fn active_clips_at(&self, time: TimeCode) -> Vec<ActiveClip> {
         let mut result = Vec::new();
 
-        // 从底层视频轨开始（倒序 → 最后一个轨道在最底）
         for (i, track) in self.video_tracks.iter().enumerate().rev() {
             if !track.is_visible || track.is_muted {
                 continue;
             }
+
+            let track_opacity = track.opacity.evaluate(time).clamp(0.0, 1.0);
             for clip in track.active_clips_at(time) {
                 let source_time = clip.timeline_to_source_time(time);
                 let transform_mat = clip.transform.evaluate_matrix(time);
-                let opacity = clip.transform.opacity.evaluate(time);
+                let opacity =
+                    (clip.transform.opacity.evaluate(time) * track_opacity).clamp(0.0, 1.0);
                 result.push(ActiveClip {
                     clip: clip.clone(),
                     track_index: i,
@@ -105,13 +101,12 @@ impl Sequence {
         result
     }
 
-    /// 全局吸附点（所有轨道的 snap points 合集 + 播放头）
     pub fn snap_points(&self) -> Vec<TimeCode> {
         let mut pts: Vec<TimeCode> = self
             .video_tracks
             .iter()
             .chain(self.audio_tracks.iter())
-            .flat_map(|t| t.snap_points())
+            .flat_map(|track| track.snap_points())
             .collect();
         pts.push(self.playhead);
         pts.push(TimeCode::new(0, self.time_base()));
@@ -120,14 +115,12 @@ impl Sequence {
         pts
     }
 
-    /// 按 ID 查找视频轨道（可变引用）
     pub fn video_track_mut(&mut self, id: TrackId) -> Option<&mut Track> {
-        self.video_tracks.iter_mut().find(|t| t.id == id)
+        self.video_tracks.iter_mut().find(|track| track.id == id)
     }
 
-    /// 按 ID 查找音频轨道（可变引用）
     pub fn audio_track_mut(&mut self, id: TrackId) -> Option<&mut Track> {
-        self.audio_tracks.iter_mut().find(|t| t.id == id)
+        self.audio_tracks.iter_mut().find(|track| track.id == id)
     }
 
     pub fn add_video_track(&mut self) -> TrackId {
@@ -154,7 +147,7 @@ impl Sequence {
             });
         }
 
-        if let Some(index) = self.video_tracks.iter().position(|t| t.id == id) {
+        if let Some(index) = self.video_tracks.iter().position(|track| track.id == id) {
             self.video_tracks.remove(index);
             Ok(())
         } else {
@@ -170,7 +163,7 @@ impl Sequence {
             });
         }
 
-        if let Some(index) = self.audio_tracks.iter().position(|t| t.id == id) {
+        if let Some(index) = self.audio_tracks.iter().position(|track| track.id == id) {
             self.audio_tracks.remove(index);
             Ok(())
         } else {
@@ -183,6 +176,9 @@ impl Sequence {
 mod tests {
     use super::*;
     use crate::clip::Clip;
+    use mondrian_core::automation::{
+        InterpolationType, Keyframe, PropertyHost, PropertyMutation, PropertyValue,
+    };
 
     #[test]
     fn sequence_active_clips() {
@@ -198,5 +194,41 @@ mod tests {
 
         let outside = seq.active_clips_at(TimeCode::new(100, tb));
         assert_eq!(outside.len(), 0);
+    }
+
+    #[test]
+    fn track_opacity_automation_affects_active_clip_opacity() {
+        let mut seq = Sequence::new("Opacity Test");
+        let tb = seq.time_base();
+        let clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(20, tb));
+        seq.video_tracks[0].add_clip(clip).expect("add clip");
+        seq.video_tracks[0]
+            .apply_property_mutation(PropertyMutation::SetKeyframe {
+                path: Track::OPACITY_PATH.to_string(),
+                keyframe: Keyframe {
+                    time: TimeCode::new(0, tb),
+                    value: PropertyValue::Float(1.0),
+                    interpolation: InterpolationType::Linear,
+                    control_in: None,
+                    control_out: None,
+                },
+            })
+            .expect("set start opacity");
+        seq.video_tracks[0]
+            .apply_property_mutation(PropertyMutation::SetKeyframe {
+                path: Track::OPACITY_PATH.to_string(),
+                keyframe: Keyframe {
+                    time: TimeCode::new(20, tb),
+                    value: PropertyValue::Float(0.4),
+                    interpolation: InterpolationType::Linear,
+                    control_in: None,
+                    control_out: None,
+                },
+            })
+            .expect("set end opacity");
+
+        let active = seq.active_clips_at(TimeCode::new(10, tb));
+        assert_eq!(active.len(), 1);
+        assert!((active[0].opacity - 0.7).abs() < 0.01);
     }
 }
