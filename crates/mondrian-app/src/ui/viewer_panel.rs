@@ -1,6 +1,6 @@
 use crate::{
     app::AppState,
-    ui::theme::{self, palette, tokens, typography},
+    ui::theme::{self, palette, typography},
 };
 use egui::{Pos2, Rect, Sense, Ui, Vec2};
 
@@ -662,8 +662,9 @@ impl ViewerPanel {
     ) {
         ui.horizontal(|ui| {
             let total_w = ui.available_width();
-            let left_w = 170.0;
-            let right_w = 240.0;
+            let row_h = ui.spacing().interact_size.y.max(28.0);
+            let left_w = 200.0;
+            let right_w = 140.0;
             let center_w = (total_w - left_w - right_w).max(120.0);
 
             let fps = state
@@ -674,15 +675,19 @@ impl ViewerPanel {
             let tc = TimeCode::new(current_frame, Rational::new(fps.den.max(1), fps.num.max(1)));
 
             ui.allocate_ui_with_layout(
-                Vec2::new(left_w, ui.spacing().interact_size.y),
+                Vec2::new(left_w, row_h),
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
-                    ui.monospace(tc.to_smpte());
+                    ui.label(
+                        egui::RichText::new(tc.to_smpte())
+                            .font(typography::mono_large())
+                            .color(palette::text_primary()),
+                    );
                 },
             );
 
             ui.allocate_ui_with_layout(
-                Vec2::new(center_w, ui.spacing().interact_size.y),
+                Vec2::new(center_w, row_h),
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
                     let btn_w = 34.0;
@@ -746,7 +751,7 @@ impl ViewerPanel {
             );
 
             ui.allocate_ui_with_layout(
-                Vec2::new(right_w, ui.spacing().interact_size.y),
+                Vec2::new(right_w, row_h),
                 egui::Layout::right_to_left(egui::Align::Center),
                 |ui| {
                     let combo_id = ui.make_persistent_id("viewer_res");
@@ -786,24 +791,6 @@ impl ViewerPanel {
                                 );
                             });
                     });
-
-                    let resolution_fps_text = state
-                        .sequence
-                        .as_ref()
-                        .map(|s| {
-                            format!(
-                                "{}x{} @ {:.2}fps",
-                                s.settings.resolution.width,
-                                s.settings.resolution.height,
-                                s.settings.frame_rate.to_f64()
-                            )
-                        })
-                        .unwrap_or_else(|| "--x-- @ --fps".to_string());
-                    ui.label(
-                        egui::RichText::new(resolution_fps_text)
-                            .size(tokens::list_proxy_tag_font_size())
-                            .color(palette::text_muted()),
-                    );
                 },
             );
         });
