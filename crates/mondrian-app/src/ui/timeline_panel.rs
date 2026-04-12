@@ -27,6 +27,7 @@ pub struct TimelinePanel {
     active_tool: TimelineTool,
     snap_enabled: bool,
     active_snap_guide_frame: Option<i64>,
+    active_insert_guide_frame: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -84,10 +85,11 @@ impl TimelinePanel {
             self.snap_enabled = true;
         }
         self.active_snap_guide_frame = None;
+        self.active_insert_guide_frame = None;
 
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
-                self.draw_timeline_tools_toolbar(ui, state);
+                self.draw_timeline_tools_toolbar(ui);
             });
 
             ui.separator();
@@ -249,7 +251,7 @@ impl TimelinePanel {
         track_label_w + max_frame as f32 * self.pixels_per_frame
     }
 
-    fn draw_timeline_tools_toolbar(&mut self, ui: &mut Ui, state: &mut AppState) {
+    fn draw_timeline_tools_toolbar(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             if theme::icon_toggle_button(
                 ui,
@@ -280,15 +282,6 @@ impl TimelinePanel {
             .on_hover_text("自动吸附")
             .clicked()
             .then(|| self.snap_enabled = !self.snap_enabled);
-
-            ui.separator();
-            ui.label("重叠:");
-            let mut overlap_mode = state.clip_overlap_mode();
-            ui.selectable_value(&mut overlap_mode, ClipOverlapMode::Overwrite, "覆盖");
-            ui.selectable_value(&mut overlap_mode, ClipOverlapMode::Insert, "插入");
-            if overlap_mode != state.clip_overlap_mode() {
-                state.set_clip_overlap_mode(overlap_mode);
-            }
             ui.separator();
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -492,6 +485,17 @@ impl TimelinePanel {
                 ui.painter().line_segment(
                     [Pos2::new(snap_x, top), Pos2::new(snap_x, bottom)],
                     Stroke::new(1.4, palette::interaction_highlight()),
+                );
+            }
+
+            if let Some(insert_frame) = self.active_insert_guide_frame {
+                let insert_x = left + insert_frame as f32 * self.pixels_per_frame;
+                ui.painter().line_segment(
+                    [Pos2::new(insert_x, top), Pos2::new(insert_x, bottom)],
+                    Stroke::new(
+                        tokens::timeline_insert_guide_width(),
+                        palette::status_warning(),
+                    ),
                 );
             }
 
@@ -812,12 +816,17 @@ impl TimelinePanel {
                                 raw_target,
                                 Some(drag.clip_id),
                             );
+                            let overlap_mode = Self::current_overlap_mode(ui);
+                            if overlap_mode == ClipOverlapMode::Insert {
+                                self.active_insert_guide_frame = Some(target_frame);
+                            }
 
-                            if let Err(err) = state.move_clip_to_track(
+                            if let Err(err) = state.move_clip_to_track_with_mode(
                                 track.id,
                                 drag.is_video_track,
                                 drag.clip_id,
                                 target_frame,
+                                overlap_mode,
                             ) {
                                 let _ = err;
                             } else {
@@ -840,6 +849,7 @@ impl TimelinePanel {
             .unwrap_or(false);
         let pointer_pos = ui.input(|i| i.pointer.interact_pos());
         let pointer_in_row = pointer_pos.map(|p| rect.contains(p)).unwrap_or(false);
+        let overlap_mode = Self::current_overlap_mode(ui);
 
         if is_video_track && can_drop_here && pointer_in_row {
             if let Some(asset) = dragging_asset.as_ref() {
@@ -881,6 +891,9 @@ impl TimelinePanel {
                 let raw_ghost_frame =
                     (((pos.x - rect.left() - track_label_w) / self.pixels_per_frame) as i64).max(0);
                 let ghost_frame = self.resolve_snap_target_frame(state, raw_ghost_frame, None);
+                if overlap_mode == ClipOverlapMode::Insert {
+                    self.active_insert_guide_frame = Some(ghost_frame);
+                }
                 let ghost_frames = ((dragging.duration.as_secs_f64()
                     * seq.settings.frame_rate.to_f64())
                 .ceil() as i64)
@@ -934,10 +947,21 @@ impl TimelinePanel {
                         ((pos.x - rect.left() - track_label_w) / self.pixels_per_frame) as i64;
                     let raw_drop_frame = raw_drop_frame.max(0);
                     let drop_frame = self.resolve_snap_target_frame(state, raw_drop_frame, None);
+                    if overlap_mode == ClipOverlapMode::Insert {
+                        self.active_insert_guide_frame = Some(drop_frame);
+                    }
                     let drop_result = if is_video_track {
-                        state.drop_dragging_asset_to_video_track(track.id, drop_frame)
+                        state.drop_dragging_asset_to_video_track_with_mode(
+                            track.id,
+                            drop_frame,
+                            overlap_mode,
+                        )
                     } else {
-                        state.drop_dragging_asset_to_audio_track(track.id, drop_frame)
+                        state.drop_dragging_asset_to_audio_track_with_mode(
+                            track.id,
+                            drop_frame,
+                            overlap_mode,
+                        )
                     };
                     match drop_result {
                         Ok(_) => {
@@ -958,6 +982,9 @@ impl TimelinePanel {
                 let raw_ghost_frame =
                     (((pos.x - rect.left() - track_label_w) / self.pixels_per_frame) as i64).max(0);
                 let ghost_frame = self.resolve_snap_target_frame(state, raw_ghost_frame, None);
+                if overlap_mode == ClipOverlapMode::Insert {
+                    self.active_insert_guide_frame = Some(ghost_frame);
+                }
                 let ghost_frames = ((dragging.duration.as_secs_f64()
                     * seq.settings.frame_rate.to_f64())
                 .ceil() as i64)
@@ -1233,6 +1260,14 @@ impl TimelinePanel {
             self.active_snap_guide_frame = Some(decision.frame);
         }
         decision.frame
+    }
+
+    fn current_overlap_mode(ui: &Ui) -> ClipOverlapMode {
+        if ui.input(|i| i.modifiers.command) {
+            ClipOverlapMode::Insert
+        } else {
+            ClipOverlapMode::Overwrite
+        }
     }
 
     fn selected_clips_all_disabled(&self, state: &AppState) -> bool {

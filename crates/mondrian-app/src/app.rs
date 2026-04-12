@@ -293,9 +293,6 @@ pub struct AppState {
     // 正在拖拽的素材（从素材库拖向时间线）
     pub dragging_asset: Option<DraggingAsset>,
 
-    // 时间线片段冲突策略（覆盖/插入）
-    pub clip_overlap_mode: ClipOverlapMode,
-
     // 渲染导出队列
     pub render_queue: Arc<RenderQueue>,
 
@@ -375,7 +372,6 @@ impl AppState {
             playback_buffering: false,
             asset_library: None,
             dragging_asset: None,
-            clip_overlap_mode: ClipOverlapMode::Overwrite,
             render_queue: RenderQueue::new(),
             status_hint: None,
             auto_proxy_enabled: false,
@@ -1032,14 +1028,6 @@ impl AppState {
 
         self.record_timeline_edit_snapshot("切换轨道锁定", before);
         Ok(())
-    }
-
-    pub fn clip_overlap_mode(&self) -> ClipOverlapMode {
-        self.clip_overlap_mode
-    }
-
-    pub fn set_clip_overlap_mode(&mut self, mode: ClipOverlapMode) {
-        self.clip_overlap_mode = mode;
     }
 
     pub fn set_clips_disabled_bulk(
@@ -2151,7 +2139,19 @@ impl AppState {
         track_id: mondrian_core::types::TrackId,
         timeline_frame: i64,
     ) -> mondrian_core::Result<ClipId> {
-        let overlap_mode = self.clip_overlap_mode;
+        self.drop_dragging_asset_to_video_track_with_mode(
+            track_id,
+            timeline_frame,
+            ClipOverlapMode::Overwrite,
+        )
+    }
+
+    pub fn drop_dragging_asset_to_video_track_with_mode(
+        &mut self,
+        track_id: mondrian_core::types::TrackId,
+        timeline_frame: i64,
+        overlap_mode: ClipOverlapMode,
+    ) -> mondrian_core::Result<ClipId> {
         let dragging =
             self.dragging_asset.clone().ok_or(mondrian_core::MondrianError::Cancelled)?;
 
@@ -2237,7 +2237,19 @@ impl AppState {
         track_id: mondrian_core::types::TrackId,
         timeline_frame: i64,
     ) -> mondrian_core::Result<ClipId> {
-        let overlap_mode = self.clip_overlap_mode;
+        self.drop_dragging_asset_to_audio_track_with_mode(
+            track_id,
+            timeline_frame,
+            ClipOverlapMode::Overwrite,
+        )
+    }
+
+    pub fn drop_dragging_asset_to_audio_track_with_mode(
+        &mut self,
+        track_id: mondrian_core::types::TrackId,
+        timeline_frame: i64,
+        overlap_mode: ClipOverlapMode,
+    ) -> mondrian_core::Result<ClipId> {
         let dragging =
             self.dragging_asset.clone().ok_or(mondrian_core::MondrianError::Cancelled)?;
 
@@ -2293,7 +2305,30 @@ impl AppState {
         clip_id: ClipId,
         timeline_frame: i64,
     ) -> mondrian_core::Result<()> {
-        self.move_clip_to_track(track_id, is_video_track, clip_id, timeline_frame)
+        self.move_clip_in_track_with_mode(
+            track_id,
+            is_video_track,
+            clip_id,
+            timeline_frame,
+            ClipOverlapMode::Overwrite,
+        )
+    }
+
+    pub fn move_clip_in_track_with_mode(
+        &mut self,
+        track_id: TrackId,
+        is_video_track: bool,
+        clip_id: ClipId,
+        timeline_frame: i64,
+        overlap_mode: ClipOverlapMode,
+    ) -> mondrian_core::Result<()> {
+        self.move_clip_to_track_with_mode(
+            track_id,
+            is_video_track,
+            clip_id,
+            timeline_frame,
+            overlap_mode,
+        )
     }
 
     pub fn move_clip_to_track(
@@ -2303,7 +2338,23 @@ impl AppState {
         clip_id: ClipId,
         timeline_frame: i64,
     ) -> mondrian_core::Result<()> {
-        let overlap_mode = self.clip_overlap_mode;
+        self.move_clip_to_track_with_mode(
+            target_track_id,
+            is_video_track,
+            clip_id,
+            timeline_frame,
+            ClipOverlapMode::Overwrite,
+        )
+    }
+
+    pub fn move_clip_to_track_with_mode(
+        &mut self,
+        target_track_id: TrackId,
+        is_video_track: bool,
+        clip_id: ClipId,
+        timeline_frame: i64,
+        overlap_mode: ClipOverlapMode,
+    ) -> mondrian_core::Result<()> {
         let seq = self.sequence.as_mut().ok_or_else(|| {
             mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "move_clip".to_string(),
@@ -4568,9 +4619,8 @@ mod timeline_edit_tests {
             seq.video_tracks[0].add_clip(clip_b).expect("add clip b");
         }
 
-        state.set_clip_overlap_mode(ClipOverlapMode::Insert);
         state
-            .move_clip_in_track(track_id, true, clip_b_id, 5)
+            .move_clip_in_track_with_mode(track_id, true, clip_b_id, 5, ClipOverlapMode::Insert)
             .expect("move should succeed");
 
         let clips = &state.sequence.as_ref().expect("sequence should exist").video_tracks[0].clips;
@@ -4596,9 +4646,8 @@ mod timeline_edit_tests {
             seq.video_tracks[0].add_clip(clip_b).expect("add clip b");
         }
 
-        state.set_clip_overlap_mode(ClipOverlapMode::Overwrite);
         state
-            .move_clip_in_track(track_id, true, clip_b_id, 5)
+            .move_clip_in_track_with_mode(track_id, true, clip_b_id, 5, ClipOverlapMode::Overwrite)
             .expect("move should succeed");
 
         let clips = &state.sequence.as_ref().expect("sequence should exist").video_tracks[0].clips;

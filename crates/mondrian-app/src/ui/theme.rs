@@ -211,6 +211,7 @@ pub struct MetricsTokens {
     pub timeline_clip_ghost_padding_y: f32,
     pub timeline_selection_stroke_width: f32,
     pub timeline_drop_stroke_width: f32,
+    pub timeline_insert_guide_width: f32,
     pub timeline_linked_audio_highlight_width: f32,
     pub timeline_playhead_stroke_width: f32,
     pub timeline_playhead_secondary_stroke_width: f32,
@@ -281,6 +282,7 @@ impl Default for MetricsTokens {
             timeline_clip_ghost_padding_y: 4.0,
             timeline_selection_stroke_width: 2.0,
             timeline_drop_stroke_width: 1.5,
+            timeline_insert_guide_width: 2.0,
             timeline_linked_audio_highlight_width: 1.5,
             timeline_playhead_stroke_width: 2.0,
             timeline_playhead_secondary_stroke_width: 1.8,
@@ -917,6 +919,10 @@ pub mod tokens {
 
     pub fn timeline_drop_stroke_width() -> f32 {
         super::with_active_tokens(|tokens| tokens.metrics.timeline_drop_stroke_width)
+    }
+
+    pub fn timeline_insert_guide_width() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_insert_guide_width)
     }
 
     pub fn timeline_linked_audio_highlight_width() -> f32 {
