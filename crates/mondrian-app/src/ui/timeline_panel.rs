@@ -17,6 +17,7 @@ pub struct TimelinePanel {
     /// 水平滚动偏移（帧数）
     scroll_offset_frames: f64,
     clip_drag: Option<ClipDragState>,
+    clip_drag_anchors: Vec<ClipDragAnchor>,
     clip_drag_moved: bool,
     clip_drag_before_sequence: Option<Sequence>,
     selected_clips: HashSet<ClipSelection>,
@@ -62,6 +63,12 @@ struct ClipDragState {
     clip_id: ClipId,
     is_video_track: bool,
     pointer_offset_frames: i64,
+}
+
+#[derive(Clone, Copy)]
+struct ClipDragAnchor {
+    clip_id: ClipId,
+    start_frame: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -222,6 +229,7 @@ impl TimelinePanel {
                                     }
                                 }
                             }
+                            self.clip_drag_anchors.clear();
                             self.clip_drag_before_sequence = None;
                             self.clip_drag_moved = false;
                         }
@@ -749,16 +757,23 @@ impl TimelinePanel {
                         self.selected_clips.clear();
                     }
                     self.selected_clips.insert(selection);
+                    self.clip_drag_anchors = self.build_clip_drag_anchors(state);
                     self.clip_drag_before_sequence = state.sequence.clone();
 
                     if let Some(pointer) = clip_resp.interact_pointer_pos() {
                         let pointer_frame = ((pointer.x - rect.left() - track_label_w)
                             / self.pixels_per_frame)
                             .round() as i64;
+                        let anchor_start = self
+                            .clip_drag_anchors
+                            .iter()
+                            .find(|anchor| anchor.clip_id == clip.id)
+                            .map(|anchor| anchor.start_frame)
+                            .unwrap_or(clip.position.frame);
                         self.clip_drag = Some(ClipDragState {
                             clip_id: clip.id,
                             is_video_track,
-                            pointer_offset_frames: pointer_frame - clip.position.frame,
+                            pointer_offset_frames: pointer_frame - anchor_start,
                         });
                     }
                 }
@@ -821,11 +836,36 @@ impl TimelinePanel {
                                 self.active_insert_guide_frame = Some(target_frame);
                             }
 
-                            if let Err(err) = state.move_clip_to_track_with_mode(
-                                track.id,
-                                drag.is_video_track,
-                                drag.clip_id,
-                                target_frame,
+                            let anchors = if self.clip_drag_anchors.is_empty() {
+                                vec![ClipDragAnchor {
+                                    clip_id: drag.clip_id,
+                                    start_frame: clip.position.frame,
+                                }]
+                            } else {
+                                self.clip_drag_anchors.clone()
+                            };
+                            let Some(drag_anchor) =
+                                anchors.iter().find(|anchor| anchor.clip_id == drag.clip_id)
+                            else {
+                                continue;
+                            };
+
+                            let min_start = anchors
+                                .iter()
+                                .map(|anchor| anchor.start_frame)
+                                .min()
+                                .unwrap_or(drag_anchor.start_frame)
+                                .max(0);
+                            let clamped_delta =
+                                (target_frame - drag_anchor.start_frame).max(-min_start);
+                            let anchor_pairs: Vec<(ClipId, i64)> = anchors
+                                .iter()
+                                .map(|anchor| (anchor.clip_id, anchor.start_frame))
+                                .collect();
+
+                            if let Err(err) = state.move_clip_group_by_delta_with_mode(
+                                &anchor_pairs,
+                                clamped_delta,
                                 overlap_mode,
                             ) {
                                 let _ = err;
@@ -1262,6 +1302,33 @@ impl TimelinePanel {
         decision.frame
     }
 
+    fn build_clip_drag_anchors(&self, state: &AppState) -> Vec<ClipDragAnchor> {
+        let Some(seq) = state.sequence.as_ref() else {
+            return Vec::new();
+        };
+
+        let mut anchors = Vec::new();
+        let mut queued: Vec<ClipId> = self.selected_clips.iter().map(|sel| sel.clip_id).collect();
+        let mut seen = HashSet::<ClipId>::new();
+
+        while let Some(clip_id) = queued.pop() {
+            if !seen.insert(clip_id) {
+                continue;
+            }
+            let Some(clip) = find_clip_in_sequence(seq, clip_id) else {
+                continue;
+            };
+            anchors.push(ClipDragAnchor { clip_id, start_frame: clip.position.frame.max(0) });
+            if let Some(linked_id) = clip.linked_clip {
+                if !seen.contains(&linked_id) {
+                    queued.push(linked_id);
+                }
+            }
+        }
+
+        anchors
+    }
+
     fn current_overlap_mode(ui: &Ui) -> ClipOverlapMode {
         if ui.input(|i| i.modifiers.command) {
             ClipOverlapMode::Insert
@@ -1318,6 +1385,18 @@ fn clip_disabled_state(seq: &Sequence, sel: ClipSelection) -> Option<bool> {
             .and_then(|track| track.clips.iter().find(|clip| clip.id == sel.clip_id))
             .map(|clip| clip.is_disabled)
     }
+}
+
+fn find_clip_in_sequence(
+    seq: &Sequence,
+    clip_id: ClipId,
+) -> Option<&mondrian_timeline::clip::Clip> {
+    for track in seq.video_tracks.iter().chain(seq.audio_tracks.iter()) {
+        if let Some(clip) = track.clips.iter().find(|clip| clip.id == clip_id) {
+            return Some(clip);
+        }
+    }
+    None
 }
 
 #[derive(Copy, Clone)]

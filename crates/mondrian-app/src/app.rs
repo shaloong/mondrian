@@ -2512,6 +2512,76 @@ impl AppState {
 
         Ok(())
     }
+
+    pub fn move_clip_group_by_delta_with_mode(
+        &mut self,
+        anchors: &[(ClipId, i64)],
+        delta_frames: i64,
+        overlap_mode: ClipOverlapMode,
+    ) -> mondrian_core::Result<usize> {
+        if anchors.is_empty() {
+            return Ok(0);
+        }
+
+        let seq = self.sequence.as_mut().ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "move_clip_group_by_delta_with_mode".to_string(),
+                reason: "当前无序列".to_string(),
+            }
+        })?;
+
+        let mut seen = HashSet::<ClipId>::new();
+        let mut target_positions = Vec::<(ClipId, i64)>::new();
+        for (clip_id, start_frame) in anchors {
+            if !seen.insert(*clip_id) {
+                continue;
+            }
+
+            let Some((track_id, _is_video, is_locked)) = find_clip_track_lock(seq, *clip_id) else {
+                continue;
+            };
+            if is_locked {
+                return Err(mondrian_core::MondrianError::TrackLocked {
+                    track_id: track_id.to_string(),
+                });
+            }
+
+            let target = start_frame.saturating_add(delta_frames).max(0);
+            target_positions.push((*clip_id, target));
+        }
+
+        if target_positions.is_empty() {
+            return Ok(0);
+        }
+
+        let mut changed_count = 0usize;
+        for (clip_id, target_frame) in &target_positions {
+            if set_clip_position(seq, *clip_id, *target_frame) {
+                changed_count += 1;
+            }
+        }
+        if changed_count == 0 {
+            return Ok(0);
+        }
+
+        for track in &mut seq.video_tracks {
+            track.clips.sort_by_key(|c| c.position.frame);
+        }
+        for track in &mut seq.audio_tracks {
+            track.clips.sort_by_key(|c| c.position.frame);
+        }
+
+        let focus_ids: HashSet<ClipId> = target_positions.iter().map(|(id, _)| *id).collect();
+        for track in &mut seq.video_tracks {
+            apply_track_conflicts_for_focus_group(track, &focus_ids, overlap_mode);
+        }
+        for track in &mut seq.audio_tracks {
+            apply_track_conflicts_for_focus_group(track, &focus_ids, overlap_mode);
+        }
+
+        clear_broken_links(seq);
+        Ok(changed_count)
+    }
 }
 
 impl Default for AppState {
@@ -3339,6 +3409,43 @@ fn resolve_track_conflicts(
     }
 }
 
+fn apply_track_conflicts_for_focus_group(
+    track: &mut mondrian_timeline::track::Track,
+    focus_ids: &HashSet<ClipId>,
+    mode: ClipOverlapMode,
+) {
+    if focus_ids.is_empty() {
+        return;
+    }
+    match mode {
+        ClipOverlapMode::Insert => resolve_track_overlaps(track),
+        ClipOverlapMode::Overwrite => {
+            let focus_ranges: Vec<(i64, i64)> = track
+                .clips
+                .iter()
+                .filter(|clip| focus_ids.contains(&clip.id))
+                .map(|clip| (clip.position.frame, clip.end_position().frame))
+                .collect();
+            if focus_ranges.is_empty() {
+                track.clips.sort_by_key(|c| c.position.frame);
+                return;
+            }
+
+            track.clips.retain(|clip| {
+                if focus_ids.contains(&clip.id) {
+                    return true;
+                }
+                let start = clip.position.frame;
+                let end = clip.end_position().frame;
+                focus_ranges
+                    .iter()
+                    .all(|(focus_start, focus_end)| end <= *focus_start || start >= *focus_end)
+            });
+            track.clips.sort_by_key(|c| c.position.frame);
+        }
+    }
+}
+
 fn apply_conflict_policy_for_existing_clip(
     seq: &mut Sequence,
     clip_id: ClipId,
@@ -3392,6 +3499,18 @@ fn set_clip_disabled(seq: &mut Sequence, clip_id: ClipId, disabled: bool) -> boo
             return false;
         }
         clip.is_disabled = disabled;
+        return true;
+    }
+    false
+}
+
+fn set_clip_position(seq: &mut Sequence, clip_id: ClipId, frame: i64) -> bool {
+    if let Some(clip) = find_clip_mut(seq, clip_id) {
+        let frame = frame.max(0);
+        if clip.position.frame == frame {
+            return false;
+        }
+        clip.position = TimeCode::new(frame, clip.position.time_base);
         return true;
     }
     false
@@ -4654,6 +4773,44 @@ mod timeline_edit_tests {
         assert_eq!(clips.len(), 1);
         assert_eq!(clips[0].id, clip_b_id);
         assert_eq!(clips[0].position.frame, 5);
+    }
+
+    #[test]
+    fn move_clip_group_overwrite_keeps_all_selected_clips() {
+        let mut state = create_state_with_sequence();
+        let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
+
+        let clip_a = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+        let clip_a_id = clip_a.id;
+        let clip_b = Clip::new(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(10, tb));
+        let clip_b_id = clip_b.id;
+        let clip_c = Clip::new(AssetId::new(), TimeCode::new(40, tb), TimeCode::new(10, tb));
+        let clip_c_id = clip_c.id;
+
+        {
+            let seq = state.sequence.as_mut().expect("sequence should exist");
+            seq.video_tracks[0].add_clip(clip_a).expect("add clip a");
+            seq.video_tracks[0].add_clip(clip_b).expect("add clip b");
+            seq.video_tracks[0].add_clip(clip_c).expect("add clip c");
+        }
+
+        state
+            .move_clip_group_by_delta_with_mode(
+                &[(clip_a_id, 0), (clip_b_id, 10)],
+                5,
+                ClipOverlapMode::Overwrite,
+            )
+            .expect("group move should succeed");
+
+        let clips = &state.sequence.as_ref().expect("sequence should exist").video_tracks[0].clips;
+        assert_eq!(clips.len(), 3);
+        let moved_a = clips.iter().find(|clip| clip.id == clip_a_id).expect("clip a should exist");
+        let moved_b = clips.iter().find(|clip| clip.id == clip_b_id).expect("clip b should exist");
+        let untouched_c =
+            clips.iter().find(|clip| clip.id == clip_c_id).expect("clip c should exist");
+        assert_eq!(moved_a.position.frame, 5);
+        assert_eq!(moved_b.position.frame, 15);
+        assert_eq!(untouched_c.position.frame, 40);
     }
 
     #[test]
