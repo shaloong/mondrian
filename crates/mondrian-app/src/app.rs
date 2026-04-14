@@ -136,6 +136,12 @@ enum PreferencesTab {
     Developer,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingCloseAction {
+    CloseProject,
+    QuitApp,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct AppPreferences {
     version: u32,
@@ -460,19 +466,25 @@ impl AppState {
     ) -> anyhow::Result<ProjectFile> {
         fs::create_dir_all(runtime_root.join("library"))?;
 
+        let saved = Self::read_project_data_from_archive(project_file)?;
+
         let file = fs::File::open(project_file)?;
         let mut archive = zip::ZipArchive::new(file)?;
-
-        let mut project_json = String::new();
-        archive.by_name("project.json")?.read_to_string(&mut project_json)?;
-
-        let saved = serde_json::from_str::<ProjectFile>(&project_json)?;
 
         let mut db_entry = archive.by_name("library/index.db")?;
         let mut db_file = fs::File::create(runtime_root.join("library").join("index.db"))?;
         std::io::copy(&mut db_entry, &mut db_file)?;
         db_file.flush()?;
 
+        Ok(saved)
+    }
+
+    fn read_project_data_from_archive(project_file: &Path) -> anyhow::Result<ProjectFile> {
+        let file = fs::File::open(project_file)?;
+        let mut archive = zip::ZipArchive::new(file)?;
+        let mut project_json = String::new();
+        archive.by_name("project.json")?.read_to_string(&mut project_json)?;
+        let saved = serde_json::from_str::<ProjectFile>(&project_json)?;
         Ok(saved)
     }
 
@@ -3705,6 +3717,8 @@ pub struct MondrianApp {
     capturing_shortcut: Option<ShortcutAction>,
     show_new_project_dialog: bool,
     show_project_bootstrap_dialog: bool,
+    pending_close_action: Option<PendingCloseAction>,
+    allow_next_viewport_close: bool,
     new_project_draft: NewProjectDraft,
     playback_last_tick: Option<std::time::Instant>,
     playback_subframe_accum: f64,
@@ -3751,6 +3765,8 @@ impl MondrianApp {
             capturing_shortcut: None,
             show_new_project_dialog: false,
             show_project_bootstrap_dialog: true,
+            pending_close_action: None,
+            allow_next_viewport_close: false,
             new_project_draft: NewProjectDraft::default(),
             playback_last_tick: None,
             playback_subframe_accum: 0.0,
@@ -3809,6 +3825,8 @@ impl eframe::App for MondrianApp {
         if ui_diag_enabled() {
             log_ui_stage_slow("process_global_shortcuts", shortcuts_started_at.elapsed());
         }
+
+        self.handle_viewport_close_requested(ctx);
 
         let cache_maintenance_started_at = std::time::Instant::now();
         self.run_cache_maintenance_if_needed();
@@ -4062,7 +4080,7 @@ impl eframe::App for MondrianApp {
                             self.show_new_project_dialog = true;
                         }
                         if ui.button("退出").clicked() {
-                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                            self.request_quit_app(ui.ctx());
                         }
                     });
 
@@ -4122,6 +4140,8 @@ impl eframe::App for MondrianApp {
             self.capture_shortcut_input(ctx);
             self.draw_preferences_window(ctx);
         }
+
+        self.draw_pending_close_action_dialog(ctx);
 
         let persist_started_at = std::time::Instant::now();
         self.persist_preferences_if_needed();
@@ -4217,6 +4237,159 @@ impl MondrianApp {
 
     fn persist_preferences_if_needed(&mut self) {
         preferences::persist_preferences_if_needed(self);
+    }
+
+    fn handle_viewport_close_requested(&mut self, ctx: &egui::Context) {
+        let close_requested = ctx.input(|i| i.viewport().close_requested());
+        if !close_requested {
+            return;
+        }
+
+        if self.allow_next_viewport_close {
+            self.allow_next_viewport_close = false;
+            return;
+        }
+
+        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        self.request_quit_app(ctx);
+    }
+
+    fn close_project_and_refresh_state(&mut self) {
+        self.state.close_project();
+        self.last_auto_save_at = None;
+        self.auto_save_error_reported = false;
+        self.crash_recovery_candidates = discover_crash_recovery_candidates();
+    }
+
+    fn has_unsaved_project_changes(&self) -> bool {
+        if !self.state.has_open_project() {
+            return false;
+        }
+
+        let Some(current) = self.state.current_project_data() else {
+            return false;
+        };
+
+        let current_fingerprint = match project_data_fingerprint(current) {
+            Ok(data) => data,
+            Err(err) => {
+                tracing::warn!("计算当前项目指纹失败，按未保存处理: {err}");
+                return true;
+            }
+        };
+
+        let project_file = match self.state.project_file_path() {
+            Ok(path) => path,
+            Err(err) => {
+                tracing::warn!("读取当前项目路径失败，按未保存处理: {err}");
+                return true;
+            }
+        };
+
+        let saved = match AppState::read_project_data_from_archive(project_file) {
+            Ok(data) => data,
+            Err(err) => {
+                tracing::warn!("读取磁盘项目数据失败，按未保存处理: {err}");
+                return true;
+            }
+        };
+
+        let saved_fingerprint = match project_data_fingerprint(saved) {
+            Ok(data) => data,
+            Err(err) => {
+                tracing::warn!("计算磁盘项目指纹失败，按未保存处理: {err}");
+                return true;
+            }
+        };
+
+        current_fingerprint != saved_fingerprint
+    }
+
+    fn request_close_project(&mut self) {
+        if !self.state.has_open_project() {
+            return;
+        }
+
+        if self.has_unsaved_project_changes() {
+            self.pending_close_action = Some(PendingCloseAction::CloseProject);
+        } else {
+            self.close_project_and_refresh_state();
+        }
+    }
+
+    fn request_quit_app(&mut self, ctx: &egui::Context) {
+        if self.state.has_open_project() {
+            if self.has_unsaved_project_changes() {
+                self.pending_close_action = Some(PendingCloseAction::QuitApp);
+                return;
+            }
+
+            self.close_project_and_refresh_state();
+        }
+
+        self.allow_next_viewport_close = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    fn execute_pending_close_action(&mut self, ctx: &egui::Context) {
+        let Some(action) = self.pending_close_action.take() else {
+            return;
+        };
+
+        match action {
+            PendingCloseAction::CloseProject => {
+                self.close_project_and_refresh_state();
+            }
+            PendingCloseAction::QuitApp => {
+                self.close_project_and_refresh_state();
+                self.allow_next_viewport_close = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+    }
+
+    fn draw_pending_close_action_dialog(&mut self, ctx: &egui::Context) {
+        let Some(action) = self.pending_close_action else {
+            return;
+        };
+
+        let mut keep_open = true;
+        egui::Window::new("关闭前保存项目")
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .collapsible(false)
+            .resizable(false)
+            .default_size([460.0, 160.0])
+            .open(&mut keep_open)
+            .show(ctx, |ui| {
+                let action_text = match action {
+                    PendingCloseAction::CloseProject => "关闭项目",
+                    PendingCloseAction::QuitApp => "退出应用",
+                };
+                ui.label(format!("正在{action_text}，是否先保存当前项目？"));
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button("保存并继续").clicked() {
+                        if let Err(err) = self.state.save_project() {
+                            tracing::error!("关闭前保存失败: {err}");
+                            self.state.set_status_hint(format!("保存项目失败：{err}"), true);
+                        } else {
+                            self.execute_pending_close_action(ctx);
+                        }
+                    }
+
+                    if ui.button("不保存").clicked() {
+                        self.execute_pending_close_action(ctx);
+                    }
+
+                    if ui.button("取消").clicked() {
+                        self.pending_close_action = None;
+                    }
+                });
+            });
+
+        if !keep_open {
+            self.pending_close_action = None;
+        }
     }
 
     /// 播放自然到达终点时调用：将播放头停在 `end_frame`，并标记自然到达标志。
@@ -4421,10 +4594,7 @@ impl MondrianApp {
                 }
                 let close_label = format!("关闭项目    {}", self.shortcuts.close_project_label());
                 if ui.button(close_label).clicked() {
-                    self.state.close_project();
-                    self.last_auto_save_at = None;
-                    self.auto_save_error_reported = false;
-                    self.crash_recovery_candidates = discover_crash_recovery_candidates();
+                    self.request_close_project();
                     ui.close_menu();
                 }
                 ui.separator();
@@ -4436,7 +4606,7 @@ impl MondrianApp {
                 ui.separator();
                 let quit_label = format!("退出    {}", self.shortcuts.quit_app_label());
                 if ui.button(quit_label).clicked() {
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    self.request_quit_app(ui.ctx());
                 }
             });
 
@@ -4622,6 +4792,11 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()>
     fs::write(&tmp, json)?;
     fs::rename(&tmp, path)?;
     Ok(())
+}
+
+fn project_data_fingerprint(mut data: ProjectFile) -> anyhow::Result<Vec<u8>> {
+    data.proxy_mode_assets.sort_by_key(|id| id.to_string());
+    Ok(serde_json::to_vec(&data)?)
 }
 
 fn unix_now_ms() -> u64 {

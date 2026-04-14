@@ -1514,6 +1514,7 @@ fn choose_track_drag_target(
             .partial_cmp(&b_dist)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.track_index.cmp(&b.track_index))
+            .then_with(|| a.track_id.to_string().cmp(&b.track_id.to_string()))
     });
 
     let target_row = same_type_rows[0];

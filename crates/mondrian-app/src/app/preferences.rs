@@ -202,13 +202,10 @@ pub(super) fn process_global_shortcuts(app: &mut MondrianApp, ctx: &egui::Contex
         }
         Some(ShortcutAction::SaveProjectAs) => save_project_as_dialog(app),
         Some(ShortcutAction::CloseProject) => {
-            app.state.close_project();
-            app.last_auto_save_at = None;
-            app.auto_save_error_reported = false;
-            app.crash_recovery_candidates = discover_crash_recovery_candidates();
+            app.request_close_project();
         }
         Some(ShortcutAction::QuitApp) => {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            app.request_quit_app(ctx);
         }
         None => {}
     }
