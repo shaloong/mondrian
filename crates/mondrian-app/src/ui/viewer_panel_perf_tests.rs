@@ -114,7 +114,16 @@ fn render_frame(canvas: &mut [u8], width: u32, height: u32, layers: &[Vec<u8>], 
     for (layer_idx, layer) in layers.iter().enumerate() {
         // 通过轻微变化 opacity 模拟时间线上内容变化带来的合成波动。
         let opacity = (0.45 + ((frame_idx + layer_idx as u64) % 7) as f32 * 0.07).min(1.0);
-        alpha_blend_layer(canvas, width, height, layer, width, height, opacity);
+        alpha_blend_layer(
+            canvas,
+            width,
+            height,
+            layer,
+            width,
+            height,
+            opacity,
+            [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+        );
     }
 }
 

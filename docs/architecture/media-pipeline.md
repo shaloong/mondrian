@@ -86,6 +86,13 @@ pub struct AudioStreamInfo {
 - 预览解码线程数当前按 `(CPU核数 - 1).clamp(1, 8)` 计算，并允许通过 `MONDRIAN_PREVIEW_DECODE_THREADS` 覆盖。
 - 预览解码后端 `PreviewDecodeBackend` 默认值为 `Auto`，通过全局原子状态切换。
 
+### 预览合成签名与变换应用（实现对齐）
+
+- 预览帧签名 `CompositeFrameSignature` 除 `asset_id/source_frame/opacity` 外，额外包含量化后的仿射变换键（`transform_key`），用于在位置、缩放、旋转等属性变化时正确触发重解码/重合成。
+- 图层解码请求在合成前携带 `transform: [f32; 6]`（2D 仿射矩阵），合成阶段统一处理变换。
+- 当所有图层均为单位变换时，优先尝试 GPU 合成路径；当存在非单位变换时，回退 CPU 仿射采样合成，保证视觉结果与时间线属性一致。
+- 单图层直通优化仅在“单位变换 + 全尺寸 + 不透明度接近 1”条件下启用，避免错误绕过变换。
+
 ### 关键 API
 
 ```rust

@@ -31,6 +31,7 @@ struct LayerDecodeRequest {
     source_secs: f64,
     source_time_base: Rational,
     opacity: f32,
+    transform: [f32; 6],
 }
 
 #[derive(Clone)]
@@ -73,6 +74,7 @@ struct LayerSignature {
     asset_id: AssetId,
     source_frame: i64,
     opacity_u8: u8,
+    transform_key: [i32; 6],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -419,6 +421,7 @@ impl ViewerPanel {
                                 asset_id: layer.frame_key.0,
                                 source_frame: layer.frame_key.1,
                                 opacity_u8: (layer.opacity * 255.0).round() as u8,
+                                transform_key: quantize_transform_signature(layer.transform),
                             })
                             .collect::<Vec<_>>();
 
@@ -1494,6 +1497,7 @@ impl ViewerPanel {
                 source_secs: active_clip.source_time.to_secs().max(0.0),
                 source_time_base: active_clip.source_time.time_base,
                 opacity,
+                transform: mat3_to_affine(active_clip.transform_matrix.to_cols_array()),
             });
         }
 
@@ -2059,6 +2063,7 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
     let mut decoded_layers = 0usize;
     let mut last_error: Option<anyhow::Error> = None;
     let mut rgba_layers_for_gpu: Vec<CpuRgbaLayer> = Vec::with_capacity(request.layers.len());
+    let mut layer_transforms: Vec<[f32; 6]> = Vec::with_capacity(request.layers.len());
 
     if request.layers.is_empty() {
         return Err(anyhow::anyhow!("无可用图层可解码"));
@@ -2083,6 +2088,7 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
                     data,
                     opacity: layer.opacity,
                 });
+                layer_transforms.push(layer.transform);
                 decoded_layers = 1;
             }
             Err(err) => {
@@ -2149,6 +2155,7 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
                         data,
                         opacity: layer.opacity,
                     });
+                    layer_transforms.push(layer.transform);
                     decoded_layers += 1;
                 }
                 Some(Err(err)) => {
@@ -2174,7 +2181,10 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
         return Err(last_error.unwrap_or_else(|| anyhow::anyhow!("无可用图层可解码")));
     }
 
-    if rgba_layers_for_gpu.len() == 1 {
+    let has_non_identity_transform =
+        layer_transforms.iter().any(|transform| !is_identity_transform(*transform));
+
+    if rgba_layers_for_gpu.len() == 1 && !has_non_identity_transform {
         let only_layer = rgba_layers_for_gpu.pop().expect("single layer should exist");
         if only_layer.opacity >= 0.999 && only_layer.width == width && only_layer.height == height {
             record_preview_perf_passthrough_frame();
@@ -2184,42 +2194,33 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
         rgba_layers_for_gpu.push(only_layer);
     }
 
-    if let Some(gpu_rgba) = try_gpu_composite_rgba_layers(width, height, &rgba_layers_for_gpu) {
-        record_preview_perf_decode_total(decode_started_at.elapsed());
-        return Ok(RgbaFrame { width, height, data: gpu_rgba });
+    if !has_non_identity_transform {
+        if let Some(gpu_rgba) = try_gpu_composite_rgba_layers(width, height, &rgba_layers_for_gpu) {
+            record_preview_perf_decode_total(decode_started_at.elapsed());
+            return Ok(RgbaFrame { width, height, data: gpu_rgba });
+        }
     }
 
     let cpu_composite_started_at = Instant::now();
-    let mut layers_iter = rgba_layers_for_gpu.into_iter();
-    let Some(first_layer) = layers_iter.next() else {
+    let mut layer_pairs = rgba_layers_for_gpu.into_iter().zip(layer_transforms);
+    let Some((first_layer, first_transform)) = layer_pairs.next() else {
         return Err(anyhow::anyhow!("无可用图层可合成"));
     };
 
-    let mut canvas = if first_layer.opacity >= 0.999
-        && first_layer.width == width
-        && first_layer.height == height
-    {
-        first_layer.data
-    } else {
-        let mut canvas = vec![0u8; (width as usize) * (height as usize) * 4];
-        initialize_canvas_alpha_opaque(&mut canvas);
-        alpha_blend_layer(
-            &mut canvas,
-            width,
-            height,
-            &first_layer.data,
-            first_layer.width,
-            first_layer.height,
-            first_layer.opacity,
-        );
-        canvas
-    };
+    let mut canvas = vec![0u8; (width as usize) * (height as usize) * 4];
+    initialize_canvas_alpha_opaque(&mut canvas);
+    alpha_blend_layer(
+        &mut canvas,
+        width,
+        height,
+        &first_layer.data,
+        first_layer.width,
+        first_layer.height,
+        first_layer.opacity,
+        first_transform,
+    );
 
-    if first_layer.opacity >= 0.999 && first_layer.width == width && first_layer.height == height {
-        initialize_canvas_alpha_opaque(&mut canvas);
-    }
-
-    for layer in layers_iter {
+    for (layer, transform) in layer_pairs {
         alpha_blend_layer(
             &mut canvas,
             width,
@@ -2228,6 +2229,7 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
             layer.width,
             layer.height,
             layer.opacity,
+            transform,
         );
     }
 
@@ -2269,6 +2271,185 @@ fn try_gpu_composite_rgba_layers(
             record_gpu_compositor_result(false);
             tracing::warn!("GPU 合成失败，回退 CPU 路径: {}", err);
             None
+        }
+    }
+}
+
+fn mat3_to_affine(cols: [f32; 9]) -> [f32; 6] {
+    [cols[0], cols[3], cols[6], cols[1], cols[4], cols[7]]
+}
+
+fn quantize_transform_signature(transform: [f32; 6]) -> [i32; 6] {
+    const SCALE: f32 = 1024.0;
+    [
+        (transform[0] * SCALE).round() as i32,
+        (transform[1] * SCALE).round() as i32,
+        (transform[2] * SCALE).round() as i32,
+        (transform[3] * SCALE).round() as i32,
+        (transform[4] * SCALE).round() as i32,
+        (transform[5] * SCALE).round() as i32,
+    ]
+}
+
+fn is_identity_transform(transform: [f32; 6]) -> bool {
+    const EPS: f32 = 1.0e-4;
+    (transform[0] - 1.0).abs() <= EPS
+        && transform[1].abs() <= EPS
+        && transform[2].abs() <= EPS
+        && transform[3].abs() <= EPS
+        && (transform[4] - 1.0).abs() <= EPS
+        && transform[5].abs() <= EPS
+}
+
+fn invert_affine(transform: [f32; 6]) -> Option<[f32; 6]> {
+    let a = transform[0];
+    let c = transform[1];
+    let tx = transform[2];
+    let b = transform[3];
+    let d = transform[4];
+    let ty = transform[5];
+
+    let det = a * d - b * c;
+    if det.abs() <= 1.0e-6 {
+        return None;
+    }
+
+    let inv_det = 1.0 / det;
+    let ia = d * inv_det;
+    let ic = -c * inv_det;
+    let ib = -b * inv_det;
+    let id = a * inv_det;
+    let itx = -(ia * tx + ic * ty);
+    let ity = -(ib * tx + id * ty);
+    Some([ia, ic, itx, ib, id, ity])
+}
+
+fn sample_src_rgba(
+    src_rgba: &[u8],
+    src_w: usize,
+    src_h: usize,
+    sx: f32,
+    sy: f32,
+) -> Option<[u8; 4]> {
+    let x = sx.round() as isize;
+    let y = sy.round() as isize;
+    if x < 0 || y < 0 || x >= src_w as isize || y >= src_h as isize {
+        return None;
+    }
+
+    let idx = (y as usize * src_w + x as usize) * 4;
+    if idx + 3 >= src_rgba.len() {
+        return None;
+    }
+    Some([
+        src_rgba[idx],
+        src_rgba[idx + 1],
+        src_rgba[idx + 2],
+        src_rgba[idx + 3],
+    ])
+}
+
+fn blend_pixel_with_alpha(
+    dst_px: &mut [u8],
+    src_px: [u8; 4],
+    opacity_u8: u32,
+    alpha_table: &[u8; 65_536],
+) {
+    let opacity_key = (opacity_u8.min(255) as usize) << 8;
+    let alpha = alpha_table[opacity_key | src_px[3] as usize] as u32;
+    if alpha == 0 {
+        return;
+    }
+
+    if alpha >= 255 {
+        dst_px[0] = src_px[0];
+        dst_px[1] = src_px[1];
+        dst_px[2] = src_px[2];
+        dst_px[3] = 255;
+        return;
+    }
+
+    let inv_alpha = 255 - alpha;
+    let src_r = src_px[0] as u32;
+    let src_g = src_px[1] as u32;
+    let src_b = src_px[2] as u32;
+    let dst_r = dst_px[0] as u32;
+    let dst_g = dst_px[1] as u32;
+    let dst_b = dst_px[2] as u32;
+
+    dst_px[0] = blend_channel_u8(src_r, dst_r, alpha, inv_alpha);
+    dst_px[1] = blend_channel_u8(src_g, dst_g, alpha, inv_alpha);
+    dst_px[2] = blend_channel_u8(src_b, dst_b, alpha, inv_alpha);
+}
+
+fn alpha_blend_layer(
+    dst_rgba: &mut [u8],
+    dst_w: u32,
+    dst_h: u32,
+    src_rgba: &[u8],
+    src_w: u32,
+    src_h: u32,
+    opacity: f32,
+    transform: [f32; 6],
+) {
+    let width = dst_w.min(src_w) as usize;
+    let height = dst_h.min(src_h) as usize;
+    let opacity_u8 = (opacity.clamp(0.0, 1.0) * 255.0).round() as u32;
+
+    if opacity_u8 == 0 {
+        return;
+    }
+
+    let alpha_table = alpha_blend_table();
+    let dst_stride = dst_w as usize * 4;
+    let src_stride = src_w as usize * 4;
+
+    if is_identity_transform(transform) {
+        if should_parallel_blend(width, height) {
+            dst_rgba
+                .par_chunks_mut(dst_stride)
+                .take(height)
+                .zip(src_rgba.par_chunks(src_stride).take(height))
+                .with_min_len(blend_parallel_min_rows())
+                .for_each(|(dst_row, src_row)| {
+                    blend_row_with_table(dst_row, src_row, width, opacity_u8, alpha_table)
+                });
+        } else {
+            for y in 0..height {
+                let dst_row = &mut dst_rgba[y * dst_stride..(y + 1) * dst_stride];
+                let src_row = &src_rgba[y * src_stride..(y + 1) * src_stride];
+                blend_row_with_table(dst_row, src_row, width, opacity_u8, alpha_table);
+            }
+        }
+        return;
+    }
+
+    let Some(inv) = invert_affine(transform) else {
+        return;
+    };
+
+    let dst_width = dst_w as usize;
+    let dst_height = dst_h as usize;
+    let src_width = src_w as usize;
+    let src_height = src_h as usize;
+
+    for dy in 0..dst_height {
+        for dx in 0..dst_width {
+            let fx = dx as f32 + 0.5;
+            let fy = dy as f32 + 0.5;
+            let sx = inv[0] * fx + inv[1] * fy + inv[2];
+            let sy = inv[3] * fx + inv[4] * fy + inv[5];
+            let Some(src_px) = sample_src_rgba(src_rgba, src_width, src_height, sx - 0.5, sy - 0.5)
+            else {
+                continue;
+            };
+
+            let dst_idx = (dy * dst_width + dx) * 4;
+            if dst_idx + 3 >= dst_rgba.len() {
+                continue;
+            }
+            let dst_px = &mut dst_rgba[dst_idx..dst_idx + 4];
+            blend_pixel_with_alpha(dst_px, src_px, opacity_u8, alpha_table);
         }
     }
 }
@@ -3061,46 +3242,6 @@ fn quantize_dimension(value: u32, step: u32) -> u32 {
     }
 }
 
-fn alpha_blend_layer(
-    dst_rgba: &mut [u8],
-    dst_w: u32,
-    dst_h: u32,
-    src_rgba: &[u8],
-    src_w: u32,
-    src_h: u32,
-    opacity: f32,
-) {
-    let width = dst_w.min(src_w) as usize;
-    let height = dst_h.min(src_h) as usize;
-    let opacity_u8 = (opacity.clamp(0.0, 1.0) * 255.0).round() as u32;
-
-    if opacity_u8 == 0 {
-        return;
-    }
-
-    let alpha_table = alpha_blend_table();
-
-    let dst_stride = dst_w as usize * 4;
-    let src_stride = src_w as usize * 4;
-
-    if should_parallel_blend(width, height) {
-        dst_rgba
-            .par_chunks_mut(dst_stride)
-            .take(height)
-            .zip(src_rgba.par_chunks(src_stride).take(height))
-            .with_min_len(blend_parallel_min_rows())
-            .for_each(|(dst_row, src_row)| {
-                blend_row_with_table(dst_row, src_row, width, opacity_u8, alpha_table)
-            });
-    } else {
-        for y in 0..height {
-            let dst_row = &mut dst_rgba[y * dst_stride..(y + 1) * dst_stride];
-            let src_row = &src_rgba[y * src_stride..(y + 1) * src_stride];
-            blend_row_with_table(dst_row, src_row, width, opacity_u8, alpha_table);
-        }
-    }
-}
-
 fn initialize_canvas_alpha_opaque(canvas: &mut [u8]) {
     let pixels = canvas.len() / 4;
     if pixels >= 1_000_000 {
@@ -3273,3 +3414,7 @@ fn draw_empty_canvas_meta(
 #[cfg(test)]
 #[path = "viewer_panel_perf_tests.rs"]
 mod perf_tests;
+
+#[cfg(test)]
+#[path = "viewer_panel_transform_tests.rs"]
+mod transform_tests;
