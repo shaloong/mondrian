@@ -124,6 +124,52 @@ impl Transform2D {
     }
 }
 
+fn blend_mode_to_text(mode: Option<BlendMode>) -> String {
+    match mode {
+        None => "inherit".to_string(),
+        Some(BlendMode::Normal) => "Normal".to_string(),
+        Some(BlendMode::Multiply) => "Multiply".to_string(),
+        Some(BlendMode::Screen) => "Screen".to_string(),
+        Some(BlendMode::Overlay) => "Overlay".to_string(),
+        Some(BlendMode::Darken) => "Darken".to_string(),
+        Some(BlendMode::Lighten) => "Lighten".to_string(),
+        Some(BlendMode::ColorDodge) => "ColorDodge".to_string(),
+        Some(BlendMode::ColorBurn) => "ColorBurn".to_string(),
+        Some(BlendMode::HardLight) => "HardLight".to_string(),
+        Some(BlendMode::SoftLight) => "SoftLight".to_string(),
+        Some(BlendMode::Difference) => "Difference".to_string(),
+        Some(BlendMode::Exclusion) => "Exclusion".to_string(),
+        Some(BlendMode::Add) => "Add".to_string(),
+        Some(BlendMode::Subtract) => "Subtract".to_string(),
+    }
+}
+
+fn blend_mode_from_text(value: &str) -> Result<Option<BlendMode>> {
+    Ok(match value {
+        "inherit" => None,
+        "Multiply" => Some(BlendMode::Multiply),
+        "Screen" => Some(BlendMode::Screen),
+        "Overlay" => Some(BlendMode::Overlay),
+        "Darken" => Some(BlendMode::Darken),
+        "Lighten" => Some(BlendMode::Lighten),
+        "ColorDodge" => Some(BlendMode::ColorDodge),
+        "ColorBurn" => Some(BlendMode::ColorBurn),
+        "HardLight" => Some(BlendMode::HardLight),
+        "SoftLight" => Some(BlendMode::SoftLight),
+        "Difference" => Some(BlendMode::Difference),
+        "Exclusion" => Some(BlendMode::Exclusion),
+        "Add" => Some(BlendMode::Add),
+        "Subtract" => Some(BlendMode::Subtract),
+        "Normal" => Some(BlendMode::Normal),
+        other => {
+            return Err(MondrianError::WorkflowStepFailed {
+                step_id: "blend_mode_parse".to_string(),
+                reason: format!("无法解析混合模式: {other}"),
+            });
+        }
+    })
+}
+
 /// 变速模式
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SpeedMode {
@@ -235,6 +281,8 @@ pub struct Clip {
 }
 
 impl Clip {
+    pub const BLEND_MODE_PATH: &'static str = "clip.blend_mode";
+
     pub fn new(asset_id: AssetId, position: TimeCode, duration: TimeCode) -> Self {
         let tb = position.time_base;
         Self {
@@ -275,6 +323,16 @@ impl Clip {
 impl PropertyHost for Clip {
     fn property_bag(&self) -> Result<PropertyBag> {
         let mut properties = self.transform.to_property_bag();
+        let blend_mode_text = blend_mode_to_text(self.blend_mode);
+        properties.upsert(AnimatedProperty {
+            descriptor: PropertyDescriptor {
+                path: Self::BLEND_MODE_PATH.to_string(),
+                display_name: "混合模式".to_string(),
+                default_value: PropertyValue::Text(blend_mode_text.clone()),
+                is_animatable: false,
+            },
+            track: SharedKeyframeTrack::constant(PropertyValue::Text(blend_mode_text)),
+        });
         properties.upsert(animated_property_from_track(
             SpeedMode::MULTIPLIER_PATH,
             "速度倍数",
@@ -287,6 +345,30 @@ impl PropertyHost for Clip {
         let path = property_mutation_path(&mutation);
         if path.starts_with("transform.") {
             self.transform.apply_property_mutation(mutation)
+        } else if path == Self::BLEND_MODE_PATH {
+            if matches!(mutation, PropertyMutation::RemoveProperty { .. }) {
+                return Err(MondrianError::WorkflowStepFailed {
+                    step_id: "clip_apply_property_mutation".to_string(),
+                    reason: "内建 clip.blend_mode 属性不可移除".to_string(),
+                });
+            }
+
+            let mut properties = self.property_bag()?;
+            properties.apply_mutation(mutation)?;
+            let property = properties.property(Self::BLEND_MODE_PATH).ok_or_else(|| {
+                MondrianError::WorkflowStepFailed {
+                    step_id: "clip_apply_property_mutation".to_string(),
+                    reason: "缺少 clip.blend_mode 属性".to_string(),
+                }
+            })?;
+            let PropertyValue::Text(value) = property.track.static_value() else {
+                return Err(MondrianError::WorkflowStepFailed {
+                    step_id: "clip_apply_property_mutation".to_string(),
+                    reason: "clip.blend_mode 需要 text 值".to_string(),
+                });
+            };
+            self.blend_mode = blend_mode_from_text(value)?;
+            Ok(())
         } else if path == SpeedMode::MULTIPLIER_PATH {
             self.speed.apply_property_mutation(mutation)
         } else {
@@ -410,5 +492,30 @@ mod tests {
             SpeedMode::Constant(speed) => assert!((speed - 1.5).abs() < f64::EPSILON),
             _ => panic!("expected constant speed"),
         }
+    }
+
+    #[test]
+    fn clip_property_bag_exposes_blend_mode_as_static_property() {
+        let clip = Clip::new(AssetId::new(), tc(0), tc(40));
+        let bag = clip.property_bag().expect("property bag should build");
+        let property = bag
+            .property(Clip::BLEND_MODE_PATH)
+            .expect("blend mode property should exist");
+
+        assert!(!property.descriptor.is_animatable);
+        assert_eq!(property.evaluate(tc(0)), PropertyValue::Text("inherit".to_string()));
+    }
+
+    #[test]
+    fn clip_property_mutation_updates_blend_mode_without_keyframes() {
+        let mut clip = Clip::new(AssetId::new(), tc(0), tc(40));
+
+        clip.apply_property_mutation(PropertyMutation::SetStaticValue {
+            path: Clip::BLEND_MODE_PATH.to_string(),
+            value: PropertyValue::Text("Multiply".to_string()),
+        })
+        .expect("set blend mode");
+
+        assert_eq!(clip.blend_mode, Some(BlendMode::Multiply));
     }
 }

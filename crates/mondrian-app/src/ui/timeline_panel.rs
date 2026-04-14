@@ -93,6 +93,13 @@ struct ClipSelection {
     clip_id: ClipId,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SelectedClipRef {
+    pub track_id: TrackId,
+    pub is_video_track: bool,
+    pub clip_id: ClipId,
+}
+
 #[derive(Clone, Copy)]
 struct ClipVisual {
     selection: ClipSelection,
@@ -108,6 +115,22 @@ struct TrackRowVisual {
 }
 
 impl TimelinePanel {
+    pub fn selected_clip_count(&self) -> usize {
+        self.selected_clips.len()
+    }
+
+    pub fn selected_clip_ref(&self) -> Option<SelectedClipRef> {
+        if self.selected_clips.len() != 1 {
+            return None;
+        }
+
+        self.selected_clips.iter().next().map(|selection| SelectedClipRef {
+            track_id: selection.track_id,
+            is_video_track: selection.is_video_track,
+            clip_id: selection.clip_id,
+        })
+    }
+
     pub fn show(&mut self, ui: &mut Ui, state: &mut AppState) {
         // 初始化默认缩放
         if self.pixels_per_frame == 0.0 {

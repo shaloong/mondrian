@@ -500,8 +500,41 @@ fn ease_in_out(t: f32) -> f32 {
     }
 }
 
-fn solve_bezier_t(x: f32, _cp_out: Option<Vec2>, _cp_in: Option<Vec2>) -> f32 {
-    x
+fn solve_bezier_t(x: f32, cp_out: Option<Vec2>, cp_in: Option<Vec2>) -> f32 {
+    let x = x.clamp(0.0, 1.0);
+    let p1 = cp_out.unwrap_or(Vec2::new(0.25, 0.0));
+    let p2 = cp_in.unwrap_or(Vec2::new(0.75, 1.0));
+
+    let sample_curve_x = |t: f32| cubic_bezier(0.0, p1.x, p2.x, 1.0, t);
+    let sample_curve_y = |t: f32| cubic_bezier(0.0, p1.y, p2.y, 1.0, t);
+    let sample_curve_derivative_x = |t: f32| cubic_bezier_derivative(0.0, p1.x, p2.x, 1.0, t);
+
+    let mut t = x;
+    for _ in 0..8 {
+        let error = sample_curve_x(t) - x;
+        if error.abs() < 1.0e-5 {
+            break;
+        }
+
+        let derivative = sample_curve_derivative_x(t);
+        if derivative.abs() < 1.0e-5 {
+            break;
+        }
+
+        t = (t - error / derivative).clamp(0.0, 1.0);
+    }
+
+    sample_curve_y(t).clamp(0.0, 1.0)
+}
+
+fn cubic_bezier(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {
+    let u = 1.0 - t;
+    u * u * u * p0 + 3.0 * u * u * t * p1 + 3.0 * u * t * t * p2 + t * t * t * p3
+}
+
+fn cubic_bezier_derivative(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {
+    let u = 1.0 - t;
+    3.0 * u * u * (p1 - p0) + 6.0 * u * t * (p2 - p1) + 3.0 * t * t * (p3 - p2)
 }
 
 #[cfg(test)]
@@ -586,5 +619,30 @@ mod tests {
             .set_static_value("effect.key.color", PropertyValue::Float(1.0))
             .expect_err("mismatched value should fail");
         assert!(err.to_string().contains("属性类型不匹配"));
+    }
+
+    #[test]
+    fn bezier_interpolation_uses_control_points() {
+        let mut track = KeyframeTrack::<f32>::constant(0.0);
+        track.set_keyframe(Keyframe {
+            time: tc(0),
+            value: 0.0,
+            interpolation: InterpolationType::Bezier,
+            control_in: None,
+            control_out: Some(Vec2::new(0.0, 0.0)),
+        });
+        track.set_keyframe(Keyframe {
+            time: tc(100),
+            value: 100.0,
+            interpolation: InterpolationType::Linear,
+            control_in: Some(Vec2::new(1.0, 1.0)),
+            control_out: None,
+        });
+
+        let mid = track.evaluate(tc(50));
+        assert!(
+            (mid - 50.0).abs() < 0.05,
+            "Expected midpoint to remain stable, got {mid}"
+        );
     }
 }

@@ -211,6 +211,9 @@ pub struct MetricsTokens {
     pub ai_workflow_editor_max_height: f32,
     pub ai_workflow_log_max_height: f32,
     pub ai_workflow_editor_rows: usize,
+    pub inspector_panel_width: f32,
+    pub inspector_panel_min_width: f32,
+    pub property_row_height: f32,
     pub timeline_toolbar_button_size: [f32; 2],
     pub timeline_clip_radius: f32,
     pub timeline_track_height: f32,
@@ -293,6 +296,9 @@ impl Default for MetricsTokens {
             ai_workflow_editor_max_height: 240.0,
             ai_workflow_log_max_height: 180.0,
             ai_workflow_editor_rows: 12,
+            inspector_panel_width: 344.0,
+            inspector_panel_min_width: 280.0,
+            property_row_height: 28.0,
             timeline_toolbar_button_size: [30.0, 26.0],
             timeline_clip_radius: 4.0,
             timeline_track_height: 42.0,
@@ -628,6 +634,7 @@ pub enum UiIcon {
     Info,
     Play,
     Pause,
+    Timer,
     StepBack,
     StepForward,
     JumpStart,
@@ -778,6 +785,7 @@ fn icon_svg_bytes(kind: UiIcon) -> &'static [u8] {
         UiIcon::Info => include_bytes!("../../assets/icons/info.svg"),
         UiIcon::Play => include_bytes!("../../assets/icons/play_fill.svg"),
         UiIcon::Pause => include_bytes!("../../assets/icons/pause_fill.svg"),
+        UiIcon::Timer => include_bytes!("../../assets/icons/stopwatch.svg"),
         UiIcon::StepBack => include_bytes!("../../assets/icons/left_frame_fill.svg"),
         UiIcon::StepForward => include_bytes!("../../assets/icons/right_frame_fill.svg"),
         UiIcon::JumpStart => include_bytes!("../../assets/icons/home_frame_fill.svg"),
@@ -988,6 +996,18 @@ pub mod tokens {
 
     pub fn ai_workflow_editor_rows() -> usize {
         super::with_active_tokens(|tokens| tokens.metrics.ai_workflow_editor_rows)
+    }
+
+    pub fn inspector_panel_width() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.inspector_panel_width)
+    }
+
+    pub fn inspector_panel_min_width() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.inspector_panel_min_width)
+    }
+
+    pub fn property_row_height() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.property_row_height)
     }
 
     pub fn export_grid_spacing() -> [f32; 2] {

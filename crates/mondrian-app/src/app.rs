@@ -9,6 +9,7 @@ use std::{sync::mpsc, thread};
 
 use mondrian_assets::{AssetKind, AssetLibrary};
 use mondrian_core::{
+    automation::{PropertyHost, PropertyMutation},
     events::{AppEvent, EventBus},
     types::{AssetId, ClipId, Rational, Resolution, SequenceId, TimeCode, TrackId},
 };
@@ -25,9 +26,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::shortcuts::{ShortcutAction, ShortcutBinding, ShortcutKey, ShortcutPreferences};
 use crate::ui::{
+    effect_controls_panel::EffectControlsPanel,
     export_panel::ExportPanel,
     library_panel::LibraryPanel,
-    timeline_panel::TimelinePanel,
+    timeline_panel::{SelectedClipRef, TimelinePanel},
     viewer_panel::{MediaCacheCleanupStats, ViewerPanel, ViewerPreferences},
 };
 
@@ -1637,6 +1639,60 @@ impl AppState {
             PlaybackState::Playing { timecode_frames } => *timecode_frames,
             PlaybackState::Paused { timecode_frames } => *timecode_frames,
         }
+    }
+
+    pub fn current_time_code(&self) -> Option<TimeCode> {
+        let seq = self.sequence.as_ref()?;
+        Some(TimeCode::new(self.current_frame().max(0), seq.time_base()))
+    }
+
+    pub fn clip_snapshot(&self, selection: SelectedClipRef) -> Option<Clip> {
+        let seq = self.sequence.as_ref()?;
+        find_clip_by_selection(seq, selection).cloned()
+    }
+
+    pub fn mutate_clip_property(
+        &mut self,
+        selection: SelectedClipRef,
+        mutation: PropertyMutation,
+        description: impl Into<String>,
+    ) -> mondrian_core::Result<bool> {
+        let description = description.into();
+        let (sequence_id, before, after) = {
+            let seq = self.sequence.as_mut().ok_or_else(|| {
+                mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "mutate_clip_property".to_string(),
+                    reason: "当前无项目".to_string(),
+                }
+            })?;
+
+            let before = seq.clone();
+            let Some((track_id, _is_video, is_locked)) =
+                find_clip_track_lock(seq, selection.clip_id)
+            else {
+                return Err(mondrian_core::MondrianError::ClipNotFound {
+                    clip_id: selection.clip_id.to_string(),
+                });
+            };
+            if is_locked {
+                return Err(mondrian_core::MondrianError::TrackLocked {
+                    track_id: track_id.to_string(),
+                });
+            }
+
+            let clip = find_clip_mut_by_selection(seq, selection).ok_or_else(|| {
+                mondrian_core::MondrianError::ClipNotFound {
+                    clip_id: selection.clip_id.to_string(),
+                }
+            })?;
+            clip.apply_property_mutation(mutation)?;
+            (seq.id, before, seq.clone())
+        };
+
+        self.record_sequence_snapshot_command(description, before, after);
+        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
+        let _ = self.save_project_file();
+        Ok(true)
     }
 
     pub fn is_playing(&self) -> bool {
@@ -3643,6 +3699,20 @@ fn find_clip(seq: &Sequence, clip_id: ClipId) -> Option<&Clip> {
     None
 }
 
+fn find_clip_by_selection(seq: &Sequence, selection: SelectedClipRef) -> Option<&Clip> {
+    if selection.is_video_track {
+        seq.video_tracks
+            .iter()
+            .find(|track| track.id == selection.track_id)
+            .and_then(|track| track.clips.iter().find(|clip| clip.id == selection.clip_id))
+    } else {
+        seq.audio_tracks
+            .iter()
+            .find(|track| track.id == selection.track_id)
+            .and_then(|track| track.clips.iter().find(|clip| clip.id == selection.clip_id))
+    }
+}
+
 fn find_clip_track_lock(seq: &Sequence, clip_id: ClipId) -> Option<(TrackId, bool, bool)> {
     for track in &seq.video_tracks {
         if track.clips.iter().any(|c| c.id == clip_id) {
@@ -3694,6 +3764,20 @@ fn find_clip_mut(seq: &mut Sequence, clip_id: ClipId) -> Option<&mut Clip> {
     None
 }
 
+fn find_clip_mut_by_selection(seq: &mut Sequence, selection: SelectedClipRef) -> Option<&mut Clip> {
+    if selection.is_video_track {
+        seq.video_tracks
+            .iter_mut()
+            .find(|track| track.id == selection.track_id)
+            .and_then(|track| track.clips.iter_mut().find(|clip| clip.id == selection.clip_id))
+    } else {
+        seq.audio_tracks
+            .iter_mut()
+            .find(|track| track.id == selection.track_id)
+            .and_then(|track| track.clips.iter_mut().find(|clip| clip.id == selection.clip_id))
+    }
+}
+
 // ─────────────────────────────────────────────
 //  MondrianApp — eframe::App 实现
 // ─────────────────────────────────────────────
@@ -3703,6 +3787,7 @@ pub struct MondrianApp {
 
     // UI 面板
     timeline_panel: TimelinePanel,
+    effect_controls_panel: EffectControlsPanel,
     viewer_panel: ViewerPanel,
     library_panel: LibraryPanel,
     export_panel: ExportPanel,
@@ -3756,6 +3841,7 @@ impl MondrianApp {
         let mut app = Self {
             state,
             timeline_panel: TimelinePanel::default(),
+            effect_controls_panel: EffectControlsPanel::default(),
             viewer_panel: ViewerPanel::default(),
             library_panel: LibraryPanel::default(),
             export_panel: ExportPanel::default(),
@@ -3935,6 +4021,30 @@ impl eframe::App for MondrianApp {
                 });
             if ui_diag_enabled() {
                 log_ui_stage_slow("library_panel", library_started_at.elapsed());
+            }
+        }
+
+        let selected_clip_count = self.timeline_panel.selected_clip_count();
+        let selected_clip_ref = self.timeline_panel.selected_clip_ref();
+        if selected_clip_count > 0 {
+            let effect_controls_started_at = std::time::Instant::now();
+            egui::SidePanel::right("effect_controls_panel")
+                .default_width(crate::ui::theme::tokens::inspector_panel_width())
+                .min_width(crate::ui::theme::tokens::inspector_panel_min_width())
+                .frame(
+                    egui::Frame::none()
+                        .fill(crate::ui::theme::palette::bg_base())
+                        .stroke(egui::Stroke::NONE)
+                        .inner_margin(egui::Margin::symmetric(12.0, 8.0)),
+                )
+                .show(ctx, |ui| {
+                    self.effect_controls_panel.show(ui, &mut self.state, selected_clip_ref);
+                });
+            if ui_diag_enabled() {
+                log_ui_stage_slow(
+                    "effect_controls_panel",
+                    effect_controls_started_at.elapsed(),
+                );
             }
         }
 
