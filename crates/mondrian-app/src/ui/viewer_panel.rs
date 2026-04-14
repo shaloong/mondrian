@@ -1,6 +1,6 @@
 use crate::{
     app::AppState,
-    ui::theme::{self, palette, typography},
+    ui::theme::{self, palette, tokens, typography},
 };
 use egui::{Pos2, Rect, Sense, Ui, Vec2};
 
@@ -358,14 +358,15 @@ impl ViewerPanel {
         }
 
         ui.vertical(|ui| {
-            let controls_height = ui.spacing().interact_size.y + 12.0;
-            let canvas_slot_height = (ui.available_height() - controls_height).max(120.0);
+            let controls_height = tokens::viewer_transport_height();
+            let transport_gap = 4.0;
+            let canvas_slot_height =
+                (ui.available_height() - controls_height - transport_gap).max(120.0);
             let (canvas_slot_rect, _) = ui.allocate_exact_size(
                 Vec2::new(ui.available_width(), canvas_slot_height),
                 Sense::hover(),
             );
 
-            // ── 视频画布 ─────────────────────
             let aspect = state
                 .sequence
                 .as_ref()
@@ -379,52 +380,130 @@ impl ViewerPanel {
             );
 
             let painter = ui.painter_at(canvas_rect);
-
-            // 背景
             painter.rect_filled(canvas_rect, 0.0, palette::canvas_bg());
 
-            // 若无序列，显示提示
-            if state.sequence.is_none() {
-                self.invalidate_pending_decode();
-                self.desired_signature = None;
-                self.asset_preview_cache.clear();
-                draw_checkerboard(&painter, canvas_rect);
-                draw_empty_canvas_meta(&painter, canvas_rect, state, current_frame);
-            }
+                if state.sequence.is_none() {
+                    self.invalidate_pending_decode();
+                    self.desired_signature = None;
+                    self.asset_preview_cache.clear();
+                    draw_checkerboard(&painter, canvas_rect);
+                    draw_empty_canvas_meta(&painter, canvas_rect, state, current_frame);
+                }
 
-            if let Some(seq) = state.sequence.as_ref() {
-                if let Some(lib) = state.asset_library.as_ref() {
-                    let base_width =
-                        scaled_dimension(canvas_rect.width(), self.preview_scale_mode.factor());
-                    let base_height =
-                        scaled_dimension(canvas_rect.height(), self.preview_scale_mode.factor());
-                    let (target_width, target_height) =
-                        playback_adjusted_target_size(base_width, base_height, is_playing);
+                if let Some(seq) = state.sequence.as_ref() {
+                    if let Some(lib) = state.asset_library.as_ref() {
+                        let base_width =
+                            scaled_dimension(canvas_rect.width(), self.preview_scale_mode.factor());
+                        let base_height =
+                            scaled_dimension(canvas_rect.height(), self.preview_scale_mode.factor());
+                        let (target_width, target_height) =
+                            playback_adjusted_target_size(base_width, base_height, is_playing);
 
-                    let layers_started_at = Instant::now();
-                    let layers =
-                        self.build_layer_decode_requests(seq, lib.as_ref(), state, current_frame);
-                    if diag_enabled {
-                        let elapsed_ms = layers_started_at.elapsed().as_millis() as u64;
-                        if elapsed_ms >= preview_diag_slow_threshold_ms() {
-                            tracing::warn!(
-                                "[preview-diag] build_layer_decode_requests slow: {}ms frame={} layers={}",
-                                elapsed_ms,
-                                current_frame,
-                                layers.len()
-                            );
+                        let layers_started_at = Instant::now();
+                        let layers =
+                            self.build_layer_decode_requests(seq, lib.as_ref(), state, current_frame);
+                        if diag_enabled {
+                            let elapsed_ms = layers_started_at.elapsed().as_millis() as u64;
+                            if elapsed_ms >= preview_diag_slow_threshold_ms() {
+                                tracing::warn!(
+                                    "[preview-diag] build_layer_decode_requests slow: {}ms frame={} layers={}",
+                                    elapsed_ms,
+                                    current_frame,
+                                    layers.len()
+                                );
+                            }
                         }
-                    }
-                    let layer_signatures = layers
-                        .iter()
-                        .map(|layer| LayerSignature {
-                            asset_id: layer.frame_key.0,
-                            source_frame: layer.frame_key.1,
-                            opacity_u8: (layer.opacity * 255.0).round() as u8,
-                        })
-                        .collect::<Vec<_>>();
+                        let layer_signatures = layers
+                            .iter()
+                            .map(|layer| LayerSignature {
+                                asset_id: layer.frame_key.0,
+                                source_frame: layer.frame_key.1,
+                                opacity_u8: (layer.opacity * 255.0).round() as u8,
+                            })
+                            .collect::<Vec<_>>();
 
-                    if layers.is_empty() {
+                        if layers.is_empty() {
+                            self.invalidate_pending_decode();
+                            self.preview_texture = None;
+                            self.preview_signature = None;
+                            self.desired_signature = None;
+                            self.preview_error = None;
+                            self.clear_prefetch_in_flight();
+                            draw_checkerboard(&painter, canvas_rect);
+                        } else {
+                            let signature = CompositeFrameSignature {
+                                width: target_width,
+                                height: target_height,
+                                layers: layer_signatures,
+                            };
+                            self.desired_signature = Some(signature.clone());
+
+                            if self.preview_signature.as_ref() != Some(&signature) {
+                                if let Some(cached) = self.cache_get(&signature) {
+                                    self.preview_texture = Some(cached);
+                                    self.preview_signature = Some(signature.clone());
+                                    self.preview_error = None;
+                                } else {
+                                    self.request_decode(
+                                        DecodeRequest {
+                                            signature,
+                                            layers,
+                                            playback_mode: is_playing,
+                                            target_width,
+                                            target_height,
+                                            layer_cache_enabled: self.layer_cache_enabled,
+                                            layer_cache: Arc::clone(&self.layer_frame_cache),
+                                            decoder_pool: Arc::clone(&self.decoder_pool),
+                                            generation: 0,
+                                            latest_generation: Arc::clone(
+                                                &self.latest_decode_generation,
+                                            ),
+                                        },
+                                        is_playing,
+                                    );
+                                }
+                            }
+
+                            if self.prefetch_allowed_for_target(
+                                target_width,
+                                target_height,
+                                is_playing,
+                            ) {
+                                self.schedule_prefetch(
+                                    seq,
+                                    lib.as_ref(),
+                                    state,
+                                    current_frame,
+                                    self.prefetch_direction(current_frame),
+                                    target_width,
+                                    target_height,
+                                    is_playing,
+                                );
+                            }
+
+                            if let Some(texture) = &self.preview_texture {
+                                painter.image(
+                                    texture.id(),
+                                    canvas_rect,
+                                    Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                                    palette::image_tint(),
+                                );
+                            } else {
+                                draw_checkerboard(&painter, canvas_rect);
+                                draw_empty_canvas_meta(&painter, canvas_rect, state, current_frame);
+                            }
+
+                            if let Some(err) = &self.preview_error {
+                                painter.text(
+                                    canvas_rect.center_bottom() + Vec2::new(0.0, -14.0),
+                                    egui::Align2::CENTER_BOTTOM,
+                                    format!("预览解码失败：{}", err),
+                                    typography::body(),
+                                    palette::status_error(),
+                                );
+                            }
+                        }
+                    } else {
                         self.invalidate_pending_decode();
                         self.preview_texture = None;
                         self.preview_signature = None;
@@ -432,105 +511,24 @@ impl ViewerPanel {
                         self.preview_error = None;
                         self.clear_prefetch_in_flight();
                         draw_checkerboard(&painter, canvas_rect);
-                    } else {
-                        let signature = CompositeFrameSignature {
-                            width: target_width,
-                            height: target_height,
-                            layers: layer_signatures,
-                        };
-                        self.desired_signature = Some(signature.clone());
-
-                        if self.preview_signature.as_ref() != Some(&signature) {
-                            if let Some(cached) = self.cache_get(&signature) {
-                                self.preview_texture = Some(cached);
-                                self.preview_signature = Some(signature.clone());
-                                self.preview_error = None;
-                            } else {
-                                self.request_decode(
-                                    DecodeRequest {
-                                        signature,
-                                        layers,
-                                        playback_mode: is_playing,
-                                        target_width,
-                                        target_height,
-                                        layer_cache_enabled: self.layer_cache_enabled,
-                                        layer_cache: Arc::clone(&self.layer_frame_cache),
-                                        decoder_pool: Arc::clone(&self.decoder_pool),
-                                        generation: 0,
-                                        latest_generation: Arc::clone(
-                                            &self.latest_decode_generation,
-                                        ),
-                                    },
-                                    is_playing,
-                                );
-                            }
-                        }
-
-                        if self.prefetch_allowed_for_target(
-                            target_width,
-                            target_height,
-                            is_playing,
-                        ) {
-                            self.schedule_prefetch(
-                                seq,
-                                lib.as_ref(),
-                                state,
-                                current_frame,
-                                self.prefetch_direction(current_frame),
-                                target_width,
-                                target_height,
-                                is_playing,
-                            );
-                        }
-
-                        if let Some(texture) = &self.preview_texture {
-                            painter.image(
-                                texture.id(),
-                                canvas_rect,
-                                Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
-                                palette::image_tint(),
-                            );
-                        } else {
-                            draw_checkerboard(&painter, canvas_rect);
-                            draw_empty_canvas_meta(&painter, canvas_rect, state, current_frame);
-                        }
-
-                        if let Some(err) = &self.preview_error {
-                            painter.text(
-                                canvas_rect.center_bottom() + Vec2::new(0.0, -14.0),
-                                egui::Align2::CENTER_BOTTOM,
-                                format!("预览解码失败：{}", err),
-                                typography::body(),
-                                palette::status_error(),
-                            );
-                        }
+                        draw_empty_canvas_meta(&painter, canvas_rect, state, current_frame);
                     }
-                } else {
-                    self.invalidate_pending_decode();
-                    self.preview_texture = None;
-                    self.preview_signature = None;
-                    self.desired_signature = None;
-                    self.preview_error = None;
-                    self.clear_prefetch_in_flight();
-                    draw_checkerboard(&painter, canvas_rect);
-                    draw_empty_canvas_meta(&painter, canvas_rect, state, current_frame);
                 }
-            }
 
-            if show_dev_metrics {
-                self.draw_dev_metrics_overlay(
-                    ui,
-                    canvas_rect,
-                    state,
-                    show_video_metrics,
-                    show_audio_metrics,
-                    show_preview_perf_metrics,
-                );
-            }
+                if show_dev_metrics {
+                    self.draw_dev_metrics_overlay(
+                        ui,
+                        canvas_rect,
+                        state,
+                        show_video_metrics,
+                        show_audio_metrics,
+                        show_preview_perf_metrics,
+                    );
+                }
 
             let controls_rect = Rect::from_min_size(
-                Pos2::new(canvas_slot_rect.left(), canvas_rect.bottom() + 4.0),
-                Vec2::new(canvas_slot_rect.width(), controls_height.max(24.0)),
+                Pos2::new(canvas_slot_rect.left(), canvas_rect.bottom() + transport_gap),
+                Vec2::new(canvas_slot_rect.width(), controls_height.max(28.0)),
             );
             ui.allocate_new_ui(egui::UiBuilder::new().max_rect(controls_rect), |ui| {
                 self.draw_transport_bar(ui, state, current_frame, is_playing);
@@ -620,13 +618,13 @@ impl ViewerPanel {
 
         ui.painter().rect_filled(
             overlay_rect,
-            4.0,
-            palette::bg_surface().gamma_multiply(0.72),
+            tokens::section_rounding(),
+            palette::overlay_fill(),
         );
         ui.painter().rect_stroke(
             overlay_rect,
-            4.0,
-            egui::Stroke::new(1.0, palette::border_subtle().gamma_multiply(0.8)),
+            tokens::section_rounding(),
+            egui::Stroke::new(1.0, palette::overlay_stroke()),
         );
 
         ui.allocate_new_ui(
@@ -636,8 +634,7 @@ impl ViewerPanel {
                 ui.add(
                     egui::Label::new(
                         egui::RichText::new(text)
-                            .monospace()
-                            .size(11.0)
+                            .font(typography::mono_small())
                             .color(palette::text_primary()),
                     )
                     .wrap(),
@@ -654,21 +651,28 @@ impl ViewerPanel {
         is_playing: bool,
     ) {
         let row_rect = ui.max_rect();
-        let row_h = row_rect.height().max(30.0);
+        let content_rect = row_rect.shrink2(Vec2::new(0.0, 4.0));
+        let row_h = content_rect.height().max(30.0);
         let left_w = 160.0;
         let right_w = 170.0;
 
-        let left_rect = Rect::from_min_size(row_rect.left_top(), Vec2::new(left_w, row_h));
+        let left_rect = Rect::from_min_size(content_rect.left_top(), Vec2::new(left_w, row_h));
         let right_rect = Rect::from_min_size(
             Pos2::new(
-                (row_rect.right() - right_w).max(row_rect.left()),
-                row_rect.top(),
+                (content_rect.right() - right_w).max(content_rect.left()),
+                content_rect.top(),
             ),
             Vec2::new(right_w, row_h),
         );
         let center_rect = Rect::from_min_max(
-            Pos2::new(left_rect.right().min(row_rect.right()), row_rect.top()),
-            Pos2::new(right_rect.left().max(row_rect.left()), row_rect.bottom()),
+            Pos2::new(
+                left_rect.right().min(content_rect.right()),
+                content_rect.top(),
+            ),
+            Pos2::new(
+                right_rect.left().max(content_rect.left()),
+                content_rect.bottom(),
+            ),
         );
 
         let fps = state
@@ -682,8 +686,7 @@ impl ViewerPanel {
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.label(
                     egui::RichText::new(tc.to_smpte())
-                        .monospace()
-                        .size(14.0)
+                        .font(typography::mono_small())
                         .color(palette::text_primary()),
                 );
             });

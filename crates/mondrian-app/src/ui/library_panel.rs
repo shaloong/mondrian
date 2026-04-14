@@ -25,6 +25,15 @@ struct ThumbnailFailureEntry {
     modified: Option<SystemTime>,
 }
 
+const GRID_SPACING_X: f32 = 20.0;
+const GRID_SPACING_Y: f32 = 12.0;
+const CARD_TARGET_WIDTH: f32 = 176.0;
+const CARD_MIN_WIDTH: f32 = 150.0;
+const THUMB_ASPECT: f32 = 16.0 / 9.0;
+const CARD_PADDING_TOP: f32 = 8.0;
+const CARD_PADDING_BOTTOM: f32 = 10.0;
+const CARD_INFO_GAP_Y: f32 = 6.0;
+
 /// 左侧素材库面板
 #[derive(Default)]
 pub struct LibraryPanel {
@@ -44,14 +53,43 @@ impl LibraryPanel {
 
     pub fn show(&mut self, ui: &mut Ui, state: &mut AppState) {
         let panel_rect = ui.max_rect();
+        const SEARCH_MARGIN_TOP: f32 = 6.0;
+        const SEARCH_MARGIN_BOTTOM: f32 = 12.0;
 
         let content = ui.vertical(|ui| {
-            ui.horizontal(|ui| {
-                let _ = theme::icon(ui, theme::UiIcon::Search, palette::text_muted());
-                ui.text_edit_singleline(&mut self.search_query);
-            });
-
-            ui.separator();
+            ui.add_space(SEARCH_MARGIN_TOP);
+            let search_height = ui.spacing().interact_size.y + 8.0;
+            ui.allocate_ui_with_layout(
+                Vec2::new(ui.available_width(), search_height),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    egui::Frame::none()
+                        .fill(palette::bg_surface_raised())
+                        .stroke(Stroke::new(1.0, palette::border_subtle()))
+                        .rounding(egui::Rounding::same(tokens::button_rounding()))
+                        .inner_margin(egui::Margin::symmetric(10.0, 4.0))
+                        .show(ui, |ui| {
+                            ui.with_layout(
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    let _ = theme::icon(
+                                        ui,
+                                        theme::UiIcon::Search,
+                                        palette::text_muted(),
+                                    );
+                                    ui.add_sized(
+                                        [ui.available_width(), ui.spacing().interact_size.y],
+                                        egui::TextEdit::singleline(&mut self.search_query)
+                                            .frame(false)
+                                            .margin(egui::Margin::ZERO)
+                                            .vertical_align(egui::Align::Center),
+                                    );
+                                },
+                            );
+                        });
+                },
+            );
+            ui.add_space(SEARCH_MARGIN_BOTTOM);
 
             let list_h = ui.available_height().max(tokens::list_min_height());
             egui::ScrollArea::vertical().id_salt("library_scroll").max_height(list_h).show(
@@ -211,12 +249,17 @@ impl LibraryPanel {
                 egui::Sense::click(),
             );
             ui.painter()
-                .rect_filled(empty_rect, tokens::list_row_radius(), palette::bg_surface());
+                .rect_filled(empty_rect, tokens::card_rounding(), palette::bg_surface());
+            ui.painter().rect_stroke(
+                empty_rect,
+                tokens::card_rounding(),
+                Stroke::new(1.0, palette::border_subtle()),
+            );
             ui.painter().text(
                 empty_rect.center(),
                 egui::Align2::CENTER_CENTER,
                 "导入媒体以开始",
-                typography::body_large(),
+                typography::body(),
                 palette::text_muted(),
             );
             if empty_resp.double_clicked() {
@@ -227,22 +270,21 @@ impl LibraryPanel {
 
         self.gc_thumbnail_cache(&assets);
 
-        const GRID_SPACING_X: f32 = 8.0;
-        const GRID_SPACING_Y: f32 = 10.0;
-        const CARD_MIN_WIDTH: f32 = 150.0;
-        const CARD_MIN_HEIGHT: f32 = 152.0;
-        const THUMB_ASPECT: f32 = 16.0 / 9.0;
-
         let available_w = ui.available_width().max(CARD_MIN_WIDTH);
-        let cols = ((available_w + GRID_SPACING_X) / (CARD_MIN_WIDTH + GRID_SPACING_X))
+        let cols = ((available_w + GRID_SPACING_X) / (CARD_TARGET_WIDTH + GRID_SPACING_X))
             .floor()
             .max(1.0) as usize;
         let total_spacing = GRID_SPACING_X * cols.saturating_sub(1) as f32;
-        let card_w = ((available_w - total_spacing) / cols as f32).max(CARD_MIN_WIDTH);
+        let card_w = ((available_w - total_spacing) / cols as f32).floor().max(CARD_MIN_WIDTH);
         let thumb_h = (card_w / THUMB_ASPECT).round();
-        let card_h = (thumb_h + 38.0).max(CARD_MIN_HEIGHT);
+        let card_h = CARD_PADDING_TOP
+            + thumb_h
+            + CARD_INFO_GAP_Y
+            + tokens::list_row_content_height()
+            + CARD_PADDING_BOTTOM;
 
-        for row in assets.chunks(cols) {
+        let row_count = assets.len().div_ceil(cols);
+        for (row_index, row) in assets.chunks(cols).enumerate() {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = GRID_SPACING_X;
                 for asset in row {
@@ -256,11 +298,10 @@ impl LibraryPanel {
                         thumb_h,
                     );
                 }
-                for _ in row.len()..cols {
-                    let _ = ui.allocate_exact_size(Vec2::new(card_w, card_h), Sense::hover());
-                }
             });
-            ui.add_space(GRID_SPACING_Y);
+            if row_index + 1 < row_count {
+                ui.add_space(GRID_SPACING_Y);
+            }
         }
     }
 
@@ -286,35 +327,39 @@ impl LibraryPanel {
         let (card_rect, card_response) =
             ui.allocate_exact_size(Vec2::new(card_w, card_h), Sense::click_and_drag());
 
-        if is_selected {
-            ui.painter().rect_filled(
-                card_rect,
-                tokens::list_row_radius(),
-                palette::bg_surface_hover(),
-            );
-            ui.painter().rect_stroke(
-                card_rect,
-                tokens::list_row_radius(),
-                Stroke::new(1.0, palette::interaction_highlight().gamma_multiply(0.7)),
-            );
+        let card_rounding = tokens::card_rounding();
+        let card_fill = if is_selected {
+            palette::accent_secondary().gamma_multiply(0.42)
         } else if card_response.hovered() {
-            ui.painter().rect_stroke(
-                card_rect,
-                tokens::list_row_radius(),
-                Stroke::new(1.0, palette::border_subtle().gamma_multiply(0.6)),
-            );
-        }
+            palette::bg_surface_hover()
+        } else {
+            palette::bg_surface_raised()
+        };
+        let card_stroke = if is_selected {
+            Stroke::new(1.0, palette::interaction_highlight())
+        } else {
+            Stroke::new(1.0, palette::border_subtle().gamma_multiply(0.9))
+        };
+        ui.painter().rect_filled(card_rect, card_rounding, card_fill);
+        ui.painter().rect_stroke(card_rect, card_rounding, card_stroke);
 
         let thumb_rect = Rect::from_min_size(
-            card_rect.min + Vec2::new(4.0, 4.0),
-            Vec2::new((card_w - 8.0).max(10.0), thumb_h.max(20.0)),
+            card_rect.min + Vec2::new(8.0, CARD_PADDING_TOP),
+            Vec2::new((card_w - 16.0).max(10.0), thumb_h.max(20.0)),
         );
         self.draw_thumbnail(ui, asset, is_offline, thumb_rect);
         self.draw_thumbnail_badges(ui, thumb_rect, asset.kind.clone(), proxy_mode, is_offline);
 
+        let row_h = tokens::list_row_content_height();
         let info_rect = Rect::from_min_max(
-            Pos2::new(card_rect.left() + 4.0, thumb_rect.bottom() + 4.0),
-            Pos2::new(card_rect.right() - 4.0, card_rect.bottom() - 4.0),
+            Pos2::new(
+                card_rect.left() + 10.0,
+                thumb_rect.bottom() + CARD_INFO_GAP_Y,
+            ),
+            Pos2::new(
+                card_rect.right() - 10.0,
+                thumb_rect.bottom() + CARD_INFO_GAP_Y + row_h,
+            ),
         );
         let duration_text = format_duration_hhmmss(asset.media_info.duration);
 
@@ -345,32 +390,46 @@ impl LibraryPanel {
                     self.editing_name.clear();
                 }
             } else {
-                let row_h = tokens::list_row_content_height();
-                let duration_w = 58.0;
-                let name_w = (info_rect.width() - duration_w - 6.0).max(30.0);
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    ui.add_sized(
-                        [name_w, row_h],
-                        egui::Label::new(
-                            egui::RichText::new(asset_name.trim_start())
-                                .color(palette::text_primary()),
-                        )
-                        .truncate(),
-                    );
+                let duration_w = 46.0;
+                let info_gap = 8.0;
+                let name_w = (info_rect.width() - duration_w - info_gap).max(24.0);
+                let name_rect = Rect::from_min_size(info_rect.min, Vec2::new(name_w, row_h));
+                let duration_rect = Rect::from_min_size(
+                    Pos2::new(name_rect.right() + info_gap, info_rect.top()),
+                    Vec2::new(duration_w, row_h),
+                );
 
-                    ui.allocate_ui_with_layout(
-                        Vec2::new(duration_w, row_h),
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            ui.label(
+                ui.allocate_new_ui(
+                    egui::UiBuilder::new()
+                        .max_rect(name_rect)
+                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                    |ui| {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(asset_name.trim_start())
+                                    .font(typography::body_small())
+                                    .color(palette::text_primary()),
+                            )
+                            .truncate()
+                            .halign(egui::Align::LEFT),
+                        );
+                    },
+                );
+                ui.allocate_new_ui(
+                    egui::UiBuilder::new()
+                        .max_rect(duration_rect)
+                        .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                    |ui| {
+                        ui.add(
+                            egui::Label::new(
                                 egui::RichText::new(duration_text.as_str())
-                                    .size(tokens::list_proxy_tag_font_size())
+                                    .font(typography::body_small())
                                     .color(palette::text_muted()),
-                            );
-                        },
-                    );
-                });
+                            )
+                            .halign(egui::Align::RIGHT),
+                        );
+                    },
+                );
             }
         });
 
@@ -481,23 +540,10 @@ impl LibraryPanel {
         &self,
         ui: &Ui,
         rect: Rect,
-        kind: AssetKind,
+        _kind: AssetKind,
         proxy_mode: bool,
         is_offline: bool,
     ) {
-        let kind_text = match kind {
-            AssetKind::Video => "VIDEO",
-            AssetKind::Audio => "AUDIO",
-        };
-        self.draw_thumbnail_badge(
-            ui,
-            rect.right_bottom() - Vec2::new(6.0, 6.0),
-            kind_text,
-            true,
-            palette::bg_base().gamma_multiply(0.78),
-            palette::text_primary(),
-        );
-
         if is_offline {
             self.draw_thumbnail_badge(
                 ui,
@@ -535,7 +581,12 @@ impl LibraryPanel {
         } else {
             Rect::from_min_size(Pos2::new(anchor.x, anchor.y - h), Vec2::new(w, h))
         };
-        ui.painter().rect_filled(rect, 3.0, bg);
+        ui.painter().rect_filled(rect, tokens::badge_rounding(), bg);
+        ui.painter().rect_stroke(
+            rect,
+            tokens::badge_rounding(),
+            Stroke::new(1.0, fg.gamma_multiply(0.18)),
+        );
         ui.painter().text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -546,7 +597,12 @@ impl LibraryPanel {
     }
 
     fn draw_thumbnail(&mut self, ui: &mut Ui, asset: &AssetRecord, is_offline: bool, rect: Rect) {
-        ui.painter().rect_filled(rect, 4.0, palette::canvas_bg());
+        ui.painter().rect_filled(rect, tokens::section_rounding(), palette::canvas_bg());
+        ui.painter().rect_stroke(
+            rect,
+            tokens::section_rounding(),
+            Stroke::new(1.0, palette::border_subtle().gamma_multiply(0.7)),
+        );
 
         if is_offline {
             self.draw_thumbnail_placeholder(ui, rect, theme::UiIcon::Warning);

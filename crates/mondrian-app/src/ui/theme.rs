@@ -84,43 +84,55 @@ impl ThemeTokens {
 pub struct PaletteTokens {
     pub bg_base: egui::Color32,
     pub bg_surface: egui::Color32,
+    pub bg_surface_raised: egui::Color32,
     pub bg_surface_hover: egui::Color32,
     pub bg_surface_active: egui::Color32,
     pub border_subtle: egui::Color32,
     pub border_emphasis: egui::Color32,
+    pub panel_divider_strong: egui::Color32,
     pub text_primary: egui::Color32,
     pub text_muted: egui::Color32,
     pub status_warning: egui::Color32,
     pub status_success: egui::Color32,
     pub interaction_highlight: egui::Color32,
+    pub accent_secondary: egui::Color32,
+    pub accent_audio: egui::Color32,
     pub status_error: egui::Color32,
     pub timeline_clip_video: egui::Color32,
     pub timeline_clip_audio: egui::Color32,
     pub timeline_playhead: egui::Color32,
     pub canvas_bg: egui::Color32,
     pub image_tint: egui::Color32,
+    pub overlay_fill: egui::Color32,
+    pub overlay_stroke: egui::Color32,
 }
 
 impl PaletteTokens {
     fn dark() -> Self {
         Self {
             bg_base: egui::Color32::from_rgb(0x12, 0x12, 0x12),
-            bg_surface: egui::Color32::from_rgb(0x2A, 0x2A, 0x2C),
-            bg_surface_hover: egui::Color32::from_rgb(0x33, 0x33, 0x36),
-            bg_surface_active: egui::Color32::from_rgb(0x3A, 0x3A, 0x3C),
-            border_subtle: egui::Color32::from_rgb(0x76, 0x76, 0x80),
-            border_emphasis: egui::Color32::from_rgb(0x76, 0x76, 0x80),
+            bg_surface: egui::Color32::from_rgb(0x1E, 0x1E, 0x1E),
+            bg_surface_raised: egui::Color32::from_rgb(0x25, 0x25, 0x27),
+            bg_surface_hover: egui::Color32::from_rgb(0x2B, 0x2B, 0x30),
+            bg_surface_active: egui::Color32::from_rgb(0x33, 0x33, 0x38),
+            border_subtle: egui::Color32::from_rgb(0x3A, 0x3A, 0x3C),
+            border_emphasis: egui::Color32::from_rgb(0x4C, 0x4C, 0x52),
+            panel_divider_strong: egui::Color32::from_rgb(0x2F, 0x2F, 0x33),
             text_primary: egui::Color32::from_rgb(0xF2, 0xF2, 0xF2),
             text_muted: egui::Color32::from_rgb(0x76, 0x76, 0x80),
-            status_warning: egui::Color32::from_rgb(0xD6, 0xAA, 0x43),
+            status_warning: egui::Color32::from_rgb(0xF5, 0x82, 0x20),
             status_success: egui::Color32::from_rgb(0x73, 0xD1, 0x8F),
             interaction_highlight: egui::Color32::from_rgb(0x00, 0x6E, 0xFF),
+            accent_secondary: egui::Color32::from_rgb(0x0A, 0x35, 0x65),
+            accent_audio: egui::Color32::from_rgb(0x5A, 0xC8, 0xFA),
             status_error: egui::Color32::from_rgb(0xE3, 0x6D, 0x6D),
-            timeline_clip_video: egui::Color32::from_rgb(0x4D, 0x72, 0x9D),
-            timeline_clip_audio: egui::Color32::from_rgb(0x4E, 0x8A, 0x6A),
-            timeline_playhead: egui::Color32::from_rgb(0xE0, 0x67, 0x67),
+            timeline_clip_video: egui::Color32::from_rgb(0x0A, 0x35, 0x65),
+            timeline_clip_audio: egui::Color32::from_rgb(0x1D, 0x58, 0x7B),
+            timeline_playhead: egui::Color32::from_rgb(0x00, 0x6E, 0xFF),
             canvas_bg: egui::Color32::BLACK,
             image_tint: egui::Color32::WHITE,
+            overlay_fill: egui::Color32::from_rgba_premultiplied(0x12, 0x12, 0x12, 0xE8),
+            overlay_stroke: egui::Color32::from_rgba_premultiplied(0x5A, 0xC8, 0xFA, 0xA0),
         }
     }
 
@@ -128,21 +140,27 @@ impl PaletteTokens {
         Self {
             bg_base: egui::Color32::from_rgb(0xF5, 0xF5, 0xF7),
             bg_surface: egui::Color32::from_rgb(0xFF, 0xFF, 0xFF),
+            bg_surface_raised: egui::Color32::from_rgb(0xF7, 0xF9, 0xFC),
             bg_surface_hover: egui::Color32::from_rgb(0xF0, 0xF2, 0xF5),
             bg_surface_active: egui::Color32::from_rgb(0xE8, 0xEC, 0xF2),
             border_subtle: egui::Color32::from_rgb(0xC9, 0xCF, 0xD8),
             border_emphasis: egui::Color32::from_rgb(0xA6, 0xB2, 0xC2),
+            panel_divider_strong: egui::Color32::from_rgb(0xD6, 0xDB, 0xE3),
             text_primary: egui::Color32::from_rgb(0x1E, 0x23, 0x2C),
             text_muted: egui::Color32::from_rgb(0x5A, 0x67, 0x7A),
-            status_warning: egui::Color32::from_rgb(0xB5, 0x78, 0x08),
+            status_warning: egui::Color32::from_rgb(0xD4, 0x74, 0x0A),
             status_success: egui::Color32::from_rgb(0x1D, 0x89, 0x48),
             interaction_highlight: egui::Color32::from_rgb(0x00, 0x5F, 0xD9),
+            accent_secondary: egui::Color32::from_rgb(0x1E, 0x4F, 0x87),
+            accent_audio: egui::Color32::from_rgb(0x1D, 0x96, 0xD3),
             status_error: egui::Color32::from_rgb(0xC1, 0x3C, 0x3C),
-            timeline_clip_video: egui::Color32::from_rgb(0x80, 0x9F, 0xC4),
-            timeline_clip_audio: egui::Color32::from_rgb(0x86, 0xB2, 0x95),
-            timeline_playhead: egui::Color32::from_rgb(0xC0, 0x54, 0x54),
+            timeline_clip_video: egui::Color32::from_rgb(0x4B, 0x73, 0xA8),
+            timeline_clip_audio: egui::Color32::from_rgb(0x58, 0x9B, 0xC2),
+            timeline_playhead: egui::Color32::from_rgb(0x00, 0x5F, 0xD9),
             canvas_bg: egui::Color32::from_rgb(0x14, 0x14, 0x14),
             image_tint: egui::Color32::WHITE,
+            overlay_fill: egui::Color32::from_rgba_premultiplied(0x14, 0x1A, 0x24, 0xE0),
+            overlay_stroke: egui::Color32::from_rgba_premultiplied(0x00, 0x5F, 0xD9, 0x90),
         }
     }
 }
@@ -152,9 +170,18 @@ pub struct MetricsTokens {
     pub item_spacing: egui::Vec2,
     pub button_padding: egui::Vec2,
     pub button_rounding: f32,
+    pub panel_rounding: f32,
+    pub section_rounding: f32,
+    pub card_rounding: f32,
+    pub badge_rounding: f32,
     pub interact_height: f32,
     pub menu_rounding: f32,
     pub window_rounding: f32,
+    pub panel_gap: f32,
+    pub panel_inner_margin_x: f32,
+    pub panel_inner_margin_y: f32,
+    pub section_inner_margin_x: f32,
+    pub section_inner_margin_y: f32,
     pub icon_size: f32,
     pub icon_raster_min_size: f32,
     pub icon_text_inset_x: f32,
@@ -216,31 +243,41 @@ pub struct MetricsTokens {
     pub timeline_linked_audio_highlight_width: f32,
     pub timeline_playhead_stroke_width: f32,
     pub timeline_playhead_secondary_stroke_width: f32,
+    pub viewer_transport_height: f32,
 }
 
 impl Default for MetricsTokens {
     fn default() -> Self {
         Self {
-            item_spacing: egui::vec2(7.0, 7.0),
-            button_padding: egui::vec2(10.0, 5.0),
-            button_rounding: 4.0,
-            interact_height: 23.0,
-            menu_rounding: 3.0,
-            window_rounding: 4.0,
+            item_spacing: egui::vec2(8.0, 8.0),
+            button_padding: egui::vec2(12.0, 6.0),
+            button_rounding: 8.0,
+            panel_rounding: 12.0,
+            section_rounding: 8.0,
+            card_rounding: 12.0,
+            badge_rounding: 4.0,
+            interact_height: 26.0,
+            menu_rounding: 8.0,
+            window_rounding: 12.0,
+            panel_gap: 10.0,
+            panel_inner_margin_x: 12.0,
+            panel_inner_margin_y: 12.0,
+            section_inner_margin_x: 12.0,
+            section_inner_margin_y: 12.0,
             icon_size: 14.0,
             icon_raster_min_size: 12.0,
             icon_text_inset_x: 6.0,
             icon_text_inset_y: 7.0,
             checkmark_stroke_width: 1.35,
             checkmark_start_x: 7.0,
-            drop_overlay_radius: 4.0,
+            drop_overlay_radius: 12.0,
             drop_overlay_stroke_width: 1.5,
-            font_small: 10.0,
-            font_body: 12.0,
-            font_large: 14.0,
-            font_mono_small: 10.0,
+            font_small: 12.0,
+            font_body: 14.0,
+            font_large: 16.0,
+            font_mono_small: 12.0,
             font_mono_large: 24.0,
-            list_row_radius: 3.0,
+            list_row_radius: 12.0,
             list_compact_spacing_x: 4.0,
             list_row_height: 36.0,
             list_min_height: 120.0,
@@ -256,11 +293,11 @@ impl Default for MetricsTokens {
             ai_workflow_editor_max_height: 240.0,
             ai_workflow_log_max_height: 180.0,
             ai_workflow_editor_rows: 12,
-            timeline_toolbar_button_size: [24.0, 22.0],
-            timeline_clip_radius: 3.0,
-            timeline_track_height: 40.0,
-            timeline_ruler_height: 24.0,
-            timeline_track_label_width: 80.0,
+            timeline_toolbar_button_size: [30.0, 26.0],
+            timeline_clip_radius: 4.0,
+            timeline_track_height: 42.0,
+            timeline_ruler_height: 28.0,
+            timeline_track_label_width: 92.0,
             timeline_min_pixels_per_frame: 0.02,
             timeline_max_pixels_per_frame: 64.0,
             timeline_drag_snap_pixels: 10.0,
@@ -273,10 +310,10 @@ impl Default for MetricsTokens {
             timeline_ruler_label_inset_y: 4.0,
             timeline_track_label_text_inset_x: 6.0,
             timeline_track_icon_size: 14.0,
-            timeline_track_lock_offset_x: 10.0,
-            timeline_track_mode_offset_x: 28.0,
+            timeline_track_lock_offset_x: 14.0,
+            timeline_track_mode_offset_x: 36.0,
             timeline_clip_top_inset: 2.0,
-            timeline_clip_bottom_inset: 4.0,
+            timeline_clip_bottom_inset: 2.0,
             timeline_clip_label_padding_x: 4.0,
             timeline_clip_label_min_width: 24.0,
             timeline_clip_ghost_min_width: 8.0,
@@ -288,6 +325,7 @@ impl Default for MetricsTokens {
             timeline_linked_audio_highlight_width: 1.5,
             timeline_playhead_stroke_width: 2.0,
             timeline_playhead_secondary_stroke_width: 1.8,
+            viewer_transport_height: 42.0,
         }
     }
 }
@@ -343,38 +381,38 @@ fn build_visuals(theme: egui::Theme, tokens: &ThemeTokens) -> egui::Visuals {
     visuals.override_text_color = Some(p.text_primary);
     visuals.panel_fill = p.bg_base;
     visuals.window_fill = p.bg_surface;
-    visuals.faint_bg_color = p.bg_surface;
+    visuals.faint_bg_color = p.bg_surface_raised;
     visuals.extreme_bg_color = p.bg_base;
-    visuals.code_bg_color = p.bg_surface;
+    visuals.code_bg_color = p.bg_surface_raised;
 
-    visuals.widgets.noninteractive.bg_fill = p.bg_base;
+    visuals.widgets.noninteractive.bg_fill = p.bg_surface;
     visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, p.border_subtle);
     visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, p.text_muted);
     visuals.widgets.noninteractive.rounding = egui::Rounding::same(m.button_rounding);
 
-    visuals.widgets.inactive.bg_fill = p.bg_surface;
+    visuals.widgets.inactive.bg_fill = p.bg_surface_raised;
     visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, p.border_subtle);
     visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, p.text_primary);
     visuals.widgets.inactive.rounding = egui::Rounding::same(m.button_rounding);
 
-    visuals.widgets.hovered.bg_fill = p.bg_surface;
+    visuals.widgets.hovered.bg_fill = p.bg_surface_hover;
     visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, p.border_emphasis);
     visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, p.text_primary);
     visuals.widgets.hovered.rounding = egui::Rounding::same(m.button_rounding);
 
     visuals.widgets.active.bg_fill = p.bg_surface_active;
-    visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, p.text_primary);
+    visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, p.interaction_highlight);
     visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, p.text_primary);
     visuals.widgets.active.rounding = egui::Rounding::same(m.button_rounding);
 
-    visuals.widgets.open.bg_fill = p.bg_surface;
+    visuals.widgets.open.bg_fill = p.bg_surface_active;
     visuals.widgets.open.bg_stroke = egui::Stroke::new(1.0, p.border_emphasis);
     visuals.widgets.open.fg_stroke = egui::Stroke::new(1.0, p.text_primary);
     visuals.widgets.open.rounding = egui::Rounding::same(m.button_rounding);
 
-    visuals.selection.bg_fill = p.bg_surface_active;
-    visuals.selection.stroke = egui::Stroke::new(1.0, p.text_primary);
-    visuals.window_stroke = egui::Stroke::new(1.0, p.border_subtle);
+    visuals.selection.bg_fill = p.interaction_highlight.gamma_multiply(0.20);
+    visuals.selection.stroke = egui::Stroke::new(1.0, p.interaction_highlight);
+    visuals.window_stroke = egui::Stroke::new(1.0, p.panel_divider_strong);
     visuals.hyperlink_color = p.interaction_highlight;
     visuals.menu_rounding = m.menu_rounding.into();
     visuals.window_rounding = m.window_rounding.into();
@@ -386,9 +424,93 @@ fn apply_style(ctx: &egui::Context, tokens: &ThemeTokens) {
     style.spacing.item_spacing = tokens.metrics.item_spacing;
     style.spacing.button_padding = tokens.metrics.button_padding;
     style.spacing.interact_size.y = tokens.metrics.interact_height;
+    style.spacing.menu_margin = egui::Margin::same(tokens.metrics.section_inner_margin_x);
+    style.spacing.window_margin = egui::Margin::same(tokens.metrics.panel_inner_margin_x);
     style.visuals.window_fill = tokens.palette.bg_surface;
     style.visuals.panel_fill = tokens.palette.bg_base;
     ctx.set_style(style);
+}
+
+pub fn panel_frame() -> egui::Frame {
+    egui::Frame::none()
+        .fill(palette::bg_surface())
+        .stroke(egui::Stroke::new(1.0, palette::panel_divider_strong()))
+        .rounding(egui::Rounding::same(tokens::panel_rounding()))
+        .inner_margin(egui::Margin::symmetric(
+            tokens::panel_inner_margin_x(),
+            tokens::panel_inner_margin_y(),
+        ))
+}
+
+pub fn section_frame() -> egui::Frame {
+    egui::Frame::none()
+        .fill(palette::bg_surface_raised())
+        .stroke(egui::Stroke::new(1.0, palette::border_subtle()))
+        .rounding(egui::Rounding::same(tokens::section_rounding()))
+        .inner_margin(egui::Margin::symmetric(
+            tokens::section_inner_margin_x(),
+            tokens::section_inner_margin_y(),
+        ))
+}
+
+pub fn toolbar_frame() -> egui::Frame {
+    egui::Frame::none()
+        .fill(palette::bg_surface_hover())
+        .stroke(egui::Stroke::new(1.0, palette::border_subtle()))
+        .rounding(egui::Rounding::same(tokens::section_rounding()))
+        .inner_margin(egui::Margin::symmetric(
+            tokens::section_inner_margin_x(),
+            8.0,
+        ))
+}
+
+pub fn dialog_frame() -> egui::Frame {
+    egui::Frame::none()
+        .fill(palette::bg_surface())
+        .stroke(egui::Stroke::new(1.0, palette::panel_divider_strong()))
+        .rounding(egui::Rounding::same(tokens::panel_rounding()))
+        .inner_margin(egui::Margin::symmetric(
+            tokens::panel_inner_margin_x(),
+            tokens::panel_inner_margin_y(),
+        ))
+}
+
+pub fn panel_header<R>(
+    ui: &mut egui::Ui,
+    title: &str,
+    subtitle: &str,
+    add_trailing: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = tokens::panel_gap();
+        ui.vertical(|ui| {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(title)
+                        .font(typography::body_large())
+                        .strong()
+                        .color(palette::text_primary()),
+                )
+                .truncate(),
+            );
+            if !subtitle.is_empty() {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(subtitle)
+                            .font(typography::body_small())
+                            .color(palette::text_muted()),
+                    )
+                    .truncate(),
+                );
+            }
+        });
+        ui.with_layout(
+            egui::Layout::right_to_left(egui::Align::Center),
+            add_trailing,
+        )
+        .inner
+    })
+    .inner
 }
 
 pub fn register_theme_override(override_provider: Arc<dyn ThemeTokenOverride>) {
@@ -544,11 +666,27 @@ pub fn icon_toggle_button(
     kind: UiIcon,
     selected: bool,
 ) -> egui::Response {
-    let response = ui.add_sized(size, egui::Button::new("").selected(selected));
+    let button = egui::Button::new("").fill(if selected {
+        palette::bg_surface_active()
+    } else {
+        palette::bg_surface_raised()
+    });
+    let response = ui.add_sized(size, button);
     let icon_size = tokens::icon_size();
     let icon_rect =
         egui::Rect::from_center_size(response.rect.center(), egui::vec2(icon_size, icon_size));
-    let icon_color = ui.visuals().text_color();
+    if selected {
+        ui.painter().rect_stroke(
+            response.rect.shrink(0.5),
+            egui::Rounding::same(tokens::button_rounding()),
+            egui::Stroke::new(1.0, palette::interaction_highlight()),
+        );
+    }
+    let icon_color = if selected {
+        palette::text_primary()
+    } else {
+        ui.visuals().text_color()
+    };
     draw_icon(ui.painter(), icon_rect, kind, icon_color);
     response
 }
@@ -720,6 +858,42 @@ pub mod typography {
 }
 
 pub mod tokens {
+    pub fn panel_rounding() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.panel_rounding)
+    }
+
+    pub fn section_rounding() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.section_rounding)
+    }
+
+    pub fn card_rounding() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.card_rounding)
+    }
+
+    pub fn badge_rounding() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.badge_rounding)
+    }
+
+    pub fn panel_gap() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.panel_gap)
+    }
+
+    pub fn panel_inner_margin_x() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.panel_inner_margin_x)
+    }
+
+    pub fn panel_inner_margin_y() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.panel_inner_margin_y)
+    }
+
+    pub fn section_inner_margin_x() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.section_inner_margin_x)
+    }
+
+    pub fn section_inner_margin_y() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.section_inner_margin_y)
+    }
+
     pub fn icon_size() -> f32 {
         super::with_active_tokens(|tokens| tokens.metrics.icon_size)
     }
@@ -947,6 +1121,10 @@ pub mod tokens {
     pub fn timeline_playhead_secondary_stroke_width() -> f32 {
         super::with_active_tokens(|tokens| tokens.metrics.timeline_playhead_secondary_stroke_width)
     }
+
+    pub fn viewer_transport_height() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.viewer_transport_height)
+    }
 }
 
 #[cfg(test)]
@@ -1047,6 +1225,10 @@ pub mod palette {
         super::with_active_tokens(|tokens| tokens.palette.bg_surface)
     }
 
+    pub fn bg_surface_raised() -> egui::Color32 {
+        super::with_active_tokens(|tokens| tokens.palette.bg_surface_raised)
+    }
+
     pub fn bg_surface_hover() -> egui::Color32 {
         super::with_active_tokens(|tokens| tokens.palette.bg_surface_hover)
     }
@@ -1061,6 +1243,10 @@ pub mod palette {
 
     pub fn border_emphasis() -> egui::Color32 {
         super::with_active_tokens(|tokens| tokens.palette.border_emphasis)
+    }
+
+    pub fn panel_divider_strong() -> egui::Color32 {
+        super::with_active_tokens(|tokens| tokens.palette.panel_divider_strong)
     }
 
     pub fn text_primary() -> egui::Color32 {
@@ -1083,20 +1269,28 @@ pub mod palette {
         super::with_active_tokens(|tokens| tokens.palette.interaction_highlight)
     }
 
+    pub fn accent_secondary() -> egui::Color32 {
+        super::with_active_tokens(|tokens| tokens.palette.accent_secondary)
+    }
+
+    pub fn accent_audio() -> egui::Color32 {
+        super::with_active_tokens(|tokens| tokens.palette.accent_audio)
+    }
+
     pub fn status_error() -> egui::Color32 {
         super::with_active_tokens(|tokens| tokens.palette.status_error)
     }
 
     pub fn drop_overlay_fill() -> egui::Color32 {
-        bg_surface().gamma_multiply(0.78)
+        super::with_active_tokens(|tokens| tokens.palette.overlay_fill)
     }
 
     pub fn drop_overlay_stroke() -> egui::Color32 {
-        interaction_highlight()
+        super::with_active_tokens(|tokens| tokens.palette.overlay_stroke)
     }
 
     pub fn drop_overlay_text() -> egui::Color32 {
-        interaction_highlight()
+        text_primary()
     }
 
     pub fn timeline_clip_video() -> egui::Color32 {
@@ -1117,5 +1311,13 @@ pub mod palette {
 
     pub fn image_tint() -> egui::Color32 {
         super::with_active_tokens(|tokens| tokens.palette.image_tint)
+    }
+
+    pub fn overlay_fill() -> egui::Color32 {
+        super::with_active_tokens(|tokens| tokens.palette.overlay_fill)
+    }
+
+    pub fn overlay_stroke() -> egui::Color32 {
+        super::with_active_tokens(|tokens| tokens.palette.overlay_stroke)
     }
 }

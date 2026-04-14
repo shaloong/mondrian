@@ -1,5 +1,5 @@
 use crate::app::AppState;
-use crate::ui::theme::{self, palette, tokens};
+use crate::ui::theme::{self, palette, tokens, typography};
 use egui::Ui;
 use mondrian_export::{
     preset::{ExportConfig, ExportInput, ExportPreset, TimelineExportInput, VideoCodecConfig},
@@ -23,16 +23,21 @@ pub struct ExportPanel {
 impl ExportPanel {
     pub fn show(&mut self, ui: &mut Ui, state: &mut AppState) {
         ui.vertical(|ui| {
-            ui.heading("导出视频");
-            ui.separator();
-
-            // ── 预设选择 ──────────────────────
-            ui.label("导出预设:");
             let presets = builtin_presets();
+            let preset = &presets[self.selected_preset_idx].1;
+            let pending = state.render_queue.list_jobs().len();
             let combo_id = ui.make_persistent_id("export_preset");
             let combo_open =
                 ui.memory(|m| m.is_popup_open(combo_id) || m.is_popup_open(combo_id.with("popup")));
 
+            ui.label(
+                egui::RichText::new(format!("队列中 {} 个任务", pending))
+                    .font(typography::body_small())
+                    .color(palette::text_muted()),
+            );
+            ui.add_space(tokens::panel_gap());
+
+            ui.label("导出预设");
             theme::with_minimal_dropdown(ui, combo_open, |ui| {
                 egui::ComboBox::from_id_salt("export_preset")
                     .selected_text(
@@ -56,10 +61,7 @@ impl ExportPanel {
                     });
             });
 
-            let preset = &presets[self.selected_preset_idx].1;
-
-            // 预设详情只读展示
-            ui.separator();
+            ui.add_space(10.0);
             egui::Grid::new("preset_details")
                 .num_columns(2)
                 .spacing(tokens::export_grid_spacing())
@@ -89,27 +91,28 @@ impl ExportPanel {
                         VideoCodecConfig::Gif { .. } => ("GIF", "N/A".to_owned()),
                     };
 
-                    ui.label("分辨率:");
+                    ui.label("分辨率");
                     ui.label(resolution_text);
                     ui.end_row();
 
-                    ui.label("视频编码:");
+                    ui.label("视频编码");
                     ui.label(codec_name);
                     ui.end_row();
 
-                    ui.label("视频码率:");
+                    ui.label("视频码率");
                     ui.label(bitrate_text);
                     ui.end_row();
 
-                    ui.label("容器格式:");
+                    ui.label("容器格式");
                     ui.label(format!("{:?}", preset.container));
                     ui.end_row();
                 });
 
+            ui.add_space(tokens::panel_gap());
             ui.separator();
+            ui.add_space(tokens::panel_gap());
 
-            // ── 输入源（时间线逐帧渲染） ──
-            ui.label("输入源:");
+            ui.label("输入源");
             if let Some(sequence) = state.sequence.as_ref() {
                 let video_clips =
                     sequence.video_tracks.iter().map(|t| t.clips.len()).sum::<usize>();
@@ -134,12 +137,16 @@ impl ExportPanel {
                 });
             }
 
+            ui.add_space(tokens::panel_gap());
             ui.separator();
+            ui.add_space(tokens::panel_gap());
 
-            // ── 输出路径 ──────────────────────
-            ui.label("输出文件:");
+            ui.label("输出文件");
             ui.horizontal(|ui| {
-                ui.text_edit_singleline(&mut self.output_path);
+                ui.add_sized(
+                    [ui.available_width() - 88.0, ui.spacing().interact_size.y],
+                    egui::TextEdit::singleline(&mut self.output_path).hint_text("选择导出路径"),
+                );
                 if ui.button("浏览…").clicked() {
                     let default_name = default_output_filename(preset);
                     if let Some(path) = FileDialog::new().set_file_name(&default_name).save_file() {
@@ -149,28 +156,15 @@ impl ExportPanel {
             });
 
             if self.output_path.is_empty() {
+                ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     let _ = theme::icon(ui, theme::UiIcon::Warning, palette::status_warning());
                     ui.colored_label(palette::status_warning(), "请指定输出路径");
                 });
             }
 
-            ui.separator();
+            ui.add_space(tokens::panel_gap());
 
-            // ── 渲染队列状态 ──────────────────
-            let pending = state.render_queue.list_jobs().len();
-            ui.label(format!("队列中: {pending} 个任务"));
-
-            // ── 操作按钮 ──────────────────────
-            ui.separator();
-            ui.horizontal(|ui| {
-                let can_export = !self.output_path.is_empty() && state.sequence.is_some();
-                if ui.add_enabled(can_export, egui::Button::new("加入导出队列")).clicked() {
-                    self.enqueue(state, preset.clone());
-                }
-            });
-
-            // ── 状态消息 ──────────────────────
             if let Some((msg, is_err)) = &self.status_msg {
                 let color = if *is_err {
                     palette::status_error()
@@ -178,7 +172,20 @@ impl ExportPanel {
                     palette::status_success()
                 };
                 ui.colored_label(color, msg);
+                ui.add_space(tokens::panel_gap());
             }
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let can_export = !self.output_path.is_empty() && state.sequence.is_some();
+                let export_button = egui::Button::new(
+                    egui::RichText::new("加入导出队列").color(palette::text_primary()).strong(),
+                )
+                .fill(palette::interaction_highlight())
+                .stroke(egui::Stroke::NONE);
+                if ui.add_enabled(can_export, export_button).clicked() {
+                    self.enqueue(state, preset.clone());
+                }
+            });
         });
     }
 

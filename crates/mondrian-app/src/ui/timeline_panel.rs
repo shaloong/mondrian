@@ -111,7 +111,7 @@ impl TimelinePanel {
     pub fn show(&mut self, ui: &mut Ui, state: &mut AppState) {
         // 初始化默认缩放
         if self.pixels_per_frame == 0.0 {
-            self.pixels_per_frame = 4.0;
+            self.pixels_per_frame = tokens::timeline_default_pixels_per_frame();
             self.snap_enabled = true;
         }
         self.active_snap_guide_frame = None;
@@ -121,13 +121,13 @@ impl TimelinePanel {
             ui.horizontal(|ui| {
                 self.draw_timeline_tools_toolbar(ui);
             });
-
-            ui.separator();
+            ui.add_space(tokens::panel_gap());
 
             if state.sequence.is_none() {
                 ui.centered_and_justified(|ui| {
                     ui.label(
                         egui::RichText::new("暂无项目 — 文件 > 新建项目")
+                            .font(typography::body())
                             .color(palette::text_muted()),
                     );
                 });
@@ -361,7 +361,11 @@ impl TimelinePanel {
         );
 
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 0.0, palette::bg_surface());
+        painter.rect_filled(
+            rect,
+            tokens::section_rounding(),
+            palette::bg_surface_raised(),
+        );
 
         if let Some(out_point) = state.out_point_frame() {
             let in_point = state.in_point_frame().max(0);
@@ -453,6 +457,11 @@ impl TimelinePanel {
                 palette::timeline_playhead(),
             ),
         );
+        painter.circle_filled(
+            Pos2::new(playhead_x, rect.top() + 6.0),
+            4.0,
+            palette::timeline_playhead(),
+        );
 
         // 点击或拖拽标尺跳转（scrub）
         if resp.clicked() || resp.dragged() || resp.drag_stopped() {
@@ -471,6 +480,9 @@ impl TimelinePanel {
             Some(s) => s,
             None => return false,
         };
+
+        let original_row_spacing = ui.spacing().item_spacing.y;
+        ui.spacing_mut().item_spacing.y = 0.0;
 
         let video_tracks = seq.video_tracks.clone();
         let audio_tracks = seq.audio_tracks.clone();
@@ -493,6 +505,8 @@ impl TimelinePanel {
                 track_index,
                 palette::timeline_clip_video(),
                 true,
+                track_index == video_tracks.len() - 1,
+                track_index == 0 && audio_tracks.is_empty(),
                 &mut first_track_top,
                 &mut last_track_bottom,
                 &mut content_left,
@@ -510,6 +524,8 @@ impl TimelinePanel {
                 track_index,
                 palette::timeline_clip_audio(),
                 false,
+                video_tracks.is_empty() && track_index == 0,
+                track_index + 1 == audio_tracks.len(),
                 &mut first_track_top,
                 &mut last_track_bottom,
                 &mut content_left,
@@ -538,7 +554,10 @@ impl TimelinePanel {
             let playhead_x = left + state.current_frame() as f32 * self.pixels_per_frame;
             ui.painter().line_segment(
                 [Pos2::new(playhead_x, top), Pos2::new(playhead_x, bottom)],
-                Stroke::new(1.8, palette::timeline_playhead()),
+                Stroke::new(
+                    tokens::timeline_playhead_secondary_stroke_width(),
+                    palette::timeline_playhead(),
+                ),
             );
 
             if let Some(snap_frame) = self.active_snap_guide_frame {
@@ -600,6 +619,8 @@ impl TimelinePanel {
             self.clear_marquee();
         }
 
+        ui.spacing_mut().item_spacing.y = original_row_spacing;
+
         dropped
     }
 
@@ -611,6 +632,8 @@ impl TimelinePanel {
         track_index: usize,
         clip_color: Color32,
         is_video_track: bool,
+        round_top: bool,
+        round_bottom: bool,
         first_track_top: &mut Option<f32>,
         last_track_bottom: &mut Option<f32>,
         content_left: &mut Option<f32>,
@@ -638,10 +661,49 @@ impl TimelinePanel {
         }
 
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 0.0, palette::bg_surface());
+        let lane_fill = if track_index % 2 == 0 {
+            palette::bg_surface()
+        } else {
+            palette::bg_surface_raised()
+        };
 
         let label_rect = Rect::from_min_size(rect.min, Vec2::new(track_label_w, track_height));
-        painter.rect_filled(label_rect, 0.0, palette::bg_base());
+        let content_rect = Rect::from_min_max(
+            Pos2::new(label_rect.right(), rect.top()),
+            rect.right_bottom(),
+        );
+        painter.rect_filled(content_rect, 0.0, lane_fill);
+        let label_fill_rect = label_rect;
+        let label_fill = lane_fill;
+        let label_rounding = egui::Rounding {
+            nw: if round_top {
+                tokens::section_rounding()
+            } else {
+                0.0
+            },
+            ne: 0.0,
+            sw: if round_bottom {
+                tokens::section_rounding()
+            } else {
+                0.0
+            },
+            se: 0.0,
+        };
+        painter.rect_filled(label_fill_rect, label_rounding, label_fill);
+        painter.line_segment(
+            [
+                Pos2::new(rect.left(), rect.bottom()),
+                Pos2::new(rect.right(), rect.bottom()),
+            ],
+            Stroke::new(1.0, palette::border_subtle().gamma_multiply(0.8)),
+        );
+        painter.line_segment(
+            [
+                Pos2::new(label_rect.right(), rect.top()),
+                Pos2::new(label_rect.right(), rect.bottom()),
+            ],
+            Stroke::new(1.0, palette::border_subtle().gamma_multiply(0.8)),
+        );
 
         let icon_size = Vec2::new(
             tokens::timeline_track_icon_size(),
@@ -718,7 +780,7 @@ impl TimelinePanel {
             ),
             egui::Align2::LEFT_CENTER,
             &track.name,
-            typography::body(),
+            typography::body_small(),
             palette::text_primary(),
         );
         let mode_icon = if is_video_track {
@@ -752,6 +814,8 @@ impl TimelinePanel {
             );
         }
 
+        let mut clip_outlines: Vec<(Rect, bool)> = Vec::new();
+
         for clip in &track.clips {
             let clip_x =
                 rect.left() + track_label_w + clip.position.frame as f32 * self.pixels_per_frame;
@@ -767,37 +831,35 @@ impl TimelinePanel {
                 ),
                 Vec2::new(clip_w, track_height - clip_bottom_inset),
             );
+            let clip_draw_rect = clip_rect.intersect(Rect::from_min_max(
+                Pos2::new(rect.left() + track_label_w, rect.top() + clip_top_inset),
+                Pos2::new(rect.right() - 1.0, rect.bottom() - 1.0),
+            ));
             let selection = ClipSelection {
                 track_id: track.id,
                 is_video_track,
                 clip_id: clip.id,
             };
-            visible_clips.push(ClipVisual { selection, rect: clip_rect });
+            visible_clips.push(ClipVisual { selection, rect: clip_draw_rect });
 
             let clip_fill = if clip.is_disabled {
                 clip_color.gamma_multiply(0.35)
             } else {
                 clip_color
             };
-            painter.rect_filled(clip_rect, tokens::timeline_clip_radius(), clip_fill);
-            painter.rect_stroke(
-                clip_rect,
-                tokens::timeline_clip_radius(),
-                Stroke::new(1.0, palette::border_emphasis().gamma_multiply(0.5)),
-            );
-            if self.selected_clips.contains(&selection) {
-                painter.rect_stroke(
-                    clip_rect.shrink(0.5),
-                    tokens::timeline_clip_radius(),
-                    Stroke::new(2.0, palette::interaction_highlight()),
-                );
-            }
+            painter.rect_filled(clip_draw_rect, tokens::timeline_clip_radius(), clip_fill);
+            clip_outlines.push((clip_draw_rect, self.selected_clips.contains(&selection)));
 
             if clip_w > tokens::timeline_clip_label_min_width() {
-                painter.text(
-                    clip_rect.left_center()
+                let label_rect = Rect::from_min_max(
+                    clip_draw_rect.left_top()
                         + Vec2::new(tokens::timeline_clip_label_padding_x(), 0.0),
-                    egui::Align2::LEFT_CENTER,
+                    clip_draw_rect.right_bottom()
+                        - Vec2::new(tokens::timeline_clip_label_padding_x(), 0.0),
+                );
+                draw_single_line_ellipsis(
+                    &painter,
+                    label_rect,
                     clip.label.as_deref().unwrap_or("clip"),
                     typography::body_small(),
                     palette::text_primary(),
@@ -806,7 +868,7 @@ impl TimelinePanel {
 
             if clip.is_disabled {
                 painter.text(
-                    clip_rect.right_center()
+                    clip_draw_rect.right_center()
                         - Vec2::new(tokens::timeline_clip_label_padding_x(), 0.0),
                     egui::Align2::RIGHT_CENTER,
                     "禁用",
@@ -817,7 +879,7 @@ impl TimelinePanel {
 
             if state.dragging_asset().is_none() && self.track_drag.is_none() {
                 let clip_resp = ui.interact(
-                    clip_rect,
+                    clip_draw_rect,
                     ui.make_persistent_id(("timeline_clip_drag", track.id, clip.id)),
                     Sense::click_and_drag(),
                 );
@@ -984,6 +1046,31 @@ impl TimelinePanel {
                         }
                     }
                 }
+            }
+        }
+
+        for (clip_rect, selected) in clip_outlines {
+            painter.rect_stroke(
+                clip_rect.shrink(0.5),
+                tokens::timeline_clip_radius(),
+                Stroke::new(
+                    1.0,
+                    if is_video_track {
+                        palette::interaction_highlight().gamma_multiply(0.55)
+                    } else {
+                        palette::accent_audio().gamma_multiply(0.60)
+                    },
+                ),
+            );
+            if selected {
+                painter.rect_stroke(
+                    clip_rect.shrink(0.5),
+                    tokens::timeline_clip_radius(),
+                    Stroke::new(
+                        tokens::timeline_selection_stroke_width(),
+                        palette::interaction_highlight(),
+                    ),
+                );
             }
         }
 
@@ -1538,6 +1625,49 @@ fn clip_disabled_state(seq: &Sequence, sel: ClipSelection) -> Option<bool> {
             .and_then(|track| track.clips.iter().find(|clip| clip.id == sel.clip_id))
             .map(|clip| clip.is_disabled)
     }
+}
+
+fn draw_single_line_ellipsis(
+    painter: &egui::Painter,
+    rect: Rect,
+    text: &str,
+    font_id: egui::FontId,
+    color: Color32,
+) {
+    if rect.width() <= 4.0 || text.is_empty() {
+        return;
+    }
+
+    let fits = |candidate: &str| {
+        painter.layout_no_wrap(candidate.to_owned(), font_id.clone(), color).size().x
+            <= rect.width()
+    };
+
+    let final_text = if fits(text) {
+        text.to_owned()
+    } else {
+        let ellipsis = "...";
+        let chars: Vec<char> = text.chars().collect();
+        let mut truncated = ellipsis.to_owned();
+
+        for keep in (0..chars.len()).rev() {
+            let candidate = format!("{}{}", chars[..keep].iter().collect::<String>(), ellipsis);
+            if fits(&candidate) {
+                truncated = candidate;
+                break;
+            }
+        }
+
+        truncated
+    };
+
+    painter.text(
+        rect.left_center(),
+        egui::Align2::LEFT_CENTER,
+        final_text,
+        font_id,
+        color,
+    );
 }
 
 fn find_clip_in_sequence(
