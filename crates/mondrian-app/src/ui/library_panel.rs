@@ -333,15 +333,21 @@ impl LibraryPanel {
         } else if card_response.hovered() {
             palette::bg_surface_hover()
         } else {
-            palette::bg_surface_raised()
+            egui::Color32::TRANSPARENT
         };
         let card_stroke = if is_selected {
             Stroke::new(1.0, palette::interaction_highlight())
+        } else if card_response.hovered() {
+            Stroke::new(1.0, palette::border_subtle().gamma_multiply(0.7))
         } else {
-            Stroke::new(1.0, palette::border_subtle().gamma_multiply(0.9))
+            Stroke::NONE
         };
-        ui.painter().rect_filled(card_rect, card_rounding, card_fill);
-        ui.painter().rect_stroke(card_rect, card_rounding, card_stroke);
+        if card_fill != egui::Color32::TRANSPARENT {
+            ui.painter().rect_filled(card_rect, card_rounding, card_fill);
+        }
+        if card_stroke != Stroke::NONE {
+            ui.painter().rect_stroke(card_rect, card_rounding, card_stroke);
+        }
 
         let thumb_rect = Rect::from_min_size(
             card_rect.min + Vec2::new(8.0, CARD_PADDING_TOP),
@@ -540,7 +546,7 @@ impl LibraryPanel {
         &self,
         ui: &Ui,
         rect: Rect,
-        _kind: AssetKind,
+        kind: AssetKind,
         proxy_mode: bool,
         is_offline: bool,
     ) {
@@ -563,6 +569,27 @@ impl LibraryPanel {
                 palette::interaction_highlight(),
             );
         }
+
+        let (label, bg, fg) = match kind {
+            AssetKind::Video => (
+                "视频",
+                palette::bg_surface_raised().gamma_multiply(0.92),
+                palette::text_muted(),
+            ),
+            AssetKind::Audio => (
+                "音频",
+                palette::bg_surface_raised().gamma_multiply(0.92),
+                palette::text_muted(),
+            ),
+        };
+        self.draw_thumbnail_badge(
+            ui,
+            rect.right_bottom() + Vec2::new(-6.0, -6.0),
+            label,
+            true,
+            bg,
+            fg,
+        );
     }
 
     fn draw_thumbnail_badge(
@@ -574,8 +601,12 @@ impl LibraryPanel {
         bg: egui::Color32,
         fg: egui::Color32,
     ) {
-        let w = 10.0 + text.chars().count() as f32 * 6.6;
-        let h = 16.0;
+        let font_id = typography::body_small();
+        let text_size = ui.painter().layout_no_wrap(text.to_owned(), font_id.clone(), fg).size();
+        let padding_x = 6.0;
+        let padding_y = 3.0;
+        let w = (text_size.x + padding_x * 2.0).ceil().max(24.0);
+        let h = (text_size.y + padding_y * 2.0).ceil().max(16.0);
         let rect = if align_right {
             Rect::from_min_size(Pos2::new(anchor.x - w, anchor.y - h), Vec2::new(w, h))
         } else {
@@ -591,7 +622,7 @@ impl LibraryPanel {
             rect.center(),
             egui::Align2::CENTER_CENTER,
             text,
-            typography::body_small(),
+            font_id,
             fg,
         );
     }
