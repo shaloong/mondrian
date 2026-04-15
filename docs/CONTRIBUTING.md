@@ -82,8 +82,26 @@ cargo test -p mondrian-app perf_project_lifecycle_smoke -- --ignored --nocapture
 
 $env:MONDRIAN_EXPORT_SIM_OUTPUT='target/perf/export-4k60.jsonl'
 cargo test -p mondrian-export export_4k60_simulated_perf -- --ignored --nocapture
+
+$env:MONDRIAN_AUDIO_SIM_OUTPUT='target/perf/audio-mix.jsonl'
+cargo test -p mondrian-media audio_mix_48k_stereo_simulated_perf -- --ignored --nocapture
 ```
 
 - 失败时测试会直接报错并附带 JSON 报告。
 - 成功时也会打印 `MONDRIAN_PERF_JSON=...` 或 `MONDRIAN_EXPORT_SIM_JSON=...`，可被日志系统或 AI 工具抓取。
 - 本地开发可放宽阈值，CI 建议使用更严格阈值并固定机器规格。
+
+### 前后对比流程（性能优化后建议实施）
+
+每次性能优化都要保留 baseline，并做 before/after 对比，避免“主观感觉变快”：
+
+```powershell
+# 1) 在优化前分支跑一轮，保存 baseline
+powershell -File scripts/perf/run-perf-suite.ps1 -OutputDir target/perf/baseline
+
+# 2) 在优化后分支跑一轮，保存 current
+powershell -File scripts/perf/run-perf-suite.ps1 -OutputDir target/perf/current
+
+# 3) 自动输出各环节对比（project/preview/export/audio）
+powershell -File scripts/perf/compare-perf.ps1 -BeforeDir target/perf/baseline -AfterDir target/perf/current
+```

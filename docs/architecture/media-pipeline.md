@@ -278,9 +278,21 @@ cargo test -p mondrian-export export_4k60_simulated_perf -- --ignored --nocaptur
 # 4K60 单层直通导出模拟测试（验证快路径）
 $env:MONDRIAN_EXPORT_SIM_OUTPUT='target/perf/export-pass-through-4k60.jsonl'
 cargo test -p mondrian-export export_4k60_single_layer_passthrough_simulated_perf -- --ignored --nocapture
+
+# 音频混合模拟测试（首块耗时 + 平均块耗时 + realtime factor）
+$env:MONDRIAN_AUDIO_SIM_OUTPUT='target/perf/audio-mix-48k.jsonl'
+cargo test -p mondrian-media audio_mix_48k_stereo_simulated_perf -- --ignored --nocapture
 ```
 
 这些测试都会输出 JSON，便于脚本或 AI 自动分析异常样本。
+
+推荐每次性能优化都执行前后对比：
+
+```powershell
+powershell -File scripts/perf/run-perf-suite.ps1 -OutputDir target/perf/baseline
+powershell -File scripts/perf/run-perf-suite.ps1 -OutputDir target/perf/current
+powershell -File scripts/perf/compare-perf.ps1 -BeforeDir target/perf/baseline -AfterDir target/perf/current
+```
 
 ### 预览合成优化说明（2026-03）
 
