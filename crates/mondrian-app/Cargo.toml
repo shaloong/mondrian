@@ -20,8 +20,9 @@ mondrian-export   = { workspace = true }
 
 # UI（Phase 1: egui）
 egui      = "0.29"
-eframe    = { version = "0.29", features = ["wgpu"] }
+eframe    = { version = "0.29", features = ["wgpu", "glow"] }
 egui-wgpu = "0.29"
+egui_extras = { version = "0.29", features = ["all_loaders"] }
 rfd       = "0.14"
 image     = { workspace = true }
 usvg = "0.45"

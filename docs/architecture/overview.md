@@ -189,6 +189,20 @@ pub struct AssetId(Uuid);
 
 这使得后续新增品牌主题、A/B 视觉实验、插件化主题包时，仅需扩展 token 与 override 注册，不需要重写各个 UI 面板。
 
+### 4.5 启动引导窗口（透明圆角）
+
+`mondrian-app` 启动阶段使用独立 viewport 模式显示项目引导界面，glow渲染以确保圆角卡片外侧为真实透明而非黑底：
+
+- NativeOptions 初始即启用透明窗口（`with_transparent(true)`），并以无系统装饰、固定尺寸启动。
+- NativeOptions 初始尺寸必须与 `theme::tokens::startup_viewport_size` 对齐，避免用户看到“先短后高”的首屏尺寸跳变。
+- App 在创建阶段立即同步 `startup_viewport_mode`，避免首帧清屏误用不透明底色。
+- `eframe::App::clear_color` 在启动模式返回全透明 RGBA，在进入主工作区后恢复常规窗口填充色。
+- 启动 UI 的 `CentralPanel` 使用透明 `Frame`，外层不再绘制兜底背景，圆角仅由启动卡片自身负责。
+- 避免在启动页最外层绘制“整窗不透明底板”。若在透明窗口上绘制接近全屏的不透明矩形，即使窗口透明链路正确，也会产生“黑底仍在”的视觉结果。
+- 当前启动页仅绘制左右两块内容卡片（左品牌卡、右操作卡），窗口其余区域保持透明。
+
+打开或新建项目后，viewport 会切换回主工作区模式（可调整尺寸、带系统装饰）。
+
 ---
 
 ## 5. 并发模型

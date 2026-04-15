@@ -247,6 +247,16 @@ pub struct MetricsTokens {
     pub timeline_playhead_stroke_width: f32,
     pub timeline_playhead_secondary_stroke_width: f32,
     pub viewer_transport_height: f32,
+    pub startup_viewport_size: [f32; 2],
+    pub startup_left_panel_width: f32,
+    pub startup_close_button_size: f32,
+    pub startup_close_button_margin_x: f32,
+    pub startup_close_button_margin_y: f32,
+    pub startup_content_padding_x: f32,
+    pub startup_content_padding_y: f32,
+    pub startup_right_content_top_offset: f32,
+    pub startup_panel_margin_x: f32,
+    pub startup_panel_margin_y: f32,
 }
 
 impl Default for MetricsTokens {
@@ -332,6 +342,16 @@ impl Default for MetricsTokens {
             timeline_playhead_stroke_width: 2.0,
             timeline_playhead_secondary_stroke_width: 1.8,
             viewer_transport_height: 42.0,
+            startup_viewport_size: [820.0, 500.0],
+            startup_left_panel_width: 300.0,
+            startup_close_button_size: 28.0,
+            startup_close_button_margin_x: 10.0,
+            startup_close_button_margin_y: 10.0,
+            startup_content_padding_x: 20.0,
+            startup_content_padding_y: 22.0,
+            startup_right_content_top_offset: 6.0,
+            startup_panel_margin_x: 18.0,
+            startup_panel_margin_y: 18.0,
         }
     }
 }
@@ -727,6 +747,9 @@ pub fn checkmark_toggle(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UiIcon {
     Search,
+    Plus,
+    FolderOpen,
+    Clock,
     Video,
     Audio,
     Warning,
@@ -878,6 +901,9 @@ fn rasterize_svg(svg_bytes: &[u8], width: u32, height: u32) -> egui::ColorImage 
 fn icon_svg_bytes(kind: UiIcon) -> &'static [u8] {
     match kind {
         UiIcon::Search => include_bytes!("../../assets/icons/search.svg"),
+        UiIcon::Plus => include_bytes!("../../assets/icons/plus_fill.svg"),
+        UiIcon::FolderOpen => include_bytes!("../../assets/icons/folder_open_fill.svg"),
+        UiIcon::Clock => include_bytes!("../../assets/icons/clock.svg"),
         UiIcon::Video => include_bytes!("../../assets/icons/film.svg"),
         UiIcon::Audio => include_bytes!("../../assets/icons/music.svg"),
         UiIcon::Warning => include_bytes!("../../assets/icons/info.svg"),
@@ -1234,6 +1260,47 @@ pub mod tokens {
 
     pub fn viewer_transport_height() -> f32 {
         super::with_active_tokens(|tokens| tokens.metrics.viewer_transport_height)
+    }
+
+    pub fn startup_viewport_size() -> egui::Vec2 {
+        let size = super::with_active_tokens(|tokens| tokens.metrics.startup_viewport_size);
+        egui::vec2(size[0], size[1])
+    }
+
+    pub fn startup_left_panel_width() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.startup_left_panel_width)
+    }
+
+    pub fn startup_close_button_size() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.startup_close_button_size)
+    }
+
+    pub fn startup_close_button_margin_x() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.startup_close_button_margin_x)
+    }
+
+    pub fn startup_close_button_margin_y() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.startup_close_button_margin_y)
+    }
+
+    pub fn startup_content_padding_x() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.startup_content_padding_x)
+    }
+
+    pub fn startup_content_padding_y() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.startup_content_padding_y)
+    }
+
+    pub fn startup_right_content_top_offset() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.startup_right_content_top_offset)
+    }
+
+    pub fn startup_panel_margin_x() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.startup_panel_margin_x)
+    }
+
+    pub fn startup_panel_margin_y() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.startup_panel_margin_y)
     }
 }
 

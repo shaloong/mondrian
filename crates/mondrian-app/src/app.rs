@@ -29,6 +29,7 @@ use crate::ui::{
     effect_controls_panel::EffectControlsPanel,
     export_panel::ExportPanel,
     library_panel::LibraryPanel,
+    startup::{BootstrapAction, BootstrapRecentProjectItem, BootstrapRecoveryItem},
     timeline_panel::{SelectedClipRef, TimelinePanel},
     viewer_panel::{MediaCacheCleanupStats, ViewerPanel, ViewerPreferences},
 };
@@ -174,6 +175,8 @@ struct AppPreferences {
     auto_save_max_recovery_points: u32,
     #[serde(default = "default_auto_save_retention_days")]
     auto_save_retention_days: u32,
+    #[serde(default)]
+    recent_projects: Vec<PathBuf>,
     viewer: ViewerPreferences,
 }
 
@@ -197,6 +200,7 @@ impl Default for AppPreferences {
             auto_save_interval_secs: default_auto_save_interval_secs(),
             auto_save_max_recovery_points: default_auto_save_max_recovery_points(),
             auto_save_retention_days: default_auto_save_retention_days(),
+            recent_projects: Vec::new(),
             viewer: ViewerPreferences::default(),
         }
     }
@@ -3819,6 +3823,7 @@ pub struct MondrianApp {
     capturing_shortcut: Option<ShortcutAction>,
     show_new_project_dialog: bool,
     show_project_bootstrap_dialog: bool,
+    startup_viewport_mode: bool,
     pending_close_action: Option<PendingCloseAction>,
     allow_next_viewport_close: bool,
     new_project_draft: NewProjectDraft,
@@ -3836,6 +3841,7 @@ pub struct MondrianApp {
     auto_save_retention_days: u32,
     last_auto_save_at: Option<std::time::Instant>,
     auto_save_error_reported: bool,
+    recent_projects: Vec<PathBuf>,
     crash_recovery_candidates: Vec<CrashRecoveryCandidate>,
     show_video_metrics: bool,
     show_audio_metrics: bool,
@@ -3852,6 +3858,7 @@ impl MondrianApp {
 
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         crate::ui::fonts::configure_fonts(&cc.egui_ctx);
+        egui_extras::install_image_loaders(&cc.egui_ctx);
 
         let state = AppState::new();
 
@@ -3871,6 +3878,7 @@ impl MondrianApp {
             capturing_shortcut: None,
             show_new_project_dialog: false,
             show_project_bootstrap_dialog: true,
+            startup_viewport_mode: false,
             pending_close_action: None,
             allow_next_viewport_close: false,
             new_project_draft: NewProjectDraft::default(),
@@ -3888,6 +3896,7 @@ impl MondrianApp {
             auto_save_retention_days: default_auto_save_retention_days(),
             last_auto_save_at: None,
             auto_save_error_reported: false,
+            recent_projects: Vec::new(),
             crash_recovery_candidates: discover_crash_recovery_candidates(),
             show_video_metrics: default_show_video_metrics(),
             show_audio_metrics: default_show_audio_metrics(),
@@ -3902,6 +3911,11 @@ impl MondrianApp {
         crate::ui::theme::apply_theme(&cc.egui_ctx, app.theme);
         cc.egui_ctx
             .send_viewport_cmd(egui::ViewportCommand::SetTheme(app.theme.to_system_theme()));
+
+        // 在首帧前就切到启动窗口模式，避免 clear_color 首帧走到不透明分支。
+        let startup_mode = !app.state.has_open_project();
+        app.sync_startup_viewport_mode(&cc.egui_ctx, startup_mode);
+
         app
     }
 }
@@ -3960,6 +3974,95 @@ impl eframe::App for MondrianApp {
         if is_playing {
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
         }
+
+        if !self.state.has_open_project() {
+            self.show_project_bootstrap_dialog = true;
+        }
+
+        self.sync_startup_viewport_mode(ctx, !self.state.has_open_project());
+
+        if self.show_project_bootstrap_dialog {
+            let recovery_items: Vec<BootstrapRecoveryItem> = self
+                .crash_recovery_candidates
+                .iter()
+                .map(|candidate| BootstrapRecoveryItem {
+                    project_name: candidate
+                        .project_file
+                        .file_name()
+                        .and_then(|v| v.to_str())
+                        .unwrap_or("未知项目")
+                        .to_string(),
+                    autosave_path: candidate.autosave_file.display().to_string(),
+                    age_label: Self::bootstrap_recovery_age_label(candidate.saved_at_unix_ms),
+                    total_snapshots: candidate.total_snapshots,
+                })
+                .collect();
+
+            let recent_items = self
+                .recent_projects
+                .iter()
+                .map(|project_path| {
+                    let (last_edited_label, project_size_label) =
+                        Self::bootstrap_recent_project_meta(project_path.as_path());
+                    BootstrapRecentProjectItem {
+                        project_name: project_path
+                            .file_stem()
+                            .or_else(|| project_path.file_name())
+                            .and_then(|v| v.to_str())
+                            .unwrap_or("未知项目")
+                            .to_string(),
+                        project_path: project_path.display().to_string(),
+                        last_edited_label,
+                        project_size_label,
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            if let Some(action) = crate::ui::startup::show_project_bootstrap_window(
+                ctx,
+                PROJECT_EXTENSION,
+                &recent_items,
+                &recovery_items,
+            ) {
+                match action {
+                    BootstrapAction::OpenProject => self.open_project_dialog(),
+                    BootstrapAction::OpenRecent(path) => match self.open_project_by_path(path) {
+                        Ok(()) => self.state.set_status_hint("项目已打开", false),
+                        Err(err) => {
+                            self.state.set_status_hint(format!("打开项目失败：{err}"), true);
+                            tracing::error!("打开项目失败: {err}");
+                        }
+                    },
+                    BootstrapAction::NewProject => self.show_new_project_dialog = true,
+                    BootstrapAction::Quit => self.request_quit_app(ctx),
+                    BootstrapAction::Recover(idx) => self.recover_project_from_candidate(idx),
+                }
+            }
+
+            if !self.state.has_open_project() {
+                if self.show_preferences_dialog {
+                    self.capture_shortcut_input(ctx);
+                    self.draw_preferences_window(ctx);
+                }
+
+                self.draw_pending_close_action_dialog(ctx);
+
+                let persist_started_at = std::time::Instant::now();
+                self.persist_preferences_if_needed();
+
+                if ui_diag_enabled() {
+                    log_ui_stage_slow(
+                        "persist_preferences_if_needed",
+                        persist_started_at.elapsed(),
+                    );
+                    log_ui_stage_slow("update_total", update_started_at.elapsed());
+                }
+
+                return;
+            }
+        }
+
+        self.sync_startup_viewport_mode(ctx, false);
 
         // ── 顶部菜单栏 ──
         let top_menu_started_at = std::time::Instant::now();
@@ -4163,7 +4266,7 @@ impl eframe::App for MondrianApp {
                         if let Some(path) = picked {
                             let project_path = ensure_project_extension(path);
                             if let Err(err) = self.state.create_new_project_at(
-                                project_path,
+                                project_path.clone(),
                                 name,
                                 self.new_project_draft.width.max(1),
                                 self.new_project_draft.height.max(1),
@@ -4172,101 +4275,14 @@ impl eframe::App for MondrianApp {
                                 self.state.set_status_hint(format!("新建项目失败：{err}"), true);
                                 tracing::error!("新建项目失败: {err}");
                             } else {
-                                self.show_library = true;
+                                self.finish_project_opened();
+                                self.record_recent_project(project_path);
                                 self.show_new_project_dialog = false;
-                                self.show_project_bootstrap_dialog = false;
-                                self.last_auto_save_at = None;
-                                self.auto_save_error_reported = false;
-                                self.crash_recovery_candidates =
-                                    discover_crash_recovery_candidates();
                             }
                         }
                     }
                 });
             self.show_new_project_dialog = open;
-        }
-
-        if !self.state.has_open_project() {
-            self.show_project_bootstrap_dialog = true;
-        }
-
-        if self.show_project_bootstrap_dialog {
-            egui::Window::new("打开或新建项目")
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .collapsible(false)
-                .resizable(false)
-                .default_size([520.0, 220.0])
-                .frame(crate::ui::theme::dialog_frame())
-                .show(ctx, |ui| {
-                    ui.label(format!(
-                        "开始前需要先打开一个项目文件，或新建一个项目。\n项目后缀：.{}",
-                        PROJECT_EXTENSION
-                    ));
-                    ui.add_space(8.0);
-                    let mut recover_index: Option<usize> = None;
-
-                    ui.horizontal(|ui| {
-                        if ui.button("打开项目...").clicked() {
-                            self.open_project_dialog();
-                        }
-                        if ui.button("新建项目...").clicked() {
-                            self.show_new_project_dialog = true;
-                        }
-                        if ui.button("退出").clicked() {
-                            self.request_quit_app(ui.ctx());
-                        }
-                    });
-
-                    if !self.crash_recovery_candidates.is_empty() {
-                        ui.add_space(10.0);
-                        ui.separator();
-                        ui.add_space(6.0);
-                        ui.label("检测到可恢复的自动保存：");
-
-                        let max_items = 3usize;
-                        for (idx, candidate) in
-                            self.crash_recovery_candidates.iter().take(max_items).enumerate()
-                        {
-                            let project_name = candidate
-                                .project_file
-                                .file_name()
-                                .and_then(|v| v.to_str())
-                                .unwrap_or("未知项目");
-                            let age_secs = ((unix_now_ms()
-                                .saturating_sub(candidate.saved_at_unix_ms))
-                                / 1000) as u64;
-                            let age_label = if age_secs < 60 {
-                                format!("{age_secs}s 前")
-                            } else if age_secs < 3600 {
-                                format!("{}m 前", age_secs / 60)
-                            } else {
-                                format!("{}h 前", age_secs / 3600)
-                            };
-                            let label = format!("恢复 {project_name}（{age_label}）");
-                            let clicked = ui
-                                .button(label)
-                                .on_hover_text(candidate.autosave_file.display().to_string())
-                                .clicked();
-                            if clicked {
-                                recover_index = Some(idx);
-                            }
-                            if candidate.total_snapshots > 1 {
-                                ui.small(format!("该项目可恢复点：{}", candidate.total_snapshots));
-                            }
-                        }
-
-                        if self.crash_recovery_candidates.len() > max_items {
-                            ui.label(format!(
-                                "还有 {} 个恢复点可用",
-                                self.crash_recovery_candidates.len() - max_items
-                            ));
-                        }
-                    }
-
-                    if let Some(idx) = recover_index {
-                        self.recover_project_from_candidate(idx);
-                    }
-                });
         }
 
         if self.show_preferences_dialog {
@@ -4286,6 +4302,14 @@ impl eframe::App for MondrianApp {
             );
             log_ui_stage_slow("update_total", update_started_at.elapsed());
         }
+    }
+
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        if self.startup_viewport_mode {
+            return [0.0, 0.0, 0.0, 0.0];
+        }
+
+        visuals.window_fill().to_normalized_gamma_f32()
     }
 }
 
@@ -4382,6 +4406,46 @@ fn audio_render_max_in_flight_buffering() -> usize {
 // ─────────────────────────────────────────────
 
 impl MondrianApp {
+    fn sync_startup_viewport_mode(&mut self, ctx: &egui::Context, startup_mode: bool) {
+        if self.startup_viewport_mode == startup_mode {
+            return;
+        }
+        self.startup_viewport_mode = startup_mode;
+
+        if startup_mode {
+            let size = crate::ui::theme::tokens::startup_viewport_size();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Transparent(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::EnableButtons {
+                close: false,
+                minimized: false,
+                maximize: false,
+            });
+            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(size));
+            ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(size));
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+            return;
+        }
+
+        ctx.send_viewport_cmd(egui::ViewportCommand::Transparent(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::EnableButtons {
+            close: true,
+            minimized: true,
+            maximize: true,
+        });
+        ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(
+            1024.0, 600.0,
+        )));
+        ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(egui::vec2(
+            4096.0, 2160.0,
+        )));
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(1600.0, 900.0)));
+    }
+
     fn load_app_preferences(&mut self) {
         preferences::load_app_preferences(self);
     }
@@ -4704,6 +4768,66 @@ impl MondrianApp {
         }
     }
 
+    fn bootstrap_recovery_age_label(saved_at_unix_ms: u64) -> String {
+        let age_secs = ((unix_now_ms().saturating_sub(saved_at_unix_ms)) / 1000) as u64;
+        if age_secs < 60 {
+            format!("{age_secs} 秒前")
+        } else if age_secs < 3600 {
+            format!("{} 分钟前", age_secs / 60)
+        } else if age_secs < 86_400 {
+            format!("{} 小时前", age_secs / 3600)
+        } else {
+            format!("{} 天前", age_secs / 86_400)
+        }
+    }
+
+    fn bootstrap_recent_project_meta(project_path: &Path) -> (String, String) {
+        let metadata = fs::metadata(project_path).ok();
+
+        let last_edited_label = metadata
+            .as_ref()
+            .and_then(|meta| meta.modified().ok())
+            .and_then(|modified| modified.elapsed().ok())
+            .map(Self::format_elapsed_label)
+            .unwrap_or_else(|| "未知时间".to_string());
+
+        let project_size_label = metadata
+            .as_ref()
+            .map(|meta| Self::format_file_size_label(meta.len()))
+            .unwrap_or_else(|| "未知大小".to_string());
+
+        (last_edited_label, project_size_label)
+    }
+
+    fn format_elapsed_label(elapsed: std::time::Duration) -> String {
+        let secs = elapsed.as_secs();
+        if secs < 60 {
+            "刚刚".to_string()
+        } else if secs < 3_600 {
+            format!("{} 分钟前", secs / 60)
+        } else if secs < 86_400 {
+            format!("{} 小时前", secs / 3_600)
+        } else {
+            format!("{} 天前", secs / 86_400)
+        }
+    }
+
+    fn format_file_size_label(bytes: u64) -> String {
+        const KB: u64 = 1024;
+        const MB: u64 = KB * 1024;
+        const GB: u64 = MB * 1024;
+
+        if bytes < KB {
+            format!("{} B", bytes)
+        } else if bytes < MB {
+            format!("{:.1} KB", bytes as f64 / KB as f64)
+        } else if bytes < GB {
+            format!("{:.1} MB", bytes as f64 / MB as f64)
+        } else {
+            format!("{:.2} GB", bytes as f64 / GB as f64)
+        }
+    }
+
     fn open_project_dialog(&mut self) {
         let picked = FileDialog::new()
             .add_filter("Mondrian Project", &[PROJECT_EXTENSION])
@@ -4713,13 +4837,8 @@ impl MondrianApp {
             return;
         };
 
-        match self.state.open_project_file(path) {
+        match self.open_project_by_path(path) {
             Ok(()) => {
-                self.show_project_bootstrap_dialog = false;
-                self.show_library = true;
-                self.last_auto_save_at = None;
-                self.auto_save_error_reported = false;
-                self.crash_recovery_candidates = discover_crash_recovery_candidates();
                 self.state.set_status_hint("项目已打开", false);
             }
             Err(err) => {
@@ -4727,6 +4846,13 @@ impl MondrianApp {
                 tracing::error!("打开项目失败: {err}");
             }
         }
+    }
+
+    fn open_project_by_path(&mut self, project_file: PathBuf) -> anyhow::Result<()> {
+        self.state.open_project_file(project_file.clone())?;
+        self.finish_project_opened();
+        self.record_recent_project(project_file);
+        Ok(())
     }
 
     fn recover_project_from_candidate(&mut self, index: usize) {
@@ -4739,11 +4865,8 @@ impl MondrianApp {
             candidate.autosave_file.clone(),
         ) {
             Ok(()) => {
-                self.show_project_bootstrap_dialog = false;
-                self.show_library = true;
-                self.last_auto_save_at = None;
-                self.auto_save_error_reported = false;
-                self.crash_recovery_candidates = discover_crash_recovery_candidates();
+                self.finish_project_opened();
+                self.record_recent_project(candidate.project_file.clone());
                 self.state.set_status_hint(
                     format!("已从自动保存恢复：{}", candidate.project_file.display()),
                     false,
@@ -4755,6 +4878,20 @@ impl MondrianApp {
                 self.crash_recovery_candidates = discover_crash_recovery_candidates();
             }
         }
+    }
+
+    fn finish_project_opened(&mut self) {
+        self.show_library = true;
+        self.show_project_bootstrap_dialog = false;
+        self.last_auto_save_at = None;
+        self.auto_save_error_reported = false;
+        self.crash_recovery_candidates = discover_crash_recovery_candidates();
+    }
+
+    fn record_recent_project(&mut self, project_file: PathBuf) {
+        self.recent_projects.retain(|existing| existing != &project_file);
+        self.recent_projects.insert(0, project_file);
+        self.recent_projects.truncate(12);
     }
 
     fn draw_menu_bar(&mut self, ui: &mut egui::Ui) {
@@ -4950,36 +5087,37 @@ impl MondrianApp {
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-            let (status_text, is_error, is_busy) = self.status_bar_text();
-            let status_color = if is_error {
-                crate::ui::theme::palette::status_error()
-            } else if is_busy {
-                crate::ui::theme::palette::interaction_highlight()
-            } else {
-                crate::ui::theme::palette::text_muted()
-            };
+                let (status_text, is_error, is_busy) = self.status_bar_text();
+                let status_color = if is_error {
+                    crate::ui::theme::palette::status_error()
+                } else if is_busy {
+                    crate::ui::theme::palette::interaction_highlight()
+                } else {
+                    crate::ui::theme::palette::text_muted()
+                };
 
-            let _ = crate::ui::theme::icon(
-                ui,
-                crate::ui::theme::UiIcon::Info,
-                crate::ui::theme::palette::text_muted(),
-            );
-            ui.add(
-                egui::Label::new(egui::RichText::new(status_text).color(status_color)).truncate(),
-            );
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let project_name = self
-                    .state
-                    .sequence
-                    .as_ref()
-                    .map(|seq| seq.name.as_str())
-                    .unwrap_or("未命名项目");
-                ui.label(
-                    egui::RichText::new(project_name)
-                        .color(crate::ui::theme::palette::text_muted()),
+                let _ = crate::ui::theme::icon(
+                    ui,
+                    crate::ui::theme::UiIcon::Info,
+                    crate::ui::theme::palette::text_muted(),
                 );
-            });
+                ui.add(
+                    egui::Label::new(egui::RichText::new(status_text).color(status_color))
+                        .truncate(),
+                );
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let project_name = self
+                        .state
+                        .sequence
+                        .as_ref()
+                        .map(|seq| seq.name.as_str())
+                        .unwrap_or("未命名项目");
+                    ui.label(
+                        egui::RichText::new(project_name)
+                            .color(crate::ui::theme::palette::text_muted()),
+                    );
+                });
             },
         );
     }

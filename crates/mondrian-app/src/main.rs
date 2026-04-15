@@ -22,14 +22,21 @@ fn main() -> anyhow::Result<()> {
     // 将 runtime handle 存入 thread-local，供后台任务调度
     let _guard = rt.enter();
 
+    let startup_size = mondrian_app::ui::theme::tokens::startup_viewport_size();
+
     // eframe 原生窗口配置
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Mondrian")
-            .with_inner_size([1600.0, 900.0])
-            .with_min_inner_size([1024.0, 600.0])
+            // 启动时先进入引导窗口模式，主工作区尺寸会在打开项目后恢复。
+            .with_inner_size(startup_size)
+            .with_min_inner_size(startup_size)
+            .with_max_inner_size(startup_size)
+            .with_decorations(false)
+            .with_resizable(false)
+            .with_transparent(true)
             .with_icon(load_icon()),
-        renderer: eframe::Renderer::Wgpu,
+        renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
 
