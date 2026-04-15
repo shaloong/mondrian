@@ -198,6 +198,10 @@ impl ExportPanel {
         let asset_paths = match collect_timeline_asset_paths(state, &sequence) {
             Ok(paths) => paths,
             Err(err) => {
+                if err == "素材库未连接" {
+                    self.status_msg = None;
+                    return;
+                }
                 self.status_msg = Some((format!("导出失败：{err}"), true));
                 return;
             }

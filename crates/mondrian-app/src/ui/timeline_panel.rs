@@ -149,7 +149,7 @@ impl TimelinePanel {
             if state.sequence.is_none() {
                 ui.centered_and_justified(|ui| {
                     ui.label(
-                        egui::RichText::new("暂无项目 — 文件 > 新建项目")
+                        egui::RichText::new("暂无序列")
                             .font(typography::body())
                             .color(palette::text_muted()),
                     );

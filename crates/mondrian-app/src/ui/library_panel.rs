@@ -108,7 +108,6 @@ impl LibraryPanel {
         state.clear_status_hint();
 
         if state.asset_library.is_none() {
-            state.set_status_hint("素材库未连接", true);
             return;
         }
 
@@ -125,7 +124,6 @@ impl LibraryPanel {
 
     fn import_from_path(&mut self, state: &mut AppState, path: &Path) {
         let Some(library) = state.asset_library.as_ref() else {
-            state.set_status_hint("素材库未连接", true);
             return;
         };
 
@@ -228,7 +226,6 @@ impl LibraryPanel {
         ui.style_mut().interaction.selectable_labels = false;
 
         let Some(library) = state.asset_library.clone() else {
-            ui.colored_label(palette::status_warning(), "素材库未连接");
             return;
         };
 
