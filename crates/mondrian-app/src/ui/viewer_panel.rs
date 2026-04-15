@@ -771,6 +771,7 @@ impl ViewerPanel {
                             },
                         ))
                         .show_ui(ui, |ui| {
+                            ui.set_min_width(112.0);
                             theme::checkmark_selectable_value(
                                 ui,
                                 &mut self.preview_scale_mode,

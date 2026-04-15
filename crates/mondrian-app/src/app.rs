@@ -3974,7 +3974,7 @@ impl eframe::App for MondrianApp {
                         1.0,
                         crate::ui::theme::palette::panel_divider_strong(),
                     ))
-                    .inner_margin(egui::Margin::symmetric(10.0, 4.0)),
+                    .inner_margin(egui::Margin::symmetric(10.0, 0.0)),
             )
             .show(ctx, |ui| {
                 self.draw_status_bar(ui);
@@ -4785,9 +4785,10 @@ impl MondrianApp {
 
             ui.menu_button("视图", |ui| {
                 ui.set_min_width(Self::MENU_POPUP_MIN_WIDTH);
-                let _ = crate::ui::theme::checkmark_toggle(ui, &mut self.show_library, "素材库");
+                let _ =
+                    crate::ui::theme::checkmark_menu_toggle(ui, &mut self.show_library, "素材库");
                 if cfg!(debug_assertions) {
-                    let _ = crate::ui::theme::checkmark_toggle(
+                    let _ = crate::ui::theme::checkmark_menu_toggle(
                         ui,
                         &mut self.show_dev_metrics,
                         "开发指标",
@@ -4868,7 +4869,11 @@ impl MondrianApp {
     }
 
     fn draw_status_bar(&self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), ui.available_height()),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
             let (status_text, is_error, is_busy) = self.status_bar_text();
             let status_color = if is_error {
                 crate::ui::theme::palette::status_error()
@@ -4899,7 +4904,8 @@ impl MondrianApp {
                         .color(crate::ui::theme::palette::text_muted()),
                 );
             });
-        });
+            },
+        );
     }
 
     fn status_bar_text(&self) -> (String, bool, bool) {

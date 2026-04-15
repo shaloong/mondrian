@@ -498,12 +498,14 @@ mod tests {
     fn clip_property_bag_exposes_blend_mode_as_static_property() {
         let clip = Clip::new(AssetId::new(), tc(0), tc(40));
         let bag = clip.property_bag().expect("property bag should build");
-        let property = bag
-            .property(Clip::BLEND_MODE_PATH)
-            .expect("blend mode property should exist");
+        let property =
+            bag.property(Clip::BLEND_MODE_PATH).expect("blend mode property should exist");
 
         assert!(!property.descriptor.is_animatable);
-        assert_eq!(property.evaluate(tc(0)), PropertyValue::Text("inherit".to_string()));
+        assert_eq!(
+            property.evaluate(tc(0)),
+            PropertyValue::Text("inherit".to_string())
+        );
     }
 
     #[test]

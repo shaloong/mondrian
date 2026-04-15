@@ -432,6 +432,8 @@ fn apply_style(ctx: &egui::Context, tokens: &ThemeTokens) {
     style.spacing.interact_size.y = tokens.metrics.interact_height;
     style.spacing.menu_margin = egui::Margin::same(tokens.metrics.section_inner_margin_x);
     style.spacing.window_margin = egui::Margin::same(tokens.metrics.panel_inner_margin_x);
+    style.interaction.tooltip_delay = 0.2;
+    style.interaction.show_tooltips_only_when_still = false;
     style.visuals.window_fill = tokens.palette.bg_surface;
     style.visuals.panel_fill = tokens.palette.bg_base;
     ctx.set_style(style);
@@ -593,16 +595,62 @@ pub fn checkmark_selectable_value<V: PartialEq>(
     text: impl Into<String>,
 ) -> egui::Response {
     let selected = *current == value;
-    let label = format!("    {}", text.into());
-    let response = ui.selectable_label(false, label);
-
-    if selected {
-        draw_checkmark_glyph(ui.painter(), response.rect);
-    }
+    let response = checkmark_menu_item(ui, selected, text.into());
 
     if response.clicked() {
         *current = value;
     }
+    response
+}
+
+pub fn checkmark_menu_toggle(
+    ui: &mut egui::Ui,
+    current: &mut bool,
+    text: impl Into<String>,
+) -> egui::Response {
+    let response = checkmark_menu_item(ui, *current, text.into());
+    if response.clicked() {
+        *current = !*current;
+    }
+    response
+}
+
+fn checkmark_menu_item(ui: &mut egui::Ui, selected: bool, text: String) -> egui::Response {
+    let box_size = 18.0;
+    let gap = 10.0;
+    let horizontal_padding = 4.0;
+    let desired_size = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+    let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click());
+
+    if ui.is_rect_visible(rect) {
+        let visuals = ui.visuals();
+        let fill = if response.hovered() {
+            visuals.widgets.hovered.weak_bg_fill
+        } else {
+            egui::Color32::TRANSPARENT
+        };
+        ui.painter().rect_filled(rect, visuals.menu_rounding, fill);
+
+        let check_rect = egui::Rect::from_center_size(
+            egui::pos2(
+                rect.left() + horizontal_padding + box_size * 0.5,
+                rect.center().y,
+            ),
+            egui::vec2(box_size, box_size),
+        );
+        if selected {
+            draw_checkmark_glyph(ui.painter(), check_rect);
+        }
+
+        ui.painter().text(
+            egui::pos2(check_rect.right() + gap, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            text,
+            typography::body_small(),
+            palette::text_primary(),
+        );
+    }
+
     response
 }
 
@@ -611,11 +659,62 @@ pub fn checkmark_toggle(
     current: &mut bool,
     text: impl Into<String>,
 ) -> egui::Response {
-    let label = format!("      {}", text.into());
-    let response = ui.selectable_label(false, label);
+    let text = text.into();
+    let font_id = typography::body();
+    let text_size = ui
+        .painter()
+        .layout_no_wrap(text.clone(), font_id.clone(), palette::text_primary())
+        .size();
+    let box_size = 18.0;
+    let gap = 10.0;
+    let horizontal_padding = 4.0;
+    let desired_size = egui::vec2(
+        text_size.x + box_size + gap + horizontal_padding * 2.0,
+        ui.spacing().interact_size.y.max(box_size + 6.0),
+    );
+    let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click());
 
-    if *current {
-        draw_checkmark_glyph(ui.painter(), response.rect);
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let box_rect = egui::Rect::from_center_size(
+            egui::pos2(
+                rect.left() + horizontal_padding + box_size * 0.5,
+                rect.center().y,
+            ),
+            egui::vec2(box_size, box_size),
+        );
+        let rounding = egui::Rounding::same(tokens::section_rounding().min(6.0));
+        let box_fill = if response.hovered() {
+            palette::bg_surface_hover()
+        } else {
+            palette::bg_surface_raised()
+        };
+        let box_stroke = if response.hovered() {
+            egui::Stroke::new(1.0, palette::border_emphasis())
+        } else {
+            egui::Stroke::new(1.0, palette::border_subtle().gamma_multiply(0.92))
+        };
+        painter.rect(box_rect, rounding, box_fill, box_stroke);
+
+        if *current {
+            draw_checkmark_glyph(painter, box_rect);
+        }
+
+        let text_rect = egui::Rect::from_min_max(
+            egui::pos2(box_rect.right() + gap, rect.top()),
+            rect.right_bottom(),
+        );
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(text_rect), |ui| {
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(text).font(font_id).color(palette::text_primary()),
+                    )
+                    .truncate()
+                    .halign(egui::Align::LEFT),
+                );
+            });
+        });
     }
 
     if response.clicked() {
@@ -790,7 +889,7 @@ fn icon_svg_bytes(kind: UiIcon) -> &'static [u8] {
         UiIcon::StepForward => include_bytes!("../../assets/icons/right_frame_fill.svg"),
         UiIcon::JumpStart => include_bytes!("../../assets/icons/home_frame_fill.svg"),
         UiIcon::JumpEnd => include_bytes!("../../assets/icons/end_frame_fill.svg"),
-        UiIcon::Cursor => include_bytes!("../../assets/icons/cursor.svg"),
+        UiIcon::Cursor => include_bytes!("../../assets/icons/cursor_fill.svg"),
         UiIcon::Scissors => include_bytes!("../../assets/icons/cut.svg"),
         UiIcon::Magnet => include_bytes!("../../assets/icons/magnet.svg"),
         UiIcon::Eye => include_bytes!("../../assets/icons/eye_visiable.svg"),
@@ -803,24 +902,15 @@ fn icon_svg_bytes(kind: UiIcon) -> &'static [u8] {
 }
 
 fn draw_checkmark_glyph(painter: &egui::Painter, rect: egui::Rect) {
-    let center_y = rect.center().y - 0.5;
-    let start_x = rect.left() + tokens::checkmark_start_x();
+    let side = rect.width().min(rect.height());
+    let center = rect.center();
+    let start = egui::pos2(center.x - side * 0.20, center.y + side * 0.04);
+    let mid = egui::pos2(center.x - side * 0.04, center.y + side * 0.20);
+    let end = egui::pos2(center.x + side * 0.24, center.y - side * 0.18);
     let stroke = egui::Stroke::new(tokens::checkmark_stroke_width(), palette::text_primary());
 
-    painter.line_segment(
-        [
-            egui::pos2(start_x, center_y + 1.5),
-            egui::pos2(start_x + 3.0, center_y + 4.2),
-        ],
-        stroke,
-    );
-    painter.line_segment(
-        [
-            egui::pos2(start_x + 3.0, center_y + 4.2),
-            egui::pos2(start_x + 9.2, center_y - 3.0),
-        ],
-        stroke,
-    );
+    painter.line_segment([start, mid], stroke);
+    painter.line_segment([mid, end], stroke);
 }
 
 pub fn draw_drop_overlay(painter: &egui::Painter, rect: egui::Rect, message: &str) {
