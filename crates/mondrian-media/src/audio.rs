@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -82,6 +83,7 @@ pub struct RealtimeAudioOutput {
     sample_rate: u32,
     channels: u8,
     queue: Arc<Mutex<VecDeque<f32>>>,
+    muted: Arc<AtomicBool>,
     _stream: cpal::Stream,
 }
 
@@ -337,6 +339,7 @@ impl RealtimeAudioOutput {
 
         let queue = Arc::new(Mutex::new(VecDeque::with_capacity(sample_rate as usize)));
         let queue_for_cb = Arc::clone(&queue);
+        let muted = Arc::new(AtomicBool::new(false));
         let err_fn = |err| tracing::error!("音频输出流错误: {}", err);
 
         let default_config = device
@@ -344,14 +347,23 @@ impl RealtimeAudioOutput {
             .map_err(|e| MondrianError::Other(anyhow::anyhow!("读取默认输出配置失败: {e}")))?;
 
         let stream = match default_config.sample_format() {
-            cpal::SampleFormat::F32 => build_f32_stream(&device, &config, queue_for_cb, err_fn)
-                .map_err(|e| MondrianError::Other(anyhow::anyhow!("创建 F32 输出流失败: {e}")))?,
+            cpal::SampleFormat::F32 => {
+                let muted_for_cb = Arc::clone(&muted);
+                build_f32_stream(&device, &config, queue_for_cb, muted_for_cb, err_fn).map_err(
+                    |e| MondrianError::Other(anyhow::anyhow!("创建 F32 输出流失败: {e}")),
+                )?
+            }
             cpal::SampleFormat::I16 => {
                 let queue_for_cb = Arc::clone(&queue);
+                let muted_for_cb = Arc::clone(&muted);
                 device
                     .build_output_stream(
                         &config,
                         move |data: &mut [i16], _| {
+                            if muted_for_cb.load(Ordering::Relaxed) {
+                                data.fill(0);
+                                return;
+                            }
                             let mut guard = queue_for_cb.lock();
                             for s in data {
                                 let v = guard.pop_front().unwrap_or(0.0).clamp(-1.0, 1.0);
@@ -367,10 +379,15 @@ impl RealtimeAudioOutput {
             }
             cpal::SampleFormat::U16 => {
                 let queue_for_cb = Arc::clone(&queue);
+                let muted_for_cb = Arc::clone(&muted);
                 device
                     .build_output_stream(
                         &config,
                         move |data: &mut [u16], _| {
+                            if muted_for_cb.load(Ordering::Relaxed) {
+                                data.fill(u16::MAX / 2);
+                                return;
+                            }
                             let mut guard = queue_for_cb.lock();
                             for s in data {
                                 let v = guard.pop_front().unwrap_or(0.0).clamp(-1.0, 1.0);
@@ -395,7 +412,13 @@ impl RealtimeAudioOutput {
             .play()
             .map_err(|e| MondrianError::Other(anyhow::anyhow!("启动音频输出流失败: {e}")))?;
 
-        Ok(Self { sample_rate, channels, queue, _stream: stream })
+        Ok(Self {
+            sample_rate,
+            channels,
+            queue,
+            muted,
+            _stream: stream,
+        })
     }
 
     pub fn enqueue(&self, buffer: &AudioBuffer) {
@@ -413,6 +436,10 @@ impl RealtimeAudioOutput {
 
     pub fn clear(&self) {
         self.queue.lock().clear();
+    }
+
+    pub fn set_muted(&self, muted: bool) {
+        self.muted.store(muted, Ordering::Relaxed);
     }
 
     pub fn buffered_frames(&self) -> usize {
@@ -457,11 +484,16 @@ fn build_f32_stream(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     queue: Arc<Mutex<VecDeque<f32>>>,
+    muted: Arc<AtomicBool>,
     err_fn: impl FnMut(cpal::StreamError) + Send + 'static,
 ) -> std::result::Result<cpal::Stream, cpal::BuildStreamError> {
     device.build_output_stream(
         config,
         move |data: &mut [f32], _| {
+            if muted.load(Ordering::Relaxed) {
+                data.fill(0.0);
+                return;
+            }
             let mut guard = queue.lock();
             for s in data {
                 *s = guard.pop_front().unwrap_or(0.0);
@@ -543,5 +575,238 @@ impl Default for AudioTrackConfig {
             is_muted: false,
             is_solo: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod perf_tests {
+    use super::*;
+    use serde::Serialize;
+    use std::cmp;
+    use std::f32::consts::PI;
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
+
+    #[derive(Debug, Serialize)]
+    struct AudioMixPerfSimReport {
+        scenario: &'static str,
+        sample_rate: u32,
+        channels: u8,
+        tracks: usize,
+        chunk_frames: usize,
+        iterations: usize,
+        first_chunk_ms: u128,
+        first_chunk_threshold_ms: u128,
+        chunk_ms_avg: f64,
+        chunk_ms_p50: u128,
+        chunk_ms_p95: u128,
+        chunk_ms_max: u128,
+        realtime_factor: f64,
+        realtime_factor_min_threshold: f64,
+        passed: bool,
+    }
+
+    fn perf_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn env_usize(key: &str, default: usize) -> usize {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(default)
+    }
+
+    fn env_u128(key: &str, default: u128) -> u128 {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.trim().parse::<u128>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(default)
+    }
+
+    fn env_f64(key: &str, default: f64) -> f64 {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(default)
+    }
+
+    fn report_output_path() -> Option<PathBuf> {
+        std::env::var_os("MONDRIAN_AUDIO_SIM_OUTPUT").map(PathBuf::from)
+    }
+
+    fn write_report_if_needed(report_json: &str) {
+        if let Some(path) = report_output_path() {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+
+            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+                let _ = writeln!(file, "{report_json}");
+            }
+        }
+    }
+
+    fn percentile_ms(values: &[u128], percentile: f64) -> u128 {
+        if values.is_empty() {
+            return 0;
+        }
+        let mut sorted = values.to_vec();
+        sorted.sort_unstable();
+        let p = percentile.clamp(0.0, 1.0);
+        let idx = ((sorted.len() - 1) as f64 * p).round() as usize;
+        sorted[idx]
+    }
+
+    fn generate_sine_track(
+        sample_rate: u32,
+        channels: u8,
+        frames: usize,
+        freq_hz: f32,
+        phase: f32,
+    ) -> AudioBuffer {
+        let channels = channels.max(1);
+        let mut samples = vec![0.0f32; frames * channels as usize];
+        for frame in 0..frames {
+            let t = frame as f32 / sample_rate.max(1) as f32;
+            let amp = ((2.0 * PI * freq_hz * t) + phase).sin() * 0.45;
+            let base = frame * channels as usize;
+            if channels >= 2 {
+                samples[base] = amp;
+                samples[base + 1] = amp * 0.92;
+            } else {
+                samples[base] = amp;
+            }
+        }
+        AudioBuffer {
+            samples,
+            sample_rate,
+            channels,
+        }
+    }
+
+    fn run_audio_mix_simulation(
+        scenario: &'static str,
+        sample_rate: u32,
+        channels: u8,
+        track_count: usize,
+        chunk_frames: usize,
+        iterations: usize,
+        first_chunk_threshold_ms: u128,
+        realtime_factor_min_threshold: f64,
+    ) -> anyhow::Result<AudioMixPerfSimReport> {
+        let sample_rate = sample_rate.max(8_000);
+        let channels = channels.max(1);
+        let track_count = track_count.max(1);
+        let chunk_frames = chunk_frames.max(64);
+        let iterations = iterations.max(1);
+        let mixer = AudioMixer::new(sample_rate, channels);
+
+        let mut tracks = Vec::with_capacity(track_count);
+        for idx in 0..track_count {
+            let freq = 220.0 + idx as f32 * 13.0;
+            let phase = idx as f32 * 0.37;
+            let buffer = generate_sine_track(sample_rate, channels, chunk_frames, freq, phase);
+            tracks.push(AudioTrackData {
+                buffer,
+                config: AudioTrackConfig {
+                    volume: (0.92f32 - idx as f32 * 0.01).max(0.35),
+                    pan: (((idx % 9) as f32) / 4.0 - 1.0).clamp(-1.0, 1.0),
+                    is_muted: false,
+                    is_solo: false,
+                },
+            });
+        }
+
+        let first_started = Instant::now();
+        let _ = mixer.mix(&tracks);
+        let first_chunk_ms = first_started.elapsed().as_millis();
+
+        let mut chunk_samples_ms = Vec::with_capacity(iterations);
+        let loop_started = Instant::now();
+        for _ in 0..iterations {
+            let started = Instant::now();
+            let _mixed = mixer.mix(&tracks);
+            chunk_samples_ms.push(started.elapsed().as_millis());
+        }
+        let elapsed_secs = loop_started.elapsed().as_secs_f64();
+
+        let total_ms = chunk_samples_ms.iter().copied().sum::<u128>();
+        let chunk_ms_avg = total_ms as f64 / cmp::max(chunk_samples_ms.len(), 1) as f64;
+        let chunk_ms_p50 = percentile_ms(&chunk_samples_ms, 0.50);
+        let chunk_ms_p95 = percentile_ms(&chunk_samples_ms, 0.95);
+        let chunk_ms_max = chunk_samples_ms.iter().copied().max().unwrap_or(0);
+
+        let simulated_audio_secs = iterations as f64 * (chunk_frames as f64 / sample_rate as f64);
+        let realtime_factor = if elapsed_secs > 0.0 {
+            simulated_audio_secs / elapsed_secs
+        } else {
+            0.0
+        };
+
+        let passed = first_chunk_ms <= first_chunk_threshold_ms
+            && realtime_factor >= realtime_factor_min_threshold;
+
+        Ok(AudioMixPerfSimReport {
+            scenario,
+            sample_rate,
+            channels,
+            tracks: track_count,
+            chunk_frames,
+            iterations,
+            first_chunk_ms,
+            first_chunk_threshold_ms,
+            chunk_ms_avg,
+            chunk_ms_p50,
+            chunk_ms_p95,
+            chunk_ms_max,
+            realtime_factor,
+            realtime_factor_min_threshold,
+            passed,
+        })
+    }
+
+    #[test]
+    #[ignore = "development audio mix perf simulation test; run manually"]
+    fn audio_mix_48k_stereo_simulated_perf() -> anyhow::Result<()> {
+        let _guard = perf_lock().lock().expect("audio perf lock poisoned");
+
+        let sample_rate = env_usize("MONDRIAN_AUDIO_SIM_SAMPLE_RATE", 48_000).clamp(8_000, 192_000)
+            as u32;
+        let channels = env_usize("MONDRIAN_AUDIO_SIM_CHANNELS", 2).clamp(1, 2) as u8;
+        let tracks = env_usize("MONDRIAN_AUDIO_SIM_TRACKS", 12).clamp(1, 64);
+        let chunk_frames = env_usize("MONDRIAN_AUDIO_SIM_CHUNK_FRAMES", 3_840).clamp(64, 96_000);
+        let iterations = env_usize("MONDRIAN_AUDIO_SIM_ITERATIONS", 280).clamp(20, 6_000);
+
+        let first_chunk_threshold_ms = env_u128("MONDRIAN_AUDIO_SIM_TTFF_MS", 120);
+        let realtime_factor_min_threshold = env_f64("MONDRIAN_AUDIO_SIM_RTF_MIN", 8.0);
+
+        let report = run_audio_mix_simulation(
+            "audio-mix-48k-stereo-simulated",
+            sample_rate,
+            channels,
+            tracks,
+            chunk_frames,
+            iterations,
+            first_chunk_threshold_ms,
+            realtime_factor_min_threshold,
+        )?;
+
+        let report_json = serde_json::to_string(&report)?;
+        eprintln!("MONDRIAN_AUDIO_SIM_JSON={report_json}");
+        write_report_if_needed(&report_json);
+
+        if !report.passed {
+            anyhow::bail!("audio mix simulation perf test failed; report: {}", report_json);
+        }
+
+        Ok(())
     }
 }

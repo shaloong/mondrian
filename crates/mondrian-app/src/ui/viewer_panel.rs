@@ -219,6 +219,7 @@ pub struct ViewerPanel {
     last_decode_submit_at: Option<Instant>,
     decoded_commit_queue: VecDeque<PendingDecodeCommit>,
     last_texture_commit_at: Option<Instant>,
+    last_committed_generation: Option<u64>,
     was_playing_last_frame: bool,
     last_timeline_frame: Option<i64>,
     proxy_config: mondrian_media::ProxyConfig,
@@ -302,6 +303,7 @@ impl Default for ViewerPanel {
             last_decode_submit_at: None,
             decoded_commit_queue: VecDeque::new(),
             last_texture_commit_at: None,
+            last_committed_generation: None,
             was_playing_last_frame: false,
             last_timeline_frame: None,
             proxy_config: mondrian_media::ProxyConfig::default(),
@@ -339,7 +341,7 @@ impl ViewerPanel {
             .map(|seq| seq.settings.frame_rate.to_f64())
             .unwrap_or(25.0)
             .max(1.0);
-        self.handle_timeline_discontinuity(current_frame);
+        self.handle_timeline_discontinuity(current_frame, is_playing, playback_fps);
 
         self.poll_proxy_events(ui.ctx());
         self.poll_decode_results(ui.ctx(), is_playing, playback_fps);
@@ -988,6 +990,14 @@ impl ViewerPanel {
         allow_stale: bool,
         is_playing: bool,
     ) {
+        if self
+            .last_committed_generation
+            .map(|last| result.generation < last)
+            .unwrap_or(false)
+        {
+            return;
+        }
+
         if !allow_stale
             && result.generation != self.latest_decode_generation.load(Ordering::Relaxed)
         {
@@ -1033,6 +1043,7 @@ impl ViewerPanel {
                     }
                     self.preview_signature = Some(result.signature);
                     self.preview_error = None;
+                    self.last_committed_generation = Some(result.generation);
                     self.last_texture_commit_at = Some(Instant::now());
                     record_preview_perf_upload(upload_started_at.elapsed());
                 }
@@ -1157,9 +1168,12 @@ impl ViewerPanel {
         self.playback_prefill_until.map(|until| Instant::now() < until).unwrap_or(false)
     }
 
-    fn handle_timeline_discontinuity(&mut self, current_frame: i64) {
-        // 跳帧 ≥ 8 帧视为一次 seek，取消所有预取并重置预取缓冲状态。
-        const SEEK_RESET_THRESHOLD_FRAMES: i64 = 8;
+    fn handle_timeline_discontinuity(
+        &mut self,
+        current_frame: i64,
+        is_playing: bool,
+        playback_fps: f64,
+    ) {
         // 跳帧 ≥ 300 帧（~12秒 @ 25fps）视为大跳帧，额外清理 DecoderPool 内 RGBA 缓存，
         // 防止大 seek 后旧缓存帧污染新位置的画面。
         const LARGE_SEEK_THRESHOLD_FRAMES: i64 = 300;
@@ -1169,7 +1183,12 @@ impl ViewerPanel {
         };
 
         let delta = (current_frame - previous_frame).abs();
-        if delta < SEEK_RESET_THRESHOLD_FRAMES {
+        let seek_reset_threshold_frames = if is_playing {
+            playback_seek_reset_threshold_frames(playback_fps)
+        } else {
+            8
+        };
+        if delta < seek_reset_threshold_frames {
             return;
         }
 
@@ -3231,6 +3250,25 @@ fn playback_layer_cache_tolerance_frames() -> i64 {
             .map(|value| value.clamp(0, 3))
             .unwrap_or(0)
     })
+}
+
+fn playback_seek_reset_threshold_frames(fps: f64) -> i64 {
+    static CONFIGURED: OnceLock<i64> = OnceLock::new();
+    let configured = *CONFIGURED.get_or_init(|| {
+        std::env::var("MONDRIAN_PLAYBACK_SEEK_RESET_FRAMES")
+            .ok()
+            .and_then(|value| value.parse::<i64>().ok())
+            .map(|value| value.clamp(8, 240))
+            .unwrap_or(-1)
+    });
+
+    if configured > 0 {
+        configured
+    } else {
+        (fps * 1.2).round() as i64
+    }
+    .max(16)
+    .clamp(12, 120)
 }
 
 fn quantize_dimension(value: u32, step: u32) -> u32 {

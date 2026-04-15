@@ -1442,6 +1442,9 @@ impl AppState {
         self.playback = PlaybackState::Playing { timecode_frames: frames };
         self.sync_audio_clock_to_frame(frames);
         self.reset_audio_render_pipeline(self.audio_clock.now_seconds().max(0.0));
+        if let Some(output) = &self.audio_output {
+            output.set_muted(false);
+        }
     }
 
     pub fn pause(&mut self) {
@@ -1451,6 +1454,7 @@ impl AppState {
         self.sync_audio_clock_to_frame(frames);
         self.reset_audio_render_pipeline(self.audio_clock.now_seconds().max(0.0));
         if let Some(output) = &self.audio_output {
+            output.set_muted(false);
             output.clear();
         }
     }
@@ -1462,6 +1466,7 @@ impl AppState {
         self.av_drift_ms = 0.0;
         self.reset_audio_render_pipeline(0.0);
         if let Some(output) = &self.audio_output {
+            output.set_muted(false);
             output.clear();
         }
     }
@@ -1478,6 +1483,7 @@ impl AppState {
         self.sync_audio_clock_to_frame(frame);
         self.reset_audio_render_pipeline(self.audio_clock.now_seconds().max(0.0));
         if let Some(output) = &self.audio_output {
+            output.set_muted(false);
             output.clear();
         }
     }
@@ -1511,6 +1517,7 @@ impl AppState {
         }
 
         if !self.is_playing() {
+            output.set_muted(false);
             output.clear();
             if audio_idle_warmup_enabled() {
                 self.warm_audio_cache_when_idle();
@@ -1529,8 +1536,18 @@ impl AppState {
 
         let sample_rate_f64 = self.audio_sample_rate as f64;
         let chunk_frames = ((self.audio_chunk_secs * sample_rate_f64).round() as usize).max(1);
-        let target_high_frames = (sample_rate_f64 * 0.46) as usize;
-        let max_in_flight = 8usize;
+        let (target_high_secs, max_in_flight) = if self.playback_buffering {
+            (
+                audio_buffer_target_high_secs_buffering(),
+                audio_render_max_in_flight_buffering(),
+            )
+        } else {
+            (
+                audio_buffer_target_high_secs_playing(),
+                audio_render_max_in_flight_playing(),
+            )
+        };
+        let target_high_frames = (sample_rate_f64 * target_high_secs).round() as usize;
 
         while output.buffered_frames() + self.audio_render_in_flight * chunk_frames
             < target_high_frames
@@ -4310,7 +4327,53 @@ fn audio_idle_warmup_enabled() -> bool {
                 let value = v.trim().to_ascii_lowercase();
                 matches!(value.as_str(), "1" | "true" | "yes" | "on")
             })
-            .unwrap_or(false)
+            .unwrap_or(true)
+    })
+}
+
+fn audio_buffer_target_high_secs_playing() -> f64 {
+    static TARGET: OnceLock<f64> = OnceLock::new();
+    *TARGET.get_or_init(|| {
+        std::env::var("MONDRIAN_AUDIO_BUFFER_HIGH_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|v| *v >= 0.20 && *v <= 2.0)
+            .unwrap_or(0.46)
+    })
+}
+
+fn audio_buffer_target_high_secs_buffering() -> f64 {
+    static TARGET: OnceLock<f64> = OnceLock::new();
+    *TARGET.get_or_init(|| {
+        std::env::var("MONDRIAN_AUDIO_BUFFER_HIGH_SECS_BUFFERING")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|v| *v >= 0.30 && *v <= 3.0)
+            .unwrap_or(0.90)
+    })
+}
+
+fn audio_render_max_in_flight_playing() -> usize {
+    static MAX: OnceLock<usize> = OnceLock::new();
+    *MAX.get_or_init(|| {
+        std::env::var("MONDRIAN_AUDIO_RENDER_MAX_IN_FLIGHT")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|v| *v > 0)
+            .map(|v| v.clamp(1, 24))
+            .unwrap_or(8)
+    })
+}
+
+fn audio_render_max_in_flight_buffering() -> usize {
+    static MAX: OnceLock<usize> = OnceLock::new();
+    *MAX.get_or_init(|| {
+        std::env::var("MONDRIAN_AUDIO_RENDER_MAX_IN_FLIGHT_BUFFERING")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|v| *v > 0)
+            .map(|v| v.clamp(1, 32))
+            .unwrap_or(12)
     })
 }
 
@@ -4520,6 +4583,7 @@ impl MondrianApp {
         self.state
             .reset_audio_render_pipeline(self.state.audio_clock.now_seconds().max(0.0));
         if let Some(output) = &self.state.audio_output {
+            output.set_muted(false);
             output.clear();
         }
         self.playback_last_tick = None;
@@ -4529,6 +4593,9 @@ impl MondrianApp {
 
     fn advance_playback_clock(&mut self) {
         if !self.state.is_playing() {
+            if let Some(output) = &self.state.audio_output {
+                output.set_muted(false);
+            }
             self.playback_last_tick = None;
             self.playback_subframe_accum = 0.0;
             self.playback_buffering_last_frame = false;
@@ -4544,6 +4611,10 @@ impl MondrianApp {
                     output.clear();
                 }
             }
+            if let Some(output) = &self.state.audio_output {
+                output.set_muted(true);
+            }
+            self.state.pump_audio_output();
 
             self.playback_last_tick = None;
             self.playback_subframe_accum = 0.0;
@@ -4552,11 +4623,16 @@ impl MondrianApp {
         }
 
         if self.playback_buffering_last_frame {
-            self.state.sync_audio_clock_to_frame(self.state.current_frame());
-            self.state
-                .reset_audio_render_pipeline(self.state.audio_clock.now_seconds().max(0.0));
+            if let Some(output) = &self.state.audio_output {
+                output.set_muted(false);
+            }
+            self.playback_last_tick = None;
+            self.playback_subframe_accum = 0.0;
         }
         self.playback_buffering_last_frame = false;
+        if let Some(output) = &self.state.audio_output {
+            output.set_muted(false);
+        }
 
         self.state.pump_audio_output();
 
@@ -4935,6 +5011,10 @@ impl MondrianApp {
                 _ => "导出处理中".to_string(),
             };
             return (label, false, true);
+        }
+
+        if self.state.is_playing() && self.state.is_playback_buffering() {
+            return ("预览缓冲中…".to_string(), false, true);
         }
 
         if let Some((message, is_error)) = &self.state.status_hint {
