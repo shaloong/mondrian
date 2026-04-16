@@ -2,30 +2,12 @@
 
 <img src="/crates/mondrian-app/assets/app-ico.png" alt="Mondrian Logo" width="180" />
 
-> **专业级非线性视频编辑器 · AI 增强生产力工具**
-> **当前版本状态：Alpha（早期开发阶段），不建议在生产环境或主力工作流中使用。**
+>**专业级非线性视频编辑器
+>**当前处于早期开发阶段，后续可能随时发生破坏性重构，不建议在生产环境中使用。
 
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.92%2B-orange)](https://rustup.rs)
 [![Build](https://github.com/shaloong/mondrian/actions/workflows/ci.yml/badge.svg)](https://github.com/shaloong/mondrian/actions)
-
----
-
-## 🎯 产品定位
-
-```text
-专业级生产力工具  +  AI 增强层
-        ↓                ↓
-  非线编核心能力    AI 工作流引擎
-        ↓                ↓
-       资产复用系统（跨项目）
-```
-
-### 核心价值
-
-Mondrian = 工业级非线编能力 + AI 融合生态 + 可复用资产生态
-
----
 
 ## 🏗️ 系统架构概览
 
@@ -79,7 +61,7 @@ Mondrian = 工业级非线编能力 + AI 融合生态 + 可复用资产生态
 ### 环境要求
 
 - Rust 1.75+
-- FFmpeg 7.x（动态链接）
+- FFmpeg 8.x（动态链接）
 - Vulkan / Metal / DirectX 12 驱动
 - Windows 11 / macOS 13+ / Ubuntu 22.04+
 

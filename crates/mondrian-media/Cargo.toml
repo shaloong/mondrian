@@ -8,8 +8,8 @@ license.workspace    = true
 [dependencies]
 mondrian-core = { workspace = true }
 
-# FFmpeg 绑定（需要系统安装 FFmpeg 7.x+）
-ffmpeg-next = "7"
+# FFmpeg 绑定（需要系统安装 FFmpeg 8.x+）
+ffmpeg-next = "8"
 
 # 音频
 cpal    = "0.15"    # 跨平台音频输出
