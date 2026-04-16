@@ -232,7 +232,22 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Compress-Archive -Path $env:BIN_PATH -DestinationPath $env:PACKAGE_PATH
+          $stageDir = Join-Path $PWD $env:PACKAGE_NAME
+          if (Test-Path $stageDir) {
+            Remove-Item $stageDir -Recurse -Force
+          }
+          New-Item -ItemType Directory -Path $stageDir | Out-Null
+
+          # 将主程序与 FFmpeg 运行时 DLL 打包到同一目录，确保开箱即用。
+          Copy-Item $env:BIN_PATH -Destination $stageDir -Force
+          $dllSource = 'C:\vcpkg\installed\x64-windows\bin'
+          $dlls = Get-ChildItem -Path $dllSource -Filter '*.dll' -ErrorAction Stop
+          if ($dlls.Count -eq 0) {
+            Write-Error "No runtime DLLs found under $dllSource"
+          }
+
+          Copy-Item -Path "$dllSource\*.dll" -Destination $stageDir -Force
+          Compress-Archive -Path "$stageDir\*" -DestinationPath $env:PACKAGE_PATH
 
       - name: 打包 (Unix)
         if: runner.os != 'Windows'
