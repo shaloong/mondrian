@@ -186,7 +186,7 @@ jobs:
             Write-Host '✓ FFmpeg already cached and installed, skipping vcpkg install'
           } else {
             Write-Host 'Installing FFmpeg via vcpkg (no binary cache available)...'
-            & C:\vcpkg\vcpkg.exe install ffmpeg:x64-windows --verbose
+            & C:\vcpkg\vcpkg.exe install ffmpeg:x64-windows
           }
           
           $pkgConf = 'C:\vcpkg\installed\x64-windows\tools\pkgconf\pkgconf.exe'
