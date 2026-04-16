@@ -36,6 +36,7 @@ use crate::ui::{
 
 const PROJECT_EXTENSION: &str = "mdp";
 
+mod new_project;
 mod preferences;
 
 // ─────────────────────────────────────────────
@@ -3979,6 +3980,10 @@ impl eframe::App for MondrianApp {
             self.show_project_bootstrap_dialog = true;
         }
 
+        if self.show_new_project_dialog {
+            new_project::draw_new_project_window(self, ctx);
+        }
+
         self.sync_startup_viewport_mode(ctx, !self.state.has_open_project());
 
         if self.show_project_bootstrap_dialog {
@@ -4205,84 +4210,6 @@ impl eframe::App for MondrianApp {
             if ui_diag_enabled() {
                 log_ui_stage_slow("export_panel", export_started_at.elapsed());
             }
-        }
-
-        if self.show_new_project_dialog {
-            let mut open = self.show_new_project_dialog;
-            egui::Window::new("新建项目")
-                .open(&mut open)
-                .default_size([420.0, 260.0])
-                .frame(crate::ui::theme::dialog_frame())
-                .show(ctx, |ui| {
-                    ui.label("项目名称");
-                    ui.text_edit_singleline(&mut self.new_project_draft.name);
-                    ui.separator();
-
-                    ui.horizontal(|ui| {
-                        ui.label("宽");
-                        ui.add(
-                            egui::DragValue::new(&mut self.new_project_draft.width)
-                                .range(320..=8192),
-                        );
-                        ui.label("高");
-                        ui.add(
-                            egui::DragValue::new(&mut self.new_project_draft.height)
-                                .range(240..=4320),
-                        );
-                    });
-
-                    ui.horizontal(|ui| {
-                        ui.label("帧率");
-                        ui.add(
-                            egui::DragValue::new(&mut self.new_project_draft.fps_num)
-                                .range(1..=240),
-                        );
-                        ui.label("/");
-                        ui.add(
-                            egui::DragValue::new(&mut self.new_project_draft.fps_den)
-                                .range(1..=1001),
-                        );
-                    });
-
-                    ui.separator();
-                    if ui.button("创建项目").clicked() {
-                        let fps = Rational::new(
-                            self.new_project_draft.fps_num.max(1),
-                            self.new_project_draft.fps_den.max(1),
-                        );
-                        let name = if self.new_project_draft.name.trim().is_empty() {
-                            "未命名项目"
-                        } else {
-                            self.new_project_draft.name.trim()
-                        };
-
-                        let default_name =
-                            format!("{}.{}", sanitize_filename(name), PROJECT_EXTENSION);
-                        let picked = FileDialog::new()
-                            .add_filter("Mondrian Project", &[PROJECT_EXTENSION])
-                            .set_file_name(&default_name)
-                            .save_file();
-
-                        if let Some(path) = picked {
-                            let project_path = ensure_project_extension(path);
-                            if let Err(err) = self.state.create_new_project_at(
-                                project_path.clone(),
-                                name,
-                                self.new_project_draft.width.max(1),
-                                self.new_project_draft.height.max(1),
-                                fps,
-                            ) {
-                                self.state.set_status_hint(format!("新建项目失败：{err}"), true);
-                                tracing::error!("新建项目失败: {err}");
-                            } else {
-                                self.finish_project_opened();
-                                self.record_recent_project(project_path);
-                                self.show_new_project_dialog = false;
-                            }
-                        }
-                    }
-                });
-            self.show_new_project_dialog = open;
         }
 
         if self.show_preferences_dialog {
