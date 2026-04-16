@@ -6,15 +6,11 @@ tab_spaces           = 4
 newline_style        = "Unix"
 
 # 导入排序
-imports_granularity  = "Crate"
-group_imports        = "StdExternalCrate"
 
 # 函数参数
 fn_params_layout     = "Tall"
 
 # 注释
-comment_width        = 100
-wrap_comments        = true
 
 # 链式调用
 chain_width          = 80

@@ -86,13 +86,9 @@ fn draw_new_project_panel(app: &mut MondrianApp, ui: &mut egui::Ui) {
 
             ui.label(egui::RichText::new("帧率").color(text_primary).size(12.5));
             ui.horizontal(|ui| {
-                ui.add(
-                    egui::DragValue::new(&mut app.new_project_draft.fps_num).range(1..=240),
-                );
+                ui.add(egui::DragValue::new(&mut app.new_project_draft.fps_num).range(1..=240));
                 ui.label(egui::RichText::new("/").color(text_muted));
-                ui.add(
-                    egui::DragValue::new(&mut app.new_project_draft.fps_den).range(1..=1001),
-                );
+                ui.add(egui::DragValue::new(&mut app.new_project_draft.fps_den).range(1..=1001));
                 ui.label(egui::RichText::new("fps").color(text_muted).size(11.5));
             });
             ui.end_row();
@@ -108,7 +104,9 @@ fn draw_new_project_panel(app: &mut MondrianApp, ui: &mut egui::Ui) {
                 egui::RichText::new("创建项目").color(egui::Color32::WHITE).size(12.5),
             )
             .fill(crate::ui::theme::palette::interaction_highlight())
-            .rounding(egui::Rounding::same(crate::ui::theme::tokens::button_rounding())),
+            .rounding(egui::Rounding::same(
+                crate::ui::theme::tokens::button_rounding(),
+            )),
         );
 
         if create_btn.clicked() {

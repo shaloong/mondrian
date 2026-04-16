@@ -61,7 +61,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             ffmpeg libavcodec-dev libavformat-dev libavfilter-dev \
-            libavdevice-dev libswscale-dev libswresample-dev pkg-config
+            libavdevice-dev libswscale-dev libswresample-dev \
+            libasound2-dev pkg-config
 
       - name: 运行 clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
@@ -113,7 +114,7 @@ jobs:
         uses: taiki-e/install-action@cargo-deny
 
       - name: 运行 cargo-deny
-        run: cargo deny check bans licenses advisibilities
+        run: cargo deny check bans licenses advisories
 
   # ───────────────────────────────────────────────────────────────────────────
   # 测试（Linux + Windows；macOS 逻辑与 Linux 同构，仅在 Release 验证）
@@ -145,7 +146,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             ffmpeg libavcodec-dev libavformat-dev libavfilter-dev \
-            libavdevice-dev libswscale-dev libswresample-dev pkg-config
+            libavdevice-dev libswscale-dev libswresample-dev \
+            libasound2-dev pkg-config
 
       # ── Windows ───────────────────────────────────────────────────────────
       - name: 安装 FFmpeg (Windows)
@@ -183,7 +185,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             ffmpeg libavcodec-dev libavformat-dev libavfilter-dev \
-            libavdevice-dev libswscale-dev libswresample-dev pkg-config
+            libavdevice-dev libswscale-dev libswresample-dev \
+            libasound2-dev pkg-config
 
       - name: 构建文档
         run: cargo doc --workspace --no-deps --exclude mondrian-app

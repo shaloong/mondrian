@@ -685,11 +685,7 @@ mod perf_tests {
                 samples[base] = amp;
             }
         }
-        AudioBuffer {
-            samples,
-            sample_rate,
-            channels,
-        }
+        AudioBuffer { samples, sample_rate, channels }
     }
 
     fn run_audio_mix_simulation(
@@ -778,8 +774,8 @@ mod perf_tests {
     fn audio_mix_48k_stereo_simulated_perf() -> anyhow::Result<()> {
         let _guard = perf_lock().lock().expect("audio perf lock poisoned");
 
-        let sample_rate = env_usize("MONDRIAN_AUDIO_SIM_SAMPLE_RATE", 48_000).clamp(8_000, 192_000)
-            as u32;
+        let sample_rate =
+            env_usize("MONDRIAN_AUDIO_SIM_SAMPLE_RATE", 48_000).clamp(8_000, 192_000) as u32;
         let channels = env_usize("MONDRIAN_AUDIO_SIM_CHANNELS", 2).clamp(1, 2) as u8;
         let tracks = env_usize("MONDRIAN_AUDIO_SIM_TRACKS", 12).clamp(1, 64);
         let chunk_frames = env_usize("MONDRIAN_AUDIO_SIM_CHUNK_FRAMES", 3_840).clamp(64, 96_000);
@@ -804,7 +800,10 @@ mod perf_tests {
         write_report_if_needed(&report_json);
 
         if !report.passed {
-            anyhow::bail!("audio mix simulation perf test failed; report: {}", report_json);
+            anyhow::bail!(
+                "audio mix simulation perf test failed; report: {}",
+                report_json
+            );
         }
 
         Ok(())

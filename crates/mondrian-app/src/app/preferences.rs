@@ -1098,7 +1098,11 @@ fn draw_info_icon(ui: &mut egui::Ui, text: &str) {
 }
 
 fn draw_info_icon_at(ui: &mut egui::Ui, rect: egui::Rect, text: &str) {
-    let response = ui.interact(rect, ui.id().with(("info", rect.min.x as i32, rect.min.y as i32)), egui::Sense::hover());
+    let response = ui.interact(
+        rect,
+        ui.id().with(("info", rect.min.x as i32, rect.min.y as i32)),
+        egui::Sense::hover(),
+    );
     paint_info_icon(ui, rect, response, text);
 }
 
