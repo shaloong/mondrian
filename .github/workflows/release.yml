@@ -150,7 +150,15 @@ jobs:
         run: |
           rustc --version
           cargo --version
-          ffmpeg -version | Select-Object -First 1
+
+          # vcpkg 在 CI 中主要提供库与 pkg-config 元数据，ffmpeg.exe 可能不存在。
+          $ffmpegCmd = Get-Command ffmpeg -ErrorAction SilentlyContinue
+          if ($null -ne $ffmpegCmd) {
+            ffmpeg -version | Select-Object -First 1
+          } else {
+            Write-Host "ffmpeg CLI not found; continuing with pkg-config based validation"
+          }
+
           pkg-config --version
           pkg-config --modversion libavcodec
           pkg-config --modversion libavformat
