@@ -75,10 +75,7 @@ impl LibraryPanel {
                         .fill(palette::bg_surface_raised())
                         .stroke(Stroke::new(1.0, palette::border_subtle()))
                         .corner_radius(corner_radius(tokens::button_rounding()))
-                        .inner_margin(egui::Margin::symmetric(
-                            margin_px(10.0),
-                            margin_px(4.0),
-                        ))
+                        .inner_margin(egui::Margin::symmetric(margin_px(10.0), margin_px(4.0)))
                         .show(ui, |ui| {
                             ui.with_layout(
                                 egui::Layout::left_to_right(egui::Align::Center),
