@@ -1,7 +1,5 @@
 # Mondrian
 
----
-
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.92%2B-orange)](https://rustup.rs)
 [![Build](https://github.com/shaloong/mondrian/actions/workflows/ci.yml/badge.svg)](https://github.com/shaloong/mondrian/actions)
@@ -9,23 +7,21 @@
 > [!WARNING]  
 > 当前处于早期开发阶段，后续可能随时发生破坏性重构，不建议在生产环境中使用。
 
----
-
 ## 🏗️ 系统架构概览
 
 ```text
 ┌─────────────────────────────────────────────────────────────┐
 │                   mondrian-app  (UI 层)                     │
-│              egui → 迁移至 CXX-Qt (v0.3+)                   │
+│                         egui                                │
 └──────────────────────────┬──────────────────────────────────┘
                            │ 事件总线 / 命令模式
-     ┌─────────────────────┼─────────────────────────┐
-     │                     │                         │
+     ┌─────────────────────┼────────────────────────┐
+     │                     │                        │
 ┌────▼──────┐   ┌──────────▼───────┐   ┌────────────▼───────┐
 │ timeline  │   │    renderer      │   │      assets        │
 │ 时间线引擎│   │  GPU 渲染管线    │   │   素材资产系统     │
 └────┬──────┘   └──────────┬───────┘   └────────────┬───────┘
-     │                     │                         │
+     │                     │                        │
 ┌────▼──────┐   ┌──────────▼───────┐   ┌────────────▼───────┐
 │   media   │   │     effects      │   │        ai          │
 │ 媒体处理  │   │  效果/LUT/转场   │   │   AI 工作流引擎    │
@@ -37,7 +33,7 @@
 │ 渲染队列  │
 │ 硬件编码  │
 └───────────┘
-         ↑ 全局共享：mondrian-core（类型 / 错误 / 事件）
+     ↑ 全局共享：mondrian-core（类型 / 错误 / 事件）
 ```
 
 ---
@@ -54,7 +50,7 @@
 | `mondrian-ai`       | AI Agent 编排、视频生成 API、自动剪辑 | reqwest, tokio         |
 | `mondrian-effects`  | LUT 调色、滤镜、转场、文字动画        | mondrian-renderer      |
 | `mondrian-export`   | 导出编码、渲染队列、硬件加速          | ffmpeg-next            |
-| `mondrian-app`      | 主程序入口、UI 状态机、面板布局       | egui/CXX-Qt            |
+| `mondrian-app`      | 主程序入口、UI 状态机、面板布局       | egui                   |
 
 ---
 
