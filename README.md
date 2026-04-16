@@ -1,13 +1,15 @@
 # Mondrian
 
-<img src="/crates/mondrian-app/assets/app-ico.png" alt="Mondrian Logo" width="180" />
-
->**专业级非线性视频编辑器
->**当前处于早期开发阶段，后续可能随时发生破坏性重构，不建议在生产环境中使用。
+---
 
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.92%2B-orange)](https://rustup.rs)
 [![Build](https://github.com/shaloong/mondrian/actions/workflows/ci.yml/badge.svg)](https://github.com/shaloong/mondrian/actions)
+
+> [!WARNING]  
+> 当前处于早期开发阶段，后续可能随时发生破坏性重构，不建议在生产环境中使用。
+
+---
 
 ## 🏗️ 系统架构概览
 
@@ -185,4 +187,4 @@ cargo bench -p mondrian-renderer
 
 ## 📄 许可证
 
-本项目采用 **MIT OR Apache-2.0** 双协议。
+本项目采用 **Apache-2.0** 协议。
