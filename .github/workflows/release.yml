@@ -3,7 +3,8 @@ name: Release
 on:
   push:
     tags:
-      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]*.[0-9]*.[0-9]*"
+      - "v[0-9]*.[0-9]*.[0-9]*-*"
   workflow_dispatch:
     # 允许手动触发进行预验证
     inputs:
@@ -11,6 +12,11 @@ on:
         description: "Dry run（不发布，仅构建）"
         required: false
         default: "false"
+        type: string
+      release_tag:
+        description: "手动构建时用于产物命名（例如 v0.2.0-rc1），留空则使用 manual-<run_number>"
+        required: false
+        default: ""
         type: string
 
 env:
@@ -25,35 +31,29 @@ jobs:
   # 构建矩阵：每个 Job 构建一个目标平台
   # ─────────────────────────────────────────────────────────────────────────
   build:
-    name: Build (${{ matrix.target }})
+    name: build / ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
           # Linux x86_64（原生）
-          - os: ubuntu-latest
+          - label: linux-x86_64-gnu
+            os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             ext: tar.gz
-            ffmpeg: |
-              sudo apt-get update
-              sudo apt-get install -y --no-install-recommends \
-                ffmpeg libavcodec-dev libavformat-dev libavfilter-dev \
-                libavdevice-dev libswscale-dev libswresample-dev pkg-config
 
           # macOS ARM64（原生，macos-latest = Apple Silicon）
-          - os: macos-latest
+          - label: macos-aarch64-darwin
+            os: macos-latest
             target: aarch64-apple-darwin
             ext: tar.gz
-            ffmpeg: |
-              brew install ffmpeg pkg-config
 
           # Windows x86_64（原生）
-          - os: windows-latest
+          - label: windows-x86_64-msvc
+            os: windows-latest
             target: x86_64-pc-windows-msvc
             ext: zip
-            ffmpeg: |
-              choco install ffmpeg -y --no-progress
 
     steps:
       - uses: actions/checkout@v4
@@ -68,30 +68,149 @@ jobs:
         with:
           cache-on-failure: true
 
-      # 安装 FFmpeg（各平台独立安装命令通过矩阵 ffmpeg 字段传入）
-      - name: 安装 FFmpeg
-        run: ${{ matrix.ffmpeg }}
-
-      - name: 记录依赖版本（调试用）
+      # ── Linux ──────────────────────────────────────────────────────────────
+      - name: 安装 FFmpeg 与系统依赖 (Linux)
+        if: runner.os == 'Linux'
         run: |
-          echo "=== 工具链版本 ==="
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ffmpeg libavcodec-dev libavformat-dev libavfilter-dev \
+            libavdevice-dev libswscale-dev libswresample-dev \
+            libasound2-dev pkg-config
+
+      # ── macOS ──────────────────────────────────────────────────────────────
+      - name: 安装 FFmpeg 与系统依赖 (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install ffmpeg pkg-config
+
+      # ── Windows ────────────────────────────────────────────────────────────
+      - name: 缓存 vcpkg (Windows)
+        if: runner.os == 'Windows'
+        id: vcpkg-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            C:\vcpkg\downloads
+            C:\vcpkg\installed
+            C:\vcpkg\packages
+            C:\vcpkg\triplets\community
+          key: ${{ runner.os }}-vcpkg-ffmpeg-release-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-vcpkg-ffmpeg-release-
+            ${{ runner.os }}-vcpkg-ffmpeg-
+
+      - name: 初始化 vcpkg (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path C:\vcpkg)) {
+            git clone https://github.com/microsoft/vcpkg C:\vcpkg
+            & C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+          }
+
+      - name: 安装 FFmpeg (Windows, vcpkg)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $cacheHit = '${{ steps.vcpkg-cache.outputs.cache-hit }}' -eq 'true'
+          Write-Host "Cache hit: $cacheHit"
+
+          $ffmpegInstall = 'C:\vcpkg\installed\x64-windows\lib\pkgconfig\libavcodec.pc'
+          if (Test-Path $ffmpegInstall) {
+            Write-Host 'FFmpeg already cached and installed, skipping vcpkg install'
+          } else {
+            Write-Host 'Installing FFmpeg via vcpkg (no binary cache available)...'
+            & C:\vcpkg\vcpkg.exe install ffmpeg:x64-windows
+          }
+
+          $pkgConf = 'C:\vcpkg\installed\x64-windows\tools\pkgconf\pkgconf.exe'
+          "VCPKG_ROOT=C:\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "VCPKGRS_TRIPLET=x64-windows" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "VCPKGRS_DYNAMIC=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "VCPKG_DEFAULT_TRIPLET=x64-windows" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "FFMPEG_DIR=C:\vcpkg\installed\x64-windows" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "PKG_CONFIG_PATH=C:\vcpkg\installed\x64-windows\lib\pkgconfig" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "PKG_CONFIG_ALLOW_CROSS=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "PKG_CONFIG_ALLOW_SYSTEM_LIBS=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "PKG_CONFIG_ALLOW_SYSTEM_CFLAGS=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "PKG_CONFIG=$pkgConf" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Split-Path $pkgConf | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "C:\vcpkg\installed\x64-windows\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: 记录依赖版本 (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
           rustc --version
           cargo --version
-          echo "=== FFmpeg 版本 ==="
-          ${{ runner.os == 'Windows' && 'ffmpeg -version | Select-Object -First 1' || 'ffmpeg -version | head -1' }}
+          ffmpeg -version | Select-Object -First 1
+          pkg-config --version
+          pkg-config --modversion libavcodec
+          pkg-config --modversion libavformat
+          pkg-config --modversion libavfilter
+          pkg-config --modversion libavdevice
+          pkg-config --modversion libswscale
+          pkg-config --modversion libswresample
 
-      - name: 构建发布版本
+      - name: 记录依赖版本 (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          rustc --version
+          cargo --version
+          ffmpeg -version | head -1
+          pkg-config --version
+          pkg-config --modversion libavcodec
+          pkg-config --modversion libavformat
+          pkg-config --modversion libavfilter
+          pkg-config --modversion libavdevice
+          pkg-config --modversion libswscale
+          pkg-config --modversion libswresample
+
+      - name: 计算包名与路径
+        id: artifact_meta
+        shell: pwsh
+        run: |
+          $version = ""
+          if ("${{ github.ref }}" -like "refs/tags/v*") {
+            $version = "${{ github.ref_name }}"
+          } elseif ("${{ inputs.release_tag }}" -ne "") {
+            $version = "${{ inputs.release_tag }}"
+          } else {
+            $version = "manual-${{ github.run_number }}"
+          }
+
+          $binName = "${{ env.BIN_NAME }}"
+          if ("${{ runner.os }}" -eq "Windows") {
+            $binPath = "target/${{ matrix.target }}/release/$binName.exe"
+          } else {
+            $binPath = "target/${{ matrix.target }}/release/$binName"
+          }
+
+          $packageName = "$binName-$version-${{ matrix.target }}"
+          $packagePath = "$packageName.${{ matrix.ext }}"
+
+          "RELEASE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "BIN_PATH=$binPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "PACKAGE_NAME=$packageName" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "PACKAGE_PATH=$packagePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "release_version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "package_name=$packageName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "package_path=$packagePath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: 构建 release 二进制
         run: |
           cargo build --release --target ${{ matrix.target }} -p mondrian-app
 
       - name: 验证二进制文件
+        shell: pwsh
         run: |
-          $BIN = "target/${{ matrix.target }}/release/${{ env.BIN_NAME }}.exe"
-          if (Test-Path $BIN) {
-            $SIZE = (Get-Item $BIN).Length / 1MB
-            echo "Binary size: $([math]::Round($SIZE, 1)) MB"
+          if (Test-Path $env:BIN_PATH) {
+            $size = (Get-Item $env:BIN_PATH).Length / 1MB
+            Write-Host "Binary: $env:BIN_PATH"
+            Write-Host "Binary size: $([math]::Round($size, 1)) MB"
           } else {
-            Write-Error "Binary not found: $BIN"
+            Write-Error "Binary not found: $env:BIN_PATH"
           }
 
       # ── 打包 ──────────────────────────────────────────────────────────────
@@ -99,27 +218,26 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $bin = "target\${{ matrix.target }}\release\${{ env.BIN_NAME }}.exe"
-          Compress-Archive -Path $bin -DestinationPath "${{ env.BIN_NAME }}-${{ matrix.target }}.${{ matrix.ext }}"
+          Compress-Archive -Path $env:BIN_PATH -DestinationPath $env:PACKAGE_PATH
 
       - name: 打包 (Unix)
         if: runner.os != 'Windows'
         run: |
-          BIN="target/${{ matrix.target }}/release/${{ env.BIN_NAME }}"
-          FILE="${{ env.BIN_NAME }}-${{ matrix.target }}.${{ matrix.ext }}"
-          tar -czf "$FILE" "$BIN"
+          tar -czf "$PACKAGE_PATH" "$BIN_PATH"
 
-      - name: 上传制品
+      - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.BIN_NAME }}-${{ matrix.target }}.${{ matrix.ext }}
-          path: ${{ env.BIN_NAME }}-${{ matrix.target }}.${{ matrix.ext }}
+          name: ${{ steps.artifact_meta.outputs.package_name }}
+          path: ${{ steps.artifact_meta.outputs.package_path }}
+          if-no-files-found: error
           retention-days: 30
 
   # ─────────────────────────────────────────────────────────────────────────
   # 发布 GitHub Release（在所有平台构建完成后执行）
   # ─────────────────────────────────────────────────────────────────────────
   release:
+    name: publish / github-release
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -142,6 +260,7 @@ jobs:
           files: dist/**/*
           generate_release_notes: true
           draft: false
-          prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
+          prerelease: ${{ contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') }}
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
