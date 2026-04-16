@@ -91,6 +91,7 @@ git push origin v0.1.1
 - Release 工作流会为 Linux/macOS/Windows 构建并上传产物。
 - Linux 构建依赖 `libasound2-dev`（用于 `alsa-sys`）。
 - Windows 构建使用 vcpkg 安装 FFmpeg，并导出 `VCPKG_ROOT`、`PKG_CONFIG_PATH` 等环境变量。
+- Windows Release 包会同时包含 `mondrian.exe` 与 FFmpeg 运行时 DLL（`avcodec-*`、`avformat-*`、`avutil-*` 等）。
 - `workflow_dispatch` 可用于手动 dry-run 验证构建，不会自动创建 GitHub Release。
 
 ## 测试要求
