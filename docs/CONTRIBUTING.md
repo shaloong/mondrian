@@ -34,8 +34,6 @@ cd mondrian
 cargo build
 ```
 
----
-
 ## 代码规范
 
 - 运行 `cargo fmt` 格式化代码
@@ -43,8 +41,6 @@ cargo build
 - 所有公共 API 必须有文档注释（`///`）
 - 错误处理用 `thiserror` 定义，禁止 `unwrap()`（测试代码除外）
 - 异步函数用 Tokio，同步 CPU 密集用 `rayon`
-
----
 
 ## 提交规范（Conventional Commits）
 
@@ -57,8 +53,6 @@ test(export): 添加渲染队列单元测试
 refactor(core): 重构事件总线类型参数
 ```
 
----
-
 ## 分支策略
 
 ```text
@@ -69,7 +63,35 @@ fix/xxx        修复分支
 perf/xxx       性能优化分支
 ```
 
----
+## 发布流程（GitHub Release）
+
+- 发布工作流文件：`.github/workflows/release.yml`
+- Tag 触发规则：`v<major>.<minor>.<patch>`（例如 `v0.1.1`）
+- 预发布 Tag：`v<major>.<minor>.<patch>-<channel>`（例如 `v0.2.0-rc1`）
+
+### 发布前检查（建议）
+
+```bash
+cargo fmt
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo nextest run --workspace
+```
+
+### 正式发布步骤
+
+```bash
+git checkout main
+git pull --ff-only
+git tag -a v0.1.1 -m "release: v0.1.1"
+git push origin v0.1.1
+```
+
+说明：
+
+- Release 工作流会为 Linux/macOS/Windows 构建并上传产物。
+- Linux 构建依赖 `libasound2-dev`（用于 `alsa-sys`）。
+- Windows 构建使用 vcpkg 安装 FFmpeg，并导出 `VCPKG_ROOT`、`PKG_CONFIG_PATH` 等环境变量。
+- `workflow_dispatch` 可用于手动 dry-run 验证构建，不会自动创建 GitHub Release。
 
 ## 测试要求
 
