@@ -1,6 +1,14 @@
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+fn corner_radius(value: f32) -> egui::CornerRadius {
+    egui::CornerRadius::same(value.round().clamp(0.0, 255.0) as u8)
+}
+
+fn margin_px(value: f32) -> i8 {
+    value.round().clamp(i8::MIN as f32, i8::MAX as f32) as i8
+}
+
 #[derive(Debug, Clone)]
 pub struct BootstrapRecentProjectItem {
     pub project_name: String,
@@ -59,10 +67,10 @@ pub fn show_project_bootstrap_window(
 
     egui::CentralPanel::default()
         .frame(
-            egui::Frame::none()
+            egui::Frame::new()
                 .fill(egui::Color32::TRANSPARENT)
                 .stroke(egui::Stroke::NONE)
-                .inner_margin(egui::Margin::same(0.0)),
+                .inner_margin(egui::Margin::same(0)),
         )
         .show(ctx, |ui| {
             let root = ui.max_rect();
@@ -136,8 +144,9 @@ pub fn show_project_bootstrap_window(
             if close_resp.hovered() {
                 ui.painter().rect_stroke(
                     close_rect,
-                    egui::Rounding::same(crate::ui::theme::tokens::button_rounding()),
+                    corner_radius(crate::ui::theme::tokens::button_rounding()),
                     egui::Stroke::new(1.0, bg_surface_hover),
+                    egui::StrokeKind::Inside,
                 );
             }
             let x_color = text_primary;
@@ -186,11 +195,11 @@ fn paint_action_card(
 ) {
     ui.painter().rect_filled(
         rect,
-        egui::Rounding {
-            nw: 0.0,
-            ne: section_rounding,
-            sw: 0.0,
-            se: section_rounding,
+        egui::CornerRadius {
+            nw: 0,
+            ne: section_rounding.round().clamp(0.0, 255.0) as u8,
+            sw: 0,
+            se: section_rounding.round().clamp(0.0, 255.0) as u8,
         },
         bg_surface_raised,
     );
@@ -199,7 +208,7 @@ fn paint_action_card(
         startup_content_padding_x,
         startup_content_padding_y,
     ));
-    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(content), |ui| {
+    ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| {
         ui.set_clip_rect(content.expand(2.0));
         ui.spacing_mut().item_spacing = egui::vec2(10.0, 12.0);
 
@@ -276,8 +285,12 @@ fn paint_action_card(
         ui.label(egui::RichText::new("最近项目").size(11.0).strong().color(text_muted));
 
         // 统一卡片垂直节奏，避免出现“上紧下松”的视觉错觉。
-        let startup_item_card_inner_margin =
-            egui::Margin { left: 10.0, right: 10.0, top: 9.0, bottom: 3.0 };
+        let startup_item_card_inner_margin = egui::Margin {
+            left: margin_px(10.0),
+            right: margin_px(10.0),
+            top: margin_px(9.0),
+            bottom: margin_px(3.0),
+        };
         let startup_item_line_gap = 0.0;
         let startup_meta_icon_size = 11.0;
 
@@ -293,10 +306,10 @@ fn paint_action_card(
                     ui.scope(|ui| {
                         ui.set_min_width(recent_card_width);
                         ui.set_max_width(recent_card_width);
-                        egui::Frame::none()
+                        egui::Frame::new()
                             .fill(bg_surface_raised)
                             .stroke(egui::Stroke::new(1.0, border_subtle))
-                            .rounding(egui::Rounding::same(section_rounding))
+                            .corner_radius(corner_radius(section_rounding))
                             .inner_margin(startup_item_card_inner_margin)
                             .show(ui, |ui| {
                                 ui.set_min_width(recent_card_inner_width);
@@ -314,12 +327,10 @@ fn paint_action_card(
                 }
 
                 for item in recent_items {
-                    let card = egui::Frame::none()
+                    let card = egui::Frame::new()
                         .fill(bg_surface_raised)
                         .stroke(egui::Stroke::new(1.0, border_subtle))
-                        .rounding(egui::Rounding::same(
-                            list_row_radius.min(section_rounding + 2.0),
-                        ))
+                        .corner_radius(corner_radius(list_row_radius.min(section_rounding + 2.0)))
                         .inner_margin(startup_item_card_inner_margin);
 
                     let response = ui
@@ -372,8 +383,9 @@ fn paint_action_card(
                     if response.hovered() {
                         ui.painter().rect_stroke(
                             response.rect,
-                            egui::Rounding::same(list_row_radius.min(section_rounding + 2.0)),
+                            corner_radius(list_row_radius.min(section_rounding + 2.0)),
                             egui::Stroke::new(1.0, bg_surface_hover),
+                            egui::StrokeKind::Inside,
                         );
                     }
 
@@ -400,10 +412,10 @@ fn paint_action_card(
                     let recovery_card_inner_width = (recovery_card_width - 20.0).max(120.0);
 
                     for (idx, item) in recovery_items.iter().enumerate() {
-                        let card = egui::Frame::none()
+                        let card = egui::Frame::new()
                             .fill(bg_surface_raised)
                             .stroke(egui::Stroke::new(1.0, border_subtle))
-                            .rounding(egui::Rounding::same(
+                            .corner_radius(corner_radius(
                                 list_row_radius.min(section_rounding + 2.0),
                             ))
                             .inner_margin(startup_item_card_inner_margin);
@@ -466,8 +478,9 @@ fn paint_action_card(
                         if response.hovered() {
                             ui.painter().rect_stroke(
                                 response.rect,
-                                egui::Rounding::same(list_row_radius.min(section_rounding + 2.0)),
+                                corner_radius(list_row_radius.min(section_rounding + 2.0)),
                                 egui::Stroke::new(1.0, bg_surface_hover),
+                                egui::StrokeKind::Inside,
                             );
                         }
 
@@ -492,11 +505,11 @@ fn paint_banner_card(
 ) {
     let mut painter = ui.painter_at(rect);
 
-    let rounding = egui::Rounding {
-        nw: panel_rounding,
-        ne: 0.0,
-        sw: panel_rounding,
-        se: 0.0,
+    let rounding = egui::CornerRadius {
+        nw: panel_rounding.round().clamp(0.0, 255.0) as u8,
+        ne: 0,
+        sw: panel_rounding.round().clamp(0.0, 255.0) as u8,
+        se: 0,
     };
     painter.rect_filled(rect, rounding, bg_surface);
 
@@ -643,12 +656,11 @@ fn draw_icon_labeled_button(
         egui::Button::new("")
             .fill(fill)
             .stroke(stroke)
-            .rounding(egui::Rounding::same(rounding)),
+            .corner_radius(corner_radius(rounding)),
     );
 
     let icon_size = crate::ui::theme::tokens::icon_size();
-    let text_galley =
-        ui.fonts(|fonts| fonts.layout_no_wrap(label.to_owned(), text_font.clone(), text_color));
+    let text_galley = ui.painter().layout_no_wrap(label.to_owned(), text_font.clone(), text_color);
     let icon_text_gap = 6.0;
     let group_w = icon_size + icon_text_gap + text_galley.size().x;
     let group_left =
@@ -682,9 +694,10 @@ fn icon_labeled_button_width(
     horizontal_padding: f32,
 ) -> f32 {
     let text_width = ui
-        .fonts(|fonts| {
-            fonts.layout_no_wrap(label.to_owned(), text_font, egui::Color32::WHITE).size().x
-        })
+        .painter()
+        .layout_no_wrap(label.to_owned(), text_font, egui::Color32::WHITE)
+        .size()
+        .x
         .max(0.0);
     let icon_text_gap = 6.0;
     icon_size + icon_text_gap + text_width + horizontal_padding * 2.0

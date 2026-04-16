@@ -535,7 +535,7 @@ impl ViewerPanel {
                 Pos2::new(canvas_slot_rect.left(), canvas_rect.bottom() + transport_gap),
                 Vec2::new(canvas_slot_rect.width(), controls_height.max(28.0)),
             );
-            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(controls_rect), |ui| {
+            ui.scope_builder(egui::UiBuilder::new().max_rect(controls_rect), |ui| {
                 self.draw_transport_bar(ui, state, current_frame, is_playing);
             });
         });
@@ -630,9 +630,10 @@ impl ViewerPanel {
             overlay_rect,
             tokens::section_rounding(),
             egui::Stroke::new(1.0, palette::overlay_stroke()),
+            egui::StrokeKind::Inside,
         );
 
-        ui.allocate_new_ui(
+        ui.scope_builder(
             egui::UiBuilder::new().max_rect(overlay_rect.shrink(8.0)),
             |ui| {
                 ui.set_clip_rect(overlay_rect.shrink(8.0));
@@ -687,7 +688,7 @@ impl ViewerPanel {
             .unwrap_or(Rational::new(24, 1));
         let tc = TimeCode::new(current_frame, Rational::new(fps.den.max(1), fps.num.max(1)));
 
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(left_rect), |ui| {
+        ui.scope_builder(egui::UiBuilder::new().max_rect(left_rect), |ui| {
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.label(
                     egui::RichText::new(tc.to_smpte())
@@ -697,7 +698,7 @@ impl ViewerPanel {
             });
         });
 
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(center_rect), |ui| {
+        ui.scope_builder(egui::UiBuilder::new().max_rect(center_rect), |ui| {
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 let btn_w = 34.0;
                 let btn_h = 22.0;
@@ -756,12 +757,11 @@ impl ViewerPanel {
             });
         });
 
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(right_rect), |ui| {
+        ui.scope_builder(egui::UiBuilder::new().max_rect(right_rect), |ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let combo_id = ui.make_persistent_id("viewer_res");
-                let combo_open = ui.memory(|m| {
-                    m.is_popup_open(combo_id) || m.is_popup_open(combo_id.with("popup"))
-                });
+                let combo_open = egui::Popup::is_id_open(ui.ctx(), combo_id)
+                    || egui::Popup::is_id_open(ui.ctx(), combo_id.with("popup"));
 
                 theme::with_minimal_dropdown(ui, combo_open, |ui| {
                     egui::ComboBox::from_id_salt("viewer_res")

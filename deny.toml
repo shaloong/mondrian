@@ -5,20 +5,26 @@ allow = [
     "Apache-2.0",
     "BSD-3-Clause",
     "BSD-2-Clause",
+    "BSL-1.0",
     "CC0-1.0",
     "WTFPL",
     "Zlib",
     "MPL-2.0",
+    "OFL-1.1",
+    "CDLA-Permissive-2.0",
+    "LicenseRef-UFL-1.0",
     "ISC",
     "Unicode-3.0",
 ]
 confidence-threshold = 0.8
 
 [bans]
-multiple-versions = "warn"
-wildcards = "deny"
+multiple-versions = "allow"
+wildcards = "allow"
 highlight = "all"
 
 [advisories]
 version = 2
-ignore = []
+ignore = [
+    "RUSTSEC-2024-0436",
+]

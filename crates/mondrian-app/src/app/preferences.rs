@@ -1,5 +1,13 @@
 use super::*;
 
+fn corner_radius(radius: f32) -> egui::CornerRadius {
+    egui::CornerRadius::same(radius.round().clamp(0.0, u8::MAX as f32) as u8)
+}
+
+fn margin_i8(value: f32) -> i8 {
+    value.round().clamp(i8::MIN as f32, i8::MAX as f32) as i8
+}
+
 pub(super) fn load_app_preferences(app: &mut MondrianApp) {
     let Ok(bytes) = fs::read(&app.app_config_path) else {
         app.last_saved_preferences = Some(capture_preferences(app));
@@ -391,9 +399,9 @@ pub(super) fn draw_preferences_window(app: &mut MondrianApp, ctx: &egui::Context
             _ => {
                 egui::CentralPanel::default()
                     .frame(
-                        egui::Frame::none()
+                        egui::Frame::new()
                             .fill(crate::ui::theme::palette::bg_surface())
-                            .inner_margin(egui::Margin::symmetric(18.0, 18.0)),
+                            .inner_margin(egui::Margin::symmetric(18, 18)),
                     )
                     .show(viewport_ctx, |ui| {
                         draw_preferences_panel(app, ui);
@@ -443,10 +451,10 @@ fn draw_preferences_panel(app: &mut MondrianApp, ui: &mut egui::Ui) {
                 egui::vec2(ui.available_width(), body_height),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
-                    egui::Frame::none()
+                    egui::Frame::new()
                         .inner_margin(egui::Margin::symmetric(
-                            CONTENT_PADDING_X,
-                            CONTENT_PADDING_Y,
+                            margin_i8(CONTENT_PADDING_X),
+                            margin_i8(CONTENT_PADDING_Y),
                         ))
                         .show(ui, |ui| {
                             egui::ScrollArea::vertical()
@@ -506,9 +514,10 @@ fn draw_preferences_nav_button(
         };
         ui.painter().rect(
             rect,
-            egui::Rounding::same(crate::ui::theme::tokens::button_rounding()),
+            corner_radius(crate::ui::theme::tokens::button_rounding()),
             fill,
             stroke,
+            egui::StrokeKind::Inside,
         );
         ui.painter().text(
             rect.left_center() + egui::vec2(14.0, 0.0),
@@ -992,7 +1001,7 @@ fn draw_shortcut_row(app: &mut MondrianApp, ui: &mut egui::Ui, action: ShortcutA
     let (row_rect, _) =
         ui.allocate_exact_size(egui::vec2(row_width, row_height), egui::Sense::hover());
 
-    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(row_rect), |ui| {
+    ui.scope_builder(egui::UiBuilder::new().max_rect(row_rect), |ui| {
         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             let (action_rect, _) =
@@ -1064,13 +1073,11 @@ fn draw_shortcut_value_chip(ui: &mut egui::Ui, width: f32, text: &str, highlight
         egui::Stroke::new(1.0, crate::ui::theme::palette::border_subtle())
     };
 
-    egui::Frame::none()
+    egui::Frame::new()
         .fill(fill)
         .stroke(stroke)
-        .rounding(egui::Rounding::same(
-            crate::ui::theme::tokens::button_rounding(),
-        ))
-        .inner_margin(egui::Margin::symmetric(10.0, 4.0))
+        .corner_radius(corner_radius(crate::ui::theme::tokens::button_rounding()))
+        .inner_margin(egui::Margin::symmetric(10, 4))
         .show(ui, |ui| {
             ui.add_sized(
                 [

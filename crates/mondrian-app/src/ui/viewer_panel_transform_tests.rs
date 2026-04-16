@@ -25,7 +25,7 @@ fn alpha_blend_layer_should_apply_translation_transform() {
     initialize_canvas_alpha_opaque(&mut dst);
 
     let mut src = vec![0u8; (src_w * src_h * 4) as usize];
-    let src_center = ((1 * src_w as usize) + 1) * 4;
+    let src_center = ((src_w as usize) + 1) * 4;
     src[src_center] = 255;
     src[src_center + 1] = 0;
     src[src_center + 2] = 0;

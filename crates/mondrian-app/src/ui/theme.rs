@@ -385,6 +385,14 @@ fn set_active_tokens(tokens: ThemeTokens) {
     }
 }
 
+fn px_i8(value: f32) -> i8 {
+    value.round().clamp(i8::MIN as f32, i8::MAX as f32) as i8
+}
+
+fn px_corner(value: f32) -> egui::CornerRadius {
+    egui::CornerRadius::same(value.round().clamp(0.0, 255.0) as u8)
+}
+
 fn resolve_tokens(preference: Theme, resolved: egui::Theme) -> ThemeTokens {
     let mut tokens = ThemeTokens::for_theme(resolved);
     if let Ok(overrides) = token_overrides().read() {
@@ -414,34 +422,34 @@ fn build_visuals(theme: egui::Theme, tokens: &ThemeTokens) -> egui::Visuals {
     visuals.widgets.noninteractive.bg_fill = p.bg_surface;
     visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, p.border_subtle);
     visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, p.text_muted);
-    visuals.widgets.noninteractive.rounding = egui::Rounding::same(m.button_rounding);
+    visuals.widgets.noninteractive.corner_radius = px_corner(m.button_rounding);
 
     visuals.widgets.inactive.bg_fill = p.bg_surface_raised;
     visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, p.border_subtle);
     visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, p.text_primary);
-    visuals.widgets.inactive.rounding = egui::Rounding::same(m.button_rounding);
+    visuals.widgets.inactive.corner_radius = px_corner(m.button_rounding);
 
     visuals.widgets.hovered.bg_fill = p.bg_surface_hover;
     visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, p.border_emphasis);
     visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, p.text_primary);
-    visuals.widgets.hovered.rounding = egui::Rounding::same(m.button_rounding);
+    visuals.widgets.hovered.corner_radius = px_corner(m.button_rounding);
 
     visuals.widgets.active.bg_fill = p.bg_surface_active;
     visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, p.interaction_highlight);
     visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, p.text_primary);
-    visuals.widgets.active.rounding = egui::Rounding::same(m.button_rounding);
+    visuals.widgets.active.corner_radius = px_corner(m.button_rounding);
 
     visuals.widgets.open.bg_fill = p.bg_surface_active;
     visuals.widgets.open.bg_stroke = egui::Stroke::new(1.0, p.border_emphasis);
     visuals.widgets.open.fg_stroke = egui::Stroke::new(1.0, p.text_primary);
-    visuals.widgets.open.rounding = egui::Rounding::same(m.button_rounding);
+    visuals.widgets.open.corner_radius = px_corner(m.button_rounding);
 
     visuals.selection.bg_fill = p.interaction_highlight.gamma_multiply(0.20);
     visuals.selection.stroke = egui::Stroke::new(1.0, p.interaction_highlight);
     visuals.window_stroke = egui::Stroke::new(1.0, p.panel_divider_strong);
     visuals.hyperlink_color = p.interaction_highlight;
-    visuals.menu_rounding = m.menu_rounding.into();
-    visuals.window_rounding = m.window_rounding.into();
+    visuals.menu_corner_radius = px_corner(m.menu_rounding);
+    visuals.window_corner_radius = px_corner(m.window_rounding);
     visuals
 }
 
@@ -450,8 +458,8 @@ fn apply_style(ctx: &egui::Context, tokens: &ThemeTokens) {
     style.spacing.item_spacing = tokens.metrics.item_spacing;
     style.spacing.button_padding = tokens.metrics.button_padding;
     style.spacing.interact_size.y = tokens.metrics.interact_height;
-    style.spacing.menu_margin = egui::Margin::same(tokens.metrics.section_inner_margin_x);
-    style.spacing.window_margin = egui::Margin::same(tokens.metrics.panel_inner_margin_x);
+    style.spacing.menu_margin = egui::Margin::same(px_i8(tokens.metrics.section_inner_margin_x));
+    style.spacing.window_margin = egui::Margin::same(px_i8(tokens.metrics.panel_inner_margin_x));
     style.interaction.tooltip_delay = 0.2;
     style.interaction.show_tooltips_only_when_still = false;
     style.visuals.window_fill = tokens.palette.bg_surface;
@@ -460,46 +468,46 @@ fn apply_style(ctx: &egui::Context, tokens: &ThemeTokens) {
 }
 
 pub fn panel_frame() -> egui::Frame {
-    egui::Frame::none()
+    egui::Frame::new()
         .fill(palette::bg_surface())
         .stroke(egui::Stroke::new(1.0, palette::panel_divider_strong()))
-        .rounding(egui::Rounding::same(tokens::panel_rounding()))
+        .corner_radius(px_corner(tokens::panel_rounding()))
         .inner_margin(egui::Margin::symmetric(
-            tokens::panel_inner_margin_x(),
-            tokens::panel_inner_margin_y(),
+            px_i8(tokens::panel_inner_margin_x()),
+            px_i8(tokens::panel_inner_margin_y()),
         ))
 }
 
 pub fn section_frame() -> egui::Frame {
-    egui::Frame::none()
+    egui::Frame::new()
         .fill(palette::bg_surface_raised())
         .stroke(egui::Stroke::new(1.0, palette::border_subtle()))
-        .rounding(egui::Rounding::same(tokens::section_rounding()))
+        .corner_radius(px_corner(tokens::section_rounding()))
         .inner_margin(egui::Margin::symmetric(
-            tokens::section_inner_margin_x(),
-            tokens::section_inner_margin_y(),
+            px_i8(tokens::section_inner_margin_x()),
+            px_i8(tokens::section_inner_margin_y()),
         ))
 }
 
 pub fn toolbar_frame() -> egui::Frame {
-    egui::Frame::none()
+    egui::Frame::new()
         .fill(palette::bg_surface_hover())
         .stroke(egui::Stroke::new(1.0, palette::border_subtle()))
-        .rounding(egui::Rounding::same(tokens::section_rounding()))
+        .corner_radius(px_corner(tokens::section_rounding()))
         .inner_margin(egui::Margin::symmetric(
-            tokens::section_inner_margin_x(),
-            8.0,
+            px_i8(tokens::section_inner_margin_x()),
+            8,
         ))
 }
 
 pub fn dialog_frame() -> egui::Frame {
-    egui::Frame::none()
+    egui::Frame::new()
         .fill(palette::bg_surface())
         .stroke(egui::Stroke::new(1.0, palette::panel_divider_strong()))
-        .rounding(egui::Rounding::same(tokens::panel_rounding()))
+        .corner_radius(px_corner(tokens::panel_rounding()))
         .inner_margin(egui::Margin::symmetric(
-            tokens::panel_inner_margin_x(),
-            tokens::panel_inner_margin_y(),
+            px_i8(tokens::panel_inner_margin_x()),
+            px_i8(tokens::panel_inner_margin_y()),
         ))
 }
 
@@ -649,7 +657,7 @@ fn checkmark_menu_item(ui: &mut egui::Ui, selected: bool, text: String) -> egui:
         } else {
             egui::Color32::TRANSPARENT
         };
-        ui.painter().rect_filled(rect, visuals.menu_rounding, fill);
+        ui.painter().rect_filled(rect, visuals.menu_corner_radius, fill);
 
         let check_rect = egui::Rect::from_center_size(
             egui::pos2(
@@ -703,7 +711,7 @@ pub fn checkmark_toggle(
             ),
             egui::vec2(box_size, box_size),
         );
-        let rounding = egui::Rounding::same(tokens::section_rounding().min(6.0));
+        let rounding = px_corner(tokens::section_rounding().min(6.0));
         let box_fill = if response.hovered() {
             palette::bg_surface_hover()
         } else {
@@ -714,7 +722,13 @@ pub fn checkmark_toggle(
         } else {
             egui::Stroke::new(1.0, palette::border_subtle().gamma_multiply(0.92))
         };
-        painter.rect(box_rect, rounding, box_fill, box_stroke);
+        painter.rect(
+            box_rect,
+            rounding,
+            box_fill,
+            box_stroke,
+            egui::StrokeKind::Inside,
+        );
 
         if *current {
             draw_checkmark_glyph(painter, box_rect);
@@ -724,7 +738,7 @@ pub fn checkmark_toggle(
             egui::pos2(box_rect.right() + gap, rect.top()),
             rect.right_bottom(),
         );
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(text_rect), |ui| {
+        ui.scope_builder(egui::UiBuilder::new().max_rect(text_rect), |ui| {
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.add(
                     egui::Label::new(
@@ -807,8 +821,9 @@ pub fn icon_toggle_button(
     if selected {
         ui.painter().rect_stroke(
             response.rect.shrink(0.5),
-            egui::Rounding::same(tokens::button_rounding()),
+            px_corner(tokens::button_rounding()),
             egui::Stroke::new(1.0, palette::interaction_highlight()),
+            egui::StrokeKind::Inside,
         );
     }
     let icon_color = if selected {
@@ -941,14 +956,15 @@ fn draw_checkmark_glyph(painter: &egui::Painter, rect: egui::Rect) {
 
 pub fn draw_drop_overlay(painter: &egui::Painter, rect: egui::Rect, message: &str) {
     let radius = tokens::drop_overlay_radius();
-    painter.rect_filled(rect, radius, palette::drop_overlay_fill());
+    painter.rect_filled(rect, px_corner(radius), palette::drop_overlay_fill());
     painter.rect_stroke(
         rect.shrink(2.0),
-        radius,
+        px_corner(radius),
         egui::Stroke::new(
             tokens::drop_overlay_stroke_width(),
             palette::drop_overlay_stroke(),
         ),
+        egui::StrokeKind::Inside,
     );
     painter.text(
         rect.center(),
@@ -1383,13 +1399,13 @@ mod tests {
         tokens.metrics.button_rounding = 4.0;
 
         let visuals = build_visuals(egui::Theme::Dark, &tokens);
-        let expected = egui::Rounding::same(4.0);
+        let expected = egui::CornerRadius::same(4);
 
-        assert_eq!(visuals.widgets.noninteractive.rounding, expected);
-        assert_eq!(visuals.widgets.inactive.rounding, expected);
-        assert_eq!(visuals.widgets.hovered.rounding, expected);
-        assert_eq!(visuals.widgets.active.rounding, expected);
-        assert_eq!(visuals.widgets.open.rounding, expected);
+        assert_eq!(visuals.widgets.noninteractive.corner_radius, expected);
+        assert_eq!(visuals.widgets.inactive.corner_radius, expected);
+        assert_eq!(visuals.widgets.hovered.corner_radius, expected);
+        assert_eq!(visuals.widgets.active.corner_radius, expected);
+        assert_eq!(visuals.widgets.open.corner_radius, expected);
     }
 }
 

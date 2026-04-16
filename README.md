@@ -6,7 +6,7 @@
 > **当前版本状态：Alpha（早期开发阶段），不建议在生产环境或主力工作流中使用。**
 
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)](https://rustup.rs)
+[![Rust](https://img.shields.io/badge/rust-1.92%2B-orange)](https://rustup.rs)
 [![Build](https://github.com/shaloong/mondrian/actions/workflows/ci.yml/badge.svg)](https://github.com/shaloong/mondrian/actions)
 
 ---

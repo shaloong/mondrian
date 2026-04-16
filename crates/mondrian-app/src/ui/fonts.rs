@@ -9,14 +9,18 @@ pub fn configure_fonts(ctx: &egui::Context) {
 
 fn apply_system_font_fallbacks(fonts: &mut egui::FontDefinitions) {
     for (name, bytes) in platform_proportional_fonts() {
-        fonts.font_data.insert(name.clone(), egui::FontData::from_owned(bytes));
+        fonts
+            .font_data
+            .insert(name.clone(), egui::FontData::from_owned(bytes).into());
         if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
             family.insert(0, name);
         }
     }
 
     for (name, bytes) in platform_monospace_fonts() {
-        fonts.font_data.insert(name.clone(), egui::FontData::from_owned(bytes));
+        fonts
+            .font_data
+            .insert(name.clone(), egui::FontData::from_owned(bytes).into());
         if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
             family.insert(0, name);
         }

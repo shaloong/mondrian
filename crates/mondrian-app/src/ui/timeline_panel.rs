@@ -8,6 +8,10 @@ use mondrian_timeline::clip::TrimEdge;
 use mondrian_timeline::sequence::Sequence;
 use std::collections::{HashMap, HashSet};
 
+fn corner_radius(value: f32) -> egui::CornerRadius {
+    egui::CornerRadius::same(value.round().clamp(0.0, 255.0) as u8)
+}
+
 // ─── TimelinePanel ──────────────────────────
 
 #[derive(Default)]
@@ -609,8 +613,9 @@ impl TimelinePanel {
                 }) {
                     ui.painter().rect_stroke(
                         target_row.rect.shrink(1.0),
-                        2.0,
+                        corner_radius(2.0),
                         Stroke::new(2.0, palette::interaction_highlight()),
+                        egui::StrokeKind::Inside,
                     );
                 }
             }
@@ -647,6 +652,7 @@ impl TimelinePanel {
         dropped
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw_track_row(
         &mut self,
         ui: &mut Ui,
@@ -698,19 +704,19 @@ impl TimelinePanel {
         painter.rect_filled(content_rect, 0.0, lane_fill);
         let label_fill_rect = label_rect;
         let label_fill = lane_fill;
-        let label_rounding = egui::Rounding {
+        let label_rounding = egui::CornerRadius {
             nw: if round_top {
-                tokens::section_rounding()
+                tokens::section_rounding().round().clamp(0.0, 255.0) as u8
             } else {
-                0.0
+                0
             },
-            ne: 0.0,
+            ne: 0,
             sw: if round_bottom {
-                tokens::section_rounding()
+                tokens::section_rounding().round().clamp(0.0, 255.0) as u8
             } else {
-                0.0
+                0
             },
-            se: 0.0,
+            se: 0,
         };
         painter.rect_filled(label_fill_rect, label_rounding, label_fill);
         painter.line_segment(
@@ -832,8 +838,9 @@ impl TimelinePanel {
         {
             painter.rect_stroke(
                 rect.shrink(1.0),
-                2.0,
+                corner_radius(2.0),
                 Stroke::new(1.5, palette::status_warning()),
+                egui::StrokeKind::Inside,
             );
         }
 
@@ -979,23 +986,23 @@ impl TimelinePanel {
                     }
                     if ui.button("删除片段").clicked() {
                         self.delete_selected_clips(state, false);
-                        ui.close_menu();
+                        ui.close();
                     }
                     if ui.button("波纹删除片段").clicked() {
                         self.delete_selected_clips(state, true);
-                        ui.close_menu();
+                        ui.close();
                     }
                     if ui.button("修剪入点到播放头").clicked() {
                         self.trim_selected_clips_to_playhead(state, TrimEdge::In);
-                        ui.close_menu();
+                        ui.close();
                     }
                     if ui.button("修剪出点到播放头").clicked() {
                         self.trim_selected_clips_to_playhead(state, TrimEdge::Out);
-                        ui.close_menu();
+                        ui.close();
                     }
                     if ui.button("滚动切点到播放头").clicked() {
                         self.roll_selected_cut_to_playhead(state);
-                        ui.close_menu();
+                        ui.close();
                     }
                     let all_disabled = self.selected_clips_all_disabled(state);
                     let toggle_label = if all_disabled {
@@ -1005,11 +1012,11 @@ impl TimelinePanel {
                     };
                     if ui.button(toggle_label).clicked() {
                         self.set_selected_clips_disabled(state, !all_disabled);
-                        ui.close_menu();
+                        ui.close();
                     }
                     if ui.button("清除选择").clicked() {
                         self.selected_clips.clear();
-                        ui.close_menu();
+                        ui.close();
                     }
                 });
 
@@ -1075,7 +1082,7 @@ impl TimelinePanel {
         for (clip_rect, selected) in clip_outlines {
             painter.rect_stroke(
                 clip_rect.shrink(0.5),
-                tokens::timeline_clip_radius(),
+                corner_radius(tokens::timeline_clip_radius()),
                 Stroke::new(
                     1.0,
                     if is_video_track {
@@ -1084,15 +1091,17 @@ impl TimelinePanel {
                         palette::accent_audio().gamma_multiply(0.60)
                     },
                 ),
+                egui::StrokeKind::Inside,
             );
             if selected {
                 painter.rect_stroke(
                     clip_rect.shrink(0.5),
-                    tokens::timeline_clip_radius(),
+                    corner_radius(tokens::timeline_clip_radius()),
                     Stroke::new(
                         tokens::timeline_selection_stroke_width(),
                         palette::interaction_highlight(),
                     ),
+                    egui::StrokeKind::Inside,
                 );
             }
         }
@@ -1134,16 +1143,18 @@ impl TimelinePanel {
         if linked_audio_row_highlight {
             painter.rect_stroke(
                 rect.shrink(1.0),
-                2.0,
+                corner_radius(2.0),
                 Stroke::new(1.5, palette::interaction_highlight()),
+                egui::StrokeKind::Inside,
             );
         }
 
         if can_drop_here && pointer_in_row {
             painter.rect_stroke(
                 rect.shrink(1.0),
-                2.0,
+                corner_radius(2.0),
                 Stroke::new(1.5, palette::interaction_highlight()),
+                egui::StrokeKind::Inside,
             );
 
             if let (Some(dragging), Some(pos), Some(seq)) = (
@@ -1182,11 +1193,12 @@ impl TimelinePanel {
                 );
                 painter.rect_stroke(
                     ghost_rect,
-                    tokens::timeline_clip_radius(),
+                    corner_radius(tokens::timeline_clip_radius()),
                     Stroke::new(
                         tokens::timeline_linked_audio_highlight_width(),
                         palette::interaction_highlight(),
                     ),
+                    egui::StrokeKind::Inside,
                 );
                 painter.text(
                     ghost_rect.left_center()
@@ -1272,11 +1284,12 @@ impl TimelinePanel {
                 );
                 painter.rect_stroke(
                     ghost_rect,
-                    tokens::timeline_clip_radius(),
+                    corner_radius(tokens::timeline_clip_radius()),
                     Stroke::new(
                         tokens::timeline_linked_audio_highlight_width(),
                         palette::interaction_highlight(),
                     ),
+                    egui::StrokeKind::Inside,
                 );
             }
         }
@@ -1284,34 +1297,34 @@ impl TimelinePanel {
         resp.context_menu(|ui| {
             if ui.button("新增视频轨道").clicked() {
                 let _ = state.add_video_track();
-                ui.close_menu();
+                ui.close();
             }
 
             if ui.button("新增音频轨道").clicked() {
                 let _ = state.add_audio_track();
-                ui.close_menu();
+                ui.close();
             }
 
             ui.separator();
             if ui.button("删除已选片段").clicked() {
                 self.delete_selected_clips(state, false);
-                ui.close_menu();
+                ui.close();
             }
             if ui.button("波纹删除已选片段").clicked() {
                 self.delete_selected_clips(state, true);
-                ui.close_menu();
+                ui.close();
             }
             if ui.button("修剪已选入点到播放头").clicked() {
                 self.trim_selected_clips_to_playhead(state, TrimEdge::In);
-                ui.close_menu();
+                ui.close();
             }
             if ui.button("修剪已选出点到播放头").clicked() {
                 self.trim_selected_clips_to_playhead(state, TrimEdge::Out);
-                ui.close_menu();
+                ui.close();
             }
             if ui.button("滚动已选切点到播放头").clicked() {
                 self.roll_selected_cut_to_playhead(state);
-                ui.close_menu();
+                ui.close();
             }
             let all_disabled = self.selected_clips_all_disabled(state);
             let toggle_label = if all_disabled {
@@ -1321,7 +1334,7 @@ impl TimelinePanel {
             };
             if ui.button(toggle_label).clicked() {
                 self.set_selected_clips_disabled(state, !all_disabled);
-                ui.close_menu();
+                ui.close();
             }
 
             ui.separator();
@@ -1332,7 +1345,7 @@ impl TimelinePanel {
             };
             if ui.button(remove_label).clicked() {
                 let _ = state.remove_track(track.id, is_video_track);
-                ui.close_menu();
+                ui.close();
             }
         });
 
@@ -1387,8 +1400,9 @@ impl TimelinePanel {
                 );
                 ui.painter().rect_stroke(
                     rect,
-                    2.0,
+                    corner_radius(2.0),
                     Stroke::new(1.2, palette::interaction_highlight()),
+                    egui::StrokeKind::Inside,
                 );
             }
         }

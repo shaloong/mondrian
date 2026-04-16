@@ -4073,13 +4073,13 @@ impl eframe::App for MondrianApp {
         let top_menu_started_at = std::time::Instant::now();
         egui::TopBottomPanel::top("top_menu")
             .frame(
-                egui::Frame::none()
+                egui::Frame::new()
                     .fill(crate::ui::theme::palette::bg_surface())
                     .stroke(egui::Stroke::new(
                         1.0,
                         crate::ui::theme::palette::panel_divider_strong(),
                     ))
-                    .inner_margin(egui::Margin::symmetric(10.0, 6.0)),
+                    .inner_margin(egui::Margin::symmetric(10, 6)),
             )
             .show(ctx, |ui| {
                 self.draw_menu_bar(ui);
@@ -4093,13 +4093,13 @@ impl eframe::App for MondrianApp {
         egui::TopBottomPanel::bottom("status_bar")
             .exact_height(28.0)
             .frame(
-                egui::Frame::none()
+                egui::Frame::new()
                     .fill(crate::ui::theme::palette::bg_surface())
                     .stroke(egui::Stroke::new(
                         1.0,
                         crate::ui::theme::palette::panel_divider_strong(),
                     ))
-                    .inner_margin(egui::Margin::symmetric(10.0, 0.0)),
+                    .inner_margin(egui::Margin::symmetric(10, 0)),
             )
             .show(ctx, |ui| {
                 self.draw_status_bar(ui);
@@ -4114,13 +4114,13 @@ impl eframe::App for MondrianApp {
             .default_height(248.0)
             .height_range(120.0..=480.0)
             .frame(
-                egui::Frame::none()
+                egui::Frame::new()
                     .fill(crate::ui::theme::palette::bg_base())
                     .stroke(egui::Stroke::new(
                         1.0,
                         crate::ui::theme::palette::panel_divider_strong(),
                     ))
-                    .inner_margin(egui::Margin::symmetric(12.0, 8.0)),
+                    .inner_margin(egui::Margin::symmetric(12, 8)),
             )
             .show(ctx, |ui| {
                 self.timeline_panel.show(ui, &mut self.state);
@@ -4136,10 +4136,10 @@ impl eframe::App for MondrianApp {
                 .default_width(296.0)
                 .min_width(220.0)
                 .frame(
-                    egui::Frame::none()
+                    egui::Frame::new()
                         .fill(crate::ui::theme::palette::bg_base())
                         .stroke(egui::Stroke::NONE)
-                        .inner_margin(egui::Margin::symmetric(12.0, 8.0)),
+                        .inner_margin(egui::Margin::symmetric(12, 8)),
                 )
                 .show(ctx, |ui| {
                     self.library_panel.show(ui, &mut self.state);
@@ -4157,10 +4157,10 @@ impl eframe::App for MondrianApp {
                 .default_width(crate::ui::theme::tokens::inspector_panel_width())
                 .min_width(crate::ui::theme::tokens::inspector_panel_min_width())
                 .frame(
-                    egui::Frame::none()
+                    egui::Frame::new()
                         .fill(crate::ui::theme::palette::bg_base())
                         .stroke(egui::Stroke::NONE)
-                        .inner_margin(egui::Margin::symmetric(12.0, 8.0)),
+                        .inner_margin(egui::Margin::symmetric(12, 8)),
                 )
                 .show(ctx, |ui| {
                     self.effect_controls_panel.show(ui, &mut self.state, selected_clip_ref);
@@ -4177,9 +4177,9 @@ impl eframe::App for MondrianApp {
         let viewer_started_at = std::time::Instant::now();
         egui::CentralPanel::default()
             .frame(
-                egui::Frame::none()
+                egui::Frame::new()
                     .fill(crate::ui::theme::palette::bg_base())
-                    .inner_margin(egui::Margin::symmetric(12.0, 8.0)),
+                    .inner_margin(egui::Margin::symmetric(12, 8)),
             )
             .show(ctx, |ui| {
                 self.viewer_panel.show(
@@ -4696,7 +4696,7 @@ impl MondrianApp {
     }
 
     fn bootstrap_recovery_age_label(saved_at_unix_ms: u64) -> String {
-        let age_secs = ((unix_now_ms().saturating_sub(saved_at_unix_ms)) / 1000) as u64;
+        let age_secs = (unix_now_ms().saturating_sub(saved_at_unix_ms)) / 1000;
         if age_secs < 60 {
             format!("{age_secs} 秒前")
         } else if age_secs < 3600 {
@@ -4825,13 +4825,13 @@ impl MondrianApp {
         ui.ctx().style_mut(|style| {
             style.spacing.menu_width = Self::MENU_POPUP_WIDTH;
         });
-        egui::menu::bar(ui, |ui| {
+        egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("文件", |ui| {
                 ui.set_min_width(Self::MENU_POPUP_MIN_WIDTH);
 
                 if Self::menu_action(ui, "新建项目...", None).clicked() {
                     self.show_new_project_dialog = true;
-                    ui.close_menu();
+                    ui.close();
                 }
                 if Self::menu_action(
                     ui,
@@ -4841,7 +4841,7 @@ impl MondrianApp {
                 .clicked()
                 {
                     self.open_project_dialog();
-                    ui.close_menu();
+                    ui.close();
                 }
                 if Self::menu_action(
                     ui,
@@ -4856,7 +4856,7 @@ impl MondrianApp {
                     } else {
                         self.state.set_status_hint("项目已保存", false);
                     }
-                    ui.close_menu();
+                    ui.close();
                 }
                 if Self::menu_action(
                     ui,
@@ -4866,7 +4866,7 @@ impl MondrianApp {
                 .clicked()
                 {
                     self.save_project_as_dialog();
-                    ui.close_menu();
+                    ui.close();
                 }
                 if Self::menu_action(
                     ui,
@@ -4876,7 +4876,7 @@ impl MondrianApp {
                 .clicked()
                 {
                     self.request_close_project();
-                    ui.close_menu();
+                    ui.close();
                 }
                 ui.separator();
                 if Self::menu_action(
@@ -4887,7 +4887,7 @@ impl MondrianApp {
                 .clicked()
                 {
                     self.trigger_import_media();
-                    ui.close_menu();
+                    ui.close();
                 }
                 ui.separator();
                 if Self::menu_action(ui, "退出", Some(self.shortcuts.quit_app_label().as_str()))
@@ -4906,20 +4906,20 @@ impl MondrianApp {
                     if let Err(err) = self.state.undo_timeline() {
                         self.state.set_status_hint(format!("撤销失败：{err}"), true);
                     }
-                    ui.close_menu();
+                    ui.close();
                 }
                 if Self::menu_action_enabled(ui, "重做", Some("Ctrl+Shift+Z"), can_redo).clicked()
                 {
                     if let Err(err) = self.state.redo_timeline() {
                         self.state.set_status_hint(format!("重做失败：{err}"), true);
                     }
-                    ui.close_menu();
+                    ui.close();
                 }
 
                 ui.separator();
                 if Self::menu_action(ui, "首选项...", None).clicked() {
                     self.show_preferences_dialog = true;
-                    ui.close_menu();
+                    ui.close();
                 }
             });
 
@@ -4940,7 +4940,7 @@ impl MondrianApp {
                 ui.set_min_width(Self::MENU_POPUP_MIN_WIDTH);
                 if Self::menu_action(ui, "导出视频…", None).clicked() {
                     self.show_export = true;
-                    ui.close_menu();
+                    ui.close();
                 }
             });
 
@@ -4976,7 +4976,7 @@ impl MondrianApp {
             } else {
                 egui::Color32::TRANSPARENT
             };
-            let rounding = visuals.menu_rounding;
+            let rounding = visuals.menu_corner_radius;
             ui.painter().rect_filled(rect, rounding, fill);
 
             let label_color = if enabled {

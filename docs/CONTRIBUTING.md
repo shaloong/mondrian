@@ -12,10 +12,18 @@ cargo install cargo-watch
 cargo install cargo-nextest    # 更快的测试运行器
 cargo install cargo-audit      # 安全审计
 
-# 3. 安装 FFmpeg（Windows）
-winget install ffmpeg
-# 设置环境变量
-setx FFMPEG_DIR "C:\ProgramData\chocolatey\lib\ffmpeg\tools\ffmpeg"
+# 3. 安装 FFmpeg（Windows，推荐与 CI 对齐）
+git clone https://github.com/microsoft/vcpkg C:\vcpkg
+C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+C:\vcpkg\vcpkg.exe install ffmpeg:x64-windows
+# 设置环境变量（PowerShell）
+$env:VCPKG_ROOT="C:\vcpkg"
+$env:VCPKGRS_TRIPLET="x64-windows"
+$env:VCPKGRS_DYNAMIC="1"
+$env:VCPKG_DEFAULT_TRIPLET="x64-windows"
+$env:FFMPEG_DIR="C:\vcpkg\installed\x64-windows"
+$env:PKG_CONFIG_PATH="C:\vcpkg\installed\x64-windows\lib\pkgconfig"
+$env:PKG_CONFIG="C:\vcpkg\installed\x64-windows\tools\pkgconf\pkgconf.exe"
 
 # 4. 安装 Vulkan SDK（Windows）
 # 下载: https://vulkan.lunarg.com/sdk/home

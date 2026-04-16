@@ -34,6 +34,14 @@ const CARD_PADDING_TOP: f32 = 8.0;
 const CARD_PADDING_BOTTOM: f32 = 10.0;
 const CARD_INFO_GAP_Y: f32 = 6.0;
 
+fn corner_radius(value: f32) -> egui::CornerRadius {
+    egui::CornerRadius::same(value.round().clamp(0.0, 255.0) as u8)
+}
+
+fn margin_px(value: f32) -> i8 {
+    value.round().clamp(i8::MIN as f32, i8::MAX as f32) as i8
+}
+
 /// 左侧素材库面板
 #[derive(Default)]
 pub struct LibraryPanel {
@@ -63,11 +71,14 @@ impl LibraryPanel {
                 Vec2::new(ui.available_width(), search_height),
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
-                    egui::Frame::none()
+                    egui::Frame::new()
                         .fill(palette::bg_surface_raised())
                         .stroke(Stroke::new(1.0, palette::border_subtle()))
-                        .rounding(egui::Rounding::same(tokens::button_rounding()))
-                        .inner_margin(egui::Margin::symmetric(10.0, 4.0))
+                        .corner_radius(corner_radius(tokens::button_rounding()))
+                        .inner_margin(egui::Margin::symmetric(
+                            margin_px(10.0),
+                            margin_px(4.0),
+                        ))
                         .show(ui, |ui| {
                             ui.with_layout(
                                 egui::Layout::left_to_right(egui::Align::Center),
@@ -249,8 +260,9 @@ impl LibraryPanel {
                 .rect_filled(empty_rect, tokens::card_rounding(), palette::bg_surface());
             ui.painter().rect_stroke(
                 empty_rect,
-                tokens::card_rounding(),
+                corner_radius(tokens::card_rounding()),
                 Stroke::new(1.0, palette::border_subtle()),
+                egui::StrokeKind::Inside,
             );
             ui.painter().text(
                 empty_rect.center(),
@@ -343,7 +355,12 @@ impl LibraryPanel {
             ui.painter().rect_filled(card_rect, card_rounding, card_fill);
         }
         if card_stroke != Stroke::NONE {
-            ui.painter().rect_stroke(card_rect, card_rounding, card_stroke);
+            ui.painter().rect_stroke(
+                card_rect,
+                corner_radius(card_rounding),
+                card_stroke,
+                egui::StrokeKind::Inside,
+            );
         }
 
         let thumb_rect = Rect::from_min_size(
@@ -366,7 +383,7 @@ impl LibraryPanel {
         );
         let duration_text = format_duration_hhmmss(asset.media_info.duration);
 
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(info_rect), |ui| {
+        ui.scope_builder(egui::UiBuilder::new().max_rect(info_rect), |ui| {
             ui.set_min_width(info_rect.width());
             ui.set_max_width(info_rect.width());
             if is_editing {
@@ -402,7 +419,7 @@ impl LibraryPanel {
                     Vec2::new(duration_w, row_h),
                 );
 
-                ui.allocate_new_ui(
+                ui.scope_builder(
                     egui::UiBuilder::new()
                         .max_rect(name_rect)
                         .layout(egui::Layout::left_to_right(egui::Align::Center)),
@@ -418,7 +435,7 @@ impl LibraryPanel {
                         );
                     },
                 );
-                ui.allocate_new_ui(
+                ui.scope_builder(
                     egui::UiBuilder::new()
                         .max_rect(duration_rect)
                         .layout(egui::Layout::right_to_left(egui::Align::Center)),
@@ -461,7 +478,7 @@ impl LibraryPanel {
                         state.set_status_hint(format!("已关闭代理模式：{}", asset_name), false);
                     }
 
-                    ui.close_menu();
+                    ui.close();
                 }
 
                 ui.separator();
@@ -484,7 +501,7 @@ impl LibraryPanel {
                             }
                         }
                     }
-                    ui.close_menu();
+                    ui.close();
                 }
                 ui.separator();
             }
@@ -513,7 +530,7 @@ impl LibraryPanel {
                         state.set_status_hint(format!("删除失败：{err}"), true);
                     }
                 }
-                ui.close_menu();
+                ui.close();
             }
         });
 
@@ -612,8 +629,9 @@ impl LibraryPanel {
         ui.painter().rect_filled(rect, tokens::badge_rounding(), bg);
         ui.painter().rect_stroke(
             rect,
-            tokens::badge_rounding(),
+            corner_radius(tokens::badge_rounding()),
             Stroke::new(1.0, fg.gamma_multiply(0.18)),
+            egui::StrokeKind::Inside,
         );
         ui.painter().text(
             rect.center(),
@@ -628,8 +646,9 @@ impl LibraryPanel {
         ui.painter().rect_filled(rect, tokens::section_rounding(), palette::canvas_bg());
         ui.painter().rect_stroke(
             rect,
-            tokens::section_rounding(),
+            corner_radius(tokens::section_rounding()),
             Stroke::new(1.0, palette::border_subtle().gamma_multiply(0.7)),
+            egui::StrokeKind::Inside,
         );
 
         if is_offline {

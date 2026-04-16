@@ -3,6 +3,10 @@ use super::*;
 const WINDOW_WIDTH: f32 = 420.0;
 const WINDOW_HEIGHT: f32 = 240.0;
 
+fn corner_radius(radius: f32) -> egui::CornerRadius {
+    egui::CornerRadius::same(radius.round().clamp(0.0, u8::MAX as f32) as u8)
+}
+
 pub(super) fn draw_new_project_window(app: &mut MondrianApp, ctx: &egui::Context) {
     let viewport_id = egui::ViewportId::from_hash_of("new_project_viewport");
     let viewport_builder = egui::ViewportBuilder::default()
@@ -39,9 +43,9 @@ pub(super) fn draw_new_project_window(app: &mut MondrianApp, ctx: &egui::Context
             _ => {
                 egui::CentralPanel::default()
                     .frame(
-                        egui::Frame::none()
+                        egui::Frame::new()
                             .fill(crate::ui::theme::palette::bg_surface())
-                            .inner_margin(egui::Margin::symmetric(18.0, 16.0)),
+                            .inner_margin(egui::Margin::symmetric(18, 16)),
                     )
                     .show(viewport_ctx, |ui| {
                         draw_new_project_panel(app, ui);
@@ -104,9 +108,7 @@ fn draw_new_project_panel(app: &mut MondrianApp, ui: &mut egui::Ui) {
                 egui::RichText::new("创建项目").color(egui::Color32::WHITE).size(12.5),
             )
             .fill(crate::ui::theme::palette::interaction_highlight())
-            .rounding(egui::Rounding::same(
-                crate::ui::theme::tokens::button_rounding(),
-            )),
+            .corner_radius(corner_radius(crate::ui::theme::tokens::button_rounding())),
         );
 
         if create_btn.clicked() {

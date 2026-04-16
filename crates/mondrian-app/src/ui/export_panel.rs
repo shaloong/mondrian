@@ -27,8 +27,8 @@ impl ExportPanel {
             let preset = &presets[self.selected_preset_idx].1;
             let pending = state.render_queue.list_jobs().len();
             let combo_id = ui.make_persistent_id("export_preset");
-            let combo_open =
-                ui.memory(|m| m.is_popup_open(combo_id) || m.is_popup_open(combo_id.with("popup")));
+            let combo_open = egui::Popup::is_id_open(ui.ctx(), combo_id)
+                || egui::Popup::is_id_open(ui.ctx(), combo_id.with("popup"));
 
             ui.label(
                 egui::RichText::new(format!("队列中 {} 个任务", pending))
