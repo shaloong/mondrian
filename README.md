@@ -36,8 +36,6 @@
      ↑ 全局共享：mondrian-core（类型 / 错误 / 事件）
 ```
 
----
-
 ## 📦 Crate 结构
 
 | Crate               | 职责                                  | 关键依赖               |
@@ -51,8 +49,6 @@
 | `mondrian-effects`  | LUT 调色、滤镜、转场、文字动画        | mondrian-renderer      |
 | `mondrian-export`   | 导出编码、渲染队列、硬件加速          | ffmpeg-next            |
 | `mondrian-app`      | 主程序入口、UI 状态机、面板布局       | egui                   |
-
----
 
 ## 🚀 快速开始
 
@@ -148,13 +144,9 @@ cargo bench -p mondrian-renderer
 - `MONDRIAN_PREVIEW_SIM_8K_FRAMES`：模拟帧数（默认 `120`）
 - `MONDRIAN_PREVIEW_SIM_8K_LAYERS`：模拟图层数（默认 `2`）
 
----
-
 ## 📋 功能路线图
 
 见 [docs/ROADMAP.md](docs/ROADMAP.md)
-
----
 
 ## 🗂️ 文档索引
 
@@ -173,13 +165,9 @@ cargo bench -p mondrian-renderer
 | [路线图](docs/ROADMAP.md)                           | 版本规划          |
 | [贡献指南](docs/CONTRIBUTING.md)                    | 开发规范          |
 
----
-
 ## 🤝 贡献
 
 请阅读 [CONTRIBUTING.md](docs/CONTRIBUTING.md)。
-
----
 
 ## 📄 许可证
 
