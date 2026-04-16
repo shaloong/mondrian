@@ -795,7 +795,7 @@ fn decode_video_layer_scaled(
 }
 
 fn compose_decoded_layers_into_canvas(
-    canvas: &mut Vec<u8>,
+    canvas: &mut [u8],
     width: u32,
     height: u32,
     layers: &[(Arc<DecodedVideoLayer>, f32)],
