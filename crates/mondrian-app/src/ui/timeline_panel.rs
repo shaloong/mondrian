@@ -1805,9 +1805,13 @@ impl TimelinePanel {
                     self.delete_selected_keyframes(state);
                     ui.close();
                 }
-
-                ui.separator();
-                for preset in visible_animation_interpolation_presets() {
+                let visible_presets = visible_animation_interpolation_presets();
+                let available_presets =
+                    state.available_animation_interpolation_presets(selection, &visible_presets);
+                if !available_presets.is_empty() {
+                    ui.separator();
+                }
+                for preset in available_presets {
                     if ui.button(interpolation_label(preset)).clicked() {
                         self.apply_interpolation_to_selected_keyframes(state, selection, preset);
                         ui.close();
@@ -2014,7 +2018,16 @@ impl TimelinePanel {
                     && bounds.contains(current)
                     && !visuals.iter().any(|visual| visual.hit_rect.contains(current))
                 {
-                    state.clear_animation_keyframe_selection_for_clip(selection.clip_id);
+                    let had_selection =
+                        !state.selected_animation_keyframes_for_clip(selection.clip_id).is_empty();
+                    if !self.animation_marquee_additive {
+                        state.clear_animation_keyframe_selection_for_clip(selection.clip_id);
+                        if !had_selection {
+                            let frame = ((current.x - bounds.left()) / self.pixels_per_frame)
+                                .round() as i64;
+                            state.seek(frame.max(0));
+                        }
+                    }
                 }
             }
             self.clear_animation_marquee();
@@ -2062,13 +2075,33 @@ impl TimelinePanel {
             centroid.x / selected_points.len() as f32,
             centroid.y / selected_points.len() as f32,
         );
+        let selected_bounds = selected_points.iter().fold(
+            Rect::from_center_size(centroid, Vec2::ZERO),
+            |acc, point| {
+                Rect::from_min_max(
+                    Pos2::new(acc.min.x.min(point.x), acc.min.y.min(point.y)),
+                    Pos2::new(acc.max.x.max(point.x), acc.max.y.max(point.y)),
+                )
+            },
+        );
+        let visible_presets = visible_animation_interpolation_presets();
+        let available_presets =
+            state.available_animation_interpolation_presets(selection, &visible_presets);
+        let viewport_rect = ctx.input(|i| i.content_rect());
+        let bubble_pos = floating_toolbar_position(
+            selected_bounds,
+            selected_bounds,
+            viewport_rect,
+            2 + usize::from(state.has_animation_clipboard()) + 1,
+            available_presets.len(),
+        );
 
         egui::Area::new(egui::Id::new((
             "timeline_keyframe_bubble",
             selection.clip_id,
         )))
         .order(egui::Order::Tooltip)
-        .fixed_pos(Pos2::new(centroid.x, centroid.y - 30.0))
+        .fixed_pos(bubble_pos)
         .show(ctx, |ui| {
             theme::toolbar_frame().show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -2112,8 +2145,10 @@ impl TimelinePanel {
                         self.delete_selected_keyframes(state);
                     }
 
-                    ui.separator();
-                    for preset in visible_animation_interpolation_presets() {
+                    if !available_presets.is_empty() {
+                        ui.separator();
+                    }
+                    for preset in available_presets {
                         if ui.small_button(interpolation_label(preset)).clicked() {
                             self.apply_interpolation_to_selected_keyframes(
                                 state, selection, preset,
@@ -2561,6 +2596,50 @@ fn animation_lane_order(path: &str) -> usize {
 
 fn ticks_to_x(time: TimeTicks, pixels_per_frame: f32) -> f32 {
     (time as f32 / SUBFRAME_TICKS_PER_FRAME as f32) * pixels_per_frame
+}
+
+fn floating_toolbar_position(
+    selected_bounds: Rect,
+    avoid_bounds: Rect,
+    container_rect: Rect,
+    icon_count: usize,
+    preset_count: usize,
+) -> Pos2 {
+    let button_size = tokens::timeline_toolbar_button_size();
+    let estimated_width = 18.0
+        + icon_count as f32 * button_size[0]
+        + preset_count as f32 * 64.0
+        + if preset_count > 0 { 16.0 } else { 0.0 };
+    let estimated_height = button_size[1] + 12.0;
+    let gap = 10.0;
+    let x = (selected_bounds.center().x - estimated_width * 0.5).clamp(
+        container_rect.left() + 8.0,
+        (container_rect.right() - estimated_width - 8.0).max(container_rect.left() + 8.0),
+    );
+
+    let above = Rect::from_min_size(
+        Pos2::new(x, selected_bounds.top() - estimated_height - gap),
+        Vec2::new(estimated_width, estimated_height),
+    );
+    let below = Rect::from_min_size(
+        Pos2::new(x, selected_bounds.bottom() + gap),
+        Vec2::new(estimated_width, estimated_height),
+    );
+    let avoid = avoid_bounds.expand(8.0);
+    let fits_above = above.top() >= container_rect.top() + 4.0 && !above.intersects(avoid);
+    let fits_below = below.bottom() <= container_rect.bottom() - 4.0 && !below.intersects(avoid);
+
+    if fits_above {
+        above.min
+    } else if fits_below {
+        below.min
+    } else if selected_bounds.top() - container_rect.top()
+        >= container_rect.bottom() - selected_bounds.bottom()
+    {
+        above.min
+    } else {
+        below.min
+    }
 }
 
 fn keyframe_drag_delta_ticks(

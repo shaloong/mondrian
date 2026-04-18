@@ -26,6 +26,9 @@ pub struct EffectControlsPanel {
     graph_channel_selection: HashMap<(ClipId, String), usize>,
     graph_handle_drag: Option<GraphHandleDragState>,
     graph_keyframe_drag: Option<GraphKeyframeDragState>,
+    graph_marquee_anchor: Option<Pos2>,
+    graph_marquee_current: Option<Pos2>,
+    graph_marquee_additive: bool,
     pending_clear_animation: Option<PendingClearAnimation>,
 }
 
@@ -72,6 +75,12 @@ struct GraphKeyframeDragAnchor {
 struct GraphEditorHandle {
     kind: GraphHandleKind,
     position: Pos2,
+}
+
+#[derive(Clone)]
+struct GraphKeyframeVisual {
+    selection: AnimationKeyframeSelection,
+    hit_rect: Rect,
 }
 
 #[derive(Clone)]
@@ -204,7 +213,14 @@ impl EffectControlsPanel {
                     .filter(|(_, property)| property.descriptor.is_animatable)
                     .map(|(path, property)| (*path, *property))
                     .collect::<Vec<_>>();
-                self.draw_graph_editor(ui, app, selection, current_time, &animatable_properties);
+                self.draw_graph_editor(
+                    ui,
+                    app,
+                    selection,
+                    &clip,
+                    current_time,
+                    &animatable_properties,
+                );
             }
         }
 
@@ -251,6 +267,7 @@ impl EffectControlsPanel {
         ui: &mut Ui,
         app: &mut AppState,
         selection: SelectedClipRef,
+        clip: &Clip,
         current_time: TimeCode,
         properties: &[(&str, &mondrian_core::automation::AnimatedProperty)],
     ) {
@@ -337,7 +354,7 @@ impl EffectControlsPanel {
         });
         ui.add_space(tokens::panel_gap() * 0.6);
 
-        let (rect, response) = ui.allocate_exact_size(
+        let (rect, _response) = ui.allocate_exact_size(
             Vec2::new(ui.available_width(), tokens::graph_editor_height()),
             Sense::click_and_drag(),
         );
@@ -366,8 +383,14 @@ impl EffectControlsPanel {
         }
 
         let current_time_ticks = timecode_to_ticks(current_time);
-        let (time_min, time_max) = graph_time_range(property, current_time_ticks);
-        let (value_min, value_max) = graph_value_range(property, channel_index, current_time_ticks);
+        let (time_min, time_max) = graph_time_range(clip);
+        let (value_min, value_max) = graph_value_range(
+            property,
+            channel_index,
+            current_time_ticks,
+            time_min,
+            time_max,
+        );
         let y_labels = [value_max, (value_min + value_max) * 0.5, value_min];
         for row in 0..=4 {
             let t = row as f32 / 4.0;
@@ -466,11 +489,15 @@ impl EffectControlsPanel {
             None
         };
         let mut selected_points = Vec::new();
+        let mut handle_points = Vec::new();
+        let mut keyframe_visuals = Vec::new();
 
         let mut graph_drag_commit: Option<(
             Vec<PropertyMutation>,
             Vec<AnimationKeyframeSelection>,
         )> = None;
+        let mut hovered_handle = false;
+        let mut hovered_keyframe = false;
 
         for (index, keyframe) in channel.keyframes().iter().enumerate() {
             let selection_item = AnimationKeyframeSelection {
@@ -507,6 +534,9 @@ impl EffectControlsPanel {
                 )),
                 Sense::click_and_drag(),
             );
+            hovered_keyframe |= key_response.hovered();
+            keyframe_visuals
+                .push(GraphKeyframeVisual { selection: selection_item.clone(), hit_rect });
             if key_response.clicked() {
                 if ui.input(|i| i.modifiers.shift) {
                     app.toggle_animation_keyframe_selection(selection_item.clone());
@@ -540,8 +570,13 @@ impl EffectControlsPanel {
                     self.delete_selected_keyframes(app, selection);
                     ui.close();
                 }
-                ui.separator();
-                for preset in visible_interpolation_presets() {
+                let visible_presets = visible_interpolation_presets();
+                let available_presets =
+                    app.available_animation_interpolation_presets(selection, &visible_presets);
+                if !available_presets.is_empty() {
+                    ui.separator();
+                }
+                for preset in available_presets {
                     if ui.button(interpolation_label(preset)).clicked() {
                         self.apply_interpolation_to_selection(app, selection, preset);
                         ui.close();
@@ -676,6 +711,8 @@ impl EffectControlsPanel {
                         )),
                         Sense::click_and_drag(),
                     );
+                    hovered_handle |= handle_response.hovered();
+                    handle_points.push(handle_position);
                     if handle_response.drag_started() {
                         self.graph_handle_drag =
                             handle_response.interact_pointer_pos().map(|pointer_pos| {
@@ -748,9 +785,6 @@ impl EffectControlsPanel {
         } else if ui.input(|i| i.pointer.any_released()) {
             self.graph_keyframe_drag = None;
         }
-        if response.clicked() && !ui.input(|i| i.modifiers.shift) && selected_on_active.is_empty() {
-            app.set_active_animation_property(selection.clip_id, active_path);
-        }
 
         if let Some((_, preview)) = active_handle_preview {
             painter.circle_filled(
@@ -760,11 +794,25 @@ impl EffectControlsPanel {
             );
         }
 
+        self.handle_graph_marquee(
+            ui,
+            app,
+            selection,
+            active_path.clone(),
+            plot_rect,
+            time_min,
+            time_max,
+            &keyframe_visuals,
+            hovered_keyframe || hovered_handle,
+        );
+
         self.draw_graph_selection_bubble(
             ui.ctx(),
             selection,
             current_time_ticks,
             &selected_points,
+            &handle_points,
+            plot_rect,
             app,
         );
     }
@@ -813,6 +861,8 @@ impl EffectControlsPanel {
         selection: SelectedClipRef,
         current_time_ticks: TimeTicks,
         selected_points: &[Pos2],
+        handle_points: &[Pos2],
+        plot_rect: Rect,
         app: &mut AppState,
     ) {
         if selected_points.is_empty()
@@ -829,7 +879,31 @@ impl EffectControlsPanel {
             centroid.x / selected_points.len() as f32,
             centroid.y / selected_points.len() as f32,
         );
-        let bubble_pos = Pos2::new(centroid.x, centroid.y - 34.0);
+        let selected_bounds = selected_points.iter().fold(
+            Rect::from_center_size(centroid, Vec2::ZERO),
+            |acc, point| {
+                Rect::from_min_max(
+                    Pos2::new(acc.min.x.min(point.x), acc.min.y.min(point.y)),
+                    Pos2::new(acc.max.x.max(point.x), acc.max.y.max(point.y)),
+                )
+            },
+        );
+        let avoid_bounds = handle_points.iter().copied().fold(selected_bounds, |acc, point| {
+            Rect::from_min_max(
+                Pos2::new(acc.min.x.min(point.x), acc.min.y.min(point.y)),
+                Pos2::new(acc.max.x.max(point.x), acc.max.y.max(point.y)),
+            )
+        });
+        let visible_presets = visible_interpolation_presets();
+        let available_presets =
+            app.available_animation_interpolation_presets(selection, &visible_presets);
+        let bubble_pos = floating_toolbar_position(
+            selected_bounds,
+            avoid_bounds,
+            plot_rect.expand2(Vec2::new(16.0, 16.0)),
+            2 + usize::from(app.has_animation_clipboard()) + 1,
+            available_presets.len(),
+        );
 
         egui::Area::new(egui::Id::new(("graph_keyframe_bubble", selection.clip_id)))
             .order(egui::Order::Tooltip)
@@ -875,8 +949,10 @@ impl EffectControlsPanel {
                             self.delete_selected_keyframes(app, selection);
                         }
 
-                        ui.separator();
-                        for preset in visible_interpolation_presets() {
+                        if !available_presets.is_empty() {
+                            ui.separator();
+                        }
+                        for preset in available_presets {
                             if ui.small_button(interpolation_label(preset)).clicked() {
                                 self.apply_interpolation_to_selection(app, selection, preset);
                             }
@@ -884,6 +960,114 @@ impl EffectControlsPanel {
                     });
                 });
             });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn handle_graph_marquee(
+        &mut self,
+        ui: &mut Ui,
+        app: &mut AppState,
+        selection: SelectedClipRef,
+        active_path: String,
+        bounds: Rect,
+        time_min: TimeTicks,
+        time_max: TimeTicks,
+        visuals: &[GraphKeyframeVisual],
+        pointer_on_anchor: bool,
+    ) {
+        if self.graph_handle_drag.is_some() || self.graph_keyframe_drag.is_some() {
+            self.clear_graph_marquee();
+            return;
+        }
+
+        let pointer_pos = ui.input(|i| i.pointer.interact_pos());
+        let primary_pressed = ui.input(|i| i.pointer.primary_pressed());
+        let primary_down = ui.input(|i| i.pointer.primary_down());
+        let primary_released = ui.input(|i| i.pointer.primary_released());
+
+        if primary_pressed {
+            if let Some(pos) = pointer_pos {
+                if bounds.contains(pos) && !pointer_on_anchor {
+                    self.graph_marquee_anchor = Some(pos);
+                    self.graph_marquee_current = Some(pos);
+                    self.graph_marquee_additive = ui.input(|i| i.modifiers.shift);
+                    app.set_active_animation_property(selection.clip_id, active_path);
+                }
+            }
+        }
+
+        if primary_down && self.graph_marquee_anchor.is_some() {
+            if let Some(pos) = pointer_pos {
+                self.graph_marquee_current = Some(pos);
+            }
+        }
+
+        if let (Some(anchor), Some(current)) =
+            (self.graph_marquee_anchor, self.graph_marquee_current)
+        {
+            let rect = Rect::from_two_pos(anchor, current).intersect(bounds);
+            if rect.width() > 2.0 && rect.height() > 2.0 {
+                ui.painter().rect_filled(
+                    rect,
+                    2.0,
+                    palette::interaction_highlight().gamma_multiply(0.16),
+                );
+                ui.painter().rect_stroke(
+                    rect,
+                    egui::CornerRadius::same(2),
+                    Stroke::new(1.2, palette::interaction_highlight()),
+                    egui::StrokeKind::Inside,
+                );
+            }
+        }
+
+        if primary_released {
+            if let (Some(anchor), Some(current)) =
+                (self.graph_marquee_anchor, self.graph_marquee_current)
+            {
+                let rect = Rect::from_two_pos(anchor, current).intersect(bounds);
+                let picks = visuals
+                    .iter()
+                    .filter(|visual| visual.hit_rect.intersects(rect))
+                    .map(|visual| visual.selection.clone())
+                    .collect::<Vec<_>>();
+
+                if rect.width() > 2.0 && rect.height() > 2.0 {
+                    if self.graph_marquee_additive {
+                        let mut combined = app
+                            .selected_animation_keyframes_for_clip(selection.clip_id)
+                            .into_iter()
+                            .collect::<std::collections::HashSet<_>>();
+                        combined.extend(picks);
+                        app.set_animation_keyframe_selection(combined.into_iter().collect());
+                    } else if picks.is_empty() {
+                        app.clear_animation_keyframe_selection_for_clip(selection.clip_id);
+                    } else {
+                        app.set_animation_keyframe_selection(picks);
+                    }
+                } else if bounds.contains(current) && !pointer_on_anchor {
+                    let had_selection =
+                        !app.selected_animation_keyframes_for_clip(selection.clip_id).is_empty();
+                    if !self.graph_marquee_additive {
+                        app.clear_animation_keyframe_selection_for_clip(selection.clip_id);
+                        if !had_selection {
+                            let frame = (graph_time_from_x(bounds, time_min, time_max, current.x)
+                                as f64
+                                / SUBFRAME_TICKS_PER_FRAME as f64)
+                                .round() as i64;
+                            app.seek(frame.max(0));
+                        }
+                    }
+                }
+            }
+            self.clear_graph_marquee();
+        }
+    }
+
+    fn clear_graph_marquee(&mut self) {
+        self.graph_marquee_anchor = None;
+        self.graph_marquee_current = None;
+        self.graph_marquee_additive = false;
     }
 
     fn draw_pending_clear_animation_dialog(&mut self, ctx: &egui::Context, app: &mut AppState) {
@@ -1036,7 +1220,7 @@ impl EffectControlsPanel {
             let add_resp = theme::icon_toggle_button(
                 ui,
                 tokens::timeline_toolbar_button_size(),
-                theme::UiIcon::Plus,
+                theme::UiIcon::Anchor,
                 add_selected,
             )
             .on_hover_text(if add_selected {
@@ -1407,6 +1591,17 @@ fn interpolation_from_handles(
     interp_in: KeyframeInterpolation,
     interp_out: KeyframeInterpolation,
 ) -> InterpolationType {
+    const EPSILON: f64 = 1e-6;
+
+    let approx_handle =
+        |handle: KeyframeInterpolation, time_offset: f64, value_offset: f64| match handle {
+            KeyframeInterpolation::Bezier(handle) => {
+                (handle.time_offset - time_offset).abs() <= EPSILON
+                    && (handle.value_offset - value_offset).abs() <= EPSILON
+            }
+            _ => false,
+        };
+
     if matches!(interp_in, KeyframeInterpolation::Hold)
         || matches!(interp_out, KeyframeInterpolation::Hold)
     {
@@ -1415,6 +1610,17 @@ fn interpolation_from_handles(
         && matches!(interp_out, KeyframeInterpolation::Linear)
     {
         InterpolationType::Linear
+    } else if matches!(interp_in, KeyframeInterpolation::Linear)
+        && approx_handle(interp_out, 1.0 / 3.0, 0.0)
+    {
+        InterpolationType::EaseIn
+    } else if approx_handle(interp_in, -1.0 / 3.0, 0.0)
+        && matches!(interp_out, KeyframeInterpolation::Linear)
+    {
+        InterpolationType::EaseOut
+    } else if approx_handle(interp_in, -1.0 / 3.0, 0.0) && approx_handle(interp_out, 1.0 / 3.0, 0.0)
+    {
+        InterpolationType::EaseInOut
     } else {
         InterpolationType::Bezier
     }
@@ -1472,24 +1678,14 @@ fn graph_channel_color(index: usize) -> Color32 {
     }
 }
 
-fn graph_time_range(
-    property: &mondrian_core::automation::AnimatedProperty,
-    current_time: TimeTicks,
-) -> (TimeTicks, TimeTicks) {
-    let times = property.keyframe_times();
-    let min_time = times.iter().copied().min().unwrap_or(current_time);
-    let max_time = times.iter().copied().max().unwrap_or(current_time);
-    if min_time == max_time {
+fn graph_time_range(clip: &Clip) -> (TimeTicks, TimeTicks) {
+    let start = timecode_to_ticks(clip.position);
+    let end = timecode_to_ticks(clip.end_position());
+    if start == end {
         let pad = SUBFRAME_TICKS_PER_FRAME * 2;
-        return (min_time.saturating_sub(pad), max_time + pad);
-    }
-
-    if current_time < min_time {
-        (current_time, max_time)
-    } else if current_time > max_time {
-        (min_time, current_time)
+        (start.saturating_sub(pad), end + pad)
     } else {
-        (min_time, max_time)
+        (start, end)
     }
 }
 
@@ -1497,6 +1693,8 @@ fn graph_value_range(
     property: &mondrian_core::automation::AnimatedProperty,
     channel_index: usize,
     current_time: TimeTicks,
+    time_min: TimeTicks,
+    time_max: TimeTicks,
 ) -> (f64, f64) {
     let mut values = property
         .channel(channel_index)
@@ -1504,6 +1702,22 @@ fn graph_value_range(
             channel.keyframes().iter().map(|keyframe| keyframe.value).collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    values.push(
+        property
+            .evaluate(time_min)
+            .to_channel_values()
+            .get(channel_index)
+            .copied()
+            .unwrap_or(0.0),
+    );
+    values.push(
+        property
+            .evaluate(time_max)
+            .to_channel_values()
+            .get(channel_index)
+            .copied()
+            .unwrap_or(0.0),
+    );
     values.push(
         property
             .evaluate(current_time)
@@ -1558,6 +1772,50 @@ fn graph_point_for_keyframe(
     )
 }
 
+fn floating_toolbar_position(
+    selected_bounds: Rect,
+    avoid_bounds: Rect,
+    container_rect: Rect,
+    icon_count: usize,
+    preset_count: usize,
+) -> Pos2 {
+    let button_size = tokens::timeline_toolbar_button_size();
+    let estimated_width = 18.0
+        + icon_count as f32 * button_size[0]
+        + preset_count as f32 * 64.0
+        + if preset_count > 0 { 16.0 } else { 0.0 };
+    let estimated_height = button_size[1] + 12.0;
+    let gap = 10.0;
+    let x = (selected_bounds.center().x - estimated_width * 0.5).clamp(
+        container_rect.left() + 8.0,
+        (container_rect.right() - estimated_width - 8.0).max(container_rect.left() + 8.0),
+    );
+
+    let above = Rect::from_min_size(
+        Pos2::new(x, selected_bounds.top() - estimated_height - gap),
+        Vec2::new(estimated_width, estimated_height),
+    );
+    let below = Rect::from_min_size(
+        Pos2::new(x, selected_bounds.bottom() + gap),
+        Vec2::new(estimated_width, estimated_height),
+    );
+    let avoid = avoid_bounds.expand(8.0);
+    let fits_above = above.top() >= container_rect.top() + 4.0 && !above.intersects(avoid);
+    let fits_below = below.bottom() <= container_rect.bottom() - 4.0 && !below.intersects(avoid);
+
+    if fits_above {
+        above.min
+    } else if fits_below {
+        below.min
+    } else if selected_bounds.top() - container_rect.top()
+        >= container_rect.bottom() - selected_bounds.bottom()
+    {
+        above.min
+    } else {
+        below.min
+    }
+}
+
 fn draw_graph_curve(
     painter: &egui::Painter,
     rect: Rect,
@@ -1571,12 +1829,9 @@ fn draw_graph_curve(
 ) {
     let samples = 96usize;
     let mut points = Vec::with_capacity(samples + 1);
-    let keyframe_times = property.keyframe_times();
-    let curve_start = keyframe_times.first().copied().unwrap_or(time_min);
-    let curve_end = keyframe_times.last().copied().unwrap_or(time_max);
     for sample in 0..=samples {
         let t = sample as f32 / samples as f32;
-        let time = curve_start + ((curve_end - curve_start) as f32 * t) as i64;
+        let time = time_min + ((time_max - time_min) as f32 * t) as i64;
         let value = property
             .evaluate(time)
             .to_channel_values()

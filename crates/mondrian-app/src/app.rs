@@ -10,7 +10,8 @@ use std::{sync::mpsc, thread};
 use mondrian_assets::{AssetKind, AssetLibrary};
 use mondrian_core::{
     automation::{
-        timecode_to_ticks, Keyframe, PropertyHost, PropertyMutation, PropertyValue, TimeTicks,
+        timecode_to_ticks, InterpolationType, Keyframe, KeyframeInterpolation, PropertyHost,
+        PropertyMutation, PropertyValue, TimeTicks,
     },
     events::{AppEvent, EventBus},
     types::{AssetId, ClipId, KeyframeId, Rational, Resolution, SequenceId, TimeCode, TrackId},
@@ -1752,6 +1753,46 @@ impl AppState {
             .collect()
     }
 
+    pub fn available_animation_interpolation_presets(
+        &self,
+        selection: SelectedClipRef,
+        presets: &[InterpolationType],
+    ) -> Vec<InterpolationType> {
+        let selected = self.selected_animation_keyframes_for_clip(selection.clip_id);
+        if selected.is_empty() {
+            return presets.to_vec();
+        }
+
+        let Some(clip) = self.clip_snapshot(selection) else {
+            return presets.to_vec();
+        };
+        let Ok(property_bag) = clip.property_bag() else {
+            return presets.to_vec();
+        };
+
+        let current = selected
+            .iter()
+            .filter_map(|item| {
+                property_bag
+                    .property(&item.path)
+                    .and_then(|property| property.keyframe_at(item.time))
+                    .map(|keyframe| {
+                        interpolation_preset_from_handles(keyframe.interp_in, keyframe.interp_out)
+                    })
+            })
+            .collect::<Vec<_>>();
+
+        if current.is_empty() {
+            return presets.to_vec();
+        }
+
+        presets
+            .iter()
+            .copied()
+            .filter(|preset| !current.iter().all(|current| current == preset))
+            .collect()
+    }
+
     pub fn is_animation_keyframe_selected(&self, selection: &AnimationKeyframeSelection) -> bool {
         self.animation_selection.selected_keyframes.contains(selection)
     }
@@ -2922,6 +2963,45 @@ impl AppState {
 
         clear_broken_links(seq);
         Ok(changed_count)
+    }
+}
+
+fn interpolation_preset_from_handles(
+    interp_in: KeyframeInterpolation,
+    interp_out: KeyframeInterpolation,
+) -> InterpolationType {
+    const EPSILON: f64 = 1e-6;
+
+    let approx_handle =
+        |handle: KeyframeInterpolation, time_offset: f64, value_offset: f64| match handle {
+            KeyframeInterpolation::Bezier(handle) => {
+                (handle.time_offset - time_offset).abs() <= EPSILON
+                    && (handle.value_offset - value_offset).abs() <= EPSILON
+            }
+            _ => false,
+        };
+
+    if matches!(interp_in, KeyframeInterpolation::Hold)
+        || matches!(interp_out, KeyframeInterpolation::Hold)
+    {
+        InterpolationType::Hold
+    } else if matches!(interp_in, KeyframeInterpolation::Linear)
+        && matches!(interp_out, KeyframeInterpolation::Linear)
+    {
+        InterpolationType::Linear
+    } else if matches!(interp_in, KeyframeInterpolation::Linear)
+        && approx_handle(interp_out, 1.0 / 3.0, 0.0)
+    {
+        InterpolationType::EaseIn
+    } else if approx_handle(interp_in, -1.0 / 3.0, 0.0)
+        && matches!(interp_out, KeyframeInterpolation::Linear)
+    {
+        InterpolationType::EaseOut
+    } else if approx_handle(interp_in, -1.0 / 3.0, 0.0) && approx_handle(interp_out, 1.0 / 3.0, 0.0)
+    {
+        InterpolationType::EaseInOut
+    } else {
+        InterpolationType::Bezier
     }
 }
 
