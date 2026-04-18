@@ -11,7 +11,7 @@ use egui::{ComboBox, DragValue, Grid, RichText, Sense, Ui, Vec2};
 use mondrian_core::{
     automation::{
         timecode_to_ticks, InterpolationType, KeyframeInterpolation, PropertyHost,
-        PropertyMutation, PropertyValue,
+        PropertyMutation, PropertyValue, TimeTicks, SUBFRAME_TICKS_PER_FRAME,
     },
     types::{ClipId, TimeCode},
 };
@@ -133,7 +133,7 @@ impl EffectControlsPanel {
         ui.add_space(6.0);
 
         Grid::new(format!("effect_controls_{}_grid", title))
-            .num_columns(3)
+            .num_columns(4)
             .spacing([8.0, 8.0])
             .striped(false)
             .show(ui, |ui| {
@@ -159,53 +159,123 @@ impl EffectControlsPanel {
         let interpolation = self.current_interpolation(property, current_time);
         let animation_enabled = property.is_enabled();
         let is_animated = property.is_animated();
+        let current_keyframe_time = self.current_keyframe_time(property, current_time_ticks);
+        let prev_keyframe_time = self.previous_keyframe_time(property, current_time_ticks);
+        let next_keyframe_time = self.next_keyframe_time(property, current_time_ticks);
+        let is_active_property =
+            app.active_animation_property_path(selection.clip_id) == Some(path);
 
-        if property.descriptor.is_animatable {
-            let stopwatch_selected = animation_enabled || is_animated;
-            if theme::icon_toggle_button(
-                ui,
-                tokens::timeline_toolbar_button_size(),
-                theme::UiIcon::Timer,
-                stopwatch_selected,
-            )
-            .on_hover_text(if animation_enabled {
-                "禁用动画（保留关键帧）"
-            } else {
-                "启用动画并在当前播放头创建首关键帧"
-            })
-            .clicked()
-            {
-                let mutation = if animation_enabled {
-                    PropertyMutation::DisableAnimation {
-                        path: path.to_string(),
-                        time: current_time_ticks,
-                    }
+        ui.horizontal(|ui| {
+            if property.descriptor.is_animatable {
+                let stopwatch_selected = animation_enabled || is_animated;
+                if theme::icon_toggle_button(
+                    ui,
+                    tokens::timeline_toolbar_button_size(),
+                    theme::UiIcon::Timer,
+                    stopwatch_selected,
+                )
+                .on_hover_text(if animation_enabled {
+                    "禁用动画（保留关键帧）"
                 } else {
-                    PropertyMutation::EnableAnimation {
-                        path: path.to_string(),
-                        time: current_time_ticks,
-                    }
-                };
-                let _ = app
-                    .mutate_clip_property(selection, mutation, "切换动画")
-                    .map_err(|err| app.set_status_hint(format!("切换动画失败：{err}"), true));
-            }
-        } else {
-            let _ = ui.allocate_exact_size(
-                Vec2::new(
-                    tokens::timeline_toolbar_button_size()[0],
-                    tokens::timeline_toolbar_button_size()[1],
-                ),
-                Sense::hover(),
-            );
-        }
+                    "启用动画并在当前播放头创建首关键帧"
+                })
+                .clicked()
+                {
+                    app.set_active_animation_property(selection.clip_id, path.to_string());
+                    let mutation = if animation_enabled {
+                        PropertyMutation::DisableAnimation {
+                            path: path.to_string(),
+                            time: current_time_ticks,
+                        }
+                    } else {
+                        PropertyMutation::EnableAnimation {
+                            path: path.to_string(),
+                            time: current_time_ticks,
+                        }
+                    };
+                    let _ = app
+                        .mutate_clip_property(selection, mutation, "切换动画")
+                        .map_err(|err| app.set_status_hint(format!("切换动画失败：{err}"), true));
+                }
 
-        ui.label(
-            RichText::new(&property.descriptor.display_name)
-                .font(typography::body_small())
-                .color(palette::text_primary()),
-        )
-        .on_hover_text(path);
+                self.draw_keyframe_nav_button(
+                    ui,
+                    theme::UiIcon::StepBack,
+                    prev_keyframe_time,
+                    "上一关键帧",
+                    app,
+                );
+                self.draw_keyframe_nav_button(
+                    ui,
+                    theme::UiIcon::StepForward,
+                    next_keyframe_time,
+                    "下一关键帧",
+                    app,
+                );
+
+                let add_selected = current_keyframe_time.is_some();
+                let add_resp = theme::icon_toggle_button(
+                    ui,
+                    tokens::timeline_toolbar_button_size(),
+                    theme::UiIcon::Plus,
+                    add_selected,
+                )
+                .on_hover_text(if add_selected {
+                    "删除当前关键帧"
+                } else {
+                    "在当前播放头添加关键帧"
+                });
+                if add_resp.clicked() {
+                    app.set_active_animation_property(selection.clip_id, path.to_string());
+                    let mutation = if add_selected {
+                        PropertyMutation::RemoveKeyframe {
+                            path: path.to_string(),
+                            time: current_time_ticks,
+                        }
+                    } else {
+                        PropertyMutation::WriteValue {
+                            path: path.to_string(),
+                            time: current_time_ticks,
+                            value: current_value.clone(),
+                            interpolation,
+                        }
+                    };
+                    let description = if add_selected {
+                        "删除关键帧"
+                    } else {
+                        "添加关键帧"
+                    };
+                    let _ =
+                        app.mutate_clip_property(selection, mutation, description).map_err(|err| {
+                            app.set_status_hint(format!("{description}失败：{err}"), true)
+                        });
+                }
+            } else {
+                let _ = ui.allocate_exact_size(
+                    Vec2::new(
+                        tokens::timeline_toolbar_button_size()[0] * 4.0 + 12.0,
+                        tokens::timeline_toolbar_button_size()[1],
+                    ),
+                    Sense::hover(),
+                );
+            }
+        });
+
+        let label_response = ui
+            .selectable_label(
+                is_active_property,
+                RichText::new(&property.descriptor.display_name)
+                    .font(typography::body_small())
+                    .color(if is_active_property {
+                        palette::text_primary()
+                    } else {
+                        palette::text_muted()
+                    }),
+            )
+            .on_hover_text(path);
+        if label_response.clicked() {
+            app.set_active_animation_property(selection.clip_id, path.to_string());
+        }
 
         self.draw_property_value_editor(
             ui,
@@ -215,6 +285,15 @@ impl EffectControlsPanel {
             &current_value,
             interpolation,
             property.descriptor.is_animatable,
+        );
+        self.draw_interpolation_selector(
+            ui,
+            app,
+            selection,
+            path,
+            property.descriptor.is_animatable,
+            current_keyframe_time,
+            interpolation,
         );
         ui.end_row();
     }
@@ -452,6 +531,7 @@ impl EffectControlsPanel {
         interpolation: InterpolationType,
         is_animatable: bool,
     ) {
+        app.set_active_animation_property(selection.clip_id, path.to_string());
         let mutation = if is_animatable {
             PropertyMutation::WriteValue {
                 path: path.to_string(),
@@ -477,6 +557,7 @@ impl EffectControlsPanel {
         interpolation: InterpolationType,
         is_animatable: bool,
     ) {
+        app.set_active_animation_property(selection.clip_id, path.to_string());
         let mutation = if is_animatable {
             PropertyMutation::WriteChannels {
                 path: path.to_string(),
@@ -516,6 +597,120 @@ impl EffectControlsPanel {
         }
         fallback
     }
+
+    fn current_keyframe_time(
+        &self,
+        property: &mondrian_core::automation::AnimatedProperty,
+        current_time_ticks: TimeTicks,
+    ) -> Option<TimeTicks> {
+        property.keyframe_times().into_iter().find(|time| *time == current_time_ticks)
+    }
+
+    fn previous_keyframe_time(
+        &self,
+        property: &mondrian_core::automation::AnimatedProperty,
+        current_time_ticks: TimeTicks,
+    ) -> Option<TimeTicks> {
+        property
+            .keyframe_times()
+            .into_iter()
+            .take_while(|time| *time < current_time_ticks)
+            .last()
+    }
+
+    fn next_keyframe_time(
+        &self,
+        property: &mondrian_core::automation::AnimatedProperty,
+        current_time_ticks: TimeTicks,
+    ) -> Option<TimeTicks> {
+        property.keyframe_times().into_iter().find(|time| *time > current_time_ticks)
+    }
+
+    fn draw_keyframe_nav_button(
+        &self,
+        ui: &mut Ui,
+        icon: theme::UiIcon,
+        target: Option<TimeTicks>,
+        tooltip: &str,
+        app: &mut AppState,
+    ) {
+        let response = theme::icon_button(ui, tokens::timeline_toolbar_button_size(), icon);
+        let response = response.on_hover_text(tooltip);
+        if response.clicked() {
+            if let Some(target) = target {
+                app.seek(ticks_to_frame(target));
+            }
+        }
+    }
+
+    fn draw_interpolation_selector(
+        &self,
+        ui: &mut Ui,
+        app: &mut AppState,
+        selection: SelectedClipRef,
+        path: &str,
+        is_animatable: bool,
+        current_keyframe_time: Option<TimeTicks>,
+        interpolation: InterpolationType,
+    ) {
+        if !is_animatable {
+            ui.label("");
+            return;
+        }
+
+        let mut selected = interpolation;
+        let has_current_keyframe = current_keyframe_time.is_some();
+        ui.add_enabled_ui(has_current_keyframe, |ui| {
+            ComboBox::from_id_salt((selection.clip_id, path, "interp"))
+                .width(86.0)
+                .selected_text(interpolation_label(selected))
+                .show_ui(ui, |ui| {
+                    for preset in interpolation_presets() {
+                        ui.selectable_value(&mut selected, preset, interpolation_label(preset));
+                    }
+                });
+        });
+
+        if has_current_keyframe && selected != interpolation {
+            app.set_active_animation_property(selection.clip_id, path.to_string());
+            let _ = app
+                .mutate_clip_property(
+                    selection,
+                    PropertyMutation::UpdateKeyframeInterpolation {
+                        path: path.to_string(),
+                        time: current_keyframe_time.expect("checked above"),
+                        interpolation: selected,
+                    },
+                    "更新关键帧插值",
+                )
+                .map_err(|err| app.set_status_hint(format!("更新插值失败：{err}"), true));
+        }
+    }
+}
+
+fn interpolation_presets() -> [InterpolationType; 5] {
+    [
+        InterpolationType::Linear,
+        InterpolationType::Hold,
+        InterpolationType::EaseIn,
+        InterpolationType::EaseOut,
+        InterpolationType::EaseInOut,
+    ]
+}
+
+fn interpolation_label(interpolation: InterpolationType) -> &'static str {
+    match interpolation {
+        InterpolationType::Hold => "Hold",
+        InterpolationType::Linear => "Linear",
+        InterpolationType::Bezier => "Bezier",
+        InterpolationType::EaseIn => "Ease In",
+        InterpolationType::EaseOut => "Ease Out",
+        InterpolationType::EaseInOut => "Ease InOut",
+    }
+}
+
+fn ticks_to_frame(time: TimeTicks) -> i64 {
+    ((time as f64) / (SUBFRAME_TICKS_PER_FRAME as f64)).round() as i64
 }
 
 fn interpolation_from_handles(

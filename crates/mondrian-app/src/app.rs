@@ -64,6 +64,25 @@ pub struct DraggingAsset {
     pub has_linked_audio: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AnimationPropertySelection {
+    pub clip_id: ClipId,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AnimationKeyframeSelection {
+    pub clip_id: ClipId,
+    pub path: String,
+    pub time: mondrian_core::automation::TimeTicks,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AnimationSelectionState {
+    pub active_property: Option<AnimationPropertySelection>,
+    pub selected_keyframes: HashSet<AnimationKeyframeSelection>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ClipOverlapMode {
     #[default]
@@ -312,6 +331,9 @@ pub struct AppState {
     // 底部状态栏提示（message, is_error）
     pub status_hint: Option<(String, bool)>,
 
+    // 动画选择状态（timeline / inspector / future graph 共用）
+    pub animation_selection: AnimationSelectionState,
+
     // 代理策略
     pub auto_proxy_enabled: bool,
     pub proxy_mode_assets: HashSet<AssetId>,
@@ -387,6 +409,7 @@ impl AppState {
             dragging_asset: None,
             render_queue: RenderQueue::new(),
             status_hint: None,
+            animation_selection: AnimationSelectionState::default(),
             auto_proxy_enabled: false,
             proxy_mode_assets: HashSet::new(),
             audio_sample_rate,
@@ -1668,6 +1691,89 @@ impl AppState {
         Some(TimeCode::new(self.current_frame().max(0), seq.time_base()))
     }
 
+    pub fn active_animation_property_path(&self, clip_id: ClipId) -> Option<&str> {
+        self.animation_selection
+            .active_property
+            .as_ref()
+            .filter(|selection| selection.clip_id == clip_id)
+            .map(|selection| selection.path.as_str())
+    }
+
+    pub fn set_active_animation_property(&mut self, clip_id: ClipId, path: impl Into<String>) {
+        let path = path.into();
+        let changed_clip = self
+            .animation_selection
+            .active_property
+            .as_ref()
+            .map(|selection| selection.clip_id != clip_id)
+            .unwrap_or(false);
+        if changed_clip {
+            self.animation_selection.selected_keyframes.clear();
+        }
+        self.animation_selection.active_property =
+            Some(AnimationPropertySelection { clip_id, path });
+    }
+
+    pub fn clear_animation_selection(&mut self) {
+        self.animation_selection = AnimationSelectionState::default();
+    }
+
+    pub fn clear_animation_keyframe_selection_for_clip(&mut self, clip_id: ClipId) {
+        self.animation_selection
+            .selected_keyframes
+            .retain(|selection| selection.clip_id != clip_id);
+    }
+
+    pub fn selected_animation_keyframes_for_clip(
+        &self,
+        clip_id: ClipId,
+    ) -> Vec<AnimationKeyframeSelection> {
+        self.animation_selection
+            .selected_keyframes
+            .iter()
+            .filter(|selection| selection.clip_id == clip_id)
+            .cloned()
+            .collect()
+    }
+
+    pub fn is_animation_keyframe_selected(&self, selection: &AnimationKeyframeSelection) -> bool {
+        self.animation_selection.selected_keyframes.contains(selection)
+    }
+
+    pub fn select_animation_keyframe_only(&mut self, selection: AnimationKeyframeSelection) {
+        self.set_active_animation_property(selection.clip_id, selection.path.clone());
+        self.animation_selection.selected_keyframes.clear();
+        self.animation_selection.selected_keyframes.insert(selection);
+    }
+
+    pub fn toggle_animation_keyframe_selection(&mut self, selection: AnimationKeyframeSelection) {
+        self.set_active_animation_property(selection.clip_id, selection.path.clone());
+        if !self.animation_selection.selected_keyframes.insert(selection.clone()) {
+            self.animation_selection.selected_keyframes.remove(&selection);
+        }
+    }
+
+    pub fn set_animation_keyframe_selection(
+        &mut self,
+        selections: Vec<AnimationKeyframeSelection>,
+    ) {
+        if let Some(first) = selections.first() {
+            self.set_active_animation_property(first.clip_id, first.path.clone());
+        }
+        self.animation_selection.selected_keyframes = selections.into_iter().collect();
+    }
+
+    pub fn retain_animation_keyframe_selection_for_clip(
+        &mut self,
+        clip_id: ClipId,
+        valid_keys: &HashSet<(String, mondrian_core::automation::TimeTicks)>,
+    ) {
+        self.animation_selection.selected_keyframes.retain(|selection| {
+            selection.clip_id != clip_id
+                || valid_keys.contains(&(selection.path.clone(), selection.time))
+        });
+    }
+
     pub fn clip_snapshot(&self, selection: SelectedClipRef) -> Option<Clip> {
         let seq = self.sequence.as_ref()?;
         find_clip_by_selection(seq, selection).cloned()
@@ -1679,11 +1785,23 @@ impl AppState {
         mutation: PropertyMutation,
         description: impl Into<String>,
     ) -> mondrian_core::Result<bool> {
+        self.mutate_clip_properties(selection, vec![mutation], description)
+    }
+
+    pub fn mutate_clip_properties(
+        &mut self,
+        selection: SelectedClipRef,
+        mutations: Vec<PropertyMutation>,
+        description: impl Into<String>,
+    ) -> mondrian_core::Result<bool> {
         let description = description.into();
+        if mutations.is_empty() {
+            return Ok(false);
+        }
         let (sequence_id, before, after) = {
             let seq = self.sequence.as_mut().ok_or_else(|| {
                 mondrian_core::MondrianError::WorkflowStepFailed {
-                    step_id: "mutate_clip_property".to_string(),
+                    step_id: "mutate_clip_properties".to_string(),
                     reason: "当前无项目".to_string(),
                 }
             })?;
@@ -1707,7 +1825,9 @@ impl AppState {
                     clip_id: selection.clip_id.to_string(),
                 }
             })?;
-            clip.apply_property_mutation(mutation)?;
+            for mutation in mutations {
+                clip.apply_property_mutation(mutation)?;
+            }
             (seq.id, before, seq.clone())
         };
 

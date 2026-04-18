@@ -246,6 +246,11 @@ pub struct MetricsTokens {
     pub timeline_linked_audio_highlight_width: f32,
     pub timeline_playhead_stroke_width: f32,
     pub timeline_playhead_secondary_stroke_width: f32,
+    pub timeline_animation_section_gap: f32,
+    pub timeline_animation_lane_height: f32,
+    pub timeline_animation_curve_stroke_width: f32,
+    pub timeline_keyframe_size: f32,
+    pub timeline_keyframe_hit_size: f32,
     pub viewer_transport_height: f32,
     pub startup_viewport_size: [f32; 2],
     pub startup_left_panel_width: f32,
@@ -341,6 +346,11 @@ impl Default for MetricsTokens {
             timeline_linked_audio_highlight_width: 1.5,
             timeline_playhead_stroke_width: 2.0,
             timeline_playhead_secondary_stroke_width: 1.8,
+            timeline_animation_section_gap: 8.0,
+            timeline_animation_lane_height: 24.0,
+            timeline_animation_curve_stroke_width: 1.2,
+            timeline_keyframe_size: 8.0,
+            timeline_keyframe_hit_size: 16.0,
             viewer_transport_height: 42.0,
             startup_viewport_size: [820.0, 500.0],
             startup_left_panel_width: 300.0,
@@ -1272,6 +1282,26 @@ pub mod tokens {
 
     pub fn timeline_playhead_secondary_stroke_width() -> f32 {
         super::with_active_tokens(|tokens| tokens.metrics.timeline_playhead_secondary_stroke_width)
+    }
+
+    pub fn timeline_animation_section_gap() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_animation_section_gap)
+    }
+
+    pub fn timeline_animation_lane_height() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_animation_lane_height)
+    }
+
+    pub fn timeline_animation_curve_stroke_width() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_animation_curve_stroke_width)
+    }
+
+    pub fn timeline_keyframe_size() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_keyframe_size)
+    }
+
+    pub fn timeline_keyframe_hit_size() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_keyframe_hit_size)
     }
 
     pub fn viewer_transport_height() -> f32 {

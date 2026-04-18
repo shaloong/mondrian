@@ -818,6 +818,93 @@ impl AnimatedProperty {
         }
     }
 
+    pub fn move_keyframe(&mut self, from_time: TimeTicks, to_time: TimeTicks) -> Result<()> {
+        if from_time == to_time {
+            return Ok(());
+        }
+
+        let mut moved_any = false;
+        let mut pending = Vec::new();
+
+        for channel in &mut self.channels {
+            let Some(keyframe) =
+                channel.keyframes.iter().find(|keyframe| keyframe.time == from_time).cloned()
+            else {
+                continue;
+            };
+
+            if channel.keyframes.iter().any(|keyframe| keyframe.time == to_time) {
+                return Err(MondrianError::WorkflowStepFailed {
+                    step_id: "property_move_keyframe".to_string(),
+                    reason: format!(
+                        "关键帧时间冲突: {} {} -> {}",
+                        self.descriptor.path, from_time, to_time
+                    ),
+                });
+            }
+
+            moved_any = true;
+            pending.push((channel.index, keyframe));
+        }
+
+        if !moved_any {
+            return Err(MondrianError::WorkflowStepFailed {
+                step_id: "property_move_keyframe".to_string(),
+                reason: format!("关键帧不存在: {} @ {}", self.descriptor.path, from_time),
+            });
+        }
+
+        for (channel_index, mut keyframe) in pending {
+            let channel = self.channels.get_mut(channel_index).ok_or_else(|| {
+                MondrianError::WorkflowStepFailed {
+                    step_id: "property_move_keyframe".to_string(),
+                    reason: format!("属性通道不存在: {}[{channel_index}]", self.descriptor.path),
+                }
+            })?;
+            let _ = channel.remove_keyframe(from_time);
+            keyframe.time = to_time;
+            channel.set_keyframe(keyframe);
+        }
+
+        Ok(())
+    }
+
+    pub fn update_keyframe_interpolation(
+        &mut self,
+        time: TimeTicks,
+        interpolation: InterpolationType,
+    ) -> Result<()> {
+        if !self.descriptor.is_animatable || !self.value_type().supports_animation() {
+            return Err(MondrianError::WorkflowStepFailed {
+                step_id: "property_update_keyframe_interpolation".to_string(),
+                reason: format!("属性不支持关键帧: {}", self.descriptor.path),
+            });
+        }
+
+        let normalized = self.value_type().normalized_interpolation(interpolation);
+        let (interp_in, interp_out) = interpolation_to_pair(normalized);
+        let mut updated_any = false;
+
+        for channel in &mut self.channels {
+            if let Some(existing) =
+                channel.keyframes.iter_mut().find(|keyframe| keyframe.time == time)
+            {
+                existing.interp_in = interp_in;
+                existing.interp_out = interp_out;
+                updated_any = true;
+            }
+        }
+
+        if !updated_any {
+            return Err(MondrianError::WorkflowStepFailed {
+                step_id: "property_update_keyframe_interpolation".to_string(),
+                reason: format!("关键帧不存在: {} @ {}", self.descriptor.path, time),
+            });
+        }
+
+        Ok(())
+    }
+
     pub fn apply_mutation(&mut self, mutation: PropertyMutation) -> Result<()> {
         match mutation {
             PropertyMutation::DefineProperty(descriptor) => {
@@ -855,6 +942,14 @@ impl AnimatedProperty {
                 self.ensure_path(&path)?;
                 self.remove_keyframe(time);
                 Ok(())
+            }
+            PropertyMutation::MoveKeyframe { path, from_time, to_time } => {
+                self.ensure_path(&path)?;
+                self.move_keyframe(from_time, to_time)
+            }
+            PropertyMutation::UpdateKeyframeInterpolation { path, time, interpolation } => {
+                self.ensure_path(&path)?;
+                self.update_keyframe_interpolation(time, interpolation)
             }
             PropertyMutation::EnableAnimation { path, time } => {
                 self.ensure_path(&path)?;
@@ -987,6 +1082,26 @@ impl PropertyBag {
         Ok(())
     }
 
+    pub fn move_keyframe(
+        &mut self,
+        path: &str,
+        from_time: TimeTicks,
+        to_time: TimeTicks,
+    ) -> Result<()> {
+        let property = self.require_property_mut(path)?;
+        property.move_keyframe(from_time, to_time)
+    }
+
+    pub fn update_keyframe_interpolation(
+        &mut self,
+        path: &str,
+        time: TimeTicks,
+        interpolation: InterpolationType,
+    ) -> Result<()> {
+        let property = self.require_property_mut(path)?;
+        property.update_keyframe_interpolation(time, interpolation)
+    }
+
     pub fn remove_property(&mut self, path: &str) -> Option<AnimatedProperty> {
         self.properties.remove(path)
     }
@@ -1000,6 +1115,12 @@ impl PropertyBag {
             PropertyMutation::SetStaticValue { path, value } => self.set_static_value(&path, value),
             PropertyMutation::SetKeyframe { path, keyframe } => self.set_keyframe(&path, keyframe),
             PropertyMutation::RemoveKeyframe { path, time } => self.remove_keyframe(&path, time),
+            PropertyMutation::MoveKeyframe { path, from_time, to_time } => {
+                self.move_keyframe(&path, from_time, to_time)
+            }
+            PropertyMutation::UpdateKeyframeInterpolation { path, time, interpolation } => {
+                self.update_keyframe_interpolation(&path, time, interpolation)
+            }
             PropertyMutation::EnableAnimation { path, time } => self.enable_animation(&path, time),
             PropertyMutation::DisableAnimation { path, time } => {
                 self.disable_animation(&path, time)
@@ -1040,6 +1161,16 @@ pub enum PropertyMutation {
         path: String,
         time: TimeTicks,
     },
+    MoveKeyframe {
+        path: String,
+        from_time: TimeTicks,
+        to_time: TimeTicks,
+    },
+    UpdateKeyframeInterpolation {
+        path: String,
+        time: TimeTicks,
+        interpolation: InterpolationType,
+    },
     EnableAnimation {
         path: String,
         time: TimeTicks,
@@ -1072,6 +1203,8 @@ impl PropertyMutation {
             Self::SetStaticValue { path, .. }
             | Self::SetKeyframe { path, .. }
             | Self::RemoveKeyframe { path, .. }
+            | Self::MoveKeyframe { path, .. }
+            | Self::UpdateKeyframeInterpolation { path, .. }
             | Self::EnableAnimation { path, .. }
             | Self::DisableAnimation { path, .. }
             | Self::WriteValue { path, .. }
@@ -1735,5 +1868,78 @@ mod tests {
         assert_eq!(stored.interp_in, keyframe.interp_in);
         assert_eq!(stored.interp_out, keyframe.interp_out);
         assert_eq!(stored.temporal_flags, keyframe.temporal_flags);
+    }
+
+    #[test]
+    fn move_keyframe_preserves_identity_and_value() {
+        let mut bag = PropertyBag::default();
+        bag.define(PropertyDescriptor::new(
+            "transform.opacity",
+            "Opacity",
+            PropertyValue::Float(0.0),
+        ));
+        let start = timecode_to_ticks(tc(5));
+        let target = timecode_to_ticks(tc(9));
+
+        bag.apply_mutation(PropertyMutation::SetKeyframe {
+            path: "transform.opacity".to_string(),
+            keyframe: Keyframe::linear(start, PropertyValue::Float(0.5)),
+        })
+        .expect("set keyframe");
+
+        let before = bag
+            .property("transform.opacity")
+            .and_then(|property| property.channel(0))
+            .and_then(|channel| channel.keyframes().iter().find(|keyframe| keyframe.time == start))
+            .cloned()
+            .expect("stored keyframe");
+
+        bag.apply_mutation(PropertyMutation::MoveKeyframe {
+            path: "transform.opacity".to_string(),
+            from_time: start,
+            to_time: target,
+        })
+        .expect("move keyframe");
+
+        let after = bag
+            .property("transform.opacity")
+            .and_then(|property| property.channel(0))
+            .and_then(|channel| channel.keyframes().iter().find(|keyframe| keyframe.time == target))
+            .expect("moved keyframe");
+        assert_eq!(after.id, before.id);
+        assert_eq!(after.value, before.value);
+        assert_eq!(after.interp_in, before.interp_in);
+        assert_eq!(after.interp_out, before.interp_out);
+    }
+
+    #[test]
+    fn update_keyframe_interpolation_changes_existing_keyframe() {
+        let mut bag = PropertyBag::default();
+        bag.define(PropertyDescriptor::new(
+            "transform.opacity",
+            "Opacity",
+            PropertyValue::Float(0.0),
+        ));
+        let time = timecode_to_ticks(tc(5));
+
+        bag.apply_mutation(PropertyMutation::SetKeyframe {
+            path: "transform.opacity".to_string(),
+            keyframe: Keyframe::linear(time, PropertyValue::Float(0.5)),
+        })
+        .expect("set keyframe");
+        bag.apply_mutation(PropertyMutation::UpdateKeyframeInterpolation {
+            path: "transform.opacity".to_string(),
+            time,
+            interpolation: InterpolationType::Hold,
+        })
+        .expect("update interpolation");
+
+        let stored = bag
+            .property("transform.opacity")
+            .and_then(|property| property.channel(0))
+            .and_then(|channel| channel.keyframes().iter().find(|keyframe| keyframe.time == time))
+            .expect("stored keyframe");
+        assert_eq!(stored.interp_in, KeyframeInterpolation::Hold);
+        assert_eq!(stored.interp_out, KeyframeInterpolation::Hold);
     }
 }

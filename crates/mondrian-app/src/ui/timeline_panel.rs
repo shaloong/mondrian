@@ -1,9 +1,14 @@
 use crate::{
-    app::{AppState, ClipOverlapMode},
+    app::{AnimationKeyframeSelection, AppState, ClipOverlapMode},
     ui::theme::{self, palette, tokens, typography},
 };
-use egui::{Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2};
-use mondrian_core::types::{ClipId, Rational, TrackId};
+use egui::{Color32, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2};
+use mondrian_core::{
+    automation::{
+        InterpolationType, PropertyHost, PropertyMutation, TimeTicks, SUBFRAME_TICKS_PER_FRAME,
+    },
+    types::{ClipId, Rational, TrackId},
+};
 use mondrian_timeline::clip::TrimEdge;
 use mondrian_timeline::sequence::Sequence;
 use std::collections::{HashMap, HashSet};
@@ -35,6 +40,12 @@ pub struct TimelinePanel {
     active_insert_guide_frame: Option<i64>,
     track_drag: Option<TrackDragState>,
     track_drag_target: Option<TrackDragTarget>,
+    keyframe_drag: Option<KeyframeDragState>,
+    animation_lanes_collapsed: bool,
+    animation_lane_view: AnimationLaneView,
+    animation_marquee_anchor: Option<Pos2>,
+    animation_marquee_current: Option<Pos2>,
+    animation_marquee_additive: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -42,6 +53,13 @@ enum TimelineTool {
     #[default]
     Select,
     Blade,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum AnimationLaneView {
+    #[default]
+    All,
+    ActiveOnly,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -115,6 +133,46 @@ struct TrackRowVisual {
     track_id: TrackId,
     is_video_track: bool,
     track_index: usize,
+    rect: Rect,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct KeyframeSelection {
+    clip_id: ClipId,
+    path: String,
+    time: TimeTicks,
+}
+
+#[derive(Clone)]
+struct KeyframeVisual {
+    selection: KeyframeSelection,
+    hit_rect: Rect,
+}
+
+#[derive(Clone)]
+struct KeyframeDragAnchor {
+    selection: KeyframeSelection,
+    original_time: TimeTicks,
+}
+
+#[derive(Clone)]
+struct KeyframeDragState {
+    clip: SelectedClipRef,
+    start_pointer_x: f32,
+    anchors: Vec<KeyframeDragAnchor>,
+    min_time: TimeTicks,
+}
+
+#[derive(Clone)]
+struct AnimationLane {
+    path: String,
+    display_name: String,
+    keyframe_times: Vec<TimeTicks>,
+}
+
+#[derive(Clone)]
+struct AnimationLaneVisual {
+    path: String,
     rect: Rect,
 }
 
@@ -257,8 +315,12 @@ impl TimelinePanel {
                         if ui.input(|i| {
                             i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)
                         }) {
-                            let ripple = ui.input(|i| i.modifiers.shift);
-                            self.delete_selected_clips(state, ripple);
+                            if !state.animation_selection.selected_keyframes.is_empty() {
+                                self.delete_selected_keyframes(state);
+                            } else {
+                                let ripple = ui.input(|i| i.modifiers.shift);
+                                self.delete_selected_clips(state, ripple);
+                            }
                         }
 
                         if ui.input(|i| i.pointer.any_released()) {
@@ -642,6 +704,8 @@ impl TimelinePanel {
             self.handle_marquee(ui, state, &visible_clips);
         }
 
+        self.draw_selected_clip_animation_lanes(ui, state);
+
         if first_track_top.is_none() || last_track_bottom.is_none() || content_left.is_none() {
             self.track_area_bounds = None;
             self.clear_marquee();
@@ -949,6 +1013,9 @@ impl TimelinePanel {
                         self.selected_clips.clear();
                         self.selected_clips.insert(selection);
                     }
+                    state.clear_animation_selection();
+                    self.keyframe_drag = None;
+                    self.clear_animation_marquee();
                 }
 
                 if clip_resp.drag_started() {
@@ -958,6 +1025,9 @@ impl TimelinePanel {
                         self.selected_clips.clear();
                     }
                     self.selected_clips.insert(selection);
+                    state.clear_animation_selection();
+                    self.keyframe_drag = None;
+                    self.clear_animation_marquee();
                     self.clip_drag_anchors = self.build_clip_drag_anchors(state);
                     self.clip_drag_before_sequence = state.sequence.clone();
 
@@ -1352,6 +1422,408 @@ impl TimelinePanel {
         dropped_here
     }
 
+    fn draw_selected_clip_animation_lanes(&mut self, ui: &mut Ui, state: &mut AppState) {
+        let Some(selection) = self.selected_clip_ref() else {
+            state.clear_animation_selection();
+            self.keyframe_drag = None;
+            self.clear_animation_marquee();
+            return;
+        };
+
+        let Some(clip) = state.clip_snapshot(selection) else {
+            state.clear_animation_selection();
+            self.keyframe_drag = None;
+            self.clear_animation_marquee();
+            return;
+        };
+
+        let Ok(property_bag) = clip.property_bag() else {
+            return;
+        };
+
+        let mut lanes = collect_animation_lanes(&property_bag);
+        if lanes.is_empty() {
+            state.clear_animation_keyframe_selection_for_clip(selection.clip_id);
+            self.keyframe_drag = None;
+            self.clear_animation_marquee();
+            return;
+        }
+
+        let active_path =
+            state.active_animation_property_path(selection.clip_id).map(str::to_owned);
+        if self.animation_lane_view == AnimationLaneView::ActiveOnly {
+            if let Some(active_path) = active_path.as_deref() {
+                let filtered = lanes
+                    .iter()
+                    .filter(|lane| lane.path == active_path)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if !filtered.is_empty() {
+                    lanes = filtered;
+                }
+            }
+        }
+
+        let valid_keys = lanes
+            .iter()
+            .flat_map(|lane| {
+                lane.keyframe_times
+                    .iter()
+                    .map(|time| (lane.path.clone(), *time))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<HashSet<_>>();
+        state.retain_animation_keyframe_selection_for_clip(selection.clip_id, &valid_keys);
+        let selected_keyframes = state
+            .selected_animation_keyframes_for_clip(selection.clip_id)
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let clip_label = clip.label.as_deref().filter(|label| !label.is_empty()).unwrap_or("Clip");
+
+        ui.add_space(tokens::timeline_animation_section_gap());
+        theme::toolbar_frame().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let collapse_label = if self.animation_lanes_collapsed {
+                    "展开"
+                } else {
+                    "收起"
+                };
+                if ui.small_button(collapse_label).clicked() {
+                    self.animation_lanes_collapsed = !self.animation_lanes_collapsed;
+                    self.clear_animation_marquee();
+                }
+
+                ui.label(
+                    RichText::new(format!("动画 · {clip_label}"))
+                        .font(typography::body_small())
+                        .strong()
+                        .color(palette::text_primary()),
+                );
+                if let Some(path) = active_path.as_deref() {
+                    if let Some(lane) = lanes.iter().find(|lane| lane.path == path) {
+                        ui.label(
+                            RichText::new(&lane.display_name)
+                                .font(typography::body_small())
+                                .color(palette::text_muted()),
+                        );
+                    }
+                } else {
+                    ui.label(
+                        RichText::new("选择属性或关键帧")
+                            .font(typography::body_small())
+                            .color(palette::text_muted()),
+                    );
+                }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.selectable_value(
+                        &mut self.animation_lane_view,
+                        AnimationLaneView::ActiveOnly,
+                        "当前",
+                    );
+                    ui.selectable_value(
+                        &mut self.animation_lane_view,
+                        AnimationLaneView::All,
+                        "全部",
+                    );
+                    if !selected_keyframes.is_empty() && ui.button("删除").clicked() {
+                        self.delete_selected_keyframes(state);
+                    }
+                    if !selected_keyframes.is_empty() {
+                        ui.menu_button("插值", |ui| {
+                            for preset in animation_interpolation_presets() {
+                                if ui.button(interpolation_label(preset)).clicked() {
+                                    self.apply_interpolation_to_selected_keyframes(
+                                        state, selection, preset,
+                                    );
+                                    ui.close();
+                                }
+                            }
+                        });
+                    }
+                    if !selected_keyframes.is_empty() {
+                        ui.label(
+                            RichText::new(format!("{} 关键帧", selected_keyframes.len()))
+                                .font(typography::body_small())
+                                .color(palette::text_muted()),
+                        );
+                    }
+                });
+            });
+        });
+        if self.animation_lanes_collapsed {
+            self.clear_animation_marquee();
+            return;
+        }
+        ui.add_space(tokens::panel_gap() * 0.4);
+        let label_width = tokens::timeline_track_label_width();
+        let content_left = ui.min_rect().left() + label_width;
+        let lane_height = tokens::timeline_animation_lane_height();
+        let mut visuals = Vec::new();
+        let mut lane_visuals = Vec::new();
+        let mut first_lane_rect = None;
+        let mut last_lane_rect = None;
+
+        for (lane_index, lane) in lanes.iter_mut().enumerate() {
+            let (rect, _) = ui
+                .allocate_exact_size(Vec2::new(ui.available_width(), lane_height), Sense::hover());
+            first_lane_rect.get_or_insert(rect);
+            last_lane_rect = Some(rect);
+            let painter = ui.painter_at(rect);
+            let lane_fill = if lane_index % 2 == 0 {
+                palette::bg_surface()
+            } else {
+                palette::bg_surface_raised()
+            };
+            let label_rect = Rect::from_min_size(rect.min, Vec2::new(label_width, lane_height));
+            let content_rect = Rect::from_min_max(
+                Pos2::new(label_rect.right(), rect.top()),
+                rect.right_bottom(),
+            );
+            lane_visuals.push(AnimationLaneVisual { path: lane.path.clone(), rect: content_rect });
+
+            painter.rect_filled(content_rect, 0.0, lane_fill);
+            painter.rect_filled(
+                label_rect,
+                0.0,
+                if active_path.as_deref() == Some(lane.path.as_str()) {
+                    palette::bg_surface_active()
+                } else {
+                    lane_fill
+                },
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(rect.left(), rect.bottom()),
+                    Pos2::new(rect.right(), rect.bottom()),
+                ],
+                Stroke::new(1.0, palette::border_subtle().gamma_multiply(0.8)),
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(label_rect.right(), rect.top()),
+                    Pos2::new(label_rect.right(), rect.bottom()),
+                ],
+                Stroke::new(1.0, palette::border_subtle().gamma_multiply(0.8)),
+            );
+            painter.text(
+                Pos2::new(
+                    label_rect.left() + tokens::timeline_track_label_text_inset_x(),
+                    label_rect.center().y,
+                ),
+                egui::Align2::LEFT_CENTER,
+                &lane.display_name,
+                typography::body_small(),
+                if state.active_animation_property_path(selection.clip_id)
+                    == Some(lane.path.as_str())
+                {
+                    palette::text_primary()
+                } else {
+                    palette::text_muted()
+                },
+            );
+            let label_response = ui.interact(
+                label_rect,
+                ui.make_persistent_id((
+                    "timeline_lane_label",
+                    selection.clip_id,
+                    lane.path.as_str(),
+                )),
+                Sense::click(),
+            );
+            if label_response.clicked() {
+                state.set_active_animation_property(selection.clip_id, lane.path.clone());
+            }
+
+            let lane_mid_y = content_rect.center().y;
+            painter.line_segment(
+                [
+                    Pos2::new(content_rect.left(), lane_mid_y),
+                    Pos2::new(content_rect.right(), lane_mid_y),
+                ],
+                Stroke::new(1.0, palette::border_subtle().gamma_multiply(0.55)),
+            );
+
+            let drag_delta = self.current_keyframe_drag_delta_ticks(ui);
+            let mut preview_times = Vec::with_capacity(lane.keyframe_times.len());
+            for time in &lane.keyframe_times {
+                let selection_item = KeyframeSelection {
+                    clip_id: selection.clip_id,
+                    path: lane.path.clone(),
+                    time: *time,
+                };
+                let preview_time = if selected_keyframes.contains(&AnimationKeyframeSelection {
+                    clip_id: selection_item.clip_id,
+                    path: selection_item.path.clone(),
+                    time: selection_item.time,
+                }) {
+                    (*time + drag_delta).max(0)
+                } else {
+                    *time
+                };
+                preview_times.push(preview_time);
+            }
+            preview_times.sort_unstable();
+
+            for pair in preview_times.windows(2) {
+                let x0 = content_left + ticks_to_x(pair[0], self.pixels_per_frame);
+                let x1 = content_left + ticks_to_x(pair[1], self.pixels_per_frame);
+                painter.line_segment(
+                    [Pos2::new(x0, lane_mid_y), Pos2::new(x1, lane_mid_y)],
+                    Stroke::new(
+                        tokens::timeline_animation_curve_stroke_width(),
+                        palette::interaction_highlight().gamma_multiply(0.5),
+                    ),
+                );
+            }
+
+            for (time, preview_time) in lane.keyframe_times.iter().zip(preview_times.iter()) {
+                let selection_item = KeyframeSelection {
+                    clip_id: selection.clip_id,
+                    path: lane.path.clone(),
+                    time: *time,
+                };
+                let center = Pos2::new(
+                    content_left + ticks_to_x(*preview_time, self.pixels_per_frame),
+                    lane_mid_y,
+                );
+                let hit_rect = Rect::from_center_size(
+                    center,
+                    Vec2::splat(tokens::timeline_keyframe_hit_size()),
+                );
+                let selected = selected_keyframes.contains(&AnimationKeyframeSelection {
+                    clip_id: selection_item.clip_id,
+                    path: selection_item.path.clone(),
+                    time: selection_item.time,
+                });
+                draw_keyframe_diamond(&painter, center, tokens::timeline_keyframe_size(), selected);
+                visuals.push(KeyframeVisual { selection: selection_item, hit_rect });
+            }
+
+            let playhead_x = content_left + state.current_frame() as f32 * self.pixels_per_frame;
+            painter.line_segment(
+                [
+                    Pos2::new(playhead_x, rect.top()),
+                    Pos2::new(playhead_x, rect.bottom()),
+                ],
+                Stroke::new(
+                    tokens::timeline_playhead_secondary_stroke_width(),
+                    palette::timeline_playhead(),
+                ),
+            );
+        }
+
+        let lane_bounds = match (first_lane_rect, last_lane_rect) {
+            (Some(first), Some(last)) => Some(Rect::from_min_max(
+                Pos2::new(content_left, first.top()),
+                Pos2::new(last.right(), last.bottom()),
+            )),
+            _ => None,
+        };
+
+        for visual in &visuals {
+            let response = ui.interact(
+                visual.hit_rect,
+                ui.make_persistent_id((
+                    "timeline_keyframe",
+                    visual.selection.clip_id,
+                    visual.selection.path.as_str(),
+                    visual.selection.time,
+                )),
+                Sense::click_and_drag(),
+            );
+            if response.clicked() {
+                let additive = ui.input(|i| i.modifiers.shift);
+                if additive {
+                    state.toggle_animation_keyframe_selection(AnimationKeyframeSelection {
+                        clip_id: visual.selection.clip_id,
+                        path: visual.selection.path.clone(),
+                        time: visual.selection.time,
+                    });
+                } else {
+                    state.select_animation_keyframe_only(AnimationKeyframeSelection {
+                        clip_id: visual.selection.clip_id,
+                        path: visual.selection.path.clone(),
+                        time: visual.selection.time,
+                    });
+                }
+            }
+
+            if response.drag_started() {
+                let current_selection = AnimationKeyframeSelection {
+                    clip_id: visual.selection.clip_id,
+                    path: visual.selection.path.clone(),
+                    time: visual.selection.time,
+                };
+                if !state.is_animation_keyframe_selected(&current_selection) {
+                    state.select_animation_keyframe_only(current_selection.clone());
+                }
+                let anchors = state
+                    .selected_animation_keyframes_for_clip(selection.clip_id)
+                    .into_iter()
+                    .filter(|selected| selected.clip_id == selection.clip_id)
+                    .map(|selected| KeyframeDragAnchor {
+                        original_time: selected.time,
+                        selection: KeyframeSelection {
+                            clip_id: selected.clip_id,
+                            path: selected.path,
+                            time: selected.time,
+                        },
+                    })
+                    .collect::<Vec<_>>();
+                let min_time = anchors
+                    .iter()
+                    .map(|anchor| anchor.original_time)
+                    .min()
+                    .unwrap_or(visual.selection.time);
+                self.keyframe_drag = response.interact_pointer_pos().map(|pos| KeyframeDragState {
+                    clip: selection,
+                    start_pointer_x: pos.x,
+                    anchors,
+                    min_time,
+                });
+            }
+
+            response.context_menu(|ui| {
+                let current_selection = AnimationKeyframeSelection {
+                    clip_id: visual.selection.clip_id,
+                    path: visual.selection.path.clone(),
+                    time: visual.selection.time,
+                };
+                if !state.is_animation_keyframe_selected(&current_selection) {
+                    state.select_animation_keyframe_only(current_selection);
+                }
+
+                if ui.button("删除关键帧").clicked() {
+                    self.delete_selected_keyframes(state);
+                    ui.close();
+                }
+
+                ui.separator();
+                for preset in animation_interpolation_presets() {
+                    if ui.button(interpolation_label(preset)).clicked() {
+                        self.apply_interpolation_to_selected_keyframes(state, selection, preset);
+                        ui.close();
+                    }
+                }
+            });
+        }
+
+        self.handle_animation_keyframe_marquee(
+            ui,
+            state,
+            selection,
+            lane_bounds,
+            &lane_visuals,
+            &visuals,
+        );
+
+        if ui.input(|i| i.pointer.any_released()) {
+            let pointer_x = ui.input(|i| i.pointer.interact_pos()).map(|pos| pos.x);
+            self.finish_keyframe_drag(state, pointer_x);
+        }
+    }
+
     fn handle_marquee(&mut self, ui: &mut Ui, state: &AppState, visible_clips: &[ClipVisual]) {
         if state.dragging_asset().is_some() || self.clip_drag.is_some() || self.track_drag.is_some()
         {
@@ -1436,6 +1908,131 @@ impl TimelinePanel {
         self.marquee_additive = false;
     }
 
+    fn handle_animation_keyframe_marquee(
+        &mut self,
+        ui: &mut Ui,
+        state: &mut AppState,
+        selection: SelectedClipRef,
+        bounds: Option<Rect>,
+        lanes: &[AnimationLaneVisual],
+        visuals: &[KeyframeVisual],
+    ) {
+        if self.keyframe_drag.is_some() {
+            self.clear_animation_marquee();
+            return;
+        }
+
+        let Some(bounds) = bounds else {
+            self.clear_animation_marquee();
+            return;
+        };
+
+        let pointer_pos = ui.input(|i| i.pointer.interact_pos());
+        let primary_pressed = ui.input(|i| i.pointer.primary_pressed());
+        let primary_down = ui.input(|i| i.pointer.primary_down());
+        let primary_released = ui.input(|i| i.pointer.primary_released());
+
+        if primary_pressed {
+            if let Some(pos) = pointer_pos {
+                let on_keyframe = visuals.iter().any(|visual| visual.hit_rect.contains(pos));
+                if bounds.contains(pos) && !on_keyframe {
+                    self.animation_marquee_anchor = Some(pos);
+                    self.animation_marquee_current = Some(pos);
+                    self.animation_marquee_additive = ui.input(|i| i.modifiers.shift);
+                    if let Some(lane) = lanes.iter().find(|lane| lane.rect.contains(pos)) {
+                        state.set_active_animation_property(selection.clip_id, lane.path.clone());
+                    }
+                }
+            }
+        }
+
+        if primary_down && self.animation_marquee_anchor.is_some() {
+            if let Some(pos) = pointer_pos {
+                self.animation_marquee_current = Some(pos);
+            }
+        }
+
+        if let (Some(anchor), Some(current)) = (
+            self.animation_marquee_anchor,
+            self.animation_marquee_current,
+        ) {
+            let rect = Rect::from_two_pos(anchor, current).intersect(bounds);
+            if rect.width() > 2.0 && rect.height() > 2.0 {
+                ui.painter().rect_filled(
+                    rect,
+                    2.0,
+                    palette::interaction_highlight().gamma_multiply(0.16),
+                );
+                ui.painter().rect_stroke(
+                    rect,
+                    corner_radius(2.0),
+                    Stroke::new(1.2, palette::interaction_highlight()),
+                    egui::StrokeKind::Inside,
+                );
+            }
+        }
+
+        if primary_released {
+            if let (Some(anchor), Some(current)) = (
+                self.animation_marquee_anchor,
+                self.animation_marquee_current,
+            ) {
+                let rect = Rect::from_two_pos(anchor, current).intersect(bounds);
+                let picks = visuals
+                    .iter()
+                    .filter(|visual| visual.hit_rect.intersects(rect))
+                    .map(|visual| AnimationKeyframeSelection {
+                        clip_id: visual.selection.clip_id,
+                        path: visual.selection.path.clone(),
+                        time: visual.selection.time,
+                    })
+                    .collect::<Vec<_>>();
+
+                if rect.width() > 2.0 && rect.height() > 2.0 {
+                    if self.animation_marquee_additive {
+                        let mut combined = state
+                            .selected_animation_keyframes_for_clip(selection.clip_id)
+                            .into_iter()
+                            .collect::<HashSet<_>>();
+                        combined.extend(picks);
+                        state.set_animation_keyframe_selection(combined.into_iter().collect());
+                    } else if picks.is_empty() {
+                        state.clear_animation_keyframe_selection_for_clip(selection.clip_id);
+                    } else {
+                        state.set_animation_keyframe_selection(picks);
+                    }
+                } else if !self.animation_marquee_additive
+                    && bounds.contains(current)
+                    && !visuals.iter().any(|visual| visual.hit_rect.contains(current))
+                {
+                    state.clear_animation_keyframe_selection_for_clip(selection.clip_id);
+                }
+            }
+            self.clear_animation_marquee();
+        }
+    }
+
+    fn clear_animation_marquee(&mut self) {
+        self.animation_marquee_anchor = None;
+        self.animation_marquee_current = None;
+        self.animation_marquee_additive = false;
+    }
+
+    fn current_keyframe_drag_delta_ticks(&self, ui: &Ui) -> TimeTicks {
+        let Some(drag) = &self.keyframe_drag else {
+            return 0;
+        };
+        let Some(pointer_x) = ui.input(|i| i.pointer.interact_pos()).map(|pos| pos.x) else {
+            return 0;
+        };
+        keyframe_drag_delta_ticks(
+            self.pixels_per_frame,
+            drag.start_pointer_x,
+            Some(pointer_x),
+            drag.min_time,
+        )
+    }
+
     fn delete_selected_clips(&mut self, state: &mut AppState, ripple: bool) {
         if self.selected_clips.is_empty() {
             return;
@@ -1450,6 +2047,105 @@ impl TimelinePanel {
         if state.remove_clips_bulk(&selections, ripple).is_ok() {
             self.selected_clips.clear();
         }
+    }
+
+    fn delete_selected_keyframes(&mut self, state: &mut AppState) {
+        let Some(selection) = self.selected_clip_ref() else {
+            state.clear_animation_selection();
+            return;
+        };
+        let selected_keyframes = state.selected_animation_keyframes_for_clip(selection.clip_id);
+        if selected_keyframes.is_empty() {
+            return;
+        }
+
+        let mut mutations = selected_keyframes
+            .iter()
+            .map(|selected| PropertyMutation::RemoveKeyframe {
+                path: selected.path.clone(),
+                time: selected.time,
+            })
+            .collect::<Vec<_>>();
+        mutations.sort_by(|a, b| a.path().cmp(b.path()));
+
+        if state.mutate_clip_properties(selection, mutations, "删除关键帧").is_ok() {
+            state.clear_animation_keyframe_selection_for_clip(selection.clip_id);
+        }
+    }
+
+    fn apply_interpolation_to_selected_keyframes(
+        &mut self,
+        state: &mut AppState,
+        selection: SelectedClipRef,
+        interpolation: InterpolationType,
+    ) {
+        let mutations = state
+            .selected_animation_keyframes_for_clip(selection.clip_id)
+            .into_iter()
+            .map(|selected| PropertyMutation::UpdateKeyframeInterpolation {
+                path: selected.path.clone(),
+                time: selected.time,
+                interpolation,
+            })
+            .collect::<Vec<_>>();
+        let _ = state
+            .mutate_clip_properties(selection, mutations, "更新关键帧插值")
+            .map_err(|err| state.set_status_hint(format!("更新关键帧插值失败：{err}"), true));
+    }
+
+    fn finish_keyframe_drag(&mut self, state: &mut AppState, pointer_x: Option<f32>) {
+        let Some(drag) = self.keyframe_drag.take() else {
+            return;
+        };
+
+        let delta_ticks = keyframe_drag_delta_ticks(
+            self.pixels_per_frame,
+            drag.start_pointer_x,
+            pointer_x,
+            drag.min_time,
+        );
+        if delta_ticks == 0 {
+            return;
+        }
+
+        let selection_after_move = drag
+            .anchors
+            .iter()
+            .map(|anchor| AnimationKeyframeSelection {
+                clip_id: anchor.selection.clip_id,
+                path: anchor.selection.path.clone(),
+                time: (anchor.original_time + delta_ticks).max(0),
+            })
+            .collect::<Vec<_>>();
+
+        let mut anchors = drag.anchors;
+        anchors.sort_by(|a, b| {
+            if delta_ticks >= 0 {
+                b.original_time
+                    .cmp(&a.original_time)
+                    .then_with(|| a.selection.path.cmp(&b.selection.path))
+            } else {
+                a.original_time
+                    .cmp(&b.original_time)
+                    .then_with(|| a.selection.path.cmp(&b.selection.path))
+            }
+        });
+
+        let mutations = anchors
+            .into_iter()
+            .map(|anchor| PropertyMutation::MoveKeyframe {
+                path: anchor.selection.path,
+                from_time: anchor.original_time,
+                to_time: (anchor.original_time + delta_ticks).max(0),
+            })
+            .collect::<Vec<_>>();
+
+        let _ = state
+            .mutate_clip_properties(drag.clip, mutations, "移动关键帧")
+            .map(|_| {
+                state.set_animation_keyframe_selection(selection_after_move);
+            })
+            .map_err(|err| state.set_status_hint(format!("移动关键帧失败：{err}"), true));
     }
 
     fn trim_selected_clips_to_playhead(&mut self, state: &mut AppState, edge: TrimEdge) {
@@ -1717,6 +2413,110 @@ fn find_clip_in_sequence(
         }
     }
     None
+}
+
+fn collect_animation_lanes(
+    property_bag: &mondrian_core::automation::PropertyBag,
+) -> Vec<AnimationLane> {
+    let mut lanes = property_bag
+        .iter()
+        .filter_map(|(path, property)| {
+            if !property.descriptor.is_animatable {
+                return None;
+            }
+            let keyframe_times = property.keyframe_times();
+            if keyframe_times.is_empty() {
+                return None;
+            }
+            Some(AnimationLane {
+                path: path.to_string(),
+                display_name: property.descriptor.display_name.clone(),
+                keyframe_times,
+            })
+        })
+        .collect::<Vec<_>>();
+    lanes.sort_by(|a, b| animation_lane_order(&a.path).cmp(&animation_lane_order(&b.path)));
+    lanes
+}
+
+fn animation_lane_order(path: &str) -> usize {
+    match path {
+        mondrian_timeline::clip::Transform2D::POSITION_PATH => 0,
+        mondrian_timeline::clip::Transform2D::SCALE_PATH => 1,
+        mondrian_timeline::clip::Transform2D::ROTATION_PATH => 2,
+        mondrian_timeline::clip::Transform2D::ANCHOR_POINT_PATH => 3,
+        mondrian_timeline::clip::Transform2D::OPACITY_PATH => 4,
+        mondrian_timeline::clip::Clip::BLEND_MODE_PATH => 5,
+        mondrian_timeline::clip::SpeedMap::MULTIPLIER_PATH => 6,
+        _ => 100,
+    }
+}
+
+fn ticks_to_x(time: TimeTicks, pixels_per_frame: f32) -> f32 {
+    (time as f32 / SUBFRAME_TICKS_PER_FRAME as f32) * pixels_per_frame
+}
+
+fn keyframe_drag_delta_ticks(
+    pixels_per_frame: f32,
+    start_pointer_x: f32,
+    pointer_x: Option<f32>,
+    min_time: TimeTicks,
+) -> TimeTicks {
+    let Some(pointer_x) = pointer_x else {
+        return 0;
+    };
+    if pixels_per_frame <= 0.0 {
+        return 0;
+    }
+
+    let frame_delta = ((pointer_x - start_pointer_x) / pixels_per_frame).round() as i64;
+    let delta_ticks = frame_delta.saturating_mul(SUBFRAME_TICKS_PER_FRAME);
+    delta_ticks.max(-min_time)
+}
+
+fn draw_keyframe_diamond(painter: &egui::Painter, center: Pos2, size: f32, selected: bool) {
+    let half = size * 0.5;
+    let points = vec![
+        Pos2::new(center.x, center.y - half),
+        Pos2::new(center.x + half, center.y),
+        Pos2::new(center.x, center.y + half),
+        Pos2::new(center.x - half, center.y),
+    ];
+    let fill = if selected {
+        palette::interaction_highlight()
+    } else {
+        palette::bg_surface_hover()
+    };
+    let stroke = Stroke::new(
+        1.0,
+        if selected {
+            palette::text_primary()
+        } else {
+            palette::interaction_highlight().gamma_multiply(0.7)
+        },
+    );
+    painter.add(egui::Shape::convex_polygon(points, fill, stroke));
+}
+
+fn animation_interpolation_presets() -> [InterpolationType; 5] {
+    [
+        InterpolationType::Linear,
+        InterpolationType::Hold,
+        InterpolationType::EaseIn,
+        InterpolationType::EaseOut,
+        InterpolationType::EaseInOut,
+    ]
+}
+
+fn interpolation_label(interpolation: InterpolationType) -> &'static str {
+    match interpolation {
+        InterpolationType::Hold => "Hold",
+        InterpolationType::Linear => "Linear",
+        InterpolationType::Bezier => "Bezier",
+        InterpolationType::EaseIn => "Ease In",
+        InterpolationType::EaseOut => "Ease Out",
+        InterpolationType::EaseInOut => "Ease InOut",
+    }
 }
 
 #[derive(Copy, Clone)]
