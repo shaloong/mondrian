@@ -251,6 +251,10 @@ pub struct MetricsTokens {
     pub timeline_animation_curve_stroke_width: f32,
     pub timeline_keyframe_size: f32,
     pub timeline_keyframe_hit_size: f32,
+    pub graph_editor_height: f32,
+    pub graph_editor_header_height: f32,
+    pub graph_editor_handle_size: f32,
+    pub graph_editor_curve_stroke_width: f32,
     pub viewer_transport_height: f32,
     pub startup_viewport_size: [f32; 2],
     pub startup_left_panel_width: f32,
@@ -351,6 +355,10 @@ impl Default for MetricsTokens {
             timeline_animation_curve_stroke_width: 1.2,
             timeline_keyframe_size: 8.0,
             timeline_keyframe_hit_size: 16.0,
+            graph_editor_height: 320.0,
+            graph_editor_header_height: 32.0,
+            graph_editor_handle_size: 7.0,
+            graph_editor_curve_stroke_width: 1.6,
             viewer_transport_height: 42.0,
             startup_viewport_size: [820.0, 500.0],
             startup_left_panel_width: 300.0,
@@ -794,6 +802,10 @@ pub enum UiIcon {
     Unlock,
     Speaker,
     Mute,
+    Trash,
+    Copy,
+    ClipboardText,
+    Anchor,
 }
 
 pub fn icon(ui: &mut egui::Ui, kind: UiIcon, color: egui::Color32) -> egui::Response {
@@ -949,6 +961,10 @@ fn icon_svg_bytes(kind: UiIcon) -> &'static [u8] {
         UiIcon::Unlock => include_bytes!("../../assets/icons/unlock.svg"),
         UiIcon::Speaker => include_bytes!("../../assets/icons/speaker.svg"),
         UiIcon::Mute => include_bytes!("../../assets/icons/speaker_muted.svg"),
+        UiIcon::Trash => include_bytes!("../../assets/icons/trash.svg"),
+        UiIcon::Copy => include_bytes!("../../assets/icons/copy.svg"),
+        UiIcon::ClipboardText => include_bytes!("../../assets/icons/clipboard_text.svg"),
+        UiIcon::Anchor => include_bytes!("../../assets/icons/anchor.svg"),
     }
 }
 
@@ -1302,6 +1318,22 @@ pub mod tokens {
 
     pub fn timeline_keyframe_hit_size() -> f32 {
         super::with_active_tokens(|tokens| tokens.metrics.timeline_keyframe_hit_size)
+    }
+
+    pub fn graph_editor_height() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.graph_editor_height)
+    }
+
+    pub fn graph_editor_header_height() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.graph_editor_header_height)
+    }
+
+    pub fn graph_editor_handle_size() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.graph_editor_handle_size)
+    }
+
+    pub fn graph_editor_curve_stroke_width() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.graph_editor_curve_stroke_width)
     }
 
     pub fn viewer_transport_height() -> f32 {

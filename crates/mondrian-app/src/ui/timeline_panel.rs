@@ -1526,21 +1526,6 @@ impl TimelinePanel {
                         AnimationLaneView::All,
                         "全部",
                     );
-                    if !selected_keyframes.is_empty() && ui.button("删除").clicked() {
-                        self.delete_selected_keyframes(state);
-                    }
-                    if !selected_keyframes.is_empty() {
-                        ui.menu_button("插值", |ui| {
-                            for preset in animation_interpolation_presets() {
-                                if ui.button(interpolation_label(preset)).clicked() {
-                                    self.apply_interpolation_to_selected_keyframes(
-                                        state, selection, preset,
-                                    );
-                                    ui.close();
-                                }
-                            }
-                        });
-                    }
                     if !selected_keyframes.is_empty() {
                         ui.label(
                             RichText::new(format!("{} 关键帧", selected_keyframes.len()))
@@ -1794,13 +1779,35 @@ impl TimelinePanel {
                     state.select_animation_keyframe_only(current_selection);
                 }
 
+                if ui.button("复制关键帧").clicked() {
+                    let _ = state.copy_selected_animation_keyframes(selection).map_err(|err| {
+                        state.set_status_hint(format!("复制关键帧失败：{err}"), true)
+                    });
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(
+                        state.has_animation_clipboard(),
+                        egui::Button::new("粘贴关键帧"),
+                    )
+                    .clicked()
+                {
+                    let destination_time = state
+                        .current_time_code()
+                        .map(mondrian_core::automation::timecode_to_ticks)
+                        .unwrap_or(0);
+                    let _ = state.paste_animation_keyframes(selection, destination_time).map_err(
+                        |err| state.set_status_hint(format!("粘贴关键帧失败：{err}"), true),
+                    );
+                    ui.close();
+                }
                 if ui.button("删除关键帧").clicked() {
                     self.delete_selected_keyframes(state);
                     ui.close();
                 }
 
                 ui.separator();
-                for preset in animation_interpolation_presets() {
+                for preset in visible_animation_interpolation_presets() {
                     if ui.button(interpolation_label(preset)).clicked() {
                         self.apply_interpolation_to_selected_keyframes(state, selection, preset);
                         ui.close();
@@ -1808,6 +1815,8 @@ impl TimelinePanel {
                 }
             });
         }
+
+        self.draw_animation_keyframe_bubble(ui.ctx(), state, selection, &visuals);
 
         self.handle_animation_keyframe_marquee(
             ui,
@@ -2016,6 +2025,104 @@ impl TimelinePanel {
         self.animation_marquee_anchor = None;
         self.animation_marquee_current = None;
         self.animation_marquee_additive = false;
+    }
+
+    fn draw_animation_keyframe_bubble(
+        &mut self,
+        ctx: &egui::Context,
+        state: &mut AppState,
+        selection: SelectedClipRef,
+        visuals: &[KeyframeVisual],
+    ) {
+        if self.keyframe_drag.is_some() {
+            return;
+        }
+
+        let selected_points = visuals
+            .iter()
+            .filter_map(|visual| {
+                let selection_item = AnimationKeyframeSelection {
+                    clip_id: visual.selection.clip_id,
+                    path: visual.selection.path.clone(),
+                    time: visual.selection.time,
+                };
+                state
+                    .is_animation_keyframe_selected(&selection_item)
+                    .then_some(visual.hit_rect.center())
+            })
+            .collect::<Vec<_>>();
+        if selected_points.is_empty() {
+            return;
+        }
+
+        let centroid = selected_points.iter().fold(Pos2::ZERO, |acc, point| {
+            Pos2::new(acc.x + point.x, acc.y + point.y)
+        });
+        let centroid = Pos2::new(
+            centroid.x / selected_points.len() as f32,
+            centroid.y / selected_points.len() as f32,
+        );
+
+        egui::Area::new(egui::Id::new((
+            "timeline_keyframe_bubble",
+            selection.clip_id,
+        )))
+        .order(egui::Order::Tooltip)
+        .fixed_pos(Pos2::new(centroid.x, centroid.y - 30.0))
+        .show(ctx, |ui| {
+            theme::toolbar_frame().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let copy = theme::icon_button(
+                        ui,
+                        tokens::timeline_toolbar_button_size(),
+                        theme::UiIcon::Copy,
+                    )
+                    .on_hover_text("复制关键帧");
+                    if copy.clicked() {
+                        let _ = state.copy_selected_animation_keyframes(selection).map_err(|err| {
+                            state.set_status_hint(format!("复制关键帧失败：{err}"), true)
+                        });
+                    }
+
+                    let paste = ui.add_enabled_ui(state.has_animation_clipboard(), |ui| {
+                        theme::icon_button(
+                            ui,
+                            tokens::timeline_toolbar_button_size(),
+                            theme::UiIcon::ClipboardText,
+                        )
+                    });
+                    if paste.inner.clicked() {
+                        let destination_time = state
+                            .current_time_code()
+                            .map(mondrian_core::automation::timecode_to_ticks)
+                            .unwrap_or(0);
+                        let _ =
+                            state.paste_animation_keyframes(selection, destination_time).map_err(
+                                |err| state.set_status_hint(format!("粘贴关键帧失败：{err}"), true),
+                            );
+                    }
+
+                    let delete = theme::icon_button(
+                        ui,
+                        tokens::timeline_toolbar_button_size(),
+                        theme::UiIcon::Trash,
+                    )
+                    .on_hover_text("删除关键帧");
+                    if delete.clicked() {
+                        self.delete_selected_keyframes(state);
+                    }
+
+                    ui.separator();
+                    for preset in visible_animation_interpolation_presets() {
+                        if ui.small_button(interpolation_label(preset)).clicked() {
+                            self.apply_interpolation_to_selected_keyframes(
+                                state, selection, preset,
+                            );
+                        }
+                    }
+                });
+            });
+        });
     }
 
     fn current_keyframe_drag_delta_ticks(&self, ui: &Ui) -> TimeTicks {
@@ -2498,10 +2605,9 @@ fn draw_keyframe_diamond(painter: &egui::Painter, center: Pos2, size: f32, selec
     painter.add(egui::Shape::convex_polygon(points, fill, stroke));
 }
 
-fn animation_interpolation_presets() -> [InterpolationType; 5] {
+fn visible_animation_interpolation_presets() -> [InterpolationType; 4] {
     [
         InterpolationType::Linear,
-        InterpolationType::Hold,
         InterpolationType::EaseIn,
         InterpolationType::EaseOut,
         InterpolationType::EaseInOut,

@@ -554,6 +554,10 @@ impl AnimationChannel {
         &self.keyframes
     }
 
+    pub fn keyframe_at(&self, time: TimeTicks) -> Option<&Keyframe<f64>> {
+        self.keyframes.iter().find(|keyframe| keyframe.time == time)
+    }
+
     pub fn set_keyframe(&mut self, keyframe: Keyframe<f64>) {
         let pos = self.keyframes.partition_point(|candidate| candidate.time < keyframe.time);
         if pos < self.keyframes.len() && self.keyframes[pos].time == keyframe.time {
@@ -649,6 +653,38 @@ impl AnimatedProperty {
         times
     }
 
+    pub fn keyframe_at(&self, time: TimeTicks) -> Option<Keyframe<PropertyValue>> {
+        let mut found = false;
+        let mut id = None;
+        let mut interp_in = KeyframeInterpolation::Linear;
+        let mut interp_out = KeyframeInterpolation::Linear;
+        let mut temporal_flags = KeyframeTemporalFlags::default();
+
+        for channel in &self.channels {
+            if let Some(keyframe) = channel.keyframe_at(time) {
+                found = true;
+                id.get_or_insert(keyframe.id);
+                interp_in = keyframe.interp_in;
+                interp_out = keyframe.interp_out;
+                temporal_flags = keyframe.temporal_flags;
+                break;
+            }
+        }
+
+        if !found {
+            return None;
+        }
+
+        Some(Keyframe {
+            id: id.unwrap_or_else(KeyframeId::new),
+            time,
+            value: self.evaluate(time),
+            interp_in,
+            interp_out,
+            temporal_flags,
+        })
+    }
+
     pub fn set_static_value(&mut self, value: PropertyValue) {
         self.static_value = value;
     }
@@ -706,6 +742,14 @@ impl AnimatedProperty {
         }
         self.static_value = self.evaluate(time);
         self.animation_enabled = false;
+        Ok(())
+    }
+
+    pub fn clear_animation(&mut self, time: TimeTicks) -> Result<()> {
+        self.disable_animation(time)?;
+        for channel in &mut self.channels {
+            channel.keyframes.clear();
+        }
         Ok(())
     }
 
@@ -905,6 +949,36 @@ impl AnimatedProperty {
         Ok(())
     }
 
+    pub fn update_channel_keyframe_handles(
+        &mut self,
+        time: TimeTicks,
+        channel_index: usize,
+        interp_in: KeyframeInterpolation,
+        interp_out: KeyframeInterpolation,
+    ) -> Result<()> {
+        let channel = self.channels.get_mut(channel_index).ok_or_else(|| {
+            MondrianError::WorkflowStepFailed {
+                step_id: "property_update_channel_keyframe_handles".to_string(),
+                reason: format!("属性通道不存在: {}[{channel_index}]", self.descriptor.path),
+            }
+        })?;
+
+        let keyframe =
+            channel.keyframes.iter_mut().find(|keyframe| keyframe.time == time).ok_or_else(
+                || MondrianError::WorkflowStepFailed {
+                    step_id: "property_update_channel_keyframe_handles".to_string(),
+                    reason: format!(
+                        "关键帧不存在: {}[{channel_index}] @ {}",
+                        self.descriptor.path, time
+                    ),
+                },
+            )?;
+
+        keyframe.interp_in = interp_in;
+        keyframe.interp_out = interp_out;
+        Ok(())
+    }
+
     pub fn apply_mutation(&mut self, mutation: PropertyMutation) -> Result<()> {
         match mutation {
             PropertyMutation::DefineProperty(descriptor) => {
@@ -951,6 +1025,16 @@ impl AnimatedProperty {
                 self.ensure_path(&path)?;
                 self.update_keyframe_interpolation(time, interpolation)
             }
+            PropertyMutation::UpdateChannelKeyframeHandles {
+                path,
+                time,
+                channel_index,
+                interp_in,
+                interp_out,
+            } => {
+                self.ensure_path(&path)?;
+                self.update_channel_keyframe_handles(time, channel_index, interp_in, interp_out)
+            }
             PropertyMutation::EnableAnimation { path, time } => {
                 self.ensure_path(&path)?;
                 self.enable_animation(time)
@@ -958,6 +1042,10 @@ impl AnimatedProperty {
             PropertyMutation::DisableAnimation { path, time } => {
                 self.ensure_path(&path)?;
                 self.disable_animation(time)
+            }
+            PropertyMutation::ClearAnimation { path, time } => {
+                self.ensure_path(&path)?;
+                self.clear_animation(time)
             }
             PropertyMutation::WriteValue { path, time, value, interpolation } => {
                 self.ensure_path(&path)?;
@@ -1053,6 +1141,11 @@ impl PropertyBag {
         property.disable_animation(time)
     }
 
+    pub fn clear_animation(&mut self, path: &str, time: TimeTicks) -> Result<()> {
+        let property = self.require_property_mut(path)?;
+        property.clear_animation(time)
+    }
+
     pub fn write_value(
         &mut self,
         path: &str,
@@ -1102,6 +1195,18 @@ impl PropertyBag {
         property.update_keyframe_interpolation(time, interpolation)
     }
 
+    pub fn update_channel_keyframe_handles(
+        &mut self,
+        path: &str,
+        time: TimeTicks,
+        channel_index: usize,
+        interp_in: KeyframeInterpolation,
+        interp_out: KeyframeInterpolation,
+    ) -> Result<()> {
+        let property = self.require_property_mut(path)?;
+        property.update_channel_keyframe_handles(time, channel_index, interp_in, interp_out)
+    }
+
     pub fn remove_property(&mut self, path: &str) -> Option<AnimatedProperty> {
         self.properties.remove(path)
     }
@@ -1121,10 +1226,24 @@ impl PropertyBag {
             PropertyMutation::UpdateKeyframeInterpolation { path, time, interpolation } => {
                 self.update_keyframe_interpolation(&path, time, interpolation)
             }
+            PropertyMutation::UpdateChannelKeyframeHandles {
+                path,
+                time,
+                channel_index,
+                interp_in,
+                interp_out,
+            } => self.update_channel_keyframe_handles(
+                &path,
+                time,
+                channel_index,
+                interp_in,
+                interp_out,
+            ),
             PropertyMutation::EnableAnimation { path, time } => self.enable_animation(&path, time),
             PropertyMutation::DisableAnimation { path, time } => {
                 self.disable_animation(&path, time)
             }
+            PropertyMutation::ClearAnimation { path, time } => self.clear_animation(&path, time),
             PropertyMutation::WriteValue { path, time, value, interpolation } => {
                 self.write_value(&path, time, value, interpolation)
             }
@@ -1171,11 +1290,22 @@ pub enum PropertyMutation {
         time: TimeTicks,
         interpolation: InterpolationType,
     },
+    UpdateChannelKeyframeHandles {
+        path: String,
+        time: TimeTicks,
+        channel_index: usize,
+        interp_in: KeyframeInterpolation,
+        interp_out: KeyframeInterpolation,
+    },
     EnableAnimation {
         path: String,
         time: TimeTicks,
     },
     DisableAnimation {
+        path: String,
+        time: TimeTicks,
+    },
+    ClearAnimation {
         path: String,
         time: TimeTicks,
     },
@@ -1205,8 +1335,10 @@ impl PropertyMutation {
             | Self::RemoveKeyframe { path, .. }
             | Self::MoveKeyframe { path, .. }
             | Self::UpdateKeyframeInterpolation { path, .. }
+            | Self::UpdateChannelKeyframeHandles { path, .. }
             | Self::EnableAnimation { path, .. }
             | Self::DisableAnimation { path, .. }
+            | Self::ClearAnimation { path, .. }
             | Self::WriteValue { path, .. }
             | Self::WriteChannels { path, .. }
             | Self::RemoveProperty { path } => path,
@@ -1341,32 +1473,26 @@ fn interpolation_to_pair(
             }),
         ),
         InterpolationType::EaseIn => (
+            KeyframeInterpolation::Linear,
             KeyframeInterpolation::Bezier(BezierHandle {
                 time_offset: 1.0 / 3.0,
                 value_offset: 0.0,
-            }),
-            KeyframeInterpolation::Bezier(BezierHandle {
-                time_offset: -1.0 / 3.0,
-                value_offset: -1.0 / 3.0,
             }),
         ),
         InterpolationType::EaseOut => (
             KeyframeInterpolation::Bezier(BezierHandle {
-                time_offset: 1.0 / 3.0,
-                value_offset: 1.0 / 3.0,
-            }),
-            KeyframeInterpolation::Bezier(BezierHandle {
                 time_offset: -1.0 / 3.0,
                 value_offset: 0.0,
             }),
+            KeyframeInterpolation::Linear,
         ),
         InterpolationType::EaseInOut => (
             KeyframeInterpolation::Bezier(BezierHandle {
-                time_offset: 1.0 / 3.0,
+                time_offset: -1.0 / 3.0,
                 value_offset: 0.0,
             }),
             KeyframeInterpolation::Bezier(BezierHandle {
-                time_offset: -1.0 / 3.0,
+                time_offset: 1.0 / 3.0,
                 value_offset: 0.0,
             }),
         ),
@@ -1941,5 +2067,103 @@ mod tests {
             .expect("stored keyframe");
         assert_eq!(stored.interp_in, KeyframeInterpolation::Hold);
         assert_eq!(stored.interp_out, KeyframeInterpolation::Hold);
+    }
+
+    #[test]
+    fn clear_animation_removes_all_keyframes_and_keeps_current_value() {
+        let mut bag = PropertyBag::default();
+        bag.define(PropertyDescriptor::new(
+            "transform.opacity",
+            "Opacity",
+            PropertyValue::Float(0.0),
+        ));
+
+        let start = timecode_to_ticks(tc(0));
+        let end = timecode_to_ticks(tc(10));
+        let mid = timecode_to_ticks(tc(5));
+
+        bag.apply_mutation(PropertyMutation::SetKeyframe {
+            path: "transform.opacity".to_string(),
+            keyframe: Keyframe::linear(start, PropertyValue::Float(0.0)),
+        })
+        .expect("set first keyframe");
+        bag.apply_mutation(PropertyMutation::SetKeyframe {
+            path: "transform.opacity".to_string(),
+            keyframe: Keyframe::linear(end, PropertyValue::Float(1.0)),
+        })
+        .expect("set second keyframe");
+
+        let before_clear = bag.evaluate("transform.opacity", mid).expect("evaluate before clear");
+
+        bag.apply_mutation(PropertyMutation::ClearAnimation {
+            path: "transform.opacity".to_string(),
+            time: mid,
+        })
+        .expect("clear animation");
+
+        let property = bag.property("transform.opacity").expect("property remains");
+        assert!(!property.is_enabled());
+        assert!(!property.is_animated());
+        assert_eq!(property.keyframe_times(), Vec::<TimeTicks>::new());
+        assert_eq!(property.static_value(), &before_clear);
+    }
+
+    #[test]
+    fn ease_presets_use_horizontal_single_side_handles() {
+        let mut bag = PropertyBag::default();
+        bag.define(PropertyDescriptor::new(
+            "transform.opacity",
+            "Opacity",
+            PropertyValue::Float(0.0),
+        ));
+        let time = timecode_to_ticks(tc(4));
+
+        bag.apply_mutation(PropertyMutation::SetKeyframe {
+            path: "transform.opacity".to_string(),
+            keyframe: Keyframe::linear(time, PropertyValue::Float(0.5)),
+        })
+        .expect("set keyframe");
+
+        bag.apply_mutation(PropertyMutation::UpdateKeyframeInterpolation {
+            path: "transform.opacity".to_string(),
+            time,
+            interpolation: InterpolationType::EaseIn,
+        })
+        .expect("ease in");
+        let ease_in = bag
+            .property("transform.opacity")
+            .and_then(|property| property.channel(0))
+            .and_then(|channel| channel.keyframes().iter().find(|keyframe| keyframe.time == time))
+            .cloned()
+            .expect("stored ease-in keyframe");
+        assert_eq!(ease_in.interp_in, KeyframeInterpolation::Linear);
+        assert_eq!(
+            ease_in.interp_out,
+            KeyframeInterpolation::Bezier(BezierHandle {
+                time_offset: 1.0 / 3.0,
+                value_offset: 0.0,
+            })
+        );
+
+        bag.apply_mutation(PropertyMutation::UpdateKeyframeInterpolation {
+            path: "transform.opacity".to_string(),
+            time,
+            interpolation: InterpolationType::EaseOut,
+        })
+        .expect("ease out");
+        let ease_out = bag
+            .property("transform.opacity")
+            .and_then(|property| property.channel(0))
+            .and_then(|channel| channel.keyframes().iter().find(|keyframe| keyframe.time == time))
+            .cloned()
+            .expect("stored ease-out keyframe");
+        assert_eq!(
+            ease_out.interp_in,
+            KeyframeInterpolation::Bezier(BezierHandle {
+                time_offset: -1.0 / 3.0,
+                value_offset: 0.0,
+            })
+        );
+        assert_eq!(ease_out.interp_out, KeyframeInterpolation::Linear);
     }
 }

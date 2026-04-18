@@ -9,9 +9,11 @@ use std::{sync::mpsc, thread};
 
 use mondrian_assets::{AssetKind, AssetLibrary};
 use mondrian_core::{
-    automation::{PropertyHost, PropertyMutation},
+    automation::{
+        timecode_to_ticks, Keyframe, PropertyHost, PropertyMutation, PropertyValue, TimeTicks,
+    },
     events::{AppEvent, EventBus},
-    types::{AssetId, ClipId, Rational, Resolution, SequenceId, TimeCode, TrackId},
+    types::{AssetId, ClipId, KeyframeId, Rational, Resolution, SequenceId, TimeCode, TrackId},
 };
 use mondrian_export::queue::{JobStatus, RenderQueue};
 use mondrian_media::audio::{
@@ -81,6 +83,18 @@ pub struct AnimationKeyframeSelection {
 pub struct AnimationSelectionState {
     pub active_property: Option<AnimationPropertySelection>,
     pub selected_keyframes: HashSet<AnimationKeyframeSelection>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AnimationClipboardEntry {
+    pub path: String,
+    pub relative_time: TimeTicks,
+    pub keyframe: Keyframe<PropertyValue>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AnimationClipboard {
+    pub entries: Vec<AnimationClipboardEntry>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -333,6 +347,7 @@ pub struct AppState {
 
     // 动画选择状态（timeline / inspector / future graph 共用）
     pub animation_selection: AnimationSelectionState,
+    pub animation_clipboard: Option<AnimationClipboard>,
 
     // 代理策略
     pub auto_proxy_enabled: bool,
@@ -410,6 +425,7 @@ impl AppState {
             render_queue: RenderQueue::new(),
             status_hint: None,
             animation_selection: AnimationSelectionState::default(),
+            animation_clipboard: None,
             auto_proxy_enabled: false,
             proxy_mode_assets: HashSet::new(),
             audio_sample_rate,
@@ -1772,6 +1788,90 @@ impl AppState {
             selection.clip_id != clip_id
                 || valid_keys.contains(&(selection.path.clone(), selection.time))
         });
+    }
+
+    pub fn has_animation_clipboard(&self) -> bool {
+        self.animation_clipboard
+            .as_ref()
+            .map(|clipboard| !clipboard.entries.is_empty())
+            .unwrap_or(false)
+    }
+
+    pub fn copy_selected_animation_keyframes(
+        &mut self,
+        selection: SelectedClipRef,
+    ) -> mondrian_core::Result<bool> {
+        let selected = self.selected_animation_keyframes_for_clip(selection.clip_id);
+        if selected.is_empty() {
+            return Ok(false);
+        }
+
+        let clip = self.clip_snapshot(selection).ok_or_else(|| {
+            mondrian_core::MondrianError::ClipNotFound { clip_id: selection.clip_id.to_string() }
+        })?;
+        let property_bag = clip.property_bag()?;
+        let anchor_time = selected.iter().map(|item| item.time).min().unwrap_or(0);
+
+        let mut entries = Vec::new();
+        for item in selected {
+            let Some(property) = property_bag.property(&item.path) else {
+                continue;
+            };
+            let Some(mut keyframe) = property.keyframe_at(item.time) else {
+                continue;
+            };
+            keyframe.id = KeyframeId::new();
+            entries.push(AnimationClipboardEntry {
+                path: item.path,
+                relative_time: item.time - anchor_time,
+                keyframe,
+            });
+        }
+
+        entries.sort_by(|a, b| {
+            a.relative_time.cmp(&b.relative_time).then_with(|| a.path.cmp(&b.path))
+        });
+        self.animation_clipboard = if entries.is_empty() {
+            None
+        } else {
+            Some(AnimationClipboard { entries })
+        };
+        Ok(self.has_animation_clipboard())
+    }
+
+    pub fn paste_animation_keyframes(
+        &mut self,
+        selection: SelectedClipRef,
+        destination_time: TimeTicks,
+    ) -> mondrian_core::Result<bool> {
+        let Some(clipboard) = self.animation_clipboard.clone() else {
+            return Ok(false);
+        };
+        if clipboard.entries.is_empty() {
+            return Ok(false);
+        }
+
+        let mut mutations = Vec::with_capacity(clipboard.entries.len());
+        let mut selections = Vec::with_capacity(clipboard.entries.len());
+
+        for entry in clipboard.entries {
+            let mut keyframe = entry.keyframe;
+            keyframe.id = KeyframeId::new();
+            keyframe.time = (destination_time + entry.relative_time).max(0);
+            mutations.push(PropertyMutation::SetKeyframe {
+                path: entry.path.clone(),
+                keyframe: keyframe.clone(),
+            });
+            selections.push(AnimationKeyframeSelection {
+                clip_id: selection.clip_id,
+                path: entry.path,
+                time: keyframe.time,
+            });
+        }
+
+        self.mutate_clip_properties(selection, mutations, "粘贴关键帧")?;
+        self.set_animation_keyframe_selection(selections);
+        Ok(true)
     }
 
     pub fn clip_snapshot(&self, selection: SelectedClipRef) -> Option<Clip> {
@@ -4271,6 +4371,33 @@ impl eframe::App for MondrianApp {
 
         let selected_clip_count = self.timeline_panel.selected_clip_count();
         let selected_clip_ref = self.timeline_panel.selected_clip_ref();
+        if let Some(selection) = selected_clip_ref {
+            if !ctx.wants_keyboard_input()
+                && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::C))
+            {
+                match self.state.copy_selected_animation_keyframes(selection) {
+                    Ok(true) => self.state.set_status_hint("已复制关键帧", false),
+                    Ok(false) => {}
+                    Err(err) => {
+                        self.state.set_status_hint(format!("复制关键帧失败：{err}"), true);
+                    }
+                }
+            }
+
+            if !ctx.wants_keyboard_input()
+                && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::V))
+            {
+                let destination_time =
+                    self.state.current_time_code().map(timecode_to_ticks).unwrap_or(0);
+                match self.state.paste_animation_keyframes(selection, destination_time) {
+                    Ok(true) => self.state.set_status_hint("已粘贴关键帧", false),
+                    Ok(false) => {}
+                    Err(err) => {
+                        self.state.set_status_hint(format!("粘贴关键帧失败：{err}"), true);
+                    }
+                }
+            }
+        }
         if selected_clip_count > 0 {
             let effect_controls_started_at = std::time::Instant::now();
             egui::SidePanel::right("effect_controls_panel")
