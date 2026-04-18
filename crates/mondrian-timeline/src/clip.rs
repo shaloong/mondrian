@@ -1,16 +1,15 @@
 //! Clip（时间线剪辑片段）
 
-use crate::keyframe::KeyframeTrack;
 use glam::Vec2;
 use mondrian_core::{
     automation::{
-        AnimatedProperty, Interpolatable, KeyframeTrack as SharedKeyframeTrack, PropertyBag,
-        PropertyDescriptor, PropertyHost, PropertyMutation, PropertyValue,
+        timecode_to_ticks, AnimatedProperty, PropertyBag, PropertyDescriptor, PropertyHost,
+        PropertyMutation, PropertyValue,
     },
     types::*,
     MondrianError, Result,
 };
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
 /// 裁剪边缘
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,11 +23,7 @@ pub enum TrimEdge {
 /// 2D 变换（位置 / 缩放 / 旋转 / 锚点 / 不透明度），所有属性可关键帧动画
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Transform2D {
-    pub position: KeyframeTrack<Vec2>,
-    pub scale: KeyframeTrack<Vec2>,
-    pub rotation: KeyframeTrack<f32>,
-    pub anchor_point: KeyframeTrack<Vec2>,
-    pub opacity: KeyframeTrack<f32>,
+    properties: PropertyBag,
 }
 
 impl Transform2D {
@@ -39,20 +34,40 @@ impl Transform2D {
     pub const OPACITY_PATH: &'static str = "transform.opacity";
 
     pub fn identity() -> Self {
-        Self {
-            position: KeyframeTrack::constant(Vec2::ZERO),
-            scale: KeyframeTrack::constant(Vec2::ONE),
-            rotation: KeyframeTrack::constant(0.0),
-            anchor_point: KeyframeTrack::constant(Vec2::ZERO),
-            opacity: KeyframeTrack::constant(1.0),
-        }
+        let mut properties = PropertyBag::default();
+        properties.define(PropertyDescriptor::new(
+            Self::POSITION_PATH,
+            "位置",
+            PropertyValue::Vec2(Vec2::ZERO),
+        ));
+        properties.define(PropertyDescriptor::new(
+            Self::SCALE_PATH,
+            "缩放",
+            PropertyValue::Vec2(Vec2::ONE),
+        ));
+        properties.define(PropertyDescriptor::new(
+            Self::ROTATION_PATH,
+            "旋转",
+            PropertyValue::Float(0.0),
+        ));
+        properties.define(PropertyDescriptor::new(
+            Self::ANCHOR_POINT_PATH,
+            "锚点",
+            PropertyValue::Vec2(Vec2::ZERO),
+        ));
+        properties.define(PropertyDescriptor::new(
+            Self::OPACITY_PATH,
+            "不透明度",
+            PropertyValue::Float(1.0),
+        ));
+        Self { properties }
     }
 
     /// 求值为 3x3 仿射变换矩阵（用于 GPU 渲染）
     pub fn evaluate_matrix(&self, time: TimeCode) -> glam::Mat3 {
-        let pos = self.position.evaluate(time);
-        let scale = self.scale.evaluate(time);
-        let rot = self.rotation.evaluate(time).to_radians();
+        let pos = self.evaluate_vec2(Self::POSITION_PATH, time);
+        let scale = self.evaluate_vec2(Self::SCALE_PATH, time);
+        let rot = self.evaluate_f32(Self::ROTATION_PATH, time).to_radians();
 
         let cos_r = rot.cos();
         let sin_r = rot.sin();
@@ -64,34 +79,12 @@ impl Transform2D {
         )
     }
 
+    pub fn evaluate_opacity(&self, time: TimeCode) -> f32 {
+        self.evaluate_f32(Self::OPACITY_PATH, time)
+    }
+
     pub fn to_property_bag(&self) -> PropertyBag {
-        let mut properties = PropertyBag::default();
-        properties.upsert(animated_property_from_track(
-            Self::POSITION_PATH,
-            "位置",
-            self.position.map(|value| PropertyValue::Vec2(*value)),
-        ));
-        properties.upsert(animated_property_from_track(
-            Self::SCALE_PATH,
-            "缩放",
-            self.scale.map(|value| PropertyValue::Vec2(*value)),
-        ));
-        properties.upsert(animated_property_from_track(
-            Self::ROTATION_PATH,
-            "旋转",
-            self.rotation.map(|value| PropertyValue::Float(*value)),
-        ));
-        properties.upsert(animated_property_from_track(
-            Self::ANCHOR_POINT_PATH,
-            "锚点",
-            self.anchor_point.map(|value| PropertyValue::Vec2(*value)),
-        ));
-        properties.upsert(animated_property_from_track(
-            Self::OPACITY_PATH,
-            "不透明度",
-            self.opacity.map(|value| PropertyValue::Float(*value)),
-        ));
-        properties
+        self.properties.clone()
     }
 
     pub fn apply_property_mutation(&mut self, mutation: PropertyMutation) -> Result<()> {
@@ -110,17 +103,21 @@ impl Transform2D {
             });
         }
 
-        let mut properties = self.to_property_bag();
-        properties.apply_mutation(mutation)?;
-        self.position =
-            track_from_property(&properties, Self::POSITION_PATH, PropertyValue::as_vec2)?;
-        self.scale = track_from_property(&properties, Self::SCALE_PATH, PropertyValue::as_vec2)?;
-        self.rotation =
-            track_from_property(&properties, Self::ROTATION_PATH, PropertyValue::as_f32)?;
-        self.anchor_point =
-            track_from_property(&properties, Self::ANCHOR_POINT_PATH, PropertyValue::as_vec2)?;
-        self.opacity = track_from_property(&properties, Self::OPACITY_PATH, PropertyValue::as_f32)?;
-        Ok(())
+        self.properties.apply_mutation(mutation)
+    }
+
+    fn evaluate_vec2(&self, path: &str, time: TimeCode) -> Vec2 {
+        self.properties
+            .evaluate(path, timecode_to_ticks(time))
+            .and_then(|value| value.as_vec2())
+            .unwrap_or(Vec2::ZERO)
+    }
+
+    fn evaluate_f32(&self, path: &str, time: TimeCode) -> f32 {
+        self.properties
+            .evaluate(path, timecode_to_ticks(time))
+            .and_then(|value| value.as_f32())
+            .unwrap_or(0.0)
     }
 }
 
@@ -170,44 +167,40 @@ fn blend_mode_from_text(value: &str) -> Result<Option<BlendMode>> {
     })
 }
 
-/// 变速模式
+/// 变速曲线（当前以速度倍数属性驱动，可扩展到更复杂时间重映射）
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum SpeedMode {
-    /// 恒定速度（1.0 = 正常速度）
-    Constant(f64),
-    /// 变速曲线（时间重映射）
-    Keyframed(KeyframeTrack<f64>),
-    /// 倒放
-    Reverse,
+pub struct SpeedMap {
+    multiplier: AnimatedProperty,
 }
 
-impl SpeedMode {
+impl SpeedMap {
     pub const MULTIPLIER_PATH: &'static str = "speed.multiplier";
 
-    /// 给定时间线本地时间 → 素材源时间（帧偏移）
-    pub fn map_time(&self, local_time: TimeCode) -> TimeCode {
-        match self {
-            Self::Constant(speed) => TimeCode::new(
-                (local_time.frame as f64 * speed) as i64,
-                local_time.time_base,
-            ),
-            Self::Keyframed(track) => {
-                let speed_at = track.evaluate(local_time);
-                TimeCode::new(
-                    (local_time.frame as f64 * speed_at) as i64,
-                    local_time.time_base,
-                )
-            }
-            Self::Reverse => local_time,
+    pub fn new() -> Self {
+        Self {
+            multiplier: AnimatedProperty::from_descriptor(PropertyDescriptor::new(
+                Self::MULTIPLIER_PATH,
+                "速度倍数",
+                PropertyValue::Double(1.0),
+            )),
         }
     }
 
-    fn to_property_track(&self) -> SharedKeyframeTrack<PropertyValue> {
-        match self {
-            Self::Constant(speed) => SharedKeyframeTrack::constant(PropertyValue::Double(*speed)),
-            Self::Keyframed(track) => track.map(|value| PropertyValue::Double(*value)),
-            Self::Reverse => SharedKeyframeTrack::constant(PropertyValue::Double(-1.0)),
-        }
+    pub fn property(&self) -> &AnimatedProperty {
+        &self.multiplier
+    }
+
+    pub fn evaluate_multiplier(&self, local_time: TimeCode) -> f64 {
+        self.multiplier.evaluate(timecode_to_ticks(local_time)).as_f64().unwrap_or(1.0)
+    }
+
+    /// 给定时间线本地时间 → 素材源时间（帧偏移）
+    pub fn map_time(&self, local_time: TimeCode) -> TimeCode {
+        let speed = self.evaluate_multiplier(local_time);
+        TimeCode::new(
+            (local_time.frame as f64 * speed) as i64,
+            local_time.time_base,
+        )
     }
 
     fn apply_property_mutation(&mut self, mutation: PropertyMutation) -> Result<()> {
@@ -215,7 +208,7 @@ impl SpeedMode {
         if path != Self::MULTIPLIER_PATH {
             return Err(MondrianError::WorkflowStepFailed {
                 step_id: "speed_apply_property_mutation".to_string(),
-                reason: format!("SpeedMode 不支持属性路径: {path}"),
+                reason: format!("SpeedMap 不支持属性路径: {path}"),
             });
         }
 
@@ -226,20 +219,7 @@ impl SpeedMode {
             });
         }
 
-        let mut properties = PropertyBag::default();
-        properties.upsert(animated_property_from_track(
-            Self::MULTIPLIER_PATH,
-            "速度倍数",
-            self.to_property_track(),
-        ));
-        properties.apply_mutation(mutation)?;
-        let track = track_from_property(&properties, Self::MULTIPLIER_PATH, PropertyValue::as_f64)?;
-        *self = if track.is_animated() {
-            SpeedMode::Keyframed(track)
-        } else {
-            SpeedMode::Constant(*track.static_value())
-        };
-        Ok(())
+        self.multiplier.apply_mutation(mutation)
     }
 }
 
@@ -267,7 +247,7 @@ pub struct Clip {
     /// 2D 变换（关键帧）
     pub transform: Transform2D,
     /// 变速模式
-    pub speed: SpeedMode,
+    pub speed: SpeedMap,
     /// 效果链
     pub effects: Vec<EffectRef>,
     /// 关联的音频/视频 Clip（保持同步）
@@ -293,7 +273,7 @@ impl Clip {
             source_in: TimeCode::new(0, tb),
             source_out: duration,
             transform: Transform2D::identity(),
-            speed: SpeedMode::Constant(1.0),
+            speed: SpeedMap::new(),
             effects: vec![],
             linked_clip: None,
             is_disabled: false,
@@ -324,20 +304,16 @@ impl PropertyHost for Clip {
     fn property_bag(&self) -> Result<PropertyBag> {
         let mut properties = self.transform.to_property_bag();
         let blend_mode_text = blend_mode_to_text(self.blend_mode);
-        properties.upsert(AnimatedProperty {
-            descriptor: PropertyDescriptor {
-                path: Self::BLEND_MODE_PATH.to_string(),
-                display_name: "混合模式".to_string(),
-                default_value: PropertyValue::Text(blend_mode_text.clone()),
-                is_animatable: false,
-            },
-            track: SharedKeyframeTrack::constant(PropertyValue::Text(blend_mode_text)),
-        });
-        properties.upsert(animated_property_from_track(
-            SpeedMode::MULTIPLIER_PATH,
-            "速度倍数",
-            self.speed.to_property_track(),
-        ));
+        let mut blend_mode_descriptor = PropertyDescriptor::new(
+            Self::BLEND_MODE_PATH,
+            "混合模式",
+            PropertyValue::Text(blend_mode_text.clone()),
+        );
+        blend_mode_descriptor.is_animatable = false;
+        let mut blend_mode_property = AnimatedProperty::from_descriptor(blend_mode_descriptor);
+        blend_mode_property.set_static_value(PropertyValue::Text(blend_mode_text));
+        properties.upsert(blend_mode_property);
+        properties.upsert(self.speed.property().clone());
         Ok(properties)
     }
 
@@ -361,7 +337,7 @@ impl PropertyHost for Clip {
                     reason: "缺少 clip.blend_mode 属性".to_string(),
                 }
             })?;
-            let PropertyValue::Text(value) = property.track.static_value() else {
+            let PropertyValue::Text(value) = property.static_value() else {
                 return Err(MondrianError::WorkflowStepFailed {
                     step_id: "clip_apply_property_mutation".to_string(),
                     reason: "clip.blend_mode 需要 text 值".to_string(),
@@ -369,7 +345,7 @@ impl PropertyHost for Clip {
             };
             self.blend_mode = blend_mode_from_text(value)?;
             Ok(())
-        } else if path == SpeedMode::MULTIPLIER_PATH {
+        } else if path == SpeedMap::MULTIPLIER_PATH {
             self.speed.apply_property_mutation(mutation)
         } else {
             Err(MondrianError::WorkflowStepFailed {
@@ -393,59 +369,15 @@ pub struct ActiveClip {
     pub opacity: f32,
 }
 
-fn animated_property_from_track(
-    path: impl Into<String>,
-    display_name: impl Into<String>,
-    track: SharedKeyframeTrack<PropertyValue>,
-) -> AnimatedProperty {
-    let path = path.into();
-    AnimatedProperty {
-        descriptor: PropertyDescriptor {
-            path,
-            display_name: display_name.into(),
-            default_value: track.static_value().clone(),
-            is_animatable: true,
-        },
-        track,
-    }
-}
-
-fn track_from_property<T, F>(
-    properties: &PropertyBag,
-    path: &str,
-    mut decode: F,
-) -> Result<KeyframeTrack<T>>
-where
-    T: Interpolatable + Serialize + DeserializeOwned,
-    F: FnMut(&PropertyValue) -> Option<T>,
-{
-    let property = properties.property(path).ok_or_else(|| MondrianError::WorkflowStepFailed {
-        step_id: "track_from_property".to_string(),
-        reason: format!("属性不存在: {path}"),
-    })?;
-    property.track.try_map(|value| {
-        decode(value).ok_or_else(|| MondrianError::WorkflowStepFailed {
-            step_id: "track_from_property".to_string(),
-            reason: format!("属性类型无法转换: {path}"),
-        })
-    })
-}
-
 fn property_mutation_path(mutation: &PropertyMutation) -> &str {
-    match mutation {
-        PropertyMutation::DefineProperty(descriptor) => &descriptor.path,
-        PropertyMutation::SetStaticValue { path, .. } => path,
-        PropertyMutation::SetKeyframe { path, .. } => path,
-        PropertyMutation::RemoveKeyframe { path, .. } => path,
-        PropertyMutation::RemoveProperty { path } => path,
-    }
+    mutation.path()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use mondrian_core::{
-        automation::{InterpolationType, Keyframe, PropertyMutation, PropertyValue},
+        automation::{timecode_to_ticks, Keyframe, PropertyMutation, PropertyValue},
         types::Rational,
     };
 
@@ -458,40 +390,31 @@ mod tests {
         let mut clip = Clip::new(AssetId::new(), tc(0), tc(40));
         clip.apply_property_mutation(PropertyMutation::SetKeyframe {
             path: Transform2D::POSITION_PATH.to_string(),
-            keyframe: Keyframe {
-                time: tc(0),
-                value: PropertyValue::Vec2(Vec2::ZERO),
-                interpolation: InterpolationType::Linear,
-                control_in: None,
-                control_out: None,
-            },
+            keyframe: Keyframe::linear(timecode_to_ticks(tc(0)), PropertyValue::Vec2(Vec2::ZERO)),
         })
         .expect("set start position");
         clip.apply_property_mutation(PropertyMutation::SetKeyframe {
             path: Transform2D::POSITION_PATH.to_string(),
-            keyframe: Keyframe {
-                time: tc(20),
-                value: PropertyValue::Vec2(Vec2::new(20.0, 10.0)),
-                interpolation: InterpolationType::Linear,
-                control_in: None,
-                control_out: None,
-            },
+            keyframe: Keyframe::linear(
+                timecode_to_ticks(tc(20)),
+                PropertyValue::Vec2(Vec2::new(20.0, 10.0)),
+            ),
         })
         .expect("set end position");
         clip.apply_property_mutation(PropertyMutation::SetStaticValue {
-            path: SpeedMode::MULTIPLIER_PATH.to_string(),
+            path: SpeedMap::MULTIPLIER_PATH.to_string(),
             value: PropertyValue::Double(1.5),
         })
         .expect("set speed multiplier");
 
-        assert_eq!(
-            clip.transform.position.evaluate(tc(10)),
-            Vec2::new(10.0, 5.0)
-        );
-        match clip.speed {
-            SpeedMode::Constant(speed) => assert!((speed - 1.5).abs() < f64::EPSILON),
-            _ => panic!("expected constant speed"),
-        }
+        let position = clip
+            .transform
+            .to_property_bag()
+            .evaluate(Transform2D::POSITION_PATH, timecode_to_ticks(tc(10)))
+            .and_then(|value| value.as_vec2())
+            .expect("evaluate position");
+        assert_eq!(position, Vec2::new(10.0, 5.0));
+        assert!((clip.speed.evaluate_multiplier(tc(10)) - 1.5).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -503,7 +426,7 @@ mod tests {
 
         assert!(!property.descriptor.is_animatable);
         assert_eq!(
-            property.evaluate(tc(0)),
+            property.evaluate(timecode_to_ticks(tc(0))),
             PropertyValue::Text("inherit".to_string())
         );
     }

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::{
     app::AppState,
@@ -9,14 +9,16 @@ use crate::{
 };
 use egui::{ComboBox, DragValue, Grid, RichText, Sense, Ui, Vec2};
 use mondrian_core::{
-    automation::{InterpolationType, Keyframe, PropertyHost, PropertyMutation, PropertyValue},
+    automation::{
+        timecode_to_ticks, InterpolationType, KeyframeInterpolation, PropertyHost,
+        PropertyMutation, PropertyValue,
+    },
     types::{ClipId, TimeCode},
 };
 use mondrian_timeline::clip::Clip;
 
 #[derive(Default)]
 pub struct EffectControlsPanel {
-    armed_properties: HashSet<(ClipId, String)>,
     text_edit_buffers: HashMap<(ClipId, String), String>,
 }
 
@@ -152,40 +154,41 @@ impl EffectControlsPanel {
         property: &mondrian_core::automation::AnimatedProperty,
         current_time: TimeCode,
     ) {
-        let current_value = property.evaluate(current_time);
+        let current_time_ticks = timecode_to_ticks(current_time);
+        let current_value = property.evaluate(current_time_ticks);
         let interpolation = self.current_interpolation(property, current_time);
-        let is_armed = self.is_armed(selection.clip_id, path);
-        let is_animated = property.track.is_animated();
+        let animation_enabled = property.is_enabled();
+        let is_animated = property.is_animated();
 
         if property.descriptor.is_animatable {
-            let stopwatch_selected = is_armed || is_animated;
+            let stopwatch_selected = animation_enabled || is_animated;
             if theme::icon_toggle_button(
                 ui,
                 tokens::timeline_toolbar_button_size(),
                 theme::UiIcon::Timer,
                 stopwatch_selected,
             )
-            .on_hover_text(if is_armed {
-                "停止关键帧打点"
+            .on_hover_text(if animation_enabled {
+                "禁用动画（保留关键帧）"
             } else {
-                "在当前播放头启用关键帧打点"
+                "启用动画并在当前播放头创建首关键帧"
             })
             .clicked()
             {
-                let key = (selection.clip_id, path.to_string());
-                if is_armed {
-                    self.armed_properties.remove(&key);
+                let mutation = if animation_enabled {
+                    PropertyMutation::DisableAnimation {
+                        path: path.to_string(),
+                        time: current_time_ticks,
+                    }
                 } else {
-                    self.armed_properties.insert(key);
-                    self.commit_value(
-                        app,
-                        selection,
-                        path,
-                        current_value.clone(),
-                        interpolation,
-                        property.descriptor.is_animatable,
-                    );
-                }
+                    PropertyMutation::EnableAnimation {
+                        path: path.to_string(),
+                        time: current_time_ticks,
+                    }
+                };
+                let _ = app
+                    .mutate_clip_property(selection, mutation, "切换动画")
+                    .map_err(|err| app.set_status_hint(format!("切换动画失败：{err}"), true));
             }
         } else {
             let _ = ui.allocate_exact_size(
@@ -211,7 +214,6 @@ impl EffectControlsPanel {
             path,
             &current_value,
             interpolation,
-            is_armed,
             property.descriptor.is_animatable,
         );
         ui.end_row();
@@ -225,7 +227,6 @@ impl EffectControlsPanel {
         path: &str,
         current_value: &PropertyValue,
         interpolation: InterpolationType,
-        is_armed: bool,
         is_animatable: bool,
     ) {
         match current_value {
@@ -284,16 +285,23 @@ impl EffectControlsPanel {
             PropertyValue::Vec2(value) => {
                 let mut edited = *value;
                 ui.horizontal(|ui| {
-                    let x =
+                    let x_changed =
                         ui.add(DragValue::new(&mut edited.x).speed(0.05).prefix("X ")).changed();
-                    let y =
+                    let y_changed =
                         ui.add(DragValue::new(&mut edited.y).speed(0.05).prefix("Y ")).changed();
-                    if x || y {
-                        self.commit_value(
+                    let mut channel_values = Vec::new();
+                    if x_changed {
+                        channel_values.push((0, edited.x as f64));
+                    }
+                    if y_changed {
+                        channel_values.push((1, edited.y as f64));
+                    }
+                    if !channel_values.is_empty() {
+                        self.commit_channel_values(
                             app,
                             selection,
                             path,
-                            PropertyValue::Vec2(edited),
+                            &channel_values,
                             interpolation,
                             is_animatable,
                         );
@@ -303,18 +311,28 @@ impl EffectControlsPanel {
             PropertyValue::Vec3(value) => {
                 let mut edited = *value;
                 ui.horizontal(|ui| {
-                    let x =
+                    let x_changed =
                         ui.add(DragValue::new(&mut edited.x).speed(0.05).prefix("X ")).changed();
-                    let y =
+                    let y_changed =
                         ui.add(DragValue::new(&mut edited.y).speed(0.05).prefix("Y ")).changed();
-                    let z =
+                    let z_changed =
                         ui.add(DragValue::new(&mut edited.z).speed(0.05).prefix("Z ")).changed();
-                    if x || y || z {
-                        self.commit_value(
+                    let mut channel_values = Vec::new();
+                    if x_changed {
+                        channel_values.push((0, edited.x as f64));
+                    }
+                    if y_changed {
+                        channel_values.push((1, edited.y as f64));
+                    }
+                    if z_changed {
+                        channel_values.push((2, edited.z as f64));
+                    }
+                    if !channel_values.is_empty() {
+                        self.commit_channel_values(
                             app,
                             selection,
                             path,
-                            PropertyValue::Vec3(edited),
+                            &channel_values,
                             interpolation,
                             is_animatable,
                         );
@@ -324,18 +342,21 @@ impl EffectControlsPanel {
             PropertyValue::Vec4(value) => {
                 let mut edited = *value;
                 ui.horizontal(|ui| {
-                    let mut changed = false;
+                    let mut channel_values = Vec::new();
                     for (index, comp) in edited.iter_mut().enumerate() {
-                        changed |= ui
+                        if ui
                             .add(DragValue::new(comp).speed(0.01).prefix(format!("{} ", index + 1)))
-                            .changed();
+                            .changed()
+                        {
+                            channel_values.push((index, *comp as f64));
+                        }
                     }
-                    if changed {
-                        self.commit_value(
+                    if !channel_values.is_empty() {
+                        self.commit_channel_values(
                             app,
                             selection,
                             path,
-                            PropertyValue::Vec4(edited),
+                            &channel_values,
                             interpolation,
                             is_animatable,
                         );
@@ -360,7 +381,7 @@ impl EffectControlsPanel {
                 let mut next_text: Option<String> = None;
                 {
                     let buffer = self.text_edit_buffers.entry(key).or_insert_with(|| value.clone());
-                    if !is_armed && *buffer != *value {
+                    if *buffer != *value {
                         *buffer = value.clone();
                     }
                     if ui.text_edit_singleline(buffer).changed() {
@@ -431,15 +452,13 @@ impl EffectControlsPanel {
         interpolation: InterpolationType,
         is_animatable: bool,
     ) {
-        let mutation = if is_animatable && self.is_armed(selection.clip_id, path) {
-            let keyframe = Keyframe {
-                time: self.current_time(app),
+        let mutation = if is_animatable {
+            PropertyMutation::WriteValue {
+                path: path.to_string(),
+                time: timecode_to_ticks(self.current_time(app)),
                 value,
                 interpolation,
-                control_in: None,
-                control_out: None,
-            };
-            PropertyMutation::SetKeyframe { path: path.to_string(), keyframe }
+            }
         } else {
             PropertyMutation::SetStaticValue { path: path.to_string(), value }
         };
@@ -449,13 +468,34 @@ impl EffectControlsPanel {
             .map_err(|err| app.set_status_hint(format!("更新属性失败：{err}"), true));
     }
 
+    fn commit_channel_values(
+        &mut self,
+        app: &mut AppState,
+        selection: SelectedClipRef,
+        path: &str,
+        channel_values: &[(usize, f64)],
+        interpolation: InterpolationType,
+        is_animatable: bool,
+    ) {
+        let mutation = if is_animatable {
+            PropertyMutation::WriteChannels {
+                path: path.to_string(),
+                time: timecode_to_ticks(self.current_time(app)),
+                channel_values: channel_values.to_vec(),
+                interpolation,
+            }
+        } else {
+            return;
+        };
+
+        let _ = app
+            .mutate_clip_property(selection, mutation, "更新属性通道")
+            .map_err(|err| app.set_status_hint(format!("更新属性失败：{err}"), true));
+    }
+
     fn current_time(&self, app: &AppState) -> TimeCode {
         app.current_time_code()
             .unwrap_or_else(|| TimeCode::new(0, mondrian_core::types::Rational::FPS_25))
-    }
-
-    fn is_armed(&self, clip_id: ClipId, path: &str) -> bool {
-        self.armed_properties.contains(&(clip_id, path.to_string()))
     }
 
     fn current_interpolation(
@@ -463,16 +503,35 @@ impl EffectControlsPanel {
         property: &mondrian_core::automation::AnimatedProperty,
         current_time: TimeCode,
     ) -> InterpolationType {
+        let current_time_ticks = timecode_to_ticks(current_time);
         let mut fallback = InterpolationType::Linear;
-        for keyframe in property.track.keyframes() {
-            if keyframe.time == current_time {
-                return keyframe.interpolation;
+        for keyframe in property.channel(0).map(|channel| channel.keyframes()).unwrap_or(&[]) {
+            let interpolation = interpolation_from_handles(keyframe.interp_in, keyframe.interp_out);
+            if keyframe.time == current_time_ticks {
+                return interpolation;
             }
-            if keyframe.time < current_time {
-                fallback = keyframe.interpolation;
+            if keyframe.time < current_time_ticks {
+                fallback = interpolation;
             }
         }
         fallback
+    }
+}
+
+fn interpolation_from_handles(
+    interp_in: KeyframeInterpolation,
+    interp_out: KeyframeInterpolation,
+) -> InterpolationType {
+    if matches!(interp_in, KeyframeInterpolation::Hold)
+        || matches!(interp_out, KeyframeInterpolation::Hold)
+    {
+        InterpolationType::Hold
+    } else if matches!(interp_in, KeyframeInterpolation::Linear)
+        && matches!(interp_out, KeyframeInterpolation::Linear)
+    {
+        InterpolationType::Linear
+    } else {
+        InterpolationType::Bezier
     }
 }
 

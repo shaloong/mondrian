@@ -1,7 +1,10 @@
 //! 效果节点抽象
 
 use mondrian_core::{
-    automation::{PropertyBag, PropertyDescriptor, PropertyHost, PropertyMutation, PropertyValue},
+    automation::{
+        timecode_to_ticks, PropertyBag, PropertyDescriptor, PropertyHost, PropertyMutation,
+        PropertyValue,
+    },
     types::{Color, EffectId, TimeCode},
     Result,
 };
@@ -46,7 +49,7 @@ impl EffectNode {
     }
 
     pub fn evaluate_property(&self, path: &str, time: TimeCode) -> Option<PropertyValue> {
-        self.properties.evaluate(path, time)
+        self.properties.evaluate(path, timecode_to_ticks(time))
     }
 
     pub fn define_property(&mut self, descriptor: PropertyDescriptor) {
@@ -165,10 +168,7 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mondrian_core::{
-        automation::{InterpolationType, Keyframe},
-        types::Rational,
-    };
+    use mondrian_core::{automation::Keyframe, types::Rational};
 
     fn tc(frame: i64) -> TimeCode {
         TimeCode::new(frame, Rational::new(1, 25))
@@ -180,25 +180,13 @@ mod tests {
         effect
             .apply_property_mutation(PropertyMutation::SetKeyframe {
                 path: "effect.blur.radius".to_string(),
-                keyframe: Keyframe {
-                    time: tc(0),
-                    value: PropertyValue::Float(8.0),
-                    interpolation: InterpolationType::Linear,
-                    control_in: None,
-                    control_out: None,
-                },
+                keyframe: Keyframe::linear(timecode_to_ticks(tc(0)), PropertyValue::Float(8.0)),
             })
             .expect("set start keyframe");
         effect
             .apply_property_mutation(PropertyMutation::SetKeyframe {
                 path: "effect.blur.radius".to_string(),
-                keyframe: Keyframe {
-                    time: tc(10),
-                    value: PropertyValue::Float(28.0),
-                    interpolation: InterpolationType::Linear,
-                    control_in: None,
-                    control_out: None,
-                },
+                keyframe: Keyframe::linear(timecode_to_ticks(tc(10)), PropertyValue::Float(28.0)),
             })
             .expect("set end keyframe");
 

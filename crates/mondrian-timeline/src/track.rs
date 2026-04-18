@@ -1,10 +1,10 @@
 //! 轨道定义
 
-use crate::{clip::Clip, keyframe::KeyframeTrack};
+use crate::clip::Clip;
 use mondrian_core::{
     automation::{
-        AnimatedProperty, PropertyBag, PropertyDescriptor, PropertyHost, PropertyMutation,
-        PropertyValue,
+        timecode_to_ticks, AnimatedProperty, PropertyBag, PropertyDescriptor, PropertyHost,
+        PropertyMutation, PropertyValue,
     },
     types::*,
     MondrianError, Result,
@@ -32,7 +32,7 @@ pub struct Track {
     pub is_visible: bool,
     pub blend_mode: BlendMode,
     /// 轨道不透明度关键帧（仅视频轨有效）
-    pub opacity: KeyframeTrack<f32>,
+    pub opacity: AnimatedProperty,
     /// 按位置排序的 Clip 列表
     pub clips: Vec<Clip>,
 }
@@ -51,7 +51,11 @@ impl Track {
             is_solo: false,
             is_visible: true,
             blend_mode: BlendMode::Normal,
-            opacity: KeyframeTrack::constant(1.0),
+            opacity: AnimatedProperty::from_descriptor(PropertyDescriptor::new(
+                Self::OPACITY_PATH,
+                "轨道不透明度",
+                PropertyValue::Float(1.0),
+            )),
             clips: vec![],
         }
     }
@@ -67,7 +71,11 @@ impl Track {
             is_solo: false,
             is_visible: true,
             blend_mode: BlendMode::Normal,
-            opacity: KeyframeTrack::constant(1.0),
+            opacity: AnimatedProperty::from_descriptor(PropertyDescriptor::new(
+                Self::OPACITY_PATH,
+                "轨道不透明度",
+                PropertyValue::Float(1.0),
+            )),
             clips: vec![],
         }
     }
@@ -109,14 +117,7 @@ impl Track {
 
     pub fn to_property_bag(&self) -> PropertyBag {
         let mut properties = PropertyBag::default();
-        properties.upsert(AnimatedProperty {
-            descriptor: PropertyDescriptor::new(
-                Self::OPACITY_PATH,
-                "轨道不透明度",
-                PropertyValue::Float(*self.opacity.static_value()),
-            ),
-            track: self.opacity.map(|value| PropertyValue::Float(*value)),
-        });
+        properties.upsert(self.opacity.clone());
         properties
     }
 }
@@ -127,13 +128,7 @@ impl PropertyHost for Track {
     }
 
     fn apply_property_mutation(&mut self, mutation: PropertyMutation) -> Result<()> {
-        let path = match &mutation {
-            PropertyMutation::DefineProperty(descriptor) => descriptor.path.as_str(),
-            PropertyMutation::SetStaticValue { path, .. } => path.as_str(),
-            PropertyMutation::SetKeyframe { path, .. } => path.as_str(),
-            PropertyMutation::RemoveKeyframe { path, .. } => path.as_str(),
-            PropertyMutation::RemoveProperty { path } => path.as_str(),
-        };
+        let path = mutation.path();
 
         if path != Self::OPACITY_PATH {
             return Err(MondrianError::WorkflowStepFailed {
@@ -148,20 +143,12 @@ impl PropertyHost for Track {
             });
         }
 
-        let mut properties = self.to_property_bag();
-        properties.apply_mutation(mutation)?;
-        let property = properties.property(Self::OPACITY_PATH).ok_or_else(|| {
-            MondrianError::WorkflowStepFailed {
-                step_id: "track_apply_property_mutation".to_string(),
-                reason: "缺少 track.opacity 属性".to_string(),
-            }
-        })?;
-        self.opacity = property.track.try_map(|value| {
-            value.as_f32().ok_or_else(|| MondrianError::WorkflowStepFailed {
-                step_id: "track_apply_property_mutation".to_string(),
-                reason: "track.opacity 需要 float 值".to_string(),
-            })
-        })?;
-        Ok(())
+        self.opacity.apply_mutation(mutation)
+    }
+}
+
+impl Track {
+    pub fn evaluate_opacity(&self, time: TimeCode) -> f32 {
+        self.opacity.evaluate(timecode_to_ticks(time)).as_f32().unwrap_or(1.0)
     }
 }
