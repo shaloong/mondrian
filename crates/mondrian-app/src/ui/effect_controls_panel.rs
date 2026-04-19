@@ -3379,11 +3379,11 @@ fn graph_selection_scale_mutations(
         GraphSelectionScaleAxis::Value => {
             for entry in &drag.entries {
                 let (_, value) = graph_selection_scaled_point(entry, drag, factor);
-                mutations.push(PropertyMutation::WriteChannels {
+                mutations.push(PropertyMutation::UpdateChannelKeyframeValue {
                     path: drag.path.clone(),
                     time: entry.selection.time,
-                    channel_values: vec![(drag.channel_index, value)],
-                    interpolation: InterpolationType::Linear,
+                    channel_index: drag.channel_index,
+                    value,
                 });
                 selections.push(AnimationKeyframeSelection {
                     clip_id,
@@ -4098,6 +4098,14 @@ mod tests {
         property
     }
 
+    fn sample_selection(time: TimeTicks) -> AnimationKeyframeSelection {
+        AnimationKeyframeSelection {
+            clip_id: ClipId::new(),
+            path: "transform.opacity".to_string(),
+            time,
+        }
+    }
+
     #[test]
     fn selected_active_keyframe_helpers_handle_empty_selection() {
         let property = sample_property();
@@ -4155,6 +4163,469 @@ mod tests {
         assert!(!mutations
             .iter()
             .any(|mutation| matches!(mutation, PropertyMutation::WriteChannels { .. })));
+    }
+
+    #[test]
+    fn graph_keyframe_drag_property_mutations_return_none_without_delta() {
+        let drag = GraphKeyframeDragState {
+            clip_id: ClipId::new(),
+            path: "transform.opacity".to_string(),
+            channel_index: 0,
+            start_pointer_pos: Pos2::new(120.0, 110.0),
+            pointer_pos: Pos2::new(120.0, 110.0),
+            anchors: vec![GraphKeyframeDragAnchor {
+                time: SUBFRAME_TICKS_PER_FRAME * 10,
+                value: 0.5,
+            }],
+        };
+
+        assert!(graph_keyframe_drag_property_mutations(
+            &drag,
+            graph_rect(),
+            0,
+            SUBFRAME_TICKS_PER_FRAME * 20,
+            0.0,
+            1.0,
+            &[],
+            &[],
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn graph_keyframe_drag_mutations_clamp_time_to_zero() {
+        let drag = GraphKeyframeDragState {
+            clip_id: ClipId::new(),
+            path: "transform.opacity".to_string(),
+            channel_index: 0,
+            start_pointer_pos: Pos2::new(200.0, 110.0),
+            pointer_pos: Pos2::new(-100.0, 110.0),
+            anchors: vec![GraphKeyframeDragAnchor {
+                time: SUBFRAME_TICKS_PER_FRAME * 3,
+                value: 0.5,
+            }],
+        };
+
+        let (_, selections) = graph_keyframe_drag_mutations(
+            &drag,
+            graph_rect(),
+            0,
+            SUBFRAME_TICKS_PER_FRAME * 20,
+            0.0,
+            1.0,
+            ClipId::new(),
+            &[],
+            &[],
+        )
+        .expect("drag mutations");
+        assert_eq!(selections[0].time, 0);
+    }
+
+    #[test]
+    fn graph_handles_respect_single_and_boundary_segments() {
+        let mut single = AnimatedProperty::from_descriptor(PropertyDescriptor::new(
+            "transform.opacity",
+            "Opacity",
+            PropertyValue::Float(0.0),
+        ));
+        single
+            .apply_mutation(PropertyMutation::SetKeyframe {
+                path: "transform.opacity".to_string(),
+                keyframe: Keyframe::from_preset(
+                    SUBFRAME_TICKS_PER_FRAME * 5,
+                    PropertyValue::Float(0.5),
+                    InterpolationType::Bezier,
+                ),
+            })
+            .expect("single keyframe");
+        let single_channel = single.channel(0).expect("single channel");
+        assert!(graph_handles_for_keyframe(
+            single_channel.keyframes(),
+            0,
+            graph_rect(),
+            0,
+            SUBFRAME_TICKS_PER_FRAME * 20,
+            0.0,
+            1.0,
+        )
+        .is_empty());
+
+        let mut boundary = AnimatedProperty::from_descriptor(PropertyDescriptor::new(
+            "transform.opacity",
+            "Opacity",
+            PropertyValue::Float(0.0),
+        ));
+        boundary
+            .apply_mutation(PropertyMutation::SetKeyframe {
+                path: "transform.opacity".to_string(),
+                keyframe: Keyframe::from_preset(
+                    0,
+                    PropertyValue::Float(0.0),
+                    InterpolationType::Bezier,
+                ),
+            })
+            .expect("boundary first");
+        boundary
+            .apply_mutation(PropertyMutation::SetKeyframe {
+                path: "transform.opacity".to_string(),
+                keyframe: Keyframe::from_preset(
+                    SUBFRAME_TICKS_PER_FRAME * 20,
+                    PropertyValue::Float(1.0),
+                    InterpolationType::Bezier,
+                ),
+            })
+            .expect("boundary last");
+        let channel = boundary.channel(0).expect("channel");
+        let first_handles = graph_handles_for_keyframe(
+            channel.keyframes(),
+            0,
+            graph_rect(),
+            0,
+            SUBFRAME_TICKS_PER_FRAME * 20,
+            0.0,
+            1.0,
+        );
+        let last_handles = graph_handles_for_keyframe(
+            channel.keyframes(),
+            channel.keyframes().len() - 1,
+            graph_rect(),
+            0,
+            SUBFRAME_TICKS_PER_FRAME * 20,
+            0.0,
+            1.0,
+        );
+        assert_eq!(first_handles.len(), 1);
+        assert!(first_handles[0].kind == GraphHandleKind::Out);
+        assert_eq!(last_handles.len(), 1);
+        assert!(last_handles[0].kind == GraphHandleKind::In);
+    }
+
+    #[test]
+    fn preview_handle_position_returns_none_for_missing_boundary_side() {
+        let property = sample_property();
+        let channel = property.channel(0).expect("channel");
+        let first = &channel.keyframes()[0];
+        let last_index = channel.keyframes().len() - 1;
+        let last = &channel.keyframes()[last_index];
+
+        assert!(preview_handle_position(
+            GraphHandleKind::In,
+            Pos2::new(100.0, 100.0),
+            channel.keyframes(),
+            0,
+            first.temporal_flags,
+            graph_rect(),
+            0,
+            SUBFRAME_TICKS_PER_FRAME * 20,
+            0.0,
+            1.0,
+        )
+        .is_none());
+        assert!(preview_handle_position(
+            GraphHandleKind::Out,
+            Pos2::new(100.0, 100.0),
+            channel.keyframes(),
+            last_index,
+            last.temporal_flags,
+            graph_rect(),
+            0,
+            SUBFRAME_TICKS_PER_FRAME * 20,
+            0.0,
+            1.0,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn graph_selection_value_scale_preserves_bezier_editing_path() {
+        let property = sample_property();
+        let drag = GraphSelectionScaleDragState {
+            clip_id: ClipId::new(),
+            path: "transform.opacity".to_string(),
+            channel_index: 0,
+            axis: GraphSelectionScaleAxis::Value,
+            edge: GraphSelectionScaleEdge::Max,
+            pointer_pos: Pos2::new(200.0, 40.0),
+            entries: vec![
+                SelectedGraphKeyframeData { selection: sample_selection(0), channel_value: 0.0 },
+                SelectedGraphKeyframeData {
+                    selection: sample_selection(SUBFRAME_TICKS_PER_FRAME * 10),
+                    channel_value: 0.5,
+                },
+            ],
+            plot_rect: graph_rect(),
+            time_min: 0,
+            time_max: SUBFRAME_TICKS_PER_FRAME * 20,
+            value_min: 0.0,
+            value_max: 1.0,
+        };
+
+        let (mutations, _) =
+            graph_selection_scale_mutations(&drag, ClipId::new()).expect("scale mutations");
+        assert!(mutations.iter().all(|mutation| matches!(
+            mutation,
+            PropertyMutation::UpdateChannelKeyframeValue { .. }
+        )));
+
+        let mut preview = property.clone();
+        for mutation in mutations {
+            preview.apply_mutation(mutation).expect("apply scale mutation");
+        }
+        let stored = preview
+            .channel(0)
+            .and_then(|channel| {
+                channel
+                    .keyframes()
+                    .iter()
+                    .find(|keyframe| keyframe.time == SUBFRAME_TICKS_PER_FRAME * 10)
+            })
+            .expect("scaled keyframe");
+        assert!(matches!(stored.interp_in, KeyframeInterpolation::Bezier(_)));
+        assert!(matches!(
+            stored.interp_out,
+            KeyframeInterpolation::Bezier(_)
+        ));
+    }
+
+    #[test]
+    fn graph_selection_time_scale_rejects_duplicate_targets() {
+        let min_time = SUBFRAME_TICKS_PER_FRAME * 10;
+        let max_time = SUBFRAME_TICKS_PER_FRAME * 11;
+        let duplicate_target = min_time + ((max_time - min_time) * 3 / 5);
+        let drag = GraphSelectionScaleDragState {
+            clip_id: ClipId::new(),
+            path: "transform.opacity".to_string(),
+            channel_index: 0,
+            axis: GraphSelectionScaleAxis::Time,
+            edge: GraphSelectionScaleEdge::Min,
+            pointer_pos: Pos2::new(
+                graph_x_for_time(
+                    graph_rect(),
+                    0,
+                    SUBFRAME_TICKS_PER_FRAME * 20,
+                    duplicate_target,
+                ),
+                120.0,
+            ),
+            entries: vec![
+                SelectedGraphKeyframeData {
+                    selection: sample_selection(min_time),
+                    channel_value: 0.4,
+                },
+                SelectedGraphKeyframeData {
+                    selection: sample_selection(max_time),
+                    channel_value: 0.6,
+                },
+            ],
+            plot_rect: graph_rect(),
+            time_min: 0,
+            time_max: SUBFRAME_TICKS_PER_FRAME * 20,
+            value_min: 0.0,
+            value_max: 1.0,
+        };
+
+        assert!(graph_selection_scale_mutations(&drag, ClipId::new()).is_none());
+    }
+
+    #[test]
+    fn speed_per_second_is_zero_for_flat_curve() {
+        let mut property = AnimatedProperty::from_descriptor(PropertyDescriptor::new(
+            "transform.opacity",
+            "Opacity",
+            PropertyValue::Float(1.0),
+        ));
+        property
+            .apply_mutation(PropertyMutation::SetKeyframe {
+                path: "transform.opacity".to_string(),
+                keyframe: Keyframe::linear(0, PropertyValue::Float(1.0)),
+            })
+            .expect("set first");
+        property
+            .apply_mutation(PropertyMutation::SetKeyframe {
+                path: "transform.opacity".to_string(),
+                keyframe: Keyframe::linear(
+                    SUBFRAME_TICKS_PER_FRAME * 20,
+                    PropertyValue::Float(1.0),
+                ),
+            })
+            .expect("set second");
+        let clip = Clip::new(
+            mondrian_core::types::AssetId::new(),
+            TimeCode::new(0, mondrian_core::types::Rational::FPS_25),
+            TimeCode::new(20, mondrian_core::types::Rational::FPS_25),
+        );
+
+        let speed = speed_per_second_at_time(
+            &property,
+            0,
+            &clip,
+            SUBFRAME_TICKS_PER_FRAME * 10,
+            0,
+            SUBFRAME_TICKS_PER_FRAME * 20,
+        );
+        assert!(speed.abs() < 1e-9);
+    }
+
+    #[test]
+    fn graph_speed_drag_mutations_return_none_without_delta() {
+        let property = sample_property();
+        let clip = Clip::new(
+            mondrian_core::types::AssetId::new(),
+            TimeCode::new(0, mondrian_core::types::Rational::FPS_25),
+            TimeCode::new(20, mondrian_core::types::Rational::FPS_25),
+        );
+        let drag = GraphSpeedKeyframeDragState {
+            clip_id: ClipId::new(),
+            path: "transform.opacity".to_string(),
+            channel_index: 0,
+            start_pointer_pos: Pos2::new(120.0, 110.0),
+            pointer_pos: Pos2::new(120.0, 110.0),
+            anchors: vec![GraphSpeedKeyframeDragAnchor {
+                time: SUBFRAME_TICKS_PER_FRAME * 10,
+                speed: 0.25,
+            }],
+        };
+
+        assert!(graph_speed_drag_mutations(
+            &drag,
+            &property,
+            &clip,
+            0,
+            SUBFRAME_TICKS_PER_FRAME * 20,
+            graph_rect(),
+            -4.0,
+            4.0,
+            ClipId::new(),
+            &[],
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn graph_speed_drag_mutations_update_only_existing_boundary_side() {
+        let property = sample_property();
+        let clip = Clip::new(
+            mondrian_core::types::AssetId::new(),
+            TimeCode::new(0, mondrian_core::types::Rational::FPS_25),
+            TimeCode::new(20, mondrian_core::types::Rational::FPS_25),
+        );
+        let drag = GraphSpeedKeyframeDragState {
+            clip_id: ClipId::new(),
+            path: "transform.opacity".to_string(),
+            channel_index: 0,
+            start_pointer_pos: Pos2::new(100.0, 120.0),
+            pointer_pos: Pos2::new(100.0, 40.0),
+            anchors: vec![GraphSpeedKeyframeDragAnchor { time: 0, speed: 0.0 }],
+        };
+
+        let (mutations, _) = graph_speed_drag_mutations(
+            &drag,
+            &property,
+            &clip,
+            0,
+            SUBFRAME_TICKS_PER_FRAME * 20,
+            graph_rect(),
+            -4.0,
+            4.0,
+            ClipId::new(),
+            &[0.5],
+        )
+        .expect("speed mutations");
+
+        let PropertyMutation::UpdateChannelKeyframeHandles { interp_in, interp_out, .. } =
+            &mutations[0]
+        else {
+            panic!("expected handle mutation");
+        };
+        assert!(matches!(interp_in, KeyframeInterpolation::Linear));
+        assert!(matches!(interp_out, KeyframeInterpolation::Bezier(_)));
+    }
+
+    #[test]
+    fn graph_speed_preview_property_preserves_handle_time_offsets() {
+        let property = sample_property();
+        let clip = Clip::new(
+            mondrian_core::types::AssetId::new(),
+            TimeCode::new(0, mondrian_core::types::Rational::FPS_25),
+            TimeCode::new(20, mondrian_core::types::Rational::FPS_25),
+        );
+        let drag = GraphSpeedKeyframeDragState {
+            clip_id: ClipId::new(),
+            path: "transform.opacity".to_string(),
+            channel_index: 0,
+            start_pointer_pos: Pos2::new(200.0, 120.0),
+            pointer_pos: Pos2::new(200.0, 60.0),
+            anchors: vec![GraphSpeedKeyframeDragAnchor {
+                time: SUBFRAME_TICKS_PER_FRAME * 10,
+                speed: 0.0,
+            }],
+        };
+
+        let preview = graph_speed_preview_property(
+            &property,
+            &drag,
+            &clip,
+            0,
+            SUBFRAME_TICKS_PER_FRAME * 20,
+            graph_rect(),
+            -4.0,
+            4.0,
+            &[0.5],
+        )
+        .expect("preview");
+        let original = property
+            .channel(0)
+            .and_then(|channel| channel.keyframe_at(SUBFRAME_TICKS_PER_FRAME * 10))
+            .expect("original");
+        let preview_keyframe = preview
+            .channel(0)
+            .and_then(|channel| channel.keyframe_at(SUBFRAME_TICKS_PER_FRAME * 10))
+            .expect("preview keyframe");
+        let KeyframeInterpolation::Bezier(original_in) = original.interp_in else {
+            panic!("expected original in handle");
+        };
+        let KeyframeInterpolation::Bezier(original_out) = original.interp_out else {
+            panic!("expected original out handle");
+        };
+        let KeyframeInterpolation::Bezier(preview_in) = preview_keyframe.interp_in else {
+            panic!("expected preview in handle");
+        };
+        let KeyframeInterpolation::Bezier(preview_out) = preview_keyframe.interp_out else {
+            panic!("expected preview out handle");
+        };
+        assert!((preview_in.time_offset - original_in.time_offset).abs() < 1e-9);
+        assert!((preview_out.time_offset - original_out.time_offset).abs() < 1e-9);
+    }
+
+    #[test]
+    fn snap_graph_time_delta_prefers_nearest_candidate() {
+        let (delta, snapped) = snap_graph_time_delta(
+            SUBFRAME_TICKS_PER_FRAME * 5,
+            &[SUBFRAME_TICKS_PER_FRAME * 10],
+            &[
+                SUBFRAME_TICKS_PER_FRAME * 14,
+                SUBFRAME_TICKS_PER_FRAME * 16,
+                SUBFRAME_TICKS_PER_FRAME * 20,
+            ],
+            graph_rect(),
+            0,
+            SUBFRAME_TICKS_PER_FRAME * 40,
+        );
+        assert_eq!(delta, SUBFRAME_TICKS_PER_FRAME * 4);
+        assert_eq!(snapped, Some(SUBFRAME_TICKS_PER_FRAME * 14));
+    }
+
+    #[test]
+    fn snap_graph_value_delta_snaps_only_within_threshold() {
+        let (close_delta, close_snap) =
+            snap_graph_value_delta(0.11, &[0.2], &[0.3], graph_rect(), 0.0, 1.0);
+        assert!(close_snap.is_some());
+        assert!((close_delta - 0.1).abs() < 1e-6);
+
+        let (far_delta, far_snap) =
+            snap_graph_value_delta(0.3, &[0.2], &[0.8], graph_rect(), 0.0, 1.0);
+        assert!(far_snap.is_none());
+        assert!((far_delta - 0.3).abs() < 1e-6);
     }
 
     #[test]
