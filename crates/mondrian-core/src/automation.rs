@@ -11,15 +11,20 @@ use glam::{Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// 面向 UI/命令层的插值意图。
+///
+/// 实际持久化和求值仍然基于 `KeyframeInterpolation` 与 `KeyframeTemporalFlags`，
+/// 这个枚举只负责把菜单动作映射到一组默认手柄与约束。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum InterpolationType {
     Hold,
     #[default]
     Linear,
     Bezier,
+    AutoBezier,
+    ContinuousBezier,
     EaseIn,
     EaseOut,
-    EaseInOut,
 }
 
 pub type TimeTicks = i64;
@@ -332,14 +337,14 @@ impl<T> Keyframe<T> {
     }
 
     pub fn from_preset(time: TimeTicks, value: T, interpolation: InterpolationType) -> Self {
-        let (interp_in, interp_out) = interpolation_to_pair(interpolation);
+        let (interp_in, interp_out, temporal_flags) = interpolation_defaults(interpolation);
         Self {
             id: KeyframeId::new(),
             time,
             value,
             interp_in,
             interp_out,
-            temporal_flags: KeyframeTemporalFlags::default(),
+            temporal_flags,
         }
     }
 }
@@ -565,11 +570,14 @@ impl AnimationChannel {
         } else {
             self.keyframes.insert(pos, keyframe);
         }
+        self.normalize_keyframes();
     }
 
     pub fn remove_keyframe(&mut self, time: TimeTicks) -> Option<Keyframe<f64>> {
         if let Some(pos) = self.keyframes.iter().position(|keyframe| keyframe.time == time) {
-            Some(self.keyframes.remove(pos))
+            let removed = self.keyframes.remove(pos);
+            self.normalize_keyframes();
+            Some(removed)
         } else {
             None
         }
@@ -581,6 +589,73 @@ impl AnimationChannel {
 
     pub fn is_animated(&self) -> bool {
         !self.keyframes.is_empty()
+    }
+
+    fn normalize_keyframes(&mut self) {
+        if self.keyframes.is_empty() {
+            return;
+        }
+
+        if self.keyframes.len() == 1 {
+            return;
+        }
+
+        let auto_handles = compute_auto_bezier_handles(&self.keyframes);
+
+        for index in 0..self.keyframes.len() {
+            let has_prev = index > 0;
+            let has_next = index + 1 < self.keyframes.len();
+            let keyframe = &mut self.keyframes[index];
+
+            if keyframe.temporal_flags.auto_bezier {
+                if let Some((interp_in, interp_out)) = auto_handles.get(index).copied() {
+                    keyframe.interp_in = if has_prev {
+                        interp_in
+                    } else {
+                        keyframe.interp_in
+                    };
+                    keyframe.interp_out = if has_next {
+                        interp_out
+                    } else {
+                        keyframe.interp_out
+                    };
+                    keyframe.temporal_flags.continuous = has_prev && has_next;
+                    keyframe.temporal_flags.broken_handles = false;
+                }
+            }
+        }
+
+        for index in 0..self.keyframes.len() {
+            if index == 0 || index + 1 >= self.keyframes.len() {
+                continue;
+            }
+
+            let previous = self.keyframes[index - 1].clone();
+            let current = self.keyframes[index].clone();
+            let next = self.keyframes[index + 1].clone();
+
+            if current.temporal_flags.auto_bezier
+                || !current.temporal_flags.continuous
+                || current.temporal_flags.broken_handles
+            {
+                continue;
+            }
+
+            let slope = continuous_tangent_slope(&previous, &current, &next);
+            let keyframe = &mut self.keyframes[index];
+            keyframe.interp_in = KeyframeInterpolation::Bezier(continuous_handle_for_in(
+                &previous,
+                &current,
+                slope,
+                handle_for_in(current.interp_in).time_offset,
+            ));
+            keyframe.interp_out = KeyframeInterpolation::Bezier(continuous_handle_for_out(
+                &current,
+                &next,
+                slope,
+                handle_for_out(current.interp_out).time_offset,
+            ));
+        }
     }
 }
 
@@ -798,6 +873,7 @@ impl AnimatedProperty {
                 temporal_flags: keyframe.temporal_flags,
             });
         }
+        self.normalize_channels();
         Ok(())
     }
 
@@ -826,8 +902,23 @@ impl AnimatedProperty {
                         existing.and_then(|keyframe| extract_handle(keyframe.interp_out)),
                     )
                 });
-                let (interp_in, interp_out) =
-                    interpolation_pair_with_handles(normalized, control_in, control_out);
+                let (default_in, default_out, default_flags) = interpolation_defaults(normalized);
+                let interp_in = if let Some(handle) = control_in {
+                    KeyframeInterpolation::Bezier(BezierHandle {
+                        time_offset: handle.x.clamp(-1.0, 0.0) as f64,
+                        value_offset: handle.y as f64,
+                    })
+                } else {
+                    default_in
+                };
+                let interp_out = if let Some(handle) = control_out {
+                    KeyframeInterpolation::Bezier(BezierHandle {
+                        time_offset: handle.x.clamp(0.0, 1.0) as f64,
+                        value_offset: handle.y as f64,
+                    })
+                } else {
+                    default_out
+                };
                 channel.set_keyframe(Keyframe {
                     id: existing.map(|keyframe| keyframe.id).unwrap_or_else(KeyframeId::new),
                     time,
@@ -836,9 +927,10 @@ impl AnimatedProperty {
                     interp_out: existing.map(|keyframe| keyframe.interp_out).unwrap_or(interp_out),
                     temporal_flags: existing
                         .map(|keyframe| keyframe.temporal_flags)
-                        .unwrap_or_default(),
+                        .unwrap_or(default_flags),
                 });
             }
+            self.normalize_channels();
             Ok(())
         } else {
             let mut static_channels = self.static_value.to_channel_values();
@@ -860,6 +952,7 @@ impl AnimatedProperty {
         for channel in &mut self.channels {
             let _ = channel.remove_keyframe(time);
         }
+        self.normalize_channels();
     }
 
     pub fn move_keyframe(&mut self, from_time: TimeTicks, to_time: TimeTicks) -> Result<()> {
@@ -909,6 +1002,7 @@ impl AnimatedProperty {
             keyframe.time = to_time;
             channel.set_keyframe(keyframe);
         }
+        self.normalize_channels();
 
         Ok(())
     }
@@ -926,15 +1020,45 @@ impl AnimatedProperty {
         }
 
         let normalized = self.value_type().normalized_interpolation(interpolation);
-        let (interp_in, interp_out) = interpolation_to_pair(normalized);
         let mut updated_any = false;
 
         for channel in &mut self.channels {
-            if let Some(existing) =
-                channel.keyframes.iter_mut().find(|keyframe| keyframe.time == time)
+            if let Some(index) = channel.keyframes.iter().position(|keyframe| keyframe.time == time)
             {
-                existing.interp_in = interp_in;
-                existing.interp_out = interp_out;
+                let has_prev = index > 0;
+                let has_next = index + 1 < channel.keyframes.len();
+                let existing = &mut channel.keyframes[index];
+                let (default_in, default_out, temporal_flags) = interpolation_defaults(normalized);
+                match normalized {
+                    InterpolationType::Bezier | InterpolationType::ContinuousBezier => {
+                        existing.interp_in = if has_prev {
+                            match existing.interp_in {
+                                KeyframeInterpolation::Bezier(handle) => {
+                                    KeyframeInterpolation::Bezier(handle)
+                                }
+                                _ => default_in,
+                            }
+                        } else {
+                            existing.interp_in
+                        };
+                        existing.interp_out = if has_next {
+                            match existing.interp_out {
+                                KeyframeInterpolation::Bezier(handle) => {
+                                    KeyframeInterpolation::Bezier(handle)
+                                }
+                                _ => default_out,
+                            }
+                        } else {
+                            existing.interp_out
+                        };
+                        existing.temporal_flags = temporal_flags;
+                    }
+                    _ => {
+                        existing.interp_in = default_in;
+                        existing.interp_out = default_out;
+                        existing.temporal_flags = temporal_flags;
+                    }
+                }
                 updated_any = true;
             }
         }
@@ -946,6 +1070,7 @@ impl AnimatedProperty {
             });
         }
 
+        self.normalize_channels();
         Ok(())
     }
 
@@ -974,9 +1099,82 @@ impl AnimatedProperty {
                 },
             )?;
 
+        let cleared_auto = keyframe.temporal_flags.auto_bezier;
         keyframe.interp_in = interp_in;
         keyframe.interp_out = interp_out;
+        if cleared_auto {
+            for channel in &mut self.channels {
+                if let Some(other) =
+                    channel.keyframes.iter_mut().find(|candidate| candidate.time == time)
+                {
+                    other.temporal_flags.auto_bezier = false;
+                }
+            }
+        }
+        self.normalize_channels();
         Ok(())
+    }
+
+    pub fn update_channel_keyframe_value(
+        &mut self,
+        time: TimeTicks,
+        channel_index: usize,
+        value: f64,
+    ) -> Result<()> {
+        let channel = self.channels.get_mut(channel_index).ok_or_else(|| {
+            MondrianError::WorkflowStepFailed {
+                step_id: "property_update_channel_keyframe_value".to_string(),
+                reason: format!("属性通道不存在: {}[{channel_index}]", self.descriptor.path),
+            }
+        })?;
+
+        let keyframe =
+            channel.keyframes.iter_mut().find(|keyframe| keyframe.time == time).ok_or_else(
+                || MondrianError::WorkflowStepFailed {
+                    step_id: "property_update_channel_keyframe_value".to_string(),
+                    reason: format!(
+                        "关键帧不存在: {}[{channel_index}] @ {}",
+                        self.descriptor.path, time
+                    ),
+                },
+            )?;
+
+        keyframe.value = value;
+        self.normalize_channels();
+        Ok(())
+    }
+
+    pub fn update_keyframe_temporal_flags(
+        &mut self,
+        time: TimeTicks,
+        temporal_flags: KeyframeTemporalFlags,
+    ) -> Result<()> {
+        let mut updated_any = false;
+
+        for channel in &mut self.channels {
+            if let Some(keyframe) =
+                channel.keyframes.iter_mut().find(|keyframe| keyframe.time == time)
+            {
+                keyframe.temporal_flags = temporal_flags;
+                updated_any = true;
+            }
+        }
+
+        if !updated_any {
+            return Err(MondrianError::WorkflowStepFailed {
+                step_id: "property_update_keyframe_temporal_flags".to_string(),
+                reason: format!("关键帧不存在: {} @ {}", self.descriptor.path, time),
+            });
+        }
+
+        self.normalize_channels();
+        Ok(())
+    }
+
+    fn normalize_channels(&mut self) {
+        for channel in &mut self.channels {
+            channel.normalize_keyframes();
+        }
     }
 
     pub fn apply_mutation(&mut self, mutation: PropertyMutation) -> Result<()> {
@@ -1034,6 +1232,14 @@ impl AnimatedProperty {
             } => {
                 self.ensure_path(&path)?;
                 self.update_channel_keyframe_handles(time, channel_index, interp_in, interp_out)
+            }
+            PropertyMutation::UpdateChannelKeyframeValue { path, time, channel_index, value } => {
+                self.ensure_path(&path)?;
+                self.update_channel_keyframe_value(time, channel_index, value)
+            }
+            PropertyMutation::UpdateKeyframeTemporalFlags { path, time, temporal_flags } => {
+                self.ensure_path(&path)?;
+                self.update_keyframe_temporal_flags(time, temporal_flags)
             }
             PropertyMutation::EnableAnimation { path, time } => {
                 self.ensure_path(&path)?;
@@ -1207,6 +1413,27 @@ impl PropertyBag {
         property.update_channel_keyframe_handles(time, channel_index, interp_in, interp_out)
     }
 
+    pub fn update_channel_keyframe_value(
+        &mut self,
+        path: &str,
+        time: TimeTicks,
+        channel_index: usize,
+        value: f64,
+    ) -> Result<()> {
+        let property = self.require_property_mut(path)?;
+        property.update_channel_keyframe_value(time, channel_index, value)
+    }
+
+    pub fn update_keyframe_temporal_flags(
+        &mut self,
+        path: &str,
+        time: TimeTicks,
+        temporal_flags: KeyframeTemporalFlags,
+    ) -> Result<()> {
+        let property = self.require_property_mut(path)?;
+        property.update_keyframe_temporal_flags(time, temporal_flags)
+    }
+
     pub fn remove_property(&mut self, path: &str) -> Option<AnimatedProperty> {
         self.properties.remove(path)
     }
@@ -1239,6 +1466,12 @@ impl PropertyBag {
                 interp_in,
                 interp_out,
             ),
+            PropertyMutation::UpdateChannelKeyframeValue { path, time, channel_index, value } => {
+                self.update_channel_keyframe_value(&path, time, channel_index, value)
+            }
+            PropertyMutation::UpdateKeyframeTemporalFlags { path, time, temporal_flags } => {
+                self.update_keyframe_temporal_flags(&path, time, temporal_flags)
+            }
             PropertyMutation::EnableAnimation { path, time } => self.enable_animation(&path, time),
             PropertyMutation::DisableAnimation { path, time } => {
                 self.disable_animation(&path, time)
@@ -1297,6 +1530,17 @@ pub enum PropertyMutation {
         interp_in: KeyframeInterpolation,
         interp_out: KeyframeInterpolation,
     },
+    UpdateChannelKeyframeValue {
+        path: String,
+        time: TimeTicks,
+        channel_index: usize,
+        value: f64,
+    },
+    UpdateKeyframeTemporalFlags {
+        path: String,
+        time: TimeTicks,
+        temporal_flags: KeyframeTemporalFlags,
+    },
     EnableAnimation {
         path: String,
         time: TimeTicks,
@@ -1336,6 +1580,8 @@ impl PropertyMutation {
             | Self::MoveKeyframe { path, .. }
             | Self::UpdateKeyframeInterpolation { path, .. }
             | Self::UpdateChannelKeyframeHandles { path, .. }
+            | Self::UpdateChannelKeyframeValue { path, .. }
+            | Self::UpdateKeyframeTemporalFlags { path, .. }
             | Self::EnableAnimation { path, .. }
             | Self::DisableAnimation { path, .. }
             | Self::ClearAnimation { path, .. }
@@ -1456,47 +1702,66 @@ fn segment_progress(
     }
 }
 
-fn interpolation_to_pair(
+fn interpolation_defaults(
     interpolation: InterpolationType,
-) -> (KeyframeInterpolation, KeyframeInterpolation) {
+) -> (
+    KeyframeInterpolation,
+    KeyframeInterpolation,
+    KeyframeTemporalFlags,
+) {
     match interpolation {
-        InterpolationType::Hold => (KeyframeInterpolation::Hold, KeyframeInterpolation::Hold),
-        InterpolationType::Linear => (KeyframeInterpolation::Linear, KeyframeInterpolation::Linear),
+        InterpolationType::Hold => (
+            KeyframeInterpolation::Hold,
+            KeyframeInterpolation::Hold,
+            KeyframeTemporalFlags::default(),
+        ),
+        InterpolationType::Linear => (
+            KeyframeInterpolation::Linear,
+            KeyframeInterpolation::Linear,
+            KeyframeTemporalFlags::default(),
+        ),
         InterpolationType::Bezier => (
-            KeyframeInterpolation::Bezier(BezierHandle {
-                time_offset: 1.0 / 3.0,
-                value_offset: 1.0 / 3.0,
-            }),
-            KeyframeInterpolation::Bezier(BezierHandle {
-                time_offset: -1.0 / 3.0,
-                value_offset: -1.0 / 3.0,
-            }),
+            KeyframeInterpolation::Bezier(default_out_bezier_handle()),
+            KeyframeInterpolation::Bezier(default_in_bezier_handle()),
+            KeyframeTemporalFlags::default(),
+        ),
+        InterpolationType::AutoBezier => (
+            KeyframeInterpolation::Bezier(default_in_bezier_handle()),
+            KeyframeInterpolation::Bezier(default_out_bezier_handle()),
+            KeyframeTemporalFlags {
+                auto_bezier: true,
+                continuous: true,
+                broken_handles: false,
+            },
+        ),
+        InterpolationType::ContinuousBezier => (
+            KeyframeInterpolation::Bezier(default_in_bezier_handle()),
+            KeyframeInterpolation::Bezier(default_out_bezier_handle()),
+            KeyframeTemporalFlags {
+                auto_bezier: false,
+                continuous: true,
+                broken_handles: false,
+            },
         ),
         InterpolationType::EaseIn => (
             KeyframeInterpolation::Linear,
-            KeyframeInterpolation::Bezier(BezierHandle {
-                time_offset: 1.0 / 3.0,
-                value_offset: 0.0,
-            }),
+            KeyframeInterpolation::Bezier(default_out_bezier_handle()),
+            KeyframeTemporalFlags::default(),
         ),
         InterpolationType::EaseOut => (
-            KeyframeInterpolation::Bezier(BezierHandle {
-                time_offset: -1.0 / 3.0,
-                value_offset: 0.0,
-            }),
+            KeyframeInterpolation::Bezier(default_in_bezier_handle()),
             KeyframeInterpolation::Linear,
-        ),
-        InterpolationType::EaseInOut => (
-            KeyframeInterpolation::Bezier(BezierHandle {
-                time_offset: -1.0 / 3.0,
-                value_offset: 0.0,
-            }),
-            KeyframeInterpolation::Bezier(BezierHandle {
-                time_offset: 1.0 / 3.0,
-                value_offset: 0.0,
-            }),
+            KeyframeTemporalFlags::default(),
         ),
     }
+}
+
+const fn default_out_bezier_handle() -> BezierHandle {
+    BezierHandle { time_offset: 1.0 / 3.0, value_offset: 0.0 }
+}
+
+const fn default_in_bezier_handle() -> BezierHandle {
+    BezierHandle { time_offset: -1.0 / 3.0, value_offset: 0.0 }
 }
 
 fn handle_for_out(interpolation: KeyframeInterpolation) -> BezierHandle {
@@ -1505,9 +1770,7 @@ fn handle_for_out(interpolation: KeyframeInterpolation) -> BezierHandle {
             time_offset: handle.time_offset.clamp(0.0, 1.0),
             value_offset: handle.value_offset,
         },
-        KeyframeInterpolation::Linear => {
-            BezierHandle { time_offset: 1.0 / 3.0, value_offset: 1.0 / 3.0 }
-        }
+        KeyframeInterpolation::Linear => default_out_bezier_handle(),
         KeyframeInterpolation::Hold => BezierHandle { time_offset: 0.0, value_offset: 0.0 },
     }
 }
@@ -1518,9 +1781,7 @@ fn handle_for_in(interpolation: KeyframeInterpolation) -> BezierHandle {
             time_offset: handle.time_offset.clamp(-1.0, 0.0),
             value_offset: handle.value_offset,
         },
-        KeyframeInterpolation::Linear => {
-            BezierHandle { time_offset: -1.0 / 3.0, value_offset: -1.0 / 3.0 }
-        }
+        KeyframeInterpolation::Linear => default_in_bezier_handle(),
         KeyframeInterpolation::Hold => BezierHandle { time_offset: 0.0, value_offset: 0.0 },
     }
 }
@@ -1533,31 +1794,6 @@ fn extract_handle(interpolation: KeyframeInterpolation) -> Option<Vec2> {
         )),
         _ => None,
     }
-}
-
-fn interpolation_pair_with_handles(
-    interpolation: InterpolationType,
-    control_in: Option<Vec2>,
-    control_out: Option<Vec2>,
-) -> (KeyframeInterpolation, KeyframeInterpolation) {
-    let (default_in, default_out) = interpolation_to_pair(interpolation);
-    let interp_in = if let Some(handle) = control_in {
-        KeyframeInterpolation::Bezier(BezierHandle {
-            time_offset: handle.x.clamp(-1.0, 0.0) as f64,
-            value_offset: handle.y as f64,
-        })
-    } else {
-        default_in
-    };
-    let interp_out = if let Some(handle) = control_out {
-        KeyframeInterpolation::Bezier(BezierHandle {
-            time_offset: handle.x.clamp(0.0, 1.0) as f64,
-            value_offset: handle.y as f64,
-        })
-    } else {
-        default_out
-    };
-    (interp_in, interp_out)
 }
 
 fn solve_bezier_t(x: f32, cp_out: BezierHandle, cp_in: BezierHandle) -> f32 {
@@ -1588,6 +1824,236 @@ fn solve_bezier_t(x: f32, cp_out: BezierHandle, cp_in: BezierHandle) -> f32 {
     }
 
     sample_curve_y(t).clamp(0.0, 1.0)
+}
+
+pub fn interpolation_mode_from_keyframe(
+    interp_in: KeyframeInterpolation,
+    interp_out: KeyframeInterpolation,
+    temporal_flags: KeyframeTemporalFlags,
+) -> InterpolationType {
+    let valid_in = !matches!(interp_in, KeyframeInterpolation::Linear);
+    let valid_out = !matches!(interp_out, KeyframeInterpolation::Linear);
+    let has_bezier = matches!(interp_in, KeyframeInterpolation::Bezier(_))
+        || matches!(interp_out, KeyframeInterpolation::Bezier(_));
+
+    if matches!(interp_in, KeyframeInterpolation::Hold)
+        || matches!(interp_out, KeyframeInterpolation::Hold)
+    {
+        InterpolationType::Hold
+    } else if temporal_flags.auto_bezier && has_bezier {
+        InterpolationType::AutoBezier
+    } else if temporal_flags.continuous && !temporal_flags.broken_handles && has_bezier {
+        InterpolationType::ContinuousBezier
+    } else if valid_in || valid_out {
+        InterpolationType::Bezier
+    } else {
+        InterpolationType::Linear
+    }
+}
+
+fn compute_auto_bezier_handles(
+    keyframes: &[Keyframe<f64>],
+) -> Vec<(KeyframeInterpolation, KeyframeInterpolation)> {
+    let count = keyframes.len();
+    if count == 0 {
+        return Vec::new();
+    }
+    if count == 1 {
+        return vec![(KeyframeInterpolation::Linear, KeyframeInterpolation::Linear)];
+    }
+
+    let mut slopes = vec![0.0; count];
+    let h = keyframes
+        .windows(2)
+        .map(|pair| (pair[1].time - pair[0].time).max(1) as f64)
+        .collect::<Vec<_>>();
+    let delta = keyframes
+        .windows(2)
+        .zip(h.iter())
+        .map(|(pair, dt)| (pair[1].value - pair[0].value) / *dt)
+        .collect::<Vec<_>>();
+
+    slopes[0] = endpoint_auto_slope(delta[0], delta.get(1).copied(), h[0], h.get(1).copied());
+    slopes[count - 1] = endpoint_auto_slope(
+        *delta.last().unwrap_or(&0.0),
+        delta.get(delta.len().saturating_sub(2)).copied(),
+        *h.last().unwrap_or(&1.0),
+        h.get(h.len().saturating_sub(2)).copied(),
+    );
+
+    for index in 1..count - 1 {
+        slopes[index] = interior_auto_slope(delta[index - 1], delta[index], h[index - 1], h[index]);
+    }
+
+    keyframes
+        .iter()
+        .enumerate()
+        .map(|(index, keyframe)| {
+            let interp_in = if index == 0 {
+                KeyframeInterpolation::Linear
+            } else {
+                let prev = &keyframes[index - 1];
+                let dt = (keyframe.time - prev.time).max(1) as f64;
+                let dv = keyframe.value - prev.value;
+                KeyframeInterpolation::Bezier(monotone_in_handle(slopes[index], dt, dv))
+            };
+            let interp_out = if index + 1 >= count {
+                KeyframeInterpolation::Linear
+            } else {
+                let next = &keyframes[index + 1];
+                let dt = (next.time - keyframe.time).max(1) as f64;
+                let dv = next.value - keyframe.value;
+                KeyframeInterpolation::Bezier(monotone_out_handle(slopes[index], dt, dv))
+            };
+            (interp_in, interp_out)
+        })
+        .collect()
+}
+
+fn endpoint_auto_slope(
+    primary_delta: f64,
+    secondary_delta: Option<f64>,
+    primary_h: f64,
+    secondary_h: Option<f64>,
+) -> f64 {
+    let Some(secondary_delta) = secondary_delta else {
+        return primary_delta;
+    };
+    let secondary_h = secondary_h.unwrap_or(primary_h);
+    let mut slope = ((2.0 * primary_h + secondary_h) * primary_delta - primary_h * secondary_delta)
+        / (primary_h + secondary_h);
+    if slope.signum() != primary_delta.signum() {
+        slope = 0.0;
+    } else if primary_delta.signum() != secondary_delta.signum()
+        && slope.abs() > 3.0 * primary_delta.abs()
+    {
+        slope = 3.0 * primary_delta;
+    }
+    slope
+}
+
+fn interior_auto_slope(delta_prev: f64, delta_next: f64, h_prev: f64, h_next: f64) -> f64 {
+    if delta_prev.abs() < f64::EPSILON
+        || delta_next.abs() < f64::EPSILON
+        || delta_prev.signum() != delta_next.signum()
+    {
+        return 0.0;
+    }
+    let w1 = 2.0 * h_next + h_prev;
+    let w2 = h_next + 2.0 * h_prev;
+    (w1 + w2) / (w1 / delta_prev + w2 / delta_next)
+}
+
+fn continuous_tangent_slope(
+    previous: &Keyframe<f64>,
+    current: &Keyframe<f64>,
+    next: &Keyframe<f64>,
+) -> f64 {
+    let in_handle = handle_for_in(current.interp_in);
+    let out_handle = handle_for_out(current.interp_out);
+    let in_slope = tangent_slope_from_in(previous, current, in_handle);
+    let out_slope = tangent_slope_from_out(current, next, out_handle);
+
+    match (in_slope, out_slope) {
+        (Some(in_slope), Some(out_slope)) => {
+            if in_slope.signum() != out_slope.signum() {
+                0.0
+            } else {
+                (in_slope + out_slope) * 0.5
+            }
+        }
+        (Some(in_slope), None) => in_slope,
+        (None, Some(out_slope)) => out_slope,
+        (None, None) => 0.0,
+    }
+}
+
+fn tangent_slope_from_out(
+    current: &Keyframe<f64>,
+    next: &Keyframe<f64>,
+    handle: BezierHandle,
+) -> Option<f64> {
+    let dv = next.value - current.value;
+    let dt = (next.time - current.time).max(1) as f64;
+    let dx = handle.time_offset.abs().clamp(0.05, 0.95);
+    if dv.abs() < f64::EPSILON {
+        Some(0.0)
+    } else {
+        Some(handle.value_offset * dv / (dx * dt))
+    }
+}
+
+fn tangent_slope_from_in(
+    previous: &Keyframe<f64>,
+    current: &Keyframe<f64>,
+    handle: BezierHandle,
+) -> Option<f64> {
+    let dv = current.value - previous.value;
+    let dt = (current.time - previous.time).max(1) as f64;
+    let dx = handle.time_offset.abs().clamp(0.05, 0.95);
+    if dv.abs() < f64::EPSILON {
+        Some(0.0)
+    } else {
+        Some(-handle.value_offset * dv / (dx * dt))
+    }
+}
+
+fn continuous_handle_for_out(
+    current: &Keyframe<f64>,
+    next: &Keyframe<f64>,
+    slope: f64,
+    time_offset: f64,
+) -> BezierHandle {
+    let dt = (next.time - current.time).max(1) as f64;
+    let dv = next.value - current.value;
+    let time_offset = time_offset.abs().clamp(0.05, 0.95);
+    if dv.abs() < f64::EPSILON || slope.abs() < f64::EPSILON {
+        BezierHandle { time_offset, value_offset: 0.0 }
+    } else {
+        BezierHandle {
+            time_offset,
+            value_offset: (slope * time_offset * dt / dv).clamp(-2.0, 2.0),
+        }
+    }
+}
+
+fn continuous_handle_for_in(
+    previous: &Keyframe<f64>,
+    current: &Keyframe<f64>,
+    slope: f64,
+    time_offset: f64,
+) -> BezierHandle {
+    let dt = (current.time - previous.time).max(1) as f64;
+    let dv = current.value - previous.value;
+    let time_offset = -time_offset.abs().clamp(0.05, 0.95);
+    if dv.abs() < f64::EPSILON || slope.abs() < f64::EPSILON {
+        BezierHandle { time_offset, value_offset: 0.0 }
+    } else {
+        BezierHandle {
+            time_offset,
+            value_offset: (slope * time_offset * dt / dv).clamp(-2.0, 2.0),
+        }
+    }
+}
+
+fn monotone_out_handle(slope: f64, dt: f64, dv: f64) -> BezierHandle {
+    if dv.abs() < f64::EPSILON || slope.abs() < f64::EPSILON {
+        return default_out_bezier_handle();
+    }
+    BezierHandle {
+        time_offset: 1.0 / 3.0,
+        value_offset: ((slope * dt / dv) / 3.0).clamp(-1.0, 1.0),
+    }
+}
+
+fn monotone_in_handle(slope: f64, dt: f64, dv: f64) -> BezierHandle {
+    if dv.abs() < f64::EPSILON || slope.abs() < f64::EPSILON {
+        return default_in_bezier_handle();
+    }
+    BezierHandle {
+        time_offset: -1.0 / 3.0,
+        value_offset: (-(slope * dt / dv) / 3.0).clamp(-1.0, 1.0),
+    }
 }
 
 fn cubic_bezier(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {
@@ -1963,16 +2429,33 @@ mod tests {
             "Opacity",
             PropertyValue::Float(1.0),
         ));
+        let previous_time = timecode_to_ticks(tc(8));
+        let time = timecode_to_ticks(tc(12));
+        let next_time = timecode_to_ticks(tc(18));
+
+        bag.apply_mutation(PropertyMutation::SetKeyframe {
+            path: "transform.opacity".to_string(),
+            keyframe: Keyframe::linear(previous_time, PropertyValue::Float(0.25)),
+        })
+        .expect("set previous keyframe");
+        bag.apply_mutation(PropertyMutation::SetKeyframe {
+            path: "transform.opacity".to_string(),
+            keyframe: Keyframe::linear(next_time, PropertyValue::Float(0.95)),
+        })
+        .expect("set next keyframe");
 
         let keyframe = Keyframe {
             id: KeyframeId::new(),
-            time: timecode_to_ticks(tc(12)),
+            time,
             value: PropertyValue::Float(0.75),
             interp_in: KeyframeInterpolation::Bezier(BezierHandle {
                 time_offset: -0.25,
                 value_offset: -0.1,
             }),
-            interp_out: KeyframeInterpolation::Linear,
+            interp_out: KeyframeInterpolation::Bezier(BezierHandle {
+                time_offset: 0.3,
+                value_offset: 0.15,
+            }),
             temporal_flags: KeyframeTemporalFlags {
                 auto_bezier: false,
                 continuous: true,
@@ -2046,13 +2529,25 @@ mod tests {
             "Opacity",
             PropertyValue::Float(0.0),
         ));
+        let start = timecode_to_ticks(tc(0));
         let time = timecode_to_ticks(tc(5));
+        let end = timecode_to_ticks(tc(10));
 
+        bag.apply_mutation(PropertyMutation::SetKeyframe {
+            path: "transform.opacity".to_string(),
+            keyframe: Keyframe::linear(start, PropertyValue::Float(0.0)),
+        })
+        .expect("set start keyframe");
         bag.apply_mutation(PropertyMutation::SetKeyframe {
             path: "transform.opacity".to_string(),
             keyframe: Keyframe::linear(time, PropertyValue::Float(0.5)),
         })
-        .expect("set keyframe");
+        .expect("set middle keyframe");
+        bag.apply_mutation(PropertyMutation::SetKeyframe {
+            path: "transform.opacity".to_string(),
+            keyframe: Keyframe::linear(end, PropertyValue::Float(1.0)),
+        })
+        .expect("set end keyframe");
         bag.apply_mutation(PropertyMutation::UpdateKeyframeInterpolation {
             path: "transform.opacity".to_string(),
             time,
@@ -2116,24 +2611,36 @@ mod tests {
             "Opacity",
             PropertyValue::Float(0.0),
         ));
-        let time = timecode_to_ticks(tc(4));
+        let start = timecode_to_ticks(tc(0));
+        let end = timecode_to_ticks(tc(8));
 
         bag.apply_mutation(PropertyMutation::SetKeyframe {
             path: "transform.opacity".to_string(),
-            keyframe: Keyframe::linear(time, PropertyValue::Float(0.5)),
+            keyframe: Keyframe::linear(start, PropertyValue::Float(0.0)),
         })
-        .expect("set keyframe");
+        .expect("set start keyframe");
+        bag.apply_mutation(PropertyMutation::SetKeyframe {
+            path: "transform.opacity".to_string(),
+            keyframe: Keyframe::linear(end, PropertyValue::Float(1.0)),
+        })
+        .expect("set end keyframe");
+
+        bag.apply_mutation(PropertyMutation::SetKeyframe {
+            path: "transform.opacity".to_string(),
+            keyframe: Keyframe::linear(start, PropertyValue::Float(0.0)),
+        })
+        .expect("refresh start keyframe");
 
         bag.apply_mutation(PropertyMutation::UpdateKeyframeInterpolation {
             path: "transform.opacity".to_string(),
-            time,
+            time: start,
             interpolation: InterpolationType::EaseIn,
         })
         .expect("ease in");
         let ease_in = bag
             .property("transform.opacity")
             .and_then(|property| property.channel(0))
-            .and_then(|channel| channel.keyframes().iter().find(|keyframe| keyframe.time == time))
+            .and_then(|channel| channel.keyframes().iter().find(|keyframe| keyframe.time == start))
             .cloned()
             .expect("stored ease-in keyframe");
         assert_eq!(ease_in.interp_in, KeyframeInterpolation::Linear);
@@ -2147,14 +2654,14 @@ mod tests {
 
         bag.apply_mutation(PropertyMutation::UpdateKeyframeInterpolation {
             path: "transform.opacity".to_string(),
-            time,
+            time: end,
             interpolation: InterpolationType::EaseOut,
         })
         .expect("ease out");
         let ease_out = bag
             .property("transform.opacity")
             .and_then(|property| property.channel(0))
-            .and_then(|channel| channel.keyframes().iter().find(|keyframe| keyframe.time == time))
+            .and_then(|channel| channel.keyframes().iter().find(|keyframe| keyframe.time == end))
             .cloned()
             .expect("stored ease-out keyframe");
         assert_eq!(
@@ -2165,5 +2672,322 @@ mod tests {
             })
         );
         assert_eq!(ease_out.interp_out, KeyframeInterpolation::Linear);
+    }
+
+    #[test]
+    fn update_keyframe_temporal_flags_changes_existing_keyframe() {
+        let mut bag = PropertyBag::default();
+        bag.define(PropertyDescriptor::new(
+            "transform.opacity",
+            "Opacity",
+            PropertyValue::Float(0.0),
+        ));
+        let time = timecode_to_ticks(tc(5));
+
+        bag.apply_mutation(PropertyMutation::SetKeyframe {
+            path: "transform.opacity".to_string(),
+            keyframe: Keyframe::linear(time, PropertyValue::Float(0.5)),
+        })
+        .expect("set keyframe");
+
+        let flags = KeyframeTemporalFlags {
+            auto_bezier: true,
+            continuous: true,
+            broken_handles: false,
+        };
+        bag.apply_mutation(PropertyMutation::UpdateKeyframeTemporalFlags {
+            path: "transform.opacity".to_string(),
+            time,
+            temporal_flags: flags,
+        })
+        .expect("update temporal flags");
+
+        let stored = bag
+            .property("transform.opacity")
+            .and_then(|property| property.channel(0))
+            .and_then(|channel| channel.keyframes().iter().find(|keyframe| keyframe.time == time))
+            .expect("stored keyframe");
+        assert_eq!(stored.temporal_flags, flags);
+        assert_eq!(stored.interp_in, KeyframeInterpolation::Linear);
+        assert_eq!(stored.interp_out, KeyframeInterpolation::Linear);
+    }
+
+    #[test]
+    fn update_channel_keyframe_value_preserves_bezier_mode() {
+        let mut bag = PropertyBag::default();
+        bag.define(PropertyDescriptor::new(
+            "transform.opacity",
+            "Opacity",
+            PropertyValue::Float(0.0),
+        ));
+        let start = timecode_to_ticks(tc(0));
+        let mid = timecode_to_ticks(tc(5));
+        let end = timecode_to_ticks(tc(10));
+
+        bag.apply_mutation(PropertyMutation::SetKeyframe {
+            path: "transform.opacity".to_string(),
+            keyframe: Keyframe::linear(start, PropertyValue::Float(0.0)),
+        })
+        .expect("set start keyframe");
+        bag.apply_mutation(PropertyMutation::SetKeyframe {
+            path: "transform.opacity".to_string(),
+            keyframe: Keyframe {
+                id: KeyframeId::new(),
+                time: mid,
+                value: PropertyValue::Float(0.5),
+                interp_in: KeyframeInterpolation::Bezier(BezierHandle {
+                    time_offset: -0.25,
+                    value_offset: -0.1,
+                }),
+                interp_out: KeyframeInterpolation::Bezier(BezierHandle {
+                    time_offset: 0.25,
+                    value_offset: 0.1,
+                }),
+                temporal_flags: KeyframeTemporalFlags {
+                    auto_bezier: false,
+                    continuous: true,
+                    broken_handles: false,
+                },
+            },
+        })
+        .expect("set middle keyframe");
+        bag.apply_mutation(PropertyMutation::SetKeyframe {
+            path: "transform.opacity".to_string(),
+            keyframe: Keyframe::linear(end, PropertyValue::Float(1.0)),
+        })
+        .expect("set end keyframe");
+
+        bag.apply_mutation(PropertyMutation::UpdateChannelKeyframeValue {
+            path: "transform.opacity".to_string(),
+            time: mid,
+            channel_index: 0,
+            value: 0.8,
+        })
+        .expect("update keyframe value");
+
+        let stored = bag
+            .property("transform.opacity")
+            .and_then(|property| property.channel(0))
+            .and_then(|channel| channel.keyframes().iter().find(|keyframe| keyframe.time == mid))
+            .expect("stored keyframe");
+        assert!(matches!(stored.interp_in, KeyframeInterpolation::Bezier(_)));
+        assert!(matches!(
+            stored.interp_out,
+            KeyframeInterpolation::Bezier(_)
+        ));
+        assert!(stored.temporal_flags.continuous);
+        assert!(!stored.temporal_flags.broken_handles);
+    }
+
+    #[test]
+    fn continuous_bezier_realigns_handles_after_value_change() {
+        let mut bag = PropertyBag::default();
+        bag.define(PropertyDescriptor::new(
+            "transform.opacity",
+            "Opacity",
+            PropertyValue::Float(0.0),
+        ));
+        let start = timecode_to_ticks(tc(0));
+        let mid = timecode_to_ticks(tc(5));
+        let end = timecode_to_ticks(tc(12));
+
+        bag.apply_mutation(PropertyMutation::SetKeyframe {
+            path: "transform.opacity".to_string(),
+            keyframe: Keyframe::linear(start, PropertyValue::Float(0.0)),
+        })
+        .expect("set start keyframe");
+        bag.apply_mutation(PropertyMutation::SetKeyframe {
+            path: "transform.opacity".to_string(),
+            keyframe: Keyframe {
+                id: KeyframeId::new(),
+                time: mid,
+                value: PropertyValue::Float(1.0),
+                interp_in: KeyframeInterpolation::Bezier(BezierHandle {
+                    time_offset: -0.2,
+                    value_offset: -0.3,
+                }),
+                interp_out: KeyframeInterpolation::Bezier(BezierHandle {
+                    time_offset: 0.4,
+                    value_offset: 0.4,
+                }),
+                temporal_flags: KeyframeTemporalFlags {
+                    auto_bezier: false,
+                    continuous: true,
+                    broken_handles: false,
+                },
+            },
+        })
+        .expect("set middle keyframe");
+        bag.apply_mutation(PropertyMutation::SetKeyframe {
+            path: "transform.opacity".to_string(),
+            keyframe: Keyframe::linear(end, PropertyValue::Float(2.0)),
+        })
+        .expect("set end keyframe");
+
+        bag.apply_mutation(PropertyMutation::UpdateChannelKeyframeValue {
+            path: "transform.opacity".to_string(),
+            time: mid,
+            channel_index: 0,
+            value: 0.4,
+        })
+        .expect("update keyframe value");
+
+        let channel = bag
+            .property("transform.opacity")
+            .and_then(|property| property.channel(0))
+            .expect("channel");
+        let previous = channel.keyframe_at(start).expect("previous");
+        let current = channel.keyframe_at(mid).expect("current");
+        let next = channel.keyframe_at(end).expect("next");
+        let in_handle = match current.interp_in {
+            KeyframeInterpolation::Bezier(handle) => handle,
+            _ => panic!("expected bezier in-handle"),
+        };
+        let out_handle = match current.interp_out {
+            KeyframeInterpolation::Bezier(handle) => handle,
+            _ => panic!("expected bezier out-handle"),
+        };
+        let in_slope = tangent_slope_from_in(previous, current, in_handle).expect("in slope");
+        let out_slope = tangent_slope_from_out(current, next, out_handle).expect("out slope");
+        assert!((in_slope - out_slope).abs() < 1e-6);
+    }
+
+    #[test]
+    fn single_keyframe_never_exposes_bezier_handles() {
+        let mut bag = PropertyBag::default();
+        bag.define(PropertyDescriptor::new(
+            "transform.opacity",
+            "Opacity",
+            PropertyValue::Float(0.0),
+        ));
+        let time = timecode_to_ticks(tc(5));
+        let before = timecode_to_ticks(tc(1));
+        let after = timecode_to_ticks(tc(9));
+
+        bag.apply_mutation(PropertyMutation::SetKeyframe {
+            path: "transform.opacity".to_string(),
+            keyframe: Keyframe::from_preset(
+                time,
+                PropertyValue::Float(0.5),
+                InterpolationType::Bezier,
+            ),
+        })
+        .expect("set single keyframe");
+
+        let before_value = bag
+            .evaluate("transform.opacity", before)
+            .and_then(|value| value.as_f32())
+            .expect("evaluate before keyframe");
+        let after_value = bag
+            .evaluate("transform.opacity", after)
+            .and_then(|value| value.as_f32())
+            .expect("evaluate after keyframe");
+        assert!((before_value - 0.5).abs() < 0.001);
+        assert!((after_value - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn boundary_keyframes_only_keep_handles_on_existing_segments() {
+        let mut bag = PropertyBag::default();
+        bag.define(PropertyDescriptor::new(
+            "transform.opacity",
+            "Opacity",
+            PropertyValue::Float(0.0),
+        ));
+        let start = timecode_to_ticks(tc(0));
+        let end = timecode_to_ticks(tc(10));
+
+        bag.apply_mutation(PropertyMutation::SetKeyframe {
+            path: "transform.opacity".to_string(),
+            keyframe: Keyframe::from_preset(
+                start,
+                PropertyValue::Float(0.0),
+                InterpolationType::Bezier,
+            ),
+        })
+        .expect("set start keyframe");
+        bag.apply_mutation(PropertyMutation::SetKeyframe {
+            path: "transform.opacity".to_string(),
+            keyframe: Keyframe::from_preset(
+                end,
+                PropertyValue::Float(1.0),
+                InterpolationType::Bezier,
+            ),
+        })
+        .expect("set end keyframe");
+
+        let channel = bag
+            .property("transform.opacity")
+            .and_then(|property| property.channel(0))
+            .expect("channel");
+        let first = channel.keyframes().iter().find(|keyframe| keyframe.time == start).unwrap();
+        let last = channel.keyframes().iter().find(|keyframe| keyframe.time == end).unwrap();
+        assert!(matches!(first.interp_out, KeyframeInterpolation::Bezier(_)));
+        assert!(matches!(last.interp_in, KeyframeInterpolation::Bezier(_)));
+        let before_start = bag
+            .evaluate(
+                "transform.opacity",
+                start.saturating_sub(SUBFRAME_TICKS_PER_FRAME),
+            )
+            .and_then(|value| value.as_f32())
+            .expect("evaluate before start");
+        let after_end = bag
+            .evaluate("transform.opacity", end + SUBFRAME_TICKS_PER_FRAME)
+            .and_then(|value| value.as_f32())
+            .expect("evaluate after end");
+        assert!((before_start - 0.0).abs() < 0.001);
+        assert!((after_end - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn auto_bezier_handles_remain_monotonic_for_monotone_values() {
+        let mut bag = PropertyBag::default();
+        bag.define(PropertyDescriptor::new(
+            "transform.opacity",
+            "Opacity",
+            PropertyValue::Float(0.0),
+        ));
+        let start = timecode_to_ticks(tc(0));
+        let mid = timecode_to_ticks(tc(8));
+        let end = timecode_to_ticks(tc(16));
+
+        bag.apply_mutation(PropertyMutation::SetKeyframe {
+            path: "transform.opacity".to_string(),
+            keyframe: Keyframe::linear(start, PropertyValue::Float(0.0)),
+        })
+        .expect("set start");
+        bag.apply_mutation(PropertyMutation::SetKeyframe {
+            path: "transform.opacity".to_string(),
+            keyframe: Keyframe::linear(mid, PropertyValue::Float(0.4)),
+        })
+        .expect("set mid");
+        bag.apply_mutation(PropertyMutation::SetKeyframe {
+            path: "transform.opacity".to_string(),
+            keyframe: Keyframe::linear(end, PropertyValue::Float(1.0)),
+        })
+        .expect("set end");
+        bag.apply_mutation(PropertyMutation::UpdateKeyframeInterpolation {
+            path: "transform.opacity".to_string(),
+            time: mid,
+            interpolation: InterpolationType::AutoBezier,
+        })
+        .expect("auto bezier");
+
+        let stored = bag
+            .property("transform.opacity")
+            .and_then(|property| property.channel(0))
+            .and_then(|channel| channel.keyframes().iter().find(|keyframe| keyframe.time == mid))
+            .expect("stored auto keyframe");
+        assert!(stored.temporal_flags.auto_bezier);
+        let KeyframeInterpolation::Bezier(in_handle) = stored.interp_in else {
+            panic!("expected auto in handle");
+        };
+        let KeyframeInterpolation::Bezier(out_handle) = stored.interp_out else {
+            panic!("expected auto out handle");
+        };
+        assert!(in_handle.time_offset < 0.0);
+        assert!(out_handle.time_offset > 0.0);
+        assert!((1.0 + in_handle.value_offset).clamp(0.0, 1.0) >= 0.0);
+        assert!(out_handle.value_offset.clamp(0.0, 1.0) >= 0.0);
     }
 }

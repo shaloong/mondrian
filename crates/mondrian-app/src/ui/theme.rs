@@ -641,7 +641,7 @@ pub fn checkmark_selectable_value<V: PartialEq>(
     text: impl Into<String>,
 ) -> egui::Response {
     let selected = *current == value;
-    let response = checkmark_menu_item(ui, selected, text.into());
+    let response = checkmark_menu_item(ui, selected, text.into(), false);
 
     if response.clicked() {
         *current = value;
@@ -654,18 +654,59 @@ pub fn checkmark_menu_toggle(
     current: &mut bool,
     text: impl Into<String>,
 ) -> egui::Response {
-    let response = checkmark_menu_item(ui, *current, text.into());
+    let response = checkmark_menu_item(ui, *current, text.into(), false);
     if response.clicked() {
         *current = !*current;
     }
     response
 }
 
-fn checkmark_menu_item(ui: &mut egui::Ui, selected: bool, text: String) -> egui::Response {
+pub fn checkmark_menu_action(
+    ui: &mut egui::Ui,
+    selected: bool,
+    text: impl Into<String>,
+) -> egui::Response {
+    checkmark_menu_item(ui, selected, text.into(), false)
+}
+
+pub fn checkmark_menu_action_fill(
+    ui: &mut egui::Ui,
+    selected: bool,
+    text: impl Into<String>,
+) -> egui::Response {
+    checkmark_menu_item(ui, selected, text.into(), true)
+}
+
+pub fn menu_action_fill(ui: &mut egui::Ui, text: impl Into<String>) -> egui::Response {
+    let text = text.into();
+    let desired_size = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+    ui.add_sized(desired_size, egui::Button::new(text))
+}
+
+fn checkmark_menu_item(
+    ui: &mut egui::Ui,
+    selected: bool,
+    text: String,
+    fill_width: bool,
+) -> egui::Response {
     let box_size = 18.0;
     let gap = 10.0;
     let horizontal_padding = 4.0;
-    let desired_size = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+    let text_size = ui
+        .painter()
+        .layout_no_wrap(
+            text.clone(),
+            typography::body_small(),
+            palette::text_primary(),
+        )
+        .size();
+    let content_width = box_size + gap + text_size.x + horizontal_padding * 2.0;
+    let desired_width = if fill_width {
+        ui.available_width().max(content_width)
+    } else {
+        content_width.min(ui.available_width())
+    };
+    let desired_size = egui::vec2(desired_width, ui.spacing().interact_size.y);
     let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click());
 
     if ui.is_rect_visible(rect) {

@@ -10,8 +10,8 @@ use std::{sync::mpsc, thread};
 use mondrian_assets::{AssetKind, AssetLibrary};
 use mondrian_core::{
     automation::{
-        timecode_to_ticks, InterpolationType, Keyframe, KeyframeInterpolation, PropertyHost,
-        PropertyMutation, PropertyValue, TimeTicks,
+        interpolation_mode_from_keyframe, timecode_to_ticks, InterpolationType, Keyframe,
+        PropertyHost, PropertyMutation, PropertyValue, TimeTicks,
     },
     events::{AppEvent, EventBus},
     types::{AssetId, ClipId, KeyframeId, Rational, Resolution, SequenceId, TimeCode, TrackId},
@@ -84,6 +84,13 @@ pub struct AnimationKeyframeSelection {
 pub struct AnimationSelectionState {
     pub active_property: Option<AnimationPropertySelection>,
     pub selected_keyframes: HashSet<AnimationKeyframeSelection>,
+    pub bubble_host: Option<AnimationBubbleHost>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AnimationBubbleHost {
+    Timeline,
+    Graph,
 }
 
 #[derive(Debug, Clone)]
@@ -1726,6 +1733,7 @@ impl AppState {
             .unwrap_or(false);
         if changed_clip {
             self.animation_selection.selected_keyframes.clear();
+            self.animation_selection.bubble_host = None;
         }
         self.animation_selection.active_property =
             Some(AnimationPropertySelection { clip_id, path });
@@ -1733,6 +1741,14 @@ impl AppState {
 
     pub fn clear_animation_selection(&mut self) {
         self.animation_selection = AnimationSelectionState::default();
+    }
+
+    pub fn animation_bubble_host(&self) -> Option<AnimationBubbleHost> {
+        self.animation_selection.bubble_host
+    }
+
+    pub fn set_animation_bubble_host(&mut self, host: AnimationBubbleHost) {
+        self.animation_selection.bubble_host = Some(host);
     }
 
     pub fn clear_animation_keyframe_selection_for_clip(&mut self, clip_id: ClipId) {
@@ -1777,7 +1793,11 @@ impl AppState {
                     .property(&item.path)
                     .and_then(|property| property.keyframe_at(item.time))
                     .map(|keyframe| {
-                        interpolation_preset_from_handles(keyframe.interp_in, keyframe.interp_out)
+                        interpolation_mode_from_keyframe(
+                            keyframe.interp_in,
+                            keyframe.interp_out,
+                            keyframe.temporal_flags,
+                        )
                     })
             })
             .collect::<Vec<_>>();
@@ -1791,6 +1811,40 @@ impl AppState {
             .copied()
             .filter(|preset| !current.iter().all(|current| current == preset))
             .collect()
+    }
+
+    pub fn selected_animation_interpolation_mode(
+        &self,
+        selection: SelectedClipRef,
+    ) -> Option<InterpolationType> {
+        let selected = self.selected_animation_keyframes_for_clip(selection.clip_id);
+        if selected.is_empty() {
+            return None;
+        }
+
+        let clip = self.clip_snapshot(selection)?;
+        let property_bag = clip.property_bag().ok()?;
+        let mut modes = selected
+            .iter()
+            .filter_map(|item| {
+                property_bag
+                    .property(&item.path)
+                    .and_then(|property| property.keyframe_at(item.time))
+                    .map(|keyframe| {
+                        interpolation_mode_from_keyframe(
+                            keyframe.interp_in,
+                            keyframe.interp_out,
+                            keyframe.temporal_flags,
+                        )
+                    })
+            })
+            .collect::<Vec<_>>();
+        let first = modes.pop()?;
+        if modes.into_iter().all(|mode| mode == first) {
+            Some(first)
+        } else {
+            None
+        }
     }
 
     pub fn is_animation_keyframe_selected(&self, selection: &AnimationKeyframeSelection) -> bool {
@@ -2963,45 +3017,6 @@ impl AppState {
 
         clear_broken_links(seq);
         Ok(changed_count)
-    }
-}
-
-fn interpolation_preset_from_handles(
-    interp_in: KeyframeInterpolation,
-    interp_out: KeyframeInterpolation,
-) -> InterpolationType {
-    const EPSILON: f64 = 1e-6;
-
-    let approx_handle =
-        |handle: KeyframeInterpolation, time_offset: f64, value_offset: f64| match handle {
-            KeyframeInterpolation::Bezier(handle) => {
-                (handle.time_offset - time_offset).abs() <= EPSILON
-                    && (handle.value_offset - value_offset).abs() <= EPSILON
-            }
-            _ => false,
-        };
-
-    if matches!(interp_in, KeyframeInterpolation::Hold)
-        || matches!(interp_out, KeyframeInterpolation::Hold)
-    {
-        InterpolationType::Hold
-    } else if matches!(interp_in, KeyframeInterpolation::Linear)
-        && matches!(interp_out, KeyframeInterpolation::Linear)
-    {
-        InterpolationType::Linear
-    } else if matches!(interp_in, KeyframeInterpolation::Linear)
-        && approx_handle(interp_out, 1.0 / 3.0, 0.0)
-    {
-        InterpolationType::EaseIn
-    } else if approx_handle(interp_in, -1.0 / 3.0, 0.0)
-        && matches!(interp_out, KeyframeInterpolation::Linear)
-    {
-        InterpolationType::EaseOut
-    } else if approx_handle(interp_in, -1.0 / 3.0, 0.0) && approx_handle(interp_out, 1.0 / 3.0, 0.0)
-    {
-        InterpolationType::EaseInOut
-    } else {
-        InterpolationType::Bezier
     }
 }
 

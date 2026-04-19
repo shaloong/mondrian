@@ -1,5 +1,5 @@
 use crate::{
-    app::{AnimationKeyframeSelection, AppState, ClipOverlapMode},
+    app::{AnimationBubbleHost, AnimationKeyframeSelection, AppState, ClipOverlapMode},
     ui::theme::{self, palette, tokens, typography},
 };
 use egui::{Color32, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2};
@@ -161,6 +161,7 @@ struct KeyframeDragState {
     start_pointer_x: f32,
     anchors: Vec<KeyframeDragAnchor>,
     min_time: TimeTicks,
+    candidate_times: Vec<TimeTicks>,
 }
 
 #[derive(Clone)]
@@ -1548,6 +1549,19 @@ impl TimelinePanel {
         let mut lane_visuals = Vec::new();
         let mut first_lane_rect = None;
         let mut last_lane_rect = None;
+        let current_time_ticks = state
+            .current_time_code()
+            .map(mondrian_core::automation::timecode_to_ticks)
+            .unwrap_or(0);
+        let all_lane_times = lanes
+            .iter()
+            .flat_map(|lane| lane.keyframe_times.iter().copied())
+            .collect::<Vec<_>>();
+        let (drag_delta, drag_snap_time) = self.current_keyframe_drag_delta_with_snap(ui);
+        if self.keyframe_drag.is_some() {
+            self.active_snap_guide_frame =
+                drag_snap_time.map(|time| (time / SUBFRAME_TICKS_PER_FRAME).max(0));
+        }
 
         for (lane_index, lane) in lanes.iter_mut().enumerate() {
             let (rect, _) = ui
@@ -1629,7 +1643,6 @@ impl TimelinePanel {
                 Stroke::new(1.0, palette::border_subtle().gamma_multiply(0.55)),
             );
 
-            let drag_delta = self.current_keyframe_drag_delta_ticks(ui);
             let mut preview_times = Vec::with_capacity(lane.keyframe_times.len());
             for time in &lane.keyframe_times {
                 let selection_item = KeyframeSelection {
@@ -1718,6 +1731,7 @@ impl TimelinePanel {
                 Sense::click_and_drag(),
             );
             if response.clicked() {
+                state.set_animation_bubble_host(AnimationBubbleHost::Timeline);
                 let additive = ui.input(|i| i.modifiers.shift);
                 if additive {
                     state.toggle_animation_keyframe_selection(AnimationKeyframeSelection {
@@ -1735,6 +1749,7 @@ impl TimelinePanel {
             }
 
             if response.drag_started() {
+                state.set_animation_bubble_host(AnimationBubbleHost::Timeline);
                 let current_selection = AnimationKeyframeSelection {
                     clip_id: visual.selection.clip_id,
                     path: visual.selection.path.clone(),
@@ -1761,11 +1776,20 @@ impl TimelinePanel {
                     .map(|anchor| anchor.original_time)
                     .min()
                     .unwrap_or(visual.selection.time);
+                let selected_times =
+                    anchors.iter().map(|anchor| anchor.original_time).collect::<HashSet<_>>();
+                let candidate_times = all_lane_times
+                    .iter()
+                    .copied()
+                    .filter(|time| !selected_times.contains(time))
+                    .chain([current_time_ticks])
+                    .collect::<Vec<_>>();
                 self.keyframe_drag = response.interact_pointer_pos().map(|pos| KeyframeDragState {
                     clip: selection,
                     start_pointer_x: pos.x,
                     anchors,
                     min_time,
+                    candidate_times,
                 });
             }
 
@@ -1805,18 +1829,18 @@ impl TimelinePanel {
                     self.delete_selected_keyframes(state);
                     ui.close();
                 }
-                let visible_presets = visible_animation_interpolation_presets();
-                let available_presets =
-                    state.available_animation_interpolation_presets(selection, &visible_presets);
-                if !available_presets.is_empty() {
-                    ui.separator();
-                }
-                for preset in available_presets {
-                    if ui.button(interpolation_label(preset)).clicked() {
-                        self.apply_interpolation_to_selected_keyframes(state, selection, preset);
-                        ui.close();
-                    }
-                }
+                let visible_modes = visible_animation_interpolation_modes();
+                ui.separator();
+                ui.menu_button("关键帧插值", |ui| {
+                    draw_keyframe_interpolation_menu(
+                        ui,
+                        state.selected_animation_interpolation_mode(selection),
+                        &visible_modes,
+                        |preset| {
+                            self.apply_interpolation_to_selected_keyframes(state, selection, preset)
+                        },
+                    );
+                });
             });
         }
 
@@ -1944,11 +1968,12 @@ impl TimelinePanel {
         let primary_pressed = ui.input(|i| i.pointer.primary_pressed());
         let primary_down = ui.input(|i| i.pointer.primary_down());
         let primary_released = ui.input(|i| i.pointer.primary_released());
+        let pointer_over_floating_ui = ui.ctx().is_pointer_over_area();
 
         if primary_pressed {
             if let Some(pos) = pointer_pos {
                 let on_keyframe = visuals.iter().any(|visual| visual.hit_rect.contains(pos));
-                if bounds.contains(pos) && !on_keyframe {
+                if bounds.contains(pos) && !on_keyframe && !pointer_over_floating_ui {
                     self.animation_marquee_anchor = Some(pos);
                     self.animation_marquee_current = Some(pos);
                     self.animation_marquee_additive = ui.input(|i| i.modifiers.shift);
@@ -2017,6 +2042,7 @@ impl TimelinePanel {
                 } else if !self.animation_marquee_additive
                     && bounds.contains(current)
                     && !visuals.iter().any(|visual| visual.hit_rect.contains(current))
+                    && !pointer_over_floating_ui
                 {
                     let had_selection =
                         !state.selected_animation_keyframes_for_clip(selection.clip_id).is_empty();
@@ -2048,6 +2074,9 @@ impl TimelinePanel {
         visuals: &[KeyframeVisual],
     ) {
         if self.keyframe_drag.is_some() {
+            return;
+        }
+        if state.animation_bubble_host() == Some(AnimationBubbleHost::Graph) {
             return;
         }
 
@@ -2084,16 +2113,14 @@ impl TimelinePanel {
                 )
             },
         );
-        let visible_presets = visible_animation_interpolation_presets();
-        let available_presets =
-            state.available_animation_interpolation_presets(selection, &visible_presets);
+        let visible_modes = visible_animation_interpolation_modes();
         let viewport_rect = ctx.input(|i| i.content_rect());
         let bubble_pos = floating_toolbar_position(
             selected_bounds,
             selected_bounds,
             viewport_rect,
-            2 + usize::from(state.has_animation_clipboard()) + 1,
-            available_presets.len(),
+            3 + usize::from(state.has_animation_clipboard()),
+            1,
         );
 
         egui::Area::new(egui::Id::new((
@@ -2145,33 +2172,38 @@ impl TimelinePanel {
                         self.delete_selected_keyframes(state);
                     }
 
-                    if !available_presets.is_empty() {
-                        ui.separator();
-                    }
-                    for preset in available_presets {
-                        if ui.small_button(interpolation_label(preset)).clicked() {
-                            self.apply_interpolation_to_selected_keyframes(
-                                state, selection, preset,
-                            );
-                        }
-                    }
+                    ui.separator();
+                    ui.menu_button("插值", |ui| {
+                        draw_keyframe_interpolation_menu(
+                            ui,
+                            state.selected_animation_interpolation_mode(selection),
+                            &visible_modes,
+                            |preset| {
+                                self.apply_interpolation_to_selected_keyframes(
+                                    state, selection, preset,
+                                )
+                            },
+                        );
+                    });
                 });
             });
         });
     }
 
-    fn current_keyframe_drag_delta_ticks(&self, ui: &Ui) -> TimeTicks {
+    fn current_keyframe_drag_delta_with_snap(&self, ui: &Ui) -> (TimeTicks, Option<TimeTicks>) {
         let Some(drag) = &self.keyframe_drag else {
-            return 0;
+            return (0, None);
         };
         let Some(pointer_x) = ui.input(|i| i.pointer.interact_pos()).map(|pos| pos.x) else {
-            return 0;
+            return (0, None);
         };
         keyframe_drag_delta_ticks(
             self.pixels_per_frame,
             drag.start_pointer_x,
             Some(pointer_x),
             drag.min_time,
+            &drag.anchors,
+            &drag.candidate_times,
         )
     }
 
@@ -2240,12 +2272,16 @@ impl TimelinePanel {
             return;
         };
 
-        let delta_ticks = keyframe_drag_delta_ticks(
+        let (delta_ticks, snapped_time) = keyframe_drag_delta_ticks(
             self.pixels_per_frame,
             drag.start_pointer_x,
             pointer_x,
             drag.min_time,
+            &drag.anchors,
+            &drag.candidate_times,
         );
+        self.active_snap_guide_frame =
+            snapped_time.map(|time| (time / SUBFRAME_TICKS_PER_FRAME).max(0));
         if delta_ticks == 0 {
             return;
         }
@@ -2288,6 +2324,7 @@ impl TimelinePanel {
                 state.set_animation_keyframe_selection(selection_after_move);
             })
             .map_err(|err| state.set_status_hint(format!("移动关键帧失败：{err}"), true));
+        self.active_snap_guide_frame = None;
     }
 
     fn trim_selected_clips_to_playhead(&mut self, state: &mut AppState, edge: TrimEdge) {
@@ -2572,7 +2609,13 @@ fn collect_animation_lanes(
             }
             Some(AnimationLane {
                 path: path.to_string(),
-                display_name: property.descriptor.display_name.clone(),
+                display_name: if let Some(group) =
+                    property.descriptor.ui_metadata.group_name.as_deref()
+                {
+                    format!("{group} · {}", property.descriptor.display_name)
+                } else {
+                    property.descriptor.display_name.clone()
+                },
                 keyframe_times,
             })
         })
@@ -2647,17 +2690,44 @@ fn keyframe_drag_delta_ticks(
     start_pointer_x: f32,
     pointer_x: Option<f32>,
     min_time: TimeTicks,
-) -> TimeTicks {
+    anchors: &[KeyframeDragAnchor],
+    candidate_times: &[TimeTicks],
+) -> (TimeTicks, Option<TimeTicks>) {
     let Some(pointer_x) = pointer_x else {
-        return 0;
+        return (0, None);
     };
     if pixels_per_frame <= 0.0 {
-        return 0;
+        return (0, None);
     }
 
     let frame_delta = ((pointer_x - start_pointer_x) / pixels_per_frame).round() as i64;
-    let delta_ticks = frame_delta.saturating_mul(SUBFRAME_TICKS_PER_FRAME);
-    delta_ticks.max(-min_time)
+    let raw_delta = frame_delta.saturating_mul(SUBFRAME_TICKS_PER_FRAME).max(-min_time);
+    let threshold_frames =
+        (tokens::timeline_drag_snap_pixels() / pixels_per_frame).ceil().max(1.0) as i64;
+    let threshold_ticks = threshold_frames.saturating_mul(SUBFRAME_TICKS_PER_FRAME);
+
+    let mut best: Option<(TimeTicks, TimeTicks)> = None;
+    for anchor in anchors {
+        let moved = (anchor.original_time + raw_delta).max(0);
+        for candidate in candidate_times {
+            let diff = (candidate - moved).abs();
+            if diff > threshold_ticks {
+                continue;
+            }
+            let snapped_delta = candidate.saturating_sub(anchor.original_time).max(-min_time);
+            if best.as_ref().is_none_or(|(_, best_diff)| diff < *best_diff) {
+                best = Some((snapped_delta, diff));
+            }
+        }
+    }
+
+    if let Some((snapped_delta, _)) = best {
+        let snapped_time =
+            anchors.first().map(|anchor| (anchor.original_time + snapped_delta).max(0));
+        (snapped_delta, snapped_time)
+    } else {
+        (raw_delta, None)
+    }
 }
 
 fn draw_keyframe_diamond(painter: &egui::Painter, center: Pos2, size: f32, selected: bool) {
@@ -2684,23 +2754,80 @@ fn draw_keyframe_diamond(painter: &egui::Painter, center: Pos2, size: f32, selec
     painter.add(egui::Shape::convex_polygon(points, fill, stroke));
 }
 
-fn visible_animation_interpolation_presets() -> [InterpolationType; 4] {
+fn visible_animation_interpolation_modes() -> [InterpolationType; 5] {
     [
         InterpolationType::Linear,
-        InterpolationType::EaseIn,
-        InterpolationType::EaseOut,
-        InterpolationType::EaseInOut,
+        InterpolationType::Bezier,
+        InterpolationType::AutoBezier,
+        InterpolationType::ContinuousBezier,
+        InterpolationType::Hold,
     ]
 }
 
-fn interpolation_label(interpolation: InterpolationType) -> &'static str {
+fn interpolation_mode_label(interpolation: InterpolationType) -> &'static str {
     match interpolation {
-        InterpolationType::Hold => "Hold",
-        InterpolationType::Linear => "Linear",
-        InterpolationType::Bezier => "Bezier",
-        InterpolationType::EaseIn => "Ease In",
-        InterpolationType::EaseOut => "Ease Out",
-        InterpolationType::EaseInOut => "Ease InOut",
+        InterpolationType::Linear => "线性",
+        InterpolationType::Bezier => "贝塞尔曲线",
+        InterpolationType::AutoBezier => "自动贝塞尔曲线",
+        InterpolationType::ContinuousBezier => "连续贝塞尔曲线",
+        InterpolationType::Hold => "定格",
+        InterpolationType::EaseIn | InterpolationType::EaseOut => "",
+    }
+}
+
+fn interpolation_action_label(interpolation: InterpolationType) -> &'static str {
+    match interpolation {
+        InterpolationType::EaseIn => "缓入",
+        InterpolationType::EaseOut => "缓出",
+        _ => "",
+    }
+}
+
+fn draw_keyframe_interpolation_menu(
+    ui: &mut Ui,
+    current_mode: Option<InterpolationType>,
+    available_modes: &[InterpolationType],
+    mut apply: impl FnMut(InterpolationType),
+) {
+    let widest_label = available_modes
+        .iter()
+        .map(|mode| interpolation_mode_label(*mode))
+        .chain(
+            [InterpolationType::EaseIn, InterpolationType::EaseOut]
+                .into_iter()
+                .map(interpolation_action_label),
+        )
+        .max_by_key(|label| label.chars().count())
+        .unwrap_or("线性");
+    let text_width = ui
+        .painter()
+        .layout_no_wrap(
+            widest_label.to_string(),
+            typography::body_small(),
+            palette::text_primary(),
+        )
+        .size()
+        .x;
+    ui.set_min_width((18.0 + 10.0 + text_width + 8.0).max(140.0));
+
+    for mode in available_modes {
+        if theme::checkmark_menu_action_fill(
+            ui,
+            current_mode == Some(*mode),
+            interpolation_mode_label(*mode),
+        )
+        .clicked()
+        {
+            apply(*mode);
+            ui.close();
+        }
+    }
+    ui.separator();
+    for action in [InterpolationType::EaseIn, InterpolationType::EaseOut] {
+        if theme::menu_action_fill(ui, interpolation_action_label(action)).clicked() {
+            apply(action);
+            ui.close();
+        }
     }
 }
 
@@ -2973,6 +3100,57 @@ mod tests {
         let decision = decide_snap_target(-3, &[], 4.0, 10.0);
         assert_eq!(decision.frame, 0);
         assert!(!decision.snapped);
+    }
+
+    #[test]
+    fn keyframe_drag_snaps_to_candidate_time() {
+        let anchors = vec![KeyframeDragAnchor {
+            selection: KeyframeSelection {
+                clip_id: ClipId::new(),
+                path: "transform.position".to_string(),
+                time: 10 * SUBFRAME_TICKS_PER_FRAME,
+            },
+            original_time: 10 * SUBFRAME_TICKS_PER_FRAME,
+        }];
+        let pixels_per_frame = 10.0;
+        let start_pointer_x = 100.0;
+        let pointer_x = Some(148.0);
+        let candidate_times = vec![15 * SUBFRAME_TICKS_PER_FRAME];
+
+        let (delta, snapped_time) = keyframe_drag_delta_ticks(
+            pixels_per_frame,
+            start_pointer_x,
+            pointer_x,
+            0,
+            &anchors,
+            &candidate_times,
+        );
+
+        assert_eq!(delta, 5 * SUBFRAME_TICKS_PER_FRAME);
+        assert_eq!(snapped_time, Some(15 * SUBFRAME_TICKS_PER_FRAME));
+    }
+
+    #[test]
+    fn keyframe_drag_stays_unsnapped_when_outside_threshold() {
+        let anchors = vec![KeyframeDragAnchor {
+            selection: KeyframeSelection {
+                clip_id: ClipId::new(),
+                path: "transform.position".to_string(),
+                time: 10 * SUBFRAME_TICKS_PER_FRAME,
+            },
+            original_time: 10 * SUBFRAME_TICKS_PER_FRAME,
+        }];
+        let (delta, snapped_time) = keyframe_drag_delta_ticks(
+            10.0,
+            100.0,
+            Some(141.0),
+            0,
+            &anchors,
+            &[20 * SUBFRAME_TICKS_PER_FRAME],
+        );
+
+        assert_eq!(delta, 4 * SUBFRAME_TICKS_PER_FRAME);
+        assert_eq!(snapped_time, None);
     }
 
     #[test]

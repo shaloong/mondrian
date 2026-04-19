@@ -2,8 +2,8 @@
 
 use mondrian_core::{
     automation::{
-        timecode_to_ticks, PropertyBag, PropertyDescriptor, PropertyHost, PropertyMutation,
-        PropertyValue,
+        timecode_to_ticks, AnimatablePropertyUiMetadata, PropertyBag, PropertyDescriptor,
+        PropertyHost, PropertyMutation, PropertyValue,
     },
     types::{Color, EffectId, TimeCode},
     Result,
@@ -69,96 +69,229 @@ impl PropertyHost for EffectNode {
 
 fn default_properties_for(effect_type: EffectType) -> PropertyBag {
     let mut properties = PropertyBag::default();
-    let mut define = |path: &str, name: &str, value: PropertyValue| {
-        properties.define(PropertyDescriptor::new(path, name, value));
+    let mut define = |path: &str,
+                      group: &str,
+                      name: &str,
+                      value: PropertyValue,
+                      min: Option<f64>,
+                      max: Option<f64>,
+                      step: Option<f64>| {
+        let mut descriptor = PropertyDescriptor::new(path, name, value);
+        descriptor.ui_metadata = AnimatablePropertyUiMetadata {
+            group_name: Some(group.to_string()),
+            min,
+            max,
+            soft_min: min,
+            soft_max: max,
+            step,
+            supports_bezier: true,
+            supports_spatial: false,
+        };
+        properties.define(descriptor);
     };
 
     match effect_type {
         EffectType::Lut3D => {
             define(
                 "effect.lut.intensity",
+                "LUT",
                 "LUT 强度",
                 PropertyValue::Float(1.0),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
             );
         }
         EffectType::ColorWheel => {
             define(
                 "effect.color_wheel.lift",
+                "色轮",
                 "Lift",
                 PropertyValue::Vec3(glam::Vec3::ONE),
+                Some(0.0),
+                Some(2.0),
+                Some(0.01),
             );
             define(
                 "effect.color_wheel.gamma",
+                "色轮",
                 "Gamma",
                 PropertyValue::Vec3(glam::Vec3::ONE),
+                Some(0.0),
+                Some(2.0),
+                Some(0.01),
             );
             define(
                 "effect.color_wheel.gain",
+                "色轮",
                 "Gain",
                 PropertyValue::Vec3(glam::Vec3::ONE),
+                Some(0.0),
+                Some(2.0),
+                Some(0.01),
             );
         }
         EffectType::Curves => {
             define(
                 "effect.curves.master",
+                "曲线",
                 "主曲线强度",
                 PropertyValue::Float(1.0),
+                Some(0.0),
+                Some(2.0),
+                Some(0.01),
             );
         }
         EffectType::HueSaturationLightness => {
-            define("effect.hsl.hue", "色相", PropertyValue::Float(0.0));
-            define("effect.hsl.saturation", "饱和度", PropertyValue::Float(1.0));
-            define("effect.hsl.lightness", "明度", PropertyValue::Float(0.0));
+            define(
+                "effect.hsl.hue",
+                "HSL",
+                "色相",
+                PropertyValue::Float(0.0),
+                Some(-180.0),
+                Some(180.0),
+                Some(1.0),
+            );
+            define(
+                "effect.hsl.saturation",
+                "HSL",
+                "饱和度",
+                PropertyValue::Float(1.0),
+                Some(0.0),
+                Some(2.0),
+                Some(0.01),
+            );
+            define(
+                "effect.hsl.lightness",
+                "HSL",
+                "明度",
+                PropertyValue::Float(0.0),
+                Some(-1.0),
+                Some(1.0),
+                Some(0.01),
+            );
         }
         EffectType::GaussianBlur => {
-            define("effect.blur.radius", "模糊半径", PropertyValue::Float(12.0));
+            define(
+                "effect.blur.radius",
+                "模糊",
+                "模糊半径",
+                PropertyValue::Float(12.0),
+                Some(0.0),
+                Some(200.0),
+                Some(0.1),
+            );
         }
         EffectType::Sharpen => {
             define(
                 "effect.sharpen.amount",
+                "锐化",
                 "锐化强度",
                 PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(4.0),
+                Some(0.01),
             );
         }
         EffectType::Vignette => {
             define(
                 "effect.vignette.intensity",
+                "暗角",
                 "暗角强度",
                 PropertyValue::Float(0.35),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
             );
             define(
                 "effect.vignette.feather",
+                "暗角",
                 "暗角羽化",
                 PropertyValue::Float(0.6),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
             );
         }
         EffectType::ChromaticAberration => {
             define(
                 "effect.chromatic.amount",
+                "色差",
                 "色差强度",
                 PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
             );
         }
         EffectType::Grain => {
-            define("effect.grain.amount", "颗粒强度", PropertyValue::Float(0.0));
-            define("effect.grain.size", "颗粒尺寸", PropertyValue::Float(1.0));
+            define(
+                "effect.grain.amount",
+                "颗粒",
+                "颗粒强度",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define(
+                "effect.grain.size",
+                "颗粒",
+                "颗粒尺寸",
+                PropertyValue::Float(1.0),
+                Some(0.1),
+                Some(4.0),
+                Some(0.01),
+            );
         }
         EffectType::ChromaKey => {
             define(
                 "effect.chroma.key_color",
+                "抠像",
                 "抠像颜色",
                 PropertyValue::Color(Color::from_hex(0x00FF00)),
+                None,
+                None,
+                None,
             );
             define(
                 "effect.chroma.similarity",
+                "抠像",
                 "相似度",
                 PropertyValue::Float(0.2),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
             );
-            define("effect.chroma.blend", "边缘混合", PropertyValue::Float(0.1));
+            define(
+                "effect.chroma.blend",
+                "抠像",
+                "边缘混合",
+                PropertyValue::Float(0.1),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
         }
         EffectType::LumaKey => {
-            define("effect.luma.threshold", "阈值", PropertyValue::Float(0.5));
-            define("effect.luma.softness", "柔化", PropertyValue::Float(0.1));
+            define(
+                "effect.luma.threshold",
+                "亮度键",
+                "阈值",
+                PropertyValue::Float(0.5),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define(
+                "effect.luma.softness",
+                "亮度键",
+                "柔化",
+                PropertyValue::Float(0.1),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
         }
     }
 

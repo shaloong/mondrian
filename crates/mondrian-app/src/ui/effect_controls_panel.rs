@@ -1,7 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::{
-    app::{AnimationKeyframeSelection, AppState},
+    app::{AnimationBubbleHost, AnimationKeyframeSelection, AppState},
     ui::{
         theme::{self, palette, tokens, typography},
         timeline_panel::SelectedClipRef,
@@ -12,10 +12,11 @@ use egui::{
 };
 use mondrian_core::{
     automation::{
-        timecode_to_ticks, BezierHandle, InterpolationType, KeyframeInterpolation, PropertyHost,
-        PropertyMutation, PropertyValue, TimeTicks, SUBFRAME_TICKS_PER_FRAME,
+        interpolation_mode_from_keyframe, timecode_to_ticks, BezierHandle, InterpolationType,
+        KeyframeInterpolation, KeyframeTemporalFlags, PropertyHost, PropertyMutation,
+        PropertyValue, TimeTicks, SUBFRAME_TICKS_PER_FRAME,
     },
-    types::{ClipId, TimeCode},
+    types::{ClipId, KeyframeId, TimeCode},
 };
 use mondrian_timeline::clip::Clip;
 
@@ -23,9 +24,12 @@ use mondrian_timeline::clip::Clip;
 pub struct EffectControlsPanel {
     text_edit_buffers: HashMap<(ClipId, String), String>,
     view: EffectControlsView,
+    graph_mode: GraphEditorMode,
     graph_channel_selection: HashMap<(ClipId, String), usize>,
     graph_handle_drag: Option<GraphHandleDragState>,
     graph_keyframe_drag: Option<GraphKeyframeDragState>,
+    graph_speed_drag: Option<GraphSpeedKeyframeDragState>,
+    graph_selection_scale_drag: Option<GraphSelectionScaleDragState>,
     graph_marquee_anchor: Option<Pos2>,
     graph_marquee_current: Option<Pos2>,
     graph_marquee_additive: bool,
@@ -37,6 +41,13 @@ enum EffectControlsView {
     #[default]
     Inspector,
     Graph,
+}
+
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum GraphEditorMode {
+    #[default]
+    Value,
+    Speed,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -72,9 +83,53 @@ struct GraphKeyframeDragAnchor {
 }
 
 #[derive(Clone)]
+struct GraphSpeedKeyframeDragState {
+    clip_id: ClipId,
+    path: String,
+    channel_index: usize,
+    start_pointer_pos: Pos2,
+    pointer_pos: Pos2,
+    anchors: Vec<GraphSpeedKeyframeDragAnchor>,
+}
+
+#[derive(Clone)]
+struct GraphSpeedKeyframeDragAnchor {
+    time: TimeTicks,
+    speed: f64,
+}
+
+#[derive(Clone)]
 struct GraphEditorHandle {
     kind: GraphHandleKind,
     position: Pos2,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GraphSelectionScaleAxis {
+    Time,
+    Value,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GraphSelectionScaleEdge {
+    Min,
+    Max,
+}
+
+#[derive(Clone)]
+struct GraphSelectionScaleDragState {
+    clip_id: ClipId,
+    path: String,
+    channel_index: usize,
+    axis: GraphSelectionScaleAxis,
+    edge: GraphSelectionScaleEdge,
+    pointer_pos: Pos2,
+    entries: Vec<SelectedGraphKeyframeData>,
+    plot_rect: Rect,
+    time_min: TimeTicks,
+    time_max: TimeTicks,
+    value_min: f64,
+    value_max: f64,
 }
 
 #[derive(Clone)]
@@ -89,6 +144,18 @@ struct PendingClearAnimation {
     path: String,
     display_name: String,
     time: TimeTicks,
+}
+
+#[derive(Clone)]
+struct SelectedGraphKeyframeData {
+    selection: AnimationKeyframeSelection,
+    channel_value: f64,
+}
+
+#[derive(Default, Clone, Copy)]
+struct GraphSnapGuides {
+    time: Option<TimeTicks>,
+    value: Option<f64>,
 }
 
 impl EffectControlsPanel {
@@ -315,14 +382,14 @@ impl EffectControlsPanel {
         theme::toolbar_frame().show(ui, |ui| {
             ui.horizontal(|ui| {
                 ComboBox::from_id_salt((selection.clip_id, "graph_property"))
-                    .selected_text(property.descriptor.display_name.as_str())
+                    .selected_text(property_display_name(property))
                     .width(140.0)
                     .show_ui(ui, |ui| {
                         for (path, candidate) in properties {
                             if ui
                                 .selectable_label(
                                     *path == active_path.as_str(),
-                                    &candidate.descriptor.display_name,
+                                    property_display_name(candidate),
                                 )
                                 .clicked()
                             {
@@ -350,6 +417,10 @@ impl EffectControlsPanel {
                         );
                     }
                 }
+
+                ui.separator();
+                ui.selectable_value(&mut self.graph_mode, GraphEditorMode::Value, "值");
+                ui.selectable_value(&mut self.graph_mode, GraphEditorMode::Speed, "速度");
             });
         });
         ui.add_space(tokens::panel_gap() * 0.6);
@@ -384,13 +455,23 @@ impl EffectControlsPanel {
 
         let current_time_ticks = timecode_to_ticks(current_time);
         let (time_min, time_max) = graph_time_range(clip);
-        let (value_min, value_max) = graph_value_range(
-            property,
-            channel_index,
-            current_time_ticks,
-            time_min,
-            time_max,
-        );
+        let (value_min, value_max) = match self.graph_mode {
+            GraphEditorMode::Value => graph_value_range(
+                property,
+                channel_index,
+                current_time_ticks,
+                time_min,
+                time_max,
+            ),
+            GraphEditorMode::Speed => graph_speed_range(
+                property,
+                channel_index,
+                clip,
+                current_time_ticks,
+                time_min,
+                time_max,
+            ),
+        };
         let y_labels = [value_max, (value_min + value_max) * 0.5, value_min];
         for row in 0..=4 {
             let t = row as f32 / 4.0;
@@ -428,13 +509,57 @@ impl EffectControlsPanel {
             typography::body_small(),
             palette::text_muted(),
         );
+        if self.graph_mode == GraphEditorMode::Speed && value_min <= 0.0 && value_max >= 0.0 {
+            let zero_y = graph_y_for_value(plot_rect, value_min, value_max, 0.0);
+            painter.line_segment(
+                [
+                    Pos2::new(plot_rect.left(), zero_y),
+                    Pos2::new(plot_rect.right(), zero_y),
+                ],
+                Stroke::new(1.2, palette::border_emphasis().gamma_multiply(0.85)),
+            );
+        }
 
-        let preview_map = self.graph_keyframe_drag.as_ref().and_then(|drag| {
+        let selected_times =
+            selected_on_active.iter().map(|selected| selected.time).collect::<Vec<_>>();
+        let time_snap_candidates = channel
+            .keyframes()
+            .iter()
+            .map(|keyframe| keyframe.time)
+            .filter(|time| !selected_times.contains(time))
+            .chain([current_time_ticks, time_min, time_max])
+            .collect::<Vec<_>>();
+        let value_snap_candidates = channel
+            .keyframes()
+            .iter()
+            .filter(|keyframe| !selected_times.contains(&keyframe.time))
+            .map(|keyframe| keyframe.value)
+            .chain([0.0])
+            .collect::<Vec<_>>();
+        let speed_snap_candidates = channel
+            .keyframes()
+            .iter()
+            .filter(|keyframe| !selected_times.contains(&keyframe.time))
+            .map(|keyframe| {
+                speed_per_second_at_time(
+                    property,
+                    channel_index,
+                    clip,
+                    keyframe.time,
+                    time_min,
+                    time_max,
+                )
+            })
+            .chain([0.0])
+            .collect::<Vec<_>>();
+        let mut snap_guides = GraphSnapGuides::default();
+
+        let _preview_map = self.graph_keyframe_drag.as_ref().and_then(|drag| {
             if drag.clip_id == selection.clip_id
                 && drag.path == active_path
                 && drag.channel_index == channel_index
             {
-                Some(graph_drag_preview_map(
+                let (map, guides) = graph_drag_preview_map_with_snap(
                     drag,
                     ui.input(|i| i.pointer.interact_pos()),
                     plot_rect,
@@ -442,7 +567,82 @@ impl EffectControlsPanel {
                     time_max,
                     value_min,
                     value_max,
-                ))
+                    &time_snap_candidates,
+                    &value_snap_candidates,
+                );
+                snap_guides = guides;
+                Some(map)
+            } else {
+                None
+            }
+        });
+        let preview_drag_property = self.graph_keyframe_drag.as_ref().and_then(|drag| {
+            if drag.clip_id == selection.clip_id
+                && drag.path == active_path
+                && drag.channel_index == channel_index
+            {
+                graph_keyframe_preview_property(
+                    property,
+                    drag,
+                    plot_rect,
+                    time_min,
+                    time_max,
+                    value_min,
+                    value_max,
+                    &time_snap_candidates,
+                    &value_snap_candidates,
+                )
+            } else {
+                None
+            }
+        });
+        let speed_preview_map = self.graph_speed_drag.as_ref().and_then(|drag| {
+            if drag.clip_id == selection.clip_id
+                && drag.path == active_path
+                && drag.channel_index == channel_index
+            {
+                let (map, guides) = graph_speed_drag_preview_map_with_snap(
+                    drag,
+                    ui.input(|i| i.pointer.interact_pos()),
+                    plot_rect,
+                    time_min,
+                    time_max,
+                    value_min,
+                    value_max,
+                    &speed_snap_candidates,
+                );
+                snap_guides.value = guides.value;
+                Some(map)
+            } else {
+                None
+            }
+        });
+        let preview_speed_property = self.graph_speed_drag.as_ref().and_then(|drag| {
+            if drag.clip_id == selection.clip_id
+                && drag.path == active_path
+                && drag.channel_index == channel_index
+            {
+                graph_speed_preview_property(
+                    property,
+                    drag,
+                    clip,
+                    time_min,
+                    time_max,
+                    plot_rect,
+                    value_min,
+                    value_max,
+                    &speed_snap_candidates,
+                )
+            } else {
+                None
+            }
+        });
+        let scale_preview_map = self.graph_selection_scale_drag.as_ref().and_then(|drag| {
+            if drag.clip_id == selection.clip_id
+                && drag.path == active_path
+                && drag.channel_index == channel_index
+            {
+                Some(graph_selection_scale_preview_map(drag))
             } else {
                 None
             }
@@ -457,18 +657,75 @@ impl EffectControlsPanel {
                 }
             }
         }
+        if let Some(drag) = &mut self.graph_speed_drag {
+            if drag.clip_id == selection.clip_id
+                && drag.path == active_path
+                && drag.channel_index == channel_index
+            {
+                if let Some(pointer_pos) = ui.input(|i| i.pointer.interact_pos()) {
+                    drag.pointer_pos = pointer_pos;
+                }
+            }
+        }
+        if let Some(drag) = &mut self.graph_selection_scale_drag {
+            if drag.clip_id == selection.clip_id
+                && drag.path == active_path
+                && drag.channel_index == channel_index
+            {
+                if let Some(pointer_pos) = ui.input(|i| i.pointer.interact_pos()) {
+                    drag.pointer_pos = pointer_pos;
+                }
+            }
+        }
 
-        draw_graph_curve(
-            &painter,
-            plot_rect,
-            property,
-            channel_index,
-            time_min,
-            time_max,
-            value_min,
-            value_max,
-            preview_map.as_ref(),
-        );
+        let display_property = preview_drag_property.as_ref().unwrap_or(property);
+        let display_channel = display_property.channel(channel_index).unwrap_or(channel);
+
+        match self.graph_mode {
+            GraphEditorMode::Value => draw_graph_curve(
+                &painter,
+                plot_rect,
+                display_property,
+                channel_index,
+                time_min,
+                time_max,
+                value_min,
+                value_max,
+                None,
+            ),
+            GraphEditorMode::Speed => draw_speed_graph_curve(
+                &painter,
+                plot_rect,
+                preview_speed_property.as_ref().unwrap_or(property),
+                channel_index,
+                clip,
+                time_min,
+                time_max,
+                value_min,
+                value_max,
+            ),
+        }
+
+        if let Some(snapped_time) = snap_guides.time {
+            let guide_x = graph_x_for_time(plot_rect, time_min, time_max, snapped_time);
+            painter.line_segment(
+                [
+                    Pos2::new(guide_x, plot_rect.top()),
+                    Pos2::new(guide_x, plot_rect.bottom()),
+                ],
+                Stroke::new(1.0, palette::timeline_playhead().gamma_multiply(0.85)),
+            );
+        }
+        if let Some(snapped_value) = snap_guides.value {
+            let guide_y = graph_y_for_value(plot_rect, value_min, value_max, snapped_value);
+            painter.line_segment(
+                [
+                    Pos2::new(plot_rect.left(), guide_y),
+                    Pos2::new(plot_rect.right(), guide_y),
+                ],
+                Stroke::new(1.0, palette::interaction_highlight().gamma_multiply(0.75)),
+            );
+        }
 
         if current_time_ticks >= time_min && current_time_ticks <= time_max {
             let playhead_x = graph_x_for_time(plot_rect, time_min, time_max, current_time_ticks);
@@ -483,8 +740,11 @@ impl EffectControlsPanel {
 
         let mut active_handle_preview: Option<(GraphHandleKind, Pos2)> = None;
         let mut handle_commit: Option<(KeyframeInterpolation, KeyframeInterpolation)> = None;
+        let mut selected_temporal_flags: Option<KeyframeTemporalFlags> = None;
+        let selected_keyframe_ids = selected_keyframe_ids(channel, &selected_on_active);
+        let selected_active_keyframe_id = selected_active_keyframe_id(channel, &selected_on_active);
         let selected_active_time = if selected_on_active.len() == 1 {
-            Some(selected_on_active[0].time)
+            selected_on_active.first().map(|selection| selection.time)
         } else {
             None
         };
@@ -499,16 +759,24 @@ impl EffectControlsPanel {
         let mut hovered_handle = false;
         let mut hovered_keyframe = false;
 
-        for (index, keyframe) in channel.keyframes().iter().enumerate() {
+        for (index, keyframe) in display_channel.keyframes().iter().enumerate() {
             let selection_item = AnimationKeyframeSelection {
                 clip_id: selection.clip_id,
                 path: active_path.clone(),
                 time: keyframe.time,
             };
-            let preview_override =
-                preview_map.as_ref().and_then(|map| map.get(&keyframe.time)).copied();
-            let point = preview_override.unwrap_or_else(|| {
-                graph_point_for_keyframe(
+            if selected_active_keyframe_id == Some(keyframe.id) {
+                selected_temporal_flags = Some(keyframe.temporal_flags);
+            }
+            let preview_override = speed_preview_map
+                .as_ref()
+                .and_then(|map| map.get(&keyframe.time))
+                .copied()
+                .or_else(|| {
+                    scale_preview_map.as_ref().and_then(|map| map.get(&keyframe.time)).copied()
+                });
+            let point = preview_override.unwrap_or_else(|| match self.graph_mode {
+                GraphEditorMode::Value => graph_point_for_keyframe(
                     plot_rect,
                     time_min,
                     time_max,
@@ -516,9 +784,25 @@ impl EffectControlsPanel {
                     value_max,
                     keyframe.time,
                     keyframe.value,
-                )
+                ),
+                GraphEditorMode::Speed => graph_point_for_keyframe(
+                    plot_rect,
+                    time_min,
+                    time_max,
+                    value_min,
+                    value_max,
+                    keyframe.time,
+                    speed_per_second_at_time(
+                        property,
+                        channel_index,
+                        clip,
+                        keyframe.time,
+                        time_min,
+                        time_max,
+                    ),
+                ),
             });
-            let selected = app.is_animation_keyframe_selected(&selection_item);
+            let selected = selected_keyframe_ids.contains(&keyframe.id);
             if selected {
                 selected_points.push(point);
             }
@@ -538,6 +822,7 @@ impl EffectControlsPanel {
             keyframe_visuals
                 .push(GraphKeyframeVisual { selection: selection_item.clone(), hit_rect });
             if key_response.clicked() {
+                app.set_animation_bubble_host(AnimationBubbleHost::Graph);
                 if ui.input(|i| i.modifiers.shift) {
                     app.toggle_animation_keyframe_selection(selection_item.clone());
                 } else {
@@ -570,52 +855,114 @@ impl EffectControlsPanel {
                     self.delete_selected_keyframes(app, selection);
                     ui.close();
                 }
-                let visible_presets = visible_interpolation_presets();
-                let available_presets =
-                    app.available_animation_interpolation_presets(selection, &visible_presets);
-                if !available_presets.is_empty() {
-                    ui.separator();
-                }
-                for preset in available_presets {
-                    if ui.button(interpolation_label(preset)).clicked() {
-                        self.apply_interpolation_to_selection(app, selection, preset);
+                if self.graph_mode == GraphEditorMode::Value && !keyframe.temporal_flags.auto_bezier
+                {
+                    let toggle_label = if keyframe.temporal_flags.broken_handles {
+                        "连续手柄"
+                    } else {
+                        "断开手柄"
+                    };
+                    if ui.button(toggle_label).clicked() {
+                        let mut flags = keyframe.temporal_flags;
+                        flags.continuous = true;
+                        flags.broken_handles = !flags.broken_handles;
+                        let _ = app
+                            .mutate_clip_property(
+                                selection,
+                                PropertyMutation::UpdateKeyframeTemporalFlags {
+                                    path: active_path.clone(),
+                                    time: keyframe.time,
+                                    temporal_flags: flags,
+                                },
+                                "更新关键帧手柄模式",
+                            )
+                            .map_err(|err| {
+                                app.set_status_hint(format!("更新关键帧手柄模式失败：{err}"), true)
+                            });
                         ui.close();
                     }
                 }
+                let visible_modes = visible_interpolation_modes();
+                ui.separator();
+                ui.menu_button("关键帧插值", |ui| {
+                    draw_keyframe_interpolation_menu(
+                        ui,
+                        app.selected_animation_interpolation_mode(selection),
+                        &visible_modes,
+                        |preset| self.apply_interpolation_to_selection(app, selection, preset),
+                    );
+                });
             });
-            if key_response.drag_started() && self.graph_handle_drag.is_none() {
+            if key_response.drag_started()
+                && self.graph_handle_drag.is_none()
+                && self.graph_selection_scale_drag.is_none()
+            {
                 let drag_targets = if app.is_animation_keyframe_selected(&selection_item) {
                     selected_on_active.clone()
                 } else {
                     app.select_animation_keyframe_only(selection_item.clone());
                     vec![selection_item.clone()]
                 };
-                self.graph_keyframe_drag =
-                    key_response.interact_pointer_pos().map(|start_pointer_pos| {
-                        GraphKeyframeDragState {
-                            clip_id: selection.clip_id,
-                            path: active_path.clone(),
-                            channel_index,
-                            start_pointer_pos,
-                            pointer_pos: start_pointer_pos,
-                            anchors: drag_targets
-                                .into_iter()
-                                .filter_map(|selected| {
-                                    property.keyframe_at(selected.time).and_then(|keyframe| {
-                                        keyframe
-                                            .value
-                                            .to_channel_values()
-                                            .get(channel_index)
-                                            .copied()
-                                            .map(|value| GraphKeyframeDragAnchor {
-                                                time: selected.time,
-                                                value,
-                                            })
-                                    })
-                                })
-                                .collect(),
-                        }
-                    });
+                match self.graph_mode {
+                    GraphEditorMode::Value => {
+                        self.graph_keyframe_drag =
+                            key_response.interact_pointer_pos().map(|start_pointer_pos| {
+                                app.set_animation_bubble_host(AnimationBubbleHost::Graph);
+                                GraphKeyframeDragState {
+                                    clip_id: selection.clip_id,
+                                    path: active_path.clone(),
+                                    channel_index,
+                                    start_pointer_pos,
+                                    pointer_pos: start_pointer_pos,
+                                    anchors: drag_targets
+                                        .into_iter()
+                                        .filter_map(|selected| {
+                                            property.keyframe_at(selected.time).and_then(
+                                                |keyframe| {
+                                                    keyframe
+                                                        .value
+                                                        .to_channel_values()
+                                                        .get(channel_index)
+                                                        .copied()
+                                                        .map(|value| GraphKeyframeDragAnchor {
+                                                            time: selected.time,
+                                                            value,
+                                                        })
+                                                },
+                                            )
+                                        })
+                                        .collect(),
+                                }
+                            });
+                    }
+                    GraphEditorMode::Speed => {
+                        self.graph_speed_drag =
+                            key_response.interact_pointer_pos().map(|start_pointer_pos| {
+                                app.set_animation_bubble_host(AnimationBubbleHost::Graph);
+                                GraphSpeedKeyframeDragState {
+                                    clip_id: selection.clip_id,
+                                    path: active_path.clone(),
+                                    channel_index,
+                                    start_pointer_pos,
+                                    pointer_pos: start_pointer_pos,
+                                    anchors: drag_targets
+                                        .into_iter()
+                                        .map(|selected| GraphSpeedKeyframeDragAnchor {
+                                            time: selected.time,
+                                            speed: speed_per_second_at_time(
+                                                property,
+                                                channel_index,
+                                                clip,
+                                                selected.time,
+                                                time_min,
+                                                time_max,
+                                            ),
+                                        })
+                                        .collect(),
+                                }
+                            });
+                    }
+                }
             }
             painter.add(Shape::circle_filled(
                 point,
@@ -639,16 +986,63 @@ impl EffectControlsPanel {
                 ),
             );
 
-            if selected_active_time == Some(keyframe.time) {
-                let handles = graph_handles_for_keyframe(
-                    channel.keyframes(),
-                    index,
-                    plot_rect,
-                    time_min,
-                    time_max,
-                    value_min,
-                    value_max,
-                );
+            if selected_active_keyframe_id == Some(keyframe.id)
+                && self.graph_mode == GraphEditorMode::Value
+                && !keyframe.temporal_flags.auto_bezier
+            {
+                let preview_keyframe = self.graph_handle_drag.as_ref().and_then(|drag| {
+                    if drag.clip_id == selection.clip_id
+                        && drag.path == active_path
+                        && drag.time == keyframe.time
+                        && drag.channel_index == channel_index
+                    {
+                        compute_handle_interpolation(
+                            drag.kind,
+                            drag.pointer_pos,
+                            display_channel.keyframes(),
+                            index,
+                            keyframe.temporal_flags,
+                            plot_rect,
+                            time_min,
+                            time_max,
+                            value_min,
+                            value_max,
+                        )
+                        .map(|(interp_in, interp_out)| {
+                            mondrian_core::automation::Keyframe {
+                                id: keyframe.id,
+                                time: keyframe.time,
+                                value: keyframe.value,
+                                interp_in,
+                                interp_out,
+                                temporal_flags: keyframe.temporal_flags,
+                            }
+                        })
+                    } else {
+                        None
+                    }
+                });
+                let handles = if let Some(preview_keyframe) = preview_keyframe {
+                    graph_handles_for_keyframe(
+                        &replace_keyframe(display_channel.keyframes(), index, preview_keyframe),
+                        index,
+                        plot_rect,
+                        time_min,
+                        time_max,
+                        value_min,
+                        value_max,
+                    )
+                } else {
+                    graph_handles_for_keyframe(
+                        display_channel.keyframes(),
+                        index,
+                        plot_rect,
+                        time_min,
+                        time_max,
+                        value_min,
+                        value_max,
+                    )
+                };
                 for handle in handles {
                     let mut handle_position = handle.position;
                     if let Some(drag) = &mut self.graph_handle_drag {
@@ -664,8 +1058,9 @@ impl EffectControlsPanel {
                             if let Some(preview) = preview_handle_position(
                                 handle.kind,
                                 drag.pointer_pos,
-                                channel.keyframes(),
+                                display_channel.keyframes(),
                                 index,
+                                keyframe.temporal_flags,
                                 plot_rect,
                                 time_min,
                                 time_max,
@@ -679,8 +1074,9 @@ impl EffectControlsPanel {
                                 handle_commit = compute_handle_interpolation(
                                     handle.kind,
                                     drag.pointer_pos,
-                                    channel.keyframes(),
+                                    display_channel.keyframes(),
                                     index,
+                                    keyframe.temporal_flags,
                                     plot_rect,
                                     time_min,
                                     time_max,
@@ -714,6 +1110,7 @@ impl EffectControlsPanel {
                     hovered_handle |= handle_response.hovered();
                     handle_points.push(handle_position);
                     if handle_response.drag_started() {
+                        app.set_animation_bubble_host(AnimationBubbleHost::Graph);
                         self.graph_handle_drag =
                             handle_response.interact_pointer_pos().map(|pointer_pos| {
                                 GraphHandleDragState {
@@ -754,7 +1151,46 @@ impl EffectControlsPanel {
                     value_min,
                     value_max,
                     selection.clip_id,
+                    &time_snap_candidates,
+                    &value_snap_candidates,
                 );
+            }
+        }
+        let mut graph_speed_commit: Option<(
+            Vec<PropertyMutation>,
+            Vec<AnimationKeyframeSelection>,
+        )> = None;
+        if let Some(drag) = &self.graph_speed_drag {
+            if drag.clip_id == selection.clip_id
+                && drag.path == active_path
+                && drag.channel_index == channel_index
+                && ui.input(|i| i.pointer.any_released())
+            {
+                graph_speed_commit = graph_speed_drag_mutations(
+                    drag,
+                    property,
+                    clip,
+                    time_min,
+                    time_max,
+                    plot_rect,
+                    value_min,
+                    value_max,
+                    selection.clip_id,
+                    &speed_snap_candidates,
+                );
+            }
+        }
+        let mut graph_scale_commit: Option<(
+            Vec<PropertyMutation>,
+            Vec<AnimationKeyframeSelection>,
+        )> = None;
+        if let Some(drag) = &self.graph_selection_scale_drag {
+            if drag.clip_id == selection.clip_id
+                && drag.path == active_path
+                && drag.channel_index == channel_index
+                && ui.input(|i| i.pointer.any_released())
+            {
+                graph_scale_commit = graph_selection_scale_mutations(drag, selection.clip_id);
             }
         }
 
@@ -785,6 +1221,24 @@ impl EffectControlsPanel {
         } else if ui.input(|i| i.pointer.any_released()) {
             self.graph_keyframe_drag = None;
         }
+        if let Some((mutations, selections)) = graph_speed_commit {
+            self.graph_speed_drag = None;
+            let _ = app
+                .mutate_clip_properties(selection, mutations, "编辑速度曲线")
+                .map(|_| app.set_animation_keyframe_selection(selections))
+                .map_err(|err| app.set_status_hint(format!("编辑速度曲线失败：{err}"), true));
+        } else if ui.input(|i| i.pointer.any_released()) {
+            self.graph_speed_drag = None;
+        }
+        if let Some((mutations, selections)) = graph_scale_commit {
+            self.graph_selection_scale_drag = None;
+            let _ = app
+                .mutate_clip_properties(selection, mutations, "缩放图形关键帧")
+                .map(|_| app.set_animation_keyframe_selection(selections))
+                .map_err(|err| app.set_status_hint(format!("缩放图形关键帧失败：{err}"), true));
+        } else if ui.input(|i| i.pointer.any_released()) {
+            self.graph_selection_scale_drag = None;
+        }
 
         if let Some((_, preview)) = active_handle_preview {
             painter.circle_filled(
@@ -792,6 +1246,31 @@ impl EffectControlsPanel {
                 tokens::graph_editor_handle_size() * 0.45,
                 palette::interaction_highlight(),
             );
+        }
+
+        let mut hovered_selection_transform = false;
+        if self.graph_mode == GraphEditorMode::Value && selected_on_active.len() >= 2 {
+            if let Some(entries) = self.selected_graph_keyframe_data(
+                app,
+                selection,
+                active_path.as_str(),
+                channel_index,
+                &selected_on_active,
+            ) {
+                hovered_selection_transform = self.draw_graph_selection_transform_handles(
+                    ui,
+                    selection,
+                    active_path.as_str(),
+                    channel_index,
+                    &entries,
+                    &selected_points,
+                    plot_rect,
+                    time_min,
+                    time_max,
+                    value_min,
+                    value_max,
+                );
+            }
         }
 
         self.handle_graph_marquee(
@@ -803,7 +1282,7 @@ impl EffectControlsPanel {
             time_min,
             time_max,
             &keyframe_visuals,
-            hovered_keyframe || hovered_handle,
+            hovered_keyframe || hovered_handle || hovered_selection_transform,
         );
 
         self.draw_graph_selection_bubble(
@@ -813,6 +1292,12 @@ impl EffectControlsPanel {
             &selected_points,
             &handle_points,
             plot_rect,
+            active_path.as_str(),
+            channel_index,
+            &selected_on_active,
+            selected_active_time,
+            selected_temporal_flags,
+            self.graph_mode,
             app,
         );
     }
@@ -855,6 +1340,294 @@ impl EffectControlsPanel {
             .map_err(|err| app.set_status_hint(format!("删除关键帧失败：{err}"), true));
     }
 
+    fn scale_graph_selection_time(
+        &mut self,
+        app: &mut AppState,
+        selection: SelectedClipRef,
+        active_path: &str,
+        selected_on_active: &[AnimationKeyframeSelection],
+        factor: f64,
+    ) {
+        if selected_on_active.len() < 2 {
+            return;
+        }
+
+        let Some(entries) =
+            self.selected_graph_keyframe_data(app, selection, active_path, 0, selected_on_active)
+        else {
+            return;
+        };
+
+        let min_time = entries.iter().map(|entry| entry.selection.time).min().unwrap_or(0);
+        let max_time = entries.iter().map(|entry| entry.selection.time).max().unwrap_or(min_time);
+        if min_time == max_time {
+            return;
+        }
+        let pivot = (min_time + max_time) as f64 * 0.5;
+
+        let new_times = entries
+            .iter()
+            .map(|entry| {
+                let scaled = pivot + (entry.selection.time as f64 - pivot) * factor;
+                let snapped = snap_time_ticks(scaled.round() as TimeTicks);
+                (entry.selection.time, snapped.max(0))
+            })
+            .collect::<Vec<_>>();
+
+        let mut dedup = std::collections::HashSet::new();
+        if new_times.iter().any(|(_, new_time)| !dedup.insert(*new_time)) {
+            app.set_status_hint("时间缩放后关键帧发生重叠，已取消", true);
+            return;
+        }
+
+        let mut ordered = entries
+            .iter()
+            .map(|entry| entry.selection.time)
+            .zip(new_times.iter().map(|(_, new_time)| *new_time))
+            .collect::<Vec<_>>();
+        ordered.sort_by(|a, b| {
+            if factor >= 1.0 {
+                b.0.cmp(&a.0)
+            } else {
+                a.0.cmp(&b.0)
+            }
+        });
+
+        let mutations = ordered
+            .into_iter()
+            .filter(|(old_time, new_time)| old_time != new_time)
+            .map(|(old_time, new_time)| PropertyMutation::MoveKeyframe {
+                path: active_path.to_string(),
+                from_time: old_time,
+                to_time: new_time,
+            })
+            .collect::<Vec<_>>();
+        if mutations.is_empty() {
+            return;
+        }
+
+        let new_selection = selected_on_active
+            .iter()
+            .zip(new_times.into_iter())
+            .map(|(selected, (_, new_time))| AnimationKeyframeSelection {
+                clip_id: selected.clip_id,
+                path: selected.path.clone(),
+                time: new_time,
+            })
+            .collect::<Vec<_>>();
+
+        let _ = app
+            .mutate_clip_properties(selection, mutations, "缩放关键帧时间")
+            .map(|_| app.set_animation_keyframe_selection(new_selection))
+            .map_err(|err| app.set_status_hint(format!("缩放关键帧时间失败：{err}"), true));
+    }
+
+    fn scale_graph_selection_values(
+        &mut self,
+        app: &mut AppState,
+        selection: SelectedClipRef,
+        active_path: &str,
+        channel_index: usize,
+        selected_on_active: &[AnimationKeyframeSelection],
+        factor: f64,
+    ) {
+        if selected_on_active.len() < 2 {
+            return;
+        }
+
+        let Some(entries) = self.selected_graph_keyframe_data(
+            app,
+            selection,
+            active_path,
+            channel_index,
+            selected_on_active,
+        ) else {
+            return;
+        };
+
+        let min_value =
+            entries.iter().map(|entry| entry.channel_value).fold(f64::INFINITY, f64::min);
+        let max_value = entries
+            .iter()
+            .map(|entry| entry.channel_value)
+            .fold(f64::NEG_INFINITY, f64::max);
+        if !min_value.is_finite() || !max_value.is_finite() {
+            return;
+        }
+        let pivot = (min_value + max_value) * 0.5;
+
+        let mutations = entries
+            .iter()
+            .map(|entry| {
+                let scaled = pivot + (entry.channel_value - pivot) * factor;
+                PropertyMutation::WriteChannels {
+                    path: active_path.to_string(),
+                    time: entry.selection.time,
+                    channel_values: vec![(channel_index, scaled)],
+                    interpolation: InterpolationType::Linear,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let _ = app
+            .mutate_clip_properties(selection, mutations, "缩放关键帧数值")
+            .map_err(|err| app.set_status_hint(format!("缩放关键帧数值失败：{err}"), true));
+    }
+
+    fn selected_graph_keyframe_data(
+        &self,
+        app: &AppState,
+        selection: SelectedClipRef,
+        active_path: &str,
+        channel_index: usize,
+        selected_on_active: &[AnimationKeyframeSelection],
+    ) -> Option<Vec<SelectedGraphKeyframeData>> {
+        let clip = app.clip_snapshot(selection)?;
+        let property_bag = clip.property_bag().ok()?;
+        let property = property_bag.property(active_path)?;
+        let entries = selected_on_active
+            .iter()
+            .filter_map(|selected| {
+                property.keyframe_at(selected.time).and_then(|keyframe| {
+                    keyframe.value.to_channel_values().get(channel_index).copied().map(
+                        |channel_value| SelectedGraphKeyframeData {
+                            selection: selected.clone(),
+                            channel_value,
+                        },
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        Some(entries)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_graph_selection_transform_handles(
+        &mut self,
+        ui: &mut Ui,
+        selection: SelectedClipRef,
+        active_path: &str,
+        channel_index: usize,
+        entries: &[SelectedGraphKeyframeData],
+        selected_points: &[Pos2],
+        plot_rect: Rect,
+        time_min: TimeTicks,
+        time_max: TimeTicks,
+        value_min: f64,
+        value_max: f64,
+    ) -> bool {
+        if selected_points.len() < 2 {
+            return false;
+        }
+
+        let centroid = selected_points.iter().fold(Pos2::ZERO, |acc, point| {
+            Pos2::new(acc.x + point.x, acc.y + point.y)
+        });
+        let centroid = Pos2::new(
+            centroid.x / selected_points.len() as f32,
+            centroid.y / selected_points.len() as f32,
+        );
+        let bounds = selected_points.iter().fold(
+            Rect::from_center_size(centroid, Vec2::ZERO),
+            |acc, point| {
+                Rect::from_min_max(
+                    Pos2::new(acc.min.x.min(point.x), acc.min.y.min(point.y)),
+                    Pos2::new(acc.max.x.max(point.x), acc.max.y.max(point.y)),
+                )
+            },
+        );
+
+        ui.painter().rect_stroke(
+            bounds.expand(6.0),
+            egui::CornerRadius::same(4),
+            Stroke::new(1.0, palette::interaction_highlight().gamma_multiply(0.55)),
+            egui::StrokeKind::Inside,
+        );
+
+        let handle_size = Vec2::splat(10.0);
+        let handles = [
+            (
+                GraphSelectionScaleAxis::Time,
+                GraphSelectionScaleEdge::Min,
+                Pos2::new(bounds.left() - 6.0, bounds.center().y),
+                "压缩/扩展起始时间",
+            ),
+            (
+                GraphSelectionScaleAxis::Time,
+                GraphSelectionScaleEdge::Max,
+                Pos2::new(bounds.right() + 6.0, bounds.center().y),
+                "压缩/扩展结束时间",
+            ),
+            (
+                GraphSelectionScaleAxis::Value,
+                GraphSelectionScaleEdge::Max,
+                Pos2::new(bounds.center().x, bounds.top() - 6.0),
+                "缩放最大数值",
+            ),
+            (
+                GraphSelectionScaleAxis::Value,
+                GraphSelectionScaleEdge::Min,
+                Pos2::new(bounds.center().x, bounds.bottom() + 6.0),
+                "缩放最小数值",
+            ),
+        ];
+
+        let mut hovered_any = false;
+        for (axis, edge, center, tooltip) in handles {
+            let rect = Rect::from_center_size(center, handle_size);
+            let response = ui
+                .interact(
+                    rect,
+                    ui.make_persistent_id((
+                        "graph_selection_scale",
+                        selection.clip_id,
+                        active_path,
+                        channel_index,
+                        matches!(axis, GraphSelectionScaleAxis::Time),
+                        matches!(edge, GraphSelectionScaleEdge::Max),
+                    )),
+                    Sense::click_and_drag(),
+                )
+                .on_hover_text(tooltip);
+            hovered_any |= response.hovered();
+            if response.drag_started() {
+                self.graph_selection_scale_drag =
+                    response.interact_pointer_pos().map(|pointer_pos| {
+                        GraphSelectionScaleDragState {
+                            clip_id: selection.clip_id,
+                            path: active_path.to_string(),
+                            channel_index,
+                            axis,
+                            edge,
+                            pointer_pos,
+                            entries: entries.to_vec(),
+                            plot_rect,
+                            time_min,
+                            time_max,
+                            value_min,
+                            value_max,
+                        }
+                    });
+            }
+            ui.painter().rect_filled(
+                rect,
+                2.0,
+                if response.hovered() {
+                    palette::interaction_highlight()
+                } else {
+                    palette::bg_surface_hover()
+                },
+            );
+            ui.painter().rect_stroke(
+                rect,
+                egui::CornerRadius::same(2),
+                Stroke::new(1.0, palette::text_primary()),
+                egui::StrokeKind::Inside,
+            );
+        }
+        hovered_any
+    }
+
     fn draw_graph_selection_bubble(
         &mut self,
         ctx: &egui::Context,
@@ -863,11 +1636,20 @@ impl EffectControlsPanel {
         selected_points: &[Pos2],
         handle_points: &[Pos2],
         plot_rect: Rect,
+        active_path: &str,
+        channel_index: usize,
+        selected_on_active: &[AnimationKeyframeSelection],
+        selected_keyframe_time: Option<TimeTicks>,
+        selected_temporal_flags: Option<KeyframeTemporalFlags>,
+        graph_mode: GraphEditorMode,
         app: &mut AppState,
     ) {
         if selected_points.is_empty()
             || self.graph_handle_drag.is_some()
             || self.graph_keyframe_drag.is_some()
+            || self.graph_speed_drag.is_some()
+            || self.graph_selection_scale_drag.is_some()
+            || app.animation_bubble_host() == Some(AnimationBubbleHost::Timeline)
         {
             return;
         }
@@ -894,15 +1676,22 @@ impl EffectControlsPanel {
                 Pos2::new(acc.max.x.max(point.x), acc.max.y.max(point.y)),
             )
         });
-        let visible_presets = visible_interpolation_presets();
-        let available_presets =
-            app.available_animation_interpolation_presets(selection, &visible_presets);
+        let visible_modes = visible_interpolation_modes();
+        let scale_action_count =
+            usize::from(graph_mode == GraphEditorMode::Value && selected_on_active.len() >= 2) * 4;
+        let handle_toggle_label = selected_temporal_flags.and_then(|flags| {
+            (!flags.auto_bezier).then_some(if flags.broken_handles {
+                "连续手柄"
+            } else {
+                "断开手柄"
+            })
+        });
         let bubble_pos = floating_toolbar_position(
             selected_bounds,
             avoid_bounds,
             plot_rect.expand2(Vec2::new(16.0, 16.0)),
-            2 + usize::from(app.has_animation_clipboard()) + 1,
-            available_presets.len(),
+            3 + usize::from(app.has_animation_clipboard()),
+            1 + usize::from(handle_toggle_label.is_some()) + scale_action_count,
         );
 
         egui::Area::new(egui::Id::new(("graph_keyframe_bubble", selection.clip_id)))
@@ -949,14 +1738,105 @@ impl EffectControlsPanel {
                             self.delete_selected_keyframes(app, selection);
                         }
 
-                        if !available_presets.is_empty() {
+                        if graph_mode == GraphEditorMode::Value && selected_on_active.len() >= 2 {
                             ui.separator();
-                        }
-                        for preset in available_presets {
-                            if ui.small_button(interpolation_label(preset)).clicked() {
-                                self.apply_interpolation_to_selection(app, selection, preset);
+                            if ui
+                                .small_button("时-")
+                                .on_hover_text("压缩所选关键帧时间范围")
+                                .clicked()
+                            {
+                                self.scale_graph_selection_time(
+                                    app,
+                                    selection,
+                                    active_path,
+                                    selected_on_active,
+                                    0.8,
+                                );
+                            }
+                            if ui
+                                .small_button("时+")
+                                .on_hover_text("扩展所选关键帧时间范围")
+                                .clicked()
+                            {
+                                self.scale_graph_selection_time(
+                                    app,
+                                    selection,
+                                    active_path,
+                                    selected_on_active,
+                                    1.25,
+                                );
+                            }
+                            if ui
+                                .small_button("值-")
+                                .on_hover_text("缩小所选关键帧数值幅度")
+                                .clicked()
+                            {
+                                self.scale_graph_selection_values(
+                                    app,
+                                    selection,
+                                    active_path,
+                                    channel_index,
+                                    selected_on_active,
+                                    0.8,
+                                );
+                            }
+                            if ui
+                                .small_button("值+")
+                                .on_hover_text("放大所选关键帧数值幅度")
+                                .clicked()
+                            {
+                                self.scale_graph_selection_values(
+                                    app,
+                                    selection,
+                                    active_path,
+                                    channel_index,
+                                    selected_on_active,
+                                    1.25,
+                                );
                             }
                         }
+
+                        if let Some(label) =
+                            handle_toggle_label.filter(|_| graph_mode == GraphEditorMode::Value)
+                        {
+                            ui.separator();
+                            if ui.small_button(label).clicked() {
+                                if let (Some(mut flags), Some(time)) =
+                                    (selected_temporal_flags, selected_keyframe_time)
+                                {
+                                    flags.continuous = true;
+                                    flags.broken_handles = !flags.broken_handles;
+                                    let _ = app
+                                        .mutate_clip_property(
+                                            selection,
+                                            PropertyMutation::UpdateKeyframeTemporalFlags {
+                                                path: active_path.to_string(),
+                                                time,
+                                                temporal_flags: flags,
+                                            },
+                                            "更新关键帧手柄模式",
+                                        )
+                                        .map_err(|err| {
+                                            app.set_status_hint(
+                                                format!("更新关键帧手柄模式失败：{err}"),
+                                                true,
+                                            )
+                                        });
+                                }
+                            }
+                        }
+
+                        ui.separator();
+                        ui.menu_button("插值", |ui| {
+                            draw_keyframe_interpolation_menu(
+                                ui,
+                                app.selected_animation_interpolation_mode(selection),
+                                &visible_modes,
+                                |preset| {
+                                    self.apply_interpolation_to_selection(app, selection, preset)
+                                },
+                            );
+                        });
                     });
                 });
             });
@@ -975,7 +1855,11 @@ impl EffectControlsPanel {
         visuals: &[GraphKeyframeVisual],
         pointer_on_anchor: bool,
     ) {
-        if self.graph_handle_drag.is_some() || self.graph_keyframe_drag.is_some() {
+        if self.graph_handle_drag.is_some()
+            || self.graph_keyframe_drag.is_some()
+            || self.graph_speed_drag.is_some()
+            || self.graph_selection_scale_drag.is_some()
+        {
             self.clear_graph_marquee();
             return;
         }
@@ -984,10 +1868,11 @@ impl EffectControlsPanel {
         let primary_pressed = ui.input(|i| i.pointer.primary_pressed());
         let primary_down = ui.input(|i| i.pointer.primary_down());
         let primary_released = ui.input(|i| i.pointer.primary_released());
+        let pointer_over_floating_ui = ui.ctx().is_pointer_over_area();
 
         if primary_pressed {
             if let Some(pos) = pointer_pos {
-                if bounds.contains(pos) && !pointer_on_anchor {
+                if bounds.contains(pos) && !pointer_on_anchor && !pointer_over_floating_ui {
                     self.graph_marquee_anchor = Some(pos);
                     self.graph_marquee_current = Some(pos);
                     self.graph_marquee_additive = ui.input(|i| i.modifiers.shift);
@@ -1045,7 +1930,10 @@ impl EffectControlsPanel {
                     } else {
                         app.set_animation_keyframe_selection(picks);
                     }
-                } else if bounds.contains(current) && !pointer_on_anchor {
+                } else if bounds.contains(current)
+                    && !pointer_on_anchor
+                    && !pointer_over_floating_ui
+                {
                     let had_selection =
                         !app.selected_animation_keyframes_for_clip(selection.clip_id).is_empty();
                     if !self.graph_marquee_additive {
@@ -1192,7 +2080,7 @@ impl EffectControlsPanel {
         let label_response = ui
             .selectable_label(
                 is_active_property,
-                RichText::new(&property.descriptor.display_name)
+                RichText::new(property_display_name(property))
                     .font(typography::body_small())
                     .color(if is_active_property {
                         palette::text_primary()
@@ -1213,6 +2101,7 @@ impl EffectControlsPanel {
             &current_value,
             interpolation,
             property.descriptor.is_animatable,
+            &property.descriptor.ui_metadata,
         );
 
         if property.descriptor.is_animatable {
@@ -1267,6 +2156,7 @@ impl EffectControlsPanel {
         current_value: &PropertyValue,
         interpolation: InterpolationType,
         is_animatable: bool,
+        metadata: &mondrian_core::automation::AnimatablePropertyUiMetadata,
     ) {
         match current_value {
             PropertyValue::Bool(value) => {
@@ -1284,7 +2174,20 @@ impl EffectControlsPanel {
             }
             PropertyValue::Int(value) => {
                 let mut edited = *value;
-                if ui.add(DragValue::new(&mut edited).speed(1.0)).changed() {
+                let mut drag = DragValue::new(&mut edited).speed(metadata.step.unwrap_or(1.0));
+                match (metadata.min, metadata.max) {
+                    (Some(min), Some(max)) => {
+                        drag = drag.range((min.round() as i64)..=(max.round() as i64));
+                    }
+                    (Some(min), None) => {
+                        drag = drag.range((min.round() as i64)..=i64::MAX);
+                    }
+                    (None, Some(max)) => {
+                        drag = drag.range(i64::MIN..=(max.round() as i64));
+                    }
+                    (None, None) => {}
+                }
+                if ui.add(drag).changed() {
                     self.commit_value(
                         app,
                         selection,
@@ -1297,7 +2200,14 @@ impl EffectControlsPanel {
             }
             PropertyValue::Float(value) => {
                 let mut edited = *value as f64;
-                if ui.add(DragValue::new(&mut edited).speed(0.01)).changed() {
+                let mut drag = DragValue::new(&mut edited).speed(metadata.step.unwrap_or(0.01));
+                match (metadata.min, metadata.max) {
+                    (Some(min), Some(max)) => drag = drag.range(min..=max),
+                    (Some(min), None) => drag = drag.range(min..=f64::INFINITY),
+                    (None, Some(max)) => drag = drag.range(f64::NEG_INFINITY..=max),
+                    (None, None) => {}
+                }
+                if ui.add(drag).changed() {
                     self.commit_value(
                         app,
                         selection,
@@ -1310,7 +2220,14 @@ impl EffectControlsPanel {
             }
             PropertyValue::Double(value) => {
                 let mut edited = *value;
-                if ui.add(DragValue::new(&mut edited).speed(0.01)).changed() {
+                let mut drag = DragValue::new(&mut edited).speed(metadata.step.unwrap_or(0.01));
+                match (metadata.min, metadata.max) {
+                    (Some(min), Some(max)) => drag = drag.range(min..=max),
+                    (Some(min), None) => drag = drag.range(min..=f64::INFINITY),
+                    (None, Some(max)) => drag = drag.range(f64::NEG_INFINITY..=max),
+                    (None, None) => {}
+                }
+                if ui.add(drag).changed() {
                     self.commit_value(
                         app,
                         selection,
@@ -1323,11 +2240,12 @@ impl EffectControlsPanel {
             }
             PropertyValue::Vec2(value) => {
                 let mut edited = *value;
+                let speed = metadata.step.unwrap_or(0.05);
                 ui.horizontal(|ui| {
                     let x_changed =
-                        ui.add(DragValue::new(&mut edited.x).speed(0.05).prefix("X ")).changed();
+                        ui.add(DragValue::new(&mut edited.x).speed(speed).prefix("X ")).changed();
                     let y_changed =
-                        ui.add(DragValue::new(&mut edited.y).speed(0.05).prefix("Y ")).changed();
+                        ui.add(DragValue::new(&mut edited.y).speed(speed).prefix("Y ")).changed();
                     let mut channel_values = Vec::new();
                     if x_changed {
                         channel_values.push((0, edited.x as f64));
@@ -1349,13 +2267,14 @@ impl EffectControlsPanel {
             }
             PropertyValue::Vec3(value) => {
                 let mut edited = *value;
+                let speed = metadata.step.unwrap_or(0.05);
                 ui.horizontal(|ui| {
                     let x_changed =
-                        ui.add(DragValue::new(&mut edited.x).speed(0.05).prefix("X ")).changed();
+                        ui.add(DragValue::new(&mut edited.x).speed(speed).prefix("X ")).changed();
                     let y_changed =
-                        ui.add(DragValue::new(&mut edited.y).speed(0.05).prefix("Y ")).changed();
+                        ui.add(DragValue::new(&mut edited.y).speed(speed).prefix("Y ")).changed();
                     let z_changed =
-                        ui.add(DragValue::new(&mut edited.z).speed(0.05).prefix("Z ")).changed();
+                        ui.add(DragValue::new(&mut edited.z).speed(speed).prefix("Z ")).changed();
                     let mut channel_values = Vec::new();
                     if x_changed {
                         channel_values.push((0, edited.x as f64));
@@ -1547,7 +2466,11 @@ impl EffectControlsPanel {
         let current_time_ticks = timecode_to_ticks(current_time);
         let mut fallback = InterpolationType::Linear;
         for keyframe in property.channel(0).map(|channel| channel.keyframes()).unwrap_or(&[]) {
-            let interpolation = interpolation_from_handles(keyframe.interp_in, keyframe.interp_out);
+            let interpolation = interpolation_mode_from_keyframe(
+                keyframe.interp_in,
+                keyframe.interp_out,
+                keyframe.temporal_flags,
+            );
             if keyframe.time == current_time_ticks {
                 return interpolation;
             }
@@ -1567,62 +2490,80 @@ impl EffectControlsPanel {
     }
 }
 
-fn visible_interpolation_presets() -> [InterpolationType; 4] {
+fn visible_interpolation_modes() -> [InterpolationType; 5] {
     [
         InterpolationType::Linear,
-        InterpolationType::EaseIn,
-        InterpolationType::EaseOut,
-        InterpolationType::EaseInOut,
+        InterpolationType::Bezier,
+        InterpolationType::AutoBezier,
+        InterpolationType::ContinuousBezier,
+        InterpolationType::Hold,
     ]
 }
 
-fn interpolation_label(interpolation: InterpolationType) -> &'static str {
+fn interpolation_mode_label(interpolation: InterpolationType) -> &'static str {
     match interpolation {
-        InterpolationType::Hold => "Hold",
-        InterpolationType::Linear => "Linear",
-        InterpolationType::Bezier => "Bezier",
-        InterpolationType::EaseIn => "Ease In",
-        InterpolationType::EaseOut => "Ease Out",
-        InterpolationType::EaseInOut => "Ease InOut",
+        InterpolationType::Linear => "线性",
+        InterpolationType::Bezier => "贝塞尔曲线",
+        InterpolationType::AutoBezier => "自动贝塞尔曲线",
+        InterpolationType::ContinuousBezier => "连续贝塞尔曲线",
+        InterpolationType::Hold => "定格",
+        InterpolationType::EaseIn | InterpolationType::EaseOut => "",
     }
 }
 
-fn interpolation_from_handles(
-    interp_in: KeyframeInterpolation,
-    interp_out: KeyframeInterpolation,
-) -> InterpolationType {
-    const EPSILON: f64 = 1e-6;
+fn interpolation_action_label(interpolation: InterpolationType) -> &'static str {
+    match interpolation {
+        InterpolationType::EaseIn => "缓入",
+        InterpolationType::EaseOut => "缓出",
+        _ => "",
+    }
+}
 
-    let approx_handle =
-        |handle: KeyframeInterpolation, time_offset: f64, value_offset: f64| match handle {
-            KeyframeInterpolation::Bezier(handle) => {
-                (handle.time_offset - time_offset).abs() <= EPSILON
-                    && (handle.value_offset - value_offset).abs() <= EPSILON
-            }
-            _ => false,
-        };
+fn draw_keyframe_interpolation_menu(
+    ui: &mut Ui,
+    current_mode: Option<InterpolationType>,
+    available_modes: &[InterpolationType],
+    mut apply: impl FnMut(InterpolationType),
+) {
+    let widest_label = available_modes
+        .iter()
+        .map(|mode| interpolation_mode_label(*mode))
+        .chain(
+            [InterpolationType::EaseIn, InterpolationType::EaseOut]
+                .into_iter()
+                .map(interpolation_action_label),
+        )
+        .max_by_key(|label| label.chars().count())
+        .unwrap_or("线性");
+    let text_width = ui
+        .painter()
+        .layout_no_wrap(
+            widest_label.to_string(),
+            typography::body_small(),
+            palette::text_primary(),
+        )
+        .size()
+        .x;
+    ui.set_min_width((18.0 + 10.0 + text_width + 8.0).max(140.0));
 
-    if matches!(interp_in, KeyframeInterpolation::Hold)
-        || matches!(interp_out, KeyframeInterpolation::Hold)
-    {
-        InterpolationType::Hold
-    } else if matches!(interp_in, KeyframeInterpolation::Linear)
-        && matches!(interp_out, KeyframeInterpolation::Linear)
-    {
-        InterpolationType::Linear
-    } else if matches!(interp_in, KeyframeInterpolation::Linear)
-        && approx_handle(interp_out, 1.0 / 3.0, 0.0)
-    {
-        InterpolationType::EaseIn
-    } else if approx_handle(interp_in, -1.0 / 3.0, 0.0)
-        && matches!(interp_out, KeyframeInterpolation::Linear)
-    {
-        InterpolationType::EaseOut
-    } else if approx_handle(interp_in, -1.0 / 3.0, 0.0) && approx_handle(interp_out, 1.0 / 3.0, 0.0)
-    {
-        InterpolationType::EaseInOut
-    } else {
-        InterpolationType::Bezier
+    for mode in available_modes {
+        if theme::checkmark_menu_action_fill(
+            ui,
+            current_mode == Some(*mode),
+            interpolation_mode_label(*mode),
+        )
+        .clicked()
+        {
+            apply(*mode);
+            ui.close();
+        }
+    }
+    ui.separator();
+    for action in [InterpolationType::EaseIn, InterpolationType::EaseOut] {
+        if theme::menu_action_fill(ui, interpolation_action_label(action)).clicked() {
+            apply(action);
+            ui.close();
+        }
     }
 }
 
@@ -1658,6 +2599,14 @@ fn property_order(path: &str) -> usize {
     }
 }
 
+fn property_display_name(property: &mondrian_core::automation::AnimatedProperty) -> String {
+    if let Some(group) = property.descriptor.ui_metadata.group_name.as_deref() {
+        format!("{group} · {}", property.descriptor.display_name)
+    } else {
+        property.descriptor.display_name.clone()
+    }
+}
+
 fn graph_channel_labels(value: &PropertyValue) -> &'static [&'static str] {
     match value {
         PropertyValue::Vec2(_) => &["X", "Y"],
@@ -1675,6 +2624,27 @@ fn graph_channel_color(index: usize) -> Color32 {
         2 => palette::status_warning(),
         3 => palette::status_success(),
         _ => palette::text_primary(),
+    }
+}
+
+fn selected_keyframe_ids(
+    channel: &mondrian_core::automation::AnimationChannel,
+    selected_on_active: &[AnimationKeyframeSelection],
+) -> HashSet<KeyframeId> {
+    selected_on_active
+        .iter()
+        .filter_map(|selected| channel.keyframe_at(selected.time).map(|keyframe| keyframe.id))
+        .collect()
+}
+
+fn selected_active_keyframe_id(
+    channel: &mondrian_core::automation::AnimationChannel,
+    selected_on_active: &[AnimationKeyframeSelection],
+) -> Option<KeyframeId> {
+    if selected_on_active.len() == 1 {
+        channel.keyframe_at(selected_on_active[0].time).map(|keyframe| keyframe.id)
+    } else {
+        None
     }
 }
 
@@ -1726,6 +2696,70 @@ fn graph_value_range(
             .copied()
             .unwrap_or(0.0),
     );
+
+    let min = values.iter().copied().fold(f64::INFINITY, f64::min);
+    let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    if !min.is_finite() || !max.is_finite() {
+        return (-1.0, 1.0);
+    }
+    if (max - min).abs() < f64::EPSILON {
+        let pad = max.abs().max(1.0) * 0.25;
+        (min - pad, max + pad)
+    } else {
+        let pad = (max - min) * 0.12;
+        (min - pad, max + pad)
+    }
+}
+
+fn graph_speed_range(
+    property: &mondrian_core::automation::AnimatedProperty,
+    channel_index: usize,
+    clip: &Clip,
+    current_time: TimeTicks,
+    time_min: TimeTicks,
+    time_max: TimeTicks,
+) -> (f64, f64) {
+    let mut values = property
+        .channel(channel_index)
+        .map(|channel| {
+            channel
+                .keyframes()
+                .iter()
+                .map(|keyframe| {
+                    speed_per_second_at_time(
+                        property,
+                        channel_index,
+                        clip,
+                        keyframe.time,
+                        time_min,
+                        time_max,
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    values.push(speed_per_second_at_time(
+        property,
+        channel_index,
+        clip,
+        current_time,
+        time_min,
+        time_max,
+    ));
+
+    let samples = 48usize;
+    for sample in 0..=samples {
+        let t = sample as f32 / samples as f32;
+        let time = time_min + ((time_max - time_min) as f32 * t) as i64;
+        values.push(speed_per_second_at_time(
+            property,
+            channel_index,
+            clip,
+            time,
+            time_min,
+            time_max,
+        ));
+    }
 
     let min = values.iter().copied().fold(f64::INFINITY, f64::min);
     let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
@@ -1855,6 +2889,73 @@ fn draw_graph_curve(
     ));
 }
 
+fn draw_speed_graph_curve(
+    painter: &egui::Painter,
+    rect: Rect,
+    property: &mondrian_core::automation::AnimatedProperty,
+    channel_index: usize,
+    clip: &Clip,
+    time_min: TimeTicks,
+    time_max: TimeTicks,
+    value_min: f64,
+    value_max: f64,
+) {
+    let samples = 128usize;
+    let mut points = Vec::with_capacity(samples + 1);
+    for sample in 0..=samples {
+        let t = sample as f32 / samples as f32;
+        let time = time_min + ((time_max - time_min) as f32 * t) as i64;
+        let speed =
+            speed_per_second_at_time(property, channel_index, clip, time, time_min, time_max);
+        points.push(graph_point_for_keyframe(
+            rect, time_min, time_max, value_min, value_max, time, speed,
+        ));
+    }
+    painter.add(Shape::line(
+        points,
+        Stroke::new(
+            tokens::graph_editor_curve_stroke_width(),
+            graph_channel_color(channel_index),
+        ),
+    ));
+}
+
+fn speed_per_second_at_time(
+    property: &mondrian_core::automation::AnimatedProperty,
+    channel_index: usize,
+    clip: &Clip,
+    time: TimeTicks,
+    time_min: TimeTicks,
+    time_max: TimeTicks,
+) -> f64 {
+    let step = (SUBFRAME_TICKS_PER_FRAME / 8).max(1);
+    let left = time.saturating_sub(step).max(time_min);
+    let right = (time + step).min(time_max);
+    if right <= left {
+        return 0.0;
+    }
+
+    let left_value = property
+        .evaluate(left)
+        .to_channel_values()
+        .get(channel_index)
+        .copied()
+        .unwrap_or(0.0);
+    let right_value = property
+        .evaluate(right)
+        .to_channel_values()
+        .get(channel_index)
+        .copied()
+        .unwrap_or(0.0);
+    let seconds =
+        (right - left) as f64 / SUBFRAME_TICKS_PER_FRAME as f64 * clip.position.time_base.to_f64();
+    if seconds.abs() < f64::EPSILON {
+        0.0
+    } else {
+        (right_value - left_value) / seconds
+    }
+}
+
 fn graph_time_from_x(rect: Rect, time_min: TimeTicks, time_max: TimeTicks, x: f32) -> TimeTicks {
     if time_max <= time_min || rect.width() <= 1.0 {
         return time_min;
@@ -1863,7 +2964,7 @@ fn graph_time_from_x(rect: Rect, time_min: TimeTicks, time_max: TimeTicks, x: f3
     time_min + ((time_max - time_min) as f32 * t).round() as i64
 }
 
-fn graph_drag_preview_map(
+fn graph_drag_preview_map_with_snap(
     drag: &GraphKeyframeDragState,
     pointer_pos: Option<Pos2>,
     rect: Rect,
@@ -1871,16 +2972,36 @@ fn graph_drag_preview_map(
     time_max: TimeTicks,
     value_min: f64,
     value_max: f64,
-) -> HashMap<TimeTicks, Pos2> {
+    time_snap_candidates: &[TimeTicks],
+    value_snap_candidates: &[f64],
+) -> (HashMap<TimeTicks, Pos2>, GraphSnapGuides) {
     let mut map = HashMap::new();
     let Some(pointer_pos) = pointer_pos else {
-        return map;
+        return (map, GraphSnapGuides::default());
     };
-    let delta_time = graph_time_from_x(rect, time_min, time_max, pointer_pos.x)
+    let raw_delta_time = graph_time_from_x(rect, time_min, time_max, pointer_pos.x)
         - graph_time_from_x(rect, time_min, time_max, drag.start_pointer_pos.x);
-    let delta_time = snap_graph_delta_ticks(delta_time);
-    let delta_value = graph_value_from_y(rect, value_min, value_max, pointer_pos.y)
+    let raw_delta_time = snap_graph_delta_ticks(raw_delta_time);
+    let anchor_times = drag.anchors.iter().map(|anchor| anchor.time).collect::<Vec<_>>();
+    let (delta_time, snapped_time) = snap_graph_time_delta(
+        raw_delta_time,
+        &anchor_times,
+        time_snap_candidates,
+        rect,
+        time_min,
+        time_max,
+    );
+    let raw_delta_value = graph_value_from_y(rect, value_min, value_max, pointer_pos.y)
         - graph_value_from_y(rect, value_min, value_max, drag.start_pointer_pos.y);
+    let anchor_values = drag.anchors.iter().map(|anchor| anchor.value).collect::<Vec<_>>();
+    let (delta_value, snapped_value) = snap_graph_value_delta(
+        raw_delta_value,
+        &anchor_values,
+        value_snap_candidates,
+        rect,
+        value_min,
+        value_max,
+    );
     for anchor in &drag.anchors {
         let time = (anchor.time + delta_time).max(0);
         let value = anchor.value + delta_value;
@@ -1889,7 +3010,82 @@ fn graph_drag_preview_map(
             graph_point_for_keyframe(rect, time_min, time_max, value_min, value_max, time, value),
         );
     }
-    map
+    (
+        map,
+        GraphSnapGuides { time: snapped_time, value: snapped_value },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn graph_keyframe_preview_property(
+    property: &mondrian_core::automation::AnimatedProperty,
+    drag: &GraphKeyframeDragState,
+    rect: Rect,
+    time_min: TimeTicks,
+    time_max: TimeTicks,
+    value_min: f64,
+    value_max: f64,
+    time_snap_candidates: &[TimeTicks],
+    value_snap_candidates: &[f64],
+) -> Option<mondrian_core::automation::AnimatedProperty> {
+    let mutations = graph_keyframe_drag_property_mutations(
+        drag,
+        rect,
+        time_min,
+        time_max,
+        value_min,
+        value_max,
+        time_snap_candidates,
+        value_snap_candidates,
+    )?;
+    let mut preview = property.clone();
+    for mutation in mutations {
+        preview.apply_mutation(mutation).ok()?;
+    }
+    Some(preview)
+}
+
+fn graph_speed_drag_preview_map_with_snap(
+    drag: &GraphSpeedKeyframeDragState,
+    pointer_pos: Option<Pos2>,
+    rect: Rect,
+    time_min: TimeTicks,
+    time_max: TimeTicks,
+    value_min: f64,
+    value_max: f64,
+    speed_snap_candidates: &[f64],
+) -> (HashMap<TimeTicks, Pos2>, GraphSnapGuides) {
+    let mut map = HashMap::new();
+    let Some(pointer_pos) = pointer_pos else {
+        return (map, GraphSnapGuides::default());
+    };
+    let raw_delta_speed = graph_value_from_y(rect, value_min, value_max, pointer_pos.y)
+        - graph_value_from_y(rect, value_min, value_max, drag.start_pointer_pos.y);
+    let anchor_speeds = drag.anchors.iter().map(|anchor| anchor.speed).collect::<Vec<_>>();
+    let (delta_speed, snapped_speed) = snap_graph_value_delta(
+        raw_delta_speed,
+        &anchor_speeds,
+        speed_snap_candidates,
+        rect,
+        value_min,
+        value_max,
+    );
+    for anchor in &drag.anchors {
+        let speed = anchor.speed + delta_speed;
+        map.insert(
+            anchor.time,
+            graph_point_for_keyframe(
+                rect,
+                time_min,
+                time_max,
+                value_min,
+                value_max,
+                anchor.time,
+                speed,
+            ),
+        );
+    }
+    (map, GraphSnapGuides { time: None, value: snapped_speed })
 }
 
 fn graph_keyframe_drag_mutations(
@@ -1900,12 +3096,78 @@ fn graph_keyframe_drag_mutations(
     value_min: f64,
     value_max: f64,
     clip_id: ClipId,
+    time_snap_candidates: &[TimeTicks],
+    value_snap_candidates: &[f64],
 ) -> Option<(Vec<PropertyMutation>, Vec<AnimationKeyframeSelection>)> {
-    let delta_time = graph_time_from_x(rect, time_min, time_max, drag.pointer_pos.x)
+    let mutations = graph_keyframe_drag_property_mutations(
+        drag,
+        rect,
+        time_min,
+        time_max,
+        value_min,
+        value_max,
+        time_snap_candidates,
+        value_snap_candidates,
+    )?;
+    let raw_delta_time = graph_time_from_x(rect, time_min, time_max, drag.pointer_pos.x)
         - graph_time_from_x(rect, time_min, time_max, drag.start_pointer_pos.x);
-    let delta_time = snap_graph_delta_ticks(delta_time);
-    let delta_value = graph_value_from_y(rect, value_min, value_max, drag.pointer_pos.y)
+    let raw_delta_time = snap_graph_delta_ticks(raw_delta_time);
+    let anchor_times = drag.anchors.iter().map(|anchor| anchor.time).collect::<Vec<_>>();
+    let (delta_time, _) = snap_graph_time_delta(
+        raw_delta_time,
+        &anchor_times,
+        time_snap_candidates,
+        rect,
+        time_min,
+        time_max,
+    );
+    let selections = drag
+        .anchors
+        .iter()
+        .map(|anchor| AnimationKeyframeSelection {
+            clip_id,
+            path: drag.path.clone(),
+            time: (anchor.time + delta_time).max(0),
+        })
+        .collect::<Vec<_>>();
+
+    Some((mutations, selections))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn graph_keyframe_drag_property_mutations(
+    drag: &GraphKeyframeDragState,
+    rect: Rect,
+    time_min: TimeTicks,
+    time_max: TimeTicks,
+    value_min: f64,
+    value_max: f64,
+    time_snap_candidates: &[TimeTicks],
+    value_snap_candidates: &[f64],
+) -> Option<Vec<PropertyMutation>> {
+    let raw_delta_time = graph_time_from_x(rect, time_min, time_max, drag.pointer_pos.x)
+        - graph_time_from_x(rect, time_min, time_max, drag.start_pointer_pos.x);
+    let raw_delta_time = snap_graph_delta_ticks(raw_delta_time);
+    let anchor_times = drag.anchors.iter().map(|anchor| anchor.time).collect::<Vec<_>>();
+    let (delta_time, _) = snap_graph_time_delta(
+        raw_delta_time,
+        &anchor_times,
+        time_snap_candidates,
+        rect,
+        time_min,
+        time_max,
+    );
+    let raw_delta_value = graph_value_from_y(rect, value_min, value_max, drag.pointer_pos.y)
         - graph_value_from_y(rect, value_min, value_max, drag.start_pointer_pos.y);
+    let anchor_values = drag.anchors.iter().map(|anchor| anchor.value).collect::<Vec<_>>();
+    let (delta_value, _) = snap_graph_value_delta(
+        raw_delta_value,
+        &anchor_values,
+        value_snap_candidates,
+        rect,
+        value_min,
+        value_max,
+    );
 
     if delta_time == 0 && delta_value.abs() < f64::EPSILON {
         return None;
@@ -1921,7 +3183,6 @@ fn graph_keyframe_drag_mutations(
     });
 
     let mut mutations = Vec::new();
-    let mut selections = Vec::new();
     for anchor in anchors {
         let new_time = (anchor.time + delta_time).max(0);
         let new_value = anchor.value + delta_value;
@@ -1932,23 +3193,486 @@ fn graph_keyframe_drag_mutations(
                 to_time: new_time,
             });
         }
-        mutations.push(PropertyMutation::WriteChannels {
+        mutations.push(PropertyMutation::UpdateChannelKeyframeValue {
             path: drag.path.clone(),
             time: new_time,
-            channel_values: vec![(drag.channel_index, new_value)],
-            interpolation: InterpolationType::Linear,
+            channel_index: drag.channel_index,
+            value: new_value,
+        });
+    }
+    Some(mutations)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn graph_speed_drag_mutations(
+    drag: &GraphSpeedKeyframeDragState,
+    property: &mondrian_core::automation::AnimatedProperty,
+    clip: &Clip,
+    time_min: TimeTicks,
+    time_max: TimeTicks,
+    rect: Rect,
+    value_min: f64,
+    value_max: f64,
+    clip_id: ClipId,
+    speed_snap_candidates: &[f64],
+) -> Option<(Vec<PropertyMutation>, Vec<AnimationKeyframeSelection>)> {
+    let raw_delta_speed = graph_value_from_y(rect, value_min, value_max, drag.pointer_pos.y)
+        - graph_value_from_y(rect, value_min, value_max, drag.start_pointer_pos.y);
+    let anchor_speeds = drag.anchors.iter().map(|anchor| anchor.speed).collect::<Vec<_>>();
+    let (delta_speed, _) = snap_graph_value_delta(
+        raw_delta_speed,
+        &anchor_speeds,
+        speed_snap_candidates,
+        rect,
+        value_min,
+        value_max,
+    );
+    if delta_speed.abs() < f64::EPSILON {
+        return None;
+    }
+
+    let channel = property.channel(drag.channel_index)?;
+    let mut mutations = Vec::new();
+    let mut selections = Vec::new();
+
+    for anchor in &drag.anchors {
+        let index = channel.keyframes().iter().position(|keyframe| keyframe.time == anchor.time)?;
+        let keyframe = &channel.keyframes()[index];
+        let target_speed = anchor.speed + delta_speed;
+        let (interp_in, interp_out) = interpolations_for_target_speed(
+            channel.keyframes(),
+            index,
+            keyframe.temporal_flags,
+            clip,
+            target_speed,
+        )?;
+        mutations.push(PropertyMutation::UpdateChannelKeyframeHandles {
+            path: drag.path.clone(),
+            time: anchor.time,
+            channel_index: drag.channel_index,
+            interp_in,
+            interp_out,
         });
         selections.push(AnimationKeyframeSelection {
             clip_id,
             path: drag.path.clone(),
-            time: new_time,
+            time: anchor.time,
         });
     }
-    Some((mutations, selections))
+
+    let _ = (time_min, time_max);
+    if mutations.is_empty() {
+        None
+    } else {
+        Some((mutations, selections))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn graph_speed_preview_property(
+    property: &mondrian_core::automation::AnimatedProperty,
+    drag: &GraphSpeedKeyframeDragState,
+    clip: &Clip,
+    time_min: TimeTicks,
+    time_max: TimeTicks,
+    rect: Rect,
+    value_min: f64,
+    value_max: f64,
+    speed_snap_candidates: &[f64],
+) -> Option<mondrian_core::automation::AnimatedProperty> {
+    let mut preview = property.clone();
+    let mutations = graph_speed_drag_mutations(
+        drag,
+        property,
+        clip,
+        time_min,
+        time_max,
+        rect,
+        value_min,
+        value_max,
+        drag.clip_id,
+        speed_snap_candidates,
+    )?
+    .0;
+    for mutation in mutations {
+        let _ = preview.apply_mutation(mutation);
+    }
+    Some(preview)
+}
+
+fn graph_selection_scale_preview_map(
+    drag: &GraphSelectionScaleDragState,
+) -> HashMap<TimeTicks, Pos2> {
+    let mut map = HashMap::new();
+    let factor = graph_selection_scale_factor(drag);
+    for entry in &drag.entries {
+        let (time, value) = graph_selection_scaled_point(entry, drag, factor);
+        map.insert(
+            entry.selection.time,
+            graph_point_for_keyframe(
+                drag.plot_rect,
+                drag.time_min,
+                drag.time_max,
+                drag.value_min,
+                drag.value_max,
+                time,
+                value,
+            ),
+        );
+    }
+    map
+}
+
+fn graph_selection_scale_mutations(
+    drag: &GraphSelectionScaleDragState,
+    clip_id: ClipId,
+) -> Option<(Vec<PropertyMutation>, Vec<AnimationKeyframeSelection>)> {
+    let factor = graph_selection_scale_factor(drag);
+    if (factor - 1.0).abs() < 1e-3 {
+        return None;
+    }
+
+    let mut mutations = Vec::new();
+    let mut selections = Vec::new();
+
+    match drag.axis {
+        GraphSelectionScaleAxis::Time => {
+            let remapped = drag
+                .entries
+                .iter()
+                .map(|entry| {
+                    let (time, _) = graph_selection_scaled_point(entry, drag, factor);
+                    (entry.selection.time, time)
+                })
+                .collect::<Vec<_>>();
+
+            let mut dedup = std::collections::HashSet::new();
+            if remapped.iter().any(|(_, new_time)| !dedup.insert(*new_time)) {
+                return None;
+            }
+
+            let mut ordered = remapped.clone();
+            ordered.sort_by(|a, b| {
+                if factor >= 1.0 {
+                    b.0.cmp(&a.0)
+                } else {
+                    a.0.cmp(&b.0)
+                }
+            });
+            for (old_time, new_time) in ordered {
+                if old_time != new_time {
+                    mutations.push(PropertyMutation::MoveKeyframe {
+                        path: drag.path.clone(),
+                        from_time: old_time,
+                        to_time: new_time,
+                    });
+                }
+            }
+            selections.extend(drag.entries.iter().zip(remapped.into_iter()).map(
+                |(entry, (_, new_time))| AnimationKeyframeSelection {
+                    clip_id,
+                    path: entry.selection.path.clone(),
+                    time: new_time,
+                },
+            ));
+        }
+        GraphSelectionScaleAxis::Value => {
+            for entry in &drag.entries {
+                let (_, value) = graph_selection_scaled_point(entry, drag, factor);
+                mutations.push(PropertyMutation::WriteChannels {
+                    path: drag.path.clone(),
+                    time: entry.selection.time,
+                    channel_values: vec![(drag.channel_index, value)],
+                    interpolation: InterpolationType::Linear,
+                });
+                selections.push(AnimationKeyframeSelection {
+                    clip_id,
+                    path: entry.selection.path.clone(),
+                    time: entry.selection.time,
+                });
+            }
+        }
+    }
+
+    if mutations.is_empty() {
+        None
+    } else {
+        Some((mutations, selections))
+    }
+}
+
+fn graph_selection_scale_factor(drag: &GraphSelectionScaleDragState) -> f64 {
+    match drag.axis {
+        GraphSelectionScaleAxis::Time => {
+            let min_time = drag.entries.iter().map(|entry| entry.selection.time).min().unwrap_or(0);
+            let max_time =
+                drag.entries.iter().map(|entry| entry.selection.time).max().unwrap_or(min_time);
+            let (pivot, start) = match drag.edge {
+                GraphSelectionScaleEdge::Min => (max_time, min_time),
+                GraphSelectionScaleEdge::Max => (min_time, max_time),
+            };
+            let current = graph_time_from_x(
+                drag.plot_rect,
+                drag.time_min,
+                drag.time_max,
+                drag.pointer_pos.x,
+            );
+            scale_factor_from_axis(start as f64, pivot as f64, current as f64, 0.1, 10.0)
+        }
+        GraphSelectionScaleAxis::Value => {
+            let min_value = drag
+                .entries
+                .iter()
+                .map(|entry| entry.channel_value)
+                .fold(f64::INFINITY, f64::min);
+            let max_value = drag
+                .entries
+                .iter()
+                .map(|entry| entry.channel_value)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let (pivot, start) = match drag.edge {
+                GraphSelectionScaleEdge::Min => (max_value, min_value),
+                GraphSelectionScaleEdge::Max => (min_value, max_value),
+            };
+            let current = graph_value_from_y(
+                drag.plot_rect,
+                drag.value_min,
+                drag.value_max,
+                drag.pointer_pos.y,
+            );
+            scale_factor_from_axis(start, pivot, current, 0.1, 10.0)
+        }
+    }
+}
+
+fn graph_selection_scaled_point(
+    entry: &SelectedGraphKeyframeData,
+    drag: &GraphSelectionScaleDragState,
+    factor: f64,
+) -> (TimeTicks, f64) {
+    match drag.axis {
+        GraphSelectionScaleAxis::Time => {
+            let min_time = drag.entries.iter().map(|entry| entry.selection.time).min().unwrap_or(0);
+            let max_time =
+                drag.entries.iter().map(|entry| entry.selection.time).max().unwrap_or(min_time);
+            let pivot = match drag.edge {
+                GraphSelectionScaleEdge::Min => max_time as f64,
+                GraphSelectionScaleEdge::Max => min_time as f64,
+            };
+            let scaled = pivot + (entry.selection.time as f64 - pivot) * factor;
+            (
+                snap_time_ticks(scaled.round() as TimeTicks).max(0),
+                entry.channel_value,
+            )
+        }
+        GraphSelectionScaleAxis::Value => {
+            let min_value = drag
+                .entries
+                .iter()
+                .map(|entry| entry.channel_value)
+                .fold(f64::INFINITY, f64::min);
+            let max_value = drag
+                .entries
+                .iter()
+                .map(|entry| entry.channel_value)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let pivot = match drag.edge {
+                GraphSelectionScaleEdge::Min => max_value,
+                GraphSelectionScaleEdge::Max => min_value,
+            };
+            (
+                entry.selection.time,
+                pivot + (entry.channel_value - pivot) * factor,
+            )
+        }
+    }
+}
+
+fn interpolations_for_target_speed(
+    keyframes: &[mondrian_core::automation::Keyframe<f64>],
+    index: usize,
+    temporal_flags: KeyframeTemporalFlags,
+    clip: &Clip,
+    target_speed: f64,
+) -> Option<(KeyframeInterpolation, KeyframeInterpolation)> {
+    let keyframe = keyframes.get(index)?;
+    let mut interp_in = keyframe.interp_in;
+    let mut interp_out = keyframe.interp_out;
+
+    if index > 0 {
+        let previous = &keyframes[index - 1];
+        interp_in = KeyframeInterpolation::Bezier(speed_handle_for_segment(
+            previous,
+            keyframe,
+            clip,
+            target_speed,
+            handle_time_offset_in(keyframe.interp_in),
+        ));
+    }
+    if let Some(next) = keyframes.get(index + 1) {
+        interp_out = KeyframeInterpolation::Bezier(speed_handle_for_segment(
+            keyframe,
+            next,
+            clip,
+            target_speed,
+            handle_time_offset_out(keyframe.interp_out),
+        ));
+    }
+
+    if temporal_flags.continuous && !temporal_flags.broken_handles {
+        if index > 0 && index + 1 < keyframes.len() {
+            let previous = &keyframes[index - 1];
+            let next = &keyframes[index + 1];
+            interp_in = KeyframeInterpolation::Bezier(speed_handle_for_segment(
+                previous,
+                keyframe,
+                clip,
+                target_speed,
+                handle_time_offset_in(keyframe.interp_in),
+            ));
+            interp_out = KeyframeInterpolation::Bezier(speed_handle_for_segment(
+                keyframe,
+                next,
+                clip,
+                target_speed,
+                handle_time_offset_out(keyframe.interp_out),
+            ));
+        }
+    }
+
+    Some((interp_in, interp_out))
+}
+
+fn speed_handle_for_segment(
+    start: &mondrian_core::automation::Keyframe<f64>,
+    end: &mondrian_core::automation::Keyframe<f64>,
+    clip: &Clip,
+    target_speed: f64,
+    time_offset: f64,
+) -> BezierHandle {
+    let dv = end.value - start.value;
+    let dt_seconds = (end.time - start.time) as f64 / SUBFRAME_TICKS_PER_FRAME as f64
+        * clip.position.time_base.to_f64();
+    if dv.abs() < f64::EPSILON || dt_seconds.abs() < f64::EPSILON {
+        BezierHandle { time_offset, value_offset: 0.0 }
+    } else {
+        let value_offset = (target_speed * dt_seconds / dv * time_offset).clamp(-2.0, 2.0);
+        BezierHandle { time_offset, value_offset }
+    }
+}
+
+fn handle_time_offset_in(interpolation: KeyframeInterpolation) -> f64 {
+    match interpolation {
+        KeyframeInterpolation::Bezier(handle) => handle.time_offset.clamp(-0.95, -0.05),
+        _ => -1.0 / 3.0,
+    }
+}
+
+fn handle_time_offset_out(interpolation: KeyframeInterpolation) -> f64 {
+    match interpolation {
+        KeyframeInterpolation::Bezier(handle) => handle.time_offset.clamp(0.05, 0.95),
+        _ => 1.0 / 3.0,
+    }
+}
+
+fn scale_factor_from_axis(
+    start: f64,
+    pivot: f64,
+    current: f64,
+    min_factor: f64,
+    max_factor: f64,
+) -> f64 {
+    let denom = start - pivot;
+    if denom.abs() < f64::EPSILON {
+        1.0
+    } else {
+        ((current - pivot) / denom).clamp(min_factor, max_factor)
+    }
+}
+
+fn snap_graph_time_delta(
+    raw_delta: TimeTicks,
+    anchor_times: &[TimeTicks],
+    candidate_times: &[TimeTicks],
+    rect: Rect,
+    time_min: TimeTicks,
+    time_max: TimeTicks,
+) -> (TimeTicks, Option<TimeTicks>) {
+    if anchor_times.is_empty() || candidate_times.is_empty() || rect.width() <= 1.0 {
+        return (raw_delta, None);
+    }
+    let threshold_ticks = (((time_max - time_min).max(1) as f32)
+        * (tokens::timeline_drag_snap_pixels() / rect.width()))
+    .ceil()
+    .max(1.0) as TimeTicks;
+
+    let mut best: Option<(TimeTicks, TimeTicks)> = None;
+    for anchor_time in anchor_times {
+        let moved = (*anchor_time + raw_delta).max(0);
+        for candidate in candidate_times {
+            let delta = candidate.saturating_sub(*anchor_time);
+            let diff = (candidate - moved).abs();
+            if diff > threshold_ticks {
+                continue;
+            }
+            if best.as_ref().is_none_or(|(_, best_diff)| diff < *best_diff) {
+                best = Some((delta, diff));
+            }
+        }
+    }
+
+    if let Some((delta, _)) = best {
+        let snapped_anchor = anchor_times[0].saturating_add(delta).max(0);
+        (delta, Some(snapped_anchor))
+    } else {
+        (raw_delta, None)
+    }
+}
+
+fn snap_graph_value_delta(
+    raw_delta: f64,
+    anchor_values: &[f64],
+    candidate_values: &[f64],
+    rect: Rect,
+    value_min: f64,
+    value_max: f64,
+) -> (f64, Option<f64>) {
+    if anchor_values.is_empty() || candidate_values.is_empty() || rect.height() <= 1.0 {
+        return (raw_delta, None);
+    }
+    let threshold_value = ((value_max - value_min).abs()
+        * (tokens::timeline_drag_snap_pixels() / rect.height()).max(0.0) as f64)
+        .max(1e-6);
+
+    let mut best: Option<(f64, f64)> = None;
+    for anchor_value in anchor_values {
+        let moved = *anchor_value + raw_delta;
+        for candidate in candidate_values {
+            let delta = *candidate - *anchor_value;
+            let diff = (*candidate - moved).abs();
+            if diff > threshold_value {
+                continue;
+            }
+            if best.as_ref().is_none_or(|(_, best_diff)| diff < *best_diff) {
+                best = Some((delta, diff));
+            }
+        }
+    }
+
+    if let Some((delta, _)) = best {
+        (delta, Some(anchor_values[0] + delta))
+    } else {
+        (raw_delta, None)
+    }
 }
 
 fn snap_graph_delta_ticks(delta_ticks: TimeTicks) -> TimeTicks {
     ((delta_ticks as f64 / SUBFRAME_TICKS_PER_FRAME as f64).round() as i64)
+        * SUBFRAME_TICKS_PER_FRAME
+}
+
+fn snap_time_ticks(time_ticks: TimeTicks) -> TimeTicks {
+    ((time_ticks as f64 / SUBFRAME_TICKS_PER_FRAME as f64).round() as i64)
         * SUBFRAME_TICKS_PER_FRAME
 }
 
@@ -1963,7 +3687,7 @@ fn graph_handles_for_keyframe(
 ) -> Vec<GraphEditorHandle> {
     let mut handles = Vec::new();
     let keyframe = &keyframes[index];
-    if !matches!(keyframe.interp_in, KeyframeInterpolation::Hold) && index > 0 {
+    if matches!(keyframe.interp_in, KeyframeInterpolation::Bezier(_)) && index > 0 {
         let previous = &keyframes[index - 1];
         let handle = handle_from_in(keyframe.interp_in);
         let point = Pos2::new(
@@ -1983,7 +3707,9 @@ fn graph_handles_for_keyframe(
         );
         handles.push(GraphEditorHandle { kind: GraphHandleKind::In, position: point });
     }
-    if !matches!(keyframe.interp_out, KeyframeInterpolation::Hold) && index + 1 < keyframes.len() {
+    if matches!(keyframe.interp_out, KeyframeInterpolation::Bezier(_))
+        && index + 1 < keyframes.len()
+    {
         let next = &keyframes[index + 1];
         let handle = handle_from_out(keyframe.interp_out);
         let point = Pos2::new(
@@ -2008,9 +3734,7 @@ fn graph_handles_for_keyframe(
 fn handle_from_out(interpolation: KeyframeInterpolation) -> BezierHandle {
     match interpolation {
         KeyframeInterpolation::Bezier(handle) => handle,
-        KeyframeInterpolation::Linear => {
-            BezierHandle { time_offset: 1.0 / 3.0, value_offset: 1.0 / 3.0 }
-        }
+        KeyframeInterpolation::Linear => BezierHandle { time_offset: 1.0 / 3.0, value_offset: 0.0 },
         KeyframeInterpolation::Hold => BezierHandle { time_offset: 0.0, value_offset: 0.0 },
     }
 }
@@ -2019,7 +3743,7 @@ fn handle_from_in(interpolation: KeyframeInterpolation) -> BezierHandle {
     match interpolation {
         KeyframeInterpolation::Bezier(handle) => handle,
         KeyframeInterpolation::Linear => {
-            BezierHandle { time_offset: -1.0 / 3.0, value_offset: -1.0 / 3.0 }
+            BezierHandle { time_offset: -1.0 / 3.0, value_offset: 0.0 }
         }
         KeyframeInterpolation::Hold => BezierHandle { time_offset: 0.0, value_offset: 0.0 },
     }
@@ -2030,6 +3754,7 @@ fn preview_handle_position(
     pointer_pos: Pos2,
     keyframes: &[mondrian_core::automation::Keyframe<f64>],
     index: usize,
+    temporal_flags: KeyframeTemporalFlags,
     rect: Rect,
     time_min: TimeTicks,
     time_max: TimeTicks,
@@ -2041,6 +3766,7 @@ fn preview_handle_position(
         pointer_pos,
         keyframes,
         index,
+        temporal_flags,
         rect,
         time_min,
         time_max,
@@ -2084,6 +3810,7 @@ fn compute_handle_interpolation(
     pointer_pos: Pos2,
     keyframes: &[mondrian_core::automation::Keyframe<f64>],
     index: usize,
+    temporal_flags: KeyframeTemporalFlags,
     rect: Rect,
     time_min: TimeTicks,
     time_max: TimeTicks,
@@ -2116,6 +3843,16 @@ fn compute_handle_interpolation(
                 time_offset: dx as f64,
                 value_offset: dy as f64,
             });
+            if temporal_flags.continuous && !temporal_flags.broken_handles {
+                if let Some(previous) = keyframes.get(index.wrapping_sub(1)).filter(|_| index > 0) {
+                    interp_in = KeyframeInterpolation::Bezier(mirror_handle_for_in(
+                        previous,
+                        keyframe,
+                        next,
+                        BezierHandle { time_offset: dx as f64, value_offset: dy as f64 },
+                    ));
+                }
+            }
         }
         GraphHandleKind::In if index > 0 => {
             let previous = &keyframes[index - 1];
@@ -2137,10 +3874,86 @@ fn compute_handle_interpolation(
                 time_offset: dx as f64,
                 value_offset: dy as f64,
             });
+            if temporal_flags.continuous && !temporal_flags.broken_handles {
+                if let Some(next) = keyframes.get(index + 1) {
+                    interp_out = KeyframeInterpolation::Bezier(mirror_handle_for_out(
+                        previous,
+                        keyframe,
+                        next,
+                        BezierHandle { time_offset: dx as f64, value_offset: dy as f64 },
+                    ));
+                }
+            }
         }
         _ => return None,
     }
     Some((interp_in, interp_out))
+}
+
+fn mirror_handle_for_in(
+    previous: &mondrian_core::automation::Keyframe<f64>,
+    current: &mondrian_core::automation::Keyframe<f64>,
+    next: &mondrian_core::automation::Keyframe<f64>,
+    out_handle: BezierHandle,
+) -> BezierHandle {
+    let out_slope = actual_slope_from_out(current, next, out_handle);
+    let time_offset = -out_handle.time_offset.abs().clamp(0.05, 0.95);
+    let dt_prev = (current.time - previous.time).max(1) as f64;
+    let dv_prev = current.value - previous.value;
+    let value_offset = if dv_prev.abs() < f64::EPSILON {
+        0.0
+    } else {
+        (out_slope * time_offset * dt_prev / dv_prev).clamp(-2.0, 2.0)
+    };
+    BezierHandle { time_offset, value_offset }
+}
+
+fn mirror_handle_for_out(
+    previous: &mondrian_core::automation::Keyframe<f64>,
+    current: &mondrian_core::automation::Keyframe<f64>,
+    next: &mondrian_core::automation::Keyframe<f64>,
+    in_handle: BezierHandle,
+) -> BezierHandle {
+    let in_slope = actual_slope_from_in(previous, current, in_handle);
+    let time_offset = in_handle.time_offset.abs().clamp(0.05, 0.95);
+    let dt_next = (next.time - current.time).max(1) as f64;
+    let dv_next = next.value - current.value;
+    let value_offset = if dv_next.abs() < f64::EPSILON {
+        0.0
+    } else {
+        (in_slope * time_offset * dt_next / dv_next).clamp(-2.0, 2.0)
+    };
+    BezierHandle { time_offset, value_offset }
+}
+
+fn actual_slope_from_out(
+    current: &mondrian_core::automation::Keyframe<f64>,
+    next: &mondrian_core::automation::Keyframe<f64>,
+    handle: BezierHandle,
+) -> f64 {
+    let dt = (next.time - current.time).max(1) as f64;
+    let dv = next.value - current.value;
+    let dx = handle.time_offset.abs().max(0.05);
+    if dv.abs() < f64::EPSILON {
+        0.0
+    } else {
+        handle.value_offset * dv / (dx * dt)
+    }
+}
+
+fn actual_slope_from_in(
+    previous: &mondrian_core::automation::Keyframe<f64>,
+    current: &mondrian_core::automation::Keyframe<f64>,
+    handle: BezierHandle,
+) -> f64 {
+    let dt = (current.time - previous.time).max(1) as f64;
+    let dv = current.value - previous.value;
+    let dx = handle.time_offset.abs().max(0.05);
+    if dv.abs() < f64::EPSILON {
+        0.0
+    } else {
+        handle.value_offset * dv / (dx * dt)
+    }
 }
 
 fn normalized_handle_value(
@@ -2224,5 +4037,191 @@ fn blend_mode_display_label(value: &str) -> String {
         "Add" => "相加".to_string(),
         "Subtract" => "相减".to_string(),
         _ => value.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mondrian_core::automation::{AnimatedProperty, Keyframe, PropertyDescriptor};
+    use mondrian_core::types::{ClipId, KeyframeId};
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    fn graph_rect() -> Rect {
+        Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(400.0, 240.0))
+    }
+
+    fn sample_property() -> AnimatedProperty {
+        let mut property = AnimatedProperty::from_descriptor(PropertyDescriptor::new(
+            "transform.opacity",
+            "Opacity",
+            PropertyValue::Float(0.0),
+        ));
+        property
+            .apply_mutation(PropertyMutation::SetKeyframe {
+                path: "transform.opacity".to_string(),
+                keyframe: Keyframe::linear(0, PropertyValue::Float(0.0)),
+            })
+            .expect("set first keyframe");
+        property
+            .apply_mutation(PropertyMutation::SetKeyframe {
+                path: "transform.opacity".to_string(),
+                keyframe: Keyframe {
+                    id: KeyframeId::new(),
+                    time: SUBFRAME_TICKS_PER_FRAME * 10,
+                    value: PropertyValue::Float(0.5),
+                    interp_in: KeyframeInterpolation::Bezier(BezierHandle {
+                        time_offset: -0.25,
+                        value_offset: -0.1,
+                    }),
+                    interp_out: KeyframeInterpolation::Bezier(BezierHandle {
+                        time_offset: 0.3,
+                        value_offset: 0.12,
+                    }),
+                    temporal_flags: KeyframeTemporalFlags {
+                        auto_bezier: false,
+                        continuous: true,
+                        broken_handles: false,
+                    },
+                },
+            })
+            .expect("set middle keyframe");
+        property
+            .apply_mutation(PropertyMutation::SetKeyframe {
+                path: "transform.opacity".to_string(),
+                keyframe: Keyframe::linear(
+                    SUBFRAME_TICKS_PER_FRAME * 20,
+                    PropertyValue::Float(1.0),
+                ),
+            })
+            .expect("set last keyframe");
+        property
+    }
+
+    #[test]
+    fn selected_active_keyframe_helpers_handle_empty_selection() {
+        let property = sample_property();
+        let channel = property.channel(0).expect("channel");
+        let selected = Vec::<AnimationKeyframeSelection>::new();
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            (
+                selected_keyframe_ids(channel, &selected),
+                selected_active_keyframe_id(channel, &selected),
+                if selected.len() == 1 {
+                    selected.first().map(|selection| selection.time)
+                } else {
+                    None
+                },
+            )
+        }))
+        .expect("helpers should not panic");
+
+        assert!(result.0.is_empty());
+        assert_eq!(result.1, None);
+        assert_eq!(result.2, None);
+    }
+
+    #[test]
+    fn graph_drag_property_mutations_preserve_bezier_editing_path() {
+        let drag = GraphKeyframeDragState {
+            clip_id: ClipId::new(),
+            path: "transform.opacity".to_string(),
+            channel_index: 0,
+            start_pointer_pos: Pos2::new(100.0, 120.0),
+            pointer_pos: Pos2::new(140.0, 80.0),
+            anchors: vec![GraphKeyframeDragAnchor {
+                time: SUBFRAME_TICKS_PER_FRAME * 10,
+                value: 0.5,
+            }],
+        };
+
+        let mutations = graph_keyframe_drag_property_mutations(
+            &drag,
+            graph_rect(),
+            0,
+            SUBFRAME_TICKS_PER_FRAME * 20,
+            0.0,
+            1.0,
+            &[],
+            &[],
+        )
+        .expect("mutations");
+
+        assert!(mutations.iter().any(|mutation| matches!(
+            mutation,
+            PropertyMutation::UpdateChannelKeyframeValue { .. }
+        )));
+        assert!(!mutations
+            .iter()
+            .any(|mutation| matches!(mutation, PropertyMutation::WriteChannels { .. })));
+    }
+
+    #[test]
+    fn graph_drag_preview_property_keeps_continuous_handles_aligned() {
+        let property = sample_property();
+        let drag = GraphKeyframeDragState {
+            clip_id: ClipId::new(),
+            path: "transform.opacity".to_string(),
+            channel_index: 0,
+            start_pointer_pos: Pos2::new(200.0, 120.0),
+            pointer_pos: Pos2::new(200.0, 70.0),
+            anchors: vec![GraphKeyframeDragAnchor {
+                time: SUBFRAME_TICKS_PER_FRAME * 10,
+                value: 0.5,
+            }],
+        };
+
+        let preview = graph_keyframe_preview_property(
+            &property,
+            &drag,
+            graph_rect(),
+            0,
+            SUBFRAME_TICKS_PER_FRAME * 20,
+            0.0,
+            1.0,
+            &[],
+            &[],
+        )
+        .expect("preview property");
+
+        let channel = preview.channel(0).expect("channel");
+        let current = channel.keyframe_at(SUBFRAME_TICKS_PER_FRAME * 10).expect("current");
+        let current_index = channel
+            .keyframes()
+            .iter()
+            .position(|keyframe| keyframe.time == current.time)
+            .expect("current index");
+        let point = graph_point_for_keyframe(
+            graph_rect(),
+            0,
+            SUBFRAME_TICKS_PER_FRAME * 20,
+            0.0,
+            1.0,
+            current.time,
+            current.value,
+        );
+        let handles = graph_handles_for_keyframe(
+            channel.keyframes(),
+            current_index,
+            graph_rect(),
+            0,
+            SUBFRAME_TICKS_PER_FRAME * 20,
+            0.0,
+            1.0,
+        );
+        let in_handle = handles
+            .iter()
+            .find(|handle| handle.kind == GraphHandleKind::In)
+            .expect("in handle")
+            .position;
+        let out_handle = handles
+            .iter()
+            .find(|handle| handle.kind == GraphHandleKind::Out)
+            .expect("out handle")
+            .position;
+        let cross = (in_handle.x - point.x) * (out_handle.y - point.y)
+            - (in_handle.y - point.y) * (out_handle.x - point.x);
+        assert!(cross.abs() < 1e-3);
     }
 }
