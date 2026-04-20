@@ -42,6 +42,7 @@ pub(super) fn load_app_preferences(app: &mut MondrianApp) {
     app.recent_projects = preferences.recent_projects.clone();
     app.show_video_metrics = preferences.show_video_metrics;
     app.show_audio_metrics = preferences.show_audio_metrics;
+    app.timeline_panel_height = preferences.timeline_panel_height.max(160.0);
     app.viewer_panel.apply_preferences(&preferences.viewer);
     app.last_saved_preferences = Some(preferences);
 }
@@ -71,6 +72,7 @@ pub(super) fn capture_preferences(app: &MondrianApp) -> AppPreferences {
         recent_projects: app.recent_projects.clone(),
         show_video_metrics: app.show_video_metrics,
         show_audio_metrics: app.show_audio_metrics,
+        timeline_panel_height: app.timeline_panel_height.max(160.0),
         viewer: app.viewer_panel.preferences_snapshot(),
     }
 }

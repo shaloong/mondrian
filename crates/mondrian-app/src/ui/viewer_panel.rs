@@ -378,10 +378,7 @@ impl ViewerPanel {
                 .unwrap_or(16.0 / 9.0)
                 .max(0.01);
             let fitted = fit_aspect(canvas_slot_rect, aspect);
-            let canvas_rect = Rect::from_min_size(
-                Pos2::new(fitted.left(), canvas_slot_rect.top()),
-                fitted.size(),
-            );
+            let canvas_rect = fitted;
 
             let painter = ui.painter_at(canvas_rect);
             painter.rect_filled(canvas_rect, 0.0, palette::canvas_bg());
@@ -396,12 +393,16 @@ impl ViewerPanel {
 
                 if let Some(seq) = state.sequence.as_ref() {
                     if let Some(lib) = state.asset_library.as_ref() {
-                        let base_width =
-                            scaled_dimension(canvas_rect.width(), self.preview_scale_mode.factor());
-                        let base_height =
-                            scaled_dimension(canvas_rect.height(), self.preview_scale_mode.factor());
-                        let (target_width, target_height) =
-                            playback_adjusted_target_size(base_width, base_height, is_playing);
+                        let resolution = seq.settings.resolution;
+                        let (target_width, target_height) = playback_adjusted_target_size(
+                            sequence_preview_target_size(
+                                resolution,
+                                canvas_rect.width(),
+                                canvas_rect.height(),
+                                self.preview_scale_mode.factor(),
+                            ),
+                            is_playing,
+                        );
 
                         let layers_started_at = Instant::now();
                         let layers =
@@ -3055,7 +3056,45 @@ fn scaled_dimension(raw: f32, factor: f32) -> u32 {
     (raw.max(1.0) * factor.max(0.05)).round().max(1.0) as u32
 }
 
-fn playback_adjusted_target_size(width: u32, height: u32, is_playing: bool) -> (u32, u32) {
+fn sequence_preview_target_size(
+    resolution: mondrian_core::types::Resolution,
+    available_width: f32,
+    available_height: f32,
+    scale_factor: f32,
+) -> (u32, u32) {
+    let max_width = scaled_dimension(available_width, scale_factor);
+    let max_height = scaled_dimension(available_height, scale_factor);
+
+    let width_scale = max_width as f64 / resolution.width.max(1) as f64;
+    let height_scale = max_height as f64 / resolution.height.max(1) as f64;
+    let scale = width_scale.min(height_scale).max(0.0001);
+
+    let mut target_width = (resolution.width.max(1) as f64 * scale).round().max(1.0) as u32;
+    let mut target_height = ((target_width as f64 / resolution.width.max(1) as f64)
+        * resolution.height.max(1) as f64)
+        .round()
+        .max(1.0) as u32;
+
+    if target_height > max_height {
+        target_height = max_height.max(1);
+        target_width = ((target_height as f64 / resolution.height.max(1) as f64)
+            * resolution.width.max(1) as f64)
+            .round()
+            .max(1.0) as u32;
+    }
+    if target_width > max_width {
+        target_width = max_width.max(1);
+        target_height = ((target_width as f64 / resolution.width.max(1) as f64)
+            * resolution.height.max(1) as f64)
+            .round()
+            .max(1.0) as u32;
+    }
+
+    (target_width.max(1), target_height.max(1))
+}
+
+fn playback_adjusted_target_size(size: (u32, u32), is_playing: bool) -> (u32, u32) {
+    let (width, height) = size;
     let width_f = width.max(1) as f64;
     let height_f = height.max(1) as f64;
     let mut out_w = width.max(1);

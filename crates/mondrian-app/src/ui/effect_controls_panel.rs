@@ -339,25 +339,15 @@ impl EffectControlsPanel {
 
         if !collapsed {
             ui.add_space(tokens::panel_gap() * 0.2);
-            ui.horizontal(|ui| {
-                ui.add_space(tokens::inspector_group_indent());
-                Grid::new(format!("effect_controls_group_grid_{}", group.meta.id))
-                    .num_columns(3)
-                    .spacing([8.0, 8.0])
-                    .striped(false)
-                    .show(ui, |ui| {
-                        for (path, property) in &group.properties {
-                            self.draw_property_row(
-                                ui,
-                                app,
-                                selection,
-                                path,
-                                property,
-                                current_time,
-                            );
-                        }
-                    });
-            });
+            Grid::new(format!("effect_controls_group_grid_{}", group.meta.id))
+                .num_columns(3)
+                .spacing([8.0, 8.0])
+                .striped(false)
+                .show(ui, |ui| {
+                    for (path, property) in &group.properties {
+                        self.draw_property_row(ui, app, selection, path, property, current_time);
+                    }
+                });
         }
         self.inspector_group_collapsed.insert(collapse_key, collapsed);
     }
@@ -457,9 +447,7 @@ impl EffectControlsPanel {
             ui.selectable_value(&mut self.graph_mode, GraphEditorMode::Value, "值");
             ui.selectable_value(&mut self.graph_mode, GraphEditorMode::Speed, "速度");
         });
-        ui.add_space(tokens::panel_gap() * 0.45);
-        ui.separator();
-        ui.add_space(tokens::panel_gap() * 0.55);
+        ui.add_space(tokens::panel_gap() * 0.7);
 
         let (rect, _response) = ui.allocate_exact_size(
             Vec2::new(ui.available_width(), tokens::graph_editor_height()),
@@ -2181,7 +2169,7 @@ impl EffectControlsPanel {
         ui.horizontal(|ui| {
             if property.descriptor.is_animatable {
                 let stopwatch_selected = animation_enabled || is_animated;
-                let timer_response = theme::icon_toggle_button(
+                let timer_response = theme::icon_ghost_toggle_button(
                     ui,
                     tokens::timeline_toolbar_button_size(),
                     theme::UiIcon::Timer,
@@ -2249,7 +2237,7 @@ impl EffectControlsPanel {
 
         if property.descriptor.is_animatable {
             let add_selected = current_keyframe_time.is_some();
-            let add_resp = theme::icon_toggle_button(
+            let add_resp = theme::icon_ghost_toggle_button(
                 ui,
                 tokens::timeline_toolbar_button_size(),
                 theme::UiIcon::Anchor,
@@ -2687,7 +2675,10 @@ fn draw_keyframe_interpolation_menu(
         )
         .size()
         .x;
-    ui.set_min_width((18.0 + 10.0 + text_width + 8.0).max(140.0));
+    let menu_width = 18.0 + 10.0 + text_width + 16.0;
+    ui.spacing_mut().menu_width = menu_width;
+    ui.set_min_width(menu_width);
+    ui.set_max_width(menu_width);
 
     for mode in available_modes {
         if theme::checkmark_menu_action_fill(

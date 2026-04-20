@@ -212,6 +212,8 @@ struct AppPreferences {
     show_video_metrics: bool,
     #[serde(default = "default_show_audio_metrics")]
     show_audio_metrics: bool,
+    #[serde(default = "default_timeline_panel_height")]
+    timeline_panel_height: f32,
     #[serde(default = "default_auto_save_enabled")]
     auto_save_enabled: bool,
     #[serde(default = "default_auto_save_interval_secs")]
@@ -242,6 +244,7 @@ impl Default for AppPreferences {
             media_cache_max_age_days: default_media_cache_max_age_days(),
             show_video_metrics: default_show_video_metrics(),
             show_audio_metrics: default_show_audio_metrics(),
+            timeline_panel_height: default_timeline_panel_height(),
             auto_save_enabled: default_auto_save_enabled(),
             auto_save_interval_secs: default_auto_save_interval_secs(),
             auto_save_max_recovery_points: default_auto_save_max_recovery_points(),
@@ -290,6 +293,10 @@ const fn default_show_video_metrics() -> bool {
 
 const fn default_show_audio_metrics() -> bool {
     true
+}
+
+const fn default_timeline_panel_height() -> f32 {
+    286.0
 }
 
 const fn default_auto_save_enabled() -> bool {
@@ -4181,6 +4188,8 @@ pub struct MondrianApp {
     crash_recovery_candidates: Vec<CrashRecoveryCandidate>,
     show_video_metrics: bool,
     show_audio_metrics: bool,
+    timeline_panel_height: f32,
+    timeline_resize_drag: Option<(f32, f32)>,
     last_saved_preferences: Option<AppPreferences>,
     persist_error_reported: bool,
     last_cache_maintenance_at: Option<std::time::Instant>,
@@ -4237,6 +4246,8 @@ impl MondrianApp {
             crash_recovery_candidates: discover_crash_recovery_candidates(),
             show_video_metrics: default_show_video_metrics(),
             show_audio_metrics: default_show_audio_metrics(),
+            timeline_panel_height: default_timeline_panel_height(),
+            timeline_resize_drag: None,
             last_saved_preferences: None,
             persist_error_reported: false,
             last_cache_maintenance_at: None,
@@ -4447,8 +4458,8 @@ impl eframe::App for MondrianApp {
         // ── 底部：时间线（全宽） ──
         let timeline_started_at = std::time::Instant::now();
         egui::TopBottomPanel::bottom("timeline_panel")
-            .default_height(248.0)
-            .height_range(120.0..=480.0)
+            .exact_height(self.timeline_panel_height)
+            .resizable(false)
             .frame(
                 egui::Frame::new()
                     .fill(crate::ui::theme::palette::bg_base())
@@ -4456,9 +4467,31 @@ impl eframe::App for MondrianApp {
                         1.0,
                         crate::ui::theme::palette::panel_divider_strong(),
                     ))
-                    .inner_margin(egui::Margin::symmetric(12, 8)),
+                    .inner_margin(egui::Margin { left: 12, right: 12, top: 0, bottom: 8 }),
             )
             .show(ctx, |ui| {
+                let (_resize_rect, resize_response) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), 8.0),
+                    egui::Sense::click_and_drag(),
+                );
+                resize_response.clone().on_hover_cursor(egui::CursorIcon::ResizeVertical);
+                if resize_response.drag_started() {
+                    if let Some(pointer) = resize_response.interact_pointer_pos() {
+                        self.timeline_resize_drag = Some((pointer.y, self.timeline_panel_height));
+                    }
+                }
+                if let Some((start_y, start_height)) = self.timeline_resize_drag {
+                    if ctx.input(|i| i.pointer.primary_down()) {
+                        if let Some(pointer) = ctx.input(|i| i.pointer.interact_pos()) {
+                            let delta = start_y - pointer.y;
+                            self.timeline_panel_height = (start_height + delta).clamp(160.0, 640.0);
+                        }
+                    } else {
+                        self.timeline_resize_drag = None;
+                    }
+                }
+
+                ui.add_space(4.0);
                 self.timeline_panel.show(ui, &mut self.state);
             });
         if ui_diag_enabled() {
@@ -4471,6 +4504,7 @@ impl eframe::App for MondrianApp {
             egui::SidePanel::left("library_panel")
                 .default_width(296.0)
                 .min_width(220.0)
+                .resizable(true)
                 .frame(
                     egui::Frame::new()
                         .fill(crate::ui::theme::palette::bg_base())
@@ -4518,6 +4552,7 @@ impl eframe::App for MondrianApp {
             egui::SidePanel::right("effect_controls_panel")
                 .default_width(crate::ui::theme::tokens::inspector_panel_width())
                 .min_width(crate::ui::theme::tokens::inspector_panel_min_width())
+                .resizable(true)
                 .frame(
                     egui::Frame::new()
                         .fill(crate::ui::theme::palette::bg_base())
@@ -5329,7 +5364,39 @@ impl MondrianApp {
         shortcut: Option<&str>,
         enabled: bool,
     ) -> egui::Response {
-        let desired_size = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+        let label_width = ui
+            .painter()
+            .layout_no_wrap(
+                label.to_owned(),
+                crate::ui::theme::typography::body_small(),
+                crate::ui::theme::palette::text_primary(),
+            )
+            .size()
+            .x;
+        let shortcut_width = shortcut
+            .map(|shortcut| {
+                ui.painter()
+                    .layout_no_wrap(
+                        shortcut.to_owned(),
+                        crate::ui::theme::typography::body_small(),
+                        crate::ui::theme::palette::text_muted(),
+                    )
+                    .size()
+                    .x
+            })
+            .unwrap_or(0.0);
+        let content_width = 10.0
+            + label_width
+            + if shortcut.is_some() {
+                28.0 + shortcut_width
+            } else {
+                0.0
+            }
+            + 10.0;
+        let desired_size = egui::vec2(
+            ui.spacing().menu_width.max(content_width),
+            ui.spacing().interact_size.y,
+        );
         let sense = if enabled {
             egui::Sense::click()
         } else {
