@@ -1,4 +1,5 @@
 use super::*;
+use mondrian_core::types::Resolution;
 
 fn pixel_at(rgba: &[u8], width: usize, x: usize, y: usize) -> [u8; 4] {
     let idx = (y * width + x) * 4;
@@ -74,4 +75,21 @@ fn alpha_blend_layer_should_skip_non_invertible_transform() {
     );
 
     assert_eq!(dst, before);
+}
+
+#[test]
+fn sequence_preview_target_size_preserves_sequence_aspect_ratio() {
+    let size = sequence_preview_target_size(Resolution::DCI4K, 800.0, 600.0, 1.0);
+
+    assert_eq!(size, (800, 422));
+}
+
+#[test]
+fn fit_aspect_keeps_canvas_centered_with_sequence_ratio() {
+    let outer = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(900.0, 700.0));
+    let fitted = fit_aspect(outer, Resolution::FHD.aspect_ratio());
+
+    assert!((fitted.center().x - outer.center().x).abs() < 0.001);
+    assert!((fitted.center().y - outer.center().y).abs() < 0.001);
+    assert!((fitted.width() / fitted.height() - Resolution::FHD.aspect_ratio()).abs() < 0.01);
 }

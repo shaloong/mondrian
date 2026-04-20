@@ -296,6 +296,7 @@ fn paint_action_card(
 
         let recent_list_max_h = (content.height() * 0.34).clamp(120.0, 180.0);
         egui::ScrollArea::vertical()
+            .id_salt("startup_recent_projects_scroll")
             .auto_shrink([false, false])
             .max_height(recent_list_max_h)
             .show(ui, |ui| {
@@ -405,6 +406,7 @@ fn paint_action_card(
 
             let recovery_list_max_h = (content.height() * 0.22).clamp(96.0, 140.0);
             egui::ScrollArea::vertical()
+                .id_salt("startup_recovery_scroll")
                 .auto_shrink([false, false])
                 .max_height(recovery_list_max_h)
                 .show(ui, |ui| {
