@@ -9,9 +9,12 @@ use std::{sync::mpsc, thread};
 
 use mondrian_assets::{AssetKind, AssetLibrary};
 use mondrian_core::{
-    automation::{PropertyHost, PropertyMutation},
+    automation::{
+        interpolation_mode_from_keyframe, timecode_to_ticks, InterpolationType, Keyframe,
+        PropertyHost, PropertyMutation, PropertyValue, TimeTicks,
+    },
     events::{AppEvent, EventBus},
-    types::{AssetId, ClipId, Rational, Resolution, SequenceId, TimeCode, TrackId},
+    types::{AssetId, ClipId, KeyframeId, Rational, Resolution, SequenceId, TimeCode, TrackId},
 };
 use mondrian_export::queue::{JobStatus, RenderQueue};
 use mondrian_media::audio::{
@@ -62,6 +65,45 @@ pub struct DraggingAsset {
     pub kind: AssetKind,
     pub duration: Duration,
     pub has_linked_audio: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AnimationPropertySelection {
+    pub clip_id: ClipId,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AnimationKeyframeSelection {
+    pub clip_id: ClipId,
+    pub path: String,
+    pub time: mondrian_core::automation::TimeTicks,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AnimationSelectionState {
+    pub active_property: Option<AnimationPropertySelection>,
+    pub remembered_active_properties: HashMap<ClipId, String>,
+    pub selected_keyframes: HashSet<AnimationKeyframeSelection>,
+    pub bubble_host: Option<AnimationBubbleHost>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AnimationBubbleHost {
+    Timeline,
+    Graph,
+}
+
+#[derive(Debug, Clone)]
+pub struct AnimationClipboardEntry {
+    pub path: String,
+    pub relative_time: TimeTicks,
+    pub keyframe: Keyframe<PropertyValue>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AnimationClipboard {
+    pub entries: Vec<AnimationClipboardEntry>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -151,6 +193,8 @@ struct AppPreferences {
     version: u32,
     #[serde(default = "default_app_theme")]
     theme: crate::ui::theme::Theme,
+    #[serde(default = "default_show_effect_controls")]
+    show_effect_controls: bool,
     show_library: bool,
     auto_proxy_enabled: bool,
     show_dev_metrics: bool,
@@ -186,6 +230,7 @@ impl Default for AppPreferences {
         Self {
             version: 1,
             theme: default_app_theme(),
+            show_effect_controls: default_show_effect_controls(),
             show_library: true,
             auto_proxy_enabled: false,
             show_dev_metrics: false,
@@ -225,6 +270,10 @@ const fn default_media_cache_auto_cleanup() -> bool {
 
 const fn default_app_theme() -> crate::ui::theme::Theme {
     crate::ui::theme::Theme::System
+}
+
+const fn default_show_effect_controls() -> bool {
+    true
 }
 
 const fn default_media_cache_max_size_gb() -> u32 {
@@ -312,6 +361,10 @@ pub struct AppState {
     // 底部状态栏提示（message, is_error）
     pub status_hint: Option<(String, bool)>,
 
+    // 动画选择状态（timeline / inspector / future graph 共用）
+    pub animation_selection: AnimationSelectionState,
+    pub animation_clipboard: Option<AnimationClipboard>,
+
     // 代理策略
     pub auto_proxy_enabled: bool,
     pub proxy_mode_assets: HashSet<AssetId>,
@@ -387,6 +440,8 @@ impl AppState {
             dragging_asset: None,
             render_queue: RenderQueue::new(),
             status_hint: None,
+            animation_selection: AnimationSelectionState::default(),
+            animation_clipboard: None,
             auto_proxy_enabled: false,
             proxy_mode_assets: HashSet::new(),
             audio_sample_rate,
@@ -1668,6 +1723,271 @@ impl AppState {
         Some(TimeCode::new(self.current_frame().max(0), seq.time_base()))
     }
 
+    pub fn active_animation_property_path(&self, clip_id: ClipId) -> Option<&str> {
+        self.animation_selection
+            .active_property
+            .as_ref()
+            .filter(|selection| selection.clip_id == clip_id)
+            .map(|selection| selection.path.as_str())
+            .or_else(|| {
+                self.animation_selection
+                    .remembered_active_properties
+                    .get(&clip_id)
+                    .map(|path| path.as_str())
+            })
+    }
+
+    pub fn set_active_animation_property(&mut self, clip_id: ClipId, path: impl Into<String>) {
+        let path = path.into();
+        let changed_clip = self
+            .animation_selection
+            .active_property
+            .as_ref()
+            .map(|selection| selection.clip_id != clip_id)
+            .unwrap_or(false);
+        if changed_clip {
+            self.animation_selection.selected_keyframes.clear();
+            self.animation_selection.bubble_host = None;
+        }
+        self.animation_selection
+            .remembered_active_properties
+            .insert(clip_id, path.clone());
+        self.animation_selection.active_property =
+            Some(AnimationPropertySelection { clip_id, path });
+    }
+
+    pub fn clear_animation_selection(&mut self) {
+        self.animation_selection.active_property = None;
+        self.animation_selection.selected_keyframes.clear();
+        self.animation_selection.bubble_host = None;
+    }
+
+    pub fn animation_bubble_host(&self) -> Option<AnimationBubbleHost> {
+        self.animation_selection.bubble_host
+    }
+
+    pub fn set_animation_bubble_host(&mut self, host: AnimationBubbleHost) {
+        self.animation_selection.bubble_host = Some(host);
+    }
+
+    pub fn clear_animation_keyframe_selection_for_clip(&mut self, clip_id: ClipId) {
+        self.animation_selection
+            .selected_keyframes
+            .retain(|selection| selection.clip_id != clip_id);
+    }
+
+    pub fn selected_animation_keyframes_for_clip(
+        &self,
+        clip_id: ClipId,
+    ) -> Vec<AnimationKeyframeSelection> {
+        self.animation_selection
+            .selected_keyframes
+            .iter()
+            .filter(|selection| selection.clip_id == clip_id)
+            .cloned()
+            .collect()
+    }
+
+    pub fn available_animation_interpolation_presets(
+        &self,
+        selection: SelectedClipRef,
+        presets: &[InterpolationType],
+    ) -> Vec<InterpolationType> {
+        let selected = self.selected_animation_keyframes_for_clip(selection.clip_id);
+        if selected.is_empty() {
+            return presets.to_vec();
+        }
+
+        let Some(clip) = self.clip_snapshot(selection) else {
+            return presets.to_vec();
+        };
+        let Ok(property_bag) = clip.property_bag() else {
+            return presets.to_vec();
+        };
+
+        let current = selected
+            .iter()
+            .filter_map(|item| {
+                property_bag
+                    .property(&item.path)
+                    .and_then(|property| property.keyframe_at(item.time))
+                    .map(|keyframe| {
+                        interpolation_mode_from_keyframe(
+                            keyframe.interp_in,
+                            keyframe.interp_out,
+                            keyframe.temporal_flags,
+                        )
+                    })
+            })
+            .collect::<Vec<_>>();
+
+        if current.is_empty() {
+            return presets.to_vec();
+        }
+
+        presets
+            .iter()
+            .copied()
+            .filter(|preset| !current.iter().all(|current| current == preset))
+            .collect()
+    }
+
+    pub fn selected_animation_interpolation_mode(
+        &self,
+        selection: SelectedClipRef,
+    ) -> Option<InterpolationType> {
+        let selected = self.selected_animation_keyframes_for_clip(selection.clip_id);
+        if selected.is_empty() {
+            return None;
+        }
+
+        let clip = self.clip_snapshot(selection)?;
+        let property_bag = clip.property_bag().ok()?;
+        let mut modes = selected
+            .iter()
+            .filter_map(|item| {
+                property_bag
+                    .property(&item.path)
+                    .and_then(|property| property.keyframe_at(item.time))
+                    .map(|keyframe| {
+                        interpolation_mode_from_keyframe(
+                            keyframe.interp_in,
+                            keyframe.interp_out,
+                            keyframe.temporal_flags,
+                        )
+                    })
+            })
+            .collect::<Vec<_>>();
+        let first = modes.pop()?;
+        if modes.into_iter().all(|mode| mode == first) {
+            Some(first)
+        } else {
+            None
+        }
+    }
+
+    pub fn is_animation_keyframe_selected(&self, selection: &AnimationKeyframeSelection) -> bool {
+        self.animation_selection.selected_keyframes.contains(selection)
+    }
+
+    pub fn select_animation_keyframe_only(&mut self, selection: AnimationKeyframeSelection) {
+        self.set_active_animation_property(selection.clip_id, selection.path.clone());
+        self.animation_selection.selected_keyframes.clear();
+        self.animation_selection.selected_keyframes.insert(selection);
+    }
+
+    pub fn toggle_animation_keyframe_selection(&mut self, selection: AnimationKeyframeSelection) {
+        self.set_active_animation_property(selection.clip_id, selection.path.clone());
+        if !self.animation_selection.selected_keyframes.insert(selection.clone()) {
+            self.animation_selection.selected_keyframes.remove(&selection);
+        }
+    }
+
+    pub fn set_animation_keyframe_selection(
+        &mut self,
+        selections: Vec<AnimationKeyframeSelection>,
+    ) {
+        if let Some(first) = selections.first() {
+            self.set_active_animation_property(first.clip_id, first.path.clone());
+        }
+        self.animation_selection.selected_keyframes = selections.into_iter().collect();
+    }
+
+    pub fn retain_animation_keyframe_selection_for_clip(
+        &mut self,
+        clip_id: ClipId,
+        valid_keys: &HashSet<(String, mondrian_core::automation::TimeTicks)>,
+    ) {
+        self.animation_selection.selected_keyframes.retain(|selection| {
+            selection.clip_id != clip_id
+                || valid_keys.contains(&(selection.path.clone(), selection.time))
+        });
+    }
+
+    pub fn has_animation_clipboard(&self) -> bool {
+        self.animation_clipboard
+            .as_ref()
+            .map(|clipboard| !clipboard.entries.is_empty())
+            .unwrap_or(false)
+    }
+
+    pub fn copy_selected_animation_keyframes(
+        &mut self,
+        selection: SelectedClipRef,
+    ) -> mondrian_core::Result<bool> {
+        let selected = self.selected_animation_keyframes_for_clip(selection.clip_id);
+        if selected.is_empty() {
+            return Ok(false);
+        }
+
+        let clip = self.clip_snapshot(selection).ok_or_else(|| {
+            mondrian_core::MondrianError::ClipNotFound { clip_id: selection.clip_id.to_string() }
+        })?;
+        let property_bag = clip.property_bag()?;
+        let anchor_time = selected.iter().map(|item| item.time).min().unwrap_or(0);
+
+        let mut entries = Vec::new();
+        for item in selected {
+            let Some(property) = property_bag.property(&item.path) else {
+                continue;
+            };
+            let Some(mut keyframe) = property.keyframe_at(item.time) else {
+                continue;
+            };
+            keyframe.id = KeyframeId::new();
+            entries.push(AnimationClipboardEntry {
+                path: item.path,
+                relative_time: item.time - anchor_time,
+                keyframe,
+            });
+        }
+
+        entries.sort_by(|a, b| {
+            a.relative_time.cmp(&b.relative_time).then_with(|| a.path.cmp(&b.path))
+        });
+        self.animation_clipboard = if entries.is_empty() {
+            None
+        } else {
+            Some(AnimationClipboard { entries })
+        };
+        Ok(self.has_animation_clipboard())
+    }
+
+    pub fn paste_animation_keyframes(
+        &mut self,
+        selection: SelectedClipRef,
+        destination_time: TimeTicks,
+    ) -> mondrian_core::Result<bool> {
+        let Some(clipboard) = self.animation_clipboard.clone() else {
+            return Ok(false);
+        };
+        if clipboard.entries.is_empty() {
+            return Ok(false);
+        }
+
+        let mut mutations = Vec::with_capacity(clipboard.entries.len());
+        let mut selections = Vec::with_capacity(clipboard.entries.len());
+
+        for entry in clipboard.entries {
+            let mut keyframe = entry.keyframe;
+            keyframe.id = KeyframeId::new();
+            keyframe.time = (destination_time + entry.relative_time).max(0);
+            mutations.push(PropertyMutation::SetKeyframe {
+                path: entry.path.clone(),
+                keyframe: keyframe.clone(),
+            });
+            selections.push(AnimationKeyframeSelection {
+                clip_id: selection.clip_id,
+                path: entry.path,
+                time: keyframe.time,
+            });
+        }
+
+        self.mutate_clip_properties(selection, mutations, "粘贴关键帧")?;
+        self.set_animation_keyframe_selection(selections);
+        Ok(true)
+    }
+
     pub fn clip_snapshot(&self, selection: SelectedClipRef) -> Option<Clip> {
         let seq = self.sequence.as_ref()?;
         find_clip_by_selection(seq, selection).cloned()
@@ -1679,11 +1999,23 @@ impl AppState {
         mutation: PropertyMutation,
         description: impl Into<String>,
     ) -> mondrian_core::Result<bool> {
+        self.mutate_clip_properties(selection, vec![mutation], description)
+    }
+
+    pub fn mutate_clip_properties(
+        &mut self,
+        selection: SelectedClipRef,
+        mutations: Vec<PropertyMutation>,
+        description: impl Into<String>,
+    ) -> mondrian_core::Result<bool> {
         let description = description.into();
+        if mutations.is_empty() {
+            return Ok(false);
+        }
         let (sequence_id, before, after) = {
             let seq = self.sequence.as_mut().ok_or_else(|| {
                 mondrian_core::MondrianError::WorkflowStepFailed {
-                    step_id: "mutate_clip_property".to_string(),
+                    step_id: "mutate_clip_properties".to_string(),
                     reason: "当前无项目".to_string(),
                 }
             })?;
@@ -1707,7 +2039,9 @@ impl AppState {
                     clip_id: selection.clip_id.to_string(),
                 }
             })?;
-            clip.apply_property_mutation(mutation)?;
+            for mutation in mutations {
+                clip.apply_property_mutation(mutation)?;
+            }
             (seq.id, before, seq.clone())
         };
 
@@ -3815,6 +4149,7 @@ pub struct MondrianApp {
     export_panel: ExportPanel,
 
     // 面板可见性
+    show_effect_controls: bool,
     show_library: bool,
     show_export: bool,
     show_dev_metrics: bool,
@@ -3870,6 +4205,7 @@ impl MondrianApp {
             viewer_panel: ViewerPanel::default(),
             library_panel: LibraryPanel::default(),
             export_panel: ExportPanel::default(),
+            show_effect_controls: true,
             show_library: true,
             show_export: false,
             show_dev_metrics: false,
@@ -4149,9 +4485,35 @@ impl eframe::App for MondrianApp {
             }
         }
 
-        let selected_clip_count = self.timeline_panel.selected_clip_count();
         let selected_clip_ref = self.timeline_panel.selected_clip_ref();
-        if selected_clip_count > 0 {
+        if let Some(selection) = selected_clip_ref {
+            if !ctx.wants_keyboard_input()
+                && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::C))
+            {
+                match self.state.copy_selected_animation_keyframes(selection) {
+                    Ok(true) => self.state.set_status_hint("已复制关键帧", false),
+                    Ok(false) => {}
+                    Err(err) => {
+                        self.state.set_status_hint(format!("复制关键帧失败：{err}"), true);
+                    }
+                }
+            }
+
+            if !ctx.wants_keyboard_input()
+                && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::V))
+            {
+                let destination_time =
+                    self.state.current_time_code().map(timecode_to_ticks).unwrap_or(0);
+                match self.state.paste_animation_keyframes(selection, destination_time) {
+                    Ok(true) => self.state.set_status_hint("已粘贴关键帧", false),
+                    Ok(false) => {}
+                    Err(err) => {
+                        self.state.set_status_hint(format!("粘贴关键帧失败：{err}"), true);
+                    }
+                }
+            }
+        }
+        if self.show_effect_controls {
             let effect_controls_started_at = std::time::Instant::now();
             egui::SidePanel::right("effect_controls_panel")
                 .default_width(crate::ui::theme::tokens::inspector_panel_width())
@@ -4808,6 +5170,7 @@ impl MondrianApp {
     }
 
     fn finish_project_opened(&mut self) {
+        self.show_effect_controls = true;
         self.show_library = true;
         self.show_project_bootstrap_dialog = false;
         self.last_auto_save_at = None;
@@ -4925,6 +5288,11 @@ impl MondrianApp {
 
             ui.menu_button("视图", |ui| {
                 ui.set_min_width(Self::MENU_POPUP_MIN_WIDTH);
+                let _ = crate::ui::theme::checkmark_menu_toggle(
+                    ui,
+                    &mut self.show_effect_controls,
+                    "属性面板",
+                );
                 let _ =
                     crate::ui::theme::checkmark_menu_toggle(ui, &mut self.show_library, "素材库");
                 if cfg!(debug_assertions) {
@@ -5938,6 +6306,217 @@ mod timeline_edit_tests {
         assert_eq!(clips_undo[1].position.frame, 10);
         assert_eq!(clips_undo[2].position.frame, 20);
         assert_eq!(clips_undo[2].source_in.frame, 0);
+    }
+}
+
+#[cfg(test)]
+mod animation_selection_tests {
+    use super::*;
+    use crate::ui::timeline_panel::SelectedClipRef;
+    use mondrian_core::automation::{PropertyMutation, PropertyValue};
+    use mondrian_timeline::clip::Transform2D;
+
+    fn create_state_with_video_clips(count: usize) -> (AppState, TrackId, Vec<ClipId>, Rational) {
+        let mut state = AppState::new();
+        state.sequence = Some(Sequence::new("test"));
+        let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
+        let track_id = state.sequence.as_ref().expect("sequence should exist").video_tracks[0].id;
+        let mut clip_ids = Vec::new();
+        for index in 0..count {
+            let clip = Clip::new(
+                AssetId::new(),
+                TimeCode::new((index as i64) * 30, tb),
+                TimeCode::new(20, tb),
+            );
+            clip_ids.push(clip.id);
+            state.sequence.as_mut().expect("sequence should exist").video_tracks[0]
+                .add_clip(clip)
+                .expect("add clip");
+        }
+        (state, track_id, clip_ids, tb)
+    }
+
+    fn clip_ref(track_id: TrackId, clip_id: ClipId) -> SelectedClipRef {
+        SelectedClipRef { track_id, is_video_track: true, clip_id }
+    }
+
+    #[test]
+    fn switching_active_animation_clip_clears_selection_and_bubble_host() {
+        let (mut state, _track_id, clip_ids, _tb) = create_state_with_video_clips(2);
+        let selected = AnimationKeyframeSelection {
+            clip_id: clip_ids[0],
+            path: Transform2D::OPACITY_PATH.to_string(),
+            time: 0,
+        };
+        state.select_animation_keyframe_only(selected);
+        state.set_animation_bubble_host(AnimationBubbleHost::Graph);
+
+        state.set_active_animation_property(clip_ids[1], Transform2D::POSITION_PATH.to_string());
+
+        assert!(state.selected_animation_keyframes_for_clip(clip_ids[0]).is_empty());
+        assert_eq!(state.animation_bubble_host(), None);
+        assert_eq!(
+            state
+                .animation_selection
+                .active_property
+                .as_ref()
+                .map(|selection| selection.clip_id),
+            Some(clip_ids[1])
+        );
+    }
+
+    #[test]
+    fn switching_active_animation_property_within_clip_preserves_selection_and_bubble_host() {
+        let (mut state, _track_id, clip_ids, _tb) = create_state_with_video_clips(1);
+        let selected = AnimationKeyframeSelection {
+            clip_id: clip_ids[0],
+            path: Transform2D::OPACITY_PATH.to_string(),
+            time: 0,
+        };
+        state.select_animation_keyframe_only(selected.clone());
+        state.set_animation_bubble_host(AnimationBubbleHost::Timeline);
+
+        state.set_active_animation_property(clip_ids[0], Transform2D::POSITION_PATH.to_string());
+
+        assert!(state.is_animation_keyframe_selected(&selected));
+        assert_eq!(
+            state.animation_bubble_host(),
+            Some(AnimationBubbleHost::Timeline)
+        );
+    }
+
+    #[test]
+    fn clearing_animation_selection_preserves_last_active_property_per_clip() {
+        let (mut state, _track_id, clip_ids, _tb) = create_state_with_video_clips(2);
+
+        state.set_active_animation_property(clip_ids[0], Transform2D::POSITION_PATH.to_string());
+        state.set_active_animation_property(clip_ids[1], Transform2D::OPACITY_PATH.to_string());
+        state.clear_animation_selection();
+
+        assert_eq!(
+            state.active_animation_property_path(clip_ids[0]),
+            Some(Transform2D::POSITION_PATH)
+        );
+        assert_eq!(
+            state.active_animation_property_path(clip_ids[1]),
+            Some(Transform2D::OPACITY_PATH)
+        );
+        assert!(state.animation_selection.active_property.is_none());
+    }
+
+    #[test]
+    fn selected_animation_interpolation_mode_returns_none_for_mixed_modes() {
+        let (mut state, track_id, clip_ids, tb) = create_state_with_video_clips(1);
+        let selection = clip_ref(track_id, clip_ids[0]);
+        let start = mondrian_core::automation::timecode_to_ticks(TimeCode::new(0, tb));
+        let end = mondrian_core::automation::timecode_to_ticks(TimeCode::new(10, tb));
+
+        state
+            .mutate_clip_property(
+                selection,
+                PropertyMutation::SetKeyframe {
+                    path: Transform2D::OPACITY_PATH.to_string(),
+                    keyframe: Keyframe::linear(start, PropertyValue::Float(0.0)),
+                },
+                "set start keyframe",
+            )
+            .expect("set start");
+        state
+            .mutate_clip_property(
+                selection,
+                PropertyMutation::SetKeyframe {
+                    path: Transform2D::OPACITY_PATH.to_string(),
+                    keyframe: Keyframe::from_preset(
+                        end,
+                        PropertyValue::Float(1.0),
+                        InterpolationType::Hold,
+                    ),
+                },
+                "set end keyframe",
+            )
+            .expect("set end");
+        state.set_animation_keyframe_selection(vec![
+            AnimationKeyframeSelection {
+                clip_id: clip_ids[0],
+                path: Transform2D::OPACITY_PATH.to_string(),
+                time: start,
+            },
+            AnimationKeyframeSelection {
+                clip_id: clip_ids[0],
+                path: Transform2D::OPACITY_PATH.to_string(),
+                time: end,
+            },
+        ]);
+
+        assert_eq!(state.selected_animation_interpolation_mode(selection), None);
+    }
+
+    #[test]
+    fn copy_paste_animation_keyframes_reassigns_ids_and_updates_selection() {
+        let (mut state, track_id, clip_ids, tb) = create_state_with_video_clips(1);
+        let selection = clip_ref(track_id, clip_ids[0]);
+        let first = mondrian_core::automation::timecode_to_ticks(TimeCode::new(5, tb));
+        let second = mondrian_core::automation::timecode_to_ticks(TimeCode::new(10, tb));
+        let destination = mondrian_core::automation::timecode_to_ticks(TimeCode::new(20, tb));
+
+        for (time, value) in [(first, 0.2), (second, 0.8)] {
+            state
+                .mutate_clip_property(
+                    selection,
+                    PropertyMutation::SetKeyframe {
+                        path: Transform2D::OPACITY_PATH.to_string(),
+                        keyframe: Keyframe::linear(time, PropertyValue::Float(value)),
+                    },
+                    "seed keyframe",
+                )
+                .expect("seed keyframe");
+        }
+
+        let before_ids = state
+            .clip_snapshot(selection)
+            .and_then(|clip| clip.property_bag().ok())
+            .and_then(|bag| bag.property(Transform2D::OPACITY_PATH).cloned())
+            .map(|property| {
+                [first, second]
+                    .into_iter()
+                    .map(|time| property.keyframe_at(time).expect("original keyframe").id)
+                    .collect::<Vec<_>>()
+            })
+            .expect("before ids");
+
+        state.set_animation_keyframe_selection(vec![
+            AnimationKeyframeSelection {
+                clip_id: clip_ids[0],
+                path: Transform2D::OPACITY_PATH.to_string(),
+                time: first,
+            },
+            AnimationKeyframeSelection {
+                clip_id: clip_ids[0],
+                path: Transform2D::OPACITY_PATH.to_string(),
+                time: second,
+            },
+        ]);
+        assert!(state.copy_selected_animation_keyframes(selection).expect("copy"));
+        assert!(state.paste_animation_keyframes(selection, destination).expect("paste"));
+
+        let pasted_times = vec![destination, destination + (second - first)];
+        let property = state
+            .clip_snapshot(selection)
+            .and_then(|clip| clip.property_bag().ok())
+            .and_then(|bag| bag.property(Transform2D::OPACITY_PATH).cloned())
+            .expect("property");
+        let pasted_ids = pasted_times
+            .iter()
+            .map(|time| property.keyframe_at(*time).expect("pasted keyframe").id)
+            .collect::<Vec<_>>();
+        assert!(pasted_ids.iter().all(|id| !before_ids.contains(id)));
+
+        let selected_times = state
+            .selected_animation_keyframes_for_clip(clip_ids[0])
+            .into_iter()
+            .map(|selection| selection.time)
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(selected_times, pasted_times.into_iter().collect());
     }
 }
 

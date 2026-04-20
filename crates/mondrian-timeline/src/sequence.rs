@@ -83,12 +83,12 @@ impl Sequence {
                 continue;
             }
 
-            let track_opacity = track.opacity.evaluate(time).clamp(0.0, 1.0);
+            let track_opacity = track.evaluate_opacity(time).clamp(0.0, 1.0);
             for clip in track.active_clips_at(time) {
                 let source_time = clip.timeline_to_source_time(time);
                 let transform_mat = clip.transform.evaluate_matrix(time);
                 let opacity =
-                    (clip.transform.opacity.evaluate(time) * track_opacity).clamp(0.0, 1.0);
+                    (clip.transform.evaluate_opacity(time) * track_opacity).clamp(0.0, 1.0);
                 result.push(ActiveClip {
                     clip: clip.clone(),
                     track_index: i,
@@ -222,7 +222,7 @@ mod tests {
     use super::*;
     use crate::clip::Clip;
     use mondrian_core::automation::{
-        InterpolationType, Keyframe, PropertyHost, PropertyMutation, PropertyValue,
+        timecode_to_ticks, Keyframe, PropertyHost, PropertyMutation, PropertyValue,
     };
 
     #[test]
@@ -250,25 +250,19 @@ mod tests {
         seq.video_tracks[0]
             .apply_property_mutation(PropertyMutation::SetKeyframe {
                 path: Track::OPACITY_PATH.to_string(),
-                keyframe: Keyframe {
-                    time: TimeCode::new(0, tb),
-                    value: PropertyValue::Float(1.0),
-                    interpolation: InterpolationType::Linear,
-                    control_in: None,
-                    control_out: None,
-                },
+                keyframe: Keyframe::linear(
+                    timecode_to_ticks(TimeCode::new(0, tb)),
+                    PropertyValue::Float(1.0),
+                ),
             })
             .expect("set start opacity");
         seq.video_tracks[0]
             .apply_property_mutation(PropertyMutation::SetKeyframe {
                 path: Track::OPACITY_PATH.to_string(),
-                keyframe: Keyframe {
-                    time: TimeCode::new(20, tb),
-                    value: PropertyValue::Float(0.4),
-                    interpolation: InterpolationType::Linear,
-                    control_in: None,
-                    control_out: None,
-                },
+                keyframe: Keyframe::linear(
+                    timecode_to_ticks(TimeCode::new(20, tb)),
+                    PropertyValue::Float(0.4),
+                ),
             })
             .expect("set end opacity");
 

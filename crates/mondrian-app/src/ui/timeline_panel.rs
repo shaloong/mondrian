@@ -949,6 +949,7 @@ impl TimelinePanel {
                         self.selected_clips.clear();
                         self.selected_clips.insert(selection);
                     }
+                    state.clear_animation_selection();
                 }
 
                 if clip_resp.drag_started() {
@@ -958,6 +959,7 @@ impl TimelinePanel {
                         self.selected_clips.clear();
                     }
                     self.selected_clips.insert(selection);
+                    state.clear_animation_selection();
                     self.clip_drag_anchors = self.build_clip_drag_anchors(state);
                     self.clip_drag_before_sequence = state.sequence.clone();
 
@@ -1372,7 +1374,7 @@ impl TimelinePanel {
         if primary_pressed {
             if let Some(pos) = pointer_pos {
                 let in_bounds = bounds.contains(pos) && pos.x >= bounds.left();
-                let on_clip = visible_clips.iter().any(|v| v.rect.contains(pos));
+                let on_clip = visible_clips.iter().any(|visual| visual.rect.contains(pos));
                 if in_bounds && !on_clip {
                     self.marquee_anchor = Some(pos);
                     self.marquee_current = Some(pos);
@@ -1413,13 +1415,13 @@ impl TimelinePanel {
                 if rect.width() > 2.0 && rect.height() > 2.0 {
                     let picks = visible_clips
                         .iter()
-                        .filter(|v| v.rect.intersects(rect))
-                        .map(|v| v.selection)
+                        .filter(|visual| visual.rect.intersects(rect))
+                        .map(|visual| visual.selection)
                         .collect::<Vec<_>>();
 
                     if self.marquee_additive {
-                        for sel in picks {
-                            self.selected_clips.insert(sel);
+                        for selection in picks {
+                            self.selected_clips.insert(selection);
                         }
                     } else {
                         self.selected_clips = picks.into_iter().collect();
@@ -1441,10 +1443,16 @@ impl TimelinePanel {
             return;
         }
 
-        let selections: Vec<(mondrian_core::types::TrackId, bool, ClipId)> = self
+        let selections: Vec<(TrackId, bool, ClipId)> = self
             .selected_clips
             .iter()
-            .map(|s| (s.track_id, s.is_video_track, s.clip_id))
+            .map(|selection| {
+                (
+                    selection.track_id,
+                    selection.is_video_track,
+                    selection.clip_id,
+                )
+            })
             .collect();
 
         if state.remove_clips_bulk(&selections, ripple).is_ok() {
@@ -1928,7 +1936,6 @@ mod tests {
         let rect = Rect::from_min_size(Pos2::new(0.0, top), Vec2::new(120.0, 40.0));
         TrackRowVisual { track_id, is_video_track, track_index, rect }
     }
-
     #[test]
     fn snap_stays_free_when_no_candidate_in_threshold() {
         let decision = decide_snap_target(

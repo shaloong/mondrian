@@ -213,6 +213,8 @@ pub struct MetricsTokens {
     pub ai_workflow_editor_rows: usize,
     pub inspector_panel_width: f32,
     pub inspector_panel_min_width: f32,
+    pub inspector_group_header_height: f32,
+    pub inspector_group_indent: f32,
     pub property_row_height: f32,
     pub timeline_toolbar_button_size: [f32; 2],
     pub timeline_clip_radius: f32,
@@ -246,6 +248,17 @@ pub struct MetricsTokens {
     pub timeline_linked_audio_highlight_width: f32,
     pub timeline_playhead_stroke_width: f32,
     pub timeline_playhead_secondary_stroke_width: f32,
+    pub timeline_animation_section_gap: f32,
+    pub timeline_animation_group_header_height: f32,
+    pub timeline_animation_group_indent: f32,
+    pub timeline_animation_lane_height: f32,
+    pub timeline_animation_curve_stroke_width: f32,
+    pub timeline_keyframe_size: f32,
+    pub timeline_keyframe_hit_size: f32,
+    pub graph_editor_height: f32,
+    pub graph_editor_header_height: f32,
+    pub graph_editor_handle_size: f32,
+    pub graph_editor_curve_stroke_width: f32,
     pub viewer_transport_height: f32,
     pub startup_viewport_size: [f32; 2],
     pub startup_left_panel_width: f32,
@@ -308,6 +321,8 @@ impl Default for MetricsTokens {
             ai_workflow_editor_rows: 12,
             inspector_panel_width: 344.0,
             inspector_panel_min_width: 280.0,
+            inspector_group_header_height: 28.0,
+            inspector_group_indent: 14.0,
             property_row_height: 28.0,
             timeline_toolbar_button_size: [30.0, 26.0],
             timeline_clip_radius: 4.0,
@@ -341,6 +356,17 @@ impl Default for MetricsTokens {
             timeline_linked_audio_highlight_width: 1.5,
             timeline_playhead_stroke_width: 2.0,
             timeline_playhead_secondary_stroke_width: 1.8,
+            timeline_animation_section_gap: 8.0,
+            timeline_animation_group_header_height: 24.0,
+            timeline_animation_group_indent: 14.0,
+            timeline_animation_lane_height: 24.0,
+            timeline_animation_curve_stroke_width: 1.2,
+            timeline_keyframe_size: 8.0,
+            timeline_keyframe_hit_size: 16.0,
+            graph_editor_height: 320.0,
+            graph_editor_header_height: 32.0,
+            graph_editor_handle_size: 7.0,
+            graph_editor_curve_stroke_width: 1.6,
             viewer_transport_height: 42.0,
             startup_viewport_size: [820.0, 500.0],
             startup_left_panel_width: 300.0,
@@ -623,7 +649,7 @@ pub fn checkmark_selectable_value<V: PartialEq>(
     text: impl Into<String>,
 ) -> egui::Response {
     let selected = *current == value;
-    let response = checkmark_menu_item(ui, selected, text.into());
+    let response = checkmark_menu_item(ui, selected, text.into(), false);
 
     if response.clicked() {
         *current = value;
@@ -636,18 +662,59 @@ pub fn checkmark_menu_toggle(
     current: &mut bool,
     text: impl Into<String>,
 ) -> egui::Response {
-    let response = checkmark_menu_item(ui, *current, text.into());
+    let response = checkmark_menu_item(ui, *current, text.into(), false);
     if response.clicked() {
         *current = !*current;
     }
     response
 }
 
-fn checkmark_menu_item(ui: &mut egui::Ui, selected: bool, text: String) -> egui::Response {
+pub fn checkmark_menu_action(
+    ui: &mut egui::Ui,
+    selected: bool,
+    text: impl Into<String>,
+) -> egui::Response {
+    checkmark_menu_item(ui, selected, text.into(), false)
+}
+
+pub fn checkmark_menu_action_fill(
+    ui: &mut egui::Ui,
+    selected: bool,
+    text: impl Into<String>,
+) -> egui::Response {
+    checkmark_menu_item(ui, selected, text.into(), true)
+}
+
+pub fn menu_action_fill(ui: &mut egui::Ui, text: impl Into<String>) -> egui::Response {
+    let text = text.into();
+    let desired_size = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+    ui.add_sized(desired_size, egui::Button::new(text))
+}
+
+fn checkmark_menu_item(
+    ui: &mut egui::Ui,
+    selected: bool,
+    text: String,
+    fill_width: bool,
+) -> egui::Response {
     let box_size = 18.0;
     let gap = 10.0;
     let horizontal_padding = 4.0;
-    let desired_size = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+    let text_size = ui
+        .painter()
+        .layout_no_wrap(
+            text.clone(),
+            typography::body_small(),
+            palette::text_primary(),
+        )
+        .size();
+    let content_width = box_size + gap + text_size.x + horizontal_padding * 2.0;
+    let desired_width = if fill_width {
+        ui.available_width().max(content_width)
+    } else {
+        content_width.min(ui.available_width())
+    };
+    let desired_size = egui::vec2(desired_width, ui.spacing().interact_size.y);
     let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click());
 
     if ui.is_rect_visible(rect) {
@@ -784,6 +851,12 @@ pub enum UiIcon {
     Unlock,
     Speaker,
     Mute,
+    Trash,
+    Copy,
+    ClipboardText,
+    Anchor,
+    CaretRight,
+    CaretDown,
 }
 
 pub fn icon(ui: &mut egui::Ui, kind: UiIcon, color: egui::Color32) -> egui::Response {
@@ -939,6 +1012,12 @@ fn icon_svg_bytes(kind: UiIcon) -> &'static [u8] {
         UiIcon::Unlock => include_bytes!("../../assets/icons/unlock.svg"),
         UiIcon::Speaker => include_bytes!("../../assets/icons/speaker.svg"),
         UiIcon::Mute => include_bytes!("../../assets/icons/speaker_muted.svg"),
+        UiIcon::Trash => include_bytes!("../../assets/icons/trash.svg"),
+        UiIcon::Copy => include_bytes!("../../assets/icons/copy.svg"),
+        UiIcon::ClipboardText => include_bytes!("../../assets/icons/clipboard_text.svg"),
+        UiIcon::Anchor => include_bytes!("../../assets/icons/anchor.svg"),
+        UiIcon::CaretRight => include_bytes!("../../assets/icons/caret_right.svg"),
+        UiIcon::CaretDown => include_bytes!("../../assets/icons/caret_down.svg"),
     }
 }
 
@@ -1138,6 +1217,14 @@ pub mod tokens {
         super::with_active_tokens(|tokens| tokens.metrics.inspector_panel_min_width)
     }
 
+    pub fn inspector_group_header_height() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.inspector_group_header_height)
+    }
+
+    pub fn inspector_group_indent() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.inspector_group_indent)
+    }
+
     pub fn property_row_height() -> f32 {
         super::with_active_tokens(|tokens| tokens.metrics.property_row_height)
     }
@@ -1272,6 +1359,50 @@ pub mod tokens {
 
     pub fn timeline_playhead_secondary_stroke_width() -> f32 {
         super::with_active_tokens(|tokens| tokens.metrics.timeline_playhead_secondary_stroke_width)
+    }
+
+    pub fn timeline_animation_section_gap() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_animation_section_gap)
+    }
+
+    pub fn timeline_animation_group_header_height() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_animation_group_header_height)
+    }
+
+    pub fn timeline_animation_group_indent() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_animation_group_indent)
+    }
+
+    pub fn timeline_animation_lane_height() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_animation_lane_height)
+    }
+
+    pub fn timeline_animation_curve_stroke_width() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_animation_curve_stroke_width)
+    }
+
+    pub fn timeline_keyframe_size() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_keyframe_size)
+    }
+
+    pub fn timeline_keyframe_hit_size() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_keyframe_hit_size)
+    }
+
+    pub fn graph_editor_height() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.graph_editor_height)
+    }
+
+    pub fn graph_editor_header_height() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.graph_editor_header_height)
+    }
+
+    pub fn graph_editor_handle_size() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.graph_editor_handle_size)
+    }
+
+    pub fn graph_editor_curve_stroke_width() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.graph_editor_curve_stroke_width)
     }
 
     pub fn viewer_transport_height() -> f32 {
