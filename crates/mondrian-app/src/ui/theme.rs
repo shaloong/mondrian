@@ -213,6 +213,8 @@ pub struct MetricsTokens {
     pub ai_workflow_editor_rows: usize,
     pub inspector_panel_width: f32,
     pub inspector_panel_min_width: f32,
+    pub inspector_group_header_height: f32,
+    pub inspector_group_indent: f32,
     pub property_row_height: f32,
     pub timeline_toolbar_button_size: [f32; 2],
     pub timeline_clip_radius: f32,
@@ -247,6 +249,8 @@ pub struct MetricsTokens {
     pub timeline_playhead_stroke_width: f32,
     pub timeline_playhead_secondary_stroke_width: f32,
     pub timeline_animation_section_gap: f32,
+    pub timeline_animation_group_header_height: f32,
+    pub timeline_animation_group_indent: f32,
     pub timeline_animation_lane_height: f32,
     pub timeline_animation_curve_stroke_width: f32,
     pub timeline_keyframe_size: f32,
@@ -317,6 +321,8 @@ impl Default for MetricsTokens {
             ai_workflow_editor_rows: 12,
             inspector_panel_width: 344.0,
             inspector_panel_min_width: 280.0,
+            inspector_group_header_height: 28.0,
+            inspector_group_indent: 14.0,
             property_row_height: 28.0,
             timeline_toolbar_button_size: [30.0, 26.0],
             timeline_clip_radius: 4.0,
@@ -351,6 +357,8 @@ impl Default for MetricsTokens {
             timeline_playhead_stroke_width: 2.0,
             timeline_playhead_secondary_stroke_width: 1.8,
             timeline_animation_section_gap: 8.0,
+            timeline_animation_group_header_height: 24.0,
+            timeline_animation_group_indent: 14.0,
             timeline_animation_lane_height: 24.0,
             timeline_animation_curve_stroke_width: 1.2,
             timeline_keyframe_size: 8.0,
@@ -847,6 +855,8 @@ pub enum UiIcon {
     Copy,
     ClipboardText,
     Anchor,
+    CaretRight,
+    CaretDown,
 }
 
 pub fn icon(ui: &mut egui::Ui, kind: UiIcon, color: egui::Color32) -> egui::Response {
@@ -1006,6 +1016,8 @@ fn icon_svg_bytes(kind: UiIcon) -> &'static [u8] {
         UiIcon::Copy => include_bytes!("../../assets/icons/copy.svg"),
         UiIcon::ClipboardText => include_bytes!("../../assets/icons/clipboard_text.svg"),
         UiIcon::Anchor => include_bytes!("../../assets/icons/anchor.svg"),
+        UiIcon::CaretRight => include_bytes!("../../assets/icons/caret_right.svg"),
+        UiIcon::CaretDown => include_bytes!("../../assets/icons/caret_down.svg"),
     }
 }
 
@@ -1205,6 +1217,14 @@ pub mod tokens {
         super::with_active_tokens(|tokens| tokens.metrics.inspector_panel_min_width)
     }
 
+    pub fn inspector_group_header_height() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.inspector_group_header_height)
+    }
+
+    pub fn inspector_group_indent() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.inspector_group_indent)
+    }
+
     pub fn property_row_height() -> f32 {
         super::with_active_tokens(|tokens| tokens.metrics.property_row_height)
     }
@@ -1343,6 +1363,14 @@ pub mod tokens {
 
     pub fn timeline_animation_section_gap() -> f32 {
         super::with_active_tokens(|tokens| tokens.metrics.timeline_animation_section_gap)
+    }
+
+    pub fn timeline_animation_group_header_height() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_animation_group_header_height)
+    }
+
+    pub fn timeline_animation_group_indent() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_animation_group_indent)
     }
 
     pub fn timeline_animation_lane_height() -> f32 {

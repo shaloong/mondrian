@@ -83,6 +83,7 @@ pub struct AnimationKeyframeSelection {
 #[derive(Debug, Clone, Default)]
 pub struct AnimationSelectionState {
     pub active_property: Option<AnimationPropertySelection>,
+    pub remembered_active_properties: HashMap<ClipId, String>,
     pub selected_keyframes: HashSet<AnimationKeyframeSelection>,
     pub bubble_host: Option<AnimationBubbleHost>,
 }
@@ -192,6 +193,8 @@ struct AppPreferences {
     version: u32,
     #[serde(default = "default_app_theme")]
     theme: crate::ui::theme::Theme,
+    #[serde(default = "default_show_effect_controls")]
+    show_effect_controls: bool,
     show_library: bool,
     auto_proxy_enabled: bool,
     show_dev_metrics: bool,
@@ -227,6 +230,7 @@ impl Default for AppPreferences {
         Self {
             version: 1,
             theme: default_app_theme(),
+            show_effect_controls: default_show_effect_controls(),
             show_library: true,
             auto_proxy_enabled: false,
             show_dev_metrics: false,
@@ -266,6 +270,10 @@ const fn default_media_cache_auto_cleanup() -> bool {
 
 const fn default_app_theme() -> crate::ui::theme::Theme {
     crate::ui::theme::Theme::System
+}
+
+const fn default_show_effect_controls() -> bool {
+    true
 }
 
 const fn default_media_cache_max_size_gb() -> u32 {
@@ -1721,6 +1729,12 @@ impl AppState {
             .as_ref()
             .filter(|selection| selection.clip_id == clip_id)
             .map(|selection| selection.path.as_str())
+            .or_else(|| {
+                self.animation_selection
+                    .remembered_active_properties
+                    .get(&clip_id)
+                    .map(|path| path.as_str())
+            })
     }
 
     pub fn set_active_animation_property(&mut self, clip_id: ClipId, path: impl Into<String>) {
@@ -1735,12 +1749,17 @@ impl AppState {
             self.animation_selection.selected_keyframes.clear();
             self.animation_selection.bubble_host = None;
         }
+        self.animation_selection
+            .remembered_active_properties
+            .insert(clip_id, path.clone());
         self.animation_selection.active_property =
             Some(AnimationPropertySelection { clip_id, path });
     }
 
     pub fn clear_animation_selection(&mut self) {
-        self.animation_selection = AnimationSelectionState::default();
+        self.animation_selection.active_property = None;
+        self.animation_selection.selected_keyframes.clear();
+        self.animation_selection.bubble_host = None;
     }
 
     pub fn animation_bubble_host(&self) -> Option<AnimationBubbleHost> {
@@ -4130,6 +4149,7 @@ pub struct MondrianApp {
     export_panel: ExportPanel,
 
     // 面板可见性
+    show_effect_controls: bool,
     show_library: bool,
     show_export: bool,
     show_dev_metrics: bool,
@@ -4185,6 +4205,7 @@ impl MondrianApp {
             viewer_panel: ViewerPanel::default(),
             library_panel: LibraryPanel::default(),
             export_panel: ExportPanel::default(),
+            show_effect_controls: true,
             show_library: true,
             show_export: false,
             show_dev_metrics: false,
@@ -4464,7 +4485,6 @@ impl eframe::App for MondrianApp {
             }
         }
 
-        let selected_clip_count = self.timeline_panel.selected_clip_count();
         let selected_clip_ref = self.timeline_panel.selected_clip_ref();
         if let Some(selection) = selected_clip_ref {
             if !ctx.wants_keyboard_input()
@@ -4493,7 +4513,7 @@ impl eframe::App for MondrianApp {
                 }
             }
         }
-        if selected_clip_count > 0 {
+        if self.show_effect_controls {
             let effect_controls_started_at = std::time::Instant::now();
             egui::SidePanel::right("effect_controls_panel")
                 .default_width(crate::ui::theme::tokens::inspector_panel_width())
@@ -5150,6 +5170,7 @@ impl MondrianApp {
     }
 
     fn finish_project_opened(&mut self) {
+        self.show_effect_controls = true;
         self.show_library = true;
         self.show_project_bootstrap_dialog = false;
         self.last_auto_save_at = None;
@@ -5267,6 +5288,11 @@ impl MondrianApp {
 
             ui.menu_button("视图", |ui| {
                 ui.set_min_width(Self::MENU_POPUP_MIN_WIDTH);
+                let _ = crate::ui::theme::checkmark_menu_toggle(
+                    ui,
+                    &mut self.show_effect_controls,
+                    "属性面板",
+                );
                 let _ =
                     crate::ui::theme::checkmark_menu_toggle(ui, &mut self.show_library, "素材库");
                 if cfg!(debug_assertions) {
@@ -6357,6 +6383,25 @@ mod animation_selection_tests {
             state.animation_bubble_host(),
             Some(AnimationBubbleHost::Timeline)
         );
+    }
+
+    #[test]
+    fn clearing_animation_selection_preserves_last_active_property_per_clip() {
+        let (mut state, _track_id, clip_ids, _tb) = create_state_with_video_clips(2);
+
+        state.set_active_animation_property(clip_ids[0], Transform2D::POSITION_PATH.to_string());
+        state.set_active_animation_property(clip_ids[1], Transform2D::OPACITY_PATH.to_string());
+        state.clear_animation_selection();
+
+        assert_eq!(
+            state.active_animation_property_path(clip_ids[0]),
+            Some(Transform2D::POSITION_PATH)
+        );
+        assert_eq!(
+            state.active_animation_property_path(clip_ids[1]),
+            Some(Transform2D::OPACITY_PATH)
+        );
+        assert!(state.animation_selection.active_property.is_none());
     }
 
     #[test]

@@ -3,6 +3,10 @@ use std::collections::{HashMap, HashSet};
 use crate::{
     app::{AnimationBubbleHost, AnimationKeyframeSelection, AppState},
     ui::{
+        animation_groups::{
+            property_display_name, property_group_meta, property_order,
+            qualified_property_display_name, AnimationGroupKind, AnimationGroupMeta,
+        },
         theme::{self, palette, tokens, typography},
         timeline_panel::SelectedClipRef,
     },
@@ -23,6 +27,7 @@ use mondrian_timeline::clip::Clip;
 #[derive(Default)]
 pub struct EffectControlsPanel {
     text_edit_buffers: HashMap<(ClipId, String), String>,
+    inspector_group_collapsed: HashMap<(ClipId, String), bool>,
     view: EffectControlsView,
     graph_mode: GraphEditorMode,
     graph_channel_selection: HashMap<(ClipId, String), usize>,
@@ -34,6 +39,11 @@ pub struct EffectControlsPanel {
     graph_marquee_current: Option<Pos2>,
     graph_marquee_additive: bool,
     pending_clear_animation: Option<PendingClearAnimation>,
+}
+
+struct InspectorGroup<'a> {
+    meta: AnimationGroupMeta,
+    properties: Vec<(&'a str, &'a mondrian_core::automation::AnimatedProperty)>,
 }
 
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
@@ -165,22 +175,32 @@ impl EffectControlsPanel {
         app: &mut AppState,
         selected_clip: Option<SelectedClipRef>,
     ) {
+        let subtitle = selected_clip
+            .and_then(|selection| {
+                app.clip_snapshot(selection).map(|clip| {
+                    let clip_label = clip
+                        .label
+                        .as_deref()
+                        .filter(|label| !label.is_empty())
+                        .unwrap_or("未命名片段");
+                    let clip_role = if selection.is_video_track {
+                        "视频"
+                    } else {
+                        "音频"
+                    };
+                    format!("{clip_role} · {clip_label}")
+                })
+            })
+            .unwrap_or_else(|| "（未选中片段）".to_string());
+
+        self.draw_panel_switcher(ui, &subtitle);
+        ui.add_space(tokens::panel_gap() * 0.65);
+
         let Some(selection) = selected_clip else {
-            theme::panel_header(ui, "效果控制", "选中一个片段后即可编辑属性", |_| {});
-            ui.add_space(tokens::panel_gap());
-            ui.centered_and_justified(|ui| {
-                ui.label(
-                    RichText::new("选中一个片段后即可编辑属性")
-                        .font(typography::body())
-                        .color(palette::text_muted()),
-                );
-            });
             return;
         };
 
         let Some(clip) = app.clip_snapshot(selection) else {
-            theme::panel_header(ui, "效果控制", "片段已不可用", |_| {});
-            ui.add_space(tokens::panel_gap());
             ui.label(
                 RichText::new("片段已被移除或不可用")
                     .font(typography::body())
@@ -193,8 +213,6 @@ impl EffectControlsPanel {
         let property_bag = match clip.property_bag() {
             Ok(bag) => bag,
             Err(err) => {
-                theme::panel_header(ui, "效果控制", "属性读取失败", |_| {});
-                ui.add_space(tokens::panel_gap());
                 ui.label(
                     RichText::new(format!("读取片段属性失败：{err}"))
                         .font(typography::body())
@@ -204,81 +222,33 @@ impl EffectControlsPanel {
             }
         };
 
-        let clip_label =
-            clip.label.as_deref().filter(|label| !label.is_empty()).unwrap_or("未命名片段");
-        let clip_role = if selection.is_video_track {
-            "视频"
-        } else {
-            "音频"
-        };
-        let subtitle = format!("{} · {}", clip_role, clip_label);
-
-        theme::panel_header(ui, "效果控制", &subtitle, |ui| {
-            ui.selectable_value(&mut self.view, EffectControlsView::Inspector, "属性");
-            ui.selectable_value(&mut self.view, EffectControlsView::Graph, "曲线");
-        });
-        ui.add_space(tokens::panel_gap());
-
+        let inspector_groups = collect_inspector_groups(&property_bag);
         if app.active_animation_property_path(selection.clip_id).is_none() {
-            if let Some((path, _)) =
-                property_bag.iter().find(|(_, property)| property.descriptor.is_animatable)
+            if let Some((path, _)) = inspector_groups
+                .iter()
+                .flat_map(|group| group.properties.iter().copied())
+                .find(|(_, property)| property.descriptor.is_animatable)
             {
                 app.set_active_animation_property(selection.clip_id, path.to_string());
             }
         }
 
-        let mut motion_properties = Vec::new();
-        let mut opacity_properties = Vec::new();
-        let mut other_properties = Vec::new();
-
-        for (path, property) in property_bag.iter() {
-            match property_section(path) {
-                PropertySection::Motion => motion_properties.push((path, property)),
-                PropertySection::Opacity => opacity_properties.push((path, property)),
-                PropertySection::Other => other_properties.push((path, property)),
-            }
-        }
-
-        motion_properties.sort_by_key(|(path, _)| property_order(path));
-        opacity_properties.sort_by_key(|(path, _)| property_order(path));
-        other_properties.sort_by_key(|(path, _)| property_order(path));
-
         match self.view {
             EffectControlsView::Inspector => {
-                self.draw_property_section(
-                    ui,
-                    "运动",
-                    &motion_properties,
-                    app,
-                    selection,
-                    current_time,
-                );
-                self.draw_property_section(
-                    ui,
-                    "不透明度",
-                    &opacity_properties,
-                    app,
-                    selection,
-                    current_time,
-                );
-                if !other_properties.is_empty() {
-                    self.draw_property_section(
-                        ui,
-                        "其他",
-                        &other_properties,
-                        app,
-                        selection,
-                        current_time,
-                    );
+                for (index, group) in inspector_groups.iter().enumerate() {
+                    if index > 0 {
+                        ui.add_space(tokens::panel_gap() * 0.4);
+                        ui.separator();
+                        ui.add_space(tokens::panel_gap() * 0.35);
+                    }
+                    self.draw_property_group(ui, app, selection, current_time, group);
                 }
             }
             EffectControlsView::Graph => {
-                let animatable_properties = motion_properties
+                let animatable_properties = inspector_groups
                     .iter()
-                    .chain(opacity_properties.iter())
-                    .chain(other_properties.iter())
+                    .flat_map(|group| group.properties.iter().copied())
                     .filter(|(_, property)| property.descriptor.is_animatable)
-                    .map(|(path, property)| (*path, *property))
                     .collect::<Vec<_>>();
                 self.draw_graph_editor(
                     ui,
@@ -294,39 +264,102 @@ impl EffectControlsPanel {
         self.draw_pending_clear_animation_dialog(ui.ctx(), app);
     }
 
-    fn draw_property_section(
+    fn draw_panel_switcher(&mut self, ui: &mut Ui, subtitle: &str) {
+        let subtitle_height = ui
+            .painter()
+            .layout_no_wrap(
+                "视频 · 占位".to_string(),
+                typography::body_small(),
+                palette::text_muted(),
+            )
+            .size()
+            .y;
+        let row_height = subtitle_height.max(28.0);
+        let controls_width = 116.0;
+        let total_width = ui.available_width();
+        let (row_rect, _) =
+            ui.allocate_exact_size(Vec2::new(total_width, row_height), Sense::hover());
+        let controls_rect = Rect::from_min_max(
+            Pos2::new(row_rect.right() - controls_width, row_rect.top()),
+            row_rect.right_bottom(),
+        );
+        let label_rect = Rect::from_min_max(
+            row_rect.min,
+            Pos2::new(
+                (controls_rect.left() - 8.0).max(row_rect.left()),
+                row_rect.bottom(),
+            ),
+        );
+
+        ui.scope_builder(egui::UiBuilder::new().max_rect(label_rect), |ui| {
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.set_max_width(label_rect.width());
+                let subtitle_response = ui.add(
+                    egui::Label::new(
+                        RichText::new(subtitle)
+                            .font(typography::body_small())
+                            .color(palette::text_muted()),
+                    )
+                    .truncate(),
+                );
+                if !subtitle.is_empty() {
+                    subtitle_response.on_hover_text(subtitle);
+                }
+            });
+        });
+
+        ui.scope_builder(egui::UiBuilder::new().max_rect(controls_rect), |ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.set_width(controls_rect.width());
+                ui.selectable_value(&mut self.view, EffectControlsView::Inspector, "属性");
+                ui.selectable_value(&mut self.view, EffectControlsView::Graph, "曲线");
+            });
+        });
+    }
+
+    fn draw_property_group(
         &mut self,
         ui: &mut Ui,
-        title: &str,
-        properties: &[(&str, &mondrian_core::automation::AnimatedProperty)],
         app: &mut AppState,
         selection: SelectedClipRef,
         current_time: TimeCode,
+        group: &InspectorGroup<'_>,
     ) {
-        if properties.is_empty() {
+        if group.properties.is_empty() {
             return;
         }
 
-        ui.add_space(tokens::panel_gap() * 0.5);
-        ui.label(
-            RichText::new(title)
-                .font(typography::body_small())
-                .strong()
-                .color(palette::text_muted()),
-        );
-        ui.add_space(6.0);
+        let collapse_key = (selection.clip_id, group.meta.id.clone());
+        let mut collapsed = *self.inspector_group_collapsed.get(&collapse_key).unwrap_or(&false);
 
-        Grid::new(format!("effect_controls_{}_grid", title))
-            .num_columns(3)
-            .spacing([8.0, 8.0])
-            .striped(false)
-            .show(ui, |ui| {
-                for (path, property) in properties {
-                    self.draw_property_row(ui, app, selection, path, property, current_time);
-                }
+        let header_response = draw_group_header_row(ui, &group.meta, collapsed, None, false, false);
+        if header_response.clicked() {
+            collapsed = !collapsed;
+        }
+
+        if !collapsed {
+            ui.add_space(tokens::panel_gap() * 0.2);
+            ui.horizontal(|ui| {
+                ui.add_space(tokens::inspector_group_indent());
+                Grid::new(format!("effect_controls_group_grid_{}", group.meta.id))
+                    .num_columns(3)
+                    .spacing([8.0, 8.0])
+                    .striped(false)
+                    .show(ui, |ui| {
+                        for (path, property) in &group.properties {
+                            self.draw_property_row(
+                                ui,
+                                app,
+                                selection,
+                                path,
+                                property,
+                                current_time,
+                            );
+                        }
+                    });
             });
-
-        ui.add_space(tokens::panel_gap() * 0.5);
+        }
+        self.inspector_group_collapsed.insert(collapse_key, collapsed);
     }
 
     fn draw_graph_editor(
@@ -379,66 +412,91 @@ impl EffectControlsPanel {
             .cloned()
             .collect::<Vec<_>>();
 
-        theme::toolbar_frame().show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ComboBox::from_id_salt((selection.clip_id, "graph_property"))
-                    .selected_text(property_display_name(property))
-                    .width(140.0)
-                    .show_ui(ui, |ui| {
-                        for (path, candidate) in properties {
-                            if ui
-                                .selectable_label(
-                                    *path == active_path.as_str(),
-                                    property_display_name(candidate),
-                                )
-                                .clicked()
-                            {
-                                active_path = (*path).to_string();
-                                app.set_active_animation_property(
-                                    selection.clip_id,
-                                    active_path.clone(),
-                                );
-                                self.graph_handle_drag = None;
-                                ui.close();
-                            }
+        ui.horizontal(|ui| {
+            ComboBox::from_id_salt((selection.clip_id, "graph_property"))
+                .selected_text(qualified_property_display_name(
+                    active_path.as_str(),
+                    property,
+                ))
+                .width(140.0)
+                .show_ui(ui, |ui| {
+                    for (path, candidate) in properties {
+                        if ui
+                            .selectable_label(
+                                *path == active_path.as_str(),
+                                qualified_property_display_name(path, candidate),
+                            )
+                            .clicked()
+                        {
+                            active_path = (*path).to_string();
+                            app.set_active_animation_property(
+                                selection.clip_id,
+                                active_path.clone(),
+                            );
+                            self.graph_handle_drag = None;
+                            ui.close();
                         }
-                    });
-
-                if property.channel_count() > 1 {
-                    for (index, label) in
-                        graph_channel_labels(property.static_value()).iter().enumerate()
-                    {
-                        ui.selectable_value(
-                            self.graph_channel_selection
-                                .entry(channel_key.clone())
-                                .or_insert(channel_index),
-                            index,
-                            *label,
-                        );
                     }
-                }
+                });
 
-                ui.separator();
-                ui.selectable_value(&mut self.graph_mode, GraphEditorMode::Value, "值");
-                ui.selectable_value(&mut self.graph_mode, GraphEditorMode::Speed, "速度");
-            });
+            if property.channel_count() > 1 {
+                for (index, label) in
+                    graph_channel_labels(property.static_value()).iter().enumerate()
+                {
+                    ui.selectable_value(
+                        self.graph_channel_selection
+                            .entry(channel_key.clone())
+                            .or_insert(channel_index),
+                        index,
+                        *label,
+                    );
+                }
+            }
+
+            ui.separator();
+            ui.selectable_value(&mut self.graph_mode, GraphEditorMode::Value, "值");
+            ui.selectable_value(&mut self.graph_mode, GraphEditorMode::Speed, "速度");
         });
-        ui.add_space(tokens::panel_gap() * 0.6);
+        ui.add_space(tokens::panel_gap() * 0.45);
+        ui.separator();
+        ui.add_space(tokens::panel_gap() * 0.55);
 
         let (rect, _response) = ui.allocate_exact_size(
             Vec2::new(ui.available_width(), tokens::graph_editor_height()),
             Sense::click_and_drag(),
         );
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 0.0, palette::bg_surface());
+
+        let ruler_height = 22.0;
+        let axis_height = 22.0;
+        let left_axis_width = 50.0;
+        let outer_padding = 12.0;
+        let right_axis_padding = 22.0;
+        let plot_rect = Rect::from_min_max(
+            Pos2::new(
+                rect.left() + left_axis_width,
+                rect.top() + ruler_height + outer_padding * 0.5,
+            ),
+            Pos2::new(
+                rect.right() - outer_padding - right_axis_padding,
+                rect.bottom() - axis_height - outer_padding,
+            ),
+        );
+        let ruler_rect = Rect::from_min_max(
+            Pos2::new(plot_rect.left(), rect.top() + 6.0),
+            Pos2::new(plot_rect.right(), plot_rect.top() - 6.0),
+        );
+        let axis_rect = Rect::from_min_max(
+            Pos2::new(plot_rect.left(), plot_rect.bottom() + 6.0),
+            Pos2::new(plot_rect.right(), rect.bottom() - 6.0),
+        );
+        painter.rect_filled(plot_rect, 6.0, palette::bg_surface_raised());
         painter.rect_stroke(
-            rect,
-            egui::CornerRadius::same(tokens::section_rounding().round() as u8),
+            plot_rect,
+            egui::CornerRadius::same(6),
             Stroke::new(1.0, palette::border_subtle()),
             egui::StrokeKind::Inside,
         );
-
-        let plot_rect = rect.shrink2(Vec2::new(12.0, 12.0));
         let Some(channel) = property.channel(channel_index) else {
             return;
         };
@@ -455,6 +513,12 @@ impl EffectControlsPanel {
 
         let current_time_ticks = timecode_to_ticks(current_time);
         let (time_min, time_max) = graph_time_range(clip);
+        let time_ticks = graph_time_axis_ticks(
+            time_min,
+            time_max,
+            clip.position.time_base,
+            plot_rect.width(),
+        );
         let (value_min, value_max) = match self.graph_mode {
             GraphEditorMode::Value => graph_value_range(
                 property,
@@ -473,6 +537,13 @@ impl EffectControlsPanel {
             ),
         };
         let y_labels = [value_max, (value_min + value_max) * 0.5, value_min];
+        painter.line_segment(
+            [
+                Pos2::new(ruler_rect.left(), ruler_rect.bottom()),
+                Pos2::new(ruler_rect.right(), ruler_rect.bottom()),
+            ],
+            Stroke::new(1.0, palette::border_subtle().gamma_multiply(0.7)),
+        );
         for row in 0..=4 {
             let t = row as f32 / 4.0;
             let y = egui::lerp(plot_rect.top()..=plot_rect.bottom(), t);
@@ -484,9 +555,16 @@ impl EffectControlsPanel {
                 Stroke::new(1.0, palette::border_subtle().gamma_multiply(0.5)),
             );
         }
-        for column in 0..=5 {
-            let t = column as f32 / 5.0;
-            let x = egui::lerp(plot_rect.left()..=plot_rect.right(), t);
+        let time_label_positions = graph_time_label_positions(
+            &painter,
+            &time_ticks,
+            plot_rect,
+            time_min,
+            time_max,
+            clip.position.time_base,
+        );
+        for time in &time_ticks {
+            let x = graph_x_for_time(plot_rect, time_min, time_max, *time);
             painter.line_segment(
                 [
                     Pos2::new(x, plot_rect.top()),
@@ -494,17 +572,40 @@ impl EffectControlsPanel {
                 ],
                 Stroke::new(1.0, palette::border_subtle().gamma_multiply(0.35)),
             );
+            painter.line_segment(
+                [
+                    Pos2::new(x, ruler_rect.bottom() - 6.0),
+                    Pos2::new(x, ruler_rect.bottom()),
+                ],
+                Stroke::new(1.0, palette::border_subtle().gamma_multiply(0.6)),
+            );
+        }
+        for label in &time_label_positions {
+            painter.text(
+                Pos2::new(label.x, axis_rect.top() + 2.0),
+                egui::Align2::CENTER_TOP,
+                &label.text,
+                typography::body_small(),
+                palette::text_muted(),
+            );
         }
         painter.text(
-            Pos2::new(plot_rect.left(), plot_rect.top() - 2.0),
-            egui::Align2::LEFT_BOTTOM,
+            Pos2::new(rect.left() + 8.0, plot_rect.top()),
+            egui::Align2::LEFT_TOP,
             format!("{:.2}", y_labels[0]),
             typography::body_small(),
             palette::text_muted(),
         );
         painter.text(
-            Pos2::new(plot_rect.left(), plot_rect.bottom() + 2.0),
-            egui::Align2::LEFT_TOP,
+            Pos2::new(rect.left() + 8.0, plot_rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            format!("{:.2}", y_labels[1]),
+            typography::body_small(),
+            palette::text_muted(),
+        );
+        painter.text(
+            Pos2::new(rect.left() + 8.0, plot_rect.bottom()),
+            egui::Align2::LEFT_BOTTOM,
             format!("{:.2}", y_labels[2]),
             typography::body_small(),
             palette::text_muted(),
@@ -522,6 +623,12 @@ impl EffectControlsPanel {
 
         let selected_times =
             selected_on_active.iter().map(|selected| selected.time).collect::<Vec<_>>();
+        let time_collision_candidates = channel
+            .keyframes()
+            .iter()
+            .map(|keyframe| keyframe.time)
+            .filter(|time| !selected_times.contains(time))
+            .collect::<Vec<_>>();
         let time_snap_candidates = channel
             .keyframes()
             .iter()
@@ -568,6 +675,7 @@ impl EffectControlsPanel {
                     value_min,
                     value_max,
                     &time_snap_candidates,
+                    &time_collision_candidates,
                     &value_snap_candidates,
                 );
                 snap_guides = guides;
@@ -590,6 +698,7 @@ impl EffectControlsPanel {
                     value_min,
                     value_max,
                     &time_snap_candidates,
+                    &time_collision_candidates,
                     &value_snap_candidates,
                 )
             } else {
@@ -735,6 +844,41 @@ impl EffectControlsPanel {
                     Pos2::new(playhead_x, plot_rect.bottom()),
                 ],
                 Stroke::new(1.2, palette::timeline_playhead()),
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(playhead_x, ruler_rect.top()),
+                    Pos2::new(playhead_x, ruler_rect.bottom()),
+                ],
+                Stroke::new(1.2, palette::timeline_playhead()),
+            );
+            let badge_text = format_graph_time_label(current_time_ticks, clip.position.time_base);
+            let badge_size = painter
+                .layout_no_wrap(
+                    badge_text.clone(),
+                    typography::body_small(),
+                    palette::text_primary(),
+                )
+                .size();
+            let badge_rect = Rect::from_min_size(
+                Pos2::new(
+                    (playhead_x - badge_size.x * 0.5 - 6.0)
+                        .clamp(ruler_rect.left(), ruler_rect.right() - badge_size.x - 12.0),
+                    ruler_rect.top() - 1.0,
+                ),
+                Vec2::new(badge_size.x + 12.0, ruler_rect.height() - 4.0),
+            );
+            painter.rect_filled(
+                badge_rect,
+                egui::CornerRadius::same(tokens::badge_rounding().round() as u8),
+                palette::bg_surface_active(),
+            );
+            painter.text(
+                badge_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                badge_text,
+                typography::body_small(),
+                palette::text_primary(),
             );
         }
 
@@ -1152,6 +1296,7 @@ impl EffectControlsPanel {
                     value_max,
                     selection.clip_id,
                     &time_snap_candidates,
+                    &time_collision_candidates,
                     &value_snap_candidates,
                 );
             }
@@ -2077,18 +2222,16 @@ impl EffectControlsPanel {
             }
         });
 
-        let label_response = ui
-            .selectable_label(
-                is_active_property,
-                RichText::new(property_display_name(property))
-                    .font(typography::body_small())
-                    .color(if is_active_property {
-                        palette::text_primary()
-                    } else {
-                        palette::text_muted()
-                    }),
-            )
-            .on_hover_text(path);
+        let label_response = ui.selectable_label(
+            is_active_property,
+            RichText::new(property_display_name(property))
+                .font(typography::body_small())
+                .color(if is_active_property {
+                    palette::text_primary()
+                } else {
+                    palette::text_muted()
+                }),
+        );
         if label_response.clicked() {
             app.set_active_animation_property(selection.clip_id, path.to_string());
         }
@@ -2567,44 +2710,151 @@ fn draw_keyframe_interpolation_menu(
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PropertySection {
-    Motion,
-    Opacity,
-    Other,
-}
+fn collect_inspector_groups(
+    property_bag: &mondrian_core::automation::PropertyBag,
+) -> Vec<InspectorGroup<'_>> {
+    let mut entries = property_bag
+        .iter()
+        .map(|(path, property)| (path, property_group_meta(path, property), property))
+        .collect::<Vec<_>>();
+    entries.sort_by(
+        |(path_a, meta_a, property_a), (path_b, meta_b, property_b)| {
+            meta_a
+                .order
+                .cmp(&meta_b.order)
+                .then_with(|| meta_a.title.cmp(&meta_b.title))
+                .then_with(|| property_order(path_a).cmp(&property_order(path_b)))
+                .then_with(|| {
+                    property_display_name(property_a).cmp(&property_display_name(property_b))
+                })
+        },
+    );
 
-fn property_section(path: &str) -> PropertySection {
-    match path {
-        Clip::BLEND_MODE_PATH | mondrian_timeline::clip::Transform2D::OPACITY_PATH => {
-            PropertySection::Opacity
+    let mut groups = Vec::<InspectorGroup<'_>>::new();
+    for (path, meta, property) in entries {
+        if let Some(group) = groups.iter_mut().find(|group| group.meta.id == meta.id) {
+            group.properties.push((path, property));
+        } else {
+            groups.push(InspectorGroup { meta, properties: vec![(path, property)] });
         }
-        mondrian_timeline::clip::Transform2D::POSITION_PATH
-        | mondrian_timeline::clip::Transform2D::SCALE_PATH
-        | mondrian_timeline::clip::Transform2D::ROTATION_PATH
-        | mondrian_timeline::clip::Transform2D::ANCHOR_POINT_PATH => PropertySection::Motion,
-        _ => PropertySection::Other,
     }
+    groups
 }
 
-fn property_order(path: &str) -> usize {
-    match path {
-        mondrian_timeline::clip::Transform2D::POSITION_PATH => 0,
-        mondrian_timeline::clip::Transform2D::SCALE_PATH => 1,
-        mondrian_timeline::clip::Transform2D::ROTATION_PATH => 2,
-        mondrian_timeline::clip::Transform2D::ANCHOR_POINT_PATH => 3,
-        mondrian_timeline::clip::Transform2D::OPACITY_PATH => 0,
-        Clip::BLEND_MODE_PATH => 1,
-        _ => 100,
-    }
-}
+fn draw_group_header_row(
+    ui: &mut Ui,
+    meta: &AnimationGroupMeta,
+    collapsed: bool,
+    enabled_state: Option<bool>,
+    show_effect_controls: bool,
+    can_delete: bool,
+) -> egui::Response {
+    let desired_size = Vec2::new(
+        ui.available_width(),
+        tokens::inspector_group_header_height(),
+    );
+    let (rect, response) = ui.allocate_exact_size(desired_size, Sense::click());
+    let visuals = ui.visuals();
 
-fn property_display_name(property: &mondrian_core::automation::AnimatedProperty) -> String {
-    if let Some(group) = property.descriptor.ui_metadata.group_name.as_deref() {
-        format!("{group} · {}", property.descriptor.display_name)
-    } else {
-        property.descriptor.display_name.clone()
+    if ui.is_rect_visible(rect) {
+        let fill = if response.hovered() {
+            palette::bg_surface_active()
+        } else {
+            Color32::TRANSPARENT
+        };
+        ui.painter().rect_filled(rect, visuals.menu_corner_radius, fill);
+
+        let title_x = rect.left() + 4.0;
+        let caret_rect = Rect::from_center_size(
+            Pos2::new(title_x + tokens::icon_size() * 0.5, rect.center().y),
+            Vec2::splat(tokens::icon_size()),
+        );
+        theme::draw_icon(
+            ui.painter(),
+            caret_rect,
+            if collapsed {
+                theme::UiIcon::CaretRight
+            } else {
+                theme::UiIcon::CaretDown
+            },
+            palette::text_muted(),
+        );
+
+        let mut title = meta.title.clone();
+        if meta.kind == AnimationGroupKind::TimeRemap {
+            title = "时间重映射".to_string();
+        }
+        let title_pos = Pos2::new(
+            title_x + tokens::icon_size() + tokens::inspector_group_indent() * 0.45,
+            rect.center().y,
+        );
+        ui.painter().text(
+            title_pos,
+            egui::Align2::LEFT_CENTER,
+            title,
+            typography::body_small(),
+            palette::text_primary(),
+        );
+
+        if meta.shows_fx_badge {
+            let badge_text = "ƒx";
+            let badge_size = ui
+                .painter()
+                .layout_no_wrap(
+                    badge_text.to_string(),
+                    typography::body_small(),
+                    palette::text_muted(),
+                )
+                .size();
+            let badge_rect = Rect::from_min_size(
+                Pos2::new(title_pos.x - badge_size.x - 12.0, rect.center().y - 8.0),
+                Vec2::new(badge_size.x + 8.0, 16.0),
+            );
+            ui.painter().rect_filled(
+                badge_rect,
+                egui::CornerRadius::same(tokens::badge_rounding().round() as u8),
+                palette::bg_surface_hover(),
+            );
+            ui.painter().text(
+                badge_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                badge_text,
+                typography::body_small(),
+                palette::text_muted(),
+            );
+        }
+
+        if show_effect_controls && (enabled_state.is_some() || can_delete) {
+            let mut action_x = rect.right() - 4.0;
+            if can_delete {
+                let icon_rect = Rect::from_center_size(
+                    Pos2::new(action_x - 10.0, rect.center().y),
+                    Vec2::splat(tokens::icon_size()),
+                );
+                theme::draw_icon(
+                    ui.painter(),
+                    icon_rect,
+                    theme::UiIcon::Trash,
+                    palette::text_muted(),
+                );
+                action_x -= 24.0;
+            }
+            if let Some(enabled) = enabled_state {
+                let icon = if enabled {
+                    theme::UiIcon::Eye
+                } else {
+                    theme::UiIcon::EyeOff
+                };
+                let icon_rect = Rect::from_center_size(
+                    Pos2::new(action_x - 10.0, rect.center().y),
+                    Vec2::splat(tokens::icon_size()),
+                );
+                theme::draw_icon(ui.painter(), icon_rect, icon, palette::text_muted());
+            }
+        }
     }
+
+    response
 }
 
 fn graph_channel_labels(value: &PropertyValue) -> &'static [&'static str] {
@@ -2657,6 +2907,150 @@ fn graph_time_range(clip: &Clip) -> (TimeTicks, TimeTicks) {
     } else {
         (start, end)
     }
+}
+
+fn graph_time_axis_ticks(
+    time_min: TimeTicks,
+    time_max: TimeTicks,
+    time_base: mondrian_core::types::Rational,
+    width: f32,
+) -> Vec<TimeTicks> {
+    if time_max <= time_min {
+        return vec![time_min];
+    }
+
+    let desired_tick_count = ((width / 92.0).round() as usize).clamp(3, 7);
+    let frame_span = ((time_max - time_min) as f64 / SUBFRAME_TICKS_PER_FRAME as f64).max(1.0);
+    let raw_step_frames = (frame_span / (desired_tick_count.saturating_sub(1)) as f64).max(1.0);
+    let step_frames = nice_frame_step(raw_step_frames, time_base);
+    let start_frame = (time_min / SUBFRAME_TICKS_PER_FRAME).max(0);
+    let end_frame = (time_max / SUBFRAME_TICKS_PER_FRAME).max(start_frame);
+    let first_tick_frame = (start_frame / step_frames) * step_frames;
+
+    let mut ticks = Vec::new();
+    let mut frame = first_tick_frame;
+    while frame <= end_frame {
+        let tick = frame * SUBFRAME_TICKS_PER_FRAME;
+        if tick >= time_min && tick <= time_max {
+            ticks.push(tick);
+        }
+        frame += step_frames;
+    }
+    if ticks.first().copied() != Some(time_min) {
+        ticks.insert(0, time_min);
+    }
+    if ticks.last().copied() != Some(time_max) {
+        ticks.push(time_max);
+    }
+    ticks.sort_unstable();
+    ticks.dedup();
+    ticks
+}
+
+fn nice_frame_step(raw_step_frames: f64, time_base: mondrian_core::types::Rational) -> i64 {
+    let fps = (1.0 / time_base.to_f64()).round().max(1.0) as i64;
+    let candidates = [1, 2, 5, 10, 15, fps / 2, fps, fps * 2, fps * 5, fps * 10];
+    candidates
+        .into_iter()
+        .filter(|step| *step > 0)
+        .find(|step| *step as f64 >= raw_step_frames)
+        .unwrap_or((raw_step_frames.ceil() as i64).max(1))
+}
+
+fn format_graph_time_label(time: TimeTicks, time_base: mondrian_core::types::Rational) -> String {
+    let frame = (time as f64 / SUBFRAME_TICKS_PER_FRAME as f64).round() as i64;
+    let smpte = TimeCode::new(frame.max(0), time_base).to_smpte();
+    if smpte.starts_with("00:") {
+        smpte[3..].to_string()
+    } else {
+        smpte
+    }
+}
+
+#[derive(Clone)]
+struct GraphTimeAxisLabel {
+    x: f32,
+    text: String,
+}
+
+fn graph_time_label_positions(
+    painter: &egui::Painter,
+    ticks: &[TimeTicks],
+    plot_rect: Rect,
+    time_min: TimeTicks,
+    time_max: TimeTicks,
+    time_base: mondrian_core::types::Rational,
+) -> Vec<GraphTimeAxisLabel> {
+    if ticks.is_empty() {
+        return Vec::new();
+    }
+
+    let candidates = ticks
+        .iter()
+        .enumerate()
+        .map(|(index, time)| {
+            let text = format_graph_time_label(*time, time_base);
+            let width = painter
+                .layout_no_wrap(
+                    text.clone(),
+                    typography::body_small(),
+                    palette::text_muted(),
+                )
+                .size()
+                .x;
+            let x = graph_x_for_time(plot_rect, time_min, time_max, *time);
+            let mut left = x - width * 0.5;
+            let mut right = x + width * 0.5;
+            if index == 0 {
+                left = plot_rect.left();
+                right = left + width;
+            } else if index + 1 == ticks.len() {
+                right = plot_rect.right();
+                left = right - width;
+            }
+            (index, GraphTimeAxisLabel { x, text }, left, right)
+        })
+        .collect::<Vec<_>>();
+
+    let min_gap = 10.0;
+    let mut visible = Vec::<(GraphTimeAxisLabel, f32, f32)>::new();
+    for (index, label, left, right) in candidates {
+        if index == 0 {
+            visible.push((label, left, right));
+            continue;
+        }
+
+        if index + 1 == ticks.len() {
+            while visible.len() > 1 {
+                let Some((_, _, last_right)) = visible.last() else {
+                    break;
+                };
+                if left >= *last_right + min_gap {
+                    break;
+                }
+                visible.pop();
+            }
+            if visible.last().is_some_and(|(_, _, last_right)| left < *last_right + min_gap) {
+                let keep_first =
+                    visible.first().map(|(_, left, right)| right - left).unwrap_or(0.0)
+                        <= right - left;
+                return if keep_first {
+                    visible.first().map(|(label, _, _)| vec![label.clone()]).unwrap_or_default()
+                } else {
+                    vec![label]
+                };
+            }
+            visible.push((label, left, right));
+            continue;
+        }
+
+        if visible.last().is_some_and(|(_, _, last_right)| left < *last_right + min_gap) {
+            continue;
+        }
+        visible.push((label, left, right));
+    }
+
+    visible.into_iter().map(|(label, _, _)| label).collect()
 }
 
 fn graph_value_range(
@@ -2973,6 +3367,7 @@ fn graph_drag_preview_map_with_snap(
     value_min: f64,
     value_max: f64,
     time_snap_candidates: &[TimeTicks],
+    time_collision_candidates: &[TimeTicks],
     value_snap_candidates: &[f64],
 ) -> (HashMap<TimeTicks, Pos2>, GraphSnapGuides) {
     let mut map = HashMap::new();
@@ -2983,10 +3378,11 @@ fn graph_drag_preview_map_with_snap(
         - graph_time_from_x(rect, time_min, time_max, drag.start_pointer_pos.x);
     let raw_delta_time = snap_graph_delta_ticks(raw_delta_time);
     let anchor_times = drag.anchors.iter().map(|anchor| anchor.time).collect::<Vec<_>>();
-    let (delta_time, snapped_time) = snap_graph_time_delta(
+    let (delta_time, snapped_time) = resolve_graph_drag_time_delta(
         raw_delta_time,
         &anchor_times,
         time_snap_candidates,
+        time_collision_candidates,
         rect,
         time_min,
         time_max,
@@ -3026,6 +3422,7 @@ fn graph_keyframe_preview_property(
     value_min: f64,
     value_max: f64,
     time_snap_candidates: &[TimeTicks],
+    time_collision_candidates: &[TimeTicks],
     value_snap_candidates: &[f64],
 ) -> Option<mondrian_core::automation::AnimatedProperty> {
     let mutations = graph_keyframe_drag_property_mutations(
@@ -3036,6 +3433,7 @@ fn graph_keyframe_preview_property(
         value_min,
         value_max,
         time_snap_candidates,
+        time_collision_candidates,
         value_snap_candidates,
     )?;
     let mut preview = property.clone();
@@ -3097,6 +3495,7 @@ fn graph_keyframe_drag_mutations(
     value_max: f64,
     clip_id: ClipId,
     time_snap_candidates: &[TimeTicks],
+    time_collision_candidates: &[TimeTicks],
     value_snap_candidates: &[f64],
 ) -> Option<(Vec<PropertyMutation>, Vec<AnimationKeyframeSelection>)> {
     let mutations = graph_keyframe_drag_property_mutations(
@@ -3107,16 +3506,18 @@ fn graph_keyframe_drag_mutations(
         value_min,
         value_max,
         time_snap_candidates,
+        time_collision_candidates,
         value_snap_candidates,
     )?;
     let raw_delta_time = graph_time_from_x(rect, time_min, time_max, drag.pointer_pos.x)
         - graph_time_from_x(rect, time_min, time_max, drag.start_pointer_pos.x);
     let raw_delta_time = snap_graph_delta_ticks(raw_delta_time);
     let anchor_times = drag.anchors.iter().map(|anchor| anchor.time).collect::<Vec<_>>();
-    let (delta_time, _) = snap_graph_time_delta(
+    let (delta_time, _) = resolve_graph_drag_time_delta(
         raw_delta_time,
         &anchor_times,
         time_snap_candidates,
+        time_collision_candidates,
         rect,
         time_min,
         time_max,
@@ -3143,16 +3544,18 @@ fn graph_keyframe_drag_property_mutations(
     value_min: f64,
     value_max: f64,
     time_snap_candidates: &[TimeTicks],
+    time_collision_candidates: &[TimeTicks],
     value_snap_candidates: &[f64],
 ) -> Option<Vec<PropertyMutation>> {
     let raw_delta_time = graph_time_from_x(rect, time_min, time_max, drag.pointer_pos.x)
         - graph_time_from_x(rect, time_min, time_max, drag.start_pointer_pos.x);
     let raw_delta_time = snap_graph_delta_ticks(raw_delta_time);
     let anchor_times = drag.anchors.iter().map(|anchor| anchor.time).collect::<Vec<_>>();
-    let (delta_time, _) = snap_graph_time_delta(
+    let (delta_time, _) = resolve_graph_drag_time_delta(
         raw_delta_time,
         &anchor_times,
         time_snap_candidates,
+        time_collision_candidates,
         rect,
         time_min,
         time_max,
@@ -3629,6 +4032,52 @@ fn snap_graph_time_delta(
     }
 }
 
+fn graph_drag_time_delta_is_valid(
+    delta: TimeTicks,
+    anchor_times: &[TimeTicks],
+    occupied_times: &[TimeTicks],
+) -> bool {
+    let mut moved_times = HashSet::with_capacity(anchor_times.len());
+    for anchor_time in anchor_times {
+        let moved_time = (*anchor_time + delta).max(0);
+        if occupied_times.contains(&moved_time) || !moved_times.insert(moved_time) {
+            return false;
+        }
+    }
+    true
+}
+
+fn resolve_graph_drag_time_delta(
+    raw_delta: TimeTicks,
+    anchor_times: &[TimeTicks],
+    snap_candidates: &[TimeTicks],
+    occupied_times: &[TimeTicks],
+    rect: Rect,
+    time_min: TimeTicks,
+    time_max: TimeTicks,
+) -> (TimeTicks, Option<TimeTicks>) {
+    let (snapped_delta, snapped_time) = snap_graph_time_delta(
+        raw_delta,
+        anchor_times,
+        snap_candidates,
+        rect,
+        time_min,
+        time_max,
+    );
+
+    if snapped_time.is_some()
+        && graph_drag_time_delta_is_valid(snapped_delta, anchor_times, occupied_times)
+    {
+        return (snapped_delta, snapped_time);
+    }
+
+    if graph_drag_time_delta_is_valid(raw_delta, anchor_times, occupied_times) {
+        (raw_delta, None)
+    } else {
+        (0, None)
+    }
+}
+
 fn snap_graph_value_delta(
     raw_delta: f64,
     anchor_values: &[f64],
@@ -4043,7 +4492,9 @@ fn blend_mode_display_label(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mondrian_core::automation::{AnimatedProperty, Keyframe, PropertyDescriptor};
+    use mondrian_core::automation::{
+        AnimatablePropertyUiMetadata, AnimatedProperty, Keyframe, PropertyBag, PropertyDescriptor,
+    };
     use mondrian_core::types::{ClipId, KeyframeId};
     use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -4106,6 +4557,19 @@ mod tests {
         }
     }
 
+    fn grouped_test_property(
+        path: &str,
+        display_name: &str,
+        group_name: Option<&str>,
+    ) -> AnimatedProperty {
+        let mut descriptor = PropertyDescriptor::new(path, display_name, PropertyValue::Float(0.0));
+        descriptor.ui_metadata = AnimatablePropertyUiMetadata {
+            group_name: group_name.map(str::to_string),
+            ..Default::default()
+        };
+        AnimatedProperty::from_descriptor(descriptor)
+    }
+
     #[test]
     fn selected_active_keyframe_helpers_handle_empty_selection() {
         let property = sample_property();
@@ -4131,6 +4595,43 @@ mod tests {
     }
 
     #[test]
+    fn collect_inspector_groups_orders_builtin_and_effect_sections() {
+        let mut bag = PropertyBag::default();
+        bag.upsert(grouped_test_property(
+            mondrian_timeline::clip::Transform2D::ROTATION_PATH,
+            "旋转",
+            None,
+        ));
+        bag.upsert(grouped_test_property(
+            mondrian_timeline::clip::Transform2D::POSITION_PATH,
+            "位置",
+            None,
+        ));
+        bag.upsert(grouped_test_property(
+            mondrian_timeline::clip::Transform2D::OPACITY_PATH,
+            "不透明度",
+            None,
+        ));
+        bag.upsert(grouped_test_property(
+            "effect.blur.radius",
+            "模糊半径",
+            Some("模糊"),
+        ));
+
+        let groups = collect_inspector_groups(&bag);
+        let titles = groups.iter().map(|group| group.meta.title.as_str()).collect::<Vec<_>>();
+        assert_eq!(titles, vec!["运动", "不透明度", "模糊"]);
+        assert_eq!(
+            groups[0]
+                .properties
+                .iter()
+                .map(|(_, property)| property.descriptor.display_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["位置", "旋转"]
+        );
+    }
+
+    #[test]
     fn graph_drag_property_mutations_preserve_bezier_editing_path() {
         let drag = GraphKeyframeDragState {
             clip_id: ClipId::new(),
@@ -4151,6 +4652,7 @@ mod tests {
             SUBFRAME_TICKS_PER_FRAME * 20,
             0.0,
             1.0,
+            &[],
             &[],
             &[],
         )
@@ -4188,6 +4690,7 @@ mod tests {
             1.0,
             &[],
             &[],
+            &[],
         )
         .is_none());
     }
@@ -4214,6 +4717,7 @@ mod tests {
             0.0,
             1.0,
             ClipId::new(),
+            &[],
             &[],
             &[],
         )
@@ -4616,6 +5120,56 @@ mod tests {
     }
 
     #[test]
+    fn resolve_graph_drag_time_delta_suppresses_invalid_snapped_collision() {
+        let anchor = SUBFRAME_TICKS_PER_FRAME * 10;
+        let raw_delta = SUBFRAME_TICKS_PER_FRAME * 3;
+        let occupied = SUBFRAME_TICKS_PER_FRAME * 14;
+
+        let (delta, snapped) = resolve_graph_drag_time_delta(
+            raw_delta,
+            &[anchor],
+            &[occupied],
+            &[occupied],
+            graph_rect(),
+            0,
+            SUBFRAME_TICKS_PER_FRAME * 40,
+        );
+
+        assert_eq!(delta, raw_delta);
+        assert_eq!(snapped, None);
+    }
+
+    #[test]
+    fn graph_drag_preview_map_hides_time_guide_for_invalid_collision_snap() {
+        let drag = GraphKeyframeDragState {
+            clip_id: ClipId::new(),
+            path: "transform.opacity".to_string(),
+            channel_index: 0,
+            start_pointer_pos: Pos2::new(120.0, 110.0),
+            pointer_pos: Pos2::new(150.0, 110.0),
+            anchors: vec![GraphKeyframeDragAnchor {
+                time: SUBFRAME_TICKS_PER_FRAME * 10,
+                value: 0.5,
+            }],
+        };
+
+        let (_map, guides) = graph_drag_preview_map_with_snap(
+            &drag,
+            Some(drag.pointer_pos),
+            graph_rect(),
+            0,
+            SUBFRAME_TICKS_PER_FRAME * 40,
+            0.0,
+            1.0,
+            &[SUBFRAME_TICKS_PER_FRAME * 14],
+            &[SUBFRAME_TICKS_PER_FRAME * 14],
+            &[],
+        );
+
+        assert_eq!(guides.time, None);
+    }
+
+    #[test]
     fn snap_graph_value_delta_snaps_only_within_threshold() {
         let (close_delta, close_snap) =
             snap_graph_value_delta(0.11, &[0.2], &[0.3], graph_rect(), 0.0, 1.0);
@@ -4651,6 +5205,7 @@ mod tests {
             SUBFRAME_TICKS_PER_FRAME * 20,
             0.0,
             1.0,
+            &[],
             &[],
             &[],
         )
