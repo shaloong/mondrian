@@ -113,14 +113,7 @@ pub fn show_project_bootstrap_window(
                 ),
             );
 
-            paint_banner_card(
-                ui,
-                left_rect,
-                panel_rounding,
-                bg_surface,
-                text_primary,
-                overlay_fill,
-            );
+            paint_banner_card(ui, left_rect, panel_rounding, bg_surface, overlay_fill);
             paint_action_card(
                 ui,
                 right_rect,
@@ -502,7 +495,6 @@ fn paint_banner_card(
     rect: egui::Rect,
     panel_rounding: f32,
     bg_surface: egui::Color32,
-    text_primary: egui::Color32,
     overlay_fill: egui::Color32,
 ) {
     let mut painter = ui.painter_at(rect);
@@ -549,15 +541,17 @@ fn paint_banner_card(
         egui::Color32::WHITE,
     );
 
+    let banner_title_color = egui::Color32::from_rgb(0xF2, 0xF2, 0xF2);
     painter.text(
         egui::pos2(logo_rect.right() + 10.0, logo_rect.center().y + 1.5),
         egui::Align2::LEFT_CENTER,
         "Mondrian",
         egui::FontId::proportional(17.0),
-        text_primary,
+        banner_title_color,
     );
 
-    let accent = crate::ui::theme::palette::interaction_highlight();
+    let slogan_primary = egui::Color32::from_rgb(0xF2, 0xF2, 0xF2);
+    let slogan_accent = egui::Color32::from_rgb(0x00, 0x6E, 0xFF);
     let slogan_left = rect.left() + 20.0;
     let slogan_top = rect.top() + rect.height() * 0.42;
 
@@ -573,14 +567,14 @@ fn paint_banner_card(
         egui::Align2::LEFT_TOP,
         slogan_main,
         egui::FontId::proportional(39.0),
-        text_primary.gamma_multiply(0.92),
+        slogan_primary.gamma_multiply(0.92),
     );
     painter.text(
         main_pos,
         egui::Align2::LEFT_TOP,
         slogan_main,
         egui::FontId::proportional(39.0),
-        text_primary,
+        slogan_primary,
     );
 
     painter.text(
@@ -588,14 +582,14 @@ fn paint_banner_card(
         egui::Align2::LEFT_TOP,
         slogan_sub,
         egui::FontId::proportional(43.0),
-        accent.gamma_multiply(0.92),
+        slogan_accent.gamma_multiply(0.92),
     );
     painter.text(
         sub_pos,
         egui::Align2::LEFT_TOP,
         slogan_sub,
         egui::FontId::proportional(43.0),
-        accent,
+        slogan_accent,
     );
 }
 
