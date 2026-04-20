@@ -138,29 +138,29 @@ impl PaletteTokens {
 
     fn light() -> Self {
         Self {
-            bg_base: egui::Color32::from_rgb(0xF5, 0xF5, 0xF7),
+            bg_base: egui::Color32::from_rgb(0xFF, 0xFF, 0xFF),
             bg_surface: egui::Color32::from_rgb(0xFF, 0xFF, 0xFF),
             bg_surface_raised: egui::Color32::from_rgb(0xF7, 0xF9, 0xFC),
-            bg_surface_hover: egui::Color32::from_rgb(0xF0, 0xF2, 0xF5),
-            bg_surface_active: egui::Color32::from_rgb(0xE8, 0xEC, 0xF2),
-            border_subtle: egui::Color32::from_rgb(0xC9, 0xCF, 0xD8),
-            border_emphasis: egui::Color32::from_rgb(0xA6, 0xB2, 0xC2),
-            panel_divider_strong: egui::Color32::from_rgb(0xD6, 0xDB, 0xE3),
-            text_primary: egui::Color32::from_rgb(0x1E, 0x23, 0x2C),
-            text_muted: egui::Color32::from_rgb(0x5A, 0x67, 0x7A),
+            bg_surface_hover: egui::Color32::from_rgb(0xEC, 0xF1, 0xF7),
+            bg_surface_active: egui::Color32::from_rgb(0xEC, 0xF1, 0xF7),
+            border_subtle: egui::Color32::from_rgb(0xD3, 0xDA, 0xE4),
+            border_emphasis: egui::Color32::from_rgb(0xB4, 0xC0, 0xCE),
+            panel_divider_strong: egui::Color32::from_rgb(0xC8, 0xD1, 0xDC),
+            text_primary: egui::Color32::from_rgb(0x20, 0x27, 0x33),
+            text_muted: egui::Color32::from_rgb(0x67, 0x74, 0x86),
             status_warning: egui::Color32::from_rgb(0xD4, 0x74, 0x0A),
             status_success: egui::Color32::from_rgb(0x1D, 0x89, 0x48),
-            interaction_highlight: egui::Color32::from_rgb(0x00, 0x5F, 0xD9),
-            accent_secondary: egui::Color32::from_rgb(0x1E, 0x4F, 0x87),
-            accent_audio: egui::Color32::from_rgb(0x1D, 0x96, 0xD3),
+            interaction_highlight: egui::Color32::from_rgb(0x0A, 0x63, 0xD8),
+            accent_secondary: egui::Color32::from_rgb(0x1F, 0x50, 0x89),
+            accent_audio: egui::Color32::from_rgb(0x1F, 0x95, 0xCB),
             status_error: egui::Color32::from_rgb(0xC1, 0x3C, 0x3C),
-            timeline_clip_video: egui::Color32::from_rgb(0x4B, 0x73, 0xA8),
-            timeline_clip_audio: egui::Color32::from_rgb(0x58, 0x9B, 0xC2),
-            timeline_playhead: egui::Color32::from_rgb(0x00, 0x5F, 0xD9),
+            timeline_clip_video: egui::Color32::from_rgb(0x3F, 0x6E, 0xB1),
+            timeline_clip_audio: egui::Color32::from_rgb(0x4A, 0x92, 0xBC),
+            timeline_playhead: egui::Color32::from_rgb(0x0A, 0x63, 0xD8),
             canvas_bg: egui::Color32::from_rgb(0x14, 0x14, 0x14),
             image_tint: egui::Color32::WHITE,
-            overlay_fill: egui::Color32::from_rgba_premultiplied(0x14, 0x1A, 0x24, 0xE0),
-            overlay_stroke: egui::Color32::from_rgba_premultiplied(0x00, 0x5F, 0xD9, 0x90),
+            overlay_fill: egui::Color32::from_rgba_premultiplied(0x18, 0x22, 0x30, 0xD8),
+            overlay_stroke: egui::Color32::from_rgba_premultiplied(0x0A, 0x63, 0xD8, 0x88),
         }
     }
 }
@@ -480,12 +480,23 @@ fn build_visuals(theme: egui::Theme, tokens: &ThemeTokens) -> egui::Visuals {
     visuals.widgets.open.fg_stroke = egui::Stroke::new(1.0, p.text_primary);
     visuals.widgets.open.corner_radius = px_corner(m.button_rounding);
 
-    visuals.selection.bg_fill = p.interaction_highlight.gamma_multiply(0.20);
+    let selection_fill = match theme {
+        egui::Theme::Dark => p.interaction_highlight.gamma_multiply(0.20),
+        egui::Theme::Light => p.interaction_highlight.gamma_multiply(0.12),
+    };
+    visuals.selection.bg_fill = selection_fill;
     visuals.selection.stroke = egui::Stroke::new(1.0, p.interaction_highlight);
     visuals.window_stroke = egui::Stroke::new(1.0, p.panel_divider_strong);
     visuals.hyperlink_color = p.interaction_highlight;
     visuals.menu_corner_radius = px_corner(m.menu_rounding);
     visuals.window_corner_radius = px_corner(m.window_rounding);
+    if matches!(theme, egui::Theme::Light) {
+        visuals.widgets.noninteractive.weak_bg_fill = p.bg_surface_raised;
+        visuals.widgets.inactive.weak_bg_fill = p.bg_surface;
+        visuals.widgets.hovered.weak_bg_fill = p.bg_surface_hover;
+        visuals.widgets.active.weak_bg_fill = p.bg_surface_active;
+        visuals.widgets.open.weak_bg_fill = p.bg_surface_active;
+    }
     visuals
 }
 
@@ -926,7 +937,7 @@ pub fn icon_toggle_button(
     let button = egui::Button::new("").fill(if selected {
         palette::bg_surface_active()
     } else {
-        palette::bg_surface_raised()
+        palette::bg_surface()
     });
     let response = ui.add_sized(size, button);
     let icon_size = tokens::icon_size();
@@ -944,6 +955,40 @@ pub fn icon_toggle_button(
         palette::text_primary()
     } else {
         ui.visuals().text_color()
+    };
+    draw_icon(ui.painter(), icon_rect, kind, icon_color);
+    response
+}
+
+pub fn icon_ghost_toggle_button(
+    ui: &mut egui::Ui,
+    size: [f32; 2],
+    kind: UiIcon,
+    selected: bool,
+) -> egui::Response {
+    let button = egui::Button::new("")
+        .fill(egui::Color32::TRANSPARENT)
+        .stroke(egui::Stroke::NONE);
+    let response = ui.add_sized(size, button);
+    let icon_size = tokens::icon_size();
+    let icon_rect =
+        egui::Rect::from_center_size(response.rect.center(), egui::vec2(icon_size, icon_size));
+
+    if selected {
+        ui.painter().rect_stroke(
+            response.rect.shrink(0.5),
+            px_corner(tokens::button_rounding()),
+            egui::Stroke::new(1.0, palette::interaction_highlight()),
+            egui::StrokeKind::Inside,
+        );
+    }
+
+    let icon_color = if selected {
+        palette::interaction_highlight()
+    } else if response.hovered() {
+        palette::text_primary()
+    } else {
+        palette::text_muted()
     };
     draw_icon(ui.painter(), icon_rect, kind, icon_color);
     response
