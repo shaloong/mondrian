@@ -219,6 +219,8 @@ pub struct MetricsTokens {
     pub timeline_toolbar_button_size: [f32; 2],
     pub timeline_clip_radius: f32,
     pub timeline_track_height: f32,
+    pub timeline_min_track_height: f32,
+    pub timeline_max_track_height: f32,
     pub timeline_ruler_height: f32,
     pub timeline_track_label_width: f32,
     pub timeline_min_pixels_per_frame: f32,
@@ -248,6 +250,9 @@ pub struct MetricsTokens {
     pub timeline_linked_audio_highlight_width: f32,
     pub timeline_playhead_stroke_width: f32,
     pub timeline_playhead_secondary_stroke_width: f32,
+    pub timeline_scrollbar_height: f32,
+    pub timeline_scrollbar_width: f32,
+    pub timeline_scrollbar_handle_width: f32,
     pub timeline_animation_section_gap: f32,
     pub timeline_animation_group_header_height: f32,
     pub timeline_animation_group_indent: f32,
@@ -326,7 +331,9 @@ impl Default for MetricsTokens {
             property_row_height: 28.0,
             timeline_toolbar_button_size: [30.0, 26.0],
             timeline_clip_radius: 4.0,
-            timeline_track_height: 42.0,
+            timeline_track_height: 40.0,
+            timeline_min_track_height: 28.0,
+            timeline_max_track_height: 64.0,
             timeline_ruler_height: 28.0,
             timeline_track_label_width: 92.0,
             timeline_min_pixels_per_frame: 0.02,
@@ -356,6 +363,9 @@ impl Default for MetricsTokens {
             timeline_linked_audio_highlight_width: 1.5,
             timeline_playhead_stroke_width: 2.0,
             timeline_playhead_secondary_stroke_width: 1.8,
+            timeline_scrollbar_height: 14.0,
+            timeline_scrollbar_width: 12.0,
+            timeline_scrollbar_handle_width: 10.0,
             timeline_animation_section_gap: 8.0,
             timeline_animation_group_header_height: 24.0,
             timeline_animation_group_indent: 14.0,
@@ -649,7 +659,7 @@ pub fn checkmark_selectable_value<V: PartialEq>(
     text: impl Into<String>,
 ) -> egui::Response {
     let selected = *current == value;
-    let response = checkmark_menu_item(ui, selected, text.into(), false);
+    let response = checkmark_menu_item(ui, selected, text.into(), true);
 
     if response.clicked() {
         *current = value;
@@ -662,7 +672,7 @@ pub fn checkmark_menu_toggle(
     current: &mut bool,
     text: impl Into<String>,
 ) -> egui::Response {
-    let response = checkmark_menu_item(ui, *current, text.into(), false);
+    let response = checkmark_menu_item(ui, *current, text.into(), true);
     if response.clicked() {
         *current = !*current;
     }
@@ -674,7 +684,7 @@ pub fn checkmark_menu_action(
     selected: bool,
     text: impl Into<String>,
 ) -> egui::Response {
-    checkmark_menu_item(ui, selected, text.into(), false)
+    checkmark_menu_item(ui, selected, text.into(), true)
 }
 
 pub fn checkmark_menu_action_fill(
@@ -687,8 +697,39 @@ pub fn checkmark_menu_action_fill(
 
 pub fn menu_action_fill(ui: &mut egui::Ui, text: impl Into<String>) -> egui::Response {
     let text = text.into();
-    let desired_size = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
-    ui.add_sized(desired_size, egui::Button::new(text))
+    let text_width = ui
+        .painter()
+        .layout_no_wrap(
+            text.clone(),
+            typography::body_small(),
+            palette::text_primary(),
+        )
+        .size()
+        .x;
+    let desired_size = egui::vec2(
+        ui.spacing().menu_width.max(text_width + 20.0),
+        ui.spacing().interact_size.y,
+    );
+    let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click());
+
+    if ui.is_rect_visible(rect) {
+        let visuals = ui.visuals();
+        let fill = if response.hovered() {
+            visuals.widgets.hovered.weak_bg_fill
+        } else {
+            egui::Color32::TRANSPARENT
+        };
+        ui.painter().rect_filled(rect, visuals.menu_corner_radius, fill);
+        ui.painter().text(
+            rect.left_center() + egui::vec2(10.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            text,
+            typography::body_small(),
+            palette::text_primary(),
+        );
+    }
+
+    response
 }
 
 fn checkmark_menu_item(
@@ -710,7 +751,7 @@ fn checkmark_menu_item(
         .size();
     let content_width = box_size + gap + text_size.x + horizontal_padding * 2.0;
     let desired_width = if fill_width {
-        ui.available_width().max(content_width)
+        ui.spacing().menu_width.max(content_width)
     } else {
         content_width.min(ui.available_width())
     };
@@ -1245,6 +1286,14 @@ pub mod tokens {
         super::with_active_tokens(|tokens| tokens.metrics.timeline_track_height)
     }
 
+    pub fn timeline_min_track_height() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_min_track_height)
+    }
+
+    pub fn timeline_max_track_height() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_max_track_height)
+    }
+
     pub fn timeline_ruler_height() -> f32 {
         super::with_active_tokens(|tokens| tokens.metrics.timeline_ruler_height)
     }
@@ -1363,6 +1412,18 @@ pub mod tokens {
 
     pub fn timeline_animation_section_gap() -> f32 {
         super::with_active_tokens(|tokens| tokens.metrics.timeline_animation_section_gap)
+    }
+
+    pub fn timeline_scrollbar_height() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_scrollbar_height)
+    }
+
+    pub fn timeline_scrollbar_width() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_scrollbar_width)
+    }
+
+    pub fn timeline_scrollbar_handle_width() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.timeline_scrollbar_handle_width)
     }
 
     pub fn timeline_animation_group_header_height() -> f32 {

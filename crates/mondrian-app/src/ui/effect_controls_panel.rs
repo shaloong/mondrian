@@ -2687,7 +2687,10 @@ fn draw_keyframe_interpolation_menu(
         )
         .size()
         .x;
-    ui.set_min_width((18.0 + 10.0 + text_width + 8.0).max(140.0));
+    let menu_width = 18.0 + 10.0 + text_width + 16.0;
+    ui.spacing_mut().menu_width = menu_width;
+    ui.set_min_width(menu_width);
+    ui.set_max_width(menu_width);
 
     for mode in available_modes {
         if theme::checkmark_menu_action_fill(

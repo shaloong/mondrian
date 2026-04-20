@@ -18,8 +18,13 @@ fn corner_radius(value: f32) -> egui::CornerRadius {
 pub struct TimelinePanel {
     /// 水平缩放：每帧占多少像素
     pixels_per_frame: f32,
+    track_height: f32,
     /// 水平滚动偏移（帧数）
     scroll_offset_frames: f64,
+    timeline_viewport_width: f32,
+    vertical_scroll_offset: f32,
+    timeline_vertical_viewport_height: f32,
+    timeline_track_content_height: f32,
     clip_drag: Option<ClipDragState>,
     clip_drag_anchors: Vec<ClipDragAnchor>,
     clip_drag_moved: bool,
@@ -35,6 +40,8 @@ pub struct TimelinePanel {
     active_insert_guide_frame: Option<i64>,
     track_drag: Option<TrackDragState>,
     track_drag_target: Option<TrackDragTarget>,
+    scrollbar_drag: Option<TimelineScrollbarDragState>,
+    vertical_scrollbar_drag: Option<TimelineVerticalScrollbarDragState>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -118,6 +125,55 @@ struct TrackRowVisual {
     rect: Rect,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimelineScrollbarDragKind {
+    Thumb,
+    LeadingHandle,
+    TrailingHandle,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TimelineScrollbarDragState {
+    kind: TimelineScrollbarDragKind,
+    start_pointer_x: f32,
+    start_offset_frames: f64,
+    start_visible_span_frames: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TimelineScrollbarMetrics {
+    total_frames: f64,
+    visible_span_frames: f64,
+    offset_frames: f64,
+    thumb_left: f32,
+    thumb_width: f32,
+    track_width: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimelineVerticalScrollbarDragKind {
+    Thumb,
+    LeadingHandle,
+    TrailingHandle,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TimelineVerticalScrollbarDragState {
+    kind: TimelineVerticalScrollbarDragKind,
+    start_pointer_y: f32,
+    start_offset: f32,
+    start_track_height: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TimelineVerticalScrollbarMetrics {
+    total_rows: f32,
+    visible_rows: f32,
+    thumb_top: f32,
+    thumb_height: f32,
+    track_height: f32,
+}
+
 impl TimelinePanel {
     pub fn selected_clip_count(&self) -> usize {
         self.selected_clips.len()
@@ -141,6 +197,9 @@ impl TimelinePanel {
             self.pixels_per_frame = tokens::timeline_default_pixels_per_frame();
             self.snap_enabled = true;
         }
+        if self.track_height == 0.0 {
+            self.track_height = tokens::timeline_track_height();
+        }
         self.active_snap_guide_frame = None;
         self.active_insert_guide_frame = None;
 
@@ -161,172 +220,233 @@ impl TimelinePanel {
                 return;
             }
 
-            // ── 水平滚动容器（标尺+轨道同轴）────
-            egui::ScrollArea::horizontal().id_salt("timeline_hscroll").show_viewport(
-                ui,
-                |ui, viewport| {
-                    let content_w = self.timeline_content_width(state).max(viewport.width());
-                    ui.set_min_width(content_w);
+            let vertical_bar_w = tokens::timeline_scrollbar_width();
+            let scrollbar_gap = tokens::panel_gap() * 0.4;
+            let bottom_scrollbar_height = tokens::timeline_scrollbar_height();
+            let min_main_height = tokens::timeline_ruler_height()
+                + self.track_height.max(tokens::timeline_min_track_height()) * 2.0;
+            let main_height = (ui.available_height() - bottom_scrollbar_height - scrollbar_gap)
+                .max(min_main_height);
 
-                    self.scroll_offset_frames =
-                        (viewport.left().max(0.0) / self.pixels_per_frame) as f64;
+            ui.allocate_ui_with_layout(
+                Vec2::new(ui.available_width(), main_height),
+                egui::Layout::left_to_right(egui::Align::Min),
+                |ui| {
+                    let left_width = (ui.available_width() - vertical_bar_w - 6.0).max(120.0);
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(left_width, ui.available_height()),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            egui::ScrollArea::horizontal()
+                                .id_salt("timeline_hscroll")
+                                .horizontal_scroll_offset(
+                                    (self.scroll_offset_frames.max(0.0) as f32)
+                                        * self.pixels_per_frame.max(0.01),
+                                )
+                                .scroll_bar_visibility(
+                                    egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
+                                )
+                                .show_viewport(ui, |ui, viewport| {
+                                    let content_w =
+                                        self.timeline_content_width(state).max(viewport.width());
+                                    ui.set_min_width(content_w);
+                                    self.timeline_viewport_width = viewport.width();
 
-                    // ── 时间标尺 ─────────────────────
-                    let ruler_resp = self.draw_ruler(ui, state);
-                    if let Some(clicked_frame) = ruler_resp {
-                        state.seek(clicked_frame);
-                    }
+                                    self.scroll_offset_frames =
+                                        (viewport.left().max(0.0) / self.pixels_per_frame) as f64;
 
-                    // ── 轨道区域（仅垂直滚动）────────
-                    egui::ScrollArea::vertical().id_salt("timeline_vscroll").show(ui, |ui| {
-                        if !ui.ctx().wants_keyboard_input() {
-                            if ui.input(|i| {
-                                i.key_pressed(egui::Key::I)
-                                    && !i.modifiers.command
-                                    && !i.modifiers.alt
-                            }) {
-                                state.mark_in_at_current_frame();
-                            }
-
-                            if ui.input(|i| {
-                                i.key_pressed(egui::Key::O)
-                                    && !i.modifiers.command
-                                    && !i.modifiers.alt
-                            }) {
-                                state.mark_out_at_current_frame();
-                            }
-
-                            if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::B)) {
-                                let _ = state.split_at_playhead();
-                            }
-
-                            if ui.input(|i| {
-                                i.modifiers.alt
-                                    && i.modifiers.shift
-                                    && i.key_pressed(egui::Key::ArrowLeft)
-                            }) {
-                                self.slide_selected_clips_by_frames(state, -1);
-                            }
-
-                            if ui.input(|i| {
-                                i.modifiers.alt
-                                    && i.modifiers.shift
-                                    && i.key_pressed(egui::Key::ArrowRight)
-                            }) {
-                                self.slide_selected_clips_by_frames(state, 1);
-                            }
-
-                            if ui.input(|i| {
-                                i.modifiers.alt
-                                    && !i.modifiers.shift
-                                    && i.key_pressed(egui::Key::ArrowLeft)
-                            }) {
-                                self.slip_selected_clips_by_frames(state, -1);
-                            }
-
-                            if ui.input(|i| {
-                                i.modifiers.alt
-                                    && !i.modifiers.shift
-                                    && i.key_pressed(egui::Key::ArrowRight)
-                            }) {
-                                self.slip_selected_clips_by_frames(state, 1);
-                            }
-
-                            if ui.input(|i| {
-                                i.modifiers.command
-                                    && !i.modifiers.shift
-                                    && i.key_pressed(egui::Key::Z)
-                            }) {
-                                let _ = state.undo_timeline();
-                            }
-
-                            if ui.input(|i| {
-                                i.modifiers.command
-                                    && ((i.modifiers.shift && i.key_pressed(egui::Key::Z))
-                                        || i.key_pressed(egui::Key::Y))
-                            }) {
-                                let _ = state.redo_timeline();
-                            }
-                        }
-
-                        let dropped = self.draw_tracks(ui, state);
-                        if ui.input(|i| i.pointer.any_released()) && !dropped {
-                            state.clear_dragging_asset();
-                        }
-
-                        if ui.input(|i| {
-                            i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)
-                        }) {
-                            let ripple = ui.input(|i| i.modifiers.shift);
-                            self.delete_selected_clips(state, ripple);
-                        }
-
-                        if ui.input(|i| i.pointer.any_released()) {
-                            if let Some(track_drag) = self.track_drag.take() {
-                                if let Some(target) = self.track_drag_target.take() {
-                                    if track_drag.is_video_track == target.is_video_track
-                                        && track_drag.source_index != target.target_index
-                                    {
-                                        if let Err(err) = state.move_track(
-                                            track_drag.track_id,
-                                            track_drag.is_video_track,
-                                            target.target_index,
-                                        ) {
-                                            state.set_status_hint(
-                                                format!("移动轨道失败：{err}"),
-                                                true,
-                                            );
-                                        }
+                                    let ruler_resp = self.draw_ruler(ui, state);
+                                    if let Some(clicked_frame) = ruler_resp {
+                                        state.seek(clicked_frame);
                                     }
-                                }
-                            }
 
-                            if self.clip_drag.take().is_some() {
-                                let pointer = ui.input(|i| i.pointer.interact_pos());
-                                let dropped_outside = match (pointer, self.track_area_bounds) {
-                                    (Some(p), Some(bounds)) => !bounds.contains(p),
-                                    _ => false,
-                                };
+                                    self.clamp_vertical_scroll_offset_for_viewport(
+                                        state,
+                                        ui.available_height(),
+                                    );
+                                    egui::ScrollArea::vertical()
+                                        .id_salt("timeline_vscroll")
+                                        .vertical_scroll_offset(self.vertical_scroll_offset)
+                                        .scroll_bar_visibility(
+                                            egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
+                                        )
+                                        .show_viewport(ui, |ui, viewport| {
+                                            self.timeline_vertical_viewport_height =
+                                                viewport.height();
+                                            self.vertical_scroll_offset = viewport.top().max(0.0);
+                                            self.timeline_track_content_height =
+                                                self.timeline_total_track_height(state);
 
-                                if dropped_outside && self.clip_drag_moved {
-                                    self.delete_selected_clips(state, false);
-                                } else if self.clip_drag_moved {
-                                    if let Some(before) = self.clip_drag_before_sequence.take() {
-                                        state.record_timeline_edit_snapshot("移动片段", before);
-                                    } else {
-                                        let _ = state.save_project();
-                                    }
-                                }
-                            }
-                            self.clip_drag_anchors.clear();
-                            self.clip_drag_before_sequence = None;
-                            self.clip_drag_moved = false;
-                            self.track_drag_target = None;
-                        }
-                    });
+                                            if !ui.ctx().wants_keyboard_input() {
+                                                if ui.input(|i| {
+                                                    i.key_pressed(egui::Key::I)
+                                                        && !i.modifiers.command
+                                                        && !i.modifiers.alt
+                                                }) {
+                                                    state.mark_in_at_current_frame();
+                                                }
+
+                                                if ui.input(|i| {
+                                                    i.key_pressed(egui::Key::O)
+                                                        && !i.modifiers.command
+                                                        && !i.modifiers.alt
+                                                }) {
+                                                    state.mark_out_at_current_frame();
+                                                }
+
+                                                if ui.input(|i| {
+                                                    i.modifiers.command
+                                                        && i.key_pressed(egui::Key::B)
+                                                }) {
+                                                    let _ = state.split_at_playhead();
+                                                }
+
+                                                if ui.input(|i| {
+                                                    i.modifiers.alt
+                                                        && i.modifiers.shift
+                                                        && i.key_pressed(egui::Key::ArrowLeft)
+                                                }) {
+                                                    self.slide_selected_clips_by_frames(state, -1);
+                                                }
+
+                                                if ui.input(|i| {
+                                                    i.modifiers.alt
+                                                        && i.modifiers.shift
+                                                        && i.key_pressed(egui::Key::ArrowRight)
+                                                }) {
+                                                    self.slide_selected_clips_by_frames(state, 1);
+                                                }
+
+                                                if ui.input(|i| {
+                                                    i.modifiers.alt
+                                                        && !i.modifiers.shift
+                                                        && i.key_pressed(egui::Key::ArrowLeft)
+                                                }) {
+                                                    self.slip_selected_clips_by_frames(state, -1);
+                                                }
+
+                                                if ui.input(|i| {
+                                                    i.modifiers.alt
+                                                        && !i.modifiers.shift
+                                                        && i.key_pressed(egui::Key::ArrowRight)
+                                                }) {
+                                                    self.slip_selected_clips_by_frames(state, 1);
+                                                }
+
+                                                if ui.input(|i| {
+                                                    i.modifiers.command
+                                                        && !i.modifiers.shift
+                                                        && i.key_pressed(egui::Key::Z)
+                                                }) {
+                                                    let _ = state.undo_timeline();
+                                                }
+
+                                                if ui.input(|i| {
+                                                    i.modifiers.command
+                                                        && ((i.modifiers.shift
+                                                            && i.key_pressed(egui::Key::Z))
+                                                            || i.key_pressed(egui::Key::Y))
+                                                }) {
+                                                    let _ = state.redo_timeline();
+                                                }
+                                            }
+
+                                            let dropped = self.draw_tracks(ui, state);
+                                            if ui.input(|i| i.pointer.any_released()) && !dropped {
+                                                state.clear_dragging_asset();
+                                            }
+
+                                            if ui.input(|i| {
+                                                i.key_pressed(egui::Key::Delete)
+                                                    || i.key_pressed(egui::Key::Backspace)
+                                            }) {
+                                                let ripple = ui.input(|i| i.modifiers.shift);
+                                                self.delete_selected_clips(state, ripple);
+                                            }
+
+                                            if ui.input(|i| i.pointer.any_released()) {
+                                                if let Some(track_drag) = self.track_drag.take() {
+                                                    if let Some(target) =
+                                                        self.track_drag_target.take()
+                                                    {
+                                                        if track_drag.is_video_track
+                                                            == target.is_video_track
+                                                            && track_drag.source_index
+                                                                != target.target_index
+                                                        {
+                                                            if let Err(err) = state.move_track(
+                                                                track_drag.track_id,
+                                                                track_drag.is_video_track,
+                                                                target.target_index,
+                                                            ) {
+                                                                state.set_status_hint(
+                                                                    format!("移动轨道失败：{err}"),
+                                                                    true,
+                                                                );
+                                                            }
+                                                        }
+                                                    }
+                                                }
+
+                                                if self.clip_drag.take().is_some() {
+                                                    let pointer =
+                                                        ui.input(|i| i.pointer.interact_pos());
+                                                    let dropped_outside =
+                                                        match (pointer, self.track_area_bounds) {
+                                                            (Some(p), Some(bounds)) => {
+                                                                !bounds.contains(p)
+                                                            }
+                                                            _ => false,
+                                                        };
+
+                                                    if dropped_outside && self.clip_drag_moved {
+                                                        self.delete_selected_clips(state, false);
+                                                    } else if self.clip_drag_moved {
+                                                        if let Some(before) =
+                                                            self.clip_drag_before_sequence.take()
+                                                        {
+                                                            state.record_timeline_edit_snapshot(
+                                                                "移动片段",
+                                                                before,
+                                                            );
+                                                        } else {
+                                                            let _ = state.save_project();
+                                                        }
+                                                    }
+                                                }
+                                                self.clip_drag_anchors.clear();
+                                                self.clip_drag_before_sequence = None;
+                                                self.clip_drag_moved = false;
+                                                self.track_drag_target = None;
+                                            }
+                                        });
+                                });
+                        },
+                    );
+
+                    ui.add_space(6.0);
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(vertical_bar_w, ui.available_height()),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.add_space(tokens::timeline_ruler_height());
+                            self.draw_right_scrollbar(ui, state);
+                        },
+                    );
                 },
             );
+            ui.add_space(scrollbar_gap);
+            self.draw_bottom_scrollbar(ui, state);
         });
     }
 
     fn timeline_content_width(&self, state: &AppState) -> f32 {
         let track_label_w = tokens::timeline_track_label_width();
-        let Some(seq) = state.sequence.as_ref() else {
+        if state.sequence.is_none() {
             return track_label_w + 1200.0;
-        };
+        }
 
-        let fps = seq.settings.frame_rate.to_f64().round() as i64;
-        let right_padding_frames = (fps.max(1)
-            * tokens::timeline_right_padding_frames_multiplier())
-        .max(tokens::timeline_right_padding_frames_min());
-        let max_frame = seq
-            .total_duration()
-            .frame
-            .max(state.current_frame())
-            .max(tokens::timeline_right_padding_frames_min())
-            + right_padding_frames;
-
-        track_label_w + max_frame as f32 * self.pixels_per_frame
+        track_label_w + self.timeline_total_frame_span(state) as f32 * self.pixels_per_frame
     }
 
     fn draw_timeline_tools_toolbar(&mut self, ui: &mut Ui) {
@@ -360,21 +480,463 @@ impl TimelinePanel {
             .on_hover_text("自动吸附")
             .clicked()
             .then(|| self.snap_enabled = !self.snap_enabled);
-            ui.separator();
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add(
-                    egui::Slider::new(
-                        &mut self.pixels_per_frame,
-                        tokens::timeline_min_pixels_per_frame()
-                            ..=tokens::timeline_max_pixels_per_frame(),
-                    )
-                    .logarithmic(true)
-                    .show_value(false),
-                );
-                ui.label("缩放:");
-            });
         });
+    }
+
+    fn timeline_total_frame_span(&self, state: &AppState) -> i64 {
+        let Some(seq) = state.sequence.as_ref() else {
+            return tokens::timeline_right_padding_frames_min();
+        };
+
+        let fps = seq.settings.frame_rate.to_f64().round() as i64;
+        let right_padding_frames = (fps.max(1)
+            * tokens::timeline_right_padding_frames_multiplier())
+        .max(tokens::timeline_right_padding_frames_min());
+        seq.total_duration()
+            .frame
+            .max(state.current_frame())
+            .max(tokens::timeline_right_padding_frames_min())
+            + right_padding_frames
+    }
+
+    fn visible_frame_span(&self) -> f64 {
+        if self.timeline_viewport_width <= 0.0 || self.pixels_per_frame <= 0.0 {
+            return 1.0;
+        }
+        (self.timeline_viewport_width / self.pixels_per_frame).max(1.0) as f64
+    }
+
+    fn update_visible_frame_span(&mut self, visible_span_frames: f64, total_frames: f64) {
+        if self.timeline_viewport_width <= 0.0 || total_frames <= 0.0 {
+            return;
+        }
+        let (min_visible, max_visible) =
+            timeline_visible_span_bounds(total_frames, self.timeline_viewport_width);
+        let clamped_visible = visible_span_frames.clamp(min_visible, max_visible);
+        self.pixels_per_frame =
+            (self.timeline_viewport_width.max(1.0) as f64 / clamped_visible).max(0.01) as f32;
+        let max_offset = (total_frames - clamped_visible).max(0.0);
+        self.scroll_offset_frames = self.scroll_offset_frames.clamp(0.0, max_offset);
+    }
+
+    fn clamp_vertical_scroll_offset_for_viewport(&mut self, state: &AppState, visible_height: f32) {
+        let total_height = self.timeline_total_track_height(state);
+        let max_offset = (total_height - visible_height.max(0.0)).max(0.0);
+        self.vertical_scroll_offset = self.vertical_scroll_offset.clamp(0.0, max_offset);
+    }
+
+    fn timeline_total_track_height(&self, state: &AppState) -> f32 {
+        state.sequence.as_ref().map_or(0.0, |seq| {
+            (seq.video_tracks.len() + seq.audio_tracks.len()) as f32 * self.track_height
+        })
+    }
+
+    fn draw_right_scrollbar(&mut self, ui: &mut Ui, state: &AppState) {
+        let total_rows = state.sequence.as_ref().map_or(0.0, |seq| {
+            (seq.video_tracks.len() + seq.audio_tracks.len()) as f32
+        });
+        let visible_height = self.timeline_vertical_viewport_height.max(0.0);
+        if visible_height <= 0.0 {
+            self.vertical_scrollbar_drag = None;
+            ui.allocate_exact_size(
+                Vec2::new(tokens::timeline_scrollbar_width(), 0.0),
+                Sense::hover(),
+            );
+            return;
+        }
+
+        let gutter_width = tokens::timeline_scrollbar_width() + 4.0;
+        let side_padding = ((gutter_width - tokens::timeline_scrollbar_width()) * 0.5).max(0.0);
+        let handle_radius = (tokens::timeline_scrollbar_width() * 0.5).min(5.0);
+        let (rect, _) =
+            ui.allocate_exact_size(Vec2::new(gutter_width, visible_height), Sense::hover());
+        let track_rect = Rect::from_min_max(
+            Pos2::new(
+                rect.left() + 2.0 + side_padding,
+                rect.top() + 2.0 + handle_radius,
+            ),
+            Pos2::new(
+                rect.right() - 2.0 - side_padding,
+                rect.bottom() - 2.0 - handle_radius,
+            ),
+        );
+        let metrics = timeline_vertical_scrollbar_metrics(
+            track_rect.height(),
+            total_rows,
+            visible_height,
+            self.track_height.max(tokens::timeline_min_track_height()),
+            self.vertical_scroll_offset,
+        );
+        let thumb_rect = Rect::from_min_max(
+            Pos2::new(track_rect.left(), track_rect.top() + metrics.thumb_top),
+            Pos2::new(
+                track_rect.right(),
+                track_rect.top() + metrics.thumb_top + metrics.thumb_height,
+            ),
+        );
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(track_rect, corner_radius(4.0), palette::bg_surface_raised());
+        painter.rect_stroke(
+            track_rect,
+            corner_radius(4.0),
+            Stroke::new(1.0, palette::border_subtle().gamma_multiply(0.9)),
+            egui::StrokeKind::Inside,
+        );
+
+        let top_handle_center = Pos2::new(thumb_rect.center().x, thumb_rect.top());
+        let bottom_handle_center = Pos2::new(thumb_rect.center().x, thumb_rect.bottom());
+        let top_handle_rect =
+            Rect::from_center_size(top_handle_center, Vec2::splat(handle_radius * 2.0));
+        let bottom_handle_rect =
+            Rect::from_center_size(bottom_handle_center, Vec2::splat(handle_radius * 2.0));
+        let thumb_drag_rect = Rect::from_min_max(
+            Pos2::new(
+                thumb_rect.left(),
+                (thumb_rect.top() + handle_radius).min(thumb_rect.bottom()),
+            ),
+            Pos2::new(
+                thumb_rect.right(),
+                (thumb_rect.bottom() - handle_radius).max(thumb_rect.top()),
+            ),
+        );
+
+        let top_handle_response = ui.interact(
+            top_handle_rect.expand2(Vec2::splat(4.0)),
+            ui.make_persistent_id("timeline_scrollbar_vertical_top_handle"),
+            Sense::click_and_drag(),
+        );
+        let bottom_handle_response = ui.interact(
+            bottom_handle_rect.expand2(Vec2::splat(4.0)),
+            ui.make_persistent_id("timeline_scrollbar_vertical_bottom_handle"),
+            Sense::click_and_drag(),
+        );
+        let thumb_response = ui.interact(
+            thumb_drag_rect,
+            ui.make_persistent_id("timeline_scrollbar_vertical_thumb"),
+            Sense::click_and_drag(),
+        );
+        let track_response = ui.interact(
+            track_rect,
+            ui.make_persistent_id("timeline_scrollbar_vertical_track"),
+            Sense::click(),
+        );
+
+        if top_handle_response.drag_started() {
+            if let Some(pointer) = top_handle_response.interact_pointer_pos() {
+                self.vertical_scrollbar_drag = Some(TimelineVerticalScrollbarDragState {
+                    kind: TimelineVerticalScrollbarDragKind::LeadingHandle,
+                    start_pointer_y: pointer.y,
+                    start_offset: self.vertical_scroll_offset,
+                    start_track_height: self.track_height,
+                });
+            }
+        } else if bottom_handle_response.drag_started() {
+            if let Some(pointer) = bottom_handle_response.interact_pointer_pos() {
+                self.vertical_scrollbar_drag = Some(TimelineVerticalScrollbarDragState {
+                    kind: TimelineVerticalScrollbarDragKind::TrailingHandle,
+                    start_pointer_y: pointer.y,
+                    start_offset: self.vertical_scroll_offset,
+                    start_track_height: self.track_height,
+                });
+            }
+        } else if thumb_response.drag_started() {
+            if let Some(pointer) = thumb_response.interact_pointer_pos() {
+                self.vertical_scrollbar_drag = Some(TimelineVerticalScrollbarDragState {
+                    kind: TimelineVerticalScrollbarDragKind::Thumb,
+                    start_pointer_y: pointer.y,
+                    start_offset: self.vertical_scroll_offset,
+                    start_track_height: self.track_height,
+                });
+            }
+        } else if track_response.clicked() {
+            if let Some(pointer) = track_response.interact_pointer_pos() {
+                if !thumb_rect.contains(pointer) {
+                    let fraction =
+                        ((pointer.y - track_rect.top()) / track_rect.height()).clamp(0.0, 1.0);
+                    let target_center = fraction * metrics.total_rows;
+                    let offset_rows = (target_center - metrics.visible_rows * 0.5)
+                        .clamp(0.0, (metrics.total_rows - metrics.visible_rows).max(0.0));
+                    self.vertical_scroll_offset = offset_rows * self.track_height.max(1.0);
+                }
+            }
+        }
+
+        if let Some(drag) = self.vertical_scrollbar_drag {
+            if ui.input(|i| i.pointer.primary_down()) {
+                if let Some(pointer) = ui.input(|i| i.pointer.interact_pos()) {
+                    let delta = pointer.y - drag.start_pointer_y;
+                    match drag.kind {
+                        TimelineVerticalScrollbarDragKind::Thumb => {
+                            self.vertical_scroll_offset =
+                                apply_timeline_vertical_scrollbar_drag(metrics, drag, delta);
+                        }
+                        TimelineVerticalScrollbarDragKind::LeadingHandle
+                        | TimelineVerticalScrollbarDragKind::TrailingHandle => {
+                            let (new_track_height, new_offset) = apply_timeline_vertical_zoom_drag(
+                                metrics,
+                                drag,
+                                delta,
+                                visible_height,
+                            );
+                            self.track_height = new_track_height;
+                            self.vertical_scroll_offset = new_offset;
+                            self.clamp_vertical_scroll_offset_for_viewport(state, visible_height);
+                        }
+                    }
+                    ui.ctx().request_repaint();
+                }
+            } else {
+                self.vertical_scrollbar_drag = None;
+            }
+        }
+
+        let active_kind = self.vertical_scrollbar_drag.map(|drag| drag.kind);
+        let thumb_fill = if thumb_response.hovered()
+            || active_kind == Some(TimelineVerticalScrollbarDragKind::Thumb)
+        {
+            palette::interaction_highlight()
+        } else {
+            palette::bg_surface_hover()
+        };
+        painter.rect_filled(thumb_rect, corner_radius(4.0), thumb_fill);
+        painter.rect_stroke(
+            thumb_rect,
+            corner_radius(4.0),
+            Stroke::new(1.0, palette::interaction_highlight().gamma_multiply(0.8)),
+            egui::StrokeKind::Inside,
+        );
+        for (center, active) in [
+            (
+                top_handle_center,
+                top_handle_response.hovered()
+                    || active_kind == Some(TimelineVerticalScrollbarDragKind::LeadingHandle),
+            ),
+            (
+                bottom_handle_center,
+                bottom_handle_response.hovered()
+                    || active_kind == Some(TimelineVerticalScrollbarDragKind::TrailingHandle),
+            ),
+        ] {
+            painter.circle_filled(
+                center,
+                handle_radius,
+                if active {
+                    palette::interaction_highlight()
+                } else {
+                    palette::bg_surface_hover()
+                },
+            );
+            painter.circle_stroke(
+                center,
+                handle_radius,
+                Stroke::new(1.0, palette::text_primary().gamma_multiply(0.7)),
+            );
+        }
+    }
+
+    fn draw_bottom_scrollbar(&mut self, ui: &mut Ui, state: &AppState) {
+        let Some(_seq) = state.sequence.as_ref() else {
+            self.scrollbar_drag = None;
+            return;
+        };
+
+        let full_rect = ui
+            .allocate_exact_size(
+                Vec2::new(ui.available_width(), tokens::timeline_scrollbar_height()),
+                Sense::hover(),
+            )
+            .0;
+        let track_label_w = tokens::timeline_track_label_width();
+        let right_scrollbar_gutter_w = tokens::timeline_scrollbar_width() + 10.0;
+        let track_rect = Rect::from_min_max(
+            Pos2::new(full_rect.left() + track_label_w, full_rect.top()),
+            Pos2::new(
+                (full_rect.right() - right_scrollbar_gutter_w)
+                    .max(full_rect.left() + track_label_w),
+                full_rect.bottom(),
+            ),
+        )
+        .shrink2(Vec2::new(0.0, 2.0));
+        if track_rect.width() <= 0.0 {
+            self.scrollbar_drag = None;
+            return;
+        }
+
+        let total_frames = self.timeline_total_frame_span(state) as f64;
+        self.update_visible_frame_span(self.visible_frame_span(), total_frames);
+        let metrics = timeline_scrollbar_metrics(
+            track_rect.width(),
+            total_frames,
+            self.timeline_viewport_width.max(track_rect.width()),
+            self.pixels_per_frame.max(0.01),
+            self.scroll_offset_frames,
+        );
+        let thumb_rect = Rect::from_min_max(
+            Pos2::new(track_rect.left() + metrics.thumb_left, track_rect.top()),
+            Pos2::new(
+                track_rect.left() + metrics.thumb_left + metrics.thumb_width,
+                track_rect.bottom(),
+            ),
+        );
+
+        let painter = ui.painter_at(full_rect);
+        painter.rect_filled(track_rect, corner_radius(4.0), palette::bg_surface_raised());
+        painter.rect_stroke(
+            track_rect,
+            corner_radius(4.0),
+            Stroke::new(1.0, palette::border_subtle().gamma_multiply(0.9)),
+            egui::StrokeKind::Inside,
+        );
+
+        let handle_radius =
+            (track_rect.height() * 0.5).min(tokens::timeline_scrollbar_handle_width());
+        let left_handle_center = Pos2::new(thumb_rect.left(), thumb_rect.center().y);
+        let right_handle_center = Pos2::new(thumb_rect.right(), thumb_rect.center().y);
+        let left_handle_rect =
+            Rect::from_center_size(left_handle_center, Vec2::splat(handle_radius * 2.0));
+        let right_handle_rect =
+            Rect::from_center_size(right_handle_center, Vec2::splat(handle_radius * 2.0));
+        let thumb_drag_rect = Rect::from_min_max(
+            Pos2::new(
+                (thumb_rect.left() + handle_radius).min(thumb_rect.right()),
+                thumb_rect.top(),
+            ),
+            Pos2::new(
+                (thumb_rect.right() - handle_radius).max(thumb_rect.left()),
+                thumb_rect.bottom(),
+            ),
+        );
+
+        let left_handle_response = ui.interact(
+            left_handle_rect.expand2(Vec2::splat(4.0)),
+            ui.make_persistent_id("timeline_scrollbar_left_handle"),
+            Sense::click_and_drag(),
+        );
+        let right_handle_response = ui.interact(
+            right_handle_rect.expand2(Vec2::splat(4.0)),
+            ui.make_persistent_id("timeline_scrollbar_right_handle"),
+            Sense::click_and_drag(),
+        );
+        let thumb_response = ui.interact(
+            thumb_drag_rect,
+            ui.make_persistent_id("timeline_scrollbar_thumb"),
+            Sense::click_and_drag(),
+        );
+        let track_response = ui.interact(
+            track_rect,
+            ui.make_persistent_id("timeline_scrollbar_track"),
+            Sense::click(),
+        );
+
+        if left_handle_response.drag_started() {
+            if let Some(pointer) = left_handle_response.interact_pointer_pos() {
+                self.scrollbar_drag = Some(TimelineScrollbarDragState {
+                    kind: TimelineScrollbarDragKind::LeadingHandle,
+                    start_pointer_x: pointer.x,
+                    start_offset_frames: metrics.offset_frames,
+                    start_visible_span_frames: metrics.visible_span_frames,
+                });
+            }
+        } else if right_handle_response.drag_started() {
+            if let Some(pointer) = right_handle_response.interact_pointer_pos() {
+                self.scrollbar_drag = Some(TimelineScrollbarDragState {
+                    kind: TimelineScrollbarDragKind::TrailingHandle,
+                    start_pointer_x: pointer.x,
+                    start_offset_frames: metrics.offset_frames,
+                    start_visible_span_frames: metrics.visible_span_frames,
+                });
+            }
+        } else if thumb_response.drag_started() {
+            if let Some(pointer) = thumb_response.interact_pointer_pos() {
+                self.scrollbar_drag = Some(TimelineScrollbarDragState {
+                    kind: TimelineScrollbarDragKind::Thumb,
+                    start_pointer_x: pointer.x,
+                    start_offset_frames: metrics.offset_frames,
+                    start_visible_span_frames: metrics.visible_span_frames,
+                });
+            }
+        } else if track_response.clicked() {
+            if let Some(pointer) = track_response.interact_pointer_pos() {
+                if !thumb_rect.contains(pointer) {
+                    let fraction = ((pointer.x - track_rect.left()) / track_rect.width())
+                        .clamp(0.0, 1.0) as f64;
+                    let target_center = fraction * metrics.total_frames;
+                    let new_offset = (target_center - metrics.visible_span_frames * 0.5).clamp(
+                        0.0,
+                        (metrics.total_frames - metrics.visible_span_frames).max(0.0),
+                    );
+                    self.scroll_offset_frames = new_offset;
+                }
+            }
+        }
+
+        if let Some(drag) = self.scrollbar_drag {
+            if ui.input(|i| i.pointer.primary_down()) {
+                if let Some(pointer) = ui.input(|i| i.pointer.interact_pos()) {
+                    let delta_px = pointer.x - drag.start_pointer_x;
+                    let (min_visible, max_visible) = timeline_visible_span_bounds(
+                        metrics.total_frames,
+                        self.timeline_viewport_width.max(track_rect.width()),
+                    );
+                    let (new_offset, new_visible) = apply_timeline_scrollbar_drag(
+                        metrics,
+                        drag,
+                        delta_px,
+                        min_visible,
+                        max_visible,
+                    );
+                    self.scroll_offset_frames = new_offset;
+                    self.update_visible_frame_span(new_visible, metrics.total_frames);
+                    ui.ctx().request_repaint();
+                }
+            } else {
+                self.scrollbar_drag = None;
+            }
+        }
+
+        let active_drag_kind = self.scrollbar_drag.map(|drag| drag.kind);
+        let thumb_fill = if thumb_response.hovered()
+            || active_drag_kind == Some(TimelineScrollbarDragKind::Thumb)
+        {
+            palette::interaction_highlight()
+        } else {
+            palette::bg_surface_hover()
+        };
+        painter.rect_filled(thumb_rect, corner_radius(4.0), thumb_fill);
+        painter.rect_stroke(
+            thumb_rect,
+            corner_radius(4.0),
+            Stroke::new(1.0, palette::interaction_highlight().gamma_multiply(0.8)),
+            egui::StrokeKind::Inside,
+        );
+
+        for (center, active) in [
+            (
+                left_handle_center,
+                left_handle_response.hovered()
+                    || active_drag_kind == Some(TimelineScrollbarDragKind::LeadingHandle),
+            ),
+            (
+                right_handle_center,
+                right_handle_response.hovered()
+                    || active_drag_kind == Some(TimelineScrollbarDragKind::TrailingHandle),
+            ),
+        ] {
+            painter.circle_filled(
+                center,
+                handle_radius,
+                if active {
+                    palette::interaction_highlight()
+                } else {
+                    palette::bg_surface_hover()
+                },
+            );
+            painter.circle_stroke(
+                center,
+                handle_radius,
+                Stroke::new(1.0, palette::text_primary().gamma_multiply(0.7)),
+            );
+        }
     }
 
     // ─── 时间标尺 ─────────────────────────────
@@ -521,7 +1083,8 @@ impl TimelinePanel {
         let mut track_rows: Vec<TrackRowVisual> = Vec::new();
         let audio_track_ids: Vec<TrackId> = audio_tracks.iter().map(|t| t.id).collect();
         let mut linked_audio_target_track_id: Option<TrackId> = None;
-        let track_height = tokens::timeline_track_height();
+        let track_height = self.track_height;
+        let mut visual_row_index = 0usize;
 
         for track_index in (0..video_tracks.len()).rev() {
             let track = &video_tracks[track_index];
@@ -530,6 +1093,7 @@ impl TimelinePanel {
                 state,
                 track,
                 track_index,
+                visual_row_index,
                 palette::timeline_clip_video(),
                 true,
                 track_index == video_tracks.len() - 1,
@@ -542,6 +1106,7 @@ impl TimelinePanel {
                 &audio_track_ids,
                 &mut linked_audio_target_track_id,
             );
+            visual_row_index += 1;
         }
         for (track_index, track) in audio_tracks.iter().enumerate() {
             dropped |= self.draw_track_row(
@@ -549,6 +1114,7 @@ impl TimelinePanel {
                 state,
                 track,
                 track_index,
+                visual_row_index,
                 palette::timeline_clip_audio(),
                 false,
                 video_tracks.is_empty() && track_index == 0,
@@ -561,6 +1127,7 @@ impl TimelinePanel {
                 &audio_track_ids,
                 &mut linked_audio_target_track_id,
             );
+            visual_row_index += 1;
         }
 
         self.track_drag_target = match (self.track_drag, ui.input(|i| i.pointer.interact_pos())) {
@@ -659,6 +1226,7 @@ impl TimelinePanel {
         state: &mut AppState,
         track: &mondrian_timeline::track::Track,
         track_index: usize,
+        visual_row_index: usize,
         clip_color: Color32,
         is_video_track: bool,
         round_top: bool,
@@ -672,7 +1240,7 @@ impl TimelinePanel {
         linked_audio_target_track_id: &mut Option<TrackId>,
     ) -> bool {
         let available_w = ui.available_width();
-        let track_height = tokens::timeline_track_height();
+        let track_height = self.track_height;
         let track_label_w = tokens::timeline_track_label_width();
         let clip_top_inset = tokens::timeline_clip_top_inset();
         let clip_bottom_inset = tokens::timeline_clip_bottom_inset();
@@ -690,7 +1258,7 @@ impl TimelinePanel {
         }
 
         let painter = ui.painter_at(rect);
-        let lane_fill = if track_index % 2 == 0 {
+        let lane_fill = if visual_row_index % 2 == 0 {
             palette::bg_surface()
         } else {
             palette::bg_surface_raised()
@@ -1923,6 +2491,193 @@ fn decide_snap_target(
     }
 }
 
+fn timeline_visible_span_bounds(total_frames: f64, viewport_width: f32) -> (f64, f64) {
+    if total_frames <= 0.0 || viewport_width <= 0.0 {
+        return (1.0, 1.0);
+    }
+
+    let min_visible = (viewport_width as f64 / tokens::timeline_max_pixels_per_frame() as f64)
+        .max(1.0)
+        .min(total_frames);
+    let max_visible = (viewport_width as f64 / tokens::timeline_min_pixels_per_frame() as f64)
+        .max(min_visible)
+        .min(total_frames);
+    (min_visible, max_visible)
+}
+
+fn timeline_scrollbar_metrics(
+    track_width: f32,
+    total_frames: f64,
+    viewport_width: f32,
+    pixels_per_frame: f32,
+    offset_frames: f64,
+) -> TimelineScrollbarMetrics {
+    let total_frames = total_frames.max(1.0);
+    let visible_span_frames = (viewport_width.max(1.0) as f64 / pixels_per_frame.max(0.01) as f64)
+        .max(1.0)
+        .min(total_frames);
+    let max_offset = (total_frames - visible_span_frames).max(0.0);
+    let offset_frames = offset_frames.clamp(0.0, max_offset);
+    let min_thumb_width = (tokens::timeline_scrollbar_handle_width() * 2.0 + 10.0).min(track_width);
+    let thumb_width = ((visible_span_frames / total_frames) as f32 * track_width)
+        .clamp(min_thumb_width, track_width);
+    let usable_track_width = (track_width - thumb_width).max(0.0);
+    let thumb_left = if max_offset <= f64::EPSILON || usable_track_width <= 0.0 {
+        0.0
+    } else {
+        (offset_frames / max_offset) as f32 * usable_track_width
+    };
+
+    TimelineScrollbarMetrics {
+        total_frames,
+        visible_span_frames,
+        offset_frames,
+        thumb_left,
+        thumb_width,
+        track_width,
+    }
+}
+
+fn apply_timeline_scrollbar_drag(
+    metrics: TimelineScrollbarMetrics,
+    drag: TimelineScrollbarDragState,
+    delta_px: f32,
+    min_visible_span: f64,
+    max_visible_span: f64,
+) -> (f64, f64) {
+    if metrics.track_width <= 0.0 || metrics.total_frames <= 0.0 {
+        return (metrics.offset_frames, metrics.visible_span_frames);
+    }
+
+    let delta_frames = delta_px as f64 * (metrics.total_frames / metrics.track_width as f64);
+    match drag.kind {
+        TimelineScrollbarDragKind::Thumb => {
+            let max_offset = (metrics.total_frames - drag.start_visible_span_frames).max(0.0);
+            (
+                (drag.start_offset_frames + delta_frames).clamp(0.0, max_offset),
+                drag.start_visible_span_frames,
+            )
+        }
+        TimelineScrollbarDragKind::LeadingHandle => {
+            let right_edge = drag.start_offset_frames + drag.start_visible_span_frames;
+            let min_left = (right_edge - max_visible_span).max(0.0);
+            let max_left = (right_edge - min_visible_span).max(0.0);
+            let new_left = (drag.start_offset_frames + delta_frames).clamp(min_left, max_left);
+            let new_visible = (right_edge - new_left)
+                .clamp(min_visible_span, max_visible_span)
+                .min(metrics.total_frames.max(min_visible_span));
+            let max_offset = (metrics.total_frames - new_visible).max(0.0);
+            (new_left.min(max_offset), new_visible)
+        }
+        TimelineScrollbarDragKind::TrailingHandle => {
+            let left_edge = drag.start_offset_frames;
+            let min_right = left_edge + min_visible_span;
+            let max_right = (left_edge + max_visible_span).min(metrics.total_frames);
+            let start_right = left_edge + drag.start_visible_span_frames;
+            let new_right = (start_right + delta_frames).clamp(min_right, max_right);
+            let new_visible = (new_right - left_edge)
+                .clamp(min_visible_span, max_visible_span)
+                .min((metrics.total_frames - left_edge).max(min_visible_span));
+            let max_offset = (metrics.total_frames - new_visible).max(0.0);
+            (left_edge.min(max_offset), new_visible)
+        }
+    }
+}
+
+fn timeline_vertical_scrollbar_metrics(
+    track_height: f32,
+    total_rows: f32,
+    visible_height: f32,
+    current_track_height: f32,
+    offset: f32,
+) -> TimelineVerticalScrollbarMetrics {
+    let total_rows = total_rows.max(1.0);
+    let visible_rows = (visible_height.max(1.0) / current_track_height.max(1.0))
+        .max(1.0)
+        .min(total_rows);
+    let offset_rows =
+        (offset / current_track_height.max(1.0)).clamp(0.0, (total_rows - visible_rows).max(0.0));
+    let min_thumb_height = 28.0f32.min(track_height);
+    let thumb_height =
+        ((visible_rows / total_rows) * track_height).clamp(min_thumb_height, track_height);
+    let usable_track_height = (track_height - thumb_height).max(0.0);
+    let max_offset_rows = (total_rows - visible_rows).max(0.0);
+    let thumb_top = if max_offset_rows <= f32::EPSILON || usable_track_height <= 0.0 {
+        0.0
+    } else {
+        (offset_rows / max_offset_rows) * usable_track_height
+    };
+
+    TimelineVerticalScrollbarMetrics {
+        total_rows,
+        visible_rows,
+        thumb_top,
+        thumb_height,
+        track_height,
+    }
+}
+
+fn apply_timeline_vertical_scrollbar_drag(
+    metrics: TimelineVerticalScrollbarMetrics,
+    drag: TimelineVerticalScrollbarDragState,
+    delta_px: f32,
+) -> f32 {
+    if metrics.track_height <= 0.0 || metrics.total_rows <= metrics.visible_rows {
+        return 0.0;
+    }
+
+    let delta_rows = delta_px * (metrics.total_rows / metrics.track_height);
+    let max_offset_rows = (metrics.total_rows - metrics.visible_rows).max(0.0);
+    let offset_rows = (drag.start_offset / drag.start_track_height.max(1.0) + delta_rows)
+        .clamp(0.0, max_offset_rows);
+    offset_rows * drag.start_track_height.max(1.0)
+}
+
+fn apply_timeline_vertical_zoom_drag(
+    metrics: TimelineVerticalScrollbarMetrics,
+    drag: TimelineVerticalScrollbarDragState,
+    delta_px: f32,
+    visible_height: f32,
+) -> (f32, f32) {
+    const ZOOM_SENSITIVITY: f32 = 0.35;
+
+    let start_track_height = drag.start_track_height.max(tokens::timeline_min_track_height());
+    let start_visible_rows =
+        (visible_height / start_track_height.max(1.0)).max(1.0).min(metrics.total_rows);
+    let start_top_row = drag.start_offset / start_track_height.max(1.0);
+    let start_bottom_row = (start_top_row + start_visible_rows).min(metrics.total_rows);
+    let row_delta =
+        delta_px * (metrics.total_rows / metrics.track_height.max(1.0)) * ZOOM_SENSITIVITY;
+    let target_visible_rows = match drag.kind {
+        TimelineVerticalScrollbarDragKind::LeadingHandle => {
+            (start_visible_rows - row_delta).max(1.0)
+        }
+        TimelineVerticalScrollbarDragKind::TrailingHandle => {
+            (start_visible_rows + row_delta).max(1.0)
+        }
+        TimelineVerticalScrollbarDragKind::Thumb => start_visible_rows,
+    }
+    .min(metrics.total_rows);
+
+    let new_track_height = visible_height / target_visible_rows.max(1.0);
+    let new_track_height = new_track_height.clamp(
+        tokens::timeline_min_track_height(),
+        tokens::timeline_max_track_height(),
+    );
+    let new_visible_rows =
+        (visible_height / new_track_height.max(1.0)).max(1.0).min(metrics.total_rows);
+    let max_top_row = (metrics.total_rows - new_visible_rows).max(0.0);
+    let new_top_row = match drag.kind {
+        TimelineVerticalScrollbarDragKind::LeadingHandle => {
+            (start_bottom_row - new_visible_rows).clamp(0.0, max_top_row)
+        }
+        TimelineVerticalScrollbarDragKind::TrailingHandle => start_top_row.clamp(0.0, max_top_row),
+        TimelineVerticalScrollbarDragKind::Thumb => start_top_row.clamp(0.0, max_top_row),
+    };
+
+    (new_track_height, new_top_row * new_track_height)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2030,5 +2785,149 @@ mod tests {
 
         let target = choose_track_drag_target(Pos2::new(20.0, 96.0), &rows, drag);
         assert!(target.is_none());
+    }
+
+    #[test]
+    fn timeline_scrollbar_dragging_thumb_pans_offset() {
+        let metrics = timeline_scrollbar_metrics(200.0, 400.0, 100.0, 2.0, 40.0);
+        let drag = TimelineScrollbarDragState {
+            kind: TimelineScrollbarDragKind::Thumb,
+            start_pointer_x: 0.0,
+            start_offset_frames: metrics.offset_frames,
+            start_visible_span_frames: metrics.visible_span_frames,
+        };
+
+        let (new_offset, new_visible) =
+            apply_timeline_scrollbar_drag(metrics, drag, 25.0, 10.0, 200.0);
+
+        assert!(new_offset > metrics.offset_frames);
+        assert_eq!(new_visible, metrics.visible_span_frames);
+    }
+
+    #[test]
+    fn timeline_scrollbar_leading_handle_changes_visible_span() {
+        let metrics = timeline_scrollbar_metrics(240.0, 600.0, 120.0, 2.0, 100.0);
+        let drag = TimelineScrollbarDragState {
+            kind: TimelineScrollbarDragKind::LeadingHandle,
+            start_pointer_x: 0.0,
+            start_offset_frames: metrics.offset_frames,
+            start_visible_span_frames: metrics.visible_span_frames,
+        };
+
+        let (new_offset, new_visible) =
+            apply_timeline_scrollbar_drag(metrics, drag, 20.0, 20.0, 260.0);
+
+        assert!(new_offset > metrics.offset_frames);
+        assert!(new_visible < metrics.visible_span_frames);
+    }
+
+    #[test]
+    fn timeline_scrollbar_trailing_handle_respects_max_visible_span() {
+        let metrics = timeline_scrollbar_metrics(240.0, 600.0, 120.0, 2.0, 60.0);
+        let drag = TimelineScrollbarDragState {
+            kind: TimelineScrollbarDragKind::TrailingHandle,
+            start_pointer_x: 0.0,
+            start_offset_frames: metrics.offset_frames,
+            start_visible_span_frames: metrics.visible_span_frames,
+        };
+
+        let (new_offset, new_visible) =
+            apply_timeline_scrollbar_drag(metrics, drag, 500.0, 20.0, 180.0);
+
+        assert_eq!(new_offset, metrics.offset_frames);
+        assert!(new_visible <= 180.0);
+    }
+
+    #[test]
+    fn vertical_scrollbar_dragging_thumb_pans_offset() {
+        let metrics = timeline_vertical_scrollbar_metrics(240.0, 20.0, 200.0, 40.0, 80.0);
+        let drag = TimelineVerticalScrollbarDragState {
+            kind: TimelineVerticalScrollbarDragKind::Thumb,
+            start_pointer_y: 0.0,
+            start_offset: 80.0,
+            start_track_height: 40.0,
+        };
+
+        let new_offset = apply_timeline_vertical_scrollbar_drag(metrics, drag, 24.0);
+
+        assert!(new_offset > drag.start_offset);
+    }
+
+    #[test]
+    fn vertical_scrollbar_thumb_fills_track_when_content_fits() {
+        let metrics = timeline_vertical_scrollbar_metrics(240.0, 3.0, 240.0, 80.0, 0.0);
+
+        assert_eq!(metrics.thumb_top, 0.0);
+        assert_eq!(metrics.thumb_height, 240.0);
+    }
+
+    #[test]
+    fn vertical_scrollbar_handle_drag_changes_track_height() {
+        let metrics = timeline_vertical_scrollbar_metrics(240.0, 10.0, 200.0, 40.0, 0.0);
+        let drag = TimelineVerticalScrollbarDragState {
+            kind: TimelineVerticalScrollbarDragKind::LeadingHandle,
+            start_pointer_y: 0.0,
+            start_offset: 0.0,
+            start_track_height: 40.0,
+        };
+
+        let (new_height, _new_offset) =
+            apply_timeline_vertical_zoom_drag(metrics, drag, 24.0, 200.0);
+
+        assert!(new_height > 40.0);
+    }
+
+    #[test]
+    fn vertical_scrollbar_leading_zoom_keeps_bottom_anchor() {
+        let metrics = timeline_vertical_scrollbar_metrics(240.0, 12.0, 200.0, 40.0, 80.0);
+        let drag = TimelineVerticalScrollbarDragState {
+            kind: TimelineVerticalScrollbarDragKind::LeadingHandle,
+            start_pointer_y: 0.0,
+            start_offset: 80.0,
+            start_track_height: 40.0,
+        };
+        let start_visible_rows = 200.0 / 40.0;
+        let start_bottom_row = drag.start_offset / drag.start_track_height + start_visible_rows;
+
+        let (new_height, new_offset) =
+            apply_timeline_vertical_zoom_drag(metrics, drag, 24.0, 200.0);
+        let new_visible_rows = 200.0 / new_height;
+        let new_bottom_row = new_offset / new_height + new_visible_rows;
+
+        assert!((new_bottom_row - start_bottom_row).abs() < 0.001);
+    }
+
+    #[test]
+    fn vertical_scrollbar_trailing_zoom_keeps_top_anchor() {
+        let metrics = timeline_vertical_scrollbar_metrics(240.0, 12.0, 200.0, 40.0, 80.0);
+        let drag = TimelineVerticalScrollbarDragState {
+            kind: TimelineVerticalScrollbarDragKind::TrailingHandle,
+            start_pointer_y: 0.0,
+            start_offset: 80.0,
+            start_track_height: 40.0,
+        };
+        let start_top_row = drag.start_offset / drag.start_track_height;
+
+        let (new_height, new_offset) =
+            apply_timeline_vertical_zoom_drag(metrics, drag, 24.0, 200.0);
+        let new_top_row = new_offset / new_height;
+
+        assert!((new_top_row - start_top_row).abs() < 0.001);
+    }
+
+    #[test]
+    fn vertical_scrollbar_zoom_is_gentler_than_one_row_per_small_drag() {
+        let metrics = timeline_vertical_scrollbar_metrics(240.0, 10.0, 200.0, 40.0, 0.0);
+        let drag = TimelineVerticalScrollbarDragState {
+            kind: TimelineVerticalScrollbarDragKind::LeadingHandle,
+            start_pointer_y: 0.0,
+            start_offset: 0.0,
+            start_track_height: 40.0,
+        };
+
+        let (new_height, _new_offset) =
+            apply_timeline_vertical_zoom_drag(metrics, drag, 24.0, 200.0);
+
+        assert!(new_height < 45.0);
     }
 }
