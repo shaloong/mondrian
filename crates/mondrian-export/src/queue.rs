@@ -13,6 +13,10 @@ use mondrian_media::audio::{
     AudioBuffer, AudioMixer, AudioSourceCache, AudioTrackConfig, AudioTrackData,
 };
 use mondrian_media::decode_video_frame_at_time_rgba_scaled;
+use mondrian_renderer::{
+    composite_timeline_elements_into, TimelineAdjustmentLayer, TimelineCompositeElement,
+    TimelineCompositeOptions, TimelineCompositeScratch, TimelineMediaLayer,
+};
 use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -732,19 +736,20 @@ fn render_timeline_frame_into(
         return Ok(());
     }
 
-    let mut layers: Vec<(Arc<DecodedVideoLayer>, f32)> = Vec::with_capacity(active_clips.len());
     let mut decode_cache = (active_clips.len() > 1).then(|| {
         HashMap::<(AssetId, i64), Arc<DecodedVideoLayer>>::with_capacity(active_clips.len())
     });
+    let mut decoded_media =
+        std::iter::repeat_with(|| None).take(active_clips.len()).collect::<Vec<_>>();
 
-    for active in active_clips {
+    for (index, active) in active_clips.iter().enumerate() {
+        if active.clip.is_adjustment_layer() || active.opacity <= 0.0 {
+            continue;
+        }
+
         let Some(path) = timeline.asset_paths.get(&active.clip.asset_id) else {
             continue;
         };
-        let opacity = active.opacity.clamp(0.0, 1.0);
-        if opacity <= 0.0 {
-            continue;
-        }
 
         let source_frame = active.source_time.frame.max(0);
         let decoded = if let Some(cache) = decode_cache.as_mut() {
@@ -770,10 +775,51 @@ fn render_timeline_frame_into(
                 height,
             )?
         };
-        layers.push((decoded, opacity));
+        decoded_media[index] = Some(decoded);
     }
 
-    compose_decoded_layers_into_canvas(canvas, width, height, &layers);
+    let mut composite_elements = Vec::with_capacity(active_clips.len());
+    for (index, active) in active_clips.iter().enumerate() {
+        let opacity = active.opacity.clamp(0.0, 1.0);
+        if opacity <= 0.0 {
+            continue;
+        }
+
+        if active.clip.is_adjustment_layer() {
+            composite_elements.push(TimelineCompositeElement::Adjustment(
+                TimelineAdjustmentLayer {
+                    params: active.clip.evaluate_effect_params(timecode),
+                    opacity,
+                    blend_mode: active.clip.blend_mode,
+                    frame_seed: timeline_frame.max(0),
+                },
+            ));
+            continue;
+        }
+
+        let Some(decoded) = decoded_media[index].as_ref() else {
+            continue;
+        };
+        composite_elements.push(TimelineCompositeElement::Media(TimelineMediaLayer {
+            rgba: &decoded.data,
+            width: decoded.width,
+            height: decoded.height,
+            opacity,
+            transform: mat3_to_affine(active.transform_matrix.to_cols_array()),
+            effect_params: active.clip.evaluate_effect_params(timecode),
+            frame_seed: timeline_frame.max(0),
+        }));
+    }
+
+    let mut scratch = TimelineCompositeScratch::default();
+    composite_timeline_elements_into(
+        canvas,
+        width,
+        height,
+        &composite_elements,
+        TimelineCompositeOptions::default(),
+        &mut scratch,
+    );
     Ok(())
 }
 
@@ -792,40 +838,6 @@ fn decode_video_layer_scaled(
         height: decoded.height,
         data: decoded.data,
     }))
-}
-
-fn compose_decoded_layers_into_canvas(
-    canvas: &mut [u8],
-    width: u32,
-    height: u32,
-    layers: &[(Arc<DecodedVideoLayer>, f32)],
-) {
-    if layers.is_empty() {
-        clear_canvas_black_opaque(canvas);
-        return;
-    }
-
-    if layers.len() == 1 {
-        let (layer, opacity) = &layers[0];
-        if *opacity >= 0.999 && layer.width == width && layer.height == height {
-            canvas.copy_from_slice(&layer.data);
-            force_canvas_alpha_opaque(canvas);
-            return;
-        }
-    }
-
-    clear_canvas_black_opaque(canvas);
-    for (layer, opacity) in layers {
-        blend_rgba_layer_centered(
-            canvas,
-            width,
-            height,
-            &layer.data,
-            layer.width,
-            layer.height,
-            *opacity,
-        );
-    }
 }
 
 fn compute_timeline_render_range(timeline: &TimelineExportInput) -> TimelineRenderRange {
@@ -879,70 +891,8 @@ fn force_canvas_alpha_opaque(canvas: &mut [u8]) {
     }
 }
 
-fn blend_rgba_layer_centered(
-    dst_rgba: &mut [u8],
-    dst_w: u32,
-    dst_h: u32,
-    src_rgba: &[u8],
-    src_w: u32,
-    src_h: u32,
-    opacity: f32,
-) {
-    if dst_w == 0 || dst_h == 0 || src_w == 0 || src_h == 0 {
-        return;
-    }
-
-    let copy_w = dst_w.min(src_w) as usize;
-    let copy_h = dst_h.min(src_h) as usize;
-    if copy_w == 0 || copy_h == 0 {
-        return;
-    }
-
-    let dst_x = ((dst_w as i64 - copy_w as i64) / 2).max(0) as usize;
-    let dst_y = ((dst_h as i64 - copy_h as i64) / 2).max(0) as usize;
-    let src_x = ((src_w as i64 - copy_w as i64) / 2).max(0) as usize;
-    let src_y = ((src_h as i64 - copy_h as i64) / 2).max(0) as usize;
-
-    let dst_stride = dst_w as usize * 4;
-    let src_stride = src_w as usize * 4;
-    let opacity_scale = opacity.clamp(0.0, 1.0);
-    if opacity_scale <= 0.0 {
-        return;
-    }
-
-    for row in 0..copy_h {
-        let dst_row_offset = (dst_y + row) * dst_stride + dst_x * 4;
-        let src_row_offset = (src_y + row) * src_stride + src_x * 4;
-        let dst_row = &mut dst_rgba[dst_row_offset..dst_row_offset + copy_w * 4];
-        let src_row = &src_rgba[src_row_offset..src_row_offset + copy_w * 4];
-
-        for (dst_px, src_px) in dst_row.chunks_exact_mut(4).zip(src_row.chunks_exact(4)) {
-            let src_alpha = src_px[3] as f32 / 255.0;
-            let alpha = (src_alpha * opacity_scale * 255.0).round().clamp(0.0, 255.0) as u32;
-            if alpha == 0 {
-                continue;
-            }
-            if alpha >= 255 {
-                dst_px[0] = src_px[0];
-                dst_px[1] = src_px[1];
-                dst_px[2] = src_px[2];
-                dst_px[3] = 255;
-                continue;
-            }
-
-            let inv_alpha = 255 - alpha;
-            dst_px[0] = blend_channel_u8(src_px[0] as u32, dst_px[0] as u32, alpha, inv_alpha);
-            dst_px[1] = blend_channel_u8(src_px[1] as u32, dst_px[1] as u32, alpha, inv_alpha);
-            dst_px[2] = blend_channel_u8(src_px[2] as u32, dst_px[2] as u32, alpha, inv_alpha);
-            dst_px[3] = 255;
-        }
-    }
-}
-
-#[inline]
-fn blend_channel_u8(src: u32, dst: u32, alpha: u32, inv_alpha: u32) -> u8 {
-    let value = src * alpha + dst * inv_alpha + 127;
-    ((value + (value >> 8)) >> 8) as u8
+fn mat3_to_affine(cols: [f32; 9]) -> [f32; 6] {
+    [cols[0], cols[3], cols[6], cols[1], cols[4], cols[7]]
 }
 
 /// 异步后台渲染队列
@@ -1413,7 +1363,8 @@ fn parse_time_spec_millis(raw: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mondrian_core::types::{AssetId, TimeCode};
+    use mondrian_core::types::{AssetId, BlendMode, TimeCode};
+    use mondrian_effects::AdjustmentLayerParams;
     use mondrian_timeline::clip::Clip;
     use mondrian_timeline::sequence::Sequence;
     use std::path::PathBuf;
@@ -1599,46 +1550,81 @@ mod tests {
     }
 
     #[test]
-    fn compose_decoded_layers_into_canvas_single_layer_passthrough_forces_alpha() {
-        let layer = Arc::new(DecodedVideoLayer {
-            width: 2,
-            height: 2,
-            data: vec![
-                12, 34, 56, 0, 12, 34, 56, 77, 12, 34, 56, 128, 12, 34, 56, 200,
-            ],
-        });
-        let mut canvas = vec![0u8; 2 * 2 * 4];
+    fn shared_compositor_applies_media_effects_for_export() {
+        let mut scratch = mondrian_renderer::TimelineCompositeScratch::default();
+        let output = mondrian_renderer::composite_timeline_elements(
+            1,
+            1,
+            &[mondrian_renderer::TimelineCompositeElement::Media(
+                mondrian_renderer::TimelineMediaLayer {
+                    rgba: &[120, 80, 40, 255],
+                    width: 1,
+                    height: 1,
+                    opacity: 1.0,
+                    transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                    effect_params: AdjustmentLayerParams {
+                        saturation: 0.0,
+                        ..AdjustmentLayerParams::default()
+                    },
+                    frame_seed: 0,
+                },
+            )],
+            mondrian_renderer::TimelineCompositeOptions::default(),
+            &mut scratch,
+        );
 
-        compose_decoded_layers_into_canvas(&mut canvas, 2, 2, &[(layer, 1.0)]);
-
-        for px in canvas.chunks_exact(4) {
-            assert_eq!(px[0], 12);
-            assert_eq!(px[1], 34);
-            assert_eq!(px[2], 56);
-            assert_eq!(px[3], 255);
-        }
+        assert_eq!(output[0], output[1]);
+        assert_eq!(output[1], output[2]);
+        assert_eq!(output[3], 255);
     }
 
     #[test]
-    fn blend_rgba_layer_centered_places_layer_in_canvas_center() {
-        let mut dst = vec![0u8; 4 * 4 * 4];
-        clear_canvas_black_opaque(&mut dst);
-        let src = vec![
-            10, 20, 30, 255, 10, 20, 30, 255, 10, 20, 30, 255, 10, 20, 30, 255,
-        ];
+    fn shared_compositor_respects_adjustment_order_for_export() {
+        let mut scratch = mondrian_renderer::TimelineCompositeScratch::default();
+        let output = mondrian_renderer::composite_timeline_elements(
+            2,
+            1,
+            &[
+                mondrian_renderer::TimelineCompositeElement::Media(
+                    mondrian_renderer::TimelineMediaLayer {
+                        rgba: &[255, 0, 0, 255, 255, 0, 0, 255],
+                        width: 2,
+                        height: 1,
+                        opacity: 1.0,
+                        transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                        effect_params: AdjustmentLayerParams::default(),
+                        frame_seed: 0,
+                    },
+                ),
+                mondrian_renderer::TimelineCompositeElement::Adjustment(
+                    mondrian_renderer::TimelineAdjustmentLayer {
+                        params: AdjustmentLayerParams {
+                            saturation: 0.0,
+                            ..AdjustmentLayerParams::default()
+                        },
+                        opacity: 1.0,
+                        blend_mode: Some(BlendMode::Normal),
+                        frame_seed: 0,
+                    },
+                ),
+                mondrian_renderer::TimelineCompositeElement::Media(
+                    mondrian_renderer::TimelineMediaLayer {
+                        rgba: &[0, 0, 0, 0, 0, 255, 0, 255],
+                        width: 2,
+                        height: 1,
+                        opacity: 1.0,
+                        transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                        effect_params: AdjustmentLayerParams::default(),
+                        frame_seed: 0,
+                    },
+                ),
+            ],
+            mondrian_renderer::TimelineCompositeOptions::default(),
+            &mut scratch,
+        );
 
-        blend_rgba_layer_centered(&mut dst, 4, 4, &src, 2, 2, 1.0);
-
-        let pixel_at = |x: usize, y: usize| -> [u8; 4] {
-            let i = (y * 4 + x) * 4;
-            [dst[i], dst[i + 1], dst[i + 2], dst[i + 3]]
-        };
-
-        assert_eq!(pixel_at(1, 1), [10, 20, 30, 255]);
-        assert_eq!(pixel_at(2, 1), [10, 20, 30, 255]);
-        assert_eq!(pixel_at(1, 2), [10, 20, 30, 255]);
-        assert_eq!(pixel_at(2, 2), [10, 20, 30, 255]);
-        assert_eq!(pixel_at(0, 0), [0, 0, 0, 255]);
+        assert_eq!(&output[0..4], &[54, 54, 54, 255]);
+        assert_eq!(&output[4..8], &[0, 255, 0, 255]);
     }
 }
 

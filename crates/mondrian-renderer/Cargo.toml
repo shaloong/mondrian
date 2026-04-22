@@ -7,6 +7,7 @@ license.workspace    = true
 
 [dependencies]
 mondrian-core     = { workspace = true }
+mondrian-effects  = { workspace = true }
 mondrian-media    = { workspace = true }
 mondrian-timeline = { workspace = true }
 

@@ -1,5 +1,9 @@
 use super::*;
 use mondrian_core::types::Resolution;
+use mondrian_renderer::{
+    composite_timeline_elements, TimelineCompositeElement, TimelineCompositeOptions,
+    TimelineCompositeScratch, TimelineMediaLayer,
+};
 
 fn pixel_at(rgba: &[u8], width: usize, x: usize, y: usize) -> [u8; 4] {
     let idx = (y * width + x) * 4;
@@ -22,9 +26,6 @@ fn alpha_blend_layer_should_apply_translation_transform() {
     let src_w = 3u32;
     let src_h = 3u32;
 
-    let mut dst = vec![0u8; (dst_w * dst_h * 4) as usize];
-    initialize_canvas_alpha_opaque(&mut dst);
-
     let mut src = vec![0u8; (src_w * src_h * 4) as usize];
     let src_center = ((src_w as usize) + 1) * 4;
     src[src_center] = 255;
@@ -32,15 +33,21 @@ fn alpha_blend_layer_should_apply_translation_transform() {
     src[src_center + 2] = 0;
     src[src_center + 3] = 255;
 
-    alpha_blend_layer(
-        &mut dst,
+    let mut scratch = TimelineCompositeScratch::default();
+    let dst = composite_timeline_elements(
         dst_w,
         dst_h,
-        &src,
-        src_w,
-        src_h,
-        1.0,
-        [1.0, 0.0, 1.0, 0.0, 1.0, 0.0],
+        &[TimelineCompositeElement::Media(TimelineMediaLayer {
+            rgba: &src,
+            width: src_w,
+            height: src_h,
+            opacity: 1.0,
+            transform: [1.0, 0.0, 1.0, 0.0, 1.0, 0.0],
+            effect_params: Default::default(),
+            frame_seed: 0,
+        })],
+        TimelineCompositeOptions::default(),
+        &mut scratch,
     );
 
     let moved = pixel_at(&dst, dst_w as usize, 2, 1);
@@ -57,22 +64,28 @@ fn alpha_blend_layer_should_skip_non_invertible_transform() {
     let src_w = 2u32;
     let src_h = 2u32;
 
-    let mut dst = vec![0u8; (dst_w * dst_h * 4) as usize];
-    initialize_canvas_alpha_opaque(&mut dst);
-    let before = dst.clone();
-
     let src = vec![255u8; (src_w * src_h * 4) as usize];
-
-    alpha_blend_layer(
-        &mut dst,
+    let mut scratch = TimelineCompositeScratch::default();
+    let dst = composite_timeline_elements(
         dst_w,
         dst_h,
-        &src,
-        src_w,
-        src_h,
-        1.0,
-        [1.0, 2.0, 0.0, 2.0, 4.0, 0.0],
+        &[TimelineCompositeElement::Media(TimelineMediaLayer {
+            rgba: &src,
+            width: src_w,
+            height: src_h,
+            opacity: 1.0,
+            transform: [1.0, 2.0, 0.0, 2.0, 4.0, 0.0],
+            effect_params: Default::default(),
+            frame_seed: 0,
+        })],
+        TimelineCompositeOptions::default(),
+        &mut scratch,
     );
+    let before = vec![0u8, 0u8, 0u8, 255u8]
+        .into_iter()
+        .cycle()
+        .take((dst_w * dst_h * 4) as usize)
+        .collect::<Vec<_>>();
 
     assert_eq!(dst, before);
 }

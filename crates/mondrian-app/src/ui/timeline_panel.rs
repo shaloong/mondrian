@@ -1191,7 +1191,8 @@ impl TimelinePanel {
                 ui.input(|i| i.pointer.interact_pos()),
                 state.dragging_asset(),
             ) {
-                if ((dragging.kind == mondrian_assets::AssetKind::Video
+                if (((dragging.kind == mondrian_assets::AssetKind::Video
+                    || dragging.kind == mondrian_assets::AssetKind::AdjustmentLayer)
                     && pos.y <= top + track_height * video_tracks.len() as f32)
                     || (dragging.kind == mondrian_assets::AssetKind::Audio
                         && pos.y > top + track_height * video_tracks.len() as f32))
@@ -1440,10 +1441,15 @@ impl TimelinePanel {
             };
             visible_clips.push(ClipVisual { selection, rect: clip_draw_rect });
 
-            let clip_fill = if clip.is_disabled {
-                clip_color.gamma_multiply(0.35)
+            let base_clip_color = if clip.is_adjustment_layer() {
+                palette::accent_secondary().gamma_multiply(0.82)
             } else {
                 clip_color
+            };
+            let clip_fill = if clip.is_disabled {
+                base_clip_color.gamma_multiply(0.35)
+            } else {
+                base_clip_color
             };
             painter.rect_filled(clip_draw_rect, tokens::timeline_clip_radius(), clip_fill);
             clip_outlines.push((clip_draw_rect, self.selected_clips.contains(&selection)));
@@ -1458,7 +1464,11 @@ impl TimelinePanel {
                 draw_single_line_ellipsis(
                     &painter,
                     label_rect,
-                    clip.label.as_deref().unwrap_or("clip"),
+                    clip.label.as_deref().unwrap_or(if clip.is_adjustment_layer() {
+                        "调整图层"
+                    } else {
+                        "clip"
+                    }),
                     typography::body_small(),
                     palette::text_primary(),
                 );
@@ -1685,7 +1695,12 @@ impl TimelinePanel {
         let can_drop_here = dragging_asset
             .as_ref()
             .map(|asset| {
-                (is_video_track && asset.kind == mondrian_assets::AssetKind::Video)
+                (is_video_track
+                    && matches!(
+                        asset.kind,
+                        mondrian_assets::AssetKind::Video
+                            | mondrian_assets::AssetKind::AdjustmentLayer
+                    ))
                     || (!is_video_track && asset.kind == mondrian_assets::AssetKind::Audio)
             })
             .unwrap_or(false);
@@ -1865,6 +1880,24 @@ impl TimelinePanel {
         }
 
         resp.context_menu(|ui| {
+            if is_video_track {
+                ui.menu_button("新建图层", |ui| {
+                    if ui.button("调整图层").clicked() {
+                        let start_frame = state.current_frame().max(0);
+                        let overlap_mode = Self::current_overlap_mode(ui);
+                        if let Err(err) = state.create_adjustment_layer_on_video_track(
+                            track.id,
+                            Some(start_frame),
+                            overlap_mode,
+                        ) {
+                            state.set_status_hint(format!("创建调整图层失败：{err}"), true);
+                        }
+                        ui.close();
+                    }
+                });
+                ui.separator();
+            }
+
             if ui.button("新增视频轨道").clicked() {
                 let _ = state.add_video_track();
                 ui.close();

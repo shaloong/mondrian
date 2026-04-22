@@ -15,6 +15,7 @@ use uuid::Uuid;
 pub enum AssetKind {
     Video,
     Audio,
+    AdjustmentLayer,
 }
 
 impl AssetKind {
@@ -22,12 +23,14 @@ impl AssetKind {
         match self {
             Self::Video => "video",
             Self::Audio => "audio",
+            Self::AdjustmentLayer => "adjustment_layer",
         }
     }
 
     fn from_str(value: &str) -> Self {
         match value {
             "audio" => Self::Audio,
+            "adjustment_layer" => Self::AdjustmentLayer,
             _ => Self::Video,
         }
     }
@@ -128,6 +131,39 @@ impl AssetLibrary {
         .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
 
         Ok(id)
+    }
+
+    pub fn create_adjustment_layer_asset(&self, name: Option<&str>) -> Result<AssetId> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let asset_id = AssetId::new();
+        let asset_name = name
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| self.next_adjustment_layer_name());
+        // The asset is a reusable palette/template entry. Any adjustment parameter state
+        // belongs to the timeline instance created from it, not this asset record.
+        let synthetic_path = synthetic_adjustment_layer_path(asset_id);
+        let metadata_json = serde_json::to_string(&MediaInfo::synthetic_adjustment_layer())?;
+        let db = self.db.lock();
+
+        db.execute(
+            "INSERT INTO assets \
+             (id, name, asset_type, path, tags, metadata, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+            rusqlite::params![
+                asset_id.0.to_string(),
+                asset_name,
+                AssetKind::AdjustmentLayer.as_str(),
+                synthetic_path.to_string_lossy().to_string(),
+                "[]",
+                metadata_json,
+                now
+            ],
+        )
+        .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
+
+        Ok(asset_id)
     }
 
     pub fn relink_asset(&self, asset_id: AssetId, path: &Path) -> Result<()> {
@@ -333,6 +369,41 @@ impl AssetLibrary {
     pub fn library_root(&self) -> &Path {
         &self.root
     }
+
+    fn next_adjustment_layer_name(&self) -> String {
+        let db = self.db.lock();
+        let mut stmt = match db
+            .prepare("SELECT name FROM assets WHERE asset_type = ?1 ORDER BY created_at ASC")
+        {
+            Ok(stmt) => stmt,
+            Err(_) => return "调整图层 1".to_string(),
+        };
+
+        let rows = match stmt.query_map(
+            rusqlite::params![AssetKind::AdjustmentLayer.as_str()],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(rows) => rows,
+            Err(_) => return "调整图层 1".to_string(),
+        };
+
+        let mut next_index = 1usize;
+        for name in rows.filter_map(std::result::Result::ok) {
+            let Some(suffix) = name.strip_prefix("调整图层 ") else {
+                continue;
+            };
+            let Ok(index) = suffix.trim().parse::<usize>() else {
+                continue;
+            };
+            next_index = next_index.max(index + 1);
+        }
+
+        format!("调整图层 {next_index}")
+    }
+}
+
+fn synthetic_adjustment_layer_path(asset_id: AssetId) -> PathBuf {
+    PathBuf::from(format!("mondrian://adjustment-layer/{asset_id}"))
 }
 
 fn has_meaningful_video_stream(info: &MediaInfo) -> bool {

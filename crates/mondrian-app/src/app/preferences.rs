@@ -21,6 +21,7 @@ pub(super) fn load_app_preferences(app: &mut MondrianApp) {
 
     app.show_library = preferences.show_library;
     app.show_effect_controls = preferences.show_effect_controls;
+    app.show_effect_library = preferences.show_effect_library;
     app.theme = preferences.theme;
     app.state.auto_proxy_enabled = preferences.auto_proxy_enabled;
     app.show_dev_metrics = if cfg!(debug_assertions) {
@@ -52,6 +53,7 @@ pub(super) fn capture_preferences(app: &MondrianApp) -> AppPreferences {
         version: 1,
         theme: app.theme,
         show_effect_controls: app.show_effect_controls,
+        show_effect_library: app.show_effect_library,
         show_library: app.show_library,
         auto_proxy_enabled: app.state.auto_proxy_enabled,
         show_dev_metrics: if cfg!(debug_assertions) {

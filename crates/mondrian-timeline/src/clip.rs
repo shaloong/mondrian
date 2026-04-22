@@ -9,6 +9,7 @@ use mondrian_core::{
     types::*,
     MondrianError, Result,
 };
+use mondrian_effects::{AdjustmentLayerParams, EffectNode, EffectType};
 use serde::{Deserialize, Serialize};
 
 /// 裁剪边缘
@@ -223,17 +224,21 @@ impl SpeedMap {
     }
 }
 
-/// 效果引用（指向效果系统中的节点）
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EffectRef {
-    pub effect_id: EffectId,
-    pub is_enabled: bool,
+/// 时间线片段语义
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ClipKind {
+    #[default]
+    Media,
+    AdjustmentLayer,
 }
 
 /// 时间线上的一个剪辑片段
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Clip {
     pub id: ClipId,
+    /// 片段语义（媒体/调整图层）
+    #[serde(default)]
+    pub kind: ClipKind,
     /// 关联的素材资产
     pub asset_id: AssetId,
     /// 在时间线上的起始位置
@@ -248,8 +253,9 @@ pub struct Clip {
     pub transform: Transform2D,
     /// 变速模式
     pub speed: SpeedMap,
-    /// 效果链
-    pub effects: Vec<EffectRef>,
+    /// 效果链（实例级，属性路径已按 effect id 做命名空间隔离）
+    #[serde(default)]
+    pub effects: Vec<EffectNode>,
     /// 关联的音频/视频 Clip（保持同步）
     pub linked_clip: Option<ClipId>,
     /// 是否禁用
@@ -267,6 +273,7 @@ impl Clip {
         let tb = position.time_base;
         Self {
             id: ClipId::new(),
+            kind: ClipKind::Media,
             asset_id,
             position,
             duration,
@@ -280,6 +287,19 @@ impl Clip {
             blend_mode: None,
             label: None,
         }
+    }
+
+    pub fn new_adjustment_layer(asset_id: AssetId, position: TimeCode, duration: TimeCode) -> Self {
+        let mut clip = Self::new(asset_id, position, duration);
+        clip.kind = ClipKind::AdjustmentLayer;
+        clip.source_in = TimeCode::new(0, position.time_base);
+        clip.source_out = duration;
+        clip.label = Some("调整图层".to_string());
+        clip
+    }
+
+    pub fn is_adjustment_layer(&self) -> bool {
+        self.kind == ClipKind::AdjustmentLayer
     }
 
     /// Clip 在时间线上的结束位置
@@ -298,11 +318,145 @@ impl Clip {
         let source_local = self.speed.map_time(local);
         self.source_in + source_local
     }
+
+    pub fn evaluate_effect_params(&self, time: TimeCode) -> AdjustmentLayerParams {
+        let mut params = AdjustmentLayerParams::default();
+        for effect in self.effects.iter().filter(|effect| effect.is_enabled) {
+            match effect.effect_type {
+                EffectType::BasicCorrection => {
+                    params.exposure =
+                        effect.evaluate_f32_by_suffix("basic.exposure", time, params.exposure);
+                    params.contrast =
+                        effect.evaluate_f32_by_suffix("basic.contrast", time, params.contrast);
+                    params.saturation =
+                        effect.evaluate_f32_by_suffix("basic.saturation", time, params.saturation);
+                }
+                EffectType::WhiteBalance => {
+                    params.temperature = effect.evaluate_f32_by_suffix(
+                        "white_balance.temperature",
+                        time,
+                        params.temperature,
+                    );
+                    params.tint =
+                        effect.evaluate_f32_by_suffix("white_balance.tint", time, params.tint);
+                }
+                EffectType::GaussianBlur => {
+                    params.blur_radius =
+                        effect.evaluate_f32_by_suffix("blur.radius", time, params.blur_radius);
+                }
+                EffectType::Sharpen => {
+                    params.sharpen_amount = effect.evaluate_f32_by_suffix(
+                        "sharpen.amount",
+                        time,
+                        params.sharpen_amount,
+                    );
+                }
+                EffectType::Vignette => {
+                    params.vignette_intensity = effect.evaluate_f32_by_suffix(
+                        "vignette.intensity",
+                        time,
+                        params.vignette_intensity,
+                    );
+                    params.vignette_feather = effect.evaluate_f32_by_suffix(
+                        "vignette.feather",
+                        time,
+                        params.vignette_feather,
+                    );
+                }
+                EffectType::ChromaticAberration => {
+                    params.chromatic_aberration = effect.evaluate_f32_by_suffix(
+                        "chromatic.amount",
+                        time,
+                        params.chromatic_aberration,
+                    );
+                }
+                EffectType::Grain => {
+                    params.grain_amount =
+                        effect.evaluate_f32_by_suffix("grain.amount", time, params.grain_amount);
+                }
+                _ => {}
+            }
+        }
+        params
+    }
+
+    pub fn add_effect(&mut self, effect_type: EffectType) -> EffectId {
+        let label = self.next_effect_group_label(&effect_type);
+        let mut effect = EffectNode::new(effect_type);
+        effect.instantiate_for_clip(label);
+        let effect_id = effect.id;
+        self.effects.push(effect);
+        effect_id
+    }
+
+    pub fn effect_enabled(&self, effect_id: EffectId) -> Option<bool> {
+        self.effects
+            .iter()
+            .find(|effect| effect.id == effect_id)
+            .map(|effect| effect.is_enabled)
+    }
+
+    pub fn effect_property_path(&self, suffix: &str) -> Option<String> {
+        self.effects
+            .iter()
+            .flat_map(|effect| effect.properties.iter())
+            .find(|(path, _)| path.ends_with(suffix))
+            .map(|(path, _)| path.to_string())
+    }
+
+    pub fn set_effect_enabled(&mut self, effect_id: EffectId, enabled: bool) -> Result<()> {
+        let effect =
+            self.effects.iter_mut().find(|effect| effect.id == effect_id).ok_or_else(|| {
+                MondrianError::WorkflowStepFailed {
+                    step_id: "clip_set_effect_enabled".to_string(),
+                    reason: format!("效果不存在: {effect_id}"),
+                }
+            })?;
+        effect.is_enabled = enabled;
+        Ok(())
+    }
+
+    pub fn remove_effect(&mut self, effect_id: EffectId) -> Result<()> {
+        let index =
+            self.effects.iter().position(|effect| effect.id == effect_id).ok_or_else(|| {
+                MondrianError::WorkflowStepFailed {
+                    step_id: "clip_remove_effect".to_string(),
+                    reason: format!("效果不存在: {effect_id}"),
+                }
+            })?;
+        self.effects.remove(index);
+        Ok(())
+    }
+
+    fn next_effect_group_label(&self, effect_type: &EffectType) -> String {
+        let base = effect_type.display_name();
+        let count = self.effects.iter().filter(|effect| effect.effect_type == *effect_type).count();
+        if count == 0 {
+            base.to_string()
+        } else {
+            format!("{base} {}", count + 1)
+        }
+    }
 }
 
 impl PropertyHost for Clip {
     fn property_bag(&self) -> Result<PropertyBag> {
-        let mut properties = self.transform.to_property_bag();
+        let mut properties = if self.is_adjustment_layer() {
+            let mut bag = PropertyBag::default();
+            if let Some(opacity) =
+                self.transform.to_property_bag().property(Transform2D::OPACITY_PATH).cloned()
+            {
+                bag.upsert(opacity);
+            }
+            bag
+        } else {
+            self.transform.to_property_bag()
+        };
+        for effect in &self.effects {
+            for (_, property) in effect.property_bag()?.iter() {
+                properties.upsert(property.clone());
+            }
+        }
         let blend_mode_text = blend_mode_to_text(self.blend_mode);
         let mut blend_mode_descriptor = PropertyDescriptor::new(
             Self::BLEND_MODE_PATH,
@@ -313,13 +467,17 @@ impl PropertyHost for Clip {
         let mut blend_mode_property = AnimatedProperty::from_descriptor(blend_mode_descriptor);
         blend_mode_property.set_static_value(PropertyValue::Text(blend_mode_text));
         properties.upsert(blend_mode_property);
-        properties.upsert(self.speed.property().clone());
+        if !self.is_adjustment_layer() {
+            properties.upsert(self.speed.property().clone());
+        }
         Ok(properties)
     }
 
     fn apply_property_mutation(&mut self, mutation: PropertyMutation) -> Result<()> {
         let path = property_mutation_path(&mutation);
-        if path.starts_with("transform.") {
+        if path == Transform2D::OPACITY_PATH
+            || (!self.is_adjustment_layer() && path.starts_with("transform."))
+        {
             self.transform.apply_property_mutation(mutation)
         } else if path == Self::BLEND_MODE_PATH {
             if matches!(mutation, PropertyMutation::RemoveProperty { .. }) {
@@ -345,8 +503,19 @@ impl PropertyHost for Clip {
             };
             self.blend_mode = blend_mode_from_text(value)?;
             Ok(())
-        } else if path == SpeedMap::MULTIPLIER_PATH {
+        } else if !self.is_adjustment_layer() && path == SpeedMap::MULTIPLIER_PATH {
             self.speed.apply_property_mutation(mutation)
+        } else if path.starts_with("effect.") {
+            if let Some(effect) = self.effects.iter_mut().find(|effect| {
+                effect.property_bag().ok().is_some_and(|bag| bag.property(path).is_some())
+            }) {
+                effect.apply_property_mutation(mutation)
+            } else {
+                Err(MondrianError::WorkflowStepFailed {
+                    step_id: "clip_apply_property_mutation".to_string(),
+                    reason: format!("当前 Clip 不支持属性路径: {path}"),
+                })
+            }
         } else {
             Err(MondrianError::WorkflowStepFailed {
                 step_id: "clip_apply_property_mutation".to_string(),
@@ -442,5 +611,40 @@ mod tests {
         .expect("set blend mode");
 
         assert_eq!(clip.blend_mode, Some(BlendMode::Multiply));
+    }
+
+    #[test]
+    fn adjustment_layer_constructor_marks_clip_kind() {
+        let clip = Clip::new_adjustment_layer(AssetId::new(), tc(12), tc(30));
+
+        assert!(clip.is_adjustment_layer());
+        assert_eq!(clip.kind, ClipKind::AdjustmentLayer);
+        assert_eq!(clip.position, tc(12));
+        assert_eq!(clip.duration, tc(30));
+        assert!(clip.effects.is_empty());
+    }
+
+    #[test]
+    fn adjustment_layer_instances_from_same_asset_do_not_share_state() {
+        let shared_asset_id = AssetId::new();
+        let mut first = Clip::new_adjustment_layer(shared_asset_id, tc(0), tc(30));
+        let mut second = Clip::new_adjustment_layer(shared_asset_id, tc(40), tc(30));
+        first.add_effect(EffectType::BasicCorrection);
+        second.add_effect(EffectType::BasicCorrection);
+        let exposure_path =
+            first.effect_property_path("basic.exposure").expect("adjustment exposure path");
+
+        first
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: exposure_path,
+                value: PropertyValue::Float(1.25),
+            })
+            .expect("set first exposure");
+
+        let first_exposure = first.evaluate_effect_params(tc(10)).exposure;
+        let second_exposure = second.evaluate_effect_params(tc(50)).exposure;
+
+        assert!((first_exposure - 1.25).abs() < 1.0e-4);
+        assert!(second_exposure.abs() < 1.0e-4);
     }
 }

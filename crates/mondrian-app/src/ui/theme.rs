@@ -907,8 +907,8 @@ pub enum UiIcon {
     Copy,
     ClipboardText,
     Anchor,
-    CaretRight,
-    CaretDown,
+    ArrowRight,
+    ArrowDown,
 }
 
 pub fn icon(ui: &mut egui::Ui, kind: UiIcon, color: egui::Color32) -> egui::Response {
@@ -925,6 +925,24 @@ pub fn icon_button(ui: &mut egui::Ui, size: [f32; 2], kind: UiIcon) -> egui::Res
     let icon_rect =
         egui::Rect::from_center_size(response.rect.center(), egui::vec2(icon_size, icon_size));
     draw_icon(ui.painter(), icon_rect, kind, ui.visuals().text_color());
+    response
+}
+
+pub fn icon_ghost_button(ui: &mut egui::Ui, size: [f32; 2], kind: UiIcon) -> egui::Response {
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(size[0], size[1]), egui::Sense::click());
+    paint_icon_ghost_button(ui.painter(), rect, kind, response.hovered());
+    response
+}
+
+pub fn icon_ghost_button_at(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    id: egui::Id,
+    kind: UiIcon,
+) -> egui::Response {
+    let response = ui.interact(rect, id, egui::Sense::click());
+    paint_icon_ghost_button(ui.painter(), rect, kind, response.hovered());
     response
 }
 
@@ -992,6 +1010,17 @@ pub fn icon_ghost_toggle_button(
     };
     draw_icon(ui.painter(), icon_rect, kind, icon_color);
     response
+}
+
+fn paint_icon_ghost_button(painter: &egui::Painter, rect: egui::Rect, kind: UiIcon, hovered: bool) {
+    let icon_size = tokens::icon_size();
+    let icon_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(icon_size, icon_size));
+    let icon_color = if hovered {
+        palette::text_primary()
+    } else {
+        palette::text_muted()
+    };
+    draw_icon(painter, icon_rect, kind, icon_color);
 }
 
 pub fn icon_text_button(
@@ -1102,8 +1131,8 @@ fn icon_svg_bytes(kind: UiIcon) -> &'static [u8] {
         UiIcon::Copy => include_bytes!("../../assets/icons/copy.svg"),
         UiIcon::ClipboardText => include_bytes!("../../assets/icons/clipboard_text.svg"),
         UiIcon::Anchor => include_bytes!("../../assets/icons/anchor.svg"),
-        UiIcon::CaretRight => include_bytes!("../../assets/icons/caret_right.svg"),
-        UiIcon::CaretDown => include_bytes!("../../assets/icons/caret_down.svg"),
+        UiIcon::ArrowRight => include_bytes!("../../assets/icons/arrow_right.svg"),
+        UiIcon::ArrowDown => include_bytes!("../../assets/icons/arrow_down.svg"),
     }
 }
 

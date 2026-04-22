@@ -12,7 +12,13 @@ pub mod compositor;
 pub mod context;
 pub mod pipeline;
 pub mod shaders;
+pub mod timeline_composite;
 
 pub use compositor::{CompositorConfig, FrameCompositor};
 pub use context::GpuContext;
 pub use pipeline::{CpuRgbaLayer, RenderPipeline};
+pub use timeline_composite::{
+    composite_timeline_elements, composite_timeline_elements_into, is_identity_transform,
+    quantize_transform_signature, TimelineAdjustmentLayer, TimelineCompositeElement,
+    TimelineCompositeOptions, TimelineCompositeScratch, TimelineMediaLayer,
+};
