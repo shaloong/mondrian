@@ -10,7 +10,8 @@ pub mod text;
 pub mod transition;
 
 pub use adjustment::{
-    apply_adjustment_layer, apply_adjustment_pass, blend_adjustment_result, AdjustmentLayerParams,
+    apply_adjustment_layer, apply_adjustment_pass, blend_adjustment_result, blend_rgba_pixel,
+    AdjustmentLayerParams,
 };
 pub use effect::{EffectNode, EffectType};
 pub use lut::Lut3D;

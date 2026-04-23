@@ -1,5 +1,5 @@
 use super::*;
-use mondrian_core::types::Resolution;
+use mondrian_core::types::{BlendMode, Resolution};
 use mondrian_renderer::{
     composite_timeline_elements, TimelineCompositeElement, TimelineCompositeOptions,
     TimelineCompositeScratch, TimelineMediaLayer,
@@ -42,6 +42,7 @@ fn alpha_blend_layer_should_apply_translation_transform() {
             width: src_w,
             height: src_h,
             opacity: 1.0,
+            blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 1.0, 0.0, 1.0, 0.0],
             effect_params: Default::default(),
             frame_seed: 0,
@@ -74,6 +75,7 @@ fn alpha_blend_layer_should_skip_non_invertible_transform() {
             width: src_w,
             height: src_h,
             opacity: 1.0,
+            blend_mode: BlendMode::Normal,
             transform: [1.0, 2.0, 0.0, 2.0, 4.0, 0.0],
             effect_params: Default::default(),
             frame_seed: 0,

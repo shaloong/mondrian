@@ -143,25 +143,62 @@ pub fn blend_adjustment_result(
     for ((base_px, processed_px), out_px) in
         base.chunks_exact(4).zip(processed.chunks_exact(4)).zip(out.chunks_exact_mut(4))
     {
-        let base_alpha = base_px[3];
-        if base_alpha == 0 {
-            out_px.copy_from_slice(base_px);
-            continue;
-        }
-
-        let base_rgb = rgb_to_unit(base_px);
-        let processed_rgb = rgb_to_unit(processed_px);
-        let blended = blend_mode_rgb(mode, base_rgb, processed_rgb);
-        let final_rgb = [
-            lerp(base_rgb[0], blended[0], opacity),
-            lerp(base_rgb[1], blended[1], opacity),
-            lerp(base_rgb[2], blended[2], opacity),
-        ];
-        out_px[0] = unit_to_u8(final_rgb[0]);
-        out_px[1] = unit_to_u8(final_rgb[1]);
-        out_px[2] = unit_to_u8(final_rgb[2]);
-        out_px[3] = base_alpha;
+        let blended = blend_rgba_pixel(
+            [base_px[0], base_px[1], base_px[2], base_px[3]],
+            [
+                processed_px[0],
+                processed_px[1],
+                processed_px[2],
+                processed_px[3],
+            ],
+            opacity,
+            mode,
+        );
+        out_px.copy_from_slice(&blended);
     }
+}
+
+pub fn blend_rgba_pixel(
+    base_px: [u8; 4],
+    blend_px: [u8; 4],
+    opacity: f32,
+    blend_mode: BlendMode,
+) -> [u8; 4] {
+    let opacity = opacity.clamp(0.0, 1.0);
+    if opacity <= 1.0e-4 {
+        return base_px;
+    }
+
+    let base_alpha = base_px[3] as f32 / 255.0;
+    let blend_alpha = (blend_px[3] as f32 / 255.0) * opacity;
+    if blend_alpha <= 1.0e-4 {
+        return base_px;
+    }
+    if base_alpha <= 1.0e-4 {
+        return [
+            blend_px[0],
+            blend_px[1],
+            blend_px[2],
+            unit_to_u8(blend_alpha),
+        ];
+    }
+
+    let base_rgb = rgb_to_unit(&base_px);
+    let blend_rgb = rgb_to_unit(&blend_px);
+    let blended_rgb = blend_mode_rgb(blend_mode, base_rgb, blend_rgb);
+    let out_alpha = blend_alpha + base_alpha * (1.0 - blend_alpha);
+    if out_alpha <= 1.0e-4 {
+        return [0, 0, 0, 0];
+    }
+
+    let mut out = [0u8; 4];
+    for channel in 0..3 {
+        let premul = blended_rgb[channel] * blend_alpha
+            + base_rgb[channel] * base_alpha * (1.0 - blend_alpha);
+        out[channel] = unit_to_u8(premul / out_alpha);
+    }
+    out[3] = unit_to_u8(out_alpha);
+    out
 }
 
 pub fn apply_adjustment_pass(
@@ -448,10 +485,6 @@ fn rgb_to_unit(px: &[u8]) -> [f32; 3] {
 
 fn unit_to_u8(value: f32) -> u8 {
     (value.clamp(0.0, 1.0) * 255.0).round() as u8
-}
-
-fn lerp(a: f32, b: f32, t: f32) -> f32 {
-    a + (b - a) * t
 }
 
 fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {

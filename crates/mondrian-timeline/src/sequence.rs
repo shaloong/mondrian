@@ -95,6 +95,7 @@ impl Sequence {
                     source_time,
                     transform_matrix: transform_mat,
                     opacity,
+                    blend_mode: clip.blend_mode.unwrap_or(track.blend_mode),
                 });
             }
         }
@@ -284,6 +285,33 @@ mod tests {
         assert_eq!(active.len(), 2);
         assert_eq!(active[0].track_index, 0);
         assert_eq!(active[1].track_index, 2);
+    }
+
+    #[test]
+    fn active_clips_inherit_track_blend_mode_when_clip_uses_default() {
+        let mut seq = Sequence::new("Track Blend Inheritance");
+        let tb = seq.time_base();
+        seq.video_tracks[0].blend_mode = BlendMode::Screen;
+        let clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(20, tb));
+        seq.video_tracks[0].add_clip(clip).expect("add clip");
+
+        let active = seq.active_clips_at(TimeCode::new(5, tb));
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].blend_mode, BlendMode::Screen);
+    }
+
+    #[test]
+    fn active_clips_prefer_clip_blend_mode_over_track_blend_mode() {
+        let mut seq = Sequence::new("Clip Blend Override");
+        let tb = seq.time_base();
+        seq.video_tracks[0].blend_mode = BlendMode::Screen;
+        let mut clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(20, tb));
+        clip.blend_mode = Some(BlendMode::Multiply);
+        seq.video_tracks[0].add_clip(clip).expect("add clip");
+
+        let active = seq.active_clips_at(TimeCode::new(5, tb));
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].blend_mode, BlendMode::Multiply);
     }
 
     #[test]

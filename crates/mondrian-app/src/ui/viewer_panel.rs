@@ -9,10 +9,10 @@ use mondrian_effects::AdjustmentLayerParams;
 use mondrian_media::cache::FrameCacheConfig;
 use mondrian_media::{DecoderPool, FrameCache, RgbaFrame};
 use mondrian_renderer::{
-    composite_timeline_elements, is_identity_transform, quantize_transform_signature,
-    CompositorConfig, CpuRgbaLayer, FrameCompositor, GpuContext, TimelineAdjustmentLayer,
-    TimelineCompositeElement, TimelineCompositeOptions, TimelineCompositeScratch,
-    TimelineMediaLayer,
+    build_timeline_render_plan, composite_timeline_elements, is_identity_transform,
+    quantize_transform_signature, CompositorConfig, CpuRgbaLayer, FrameCompositor, GpuContext,
+    TimelineAdjustmentLayer, TimelineCompositeElement, TimelineCompositeOptions,
+    TimelineCompositeScratch, TimelineMediaLayer, TimelineRenderPlanElement,
 };
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -37,6 +37,7 @@ struct LayerDecodeRequest {
     source_secs: f64,
     source_time_base: Rational,
     opacity: f32,
+    blend_mode: BlendMode,
     transform: [f32; 6],
     effect_params: AdjustmentLayerParams,
     frame_seed: i64,
@@ -97,6 +98,7 @@ enum LayerSignature {
         asset_id: AssetId,
         source_frame: i64,
         opacity_u8: u8,
+        blend_mode: BlendMode,
         transform_key: [i32; 6],
         frame_seed: i64,
         param_bits: [u32; 11],
@@ -457,6 +459,7 @@ impl ViewerPanel {
                                     asset_id: layer.frame_key.0,
                                     source_frame: layer.frame_key.1,
                                     opacity_u8: (layer.opacity * 255.0).round() as u8,
+                                    blend_mode: layer.blend_mode,
                                     transform_key: quantize_transform_signature(layer.transform),
                                     frame_seed: layer.frame_seed,
                                     param_bits: layer.effect_params.signature_words(),
@@ -1519,59 +1522,58 @@ impl ViewerPanel {
         state: &AppState,
         timeline_frame: i64,
     ) -> Vec<RenderElement> {
-        let current = TimeCode::new(timeline_frame, seq.time_base());
-        let active = seq.active_clips_at(current);
         let mut layers: Vec<RenderElement> = Vec::new();
 
-        for active_clip in active {
-            if active_clip.clip.is_adjustment_layer() {
-                let params = active_clip.clip.evaluate_effect_params(current);
-                layers.push(RenderElement::Adjustment(AdjustmentRenderRequest {
-                    params,
-                    opacity: active_clip.opacity.clamp(0.0, 1.0),
-                    blend_mode: active_clip.clip.blend_mode,
-                    frame_seed: timeline_frame.max(0),
-                }));
-                continue;
+        for plan in build_timeline_render_plan(seq, timeline_frame) {
+            match plan {
+                TimelineRenderPlanElement::Adjustment(adjustment) => {
+                    layers.push(RenderElement::Adjustment(AdjustmentRenderRequest {
+                        params: adjustment.params,
+                        opacity: adjustment.opacity,
+                        blend_mode: Some(adjustment.blend_mode),
+                        frame_seed: adjustment.frame_seed,
+                    }));
+                }
+                TimelineRenderPlanElement::Media(media) => {
+                    let asset_id = media.asset_id;
+                    let cached = if let Some(hit) = self.asset_preview_cache.get(&asset_id) {
+                        hit.clone()
+                    } else {
+                        let loaded = lib.get_asset(asset_id).ok().flatten().map(|asset| {
+                            CachedAssetPreview {
+                                is_video: matches!(asset.kind, mondrian_assets::AssetKind::Video),
+                                source_path: asset.path,
+                            }
+                        });
+                        self.asset_preview_cache.insert(asset_id, loaded.clone());
+                        loaded
+                    };
+
+                    let Some(asset) = cached else {
+                        continue;
+                    };
+                    if !asset.is_video {
+                        continue;
+                    }
+
+                    let path = self.resolve_preview_source_path(
+                        asset_id,
+                        asset.source_path.as_path(),
+                        state.is_asset_proxy_mode(asset_id),
+                    );
+                    layers.push(RenderElement::Media(LayerDecodeRequest {
+                        frame_key: (asset_id, media.source_frame),
+                        path,
+                        source_secs: media.source_secs,
+                        source_time_base: media.source_time_base,
+                        opacity: media.opacity,
+                        blend_mode: media.blend_mode,
+                        transform: media.transform,
+                        effect_params: media.effect_params,
+                        frame_seed: media.frame_seed,
+                    }));
+                }
             }
-
-            let asset_id = active_clip.clip.asset_id;
-            let cached = if let Some(hit) = self.asset_preview_cache.get(&asset_id) {
-                hit.clone()
-            } else {
-                let loaded =
-                    lib.get_asset(asset_id).ok().flatten().map(|asset| CachedAssetPreview {
-                        is_video: matches!(asset.kind, mondrian_assets::AssetKind::Video),
-                        source_path: asset.path,
-                    });
-                self.asset_preview_cache.insert(asset_id, loaded.clone());
-                loaded
-            };
-
-            let Some(asset) = cached else {
-                continue;
-            };
-            if !asset.is_video {
-                continue;
-            }
-
-            let source_frame = active_clip.source_time.frame.max(0);
-            let opacity = active_clip.opacity.clamp(0.0, 1.0);
-            let path = self.resolve_preview_source_path(
-                asset_id,
-                asset.source_path.as_path(),
-                state.is_asset_proxy_mode(asset_id),
-            );
-            layers.push(RenderElement::Media(LayerDecodeRequest {
-                frame_key: (asset_id, source_frame),
-                path,
-                source_secs: active_clip.source_time.to_secs().max(0.0),
-                source_time_base: active_clip.source_time.time_base,
-                opacity,
-                transform: mat3_to_affine(active_clip.transform_matrix.to_cols_array()),
-                effect_params: active_clip.clip.evaluate_effect_params(current),
-                frame_seed: timeline_frame.max(0),
-            }));
         }
 
         layers
@@ -2239,7 +2241,9 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
 
     let has_cpu_only_ops = request.layers.iter().any(|layer| match layer {
         RenderElement::Media(layer) => {
-            !layer.effect_params.is_identity() || !is_identity_transform(layer.transform)
+            !layer.effect_params.is_identity()
+                || !is_identity_transform(layer.transform)
+                || layer.blend_mode != BlendMode::Normal
         }
         RenderElement::Adjustment(_) => true,
     });
@@ -2285,6 +2289,7 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
                     width: frame.width,
                     height: frame.height,
                     opacity: layer.opacity,
+                    blend_mode: layer.blend_mode,
                     transform: layer.transform,
                     effect_params: layer.effect_params,
                     frame_seed: layer.frame_seed,
@@ -2352,10 +2357,6 @@ fn try_gpu_composite_rgba_layers(
             None
         }
     }
-}
-
-fn mat3_to_affine(cols: [f32; 9]) -> [f32; 6] {
-    [cols[0], cols[3], cols[6], cols[1], cols[4], cols[7]]
 }
 
 fn global_gpu_compositor() -> Option<&'static Mutex<FrameCompositor>> {

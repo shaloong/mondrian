@@ -536,6 +536,8 @@ pub struct ActiveClip {
     pub transform_matrix: glam::Mat3,
     /// 不透明度（已在此时刻求值）
     pub opacity: f32,
+    /// 生效后的混合模式（clip 覆盖轨道，否则继承轨道）
+    pub blend_mode: BlendMode,
 }
 
 fn property_mutation_path(mutation: &PropertyMutation) -> &str {

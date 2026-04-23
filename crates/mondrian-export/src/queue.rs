@@ -14,8 +14,9 @@ use mondrian_media::audio::{
 };
 use mondrian_media::decode_video_frame_at_time_rgba_scaled;
 use mondrian_renderer::{
-    composite_timeline_elements_into, TimelineAdjustmentLayer, TimelineCompositeElement,
-    TimelineCompositeOptions, TimelineCompositeScratch, TimelineMediaLayer,
+    build_timeline_render_plan, composite_timeline_elements_into, TimelineAdjustmentLayer,
+    TimelineCompositeElement, TimelineCompositeOptions, TimelineCompositeScratch,
+    TimelineMediaLayer, TimelineRenderPlanElement,
 };
 use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
@@ -729,48 +730,44 @@ fn render_timeline_frame_into(
         canvas.resize(required_len, 0);
     }
 
-    let timecode = TimeCode::new(timeline_frame.max(0), timeline.sequence.time_base());
-    let active_clips = timeline.sequence.active_clips_at(timecode);
-    if active_clips.is_empty() {
+    let render_plan = build_timeline_render_plan(&timeline.sequence, timeline_frame.max(0));
+    if render_plan.is_empty() {
         clear_canvas_black_opaque(canvas);
         return Ok(());
     }
 
-    let mut decode_cache = (active_clips.len() > 1).then(|| {
-        HashMap::<(AssetId, i64), Arc<DecodedVideoLayer>>::with_capacity(active_clips.len())
+    let mut decode_cache = (render_plan.len() > 1).then(|| {
+        HashMap::<(AssetId, i64), Arc<DecodedVideoLayer>>::with_capacity(render_plan.len())
     });
     let mut decoded_media =
-        std::iter::repeat_with(|| None).take(active_clips.len()).collect::<Vec<_>>();
+        std::iter::repeat_with(|| None).take(render_plan.len()).collect::<Vec<_>>();
 
-    for (index, active) in active_clips.iter().enumerate() {
-        if active.clip.is_adjustment_layer() || active.opacity <= 0.0 {
-            continue;
-        }
-
-        let Some(path) = timeline.asset_paths.get(&active.clip.asset_id) else {
+    for (index, element) in render_plan.iter().enumerate() {
+        let TimelineRenderPlanElement::Media(media) = element else {
             continue;
         };
-
-        let source_frame = active.source_time.frame.max(0);
+        let Some(path) = timeline.asset_paths.get(&media.asset_id) else {
+            continue;
+        };
         let decoded = if let Some(cache) = decode_cache.as_mut() {
-            if let Some(hit) = cache.get(&(active.clip.asset_id, source_frame)) {
+            if let Some(hit) = cache.get(&(media.asset_id, media.source_frame)) {
                 Arc::clone(hit)
             } else {
                 let decoded = decode_video_layer_scaled(
-                    active.clip.asset_id,
+                    media.asset_id,
                     path.as_path(),
-                    active.source_time.to_secs().max(0.0),
+                    media.source_secs,
                     width,
                     height,
                 )?;
-                cache.insert((active.clip.asset_id, source_frame), Arc::clone(&decoded));
+                cache.insert((media.asset_id, media.source_frame), Arc::clone(&decoded));
                 decoded
             }
         } else {
             decode_video_layer_scaled(
-                active.clip.asset_id,
+                media.asset_id,
                 path.as_path(),
-                active.source_time.to_secs().max(0.0),
+                media.source_secs,
                 width,
                 height,
             )?
@@ -778,37 +775,35 @@ fn render_timeline_frame_into(
         decoded_media[index] = Some(decoded);
     }
 
-    let mut composite_elements = Vec::with_capacity(active_clips.len());
-    for (index, active) in active_clips.iter().enumerate() {
-        let opacity = active.opacity.clamp(0.0, 1.0);
-        if opacity <= 0.0 {
-            continue;
+    let mut composite_elements = Vec::with_capacity(render_plan.len());
+    for (index, element) in render_plan.iter().enumerate() {
+        match element {
+            TimelineRenderPlanElement::Adjustment(adjustment) => {
+                composite_elements.push(TimelineCompositeElement::Adjustment(
+                    TimelineAdjustmentLayer {
+                        params: adjustment.params,
+                        opacity: adjustment.opacity,
+                        blend_mode: Some(adjustment.blend_mode),
+                        frame_seed: adjustment.frame_seed,
+                    },
+                ));
+            }
+            TimelineRenderPlanElement::Media(media) => {
+                let Some(decoded) = decoded_media[index].as_ref() else {
+                    continue;
+                };
+                composite_elements.push(TimelineCompositeElement::Media(TimelineMediaLayer {
+                    rgba: &decoded.data,
+                    width: decoded.width,
+                    height: decoded.height,
+                    opacity: media.opacity,
+                    blend_mode: media.blend_mode,
+                    transform: media.transform,
+                    effect_params: media.effect_params,
+                    frame_seed: media.frame_seed,
+                }));
+            }
         }
-
-        if active.clip.is_adjustment_layer() {
-            composite_elements.push(TimelineCompositeElement::Adjustment(
-                TimelineAdjustmentLayer {
-                    params: active.clip.evaluate_effect_params(timecode),
-                    opacity,
-                    blend_mode: active.clip.blend_mode,
-                    frame_seed: timeline_frame.max(0),
-                },
-            ));
-            continue;
-        }
-
-        let Some(decoded) = decoded_media[index].as_ref() else {
-            continue;
-        };
-        composite_elements.push(TimelineCompositeElement::Media(TimelineMediaLayer {
-            rgba: &decoded.data,
-            width: decoded.width,
-            height: decoded.height,
-            opacity,
-            transform: mat3_to_affine(active.transform_matrix.to_cols_array()),
-            effect_params: active.clip.evaluate_effect_params(timecode),
-            frame_seed: timeline_frame.max(0),
-        }));
     }
 
     let mut scratch = TimelineCompositeScratch::default();
@@ -889,10 +884,6 @@ fn force_canvas_alpha_opaque(canvas: &mut [u8]) {
     for px in canvas.chunks_exact_mut(4) {
         px[3] = 255;
     }
-}
-
-fn mat3_to_affine(cols: [f32; 9]) -> [f32; 6] {
-    [cols[0], cols[3], cols[6], cols[1], cols[4], cols[7]]
 }
 
 /// 异步后台渲染队列
@@ -1561,6 +1552,7 @@ mod tests {
                     width: 1,
                     height: 1,
                     opacity: 1.0,
+                    blend_mode: BlendMode::Normal,
                     transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                     effect_params: AdjustmentLayerParams {
                         saturation: 0.0,
@@ -1591,6 +1583,7 @@ mod tests {
                         width: 2,
                         height: 1,
                         opacity: 1.0,
+                        blend_mode: BlendMode::Normal,
                         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                         effect_params: AdjustmentLayerParams::default(),
                         frame_seed: 0,
@@ -1613,6 +1606,7 @@ mod tests {
                         width: 2,
                         height: 1,
                         opacity: 1.0,
+                        blend_mode: BlendMode::Normal,
                         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                         effect_params: AdjustmentLayerParams::default(),
                         frame_seed: 0,

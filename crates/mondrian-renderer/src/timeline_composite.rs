@@ -1,5 +1,7 @@
 use mondrian_core::types::BlendMode;
-use mondrian_effects::{apply_adjustment_layer, apply_adjustment_pass, AdjustmentLayerParams};
+use mondrian_effects::{
+    apply_adjustment_layer, apply_adjustment_pass, blend_rgba_pixel, AdjustmentLayerParams,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct TimelineMediaLayer<'a> {
@@ -7,6 +9,7 @@ pub struct TimelineMediaLayer<'a> {
     pub width: u32,
     pub height: u32,
     pub opacity: f32,
+    pub blend_mode: BlendMode,
     pub transform: [f32; 6],
     pub effect_params: AdjustmentLayerParams,
     pub frame_seed: i64,
@@ -98,6 +101,7 @@ pub fn composite_timeline_elements_into(
                     layer.width,
                     layer.height,
                     layer.opacity,
+                    layer.blend_mode,
                     layer.transform,
                 );
                 has_composited_media = true;
@@ -163,12 +167,13 @@ fn alpha_blend_layer(
     src_w: u32,
     src_h: u32,
     opacity: f32,
+    blend_mode: BlendMode,
     transform: [f32; 6],
 ) {
     let width = dst_w.min(src_w) as usize;
     let height = dst_h.min(src_h) as usize;
-    let opacity_u8 = (opacity.clamp(0.0, 1.0) * 255.0).round() as u32;
-    if opacity_u8 == 0 {
+    let opacity = opacity.clamp(0.0, 1.0);
+    if opacity <= 1.0e-4 {
         return;
     }
 
@@ -182,11 +187,13 @@ fn alpha_blend_layer(
             for (dst_px, src_px) in
                 dst_row.chunks_exact_mut(4).zip(src_row.chunks_exact(4)).take(width)
             {
-                blend_pixel_with_alpha(
-                    dst_px,
+                let blended = blend_rgba_pixel(
+                    [dst_px[0], dst_px[1], dst_px[2], dst_px[3]],
                     [src_px[0], src_px[1], src_px[2], src_px[3]],
-                    opacity_u8,
+                    opacity,
+                    blend_mode,
                 );
+                dst_px.copy_from_slice(&blended);
             }
         }
         return;
@@ -215,7 +222,14 @@ fn alpha_blend_layer(
             if dst_idx + 3 >= dst_rgba.len() {
                 continue;
             }
-            blend_pixel_with_alpha(&mut dst_rgba[dst_idx..dst_idx + 4], src_px, opacity_u8);
+            let dst_px = &mut dst_rgba[dst_idx..dst_idx + 4];
+            let blended = blend_rgba_pixel(
+                [dst_px[0], dst_px[1], dst_px[2], dst_px[3]],
+                src_px,
+                opacity,
+                blend_mode,
+            );
+            dst_px.copy_from_slice(&blended);
         }
     }
 }
@@ -268,31 +282,6 @@ fn sample_src_rgba(
     ])
 }
 
-fn blend_pixel_with_alpha(dst_px: &mut [u8], src_px: [u8; 4], opacity_u8: u32) {
-    let alpha = ((src_px[3] as u32 * opacity_u8 + 127) / 255).min(255);
-    if alpha == 0 {
-        return;
-    }
-    if alpha >= 255 {
-        dst_px[0] = src_px[0];
-        dst_px[1] = src_px[1];
-        dst_px[2] = src_px[2];
-        dst_px[3] = 255;
-        return;
-    }
-
-    let inv_alpha = 255 - alpha;
-    dst_px[0] = blend_channel_u8(src_px[0] as u32, dst_px[0] as u32, alpha, inv_alpha);
-    dst_px[1] = blend_channel_u8(src_px[1] as u32, dst_px[1] as u32, alpha, inv_alpha);
-    dst_px[2] = blend_channel_u8(src_px[2] as u32, dst_px[2] as u32, alpha, inv_alpha);
-}
-
-#[inline]
-fn blend_channel_u8(src: u32, dst: u32, alpha: u32, inv_alpha: u32) -> u8 {
-    let value = src * alpha + dst * inv_alpha + 127;
-    ((value + (value >> 8)) >> 8) as u8
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,6 +292,7 @@ mod tests {
             width,
             height,
             opacity: 1.0,
+            blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_params: AdjustmentLayerParams::default(),
             frame_seed: 0,
@@ -320,6 +310,7 @@ mod tests {
                 width: 1,
                 height: 1,
                 opacity: 1.0,
+                blend_mode: BlendMode::Normal,
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                 effect_params: AdjustmentLayerParams {
                     saturation: 0.0,
@@ -361,5 +352,31 @@ mod tests {
 
         assert_eq!(&output[0..4], &[54, 54, 54, 255]);
         assert_eq!(&output[4..8], &[0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn media_blend_mode_is_applied_during_compositing() {
+        let mut scratch = TimelineCompositeScratch::default();
+        let output = composite_timeline_elements(
+            1,
+            1,
+            &[
+                identity_media(&[128, 64, 32, 255], 1, 1),
+                TimelineCompositeElement::Media(TimelineMediaLayer {
+                    rgba: &[64, 192, 128, 255],
+                    width: 1,
+                    height: 1,
+                    opacity: 1.0,
+                    blend_mode: BlendMode::Multiply,
+                    transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                    effect_params: AdjustmentLayerParams::default(),
+                    frame_seed: 0,
+                }),
+            ],
+            TimelineCompositeOptions::default(),
+            &mut scratch,
+        );
+
+        assert_eq!(&output[0..4], &[32, 48, 16, 255]);
     }
 }

@@ -1,4 +1,5 @@
 use super::*;
+use mondrian_core::types::BlendMode;
 use mondrian_effects::AdjustmentLayerParams;
 use mondrian_renderer::{
     composite_timeline_elements_into, TimelineCompositeElement, TimelineCompositeOptions,
@@ -151,6 +152,7 @@ fn compose_frame_layers_into_canvas(
                 width: layer.width,
                 height: layer.height,
                 opacity: *opacity,
+                blend_mode: BlendMode::Normal,
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                 effect_params: AdjustmentLayerParams::default(),
                 frame_seed: frame_idx as i64,
