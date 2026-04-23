@@ -1,4 +1,10 @@
 use super::*;
+use mondrian_core::types::BlendMode;
+use mondrian_effects::AdjustmentLayerParams;
+use mondrian_renderer::{
+    composite_timeline_elements_into, TimelineCompositeElement, TimelineCompositeOptions,
+    TimelineCompositeScratch, TimelineMediaLayer,
+};
 use serde::Serialize;
 use std::cmp;
 use std::fs::OpenOptions;
@@ -130,6 +136,39 @@ fn build_frame_layers(
     out
 }
 
+fn compose_frame_layers_into_canvas(
+    canvas: &mut Vec<u8>,
+    width: u32,
+    height: u32,
+    layers: &[(Arc<DecodedVideoLayer>, f32)],
+    frame_idx: u64,
+) {
+    let mut scratch = TimelineCompositeScratch::default();
+    let elements = layers
+        .iter()
+        .map(|(layer, opacity)| {
+            TimelineCompositeElement::Media(TimelineMediaLayer {
+                rgba: &layer.data,
+                width: layer.width,
+                height: layer.height,
+                opacity: *opacity,
+                blend_mode: BlendMode::Normal,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_params: AdjustmentLayerParams::default(),
+                frame_seed: frame_idx as i64,
+            })
+        })
+        .collect::<Vec<_>>();
+    composite_timeline_elements_into(
+        canvas,
+        width,
+        height,
+        &elements,
+        TimelineCompositeOptions::default(),
+        &mut scratch,
+    );
+}
+
 fn run_export_render_simulation(
     scenario: &'static str,
     width: u32,
@@ -166,7 +205,7 @@ fn run_export_render_simulation(
         && first_frame_layers[0].0.width == width
         && first_frame_layers[0].0.height == height;
     let first_started = Instant::now();
-    compose_decoded_layers_into_canvas(&mut canvas, width, height, &first_frame_layers);
+    compose_frame_layers_into_canvas(&mut canvas, width, height, &first_frame_layers, 0);
     let first_frame_ms = first_started.elapsed().as_millis();
     if first_frame_passthrough {
         passthrough_frames += 1;
@@ -184,7 +223,7 @@ fn run_export_render_simulation(
             && frame_layers[0].0.height == height;
 
         let started = Instant::now();
-        compose_decoded_layers_into_canvas(&mut canvas, width, height, &frame_layers);
+        compose_frame_layers_into_canvas(&mut canvas, width, height, &frame_layers, frame + 1);
         let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
 
         if frame_passthrough {

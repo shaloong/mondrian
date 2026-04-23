@@ -1,6 +1,7 @@
 use crate::app::AppState;
 use crate::ui::theme::{self, palette, tokens, typography};
 use egui::Ui;
+use mondrian_assets::AssetKind;
 use mondrian_export::{
     preset::{ExportConfig, ExportInput, ExportPreset, TimelineExportInput, VideoCodecConfig},
     queue::RenderJob,
@@ -248,6 +249,10 @@ fn collect_timeline_asset_paths(
             .map_err(|err| format!("读取素材 {} 失败: {}", asset_id, err))?
             .ok_or_else(|| format!("素材不存在: {}", asset_id))?;
 
+        if matches!(asset.kind, AssetKind::AdjustmentLayer) {
+            continue;
+        }
+
         if !asset.path.exists() {
             return Err(format!("素材离线: {}", asset.path.display()));
         }
@@ -270,6 +275,47 @@ fn builtin_presets() -> Vec<(String, ExportPreset)> {
         ),
         ("代理文件 720p".to_owned(), ExportPreset::proxy_720p()),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mondrian_assets::AssetLibrary;
+    use mondrian_core::types::TimeCode;
+    use mondrian_timeline::{clip::Clip, sequence::Sequence};
+
+    #[test]
+    fn build_asset_paths_skips_synthetic_adjustment_assets() {
+        let mut state = AppState::default();
+        state.sequence = Some(Sequence::new("export-adjustment"));
+        let temp_root = std::env::temp_dir().join(format!(
+            "mondrian-export-adjustment-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        state.asset_library = Some(AssetLibrary::open(temp_root.clone()).expect("open library"));
+
+        let asset_id = state.create_adjustment_layer_asset(None).expect("create adjustment asset");
+        {
+            let seq = state.sequence.as_mut().expect("sequence should exist");
+            let tb = seq.time_base();
+            seq.video_tracks[0]
+                .add_clip(Clip::new_adjustment_layer(
+                    asset_id,
+                    TimeCode::new(0, tb),
+                    TimeCode::new(20, tb),
+                ))
+                .expect("add adjustment clip");
+        }
+
+        let seq = state.sequence.as_ref().expect("sequence should exist");
+        let paths = collect_timeline_asset_paths(&state, seq).expect("collect asset paths");
+        assert!(!paths.contains_key(&asset_id));
+
+        let _ = std::fs::remove_dir_all(temp_root);
+    }
 }
 
 fn default_output_filename(preset: &ExportPreset) -> String {

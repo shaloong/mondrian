@@ -14,8 +14,11 @@ use mondrian_core::{
         PropertyHost, PropertyMutation, PropertyValue, TimeTicks,
     },
     events::{AppEvent, EventBus},
-    types::{AssetId, ClipId, KeyframeId, Rational, Resolution, SequenceId, TimeCode, TrackId},
+    types::{
+        AssetId, ClipId, EffectId, KeyframeId, Rational, Resolution, SequenceId, TimeCode, TrackId,
+    },
 };
+use mondrian_effects::EffectType;
 use mondrian_export::queue::{JobStatus, RenderQueue};
 use mondrian_media::audio::{
     AudioBuffer, AudioClock, AudioMixer, AudioSourceCache, AudioSyncController, AudioTrackConfig,
@@ -30,6 +33,7 @@ use serde::{Deserialize, Serialize};
 use crate::shortcuts::{ShortcutAction, ShortcutBinding, ShortcutKey, ShortcutPreferences};
 use crate::ui::{
     effect_controls_panel::EffectControlsPanel,
+    effect_library_panel::EffectLibraryPanel,
     export_panel::ExportPanel,
     library_panel::LibraryPanel,
     startup::{BootstrapAction, BootstrapRecentProjectItem, BootstrapRecoveryItem},
@@ -38,6 +42,7 @@ use crate::ui::{
 };
 
 const PROJECT_EXTENSION: &str = "mdp";
+const DEFAULT_ADJUSTMENT_LAYER_DURATION_SECS: f64 = 5.0;
 
 mod new_project;
 mod preferences;
@@ -195,6 +200,8 @@ struct AppPreferences {
     theme: crate::ui::theme::Theme,
     #[serde(default = "default_show_effect_controls")]
     show_effect_controls: bool,
+    #[serde(default = "default_show_effect_library")]
+    show_effect_library: bool,
     show_library: bool,
     auto_proxy_enabled: bool,
     show_dev_metrics: bool,
@@ -233,6 +240,7 @@ impl Default for AppPreferences {
             version: 1,
             theme: default_app_theme(),
             show_effect_controls: default_show_effect_controls(),
+            show_effect_library: default_show_effect_library(),
             show_library: true,
             auto_proxy_enabled: false,
             show_dev_metrics: false,
@@ -276,6 +284,10 @@ const fn default_app_theme() -> crate::ui::theme::Theme {
 }
 
 const fn default_show_effect_controls() -> bool {
+    true
+}
+
+const fn default_show_effect_library() -> bool {
     true
 }
 
@@ -988,6 +1000,95 @@ impl AppState {
         Ok(())
     }
 
+    pub fn default_adjustment_layer_duration_frames(&self) -> i64 {
+        let selection_span = self
+            .out_point_frame()
+            .map(|out| out.saturating_sub(self.in_point_frame()))
+            .filter(|span| *span > 0);
+        if let Some(span) = selection_span {
+            return span.max(1);
+        }
+
+        let fps = self
+            .sequence
+            .as_ref()
+            .map(|seq| seq.settings.frame_rate.to_f64())
+            .unwrap_or(25.0);
+        ((DEFAULT_ADJUSTMENT_LAYER_DURATION_SECS * fps).round() as i64).max(1)
+    }
+
+    pub fn default_adjustment_layer_drag_duration(&self) -> Duration {
+        let fps = self
+            .sequence
+            .as_ref()
+            .map(|seq| seq.settings.frame_rate.to_f64())
+            .unwrap_or(25.0);
+        let secs = self.default_adjustment_layer_duration_frames() as f64 / fps.max(1.0);
+        Duration::from_secs_f64(secs.max(1.0 / fps.max(1.0)))
+    }
+
+    fn create_adjustment_layer_asset_internal(
+        &mut self,
+        name: Option<&str>,
+        announce: bool,
+    ) -> mondrian_core::Result<(AssetId, String)> {
+        let library = self.asset_library.as_ref().ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "create_adjustment_layer_asset".to_string(),
+                reason: "素材库未连接".to_string(),
+            }
+        })?;
+
+        let asset_id = library.create_adjustment_layer_asset(name)?;
+        let asset_name = library
+            .get_asset(asset_id)?
+            .map(|asset| asset.name)
+            .unwrap_or_else(|| "调整图层".to_string());
+
+        self.event_bus
+            .publish(mondrian_core::events::AppEvent::AssetImported { asset_id });
+        let _ = self.save_project_file();
+        if announce {
+            self.set_status_hint(format!("已新建：{}", asset_name), false);
+        }
+        Ok((asset_id, asset_name))
+    }
+
+    pub fn create_adjustment_layer_asset(
+        &mut self,
+        name: Option<&str>,
+    ) -> mondrian_core::Result<AssetId> {
+        self.create_adjustment_layer_asset_internal(name, true)
+            .map(|(asset_id, _)| asset_id)
+    }
+
+    pub fn create_adjustment_layer_on_video_track(
+        &mut self,
+        track_id: TrackId,
+        timeline_frame: Option<i64>,
+        overlap_mode: ClipOverlapMode,
+    ) -> mondrian_core::Result<ClipId> {
+        let selection_start = self
+            .out_point_frame()
+            .filter(|out| *out > self.in_point_frame())
+            .map(|_| self.in_point_frame());
+        let start_frame = timeline_frame
+            .or(selection_start)
+            .unwrap_or_else(|| self.current_frame().max(0));
+        let (asset_id, asset_name) = self.create_adjustment_layer_asset_internal(None, false)?;
+        self.begin_drag_asset(
+            asset_id,
+            asset_name.clone(),
+            AssetKind::AdjustmentLayer,
+            self.default_adjustment_layer_drag_duration(),
+            false,
+        );
+        let clip_id =
+            self.drop_dragging_asset_to_video_track_with_mode(track_id, start_frame, overlap_mode)?;
+        self.set_status_hint(format!("已创建调整图层：{}", asset_name), false);
+        Ok(clip_id)
+    }
+
     pub fn remove_track(&mut self, track_id: TrackId, is_video: bool) -> mondrian_core::Result<()> {
         let before = {
             let seq = self.sequence.as_mut().ok_or_else(|| {
@@ -1439,8 +1540,10 @@ impl AppState {
         })?;
 
         let assets = library.list_assets()?;
-        let offline_assets: Vec<_> =
-            assets.into_iter().filter(|asset| !asset.path.exists()).collect();
+        let offline_assets: Vec<_> = assets
+            .into_iter()
+            .filter(|asset| asset.kind != AssetKind::AdjustmentLayer && !asset.path.exists())
+            .collect();
         if offline_assets.is_empty() {
             return Ok(0);
         }
@@ -2058,6 +2161,141 @@ impl AppState {
         Ok(true)
     }
 
+    pub fn add_effect_to_clip(
+        &mut self,
+        selection: SelectedClipRef,
+        effect_type: EffectType,
+    ) -> mondrian_core::Result<bool> {
+        if !selection.is_video_track {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "add_effect_to_clip".to_string(),
+                reason: "当前仅支持给视频类片段添加特效".to_string(),
+            });
+        }
+
+        let (sequence_id, before, after) = {
+            let seq = self.sequence.as_mut().ok_or_else(|| {
+                mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "add_effect_to_clip".to_string(),
+                    reason: "当前无项目".to_string(),
+                }
+            })?;
+            let before = seq.clone();
+            let Some((track_id, _is_video, is_locked)) =
+                find_clip_track_lock(seq, selection.clip_id)
+            else {
+                return Err(mondrian_core::MondrianError::ClipNotFound {
+                    clip_id: selection.clip_id.to_string(),
+                });
+            };
+            if is_locked {
+                return Err(mondrian_core::MondrianError::TrackLocked {
+                    track_id: track_id.to_string(),
+                });
+            }
+
+            let clip = find_clip_mut_by_selection(seq, selection).ok_or_else(|| {
+                mondrian_core::MondrianError::ClipNotFound {
+                    clip_id: selection.clip_id.to_string(),
+                }
+            })?;
+            clip.add_effect(effect_type.clone());
+            (seq.id, before, seq.clone())
+        };
+
+        self.record_sequence_snapshot_command(
+            format!("添加{}", effect_type.display_name()),
+            before,
+            after,
+        );
+        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
+        let _ = self.save_project_file();
+        Ok(true)
+    }
+
+    pub fn set_clip_effect_enabled(
+        &mut self,
+        selection: SelectedClipRef,
+        effect_id: EffectId,
+        enabled: bool,
+    ) -> mondrian_core::Result<bool> {
+        let (sequence_id, before, after) = {
+            let seq = self.sequence.as_mut().ok_or_else(|| {
+                mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "set_clip_effect_enabled".to_string(),
+                    reason: "当前无项目".to_string(),
+                }
+            })?;
+            let before = seq.clone();
+            let Some((track_id, _is_video, is_locked)) =
+                find_clip_track_lock(seq, selection.clip_id)
+            else {
+                return Err(mondrian_core::MondrianError::ClipNotFound {
+                    clip_id: selection.clip_id.to_string(),
+                });
+            };
+            if is_locked {
+                return Err(mondrian_core::MondrianError::TrackLocked {
+                    track_id: track_id.to_string(),
+                });
+            }
+
+            let clip = find_clip_mut_by_selection(seq, selection).ok_or_else(|| {
+                mondrian_core::MondrianError::ClipNotFound {
+                    clip_id: selection.clip_id.to_string(),
+                }
+            })?;
+            clip.set_effect_enabled(effect_id, enabled)?;
+            (seq.id, before, seq.clone())
+        };
+
+        self.record_sequence_snapshot_command("切换特效启用状态", before, after);
+        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
+        let _ = self.save_project_file();
+        Ok(true)
+    }
+
+    pub fn remove_effect_from_clip(
+        &mut self,
+        selection: SelectedClipRef,
+        effect_id: EffectId,
+    ) -> mondrian_core::Result<bool> {
+        let (sequence_id, before, after) = {
+            let seq = self.sequence.as_mut().ok_or_else(|| {
+                mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "remove_effect_from_clip".to_string(),
+                    reason: "当前无项目".to_string(),
+                }
+            })?;
+            let before = seq.clone();
+            let Some((track_id, _is_video, is_locked)) =
+                find_clip_track_lock(seq, selection.clip_id)
+            else {
+                return Err(mondrian_core::MondrianError::ClipNotFound {
+                    clip_id: selection.clip_id.to_string(),
+                });
+            };
+            if is_locked {
+                return Err(mondrian_core::MondrianError::TrackLocked {
+                    track_id: track_id.to_string(),
+                });
+            }
+
+            let clip = find_clip_mut_by_selection(seq, selection).ok_or_else(|| {
+                mondrian_core::MondrianError::ClipNotFound {
+                    clip_id: selection.clip_id.to_string(),
+                }
+            })?;
+            clip.remove_effect(effect_id)?;
+            (seq.id, before, seq.clone())
+        };
+
+        self.record_sequence_snapshot_command("删除特效", before, after);
+        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
+        let _ = self.save_project_file();
+        Ok(true)
+    }
+
     pub fn is_playing(&self) -> bool {
         matches!(self.playback, PlaybackState::Playing { .. })
     }
@@ -2614,9 +2852,9 @@ impl AppState {
         let dragging =
             self.dragging_asset.clone().ok_or(mondrian_core::MondrianError::Cancelled)?;
 
-        if dragging.kind != AssetKind::Video {
+        if !matches!(dragging.kind, AssetKind::Video | AssetKind::AdjustmentLayer) {
             return Err(mondrian_core::MondrianError::UnsupportedFormat {
-                format: "仅支持将视频素材拖到视频轨".to_string(),
+                format: "仅支持将视频素材或调整图层拖到视频轨".to_string(),
             });
         }
 
@@ -2634,15 +2872,24 @@ impl AppState {
             let time_base = seq.time_base();
             let start_frame = timeline_frame.max(0);
 
-            let mut clip = Clip::new(
-                dragging.asset_id,
-                TimeCode::new(start_frame, time_base),
-                TimeCode::new(duration_frames, time_base),
-            );
+            let mut clip = if dragging.kind == AssetKind::AdjustmentLayer {
+                Clip::new_adjustment_layer(
+                    dragging.asset_id,
+                    TimeCode::new(start_frame, time_base),
+                    TimeCode::new(duration_frames, time_base),
+                )
+            } else {
+                Clip::new(
+                    dragging.asset_id,
+                    TimeCode::new(start_frame, time_base),
+                    TimeCode::new(duration_frames, time_base),
+                )
+            };
             clip.label = Some(dragging.name.clone());
             let clip_id = clip.id;
 
-            let should_create_linked_audio = dragging.has_linked_audio;
+            let should_create_linked_audio =
+                dragging.kind == AssetKind::Video && dragging.has_linked_audio;
 
             let mut linked_audio_clip = if should_create_linked_audio {
                 let mut audio_clip = Clip::new(
@@ -3404,6 +3651,12 @@ fn slip_clip_in_track(
     let Some(original) = track.clips.get(clip_index).cloned() else {
         return Ok(false);
     };
+    if original.is_adjustment_layer() {
+        return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+            step_id: "slip_clip".to_string(),
+            reason: "调整图层不支持 slip".to_string(),
+        });
+    }
 
     let source_span = original.source_out.frame - original.source_in.frame;
     if source_span <= 0 {
@@ -3435,6 +3688,10 @@ fn slip_clip_in_track(
 }
 
 fn estimate_asset_total_source_frames(library: &AssetLibrary, clip: &Clip) -> Option<i64> {
+    if clip.is_adjustment_layer() {
+        return None;
+    }
+
     let asset = match library.get_asset(clip.asset_id) {
         Ok(Some(asset)) => asset,
         Ok(None) => return None,
@@ -4150,6 +4407,7 @@ pub struct MondrianApp {
 
     // UI 面板
     timeline_panel: TimelinePanel,
+    effect_library_panel: EffectLibraryPanel,
     effect_controls_panel: EffectControlsPanel,
     viewer_panel: ViewerPanel,
     library_panel: LibraryPanel,
@@ -4157,6 +4415,7 @@ pub struct MondrianApp {
 
     // 面板可见性
     show_effect_controls: bool,
+    show_effect_library: bool,
     show_library: bool,
     show_export: bool,
     show_dev_metrics: bool,
@@ -4210,11 +4469,13 @@ impl MondrianApp {
         let mut app = Self {
             state,
             timeline_panel: TimelinePanel::default(),
+            effect_library_panel: EffectLibraryPanel::default(),
             effect_controls_panel: EffectControlsPanel::default(),
             viewer_panel: ViewerPanel::default(),
             library_panel: LibraryPanel::default(),
             export_panel: ExportPanel::default(),
             show_effect_controls: true,
+            show_effect_library: true,
             show_library: true,
             show_export: false,
             show_dev_metrics: false,
@@ -4567,6 +4828,25 @@ impl eframe::App for MondrianApp {
                     "effect_controls_panel",
                     effect_controls_started_at.elapsed(),
                 );
+            }
+        }
+        if self.show_effect_library {
+            let effect_library_started_at = std::time::Instant::now();
+            egui::SidePanel::right("effect_library_panel")
+                .default_width(252.0)
+                .min_width(208.0)
+                .resizable(true)
+                .frame(
+                    egui::Frame::new()
+                        .fill(crate::ui::theme::palette::bg_base())
+                        .stroke(egui::Stroke::NONE)
+                        .inner_margin(egui::Margin::symmetric(12, 8)),
+                )
+                .show(ctx, |ui| {
+                    self.effect_library_panel.show(ui, &mut self.state, selected_clip_ref);
+                });
+            if ui_diag_enabled() {
+                log_ui_stage_slow("effect_library_panel", effect_library_started_at.elapsed());
             }
         }
 
@@ -5206,6 +5486,7 @@ impl MondrianApp {
 
     fn finish_project_opened(&mut self) {
         self.show_effect_controls = true;
+        self.show_effect_library = true;
         self.show_library = true;
         self.show_project_bootstrap_dialog = false;
         self.last_auto_save_at = None;
@@ -5327,6 +5608,11 @@ impl MondrianApp {
                     ui,
                     &mut self.show_effect_controls,
                     "属性面板",
+                );
+                let _ = crate::ui::theme::checkmark_menu_toggle(
+                    ui,
+                    &mut self.show_effect_library,
+                    "特效库",
                 );
                 let _ =
                     crate::ui::theme::checkmark_menu_toggle(ui, &mut self.show_library, "素材库");
@@ -6230,6 +6516,129 @@ mod timeline_edit_tests {
     }
 
     #[test]
+    fn creating_adjustment_layer_on_track_also_creates_library_asset() {
+        let mut state = create_state_with_sequence();
+        let temp_root = std::env::temp_dir().join(format!(
+            "mondrian-adjustment-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        state.asset_library = Some(AssetLibrary::open(temp_root.clone()).expect("open library"));
+        state.project_in_point = Some(10);
+        state.project_out_point = Some(40);
+
+        let target_track_id =
+            state.sequence.as_ref().expect("sequence should exist").video_tracks[0].id;
+        let clip_id = state
+            .create_adjustment_layer_on_video_track(
+                target_track_id,
+                None,
+                ClipOverlapMode::Overwrite,
+            )
+            .expect("create adjustment layer");
+
+        let library = state.asset_library.as_ref().expect("library should exist");
+        let assets = library.list_assets().expect("list assets");
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].kind, AssetKind::AdjustmentLayer);
+
+        let seq = state.sequence.as_ref().expect("sequence should exist");
+        let clip = seq.video_tracks[0]
+            .clips
+            .iter()
+            .find(|clip| clip.id == clip_id)
+            .expect("adjustment clip should exist");
+        assert!(clip.is_adjustment_layer());
+        assert_eq!(clip.asset_id, assets[0].id);
+        assert_eq!(clip.position.frame, 10);
+        assert_eq!(clip.duration.frame, 30);
+
+        let _ = std::fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn splitting_adjustment_layer_keeps_instance_state_isolated() {
+        let mut state = create_state_with_sequence();
+        let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
+
+        let mut clip =
+            Clip::new_adjustment_layer(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(40, tb));
+        clip.add_effect(EffectType::BasicCorrection);
+        let exposure_path =
+            clip.effect_property_path("basic.exposure").expect("adjustment exposure path");
+        clip.apply_property_mutation(
+            mondrian_core::automation::PropertyMutation::SetStaticValue {
+                path: exposure_path,
+                value: mondrian_core::automation::PropertyValue::Float(0.75),
+            },
+        )
+        .expect("set adjustment exposure");
+        let clip_id = clip.id;
+        state.sequence.as_mut().expect("sequence should exist").video_tracks[0]
+            .add_clip(clip)
+            .expect("add adjustment clip");
+
+        state
+            .split_clip_at_frame(
+                state.sequence.as_ref().expect("sequence should exist").video_tracks[0].id,
+                true,
+                clip_id,
+                20,
+            )
+            .expect("split adjustment layer");
+
+        let seq = state.sequence.as_ref().expect("sequence should exist");
+        let mut split_clips = seq.video_tracks[0].clips.clone();
+        split_clips.sort_by_key(|clip| clip.position.frame);
+        assert_eq!(split_clips.len(), 2);
+        assert!(split_clips.iter().all(|clip| clip.is_adjustment_layer()));
+        assert!(split_clips.iter().all(|clip| {
+            (clip.evaluate_effect_params(TimeCode::new(20, tb)).exposure - 0.75).abs() < 1.0e-4
+        }));
+
+        let right_id = split_clips[1].id;
+        let seq_mut = state.sequence.as_mut().expect("sequence should exist");
+        let right_clip = seq_mut.video_tracks[0]
+            .clips
+            .iter_mut()
+            .find(|clip| clip.id == right_id)
+            .expect("right split clip should exist");
+        let right_exposure_path = right_clip
+            .effect_property_path("basic.exposure")
+            .expect("right adjustment exposure path");
+        right_clip
+            .apply_property_mutation(
+                mondrian_core::automation::PropertyMutation::SetStaticValue {
+                    path: right_exposure_path,
+                    value: mondrian_core::automation::PropertyValue::Float(1.5),
+                },
+            )
+            .expect("mutate right split clip");
+
+        let seq = state.sequence.as_ref().expect("sequence should exist");
+        let left_clip = seq.video_tracks[0]
+            .clips
+            .iter()
+            .find(|clip| clip.id == clip_id)
+            .expect("left split clip should exist");
+        let right_clip = seq.video_tracks[0]
+            .clips
+            .iter()
+            .find(|clip| clip.id == right_id)
+            .expect("right split clip should exist");
+        assert!(
+            (left_clip.evaluate_effect_params(TimeCode::new(10, tb)).exposure - 0.75).abs()
+                < 1.0e-4
+        );
+        assert!(
+            (right_clip.evaluate_effect_params(TimeCode::new(30, tb)).exposure - 1.5).abs()
+                < 1.0e-4
+        );
+    }
+
+    #[test]
     fn roll_cut_to_frame_is_undoable() {
         let mut state = create_state_with_sequence();
         let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
@@ -6327,6 +6736,33 @@ mod timeline_edit_tests {
             .expect("clip should exist after undo");
         assert_eq!(restored.source_in.frame, 10);
         assert_eq!(restored.source_out.frame, 30);
+
+        state.asset_library = None;
+        let _ = std::fs::remove_dir_all(&library_root);
+    }
+
+    #[test]
+    fn adjustment_layer_rejects_slip() {
+        let mut state = create_state_with_sequence();
+        let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
+        let library_root = std::env::temp_dir().join(format!(
+            "mondrian_adjustment_slip_test_{}_{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        std::fs::create_dir_all(&library_root).expect("create temp library root");
+        state.asset_library = Some(AssetLibrary::open(library_root.clone()).expect("open library"));
+        let clip =
+            Clip::new_adjustment_layer(AssetId::new(), TimeCode::new(8, tb), TimeCode::new(20, tb));
+        let clip_id = clip.id;
+        state.sequence.as_mut().expect("sequence should exist").video_tracks[0]
+            .add_clip(clip)
+            .expect("add adjustment clip");
+
+        let err = state
+            .slip_clips_bulk_by_frames(&[clip_id], 5)
+            .expect_err("adjustment layers should reject slip");
+        assert!(err.to_string().contains("调整图层不支持 slip"));
 
         state.asset_library = None;
         let _ = std::fs::remove_dir_all(&library_root);

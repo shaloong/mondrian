@@ -59,6 +59,17 @@ impl LibraryPanel {
         self.import_media(state);
     }
 
+    fn create_adjustment_layer(&mut self, state: &mut AppState) {
+        match state.create_adjustment_layer_asset(None) {
+            Ok(asset_id) => {
+                self.selected_asset = Some(asset_id);
+            }
+            Err(err) => {
+                state.set_status_hint(format!("新建调整图层失败：{err}"), true);
+            }
+        }
+    }
+
     pub fn show(&mut self, ui: &mut Ui, state: &mut AppState) {
         let panel_rect = ui.max_rect();
         const SEARCH_MARGIN_TOP: f32 = 6.0;
@@ -67,45 +78,77 @@ impl LibraryPanel {
         let content = ui.vertical(|ui| {
             ui.add_space(SEARCH_MARGIN_TOP);
             let search_height = ui.spacing().interact_size.y + 8.0;
-            ui.allocate_ui_with_layout(
-                Vec2::new(ui.available_width(), search_height),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| {
-                    egui::Frame::new()
-                        .fill(palette::bg_surface_raised())
-                        .stroke(Stroke::new(1.0, palette::border_subtle()))
-                        .corner_radius(corner_radius(tokens::button_rounding()))
-                        .inner_margin(egui::Margin::symmetric(margin_px(10.0), margin_px(4.0)))
-                        .show(ui, |ui| {
-                            ui.with_layout(
-                                egui::Layout::left_to_right(egui::Align::Center),
-                                |ui| {
-                                    let _ = theme::icon(
-                                        ui,
-                                        theme::UiIcon::Search,
-                                        palette::text_muted(),
-                                    );
-                                    ui.add_sized(
-                                        [ui.available_width(), ui.spacing().interact_size.y],
-                                        egui::TextEdit::singleline(&mut self.search_query)
-                                            .frame(false)
-                                            .margin(egui::Margin::ZERO)
-                                            .vertical_align(egui::Align::Center),
-                                    );
-                                },
-                            );
-                        });
-                },
-            );
+            let import_button_width = 28.0;
+            let search_gap = 8.0;
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                let search_width =
+                    (ui.available_width() - import_button_width - search_gap).max(48.0);
+                ui.allocate_ui_with_layout(
+                    Vec2::new(search_width, search_height),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        egui::Frame::new()
+                            .fill(palette::bg_surface_raised())
+                            .stroke(Stroke::new(1.0, palette::border_subtle()))
+                            .corner_radius(corner_radius(tokens::button_rounding()))
+                            .inner_margin(egui::Margin::symmetric(margin_px(10.0), margin_px(4.0)))
+                            .show(ui, |ui| {
+                                ui.with_layout(
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        let _ = theme::icon(
+                                            ui,
+                                            theme::UiIcon::Search,
+                                            palette::text_muted(),
+                                        );
+                                        let input_width = ui.available_width().max(24.0);
+                                        ui.add_sized(
+                                            [input_width, ui.spacing().interact_size.y],
+                                            egui::TextEdit::singleline(&mut self.search_query)
+                                                .frame(false)
+                                                .margin(egui::Margin::ZERO)
+                                                .vertical_align(egui::Align::Center),
+                                        );
+                                    },
+                                );
+                            });
+                    },
+                );
+                ui.add_space(search_gap);
+                let import_clicked = theme::icon_button(
+                    ui,
+                    [28.0, ui.spacing().interact_size.y],
+                    theme::UiIcon::FolderOpen,
+                )
+                .on_hover_text("导入媒体")
+                .clicked();
+                if import_clicked {
+                    self.open_import_dialog(state);
+                }
+            });
             ui.add_space(SEARCH_MARGIN_BOTTOM);
 
             let list_h = ui.available_height().max(tokens::list_min_height());
-            egui::ScrollArea::vertical().id_salt("library_scroll").max_height(list_h).show(
-                ui,
-                |ui| {
+            let scroll_area = egui::ScrollArea::vertical()
+                .id_salt("library_scroll")
+                .max_height(list_h)
+                .show(ui, |ui| {
                     self.show_assets(ui, state);
-                },
+                });
+            let scroll_response = ui.interact(
+                scroll_area.inner_rect,
+                ui.id().with("library_scroll_context"),
+                Sense::click(),
             );
+            scroll_response.context_menu(|ui| {
+                ui.menu_button("新建图层", |ui| {
+                    if ui.button("调整图层").clicked() {
+                        self.create_adjustment_layer(state);
+                        ui.close();
+                    }
+                });
+            });
         });
 
         let _ = content;
@@ -326,7 +369,7 @@ impl LibraryPanel {
             mondrian_media::ProxyGenerator::new(mondrian_media::ProxyConfig::default());
         let has_proxy = proxy_generator.proxy_exists(asset.path.as_path());
         let proxy_mode = state.is_asset_proxy_mode(asset.id);
-        let is_offline = !asset.path.exists();
+        let is_offline = asset_is_offline(asset);
         let is_editing = self.editing_asset == Some(asset.id);
         let is_selected = self.selected_asset == Some(asset.id);
 
@@ -378,7 +421,10 @@ impl LibraryPanel {
                 thumb_rect.bottom() + CARD_INFO_GAP_Y + row_h,
             ),
         );
-        let duration_text = format_duration_hhmmss(asset.media_info.duration);
+        let duration_text = match asset.kind {
+            AssetKind::AdjustmentLayer => "可变".to_string(),
+            _ => format_duration_hhmmss(asset.media_info.duration),
+        };
 
         ui.scope_builder(egui::UiBuilder::new().max_rect(info_rect), |ui| {
             ui.set_min_width(info_rect.width());
@@ -457,7 +503,8 @@ impl LibraryPanel {
         card_response.context_menu(|ui| {
             if matches!(asset.kind, AssetKind::Video) {
                 let mut proxy_mode_toggle = proxy_mode;
-                if theme::checkmark_toggle(ui, &mut proxy_mode_toggle, "代理模式").clicked() {
+                if theme::checkmark_menu_toggle(ui, &mut proxy_mode_toggle, "代理模式").clicked()
+                {
                     state.set_asset_proxy_mode(asset.id, proxy_mode_toggle);
                     let _ = state.save_project_file();
 
@@ -538,15 +585,19 @@ impl LibraryPanel {
 
         if card_response.drag_started() && !is_editing {
             self.selected_asset = Some(asset.id);
+            let drag_duration = match asset.kind {
+                AssetKind::AdjustmentLayer => state.default_adjustment_layer_drag_duration(),
+                _ => asset.media_info.duration,
+            };
             state.begin_drag_asset(
                 asset.id,
                 asset_name.clone(),
                 asset.kind.clone(),
-                asset.media_info.duration,
+                drag_duration,
                 matches!(asset.kind, AssetKind::Video) && asset.media_info.has_audio,
             );
             let lane = match asset.kind {
-                AssetKind::Video => "视频轨",
+                AssetKind::Video | AssetKind::AdjustmentLayer => "视频轨",
                 AssetKind::Audio => "音频轨",
             };
             state.set_status_hint(format!("拖拽中：{}（释放到{}）", asset_name, lane), false);
@@ -591,6 +642,11 @@ impl LibraryPanel {
                 "音频",
                 palette::bg_surface_raised().gamma_multiply(0.92),
                 palette::text_muted(),
+            ),
+            AssetKind::AdjustmentLayer => (
+                "调整",
+                palette::accent_secondary().gamma_multiply(0.22),
+                palette::text_primary(),
             ),
         };
         self.draw_thumbnail_badge(
@@ -655,6 +711,11 @@ impl LibraryPanel {
 
         if matches!(asset.kind, AssetKind::Audio) {
             self.draw_thumbnail_placeholder(ui, rect, theme::UiIcon::Audio);
+            return;
+        }
+
+        if matches!(asset.kind, AssetKind::AdjustmentLayer) {
+            self.draw_thumbnail_placeholder(ui, rect, theme::UiIcon::Plus);
             return;
         }
 
@@ -741,6 +802,10 @@ impl LibraryPanel {
         self.thumbnail_cache.retain(|id, _| alive.contains(id));
         self.thumbnail_failures.retain(|id, _| alive.contains(id));
     }
+}
+
+fn asset_is_offline(asset: &AssetRecord) -> bool {
+    !matches!(asset.kind, AssetKind::AdjustmentLayer) && !asset.path.exists()
 }
 
 fn format_duration_hhmmss(duration: Duration) -> String {

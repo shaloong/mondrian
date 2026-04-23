@@ -4,10 +4,16 @@ use crate::{
 };
 use egui::{Pos2, Rect, Sense, Ui, Vec2};
 
-use mondrian_core::types::{AssetId, Rational, TimeCode};
+use mondrian_core::types::{AssetId, BlendMode, Rational, TimeCode};
+use mondrian_effects::AdjustmentLayerParams;
 use mondrian_media::cache::FrameCacheConfig;
 use mondrian_media::{DecoderPool, FrameCache, RgbaFrame};
-use mondrian_renderer::{CompositorConfig, CpuRgbaLayer, FrameCompositor, GpuContext};
+use mondrian_renderer::{
+    build_timeline_render_plan, composite_timeline_elements, is_identity_transform,
+    quantize_transform_signature, CompositorConfig, CpuRgbaLayer, FrameCompositor, GpuContext,
+    TimelineAdjustmentLayer, TimelineCompositeElement, TimelineCompositeOptions,
+    TimelineCompositeScratch, TimelineMediaLayer, TimelineRenderPlanElement,
+};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -31,13 +37,30 @@ struct LayerDecodeRequest {
     source_secs: f64,
     source_time_base: Rational,
     opacity: f32,
+    blend_mode: BlendMode,
     transform: [f32; 6],
+    effect_params: AdjustmentLayerParams,
+    frame_seed: i64,
+}
+
+#[derive(Clone)]
+struct AdjustmentRenderRequest {
+    params: AdjustmentLayerParams,
+    opacity: f32,
+    blend_mode: Option<BlendMode>,
+    frame_seed: i64,
+}
+
+#[derive(Clone)]
+enum RenderElement {
+    Media(LayerDecodeRequest),
+    Adjustment(AdjustmentRenderRequest),
 }
 
 #[derive(Clone)]
 struct DecodeRequest {
     signature: CompositeFrameSignature,
-    layers: Vec<LayerDecodeRequest>,
+    layers: Vec<RenderElement>,
     playback_mode: bool,
     target_width: u32,
     target_height: u32,
@@ -70,11 +93,22 @@ struct PrefetchTaskInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct LayerSignature {
-    asset_id: AssetId,
-    source_frame: i64,
-    opacity_u8: u8,
-    transform_key: [i32; 6],
+enum LayerSignature {
+    Media {
+        asset_id: AssetId,
+        source_frame: i64,
+        opacity_u8: u8,
+        blend_mode: BlendMode,
+        transform_key: [i32; 6],
+        frame_seed: i64,
+        param_bits: [u32; 11],
+    },
+    Adjustment {
+        opacity_u8: u8,
+        blend_mode: Option<BlendMode>,
+        frame_seed: i64,
+        param_bits: [u32; 11],
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -406,12 +440,12 @@ impl ViewerPanel {
 
                         let layers_started_at = Instant::now();
                         let layers =
-                            self.build_layer_decode_requests(seq, lib.as_ref(), state, current_frame);
+                            self.build_render_elements(seq, lib.as_ref(), state, current_frame);
                         if diag_enabled {
                             let elapsed_ms = layers_started_at.elapsed().as_millis() as u64;
                             if elapsed_ms >= preview_diag_slow_threshold_ms() {
                                 tracing::warn!(
-                                    "[preview-diag] build_layer_decode_requests slow: {}ms frame={} layers={}",
+                                    "[preview-diag] build_render_elements slow: {}ms frame={} layers={}",
                                     elapsed_ms,
                                     current_frame,
                                     layers.len()
@@ -420,11 +454,22 @@ impl ViewerPanel {
                         }
                         let layer_signatures = layers
                             .iter()
-                            .map(|layer| LayerSignature {
-                                asset_id: layer.frame_key.0,
-                                source_frame: layer.frame_key.1,
-                                opacity_u8: (layer.opacity * 255.0).round() as u8,
-                                transform_key: quantize_transform_signature(layer.transform),
+                            .map(|layer| match layer {
+                                RenderElement::Media(layer) => LayerSignature::Media {
+                                    asset_id: layer.frame_key.0,
+                                    source_frame: layer.frame_key.1,
+                                    opacity_u8: (layer.opacity * 255.0).round() as u8,
+                                    blend_mode: layer.blend_mode,
+                                    transform_key: quantize_transform_signature(layer.transform),
+                                    frame_seed: layer.frame_seed,
+                                    param_bits: layer.effect_params.signature_words(),
+                                },
+                                RenderElement::Adjustment(layer) => LayerSignature::Adjustment {
+                                    opacity_u8: (layer.opacity * 255.0).round() as u8,
+                                    blend_mode: layer.blend_mode,
+                                    frame_seed: layer.frame_seed,
+                                    param_bits: layer.params.signature_words(),
+                                },
                             })
                             .collect::<Vec<_>>();
 
@@ -1290,18 +1335,12 @@ impl ViewerPanel {
             direction.signum()
         };
 
-        let mut layer_request_cache: HashMap<i64, Arc<Vec<LayerDecodeRequest>>> = HashMap::new();
+        let mut layer_request_cache: HashMap<i64, Arc<Vec<RenderElement>>> = HashMap::new();
 
         let prefill_active = is_playing && self.playback_prefill_active();
 
         let active_layer_count = self
-            .build_layer_decode_requests_cached(
-                seq,
-                lib,
-                state,
-                current_frame,
-                &mut layer_request_cache,
-            )
+            .build_render_elements_cached(seq, lib, state, current_frame, &mut layer_request_cache)
             .len();
         let mut budget = prefetch_budget(active_layer_count, is_playing);
 
@@ -1403,7 +1442,7 @@ impl ViewerPanel {
             if timeline_frame < 0 {
                 continue;
             }
-            let layers = self.build_layer_decode_requests_cached(
+            let layers = self.build_render_elements_cached(
                 seq,
                 lib,
                 state,
@@ -1412,6 +1451,9 @@ impl ViewerPanel {
             );
 
             for layer in layers.iter() {
+                let RenderElement::Media(layer) = layer else {
+                    continue;
+                };
                 let cache_key = LayerFrameCacheKey {
                     asset_id: layer.frame_key.0,
                     source_frame: layer.frame_key.1,
@@ -1473,71 +1515,83 @@ impl ViewerPanel {
         }
     }
 
-    fn build_layer_decode_requests(
+    fn build_render_elements(
         &mut self,
         seq: &mondrian_timeline::sequence::Sequence,
         lib: &mondrian_assets::AssetLibrary,
         state: &AppState,
         timeline_frame: i64,
-    ) -> Vec<LayerDecodeRequest> {
-        let current = TimeCode::new(timeline_frame, seq.time_base());
-        let active = seq.active_clips_at(current);
-        let mut layers = Vec::new();
+    ) -> Vec<RenderElement> {
+        let mut layers: Vec<RenderElement> = Vec::new();
 
-        for active_clip in active {
-            let asset_id = active_clip.clip.asset_id;
-            let cached = if let Some(hit) = self.asset_preview_cache.get(&asset_id) {
-                hit.clone()
-            } else {
-                let loaded =
-                    lib.get_asset(asset_id).ok().flatten().map(|asset| CachedAssetPreview {
-                        is_video: matches!(asset.kind, mondrian_assets::AssetKind::Video),
-                        source_path: asset.path,
-                    });
-                self.asset_preview_cache.insert(asset_id, loaded.clone());
-                loaded
-            };
+        for plan in build_timeline_render_plan(seq, timeline_frame) {
+            match plan {
+                TimelineRenderPlanElement::Adjustment(adjustment) => {
+                    layers.push(RenderElement::Adjustment(AdjustmentRenderRequest {
+                        params: adjustment.params,
+                        opacity: adjustment.opacity,
+                        blend_mode: Some(adjustment.blend_mode),
+                        frame_seed: adjustment.frame_seed,
+                    }));
+                }
+                TimelineRenderPlanElement::Media(media) => {
+                    let asset_id = media.asset_id;
+                    let cached = if let Some(hit) = self.asset_preview_cache.get(&asset_id) {
+                        hit.clone()
+                    } else {
+                        let loaded = lib.get_asset(asset_id).ok().flatten().map(|asset| {
+                            CachedAssetPreview {
+                                is_video: matches!(asset.kind, mondrian_assets::AssetKind::Video),
+                                source_path: asset.path,
+                            }
+                        });
+                        self.asset_preview_cache.insert(asset_id, loaded.clone());
+                        loaded
+                    };
 
-            let Some(asset) = cached else {
-                continue;
-            };
-            if !asset.is_video {
-                continue;
+                    let Some(asset) = cached else {
+                        continue;
+                    };
+                    if !asset.is_video {
+                        continue;
+                    }
+
+                    let path = self.resolve_preview_source_path(
+                        asset_id,
+                        asset.source_path.as_path(),
+                        state.is_asset_proxy_mode(asset_id),
+                    );
+                    layers.push(RenderElement::Media(LayerDecodeRequest {
+                        frame_key: (asset_id, media.source_frame),
+                        path,
+                        source_secs: media.source_secs,
+                        source_time_base: media.source_time_base,
+                        opacity: media.opacity,
+                        blend_mode: media.blend_mode,
+                        transform: media.transform,
+                        effect_params: media.effect_params,
+                        frame_seed: media.frame_seed,
+                    }));
+                }
             }
-
-            let source_frame = active_clip.source_time.frame.max(0);
-            let opacity = active_clip.opacity.clamp(0.0, 1.0);
-            let path = self.resolve_preview_source_path(
-                asset_id,
-                asset.source_path.as_path(),
-                state.is_asset_proxy_mode(asset_id),
-            );
-            layers.push(LayerDecodeRequest {
-                frame_key: (asset_id, source_frame),
-                path,
-                source_secs: active_clip.source_time.to_secs().max(0.0),
-                source_time_base: active_clip.source_time.time_base,
-                opacity,
-                transform: mat3_to_affine(active_clip.transform_matrix.to_cols_array()),
-            });
         }
 
         layers
     }
 
-    fn build_layer_decode_requests_cached(
+    fn build_render_elements_cached(
         &mut self,
         seq: &mondrian_timeline::sequence::Sequence,
         lib: &mondrian_assets::AssetLibrary,
         state: &AppState,
         timeline_frame: i64,
-        request_cache: &mut HashMap<i64, Arc<Vec<LayerDecodeRequest>>>,
-    ) -> Arc<Vec<LayerDecodeRequest>> {
+        request_cache: &mut HashMap<i64, Arc<Vec<RenderElement>>>,
+    ) -> Arc<Vec<RenderElement>> {
         if let Some(cached) = request_cache.get(&timeline_frame) {
             return Arc::clone(cached);
         }
 
-        let layers = Arc::new(self.build_layer_decode_requests(seq, lib, state, timeline_frame));
+        let layers = Arc::new(self.build_render_elements(seq, lib, state, timeline_frame));
         request_cache.insert(timeline_frame, Arc::clone(&layers));
         layers
     }
@@ -1551,7 +1605,7 @@ impl ViewerPanel {
         target_width: u32,
         target_height: u32,
         frames_ahead: i64,
-        layer_request_cache: &mut HashMap<i64, Arc<Vec<LayerDecodeRequest>>>,
+        layer_request_cache: &mut HashMap<i64, Arc<Vec<RenderElement>>>,
     ) -> bool {
         let offsets = prefetch_offsets(
             frames_ahead,
@@ -1572,7 +1626,7 @@ impl ViewerPanel {
                 continue;
             }
 
-            let layers = self.build_layer_decode_requests_cached(
+            let layers = self.build_render_elements_cached(
                 seq,
                 lib,
                 state,
@@ -1580,6 +1634,9 @@ impl ViewerPanel {
                 layer_request_cache,
             );
             for layer in layers.iter() {
+                let RenderElement::Media(layer) = layer else {
+                    continue;
+                };
                 total += 1;
                 let key = LayerFrameCacheKey {
                     asset_id: layer.frame_key.0,
@@ -1614,7 +1671,7 @@ impl ViewerPanel {
         target_width: u32,
         target_height: u32,
         target_frames: i64,
-        layer_request_cache: &mut HashMap<i64, Arc<Vec<LayerDecodeRequest>>>,
+        layer_request_cache: &mut HashMap<i64, Arc<Vec<RenderElement>>>,
     ) -> i64 {
         let mut ready_frames = 0i64;
 
@@ -1624,7 +1681,7 @@ impl ViewerPanel {
                 break;
             }
 
-            let layers = self.build_layer_decode_requests_cached(
+            let layers = self.build_render_elements_cached(
                 seq,
                 lib,
                 state,
@@ -1636,6 +1693,9 @@ impl ViewerPanel {
             }
 
             let frame_ready = layers.iter().all(|layer| {
+                let RenderElement::Media(layer) = layer else {
+                    return true;
+                };
                 let key = LayerFrameCacheKey {
                     asset_id: layer.frame_key.0,
                     source_frame: layer.frame_key.1,
@@ -2083,36 +2143,74 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
 
     let mut decoded_layers = 0usize;
     let mut last_error: Option<anyhow::Error> = None;
-    let mut rgba_layers_for_gpu: Vec<CpuRgbaLayer> = Vec::with_capacity(request.layers.len());
-    let mut layer_transforms: Vec<[f32; 6]> = Vec::with_capacity(request.layers.len());
 
     if request.layers.is_empty() {
-        return Err(anyhow::anyhow!("无可用图层可解码"));
-    }
-
-    if request.layers.len() == 1 {
-        let layer = &request.layers[0];
-        match decode_layer_rgba(
-            layer,
+        return Ok(RgbaFrame {
             width,
             height,
-            request.playback_mode,
-            request.layer_cache_enabled,
-            &request.layer_cache,
-            &request.decoder_pool,
-        ) {
-            Ok(frame) => {
-                let RgbaFrame { width, height, data } = frame;
-                rgba_layers_for_gpu.push(CpuRgbaLayer {
+            data: vec![0u8; width as usize * height as usize * 4],
+        });
+    }
+
+    let playback_mode = request.playback_mode;
+    let layer_cache_enabled = request.layer_cache_enabled;
+    let decode_generation = request.generation;
+    let latest_generation = Arc::clone(&request.latest_generation);
+    let layer_cache = Arc::clone(&request.layer_cache);
+    let decoder_pool = Arc::clone(&request.decoder_pool);
+
+    let layer_outputs = preview_decode_pool().install(|| {
+        request
+            .layers
+            .par_iter()
+            .cloned()
+            .enumerate()
+            .filter_map(|(index, layer)| {
+                let RenderElement::Media(layer) = layer else {
+                    return None;
+                };
+                if decode_generation != latest_generation.load(Ordering::Relaxed) {
+                    return Some((
+                        index,
+                        Err("decode cancelled by newer generation".to_string()),
+                    ));
+                }
+
+                let decoded = decode_layer_rgba(
+                    &layer,
                     width,
                     height,
-                    data,
-                    opacity: layer.opacity,
-                });
-                layer_transforms.push(layer.transform);
-                decoded_layers = 1;
+                    playback_mode,
+                    layer_cache_enabled,
+                    &layer_cache,
+                    &decoder_pool,
+                )
+                .map_err(|e| e.to_string());
+                Some((index, decoded))
+            })
+            .collect::<Vec<_>>()
+    });
+
+    let mut layer_results: Vec<Option<Result<RgbaFrame, String>>> =
+        vec![None; request.layers.len()];
+    let mut decoded_media_frames =
+        std::iter::repeat_with(|| None).take(request.layers.len()).collect::<Vec<_>>();
+    for (index, decoded) in layer_outputs {
+        if index < layer_results.len() {
+            layer_results[index] = Some(decoded);
+        }
+    }
+
+    for (index, layer) in request.layers.iter().enumerate() {
+        let RenderElement::Media(layer) = layer else {
+            continue;
+        };
+        match layer_results.get_mut(index).and_then(Option::take) {
+            Some(Ok(frame)) => {
+                decoded_media_frames[index] = Some((layer.clone(), frame));
+                decoded_layers += 1;
             }
-            Err(err) => {
+            Some(Err(err)) => {
                 last_error = Some(anyhow::anyhow!(
                     "{}@{} 解码失败: {}",
                     layer.frame_key.0,
@@ -2120,102 +2218,58 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
                     err
                 ));
             }
-        }
-    } else {
-        let playback_mode = request.playback_mode;
-        let layer_cache_enabled = request.layer_cache_enabled;
-        let decode_generation = request.generation;
-        let latest_generation = Arc::clone(&request.latest_generation);
-        let layer_cache = Arc::clone(&request.layer_cache);
-        let decoder_pool = Arc::clone(&request.decoder_pool);
-
-        let layer_outputs = preview_decode_pool().install(|| {
-            request
-                .layers
-                .par_iter()
-                .cloned()
-                .enumerate()
-                .map(|(index, layer)| {
-                    if decode_generation != latest_generation.load(Ordering::Relaxed) {
-                        return (
-                            index,
-                            Err("decode cancelled by newer generation".to_string()),
-                        );
-                    }
-
-                    let decoded = decode_layer_rgba(
-                        &layer,
-                        width,
-                        height,
-                        playback_mode,
-                        layer_cache_enabled,
-                        &layer_cache,
-                        &decoder_pool,
-                    )
-                    .map_err(|e| e.to_string());
-                    (index, decoded)
-                })
-                .collect::<Vec<_>>()
-        });
-
-        let mut layer_results: Vec<Option<Result<RgbaFrame, String>>> =
-            vec![None; request.layers.len()];
-        for (index, decoded) in layer_outputs {
-            if index < layer_results.len() {
-                layer_results[index] = Some(decoded);
-            }
-        }
-
-        for (index, layer) in request.layers.iter().enumerate() {
-            match layer_results.get_mut(index).and_then(Option::take) {
-                Some(Ok(frame)) => {
-                    let RgbaFrame { width, height, data } = frame;
-                    rgba_layers_for_gpu.push(CpuRgbaLayer {
-                        width,
-                        height,
-                        data,
-                        opacity: layer.opacity,
-                    });
-                    layer_transforms.push(layer.transform);
-                    decoded_layers += 1;
-                }
-                Some(Err(err)) => {
-                    last_error = Some(anyhow::anyhow!(
-                        "{}@{} 解码失败: {}",
-                        layer.frame_key.0,
-                        layer.frame_key.1,
-                        err
-                    ));
-                }
-                None => {
-                    last_error = Some(anyhow::anyhow!(
-                        "{}@{} 解码失败: worker 未返回结果",
-                        layer.frame_key.0,
-                        layer.frame_key.1
-                    ));
-                }
+            None => {
+                last_error = Some(anyhow::anyhow!(
+                    "{}@{} 解码失败: worker 未返回结果",
+                    layer.frame_key.0,
+                    layer.frame_key.1
+                ));
             }
         }
     }
 
     if decoded_layers == 0 {
-        return Err(last_error.unwrap_or_else(|| anyhow::anyhow!("无可用图层可解码")));
+        if let Some(err) = last_error {
+            tracing::debug!("预览合成回退到透明帧：{}", err);
+        }
+        return Ok(RgbaFrame {
+            width,
+            height,
+            data: vec![0u8; width as usize * height as usize * 4],
+        });
     }
 
-    let has_non_identity_transform =
-        layer_transforms.iter().any(|transform| !is_identity_transform(*transform));
+    let has_cpu_only_ops = request.layers.iter().any(|layer| match layer {
+        RenderElement::Media(layer) => {
+            !layer.effect_params.is_identity()
+                || !is_identity_transform(layer.transform)
+                || layer.blend_mode != BlendMode::Normal
+        }
+        RenderElement::Adjustment(_) => true,
+    });
 
-    if rgba_layers_for_gpu.len() == 1 && !has_non_identity_transform {
-        let only_layer = rgba_layers_for_gpu.pop().expect("single layer should exist");
-        if only_layer.opacity >= 0.999 && only_layer.width == width && only_layer.height == height {
+    if !has_cpu_only_ops && decoded_layers == 1 {
+        let only_layer =
+            decoded_media_frames.iter().flatten().next().expect("single layer should exist");
+        let (_, frame) = only_layer;
+        if frame.width == width && frame.height == height {
             record_preview_perf_passthrough_frame();
             record_preview_perf_decode_total(decode_started_at.elapsed());
-            return Ok(RgbaFrame { width, height, data: only_layer.data });
+            return Ok(RgbaFrame { width, height, data: frame.data.clone() });
         }
-        rgba_layers_for_gpu.push(only_layer);
     }
 
-    if !has_non_identity_transform {
+    if !has_cpu_only_ops {
+        let rgba_layers_for_gpu = decoded_media_frames
+            .iter()
+            .flatten()
+            .map(|(layer, frame)| CpuRgbaLayer {
+                width: frame.width,
+                height: frame.height,
+                data: frame.data.clone(),
+                opacity: layer.opacity,
+            })
+            .collect::<Vec<_>>();
         if let Some(gpu_rgba) = try_gpu_composite_rgba_layers(width, height, &rgba_layers_for_gpu) {
             record_preview_perf_decode_total(decode_started_at.elapsed());
             return Ok(RgbaFrame { width, height, data: gpu_rgba });
@@ -2223,36 +2277,45 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
     }
 
     let cpu_composite_started_at = Instant::now();
-    let mut layer_pairs = rgba_layers_for_gpu.into_iter().zip(layer_transforms);
-    let Some((first_layer, first_transform)) = layer_pairs.next() else {
-        return Err(anyhow::anyhow!("无可用图层可合成"));
-    };
+    let mut composite_elements = Vec::with_capacity(request.layers.len());
+    for (index, layer) in request.layers.iter().enumerate() {
+        match layer {
+            RenderElement::Media(_) => {
+                let Some((layer, frame)) = decoded_media_frames[index].as_ref() else {
+                    continue;
+                };
+                composite_elements.push(TimelineCompositeElement::Media(TimelineMediaLayer {
+                    rgba: &frame.data,
+                    width: frame.width,
+                    height: frame.height,
+                    opacity: layer.opacity,
+                    blend_mode: layer.blend_mode,
+                    transform: layer.transform,
+                    effect_params: layer.effect_params,
+                    frame_seed: layer.frame_seed,
+                }));
+            }
+            RenderElement::Adjustment(adjustment) => {
+                composite_elements.push(TimelineCompositeElement::Adjustment(
+                    TimelineAdjustmentLayer {
+                        params: adjustment.params,
+                        opacity: adjustment.opacity,
+                        blend_mode: adjustment.blend_mode,
+                        frame_seed: adjustment.frame_seed,
+                    },
+                ));
+            }
+        }
+    }
 
-    let mut canvas = vec![0u8; (width as usize) * (height as usize) * 4];
-    initialize_canvas_alpha_opaque(&mut canvas);
-    alpha_blend_layer(
-        &mut canvas,
+    let mut scratch = TimelineCompositeScratch::default();
+    let canvas = composite_timeline_elements(
         width,
         height,
-        &first_layer.data,
-        first_layer.width,
-        first_layer.height,
-        first_layer.opacity,
-        first_transform,
+        &composite_elements,
+        TimelineCompositeOptions { empty_canvas_transparent: true },
+        &mut scratch,
     );
-
-    for (layer, transform) in layer_pairs {
-        alpha_blend_layer(
-            &mut canvas,
-            width,
-            height,
-            &layer.data,
-            layer.width,
-            layer.height,
-            layer.opacity,
-            transform,
-        );
-    }
 
     record_preview_perf_composite_ns(cpu_composite_started_at.elapsed().as_nanos() as u64, false);
     record_preview_perf_decode_total(decode_started_at.elapsed());
@@ -2292,185 +2355,6 @@ fn try_gpu_composite_rgba_layers(
             record_gpu_compositor_result(false);
             tracing::warn!("GPU 合成失败，回退 CPU 路径: {}", err);
             None
-        }
-    }
-}
-
-fn mat3_to_affine(cols: [f32; 9]) -> [f32; 6] {
-    [cols[0], cols[3], cols[6], cols[1], cols[4], cols[7]]
-}
-
-fn quantize_transform_signature(transform: [f32; 6]) -> [i32; 6] {
-    const SCALE: f32 = 1024.0;
-    [
-        (transform[0] * SCALE).round() as i32,
-        (transform[1] * SCALE).round() as i32,
-        (transform[2] * SCALE).round() as i32,
-        (transform[3] * SCALE).round() as i32,
-        (transform[4] * SCALE).round() as i32,
-        (transform[5] * SCALE).round() as i32,
-    ]
-}
-
-fn is_identity_transform(transform: [f32; 6]) -> bool {
-    const EPS: f32 = 1.0e-4;
-    (transform[0] - 1.0).abs() <= EPS
-        && transform[1].abs() <= EPS
-        && transform[2].abs() <= EPS
-        && transform[3].abs() <= EPS
-        && (transform[4] - 1.0).abs() <= EPS
-        && transform[5].abs() <= EPS
-}
-
-fn invert_affine(transform: [f32; 6]) -> Option<[f32; 6]> {
-    let a = transform[0];
-    let c = transform[1];
-    let tx = transform[2];
-    let b = transform[3];
-    let d = transform[4];
-    let ty = transform[5];
-
-    let det = a * d - b * c;
-    if det.abs() <= 1.0e-6 {
-        return None;
-    }
-
-    let inv_det = 1.0 / det;
-    let ia = d * inv_det;
-    let ic = -c * inv_det;
-    let ib = -b * inv_det;
-    let id = a * inv_det;
-    let itx = -(ia * tx + ic * ty);
-    let ity = -(ib * tx + id * ty);
-    Some([ia, ic, itx, ib, id, ity])
-}
-
-fn sample_src_rgba(
-    src_rgba: &[u8],
-    src_w: usize,
-    src_h: usize,
-    sx: f32,
-    sy: f32,
-) -> Option<[u8; 4]> {
-    let x = sx.round() as isize;
-    let y = sy.round() as isize;
-    if x < 0 || y < 0 || x >= src_w as isize || y >= src_h as isize {
-        return None;
-    }
-
-    let idx = (y as usize * src_w + x as usize) * 4;
-    if idx + 3 >= src_rgba.len() {
-        return None;
-    }
-    Some([
-        src_rgba[idx],
-        src_rgba[idx + 1],
-        src_rgba[idx + 2],
-        src_rgba[idx + 3],
-    ])
-}
-
-fn blend_pixel_with_alpha(
-    dst_px: &mut [u8],
-    src_px: [u8; 4],
-    opacity_u8: u32,
-    alpha_table: &[u8; 65_536],
-) {
-    let opacity_key = (opacity_u8.min(255) as usize) << 8;
-    let alpha = alpha_table[opacity_key | src_px[3] as usize] as u32;
-    if alpha == 0 {
-        return;
-    }
-
-    if alpha >= 255 {
-        dst_px[0] = src_px[0];
-        dst_px[1] = src_px[1];
-        dst_px[2] = src_px[2];
-        dst_px[3] = 255;
-        return;
-    }
-
-    let inv_alpha = 255 - alpha;
-    let src_r = src_px[0] as u32;
-    let src_g = src_px[1] as u32;
-    let src_b = src_px[2] as u32;
-    let dst_r = dst_px[0] as u32;
-    let dst_g = dst_px[1] as u32;
-    let dst_b = dst_px[2] as u32;
-
-    dst_px[0] = blend_channel_u8(src_r, dst_r, alpha, inv_alpha);
-    dst_px[1] = blend_channel_u8(src_g, dst_g, alpha, inv_alpha);
-    dst_px[2] = blend_channel_u8(src_b, dst_b, alpha, inv_alpha);
-}
-
-fn alpha_blend_layer(
-    dst_rgba: &mut [u8],
-    dst_w: u32,
-    dst_h: u32,
-    src_rgba: &[u8],
-    src_w: u32,
-    src_h: u32,
-    opacity: f32,
-    transform: [f32; 6],
-) {
-    let width = dst_w.min(src_w) as usize;
-    let height = dst_h.min(src_h) as usize;
-    let opacity_u8 = (opacity.clamp(0.0, 1.0) * 255.0).round() as u32;
-
-    if opacity_u8 == 0 {
-        return;
-    }
-
-    let alpha_table = alpha_blend_table();
-    let dst_stride = dst_w as usize * 4;
-    let src_stride = src_w as usize * 4;
-
-    if is_identity_transform(transform) {
-        if should_parallel_blend(width, height) {
-            dst_rgba
-                .par_chunks_mut(dst_stride)
-                .take(height)
-                .zip(src_rgba.par_chunks(src_stride).take(height))
-                .with_min_len(blend_parallel_min_rows())
-                .for_each(|(dst_row, src_row)| {
-                    blend_row_with_table(dst_row, src_row, width, opacity_u8, alpha_table)
-                });
-        } else {
-            for y in 0..height {
-                let dst_row = &mut dst_rgba[y * dst_stride..(y + 1) * dst_stride];
-                let src_row = &src_rgba[y * src_stride..(y + 1) * src_stride];
-                blend_row_with_table(dst_row, src_row, width, opacity_u8, alpha_table);
-            }
-        }
-        return;
-    }
-
-    let Some(inv) = invert_affine(transform) else {
-        return;
-    };
-
-    let dst_width = dst_w as usize;
-    let dst_height = dst_h as usize;
-    let src_width = src_w as usize;
-    let src_height = src_h as usize;
-
-    for dy in 0..dst_height {
-        for dx in 0..dst_width {
-            let fx = dx as f32 + 0.5;
-            let fy = dy as f32 + 0.5;
-            let sx = inv[0] * fx + inv[1] * fy + inv[2];
-            let sy = inv[3] * fx + inv[4] * fy + inv[5];
-            let Some(src_px) = sample_src_rgba(src_rgba, src_width, src_height, sx - 0.5, sy - 0.5)
-            else {
-                continue;
-            };
-
-            let dst_idx = (dy * dst_width + dx) * 4;
-            if dst_idx + 3 >= dst_rgba.len() {
-                continue;
-            }
-            let dst_px = &mut dst_rgba[dst_idx..dst_idx + 4];
-            blend_pixel_with_alpha(dst_px, src_px, opacity_u8, alpha_table);
         }
     }
 }
@@ -3318,98 +3202,6 @@ fn quantize_dimension(value: u32, step: u32) -> u32 {
     } else {
         rounded.max(1)
     }
-}
-
-fn initialize_canvas_alpha_opaque(canvas: &mut [u8]) {
-    let pixels = canvas.len() / 4;
-    if pixels >= 1_000_000 {
-        canvas
-            .par_chunks_mut(4)
-            .with_min_len(alpha_init_parallel_min_chunk_pixels())
-            .for_each(|px| px[3] = 255);
-    } else {
-        for px in canvas.chunks_exact_mut(4) {
-            px[3] = 255;
-        }
-    }
-}
-
-fn should_parallel_blend(width: usize, height: usize) -> bool {
-    let pixels = width.saturating_mul(height);
-    pixels >= 1_000_000
-}
-
-fn blend_parallel_min_rows() -> usize {
-    16
-}
-
-fn alpha_init_parallel_min_chunk_pixels() -> usize {
-    8_192
-}
-
-fn alpha_blend_table() -> &'static [u8; 65_536] {
-    static TABLE: OnceLock<Box<[u8; 65_536]>> = OnceLock::new();
-    TABLE.get_or_init(|| {
-        let mut table = Box::new([0u8; 65_536]);
-        for opacity in 0u32..=255 {
-            let base = (opacity as usize) << 8;
-            for src_alpha in 0u32..=255 {
-                table[base | src_alpha as usize] = ((src_alpha * opacity + 127) / 255) as u8;
-            }
-        }
-        table
-    })
-}
-
-fn blend_row_with_table(
-    dst_row: &mut [u8],
-    src_row: &[u8],
-    width: usize,
-    opacity_u8: u32,
-    alpha_table: &[u8; 65_536],
-) {
-    let pixel_bytes = width.saturating_mul(4);
-    if dst_row.len() < pixel_bytes || src_row.len() < pixel_bytes {
-        return;
-    }
-
-    let opacity_key = (opacity_u8.min(255) as usize) << 8;
-
-    for (dst_px, src_px) in dst_row.chunks_exact_mut(4).zip(src_row.chunks_exact(4)).take(width) {
-        // Integer alpha blend keeps math branch-light on CPU hot path.
-        let alpha = alpha_table[opacity_key | src_px[3] as usize] as u32;
-        if alpha == 0 {
-            continue;
-        }
-
-        if alpha >= 255 {
-            dst_px[0] = src_px[0];
-            dst_px[1] = src_px[1];
-            dst_px[2] = src_px[2];
-            dst_px[3] = 255;
-            continue;
-        }
-
-        let inv_alpha = 255 - alpha;
-
-        let src_r = src_px[0] as u32;
-        let src_g = src_px[1] as u32;
-        let src_b = src_px[2] as u32;
-
-        let dst_r = dst_px[0] as u32;
-        let dst_g = dst_px[1] as u32;
-        let dst_b = dst_px[2] as u32;
-
-        dst_px[0] = blend_channel_u8(src_r, dst_r, alpha, inv_alpha);
-        dst_px[1] = blend_channel_u8(src_g, dst_g, alpha, inv_alpha);
-        dst_px[2] = blend_channel_u8(src_b, dst_b, alpha, inv_alpha);
-    }
-}
-
-#[inline]
-fn blend_channel_u8(src: u32, dst: u32, alpha: u32, inv_alpha: u32) -> u8 {
-    let value = src * alpha + dst * inv_alpha + 127;
-    ((value + (value >> 8)) >> 8) as u8
 }
 
 /// 将矩形按指定宽高比居中裁剪（letterbox / pillarbox）

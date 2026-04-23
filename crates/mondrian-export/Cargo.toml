@@ -10,6 +10,7 @@ mondrian-core     = { workspace = true }
 mondrian-media    = { workspace = true }
 mondrian-timeline = { workspace = true }
 mondrian-renderer = { workspace = true }
+mondrian-effects  = { workspace = true }
 
 tokio       = { workspace = true }
 async-trait = { workspace = true }

@@ -277,7 +277,7 @@ impl Rect {
 
 // ─── 混合模式 ─────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum BlendMode {
     #[default]
     Normal,

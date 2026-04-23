@@ -15,7 +15,7 @@ pub mod keyframe;
 pub mod sequence;
 pub mod track;
 
-pub use clip::{ActiveClip, Clip};
+pub use clip::{ActiveClip, Clip, ClipKind};
 pub use command::{Command, CommandHistory};
 pub use keyframe::{InterpolationType, Keyframe, KeyframeTrack};
 pub use sequence::{Sequence, SequenceSettings};

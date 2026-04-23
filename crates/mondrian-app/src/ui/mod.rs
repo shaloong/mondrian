@@ -1,5 +1,6 @@
 pub mod animation_groups;
 pub mod effect_controls_panel;
+pub mod effect_library_panel;
 pub mod export_panel;
 pub mod fonts;
 pub mod library_panel;

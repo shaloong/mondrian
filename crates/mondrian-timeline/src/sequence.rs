@@ -78,7 +78,7 @@ impl Sequence {
     pub fn active_clips_at(&self, time: TimeCode) -> Vec<ActiveClip> {
         let mut result = Vec::new();
 
-        for (i, track) in self.video_tracks.iter().enumerate().rev() {
+        for (i, track) in self.video_tracks.iter().enumerate() {
             if !track.is_visible || track.is_muted {
                 continue;
             }
@@ -95,6 +95,7 @@ impl Sequence {
                     source_time,
                     transform_matrix: transform_mat,
                     opacity,
+                    blend_mode: clip.blend_mode.unwrap_or(track.blend_mode),
                 });
             }
         }
@@ -269,6 +270,71 @@ mod tests {
         let active = seq.active_clips_at(TimeCode::new(10, tb));
         assert_eq!(active.len(), 1);
         assert!((active[0].opacity - 0.7).abs() < 0.01);
+    }
+
+    #[test]
+    fn active_clips_follow_bottom_to_top_track_order() {
+        let mut seq = Sequence::new("Track Order");
+        let tb = seq.time_base();
+        let bottom = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(20, tb));
+        let top = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(20, tb));
+        seq.video_tracks[0].add_clip(bottom).expect("add bottom clip");
+        seq.video_tracks[2].add_clip(top).expect("add top clip");
+
+        let active = seq.active_clips_at(TimeCode::new(5, tb));
+        assert_eq!(active.len(), 2);
+        assert_eq!(active[0].track_index, 0);
+        assert_eq!(active[1].track_index, 2);
+    }
+
+    #[test]
+    fn active_clips_inherit_track_blend_mode_when_clip_uses_default() {
+        let mut seq = Sequence::new("Track Blend Inheritance");
+        let tb = seq.time_base();
+        seq.video_tracks[0].blend_mode = BlendMode::Screen;
+        let clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(20, tb));
+        seq.video_tracks[0].add_clip(clip).expect("add clip");
+
+        let active = seq.active_clips_at(TimeCode::new(5, tb));
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].blend_mode, BlendMode::Screen);
+    }
+
+    #[test]
+    fn active_clips_prefer_clip_blend_mode_over_track_blend_mode() {
+        let mut seq = Sequence::new("Clip Blend Override");
+        let tb = seq.time_base();
+        seq.video_tracks[0].blend_mode = BlendMode::Screen;
+        let mut clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(20, tb));
+        clip.blend_mode = Some(BlendMode::Multiply);
+        seq.video_tracks[0].add_clip(clip).expect("add clip");
+
+        let active = seq.active_clips_at(TimeCode::new(5, tb));
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].blend_mode, BlendMode::Multiply);
+    }
+
+    #[test]
+    fn adjustment_layer_is_active_only_within_its_time_range() {
+        let mut seq = Sequence::new("Adjustment Range");
+        let tb = seq.time_base();
+        let media = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(30, tb));
+        let adjustment =
+            Clip::new_adjustment_layer(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(5, tb));
+        seq.video_tracks[0].add_clip(media).expect("add media clip");
+        seq.video_tracks[1].add_clip(adjustment).expect("add adjustment clip");
+
+        let before = seq.active_clips_at(TimeCode::new(9, tb));
+        assert_eq!(before.len(), 1);
+        assert!(!before.iter().any(|clip| clip.clip.is_adjustment_layer()));
+
+        let overlapping = seq.active_clips_at(TimeCode::new(12, tb));
+        assert_eq!(overlapping.len(), 2);
+        assert!(overlapping.iter().any(|clip| clip.clip.is_adjustment_layer()));
+
+        let after = seq.active_clips_at(TimeCode::new(15, tb));
+        assert_eq!(after.len(), 1);
+        assert!(!after.iter().any(|clip| clip.clip.is_adjustment_layer()));
     }
 
     #[test]

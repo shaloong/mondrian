@@ -135,6 +135,19 @@ pub struct MediaInfo {
 }
 
 impl MediaInfo {
+    pub fn synthetic_adjustment_layer() -> Self {
+        Self {
+            path: PathBuf::from("mondrian://adjustment-layer"),
+            duration: Duration::ZERO,
+            file_size: 0,
+            container: "adjustment-layer".to_string(),
+            video_streams: Vec::new(),
+            audio_streams: Vec::new(),
+            has_video: false,
+            has_audio: false,
+        }
+    }
+
     /// 探针媒体文件（同步，通过 FFmpeg AVFormatContext）
     ///
     /// # 注意

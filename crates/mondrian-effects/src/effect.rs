@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EffectType {
+    BasicCorrection,
+    WhiteBalance,
     Lut3D,
     ColorWheel,
     Curves,
@@ -55,6 +57,39 @@ impl EffectNode {
     pub fn define_property(&mut self, descriptor: PropertyDescriptor) {
         self.properties.define(descriptor);
     }
+
+    pub fn instantiate_for_clip(&mut self, group_name: String) {
+        let mut namespaced = PropertyBag::default();
+        for (_, property) in self.properties.iter() {
+            let mut property = property.clone();
+            property.descriptor.path = namespaced_effect_path(self.id, &property.descriptor.path);
+            property.descriptor.ui_metadata.group_name = Some(group_name.clone());
+            namespaced.upsert(property);
+        }
+        self.properties = namespaced;
+    }
+
+    pub fn evaluate_f32_by_suffix(&self, suffix: &str, time: TimeCode, fallback: f32) -> f32 {
+        self.properties
+            .iter()
+            .find(|(path, _)| path.ends_with(suffix))
+            .and_then(|(path, _)| self.evaluate_property(path, time))
+            .and_then(|value| value.as_f32())
+            .unwrap_or(fallback)
+    }
+
+    pub fn set_static_value_by_suffix(&mut self, suffix: &str, value: PropertyValue) -> Result<()> {
+        let path = self
+            .properties
+            .iter()
+            .find(|(path, _)| path.ends_with(suffix))
+            .map(|(path, _)| path.to_string())
+            .ok_or_else(|| mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "effect_set_static_value".to_string(),
+                reason: format!("效果属性不存在: {suffix}"),
+            })?;
+        self.properties.set_static_value(&path, value)
+    }
 }
 
 impl PropertyHost for EffectNode {
@@ -91,6 +126,55 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
     };
 
     match effect_type {
+        EffectType::BasicCorrection => {
+            define(
+                "effect.basic.exposure",
+                "基础校正",
+                "曝光",
+                PropertyValue::Float(0.0),
+                Some(-4.0),
+                Some(4.0),
+                Some(0.01),
+            );
+            define(
+                "effect.basic.contrast",
+                "基础校正",
+                "对比度",
+                PropertyValue::Float(1.0),
+                Some(0.0),
+                Some(3.0),
+                Some(0.01),
+            );
+            define(
+                "effect.basic.saturation",
+                "基础校正",
+                "饱和度",
+                PropertyValue::Float(1.0),
+                Some(0.0),
+                Some(3.0),
+                Some(0.01),
+            );
+        }
+        EffectType::WhiteBalance => {
+            define(
+                "effect.white_balance.temperature",
+                "白平衡",
+                "色温",
+                PropertyValue::Float(0.0),
+                Some(-1.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define(
+                "effect.white_balance.tint",
+                "白平衡",
+                "色调",
+                PropertyValue::Float(0.0),
+                Some(-1.0),
+                Some(1.0),
+                Some(0.01),
+            );
+        }
         EffectType::Lut3D => {
             define(
                 "effect.lut.intensity",
@@ -296,6 +380,34 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
     }
 
     properties
+}
+
+fn namespaced_effect_path(effect_id: EffectId, path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("effect.") {
+        format!("effect.{}.{}", effect_id, rest)
+    } else {
+        format!("effect.{}.{}", effect_id, path)
+    }
+}
+
+impl EffectType {
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            EffectType::BasicCorrection => "基础校正",
+            EffectType::WhiteBalance => "白平衡",
+            EffectType::Lut3D => "LUT",
+            EffectType::ColorWheel => "色轮",
+            EffectType::Curves => "曲线",
+            EffectType::HueSaturationLightness => "HSL",
+            EffectType::GaussianBlur => "模糊",
+            EffectType::Sharpen => "锐化",
+            EffectType::Vignette => "暗角",
+            EffectType::ChromaticAberration => "色差",
+            EffectType::Grain => "颗粒",
+            EffectType::ChromaKey => "色度抠像",
+            EffectType::LumaKey => "亮度键",
+        }
+    }
 }
 
 #[cfg(test)]

@@ -20,7 +20,7 @@ use mondrian_core::{
         KeyframeInterpolation, KeyframeTemporalFlags, PropertyHost, PropertyMutation,
         PropertyValue, TimeTicks, SUBFRAME_TICKS_PER_FRAME,
     },
-    types::{ClipId, KeyframeId, TimeCode},
+    types::{ClipId, EffectId, KeyframeId, TimeCode},
 };
 use mondrian_timeline::clip::Clip;
 
@@ -44,6 +44,12 @@ pub struct EffectControlsPanel {
 struct InspectorGroup<'a> {
     meta: AnimationGroupMeta,
     properties: Vec<(&'a str, &'a mondrian_core::automation::AnimatedProperty)>,
+}
+
+struct GroupHeaderRowResponse {
+    row: egui::Response,
+    toggle_effect: Option<egui::Response>,
+    delete_effect: Option<egui::Response>,
 }
 
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
@@ -178,12 +184,17 @@ impl EffectControlsPanel {
         let subtitle = selected_clip
             .and_then(|selection| {
                 app.clip_snapshot(selection).map(|clip| {
-                    let clip_label = clip
-                        .label
-                        .as_deref()
-                        .filter(|label| !label.is_empty())
-                        .unwrap_or("未命名片段");
-                    let clip_role = if selection.is_video_track {
+                    let clip_label =
+                        clip.label.as_deref().filter(|label| !label.is_empty()).unwrap_or(
+                            if clip.is_adjustment_layer() {
+                                "调整图层"
+                            } else {
+                                "未命名片段"
+                            },
+                        );
+                    let clip_role = if clip.is_adjustment_layer() {
+                        "调整图层"
+                    } else if selection.is_video_track {
                         "视频"
                     } else {
                         "音频"
@@ -332,9 +343,37 @@ impl EffectControlsPanel {
         let collapse_key = (selection.clip_id, group.meta.id.clone());
         let mut collapsed = *self.inspector_group_collapsed.get(&collapse_key).unwrap_or(&false);
 
-        let header_response = draw_group_header_row(ui, &group.meta, collapsed, None, false, false);
-        if header_response.clicked() {
+        let effect_id = group_effect_id(group);
+        let enabled_state = effect_id
+            .and_then(|id| app.clip_snapshot(selection).and_then(|clip| clip.effect_enabled(id)));
+        let header_response = draw_group_header_row(
+            ui,
+            &group.meta,
+            collapsed,
+            enabled_state,
+            effect_id.is_some(),
+            effect_id.is_some(),
+        );
+        let action_clicked =
+            header_response.toggle_effect.as_ref().is_some_and(egui::Response::clicked)
+                || header_response.delete_effect.as_ref().is_some_and(egui::Response::clicked);
+        if header_response.row.clicked() && !action_clicked {
             collapsed = !collapsed;
+        }
+        if let (Some(effect_id), Some(toggle)) = (effect_id, header_response.toggle_effect.as_ref())
+        {
+            if toggle.clicked() {
+                let next_enabled = !enabled_state.unwrap_or(true);
+                let _ = app.set_clip_effect_enabled(selection, effect_id, next_enabled);
+            }
+        }
+        if let (Some(effect_id), Some(delete)) = (effect_id, header_response.delete_effect.as_ref())
+        {
+            if delete.clicked() {
+                let _ = app.remove_effect_from_clip(selection, effect_id);
+                self.inspector_group_collapsed.remove(&collapse_key);
+                return;
+            }
         }
 
         if !collapsed {
@@ -2739,113 +2778,155 @@ fn draw_group_header_row(
     enabled_state: Option<bool>,
     show_effect_controls: bool,
     can_delete: bool,
-) -> egui::Response {
+) -> GroupHeaderRowResponse {
     let desired_size = Vec2::new(
         ui.available_width(),
         tokens::inspector_group_header_height(),
     );
-    let (rect, response) = ui.allocate_exact_size(desired_size, Sense::click());
+    let (rect, row_response) = ui.allocate_exact_size(desired_size, Sense::click());
     let visuals = ui.visuals();
+    let mut toggle_effect = None;
+    let mut delete_effect = None;
 
     if ui.is_rect_visible(rect) {
-        let fill = if response.hovered() {
+        let fill = if row_response.hovered() {
             palette::bg_surface_active()
         } else {
             Color32::TRANSPARENT
         };
         ui.painter().rect_filled(rect, visuals.menu_corner_radius, fill);
 
-        let title_x = rect.left() + 4.0;
-        let caret_rect = Rect::from_center_size(
-            Pos2::new(title_x + tokens::icon_size() * 0.5, rect.center().y),
-            Vec2::splat(tokens::icon_size()),
-        );
-        theme::draw_icon(
-            ui.painter(),
-            caret_rect,
-            if collapsed {
-                theme::UiIcon::CaretRight
-            } else {
-                theme::UiIcon::CaretDown
-            },
-            palette::text_muted(),
-        );
-
         let mut title = meta.title.clone();
         if meta.kind == AnimationGroupKind::TimeRemap {
             title = "时间重映射".to_string();
         }
-        let title_pos = Pos2::new(
-            title_x + tokens::icon_size() + tokens::inspector_group_indent() * 0.45,
-            rect.center().y,
+
+        let ghost_button_size = tokens::timeline_toolbar_button_size();
+        let button_size = Vec2::new(ghost_button_size[0], ghost_button_size[1]);
+        let button_gap = 4.0;
+        let button_count = usize::from(enabled_state.is_some()) + usize::from(can_delete);
+        let action_width = if show_effect_controls && button_count > 0 {
+            button_count as f32 * button_size.x + button_count.saturating_sub(1) as f32 * button_gap
+        } else {
+            0.0
+        };
+        let action_rect = if action_width > 0.0 {
+            Some(Rect::from_min_max(
+                Pos2::new(
+                    (rect.right() - 4.0 - action_width).max(rect.left() + 4.0),
+                    rect.top(),
+                ),
+                Pos2::new(rect.right() - 4.0, rect.bottom()),
+            ))
+        } else {
+            None
+        };
+        let title_rect = Rect::from_min_max(
+            Pos2::new(rect.left() + 4.0, rect.top()),
+            Pos2::new(
+                action_rect
+                    .map(|action| (action.left() - 8.0).max(rect.left() + 4.0))
+                    .unwrap_or(rect.right() - 4.0),
+                rect.bottom(),
+            ),
         );
-        ui.painter().text(
-            title_pos,
-            egui::Align2::LEFT_CENTER,
-            title,
+        let content_center_y = rect.center().y;
+        let caret_rect = Rect::from_center_size(
+            Pos2::new(
+                title_rect.left() + tokens::icon_size() * 0.5,
+                content_center_y,
+            ),
+            Vec2::splat(tokens::icon_size()),
+        );
+        let title_x = caret_rect.right() + tokens::inspector_group_indent() * 0.45;
+        let title_galley = ui.painter().layout_no_wrap(
+            title.clone(),
             typography::body_small(),
             palette::text_primary(),
         );
+        let label_rect = Rect::from_min_size(
+            Pos2::new(title_x, content_center_y - title_galley.size().y * 0.5),
+            title_galley.size(),
+        );
 
-        if meta.shows_fx_badge {
-            let badge_text = "ƒx";
-            let badge_size = ui
-                .painter()
-                .layout_no_wrap(
-                    badge_text.to_string(),
-                    typography::body_small(),
-                    palette::text_muted(),
+        theme::draw_icon(
+            ui.painter(),
+            caret_rect,
+            if collapsed {
+                theme::UiIcon::ArrowRight
+            } else {
+                theme::UiIcon::ArrowDown
+            },
+            palette::text_muted(),
+        );
+        ui.painter().with_clip_rect(title_rect).galley(
+            label_rect.min,
+            title_galley,
+            palette::text_primary(),
+        );
+
+        if let Some(action_bounds) = action_rect {
+            let action_rect = Rect::from_center_size(
+                Pos2::new(action_bounds.center().x, content_center_y),
+                Vec2::new(action_width, button_size.y),
+            );
+            let delete_rect = can_delete.then(|| {
+                Rect::from_center_size(
+                    Pos2::new(action_rect.right() - button_size.x * 0.5, content_center_y),
+                    button_size,
                 )
-                .size();
-            let badge_rect = Rect::from_min_size(
-                Pos2::new(title_pos.x - badge_size.x - 12.0, rect.center().y - 8.0),
-                Vec2::new(badge_size.x + 8.0, 16.0),
-            );
-            ui.painter().rect_filled(
-                badge_rect,
-                egui::CornerRadius::same(tokens::badge_rounding().round() as u8),
-                palette::bg_surface_hover(),
-            );
-            ui.painter().text(
-                badge_rect.center(),
-                egui::Align2::CENTER_CENTER,
-                badge_text,
-                typography::body_small(),
-                palette::text_muted(),
-            );
-        }
-
-        if show_effect_controls && (enabled_state.is_some() || can_delete) {
-            let mut action_x = rect.right() - 4.0;
-            if can_delete {
-                let icon_rect = Rect::from_center_size(
-                    Pos2::new(action_x - 10.0, rect.center().y),
-                    Vec2::splat(tokens::icon_size()),
+            });
+            let toggle_rect = enabled_state.map(|enabled| {
+                let right_edge =
+                    delete_rect.map(|rect| rect.left() - button_gap).unwrap_or(action_rect.right());
+                let rect = Rect::from_center_size(
+                    Pos2::new(right_edge - button_size.x * 0.5, content_center_y),
+                    button_size,
                 );
-                theme::draw_icon(
-                    ui.painter(),
-                    icon_rect,
-                    theme::UiIcon::Trash,
-                    palette::text_muted(),
-                );
-                action_x -= 24.0;
-            }
-            if let Some(enabled) = enabled_state {
                 let icon = if enabled {
                     theme::UiIcon::Eye
                 } else {
                     theme::UiIcon::EyeOff
                 };
-                let icon_rect = Rect::from_center_size(
-                    Pos2::new(action_x - 10.0, rect.center().y),
-                    Vec2::splat(tokens::icon_size()),
+                let response = theme::icon_ghost_button_at(
+                    ui,
+                    rect,
+                    row_response.id.with("toggle_effect"),
+                    icon,
                 );
-                theme::draw_icon(ui.painter(), icon_rect, icon, palette::text_muted());
+                toggle_effect = Some(response);
+                rect
+            });
+            if let Some(rect) = delete_rect {
+                let response = theme::icon_ghost_button_at(
+                    ui,
+                    rect,
+                    row_response.id.with("delete_effect"),
+                    theme::UiIcon::Trash,
+                );
+                delete_effect = Some(response);
             }
+            let _ = toggle_rect;
         }
     }
 
-    response
+    GroupHeaderRowResponse { row: row_response, toggle_effect, delete_effect }
+}
+
+fn group_effect_id(group: &InspectorGroup<'_>) -> Option<EffectId> {
+    group
+        .properties
+        .first()
+        .and_then(|(path, _)| parse_effect_id_from_property_path(path))
+}
+
+fn parse_effect_id_from_property_path(path: &str) -> Option<EffectId> {
+    let mut segments = path.split('.');
+    if segments.next()? != "effect" {
+        return None;
+    }
+    let id_raw = segments.next()?;
+    uuid::Uuid::parse_str(id_raw).ok().map(EffectId)
 }
 
 fn graph_channel_labels(value: &PropertyValue) -> &'static [&'static str] {

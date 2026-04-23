@@ -39,6 +39,7 @@ anyhow    = { workspace = true }
 # 序列化
 serde     = { workspace = true }
 serde_json = { workspace = true }
+uuid = { workspace = true }
 # 并发
 parking_lot = { workspace = true }
 rayon = { workspace = true }

@@ -1,4 +1,8 @@
-use super::*;
+use mondrian_core::types::BlendMode;
+use mondrian_renderer::{
+    composite_timeline_elements_into, TimelineCompositeElement, TimelineCompositeOptions,
+    TimelineCompositeScratch, TimelineMediaLayer,
+};
 use serde::Serialize;
 use std::cmp;
 use std::fs::OpenOptions;
@@ -110,21 +114,34 @@ fn clear_canvas(canvas: &mut [u8]) {
 
 fn render_frame(canvas: &mut [u8], width: u32, height: u32, layers: &[Vec<u8>], frame_idx: u64) {
     clear_canvas(canvas);
-
-    for (layer_idx, layer) in layers.iter().enumerate() {
-        // 通过轻微变化 opacity 模拟时间线上内容变化带来的合成波动。
-        let opacity = (0.45 + ((frame_idx + layer_idx as u64) % 7) as f32 * 0.07).min(1.0);
-        alpha_blend_layer(
-            canvas,
-            width,
-            height,
-            layer,
-            width,
-            height,
-            opacity,
-            [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-        );
-    }
+    let mut scratch = TimelineCompositeScratch::default();
+    let elements = layers
+        .iter()
+        .enumerate()
+        .map(|(layer_idx, layer)| {
+            let opacity = (0.45 + ((frame_idx + layer_idx as u64) % 7) as f32 * 0.07).min(1.0);
+            TimelineCompositeElement::Media(TimelineMediaLayer {
+                rgba: layer,
+                width,
+                height,
+                opacity,
+                blend_mode: BlendMode::Normal,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_params: Default::default(),
+                frame_seed: frame_idx as i64,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut owned_canvas = canvas.to_vec();
+    composite_timeline_elements_into(
+        &mut owned_canvas,
+        width,
+        height,
+        &elements,
+        TimelineCompositeOptions::default(),
+        &mut scratch,
+    );
+    canvas.copy_from_slice(&owned_canvas);
 }
 
 fn run_preview_simulation(
