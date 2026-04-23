@@ -13,6 +13,9 @@ pub use adjustment::{
     apply_adjustment_layer, apply_adjustment_pass, blend_adjustment_result, blend_rgba_pixel,
     AdjustmentLayerParams,
 };
-pub use effect::{EffectNode, EffectType};
+pub use effect::{
+    effect_definition, effect_library_types, evaluate_effect_stack, register_effect_definition,
+    EffectDefinition, EffectEvalContext, EffectNode, EffectStackEvaluation, EffectType,
+};
 pub use lut::Lut3D;
 pub use transition::Transition;

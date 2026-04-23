@@ -6,7 +6,7 @@ use crate::{
     },
 };
 use egui::{RichText, Ui};
-use mondrian_effects::EffectType;
+use mondrian_effects::effect_library_types;
 
 #[derive(Default)]
 pub struct EffectLibraryPanel;
@@ -58,7 +58,7 @@ impl EffectLibraryPanel {
         egui::ScrollArea::vertical()
             .id_salt("effect_library_panel_scroll")
             .show(ui, |ui| {
-                for effect_type in supported_video_effect_library() {
+                for effect_type in effect_library_types() {
                     let clicked = ui
                         .add_sized(
                             [ui.available_width(), 34.0],
@@ -83,16 +83,4 @@ impl EffectLibraryPanel {
                 }
             });
     }
-}
-
-fn supported_video_effect_library() -> Vec<EffectType> {
-    vec![
-        EffectType::BasicCorrection,
-        EffectType::WhiteBalance,
-        EffectType::GaussianBlur,
-        EffectType::Sharpen,
-        EffectType::Vignette,
-        EffectType::ChromaticAberration,
-        EffectType::Grain,
-    ]
 }

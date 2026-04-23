@@ -13,6 +13,23 @@ use std::{
 };
 
 #[derive(Clone)]
+struct AssetCardBadge {
+    text: String,
+    bg: egui::Color32,
+    fg: egui::Color32,
+    align_right: bool,
+}
+
+#[derive(Clone)]
+struct AssetCardPresentation {
+    placeholder_icon: theme::UiIcon,
+    badges: Vec<AssetCardBadge>,
+    duration_text: Option<String>,
+    drag_duration: Duration,
+    target_lane_label: &'static str,
+}
+
+#[derive(Clone)]
 struct ThumbnailCacheEntry {
     path: PathBuf,
     modified: Option<SystemTime>,
@@ -407,8 +424,16 @@ impl LibraryPanel {
             card_rect.min + Vec2::new(8.0, CARD_PADDING_TOP),
             Vec2::new((card_w - 16.0).max(10.0), thumb_h.max(20.0)),
         );
-        self.draw_thumbnail(ui, asset, is_offline, thumb_rect);
-        self.draw_thumbnail_badges(ui, thumb_rect, asset.kind.clone(), proxy_mode, is_offline);
+        let presentation = asset_card_presentation(asset, state, proxy_mode, is_offline);
+
+        self.draw_thumbnail(
+            ui,
+            asset,
+            is_offline,
+            thumb_rect,
+            presentation.placeholder_icon,
+        );
+        self.draw_thumbnail_badges(ui, thumb_rect, &presentation.badges);
 
         let row_h = tokens::list_row_content_height();
         let info_rect = Rect::from_min_max(
@@ -421,11 +446,6 @@ impl LibraryPanel {
                 thumb_rect.bottom() + CARD_INFO_GAP_Y + row_h,
             ),
         );
-        let duration_text = match asset.kind {
-            AssetKind::AdjustmentLayer => "可变".to_string(),
-            _ => format_duration_hhmmss(asset.media_info.duration),
-        };
-
         ui.scope_builder(egui::UiBuilder::new().max_rect(info_rect), |ui| {
             ui.set_min_width(info_rect.width());
             ui.set_max_width(info_rect.width());
@@ -455,12 +475,19 @@ impl LibraryPanel {
             } else {
                 let duration_w = 46.0;
                 let info_gap = 8.0;
-                let name_w = (info_rect.width() - duration_w - info_gap).max(24.0);
-                let name_rect = Rect::from_min_size(info_rect.min, Vec2::new(name_w, row_h));
-                let duration_rect = Rect::from_min_size(
-                    Pos2::new(name_rect.right() + info_gap, info_rect.top()),
-                    Vec2::new(duration_w, row_h),
-                );
+                let (name_rect, duration_rect) =
+                    if presentation.duration_text.as_ref().is_some_and(|text| !text.is_empty()) {
+                        let name_w = (info_rect.width() - duration_w - info_gap).max(24.0);
+                        let name_rect =
+                            Rect::from_min_size(info_rect.min, Vec2::new(name_w, row_h));
+                        let duration_rect = Rect::from_min_size(
+                            Pos2::new(name_rect.right() + info_gap, info_rect.top()),
+                            Vec2::new(duration_w, row_h),
+                        );
+                        (name_rect, Some(duration_rect))
+                    } else {
+                        (info_rect, None)
+                    };
 
                 ui.scope_builder(
                     egui::UiBuilder::new()
@@ -478,21 +505,25 @@ impl LibraryPanel {
                         );
                     },
                 );
-                ui.scope_builder(
-                    egui::UiBuilder::new()
-                        .max_rect(duration_rect)
-                        .layout(egui::Layout::right_to_left(egui::Align::Center)),
-                    |ui| {
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(duration_text.as_str())
-                                    .font(typography::body_small())
-                                    .color(palette::text_muted()),
-                            )
-                            .halign(egui::Align::RIGHT),
-                        );
-                    },
-                );
+                if let (Some(duration_rect), Some(duration_text)) =
+                    (duration_rect, presentation.duration_text.as_ref())
+                {
+                    ui.scope_builder(
+                        egui::UiBuilder::new()
+                            .max_rect(duration_rect)
+                            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                        |ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(duration_text.as_str())
+                                        .font(typography::body_small())
+                                        .color(palette::text_muted()),
+                                )
+                                .halign(egui::Align::RIGHT),
+                            );
+                        },
+                    );
+                }
             }
         });
 
@@ -585,78 +616,39 @@ impl LibraryPanel {
 
         if card_response.drag_started() && !is_editing {
             self.selected_asset = Some(asset.id);
-            let drag_duration = match asset.kind {
-                AssetKind::AdjustmentLayer => state.default_adjustment_layer_drag_duration(),
-                _ => asset.media_info.duration,
-            };
             state.begin_drag_asset(
                 asset.id,
                 asset_name.clone(),
                 asset.kind.clone(),
-                drag_duration,
+                presentation.drag_duration,
                 matches!(asset.kind, AssetKind::Video) && asset.media_info.has_audio,
             );
-            let lane = match asset.kind {
-                AssetKind::Video | AssetKind::AdjustmentLayer => "视频轨",
-                AssetKind::Audio => "音频轨",
-            };
-            state.set_status_hint(format!("拖拽中：{}（释放到{}）", asset_name, lane), false);
+            state.set_status_hint(
+                format!(
+                    "拖拽中：{}（释放到{}）",
+                    asset_name, presentation.target_lane_label
+                ),
+                false,
+            );
         }
     }
 
-    fn draw_thumbnail_badges(
-        &self,
-        ui: &Ui,
-        rect: Rect,
-        kind: AssetKind,
-        proxy_mode: bool,
-        is_offline: bool,
-    ) {
-        if is_offline {
+    fn draw_thumbnail_badges(&self, ui: &Ui, rect: Rect, badges: &[AssetCardBadge]) {
+        for badge in badges {
+            let anchor = if badge.align_right {
+                rect.right_bottom() + Vec2::new(-6.0, -6.0)
+            } else {
+                rect.left_bottom() + Vec2::new(6.0, -6.0)
+            };
             self.draw_thumbnail_badge(
                 ui,
-                rect.left_bottom() + Vec2::new(6.0, -6.0),
-                "OFFLINE",
-                false,
-                palette::status_warning().gamma_multiply(0.20),
-                palette::status_warning(),
-            );
-        } else if proxy_mode {
-            self.draw_thumbnail_badge(
-                ui,
-                rect.left_bottom() + Vec2::new(6.0, -6.0),
-                "PROXY",
-                false,
-                palette::interaction_highlight().gamma_multiply(0.18),
-                palette::interaction_highlight(),
+                anchor,
+                badge.text.as_str(),
+                badge.align_right,
+                badge.bg,
+                badge.fg,
             );
         }
-
-        let (label, bg, fg) = match kind {
-            AssetKind::Video => (
-                "视频",
-                palette::bg_surface_raised().gamma_multiply(0.92),
-                palette::text_muted(),
-            ),
-            AssetKind::Audio => (
-                "音频",
-                palette::bg_surface_raised().gamma_multiply(0.92),
-                palette::text_muted(),
-            ),
-            AssetKind::AdjustmentLayer => (
-                "调整",
-                palette::accent_secondary().gamma_multiply(0.22),
-                palette::text_primary(),
-            ),
-        };
-        self.draw_thumbnail_badge(
-            ui,
-            rect.right_bottom() + Vec2::new(-6.0, -6.0),
-            label,
-            true,
-            bg,
-            fg,
-        );
     }
 
     fn draw_thumbnail_badge(
@@ -695,7 +687,14 @@ impl LibraryPanel {
         );
     }
 
-    fn draw_thumbnail(&mut self, ui: &mut Ui, asset: &AssetRecord, is_offline: bool, rect: Rect) {
+    fn draw_thumbnail(
+        &mut self,
+        ui: &mut Ui,
+        asset: &AssetRecord,
+        is_offline: bool,
+        rect: Rect,
+        placeholder_icon: theme::UiIcon,
+    ) {
         ui.painter().rect_filled(rect, tokens::section_rounding(), palette::canvas_bg());
         ui.painter().rect_stroke(
             rect,
@@ -709,13 +708,8 @@ impl LibraryPanel {
             return;
         }
 
-        if matches!(asset.kind, AssetKind::Audio) {
-            self.draw_thumbnail_placeholder(ui, rect, theme::UiIcon::Audio);
-            return;
-        }
-
-        if matches!(asset.kind, AssetKind::AdjustmentLayer) {
-            self.draw_thumbnail_placeholder(ui, rect, theme::UiIcon::Plus);
+        if !matches!(asset.kind, AssetKind::Video) {
+            self.draw_thumbnail_placeholder(ui, rect, placeholder_icon);
             return;
         }
 
@@ -727,7 +721,7 @@ impl LibraryPanel {
                 palette::image_tint(),
             );
         } else {
-            self.draw_thumbnail_placeholder(ui, rect, theme::UiIcon::Video);
+            self.draw_thumbnail_placeholder(ui, rect, placeholder_icon);
         }
     }
 
@@ -808,6 +802,99 @@ fn asset_is_offline(asset: &AssetRecord) -> bool {
     !matches!(asset.kind, AssetKind::AdjustmentLayer) && !asset.path.exists()
 }
 
+fn asset_card_presentation(
+    asset: &AssetRecord,
+    state: &AppState,
+    proxy_mode: bool,
+    is_offline: bool,
+) -> AssetCardPresentation {
+    let mut badges = Vec::with_capacity(2);
+    if let Some(status_badge) = asset_status_badge(proxy_mode, is_offline) {
+        badges.push(status_badge);
+    }
+    badges.push(asset_kind_badge(&asset.kind));
+
+    AssetCardPresentation {
+        placeholder_icon: asset_placeholder_icon(&asset.kind),
+        badges,
+        duration_text: asset_duration_text(asset),
+        drag_duration: asset_drag_duration(asset, state),
+        target_lane_label: asset_target_lane_label(&asset.kind),
+    }
+}
+
+fn asset_status_badge(proxy_mode: bool, is_offline: bool) -> Option<AssetCardBadge> {
+    if is_offline {
+        Some(AssetCardBadge {
+            text: "OFFLINE".to_string(),
+            bg: palette::status_warning().gamma_multiply(0.20),
+            fg: palette::status_warning(),
+            align_right: false,
+        })
+    } else if proxy_mode {
+        Some(AssetCardBadge {
+            text: "PROXY".to_string(),
+            bg: palette::interaction_highlight().gamma_multiply(0.18),
+            fg: palette::interaction_highlight(),
+            align_right: false,
+        })
+    } else {
+        None
+    }
+}
+
+fn asset_kind_badge(kind: &AssetKind) -> AssetCardBadge {
+    let (text, bg, fg) = match kind {
+        AssetKind::Video => (
+            "视频",
+            palette::bg_surface_raised().gamma_multiply(0.92),
+            palette::text_muted(),
+        ),
+        AssetKind::Audio => (
+            "音频",
+            palette::bg_surface_raised().gamma_multiply(0.92),
+            palette::text_muted(),
+        ),
+        AssetKind::AdjustmentLayer => (
+            "调整",
+            palette::accent_secondary().gamma_multiply(0.22),
+            palette::text_primary(),
+        ),
+    };
+    AssetCardBadge { text: text.to_string(), bg, fg, align_right: true }
+}
+
+fn asset_placeholder_icon(kind: &AssetKind) -> theme::UiIcon {
+    match kind {
+        AssetKind::Video => theme::UiIcon::Video,
+        AssetKind::Audio => theme::UiIcon::Audio,
+        AssetKind::AdjustmentLayer => theme::UiIcon::Plus,
+    }
+}
+
+fn asset_target_lane_label(kind: &AssetKind) -> &'static str {
+    match kind {
+        AssetKind::Audio => "音频轨",
+        AssetKind::Video | AssetKind::AdjustmentLayer => "视频轨",
+    }
+}
+
+fn asset_has_display_duration(asset: &AssetRecord) -> bool {
+    asset.media_info.duration > Duration::ZERO && !matches!(asset.kind, AssetKind::AdjustmentLayer)
+}
+
+fn asset_duration_text(asset: &AssetRecord) -> Option<String> {
+    asset_has_display_duration(asset).then(|| format_duration_hhmmss(asset.media_info.duration))
+}
+
+fn asset_drag_duration(asset: &AssetRecord, state: &AppState) -> Duration {
+    if asset_has_display_duration(asset) {
+        asset.media_info.duration
+    } else {
+        state.default_adjustment_layer_drag_duration()
+    }
+}
+
 fn format_duration_hhmmss(duration: Duration) -> String {
     let secs = duration.as_secs();
     let h = secs / 3600;
@@ -817,5 +904,73 @@ fn format_duration_hhmmss(duration: Duration) -> String {
         format!("{h:02}:{m:02}:{s:02}")
     } else {
         format!("{m:02}:{s:02}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mondrian_assets::AssetKind;
+    use mondrian_core::types::AssetId;
+    use mondrian_media::MediaInfo;
+
+    fn asset(kind: AssetKind, duration: Duration) -> AssetRecord {
+        let mut media_info = match kind {
+            AssetKind::AdjustmentLayer => MediaInfo::synthetic_adjustment_layer(),
+            _ => MediaInfo::synthetic_adjustment_layer(),
+        };
+        media_info.duration = duration;
+        AssetRecord {
+            id: AssetId::new(),
+            name: "Test".to_string(),
+            kind,
+            path: PathBuf::from("test"),
+            media_info,
+            created_at: "now".to_string(),
+            updated_at: "now".to_string(),
+        }
+    }
+
+    #[test]
+    fn asset_duration_text_hides_variable_length_assets() {
+        assert_eq!(
+            asset_duration_text(&asset(AssetKind::AdjustmentLayer, Duration::ZERO)),
+            None
+        );
+        assert_eq!(
+            asset_duration_text(&asset(AssetKind::Video, Duration::ZERO)),
+            None
+        );
+        assert_eq!(
+            asset_duration_text(&asset(AssetKind::Audio, Duration::from_secs(65))),
+            Some("01:05".to_string())
+        );
+    }
+
+    #[test]
+    fn asset_card_presentation_uses_consistent_badge_slots() {
+        let state = AppState::default();
+        let video = asset_card_presentation(
+            &asset(AssetKind::Video, Duration::from_secs(10)),
+            &state,
+            true,
+            false,
+        );
+        assert_eq!(video.badges.len(), 2);
+        assert!(!video.badges[0].align_right);
+        assert!(video.badges[1].align_right);
+        assert_eq!(video.badges[0].text, "PROXY");
+        assert_eq!(video.badges[1].text, "视频");
+
+        let adjustment = asset_card_presentation(
+            &asset(AssetKind::AdjustmentLayer, Duration::ZERO),
+            &state,
+            false,
+            false,
+        );
+        assert_eq!(adjustment.badges.len(), 1);
+        assert_eq!(adjustment.badges[0].text, "调整");
+        assert!(adjustment.badges[0].align_right);
+        assert_eq!(adjustment.duration_text, None);
     }
 }

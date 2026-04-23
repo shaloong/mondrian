@@ -9,7 +9,7 @@ use mondrian_core::{
     types::*,
     MondrianError, Result,
 };
-use mondrian_effects::{AdjustmentLayerParams, EffectNode, EffectType};
+use mondrian_effects::{evaluate_effect_stack, AdjustmentLayerParams, EffectNode, EffectType};
 use serde::{Deserialize, Serialize};
 
 /// 裁剪边缘
@@ -320,64 +320,7 @@ impl Clip {
     }
 
     pub fn evaluate_effect_params(&self, time: TimeCode) -> AdjustmentLayerParams {
-        let mut params = AdjustmentLayerParams::default();
-        for effect in self.effects.iter().filter(|effect| effect.is_enabled) {
-            match effect.effect_type {
-                EffectType::BasicCorrection => {
-                    params.exposure =
-                        effect.evaluate_f32_by_suffix("basic.exposure", time, params.exposure);
-                    params.contrast =
-                        effect.evaluate_f32_by_suffix("basic.contrast", time, params.contrast);
-                    params.saturation =
-                        effect.evaluate_f32_by_suffix("basic.saturation", time, params.saturation);
-                }
-                EffectType::WhiteBalance => {
-                    params.temperature = effect.evaluate_f32_by_suffix(
-                        "white_balance.temperature",
-                        time,
-                        params.temperature,
-                    );
-                    params.tint =
-                        effect.evaluate_f32_by_suffix("white_balance.tint", time, params.tint);
-                }
-                EffectType::GaussianBlur => {
-                    params.blur_radius =
-                        effect.evaluate_f32_by_suffix("blur.radius", time, params.blur_radius);
-                }
-                EffectType::Sharpen => {
-                    params.sharpen_amount = effect.evaluate_f32_by_suffix(
-                        "sharpen.amount",
-                        time,
-                        params.sharpen_amount,
-                    );
-                }
-                EffectType::Vignette => {
-                    params.vignette_intensity = effect.evaluate_f32_by_suffix(
-                        "vignette.intensity",
-                        time,
-                        params.vignette_intensity,
-                    );
-                    params.vignette_feather = effect.evaluate_f32_by_suffix(
-                        "vignette.feather",
-                        time,
-                        params.vignette_feather,
-                    );
-                }
-                EffectType::ChromaticAberration => {
-                    params.chromatic_aberration = effect.evaluate_f32_by_suffix(
-                        "chromatic.amount",
-                        time,
-                        params.chromatic_aberration,
-                    );
-                }
-                EffectType::Grain => {
-                    params.grain_amount =
-                        effect.evaluate_f32_by_suffix("grain.amount", time, params.grain_amount);
-                }
-                _ => {}
-            }
-        }
-        params
+        evaluate_effect_stack(&self.effects, time).adjustment
     }
 
     pub fn add_effect(&mut self, effect_type: EffectType) -> EffectId {
