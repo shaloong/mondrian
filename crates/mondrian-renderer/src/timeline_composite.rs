@@ -1,9 +1,11 @@
 use mondrian_core::types::BlendMode;
 use mondrian_effects::{
-    apply_adjustment_layer, apply_adjustment_pass, blend_rgba_pixel, AdjustmentLayerParams,
+    apply_compiled_effect_graph, apply_compiled_effect_graph_pass, blend_rgba_pixel,
+    CompiledEffectGraph,
 };
+use std::sync::Arc;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct TimelineMediaLayer<'a> {
     pub rgba: &'a [u8],
     pub width: u32,
@@ -11,33 +13,27 @@ pub struct TimelineMediaLayer<'a> {
     pub opacity: f32,
     pub blend_mode: BlendMode,
     pub transform: [f32; 6],
-    pub effect_params: AdjustmentLayerParams,
+    pub effect_graph: Arc<CompiledEffectGraph>,
     pub frame_seed: i64,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct TimelineAdjustmentLayer {
-    pub params: AdjustmentLayerParams,
+    pub effect_graph: Arc<CompiledEffectGraph>,
     pub opacity: f32,
     pub blend_mode: Option<BlendMode>,
     pub frame_seed: i64,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum TimelineCompositeElement<'a> {
     Media(TimelineMediaLayer<'a>),
     Adjustment(TimelineAdjustmentLayer),
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct TimelineCompositeOptions {
     pub empty_canvas_transparent: bool,
-}
-
-impl Default for TimelineCompositeOptions {
-    fn default() -> Self {
-        Self { empty_canvas_transparent: false }
-    }
 }
 
 #[derive(Default)]
@@ -81,14 +77,14 @@ pub fn composite_timeline_elements_into(
     for element in elements {
         match element {
             TimelineCompositeElement::Media(layer) => {
-                let src_rgba = if layer.effect_params.is_identity() {
+                let src_rgba = if layer.effect_graph.graph.is_identity() {
                     layer.rgba
                 } else {
-                    scratch.media_effect = apply_adjustment_layer(
+                    scratch.media_effect = apply_compiled_effect_graph(
                         layer.rgba,
                         layer.width,
                         layer.height,
-                        layer.effect_params,
+                        &layer.effect_graph,
                         layer.frame_seed,
                     );
                     scratch.media_effect.as_slice()
@@ -107,14 +103,17 @@ pub fn composite_timeline_elements_into(
                 has_composited_media = true;
             }
             TimelineCompositeElement::Adjustment(layer) => {
-                if !has_composited_media || layer.opacity <= 1.0e-4 || layer.params.is_identity() {
+                if !has_composited_media
+                    || layer.opacity <= 1.0e-4
+                    || layer.effect_graph.graph.is_identity()
+                {
                     continue;
                 }
-                apply_adjustment_pass(
+                apply_compiled_effect_graph_pass(
                     out,
                     width,
                     height,
-                    layer.params,
+                    &layer.effect_graph,
                     layer.opacity,
                     layer.blend_mode,
                     layer.frame_seed,
@@ -285,6 +284,7 @@ fn sample_src_rgba(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mondrian_effects::{get_or_compile_scheduled_effect_graph, EffectRenderPlan};
 
     fn identity_media<'a>(rgba: &'a [u8], width: u32, height: u32) -> TimelineCompositeElement<'a> {
         TimelineCompositeElement::Media(TimelineMediaLayer {
@@ -294,7 +294,8 @@ mod tests {
             opacity: 1.0,
             blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-            effect_params: AdjustmentLayerParams::default(),
+            effect_graph: get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
+                .expect("compile identity graph"),
             frame_seed: 0,
         })
     }
@@ -312,10 +313,14 @@ mod tests {
                 opacity: 1.0,
                 blend_mode: BlendMode::Normal,
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-                effect_params: AdjustmentLayerParams {
-                    saturation: 0.0,
-                    ..AdjustmentLayerParams::default()
-                },
+                effect_graph: get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
+                    ops: vec![mondrian_effects::EffectRenderOp::ColorAdjust {
+                        exposure: 0.0,
+                        contrast: 1.0,
+                        saturation: 0.0,
+                    }],
+                })
+                .expect("compile effect graph"),
                 frame_seed: 0,
             })],
             TimelineCompositeOptions { empty_canvas_transparent: true },
@@ -328,6 +333,49 @@ mod tests {
     }
 
     #[test]
+    fn custom_render_ops_flow_through_shared_compositor() {
+        mondrian_effects::register_custom_render_processor(
+            "plugin.render.test_invert",
+            std::sync::Arc::new(|buffer, _, _, _, _| {
+                for px in buffer.chunks_exact_mut(4) {
+                    px[0] = 255u8.saturating_sub(px[0]);
+                    px[1] = 255u8.saturating_sub(px[1]);
+                    px[2] = 255u8.saturating_sub(px[2]);
+                }
+                Ok(())
+            }),
+        );
+
+        let mut scratch = TimelineCompositeScratch::default();
+        let output = composite_timeline_elements(
+            1,
+            1,
+            &[TimelineCompositeElement::Media(TimelineMediaLayer {
+                rgba: &[10, 20, 30, 255],
+                width: 1,
+                height: 1,
+                opacity: 1.0,
+                blend_mode: BlendMode::Normal,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_graph: get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
+                    ops: vec![mondrian_effects::EffectRenderOp::Custom {
+                        key: "plugin.render.test_invert".to_string(),
+                        params: Default::default(),
+                        cache_key: None,
+                        cache_policy: mondrian_effects::EffectCachePolicy::Deterministic,
+                    }],
+                })
+                .expect("compile custom graph"),
+                frame_seed: 0,
+            })],
+            TimelineCompositeOptions { empty_canvas_transparent: true },
+            &mut scratch,
+        );
+
+        assert_eq!(&output[0..4], &[245, 235, 225, 255]);
+    }
+
+    #[test]
     fn adjustment_affects_only_layers_below_it() {
         let mut scratch = TimelineCompositeScratch::default();
         let output = composite_timeline_elements(
@@ -336,10 +384,14 @@ mod tests {
             &[
                 identity_media(&[255, 0, 0, 255, 255, 0, 0, 255], 2, 1),
                 TimelineCompositeElement::Adjustment(TimelineAdjustmentLayer {
-                    params: AdjustmentLayerParams {
-                        saturation: 0.0,
-                        ..AdjustmentLayerParams::default()
-                    },
+                    effect_graph: get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
+                        ops: vec![mondrian_effects::EffectRenderOp::ColorAdjust {
+                            exposure: 0.0,
+                            contrast: 1.0,
+                            saturation: 0.0,
+                        }],
+                    })
+                    .expect("compile adjustment graph"),
                     opacity: 1.0,
                     blend_mode: Some(BlendMode::Normal),
                     frame_seed: 0,
@@ -369,7 +421,10 @@ mod tests {
                     opacity: 1.0,
                     blend_mode: BlendMode::Multiply,
                     transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-                    effect_params: AdjustmentLayerParams::default(),
+                    effect_graph: get_or_compile_scheduled_effect_graph(
+                        &EffectRenderPlan::default(),
+                    )
+                    .expect("compile identity graph"),
                     frame_seed: 0,
                 }),
             ],

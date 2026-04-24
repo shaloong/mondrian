@@ -4685,7 +4685,7 @@ mod tests {
             None,
         ));
         bag.upsert(grouped_test_property(
-            "effect.blur.radius",
+            "effect.gaussian_blur.radius",
             "模糊半径",
             Some("模糊"),
         ));

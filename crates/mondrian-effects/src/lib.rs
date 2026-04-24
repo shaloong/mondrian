@@ -4,18 +4,41 @@
 
 pub mod adjustment;
 pub mod effect;
+pub mod execution;
+pub mod graph;
 pub mod lut;
 pub mod mask;
+pub mod plugin_contract;
+pub mod plugin_sdk;
 pub mod text;
 pub mod transition;
 
-pub use adjustment::{
-    apply_adjustment_layer, apply_adjustment_pass, blend_adjustment_result, blend_rgba_pixel,
-    AdjustmentLayerParams,
-};
+pub use adjustment::blend_rgba_pixel;
 pub use effect::{
-    effect_definition, effect_library_types, evaluate_effect_stack, register_effect_definition,
-    EffectDefinition, EffectEvalContext, EffectNode, EffectStackEvaluation, EffectType,
+    build_effect_render_graph, build_effect_render_plan, effect_definition, effect_library_types,
+    evaluate_effect_stack, register_effect_definition, EffectCacheKeyBuilder, EffectCachePolicy,
+    EffectCapabilities, EffectDefinition, EffectEvalContext, EffectGraphBuilder, EffectNode,
+    EffectRenderOp, EffectRenderParamsBuilder, EffectRenderPlan, EffectStackEvaluation, EffectType,
+};
+pub use execution::{
+    apply_compiled_effect_graph, apply_compiled_effect_graph_pass, apply_effect_render_graph,
+    apply_effect_render_graph_pass, apply_effect_render_plan, apply_effect_render_plan_pass,
+    register_custom_render_processor, CustomEffectRenderProcessor,
+};
+pub use graph::{
+    compile_effect_render_graph, compile_scheduled_effect_graph,
+    get_or_compile_scheduled_effect_graph, get_or_compile_scheduled_render_graph,
+    schedule_effect_render_graph, CompiledEffectGraph, EffectExecutionSchedule,
+    EffectGraphBuilderState, EffectGraphNode, EffectGraphNodeId, EffectGraphNodeKind,
+    EffectGraphValue, EffectRenderGraph,
 };
 pub use lut::Lut3D;
+pub use plugin_contract::{
+    effect_plugin_is_library_visible, effect_plugin_is_runtime_available,
+    effect_plugin_runtime_status, plugin_contract, record_plugin_runtime_failure,
+    register_plugin_contract, EffectPluginApiVersion, EffectPluginContract,
+    EffectPluginDegradationPolicy, EffectPluginFailurePolicy, EffectPluginRuntimeStatus,
+    CURRENT_EFFECT_PLUGIN_API_VERSION,
+};
+pub use plugin_sdk::{EffectGraphDsl, EffectPluginDefinitionBuilder};
 pub use transition::Transition;

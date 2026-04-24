@@ -1,5 +1,15 @@
+use crate::execution::custom_render_processor_registry;
+use crate::EffectRenderOp;
+use crate::{effect_definition, plugin_contract, record_plugin_runtime_failure};
 use mondrian_core::types::BlendMode;
 use serde::{Deserialize, Serialize};
+use std::panic::{catch_unwind, AssertUnwindSafe};
+
+pub use crate::execution::{
+    apply_compiled_effect_graph, apply_compiled_effect_graph_pass, apply_effect_render_graph,
+    apply_effect_render_graph_pass, apply_effect_render_plan, apply_effect_render_plan_pass,
+    register_custom_render_processor, CustomEffectRenderProcessor,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct AdjustmentLayerParams {
@@ -117,6 +127,118 @@ pub fn apply_adjustment_layer(
     }
 
     working
+}
+
+pub(crate) fn apply_render_op(
+    working: &mut Vec<u8>,
+    width: u32,
+    height: u32,
+    op: &EffectRenderOp,
+    frame_seed: i64,
+) {
+    match op {
+        EffectRenderOp::ColorAdjust { exposure, contrast, saturation } => {
+            apply_primary_color_adjustments(
+                working,
+                AdjustmentLayerParams {
+                    exposure: *exposure,
+                    contrast: *contrast,
+                    saturation: *saturation,
+                    ..AdjustmentLayerParams::default()
+                },
+            );
+        }
+        EffectRenderOp::WhiteBalance { temperature, tint } => {
+            apply_primary_color_adjustments(
+                working,
+                AdjustmentLayerParams {
+                    temperature: *temperature,
+                    tint: *tint,
+                    ..AdjustmentLayerParams::default()
+                },
+            );
+        }
+        EffectRenderOp::GaussianBlur { radius } => {
+            let blur_radius = radius.round().clamp(0.0, 24.0) as usize;
+            if blur_radius > 0 {
+                *working = box_blur_rgb(working, width as usize, height as usize, blur_radius);
+            }
+        }
+        EffectRenderOp::Sharpen { amount } => {
+            if *amount > 1.0e-4 {
+                let blurred = box_blur_rgb(working, width as usize, height as usize, 1);
+                apply_unsharp_mask(working, &blurred, amount.clamp(0.0, 2.0));
+            }
+        }
+        EffectRenderOp::Vignette { intensity, feather } => {
+            if *intensity > 1.0e-4 {
+                apply_vignette(
+                    working,
+                    width as usize,
+                    height as usize,
+                    AdjustmentLayerParams {
+                        vignette_intensity: *intensity,
+                        vignette_feather: *feather,
+                        ..AdjustmentLayerParams::default()
+                    },
+                );
+            }
+        }
+        EffectRenderOp::ChromaticAberration { amount } => {
+            if *amount > 1.0e-4 {
+                *working = apply_chromatic_aberration(
+                    working,
+                    width as usize,
+                    height as usize,
+                    amount.clamp(0.0, 1.0),
+                );
+            }
+        }
+        EffectRenderOp::Grain { amount } => {
+            if *amount > 1.0e-4 {
+                apply_grain(
+                    working,
+                    width as usize,
+                    height as usize,
+                    amount.clamp(0.0, 1.0),
+                    frame_seed,
+                );
+            }
+        }
+        EffectRenderOp::Custom { key, params, .. } => {
+            let contract = plugin_contract(key);
+            if let Some(processor) = custom_render_processor_registry()
+                .read()
+                .expect("custom render processor registry poisoned")
+                .get(key)
+                .cloned()
+            {
+                let mut staged = working.clone();
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    processor(&mut staged, width, height, params, frame_seed)
+                }));
+                match result {
+                    Ok(Ok(())) => *working = staged,
+                    Ok(Err(error)) => {
+                        record_plugin_runtime_failure(key, contract.as_ref(), format!("{error}"));
+                    }
+                    Err(_) => {
+                        record_plugin_runtime_failure(
+                            key,
+                            contract.as_ref(),
+                            "custom render processor panicked",
+                        );
+                    }
+                }
+            } else if let Some(definition) = effect_definition(&crate::EffectType::from_key(key)) {
+                record_plugin_runtime_failure(
+                    key,
+                    definition.plugin_contract(),
+                    "custom render processor missing",
+                );
+            }
+        }
+    }
 }
 
 pub fn blend_adjustment_result(
@@ -483,7 +605,7 @@ fn rgb_to_unit(px: &[u8]) -> [f32; 3] {
     ]
 }
 
-fn unit_to_u8(value: f32) -> u8 {
+pub(crate) fn unit_to_u8(value: f32) -> u8 {
     (value.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
@@ -513,6 +635,14 @@ fn sample_channel(input: &[u8], width: usize, height: usize, x: f32, y: f32, cha
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        get_or_compile_scheduled_effect_graph, EffectGraphNode, EffectGraphNodeId,
+        EffectGraphNodeKind, EffectRenderGraph, EffectRenderPlan,
+    };
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
 
     #[test]
     fn identity_adjustment_leaves_frame_unchanged() {
@@ -576,5 +706,298 @@ mod tests {
         assert_eq!(out[3], 255);
         assert!(out[0] < base[0]);
         assert!(out[0] > 0);
+    }
+
+    #[test]
+    fn custom_render_processor_can_modify_effect_render_plan_output() {
+        register_custom_render_processor(
+            "plugin.render.glow",
+            Arc::new(|buffer, _width, _height, params, _frame_seed| {
+                let amount = params["amount"].as_f64().unwrap_or(0.0) as f32;
+                for px in buffer.chunks_exact_mut(4) {
+                    px[0] = unit_to_u8((px[0] as f32 / 255.0 + amount).clamp(0.0, 1.0));
+                }
+                Ok(())
+            }),
+        );
+
+        let input = vec![0u8, 0, 0, 255];
+        let output = apply_effect_render_plan(
+            &input,
+            1,
+            1,
+            &EffectRenderPlan {
+                ops: vec![EffectRenderOp::Custom {
+                    key: "plugin.render.glow".to_string(),
+                    params: serde_json::json!({ "amount": 0.5 }),
+                    cache_key: None,
+                    cache_policy: crate::effect::EffectCachePolicy::Deterministic,
+                }],
+            },
+            0,
+        );
+
+        assert_eq!(output[0], 128);
+        assert_eq!(output[3], 255);
+    }
+
+    #[test]
+    fn blend_graph_node_combines_two_inputs() {
+        let graph = EffectRenderGraph {
+            nodes: vec![
+                EffectGraphNode {
+                    id: EffectGraphNodeId(0),
+                    kind: EffectGraphNodeKind::Source,
+                },
+                EffectGraphNode {
+                    id: EffectGraphNodeId(1),
+                    kind: EffectGraphNodeKind::UnaryEffect {
+                        input: EffectGraphNodeId(0),
+                        op: EffectRenderOp::ColorAdjust {
+                            exposure: 0.0,
+                            contrast: 1.0,
+                            saturation: 0.0,
+                        },
+                    },
+                },
+                EffectGraphNode {
+                    id: EffectGraphNodeId(2),
+                    kind: EffectGraphNodeKind::Blend {
+                        base: EffectGraphNodeId(0),
+                        overlay: EffectGraphNodeId(1),
+                        blend_mode: BlendMode::Normal,
+                        opacity: 0.5,
+                    },
+                },
+            ],
+            output: Some(EffectGraphNodeId(2)),
+        };
+        let schedule = crate::schedule_effect_render_graph(&graph).expect("schedule graph");
+        let input = vec![200u8, 40, 20, 255];
+
+        let output = apply_effect_render_graph(&input, 1, 1, &graph, &schedule, 0);
+        assert_eq!(output[3], 255);
+        assert!(output[0] < input[0]);
+        assert!(output[1] > input[1]);
+    }
+
+    #[test]
+    fn mask_graph_node_modulates_alpha() {
+        let graph = EffectRenderGraph {
+            nodes: vec![
+                EffectGraphNode {
+                    id: EffectGraphNodeId(0),
+                    kind: EffectGraphNodeKind::Source,
+                },
+                EffectGraphNode {
+                    id: EffectGraphNodeId(1),
+                    kind: EffectGraphNodeKind::UnaryEffect {
+                        input: EffectGraphNodeId(0),
+                        op: EffectRenderOp::Custom {
+                            key: "plugin.render.alpha_mask".to_string(),
+                            params: serde_json::json!({}),
+                            cache_key: None,
+                            cache_policy: crate::effect::EffectCachePolicy::Deterministic,
+                        },
+                    },
+                },
+                EffectGraphNode {
+                    id: EffectGraphNodeId(2),
+                    kind: EffectGraphNodeKind::Mask {
+                        input: EffectGraphNodeId(0),
+                        mask: EffectGraphNodeId(1),
+                        invert: false,
+                    },
+                },
+            ],
+            output: Some(EffectGraphNodeId(2)),
+        };
+
+        register_custom_render_processor(
+            "plugin.render.alpha_mask",
+            Arc::new(|buffer, _width, _height, _params, _frame_seed| {
+                for px in buffer.chunks_exact_mut(4) {
+                    px[3] = 64;
+                }
+                Ok(())
+            }),
+        );
+
+        let schedule = crate::schedule_effect_render_graph(&graph).expect("schedule graph");
+        let input = vec![20u8, 30, 40, 255];
+        let output = apply_effect_render_graph(&input, 1, 1, &graph, &schedule, 0);
+        assert_eq!(&output[0..3], &input[0..3]);
+        assert_eq!(output[3], 64);
+    }
+
+    #[test]
+    fn blend_graph_node_supports_shared_input_branch() {
+        let graph = EffectRenderGraph {
+            nodes: vec![
+                EffectGraphNode {
+                    id: EffectGraphNodeId(0),
+                    kind: EffectGraphNodeKind::Source,
+                },
+                EffectGraphNode {
+                    id: EffectGraphNodeId(1),
+                    kind: EffectGraphNodeKind::Blend {
+                        base: EffectGraphNodeId(0),
+                        overlay: EffectGraphNodeId(0),
+                        blend_mode: BlendMode::Screen,
+                        opacity: 0.5,
+                    },
+                },
+            ],
+            output: Some(EffectGraphNodeId(1)),
+        };
+
+        let schedule = crate::schedule_effect_render_graph(&graph).expect("schedule graph");
+        let input = vec![64u8, 96, 128, 255];
+        let output = apply_effect_render_graph(&input, 1, 1, &graph, &schedule, 0);
+        assert_eq!(output[3], 255);
+        assert!(output[0] >= input[0]);
+        assert!(output[1] >= input[1]);
+        assert!(output[2] >= input[2]);
+    }
+
+    #[test]
+    fn deterministic_custom_effect_output_hits_shared_cache() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_processor = Arc::clone(&calls);
+        register_custom_render_processor(
+            "plugin.render.cache_counter",
+            Arc::new(move |buffer, _width, _height, _params, _frame_seed| {
+                calls_for_processor.fetch_add(1, Ordering::SeqCst);
+                for px in buffer.chunks_exact_mut(4) {
+                    px[0] = px[0].saturating_add(10);
+                }
+                Ok(())
+            }),
+        );
+
+        let compiled = get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
+            ops: vec![
+                EffectRenderOp::GaussianBlur { radius: 2.0 },
+                EffectRenderOp::Custom {
+                    key: "plugin.render.cache_counter".to_string(),
+                    params: serde_json::json!({}),
+                    cache_key: Some("cache-counter".to_string()),
+                    cache_policy: crate::effect::EffectCachePolicy::Deterministic,
+                },
+            ],
+        })
+        .expect("compile effect graph");
+
+        let input = vec![12u8, 24, 36, 255];
+        let first = apply_compiled_effect_graph(&input, 1, 1, compiled.as_ref(), 0);
+        let second = apply_compiled_effect_graph(&input, 1, 1, compiled.as_ref(), 0);
+
+        assert_eq!(first, second);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn frame_dependent_effect_output_cache_respects_frame_seed() {
+        let compiled = get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
+            ops: vec![
+                EffectRenderOp::GaussianBlur { radius: 2.0 },
+                EffectRenderOp::Grain { amount: 0.5 },
+            ],
+        })
+        .expect("compile grain graph");
+
+        let input = vec![80u8, 90, 100, 255];
+        let first = apply_compiled_effect_graph(&input, 1, 1, compiled.as_ref(), 1);
+        let second = apply_compiled_effect_graph(&input, 1, 1, compiled.as_ref(), 2);
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn expensive_deterministic_subtree_cache_reuses_output_across_graphs() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_processor = Arc::clone(&calls);
+        register_custom_render_processor(
+            "plugin.render.shared_subtree",
+            Arc::new(move |buffer, _width, _height, _params, _frame_seed| {
+                calls_for_processor.fetch_add(1, Ordering::SeqCst);
+                for px in buffer.chunks_exact_mut(4) {
+                    px[0] = px[0].saturating_add(20);
+                }
+                Ok(())
+            }),
+        );
+
+        let first_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
+            ops: vec![
+                EffectRenderOp::Custom {
+                    key: "plugin.render.shared_subtree".to_string(),
+                    params: serde_json::json!({}),
+                    cache_key: Some("shared-subtree".to_string()),
+                    cache_policy: crate::effect::EffectCachePolicy::Deterministic,
+                },
+                EffectRenderOp::ColorAdjust { exposure: 0.0, contrast: 1.0, saturation: 0.0 },
+            ],
+        })
+        .expect("compile first graph");
+
+        let second_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
+            ops: vec![
+                EffectRenderOp::Custom {
+                    key: "plugin.render.shared_subtree".to_string(),
+                    params: serde_json::json!({}),
+                    cache_key: Some("shared-subtree".to_string()),
+                    cache_policy: crate::effect::EffectCachePolicy::Deterministic,
+                },
+                EffectRenderOp::Sharpen { amount: 0.25 },
+            ],
+        })
+        .expect("compile second graph");
+
+        let input = vec![30u8, 60, 90, 255];
+        let _ = apply_compiled_effect_graph(&input, 1, 1, first_graph.as_ref(), 0);
+        let _ = apply_compiled_effect_graph(&input, 1, 1, second_graph.as_ref(), 0);
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn failing_custom_processor_does_not_commit_partial_frame_changes() {
+        let key = "plugin.render.fail_safe";
+        crate::register_plugin_contract(
+            key,
+            crate::EffectPluginContract::new("1.0.0")
+                .with_failure_policy(crate::EffectPluginFailurePolicy::BypassEffect),
+        );
+        register_custom_render_processor(
+            key,
+            Arc::new(|buffer, _width, _height, _params, _frame_seed| {
+                for px in buffer.chunks_exact_mut(4) {
+                    px[0] = 255;
+                }
+                Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "plugin.render.fail_safe".to_string(),
+                    reason: "intentional failure".to_string(),
+                })
+            }),
+        );
+
+        let input = vec![32u8, 48, 64, 255];
+        let output = apply_effect_render_plan(
+            &input,
+            1,
+            1,
+            &EffectRenderPlan {
+                ops: vec![EffectRenderOp::Custom {
+                    key: key.to_string(),
+                    params: serde_json::json!({}),
+                    cache_key: None,
+                    cache_policy: crate::effect::EffectCachePolicy::Deterministic,
+                }],
+            },
+            0,
+        );
+
+        assert_eq!(output, input);
     }
 }

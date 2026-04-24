@@ -1,8 +1,9 @@
 use mondrian_core::types::{AssetId, BlendMode, Rational, TimeCode};
-use mondrian_effects::AdjustmentLayerParams;
+use mondrian_effects::CompiledEffectGraph;
 use mondrian_timeline::sequence::Sequence;
+use std::sync::Arc;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct TimelineMediaPlan {
     pub asset_id: AssetId,
     pub source_frame: i64,
@@ -11,19 +12,19 @@ pub struct TimelineMediaPlan {
     pub opacity: f32,
     pub blend_mode: BlendMode,
     pub transform: [f32; 6],
-    pub effect_params: AdjustmentLayerParams,
+    pub effect_graph: Arc<CompiledEffectGraph>,
     pub frame_seed: i64,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct TimelineAdjustmentPlan {
-    pub params: AdjustmentLayerParams,
+    pub effect_graph: Arc<CompiledEffectGraph>,
     pub opacity: f32,
     pub blend_mode: BlendMode,
     pub frame_seed: i64,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum TimelineRenderPlanElement {
     Media(TimelineMediaPlan),
     Adjustment(TimelineAdjustmentPlan),
@@ -44,9 +45,13 @@ pub fn build_timeline_render_plan(
         }
 
         if active_clip.clip.is_adjustment_layer() {
+            let Some(effect_graph) = active_clip.clip.evaluate_compiled_effect_graph(current)
+            else {
+                continue;
+            };
             elements.push(TimelineRenderPlanElement::Adjustment(
                 TimelineAdjustmentPlan {
-                    params: active_clip.clip.evaluate_effect_params(current),
+                    effect_graph,
                     opacity,
                     blend_mode: active_clip.blend_mode,
                     frame_seed: timeline_frame.max(0),
@@ -55,6 +60,9 @@ pub fn build_timeline_render_plan(
             continue;
         }
 
+        let Some(effect_graph) = active_clip.clip.evaluate_compiled_effect_graph(current) else {
+            continue;
+        };
         elements.push(TimelineRenderPlanElement::Media(TimelineMediaPlan {
             asset_id: active_clip.clip.asset_id,
             source_frame: active_clip.source_time.frame.max(0),
@@ -63,7 +71,7 @@ pub fn build_timeline_render_plan(
             opacity,
             blend_mode: active_clip.blend_mode,
             transform: mat3_to_affine(active_clip.transform_matrix.to_cols_array()),
-            effect_params: active_clip.clip.evaluate_effect_params(current),
+            effect_graph,
             frame_seed: timeline_frame.max(0),
         }));
     }
@@ -98,14 +106,14 @@ mod tests {
         let plan = build_timeline_render_plan(&seq, 5);
         assert_eq!(plan.len(), 2);
 
-        match plan[0] {
+        match &plan[0] {
             TimelineRenderPlanElement::Media(media) => {
                 assert_eq!(media.blend_mode, BlendMode::Screen);
             }
             _ => panic!("expected media"),
         }
 
-        match plan[1] {
+        match &plan[1] {
             TimelineRenderPlanElement::Adjustment(adjustment) => {
                 assert_eq!(adjustment.blend_mode, BlendMode::Multiply);
             }
@@ -125,7 +133,7 @@ mod tests {
 
         let plan = build_timeline_render_plan(&seq, 5);
         assert_eq!(plan.len(), 1);
-        match plan[0] {
+        match &plan[0] {
             TimelineRenderPlanElement::Media(media) => {
                 assert_eq!(media.blend_mode, BlendMode::HardLight);
             }

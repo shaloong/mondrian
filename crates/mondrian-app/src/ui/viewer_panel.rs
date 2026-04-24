@@ -5,7 +5,7 @@ use crate::{
 use egui::{Pos2, Rect, Sense, Ui, Vec2};
 
 use mondrian_core::types::{AssetId, BlendMode, Rational, TimeCode};
-use mondrian_effects::AdjustmentLayerParams;
+use mondrian_effects::CompiledEffectGraph;
 use mondrian_media::cache::FrameCacheConfig;
 use mondrian_media::{DecoderPool, FrameCache, RgbaFrame};
 use mondrian_renderer::{
@@ -39,13 +39,13 @@ struct LayerDecodeRequest {
     opacity: f32,
     blend_mode: BlendMode,
     transform: [f32; 6],
-    effect_params: AdjustmentLayerParams,
+    effect_graph: std::sync::Arc<CompiledEffectGraph>,
     frame_seed: i64,
 }
 
 #[derive(Clone)]
 struct AdjustmentRenderRequest {
-    params: AdjustmentLayerParams,
+    effect_graph: std::sync::Arc<CompiledEffectGraph>,
     opacity: f32,
     blend_mode: Option<BlendMode>,
     frame_seed: i64,
@@ -101,13 +101,13 @@ enum LayerSignature {
         blend_mode: BlendMode,
         transform_key: [i32; 6],
         frame_seed: i64,
-        param_bits: [u32; 11],
+        effect_hash: u64,
     },
     Adjustment {
         opacity_u8: u8,
         blend_mode: Option<BlendMode>,
         frame_seed: i64,
-        param_bits: [u32; 11],
+        effect_hash: u64,
     },
 }
 
@@ -462,13 +462,13 @@ impl ViewerPanel {
                                     blend_mode: layer.blend_mode,
                                     transform_key: quantize_transform_signature(layer.transform),
                                     frame_seed: layer.frame_seed,
-                                    param_bits: layer.effect_params.signature_words(),
+                                    effect_hash: layer.effect_graph.signature_hash,
                                 },
                                 RenderElement::Adjustment(layer) => LayerSignature::Adjustment {
                                     opacity_u8: (layer.opacity * 255.0).round() as u8,
                                     blend_mode: layer.blend_mode,
                                     frame_seed: layer.frame_seed,
-                                    param_bits: layer.params.signature_words(),
+                                    effect_hash: layer.effect_graph.signature_hash,
                                 },
                             })
                             .collect::<Vec<_>>();
@@ -1528,7 +1528,7 @@ impl ViewerPanel {
             match plan {
                 TimelineRenderPlanElement::Adjustment(adjustment) => {
                     layers.push(RenderElement::Adjustment(AdjustmentRenderRequest {
-                        params: adjustment.params,
+                        effect_graph: adjustment.effect_graph,
                         opacity: adjustment.opacity,
                         blend_mode: Some(adjustment.blend_mode),
                         frame_seed: adjustment.frame_seed,
@@ -1569,7 +1569,7 @@ impl ViewerPanel {
                         opacity: media.opacity,
                         blend_mode: media.blend_mode,
                         transform: media.transform,
-                        effect_params: media.effect_params,
+                        effect_graph: media.effect_graph,
                         frame_seed: media.frame_seed,
                     }));
                 }
@@ -2241,7 +2241,7 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
 
     let has_cpu_only_ops = request.layers.iter().any(|layer| match layer {
         RenderElement::Media(layer) => {
-            !layer.effect_params.is_identity()
+            !layer.effect_graph.graph.is_identity()
                 || !is_identity_transform(layer.transform)
                 || layer.blend_mode != BlendMode::Normal
         }
@@ -2291,14 +2291,14 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
                     opacity: layer.opacity,
                     blend_mode: layer.blend_mode,
                     transform: layer.transform,
-                    effect_params: layer.effect_params,
+                    effect_graph: std::sync::Arc::clone(&layer.effect_graph),
                     frame_seed: layer.frame_seed,
                 }));
             }
             RenderElement::Adjustment(adjustment) => {
                 composite_elements.push(TimelineCompositeElement::Adjustment(
                     TimelineAdjustmentLayer {
-                        params: adjustment.params,
+                        effect_graph: std::sync::Arc::clone(&adjustment.effect_graph),
                         opacity: adjustment.opacity,
                         blend_mode: adjustment.blend_mode,
                         frame_seed: adjustment.frame_seed,

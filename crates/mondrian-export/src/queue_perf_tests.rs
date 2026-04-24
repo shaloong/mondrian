@@ -1,6 +1,6 @@
 use super::*;
 use mondrian_core::types::BlendMode;
-use mondrian_effects::AdjustmentLayerParams;
+use mondrian_effects::{get_or_compile_scheduled_effect_graph, EffectRenderPlan};
 use mondrian_renderer::{
     composite_timeline_elements_into, TimelineCompositeElement, TimelineCompositeOptions,
     TimelineCompositeScratch, TimelineMediaLayer,
@@ -154,7 +154,8 @@ fn compose_frame_layers_into_canvas(
                 opacity: *opacity,
                 blend_mode: BlendMode::Normal,
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-                effect_params: AdjustmentLayerParams::default(),
+                effect_graph: get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
+                    .expect("compile identity graph"),
                 frame_seed: frame_idx as i64,
             })
         })

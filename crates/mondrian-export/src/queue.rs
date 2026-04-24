@@ -781,7 +781,7 @@ fn render_timeline_frame_into(
             TimelineRenderPlanElement::Adjustment(adjustment) => {
                 composite_elements.push(TimelineCompositeElement::Adjustment(
                     TimelineAdjustmentLayer {
-                        params: adjustment.params,
+                        effect_graph: adjustment.effect_graph.clone(),
                         opacity: adjustment.opacity,
                         blend_mode: Some(adjustment.blend_mode),
                         frame_seed: adjustment.frame_seed,
@@ -799,7 +799,7 @@ fn render_timeline_frame_into(
                     opacity: media.opacity,
                     blend_mode: media.blend_mode,
                     transform: media.transform,
-                    effect_params: media.effect_params,
+                    effect_graph: media.effect_graph.clone(),
                     frame_seed: media.frame_seed,
                 }));
             }
@@ -1355,7 +1355,7 @@ fn parse_time_spec_millis(raw: &str) -> Option<u64> {
 mod tests {
     use super::*;
     use mondrian_core::types::{AssetId, BlendMode, TimeCode};
-    use mondrian_effects::AdjustmentLayerParams;
+    use mondrian_effects::{get_or_compile_scheduled_effect_graph, EffectRenderPlan};
     use mondrian_timeline::clip::Clip;
     use mondrian_timeline::sequence::Sequence;
     use std::path::PathBuf;
@@ -1554,10 +1554,14 @@ mod tests {
                     opacity: 1.0,
                     blend_mode: BlendMode::Normal,
                     transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-                    effect_params: AdjustmentLayerParams {
-                        saturation: 0.0,
-                        ..AdjustmentLayerParams::default()
-                    },
+                    effect_graph: get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
+                        ops: vec![mondrian_effects::EffectRenderOp::ColorAdjust {
+                            exposure: 0.0,
+                            contrast: 1.0,
+                            saturation: 0.0,
+                        }],
+                    })
+                    .expect("compile media effect graph"),
                     frame_seed: 0,
                 },
             )],
@@ -1585,16 +1589,23 @@ mod tests {
                         opacity: 1.0,
                         blend_mode: BlendMode::Normal,
                         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-                        effect_params: AdjustmentLayerParams::default(),
+                        effect_graph: get_or_compile_scheduled_effect_graph(
+                            &EffectRenderPlan::default(),
+                        )
+                        .expect("compile identity graph"),
                         frame_seed: 0,
                     },
                 ),
                 mondrian_renderer::TimelineCompositeElement::Adjustment(
                     mondrian_renderer::TimelineAdjustmentLayer {
-                        params: AdjustmentLayerParams {
-                            saturation: 0.0,
-                            ..AdjustmentLayerParams::default()
-                        },
+                        effect_graph: get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
+                            ops: vec![mondrian_effects::EffectRenderOp::ColorAdjust {
+                                exposure: 0.0,
+                                contrast: 1.0,
+                                saturation: 0.0,
+                            }],
+                        })
+                        .expect("compile adjustment graph"),
                         opacity: 1.0,
                         blend_mode: Some(BlendMode::Normal),
                         frame_seed: 0,
@@ -1608,7 +1619,10 @@ mod tests {
                         opacity: 1.0,
                         blend_mode: BlendMode::Normal,
                         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-                        effect_params: AdjustmentLayerParams::default(),
+                        effect_graph: get_or_compile_scheduled_effect_graph(
+                            &EffectRenderPlan::default(),
+                        )
+                        .expect("compile identity graph"),
                         frame_seed: 0,
                     },
                 ),

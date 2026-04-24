@@ -208,13 +208,13 @@ mod tests {
 
     #[test]
     fn effect_properties_use_fx_groups() {
-        let blur = property("effect.blur.radius", "模糊半径", Some("模糊"));
-        let meta = property_group_meta("effect.blur.radius", &blur);
+        let blur = property("effect.gaussian_blur.radius", "模糊半径", Some("模糊"));
+        let meta = property_group_meta("effect.gaussian_blur.radius", &blur);
         assert_eq!(meta.kind, AnimationGroupKind::Effect);
         assert!(meta.shows_fx_badge);
         assert!(meta.allows_effect_controls);
         assert_eq!(
-            qualified_property_display_name("effect.blur.radius", &blur),
+            qualified_property_display_name("effect.gaussian_blur.radius", &blur),
             "模糊 · 模糊半径"
         );
     }

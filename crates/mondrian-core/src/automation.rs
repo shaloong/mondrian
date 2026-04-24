@@ -2089,23 +2089,23 @@ mod tests {
     fn property_bag_supports_plugin_style_keyframe_mutation() {
         let mut bag = PropertyBag::default();
         bag.define(PropertyDescriptor::new(
-            "effect.blur.radius",
+            "effect.gaussian_blur.radius",
             "模糊半径",
             PropertyValue::Float(8.0),
         ));
         bag.apply_mutation(PropertyMutation::SetKeyframe {
-            path: "effect.blur.radius".to_string(),
+            path: "effect.gaussian_blur.radius".to_string(),
             keyframe: Keyframe::linear(timecode_to_ticks(tc(0)), PropertyValue::Float(8.0)),
         })
         .expect("set start keyframe");
         bag.apply_mutation(PropertyMutation::SetKeyframe {
-            path: "effect.blur.radius".to_string(),
+            path: "effect.gaussian_blur.radius".to_string(),
             keyframe: Keyframe::linear(timecode_to_ticks(tc(20)), PropertyValue::Float(28.0)),
         })
         .expect("set end keyframe");
 
         let value = bag
-            .evaluate("effect.blur.radius", timecode_to_ticks(tc(10)))
+            .evaluate("effect.gaussian_blur.radius", timecode_to_ticks(tc(10)))
             .and_then(|value| value.as_f32())
             .expect("evaluate interpolated value");
         assert!((value - 18.0).abs() < 0.01);
@@ -2187,20 +2187,21 @@ mod tests {
     fn write_value_updates_static_value_when_animation_is_disabled() {
         let mut bag = PropertyBag::default();
         bag.define(PropertyDescriptor::new(
-            "effect.blur.radius",
+            "effect.gaussian_blur.radius",
             "模糊半径",
             PropertyValue::Float(8.0),
         ));
 
         bag.apply_mutation(PropertyMutation::WriteValue {
-            path: "effect.blur.radius".to_string(),
+            path: "effect.gaussian_blur.radius".to_string(),
             time: timecode_to_ticks(tc(10)),
             value: PropertyValue::Float(18.0),
             interpolation: InterpolationType::Linear,
         })
         .expect("write static value");
 
-        let property = bag.property("effect.blur.radius").expect("blur property should exist");
+        let property =
+            bag.property("effect.gaussian_blur.radius").expect("blur property should exist");
         assert!(!property.is_enabled());
         assert!(property.keyframe_times().is_empty());
         assert_eq!(*property.static_value(), PropertyValue::Float(18.0));

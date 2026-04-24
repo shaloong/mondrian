@@ -9,8 +9,12 @@ use mondrian_core::{
     types::*,
     MondrianError, Result,
 };
-use mondrian_effects::{evaluate_effect_stack, AdjustmentLayerParams, EffectNode, EffectType};
+use mondrian_effects::{
+    build_effect_render_graph, build_effect_render_plan, get_or_compile_scheduled_render_graph,
+    CompiledEffectGraph, EffectNode, EffectRenderPlan, EffectType,
+};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// 裁剪边缘
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,6 +228,12 @@ impl SpeedMap {
     }
 }
 
+impl Default for SpeedMap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// 时间线片段语义
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ClipKind {
@@ -319,8 +329,16 @@ impl Clip {
         self.source_in + source_local
     }
 
-    pub fn evaluate_effect_params(&self, time: TimeCode) -> AdjustmentLayerParams {
-        evaluate_effect_stack(&self.effects, time).adjustment
+    pub fn evaluate_effect_render_plan(&self, time: TimeCode) -> EffectRenderPlan {
+        build_effect_render_plan(&self.effects, time)
+    }
+
+    pub fn evaluate_compiled_effect_graph(
+        &self,
+        time: TimeCode,
+    ) -> Option<Arc<CompiledEffectGraph>> {
+        let graph = build_effect_render_graph(&self.effects, time);
+        get_or_compile_scheduled_render_graph(graph)
     }
 
     pub fn add_effect(&mut self, effect_type: EffectType) -> EffectId {
@@ -494,9 +512,20 @@ mod tests {
         automation::{timecode_to_ticks, Keyframe, PropertyMutation, PropertyValue},
         types::Rational,
     };
+    use mondrian_effects::EffectRenderOp;
 
     fn tc(frame: i64) -> TimeCode {
         TimeCode::new(frame, Rational::new(1, 25))
+    }
+
+    fn exposure_from_plan(plan: &EffectRenderPlan) -> f32 {
+        plan.ops
+            .iter()
+            .find_map(|op| match op {
+                EffectRenderOp::ColorAdjust { exposure, .. } => Some(*exposure),
+                _ => None,
+            })
+            .unwrap_or(0.0)
     }
 
     #[test]
@@ -576,8 +605,9 @@ mod tests {
         let mut second = Clip::new_adjustment_layer(shared_asset_id, tc(40), tc(30));
         first.add_effect(EffectType::BasicCorrection);
         second.add_effect(EffectType::BasicCorrection);
-        let exposure_path =
-            first.effect_property_path("basic.exposure").expect("adjustment exposure path");
+        let exposure_path = first
+            .effect_property_path("basic_correction.exposure")
+            .expect("adjustment exposure path");
 
         first
             .apply_property_mutation(PropertyMutation::SetStaticValue {
@@ -586,8 +616,8 @@ mod tests {
             })
             .expect("set first exposure");
 
-        let first_exposure = first.evaluate_effect_params(tc(10)).exposure;
-        let second_exposure = second.evaluate_effect_params(tc(50)).exposure;
+        let first_exposure = exposure_from_plan(&first.evaluate_effect_render_plan(tc(10)));
+        let second_exposure = exposure_from_plan(&second.evaluate_effect_render_plan(tc(50)));
 
         assert!((first_exposure - 1.25).abs() < 1.0e-4);
         assert!(second_exposure.abs() < 1.0e-4);

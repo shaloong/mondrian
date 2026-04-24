@@ -6031,6 +6031,7 @@ fn collect_files_by_name(
 #[cfg(test)]
 mod timeline_edit_tests {
     use super::*;
+    use mondrian_effects::EffectRenderOp;
 
     fn create_state_with_sequence() -> AppState {
         let mut state = AppState::new();
@@ -6053,6 +6054,17 @@ mod timeline_edit_tests {
             .and_then(|seq| seq.video_tracks[0].clips.iter().find(|clip| clip.id == clip_id))
             .map(|clip| clip.is_disabled)
             .unwrap_or(false)
+    }
+
+    fn exposure_from_clip(clip: &Clip, time: TimeCode) -> f32 {
+        clip.evaluate_effect_render_plan(time)
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                EffectRenderOp::ColorAdjust { exposure, .. } => Some(*exposure),
+                _ => None,
+            })
+            .unwrap_or(0.0)
     }
 
     #[test]
@@ -6566,8 +6578,9 @@ mod timeline_edit_tests {
         let mut clip =
             Clip::new_adjustment_layer(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(40, tb));
         clip.add_effect(EffectType::BasicCorrection);
-        let exposure_path =
-            clip.effect_property_path("basic.exposure").expect("adjustment exposure path");
+        let exposure_path = clip
+            .effect_property_path("basic_correction.exposure")
+            .expect("adjustment exposure path");
         clip.apply_property_mutation(
             mondrian_core::automation::PropertyMutation::SetStaticValue {
                 path: exposure_path,
@@ -6595,7 +6608,7 @@ mod timeline_edit_tests {
         assert_eq!(split_clips.len(), 2);
         assert!(split_clips.iter().all(|clip| clip.is_adjustment_layer()));
         assert!(split_clips.iter().all(|clip| {
-            (clip.evaluate_effect_params(TimeCode::new(20, tb)).exposure - 0.75).abs() < 1.0e-4
+            (exposure_from_clip(clip, TimeCode::new(20, tb)) - 0.75).abs() < 1.0e-4
         }));
 
         let right_id = split_clips[1].id;
@@ -6606,7 +6619,7 @@ mod timeline_edit_tests {
             .find(|clip| clip.id == right_id)
             .expect("right split clip should exist");
         let right_exposure_path = right_clip
-            .effect_property_path("basic.exposure")
+            .effect_property_path("basic_correction.exposure")
             .expect("right adjustment exposure path");
         right_clip
             .apply_property_mutation(
@@ -6628,14 +6641,8 @@ mod timeline_edit_tests {
             .iter()
             .find(|clip| clip.id == right_id)
             .expect("right split clip should exist");
-        assert!(
-            (left_clip.evaluate_effect_params(TimeCode::new(10, tb)).exposure - 0.75).abs()
-                < 1.0e-4
-        );
-        assert!(
-            (right_clip.evaluate_effect_params(TimeCode::new(30, tb)).exposure - 1.5).abs()
-                < 1.0e-4
-        );
+        assert!((exposure_from_clip(left_clip, TimeCode::new(10, tb)) - 0.75).abs() < 1.0e-4);
+        assert!((exposure_from_clip(right_clip, TimeCode::new(30, tb)) - 1.5).abs() < 1.0e-4);
     }
 
     #[test]
