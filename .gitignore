@@ -24,7 +24,7 @@ Thumbs.db
 *.aac
 !tests/fixtures/small/*.mp4
 
-# AI API 密钥 / 环境变量
+# API 密钥 / 环境变量
 .env
 .env.local
 secrets/
@@ -46,3 +46,7 @@ logs/
 
 # 程序文件
 .mondrian
+
+# 工作区 AI 数据
+.codex/
+CLAUDE.md
