@@ -159,6 +159,7 @@ cargo bench -p mondrian-renderer
 | [AI 工作流](docs/architecture/ai-workflow.md)       | Agent 系统设计    |
 | [素材资产系统](docs/architecture/asset-system.md)   | 跨项目复用架构    |
 | [效果系统](docs/architecture/effects-system.md)     | LUT / 滤镜 / 转场 |
+| [插件开发手册](docs/plugins/README.md) | 插件开发者完整手册 |
 | [导出系统](docs/architecture/export-system.md)      | 渲染队列设计      |
 | [设计准则](docs/DESIGN_GUIDELINES.md)               | UI/UX 设计基线    |
 | [技术栈选型](docs/TECH_STACK.md)                    | 选型理由与对比    |
