@@ -15,7 +15,8 @@ use mondrian_core::{
     },
     events::{AppEvent, EventBus},
     types::{
-        AssetId, ClipId, EffectId, KeyframeId, Rational, Resolution, SequenceId, TimeCode, TrackId,
+        AssetId, ClipId, ColorSpace, EffectId, KeyframeId, Rational, Resolution, SequenceId,
+        TimeCode, TrackId,
     },
 };
 use mondrian_effects::EffectType;
@@ -26,7 +27,11 @@ use mondrian_media::audio::{
 };
 use mondrian_timeline::clip::{Clip, TrimEdge};
 use mondrian_timeline::command::SequenceSnapshotCommand;
-use mondrian_timeline::sequence::Sequence;
+use mondrian_timeline::sequence::{
+    AudioDisplayFormat, ColorWorkflow, EditingMode, ExportBitDepth, FieldOrder,
+    MissingColorMetadataPolicy, NestedColorProcessing, PixelAspectRatio, Sequence,
+    SequenceCollection, SequenceSettings, VideoDisplayFormat, VideoRange,
+};
 use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
 
@@ -132,9 +137,7 @@ pub enum ClipOverlapMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProjectFile {
     pub name: String,
-    pub sequence: Sequence,
-    pub in_point_frame: Option<i64>,
-    pub out_point_frame: Option<i64>,
+    pub sequences: SequenceCollection,
     pub proxy_mode_assets: Vec<AssetId>,
 }
 
@@ -182,11 +185,46 @@ impl AutosaveManifest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct NewProjectDraft {
+    #[serde(default)]
     name: String,
+    #[serde(default = "default_new_project_width")]
     width: u32,
+    #[serde(default = "default_new_project_height")]
     height: u32,
+    #[serde(default = "default_new_project_fps_num")]
     fps_num: i64,
+    #[serde(default = "default_new_project_fps_den")]
     fps_den: i64,
+    #[serde(default)]
+    editing_mode: EditingMode,
+    #[serde(default)]
+    pixel_aspect_ratio: PixelAspectRatio,
+    #[serde(default)]
+    field_order: FieldOrder,
+    #[serde(default)]
+    video_display_format: VideoDisplayFormat,
+    #[serde(default = "default_new_project_audio_sample_rate")]
+    audio_sample_rate: u32,
+    #[serde(default)]
+    audio_display_format: AudioDisplayFormat,
+    #[serde(default)]
+    color_space: ColorSpace,
+    #[serde(default = "default_new_project_auto_tone_map_media")]
+    auto_tone_map_media: bool,
+    #[serde(default)]
+    color_workflow: ColorWorkflow,
+    #[serde(default)]
+    missing_color_metadata_policy: MissingColorMetadataPolicy,
+    #[serde(default)]
+    nested_color_processing: NestedColorProcessing,
+    #[serde(default)]
+    output_color_space: ColorSpace,
+    #[serde(default)]
+    video_range: VideoRange,
+    #[serde(default)]
+    export_bit_depth: ExportBitDepth,
+    #[serde(default)]
+    preserve_hdr_metadata: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -278,12 +316,51 @@ impl Default for NewProjectDraft {
     fn default() -> Self {
         Self {
             name: "未命名项目".to_string(),
-            width: 1920,
-            height: 1080,
-            fps_num: 25,
-            fps_den: 1,
+            width: default_new_project_width(),
+            height: default_new_project_height(),
+            fps_num: default_new_project_fps_num(),
+            fps_den: default_new_project_fps_den(),
+            editing_mode: EditingMode::Custom,
+            pixel_aspect_ratio: PixelAspectRatio::Square,
+            field_order: FieldOrder::Progressive,
+            video_display_format: VideoDisplayFormat::Frames,
+            audio_sample_rate: default_new_project_audio_sample_rate(),
+            audio_display_format: AudioDisplayFormat::AudioSamples,
+            color_space: ColorSpace::Rec709,
+            auto_tone_map_media: default_new_project_auto_tone_map_media(),
+            color_workflow: ColorWorkflow::DisplayReferred,
+            missing_color_metadata_policy: MissingColorMetadataPolicy::AssumeRec709,
+            nested_color_processing: NestedColorProcessing::PreserveChildWorkingSpace,
+            output_color_space: ColorSpace::Rec709,
+            video_range: VideoRange::Full,
+            export_bit_depth: ExportBitDepth::SixteenFloat,
+            preserve_hdr_metadata: false,
         }
     }
+}
+
+const fn default_new_project_width() -> u32 {
+    1920
+}
+
+const fn default_new_project_height() -> u32 {
+    1080
+}
+
+const fn default_new_project_fps_num() -> i64 {
+    25
+}
+
+const fn default_new_project_fps_den() -> i64 {
+    1
+}
+
+const fn default_new_project_audio_sample_rate() -> u32 {
+    48_000
+}
+
+const fn default_new_project_auto_tone_map_media() -> bool {
+    true
 }
 
 const fn default_media_cache_auto_cleanup() -> bool {
@@ -356,16 +433,16 @@ pub struct AppState {
 
     // 当前打开的序列（None = 无项目）
     pub sequence: Option<Sequence>,
+    pub sequences: Vec<Sequence>,
+    pub active_sequence_id: Option<SequenceId>,
+    pub default_sequence_id: Option<SequenceId>,
+    pub sequence_navigation_stack: Vec<SequenceId>,
 
     // 当前打开的项目文件
     pub current_project_path: Option<PathBuf>,
 
     // 当前项目运行时工作目录（用于素材库 SQLite）
     pub project_runtime_dir: Option<PathBuf>,
-
-    // 项目级入/出点（帧）
-    pub project_in_point: Option<i64>,
-    pub project_out_point: Option<i64>,
 
     // 撤销/重做历史（封装在 timeline crate 中）
     pub cmd_history: mondrian_timeline::command::CommandHistory,
@@ -458,10 +535,12 @@ impl AppState {
         Self {
             event_bus: EventBus::new(),
             sequence: None,
+            sequences: Vec::new(),
+            active_sequence_id: None,
+            default_sequence_id: None,
+            sequence_navigation_stack: Vec::new(),
             current_project_path: None,
             project_runtime_dir: None,
-            project_in_point: None,
-            project_out_point: None,
             cmd_history: mondrian_timeline::command::CommandHistory::new(200),
             playback: PlaybackState::default(),
             playback_reached_end: false,
@@ -552,6 +631,7 @@ pub struct MondrianApp {
     show_effect_library: bool,
     show_library: bool,
     show_export: bool,
+    show_sequence_settings: bool,
     show_dev_metrics: bool,
     show_preferences_dialog: bool,
     theme: crate::ui::theme::Theme,
@@ -612,6 +692,7 @@ impl MondrianApp {
             show_effect_library: true,
             show_library: true,
             show_export: false,
+            show_sequence_settings: false,
             show_dev_metrics: false,
             show_preferences_dialog: false,
             theme: default_app_theme(),
@@ -1023,6 +1104,18 @@ impl eframe::App for MondrianApp {
             }
         }
 
+        if self.show_sequence_settings {
+            let mut open = self.show_sequence_settings;
+            egui::Window::new("序列设置")
+                .open(&mut open)
+                .default_size([520.0, 520.0])
+                .frame(crate::ui::theme::dialog_frame())
+                .show(ctx, |ui| {
+                    self.draw_sequence_settings_window(ui);
+                });
+            self.show_sequence_settings = open;
+        }
+
         if self.show_preferences_dialog {
             self.capture_shortcut_input(ctx);
             self.draw_preferences_window(ctx);
@@ -1166,6 +1259,312 @@ impl MondrianApp {
 
     fn save_project_as_dialog(&mut self) {
         preferences::save_project_as_dialog(self);
+    }
+
+    fn draw_sequence_settings_window(&mut self, ui: &mut egui::Ui) {
+        let Some(sequence) = self.state.sequence.as_ref() else {
+            ui.label("当前无序列");
+            return;
+        };
+
+        let mut settings = sequence.settings.clone();
+        ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+
+        egui::Grid::new("sequence_settings_grid")
+            .num_columns(2)
+            .spacing([14.0, 8.0])
+            .show(ui, |ui| {
+                ui.label("编辑模式");
+                egui::ComboBox::from_id_salt("sequence_editing_mode")
+                    .selected_text(editing_mode_label(settings.editing_mode))
+                    .show_ui(ui, |ui| {
+                        let mut selected_mode = settings.editing_mode;
+                        for mode in [
+                            EditingMode::Custom,
+                            EditingMode::Dslr1080p,
+                            EditingMode::Dslr720p,
+                            EditingMode::Avchd1080p,
+                            EditingMode::DigitalCinema4k,
+                            EditingMode::SocialVertical1080p,
+                        ] {
+                            ui.selectable_value(&mut selected_mode, mode, editing_mode_label(mode));
+                        }
+                        if selected_mode != settings.editing_mode {
+                            settings.apply_editing_mode_preset(selected_mode);
+                        }
+                    });
+                ui.end_row();
+
+                ui.label("时基");
+                egui::ComboBox::from_id_salt("sequence_frame_rate")
+                    .selected_text(frame_rate_label(settings.frame_rate))
+                    .show_ui(ui, |ui| {
+                        for frame_rate in Rational::SEQUENCE_FRAME_RATES {
+                            ui.selectable_value(
+                                &mut settings.frame_rate,
+                                frame_rate,
+                                frame_rate_label(frame_rate),
+                            );
+                        }
+                    });
+                ui.end_row();
+
+                ui.label("帧大小");
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::DragValue::new(&mut settings.resolution.width)
+                            .range(SequenceSettings::MIN_WIDTH..=SequenceSettings::MAX_WIDTH)
+                            .speed(8)
+                            .suffix(" px"),
+                    );
+                    ui.label("x");
+                    ui.add(
+                        egui::DragValue::new(&mut settings.resolution.height)
+                            .range(SequenceSettings::MIN_HEIGHT..=SequenceSettings::MAX_HEIGHT)
+                            .speed(8)
+                            .suffix(" px"),
+                    );
+                });
+                ui.end_row();
+
+                ui.label("像素长宽比");
+                egui::ComboBox::from_id_salt("sequence_pixel_aspect_ratio")
+                    .selected_text(pixel_aspect_ratio_label(settings.pixel_aspect_ratio))
+                    .show_ui(ui, |ui| {
+                        for par in [
+                            PixelAspectRatio::Square,
+                            PixelAspectRatio::D1DvNtsc,
+                            PixelAspectRatio::D1DvNtscWidescreen,
+                            PixelAspectRatio::D1DvPal,
+                            PixelAspectRatio::D1DvPalWidescreen,
+                            PixelAspectRatio::Anamorphic2x,
+                            PixelAspectRatio::HdAnamorphic1080,
+                            PixelAspectRatio::DvcproHd,
+                            PixelAspectRatio::Unknown,
+                        ] {
+                            ui.selectable_value(
+                                &mut settings.pixel_aspect_ratio,
+                                par,
+                                pixel_aspect_ratio_label(par),
+                            );
+                        }
+                    });
+                ui.end_row();
+
+                ui.label("场");
+                egui::ComboBox::from_id_salt("sequence_field_order")
+                    .selected_text(field_order_label(settings.field_order))
+                    .show_ui(ui, |ui| {
+                        for field_order in [
+                            FieldOrder::Progressive,
+                            FieldOrder::UpperFirst,
+                            FieldOrder::LowerFirst,
+                        ] {
+                            ui.selectable_value(
+                                &mut settings.field_order,
+                                field_order,
+                                field_order_label(field_order),
+                            );
+                        }
+                    });
+                ui.end_row();
+
+                ui.label("显示格式");
+                egui::ComboBox::from_id_salt("sequence_video_display_format")
+                    .selected_text(video_display_format_label(settings.video_display_format))
+                    .show_ui(ui, |ui| {
+                        for display_format in [
+                            VideoDisplayFormat::Timecode2997DropFrame,
+                            VideoDisplayFormat::Timecode2997NonDropFrame,
+                            VideoDisplayFormat::FeetAndFrames16mm,
+                            VideoDisplayFormat::FeetAndFrames35mm,
+                            VideoDisplayFormat::Frames,
+                        ] {
+                            ui.selectable_value(
+                                &mut settings.video_display_format,
+                                display_format,
+                                video_display_format_label(display_format),
+                            );
+                        }
+                    });
+                ui.end_row();
+
+                ui.label("工作色彩空间");
+                egui::ComboBox::from_id_salt("sequence_color_space")
+                    .selected_text(color_space_label(settings.color_space))
+                    .show_ui(ui, |ui| {
+                        for color_space in color_space_options() {
+                            ui.selectable_value(
+                                &mut settings.color_space,
+                                color_space,
+                                color_space_label(color_space),
+                            );
+                        }
+                    });
+                ui.end_row();
+
+                ui.label("自动色调映射");
+                ui.checkbox(&mut settings.auto_tone_map_media, "");
+                ui.end_row();
+
+                ui.label("色彩工作流");
+                egui::ComboBox::from_id_salt("sequence_color_workflow")
+                    .selected_text(color_workflow_label(settings.color_management.workflow))
+                    .show_ui(ui, |ui| {
+                        for workflow in [
+                            ColorWorkflow::DisplayReferred,
+                            ColorWorkflow::SceneReferred,
+                            ColorWorkflow::Aces,
+                        ] {
+                            ui.selectable_value(
+                                &mut settings.color_management.workflow,
+                                workflow,
+                                color_workflow_label(workflow),
+                            );
+                        }
+                    });
+                ui.end_row();
+
+                ui.label("缺失色彩元数据");
+                egui::ComboBox::from_id_salt("sequence_missing_color_metadata")
+                    .selected_text(missing_color_metadata_policy_label(
+                        settings.color_management.missing_metadata_policy,
+                    ))
+                    .show_ui(ui, |ui| {
+                        for policy in [
+                            MissingColorMetadataPolicy::AssumeRec709,
+                            MissingColorMetadataPolicy::AssumeSequenceWorkingSpace,
+                            MissingColorMetadataPolicy::RejectMedia,
+                        ] {
+                            ui.selectable_value(
+                                &mut settings.color_management.missing_metadata_policy,
+                                policy,
+                                missing_color_metadata_policy_label(policy),
+                            );
+                        }
+                    });
+                ui.end_row();
+
+                ui.label("嵌套序列色彩");
+                egui::ComboBox::from_id_salt("sequence_nested_color_processing")
+                    .selected_text(nested_color_processing_label(
+                        settings.color_management.nested_processing,
+                    ))
+                    .show_ui(ui, |ui| {
+                        for processing in [
+                            NestedColorProcessing::PreserveChildWorkingSpace,
+                            NestedColorProcessing::ForceParentWorkingSpace,
+                            NestedColorProcessing::BakeChildOutputTransform,
+                        ] {
+                            ui.selectable_value(
+                                &mut settings.color_management.nested_processing,
+                                processing,
+                                nested_color_processing_label(processing),
+                            );
+                        }
+                    });
+                ui.end_row();
+
+                ui.label("输出色彩空间");
+                egui::ComboBox::from_id_salt("sequence_output_color_space")
+                    .selected_text(color_space_label(
+                        settings.color_management.output_color_space,
+                    ))
+                    .show_ui(ui, |ui| {
+                        for color_space in color_space_options() {
+                            ui.selectable_value(
+                                &mut settings.color_management.output_color_space,
+                                color_space,
+                                color_space_label(color_space),
+                            );
+                        }
+                    });
+                ui.end_row();
+
+                ui.label("视频电平");
+                egui::ComboBox::from_id_salt("sequence_video_range")
+                    .selected_text(video_range_label(settings.color_management.video_range))
+                    .show_ui(ui, |ui| {
+                        for range in [VideoRange::Full, VideoRange::Legal] {
+                            ui.selectable_value(
+                                &mut settings.color_management.video_range,
+                                range,
+                                video_range_label(range),
+                            );
+                        }
+                    });
+                ui.end_row();
+
+                ui.label("导出位深");
+                egui::ComboBox::from_id_salt("sequence_export_bit_depth")
+                    .selected_text(export_bit_depth_label(
+                        settings.color_management.export_bit_depth,
+                    ))
+                    .show_ui(ui, |ui| {
+                        for bit_depth in [
+                            ExportBitDepth::Eight,
+                            ExportBitDepth::Ten,
+                            ExportBitDepth::SixteenFloat,
+                        ] {
+                            ui.selectable_value(
+                                &mut settings.color_management.export_bit_depth,
+                                bit_depth,
+                                export_bit_depth_label(bit_depth),
+                            );
+                        }
+                    });
+                ui.end_row();
+
+                ui.label("保留 HDR metadata");
+                ui.checkbox(&mut settings.color_management.preserve_hdr_metadata, "");
+                ui.end_row();
+
+                ui.label("采样率");
+                egui::ComboBox::from_id_salt("sequence_audio_sample_rate")
+                    .selected_text(format!("{} Hz", settings.audio_sample_rate))
+                    .show_ui(ui, |ui| {
+                        for sample_rate in SequenceSettings::AUDIO_SAMPLE_RATES {
+                            ui.selectable_value(
+                                &mut settings.audio_sample_rate,
+                                sample_rate,
+                                format!("{sample_rate} Hz"),
+                            );
+                        }
+                    });
+                ui.end_row();
+
+                ui.label("音频显示格式");
+                egui::ComboBox::from_id_salt("sequence_audio_display_format")
+                    .selected_text(audio_display_format_label(settings.audio_display_format))
+                    .show_ui(ui, |ui| {
+                        for display_format in [
+                            AudioDisplayFormat::AudioSamples,
+                            AudioDisplayFormat::Milliseconds,
+                        ] {
+                            ui.selectable_value(
+                                &mut settings.audio_display_format,
+                                display_format,
+                                audio_display_format_label(display_format),
+                            );
+                        }
+                    });
+                ui.end_row();
+            });
+
+        ui.add_space(12.0);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button("应用").clicked() {
+                match self.state.update_active_sequence_settings(settings) {
+                    Ok(()) => {
+                        self.state.set_status_hint("序列设置已更新", false);
+                        self.show_sequence_settings = false;
+                    }
+                    Err(err) => {
+                        self.state.set_status_hint(format!("更新序列设置失败：{err}"), true);
+                    }
+                }
+            }
+        });
     }
 
     fn capture_shortcut_input(&mut self, ctx: &egui::Context) {
@@ -1468,12 +1867,20 @@ impl MondrianApp {
 }
 
 fn app_preferences_path() -> PathBuf {
+    app_data_dir().join("app_preferences.json")
+}
+
+fn app_data_dir() -> PathBuf {
     let base = std::env::var_os("APPDATA")
         .or_else(|| std::env::var_os("HOME"))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
 
-    base.join("mondrian").join("app_preferences.json")
+    base.join("mondrian")
+}
+
+fn app_lut_library_dir() -> PathBuf {
+    app_data_dir().join("LUTs")
 }
 
 fn sanitize_filename(raw: &str) -> String {
@@ -1516,6 +1923,134 @@ fn ensure_project_extension(path: PathBuf) -> PathBuf {
         path
     } else {
         path.with_extension(PROJECT_EXTENSION)
+    }
+}
+
+fn editing_mode_label(value: EditingMode) -> &'static str {
+    match value {
+        EditingMode::Custom => "自定义",
+        EditingMode::Dslr1080p => "DSLR 1080p",
+        EditingMode::Dslr720p => "DSLR 720p",
+        EditingMode::Avchd1080p => "AVCHD 1080p",
+        EditingMode::DigitalCinema4k => "Digital Cinema 4K",
+        EditingMode::SocialVertical1080p => "社媒竖屏 1080p",
+    }
+}
+
+fn frame_rate_label(value: Rational) -> String {
+    let fps = value.to_f64();
+    if (fps.fract()).abs() < 0.001 {
+        format!("{fps:.0} fps")
+    } else if (fps * 10.0).fract().abs() < 0.001 {
+        format!("{fps:.1} fps")
+    } else {
+        format!("{fps:.3} fps")
+    }
+}
+
+fn pixel_aspect_ratio_label(value: PixelAspectRatio) -> &'static str {
+    match value {
+        PixelAspectRatio::Square => "方形像素 (1.0)",
+        PixelAspectRatio::D1DvNtsc => "D1/DV NTSC (0.9091)",
+        PixelAspectRatio::D1DvNtscWidescreen => "D1/DV NTSC 宽银幕 16:9 (1.2121)",
+        PixelAspectRatio::D1DvPal => "D1/DV PAL (1.0940)",
+        PixelAspectRatio::D1DvPalWidescreen => "D1/DV PAL 宽银幕 16:9 (1.4587)",
+        PixelAspectRatio::Anamorphic2x => "变形 2:1 (2.0)",
+        PixelAspectRatio::HdAnamorphic1080 => "HD 变形 1080 (1.333)",
+        PixelAspectRatio::DvcproHd => "DVCPRO HD (1.5)",
+        PixelAspectRatio::Unknown => "未知 PAR",
+    }
+}
+
+fn field_order_label(value: FieldOrder) -> &'static str {
+    match value {
+        FieldOrder::Progressive => "逐行扫描",
+        FieldOrder::UpperFirst => "高场优先",
+        FieldOrder::LowerFirst => "低场优先",
+    }
+}
+
+fn video_display_format_label(value: VideoDisplayFormat) -> &'static str {
+    match value {
+        VideoDisplayFormat::Timecode2997DropFrame => "29.97 fps 丢帧时间码",
+        VideoDisplayFormat::Timecode2997NonDropFrame => "29.97 fps 无丢帧时间码",
+        VideoDisplayFormat::FeetAndFrames16mm => "英尺 + 帧 16mm",
+        VideoDisplayFormat::FeetAndFrames35mm => "英尺 + 帧 35mm",
+        VideoDisplayFormat::Frames => "画框",
+    }
+}
+
+fn color_space_label(value: ColorSpace) -> &'static str {
+    match value {
+        ColorSpace::Rec709 => "Rec. 709",
+        ColorSpace::Rec2100Hlg => "Rec. 2100 HLG",
+        ColorSpace::Rec2100Pq => "Rec. 2100 PQ",
+        ColorSpace::Srgb => "sRGB",
+        ColorSpace::Rec2020 => "Rec. 2020",
+        ColorSpace::DciP3 => "DCI-P3",
+        ColorSpace::AppleLog => "Apple Log",
+        ColorSpace::SLog3 => "S-Log3",
+        ColorSpace::ArriLogC4 => "ARRI LogC4",
+    }
+}
+
+fn color_space_options() -> [ColorSpace; 9] {
+    [
+        ColorSpace::Rec709,
+        ColorSpace::Rec2100Hlg,
+        ColorSpace::Rec2100Pq,
+        ColorSpace::Srgb,
+        ColorSpace::Rec2020,
+        ColorSpace::DciP3,
+        ColorSpace::AppleLog,
+        ColorSpace::SLog3,
+        ColorSpace::ArriLogC4,
+    ]
+}
+
+fn color_workflow_label(value: ColorWorkflow) -> &'static str {
+    match value {
+        ColorWorkflow::DisplayReferred => "显示参考",
+        ColorWorkflow::SceneReferred => "场景参考",
+        ColorWorkflow::Aces => "ACES",
+    }
+}
+
+fn missing_color_metadata_policy_label(value: MissingColorMetadataPolicy) -> &'static str {
+    match value {
+        MissingColorMetadataPolicy::AssumeRec709 => "按 Rec. 709 解释",
+        MissingColorMetadataPolicy::AssumeSequenceWorkingSpace => "按序列工作空间解释",
+        MissingColorMetadataPolicy::RejectMedia => "拒绝导入/渲染",
+    }
+}
+
+fn nested_color_processing_label(value: NestedColorProcessing) -> &'static str {
+    match value {
+        NestedColorProcessing::PreserveChildWorkingSpace => "保留子序列工作空间",
+        NestedColorProcessing::ForceParentWorkingSpace => "强制父序列工作空间",
+        NestedColorProcessing::BakeChildOutputTransform => "烘焙子序列输出变换",
+    }
+}
+
+fn video_range_label(value: VideoRange) -> &'static str {
+    match value {
+        VideoRange::Full => "全范围",
+        VideoRange::Legal => "视频合法范围",
+    }
+}
+
+fn export_bit_depth_label(value: ExportBitDepth) -> &'static str {
+    match value {
+        ExportBitDepth::Eight => "8-bit",
+        ExportBitDepth::Ten => "10-bit",
+        ExportBitDepth::SixteenFloat => "16-bit float",
+    }
+}
+
+fn audio_display_format_label(value: AudioDisplayFormat) -> &'static str {
+    match value {
+        AudioDisplayFormat::AudioSamples => "音频采样",
+        AudioDisplayFormat::Milliseconds => "毫秒",
     }
 }
 

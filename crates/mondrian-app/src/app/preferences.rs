@@ -689,6 +689,59 @@ fn draw_media_preferences(app: &mut MondrianApp, ui: &mut egui::Ui) {
         );
     });
 
+    draw_preferences_section(ui, "LUT 库", |ui| {
+        let library = mondrian_effects::LutLibrary::new(app_lut_library_dir());
+        preference_status_line(
+            ui,
+            &format!("目录：{}", library.root().display()),
+            Some("导入的 .cube 文件会被复制到应用数据目录，项目中的 LUT 效果可以直接引用这里的文件。"),
+        );
+        ui.add_space(10.0);
+
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            if ui.button("创建目录").clicked() {
+                match library.ensure_root() {
+                    Ok(()) => app.state.set_status_hint("LUT 库目录已就绪", false),
+                    Err(err) => app.state.set_status_hint(format!("创建 LUT 库失败：{err}"), true),
+                }
+            }
+            if ui.button("导入 .cube LUT").clicked() {
+                if let Some(path) = FileDialog::new().add_filter("Cube LUT", &["cube"]).pick_file()
+                {
+                    match library.import_cube_file(&path) {
+                        Ok(imported) => app
+                            .state
+                            .set_status_hint(format!("LUT 已导入：{}", imported.display()), false),
+                        Err(err) => {
+                            app.state.set_status_hint(format!("导入 LUT 失败：{err}"), true);
+                        }
+                    }
+                }
+            }
+        });
+
+        match library.list_luts() {
+            Ok(entries) if entries.is_empty() => {
+                preference_status_line(ui, "当前没有已导入的 LUT", None);
+            }
+            Ok(entries) => {
+                preference_status_line(ui, &format!("已导入 {} 个 LUT", entries.len()), None);
+                for entry in entries.iter().take(8) {
+                    let path_text = entry.path.display().to_string();
+                    preference_status_line(
+                        ui,
+                        &format!("{} · {}³", entry.name, entry.size),
+                        Some(&path_text),
+                    );
+                }
+            }
+            Err(err) => {
+                preference_status_line(ui, &format!("读取 LUT 库失败：{err}"), None);
+            }
+        }
+    });
+
     draw_preferences_section(ui, "缓存", |ui| {
         preference_toggle_row(
             ui,

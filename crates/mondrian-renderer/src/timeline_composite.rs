@@ -1,4 +1,7 @@
-use mondrian_core::types::BlendMode;
+use mondrian_core::{
+    types::{BlendMode, ColorSpace},
+    RgbaF32Frame,
+};
 use mondrian_effects::{
     apply_compiled_effect_graph, apply_compiled_effect_graph_pass, blend_rgba_pixel,
     CompiledEffectGraph,
@@ -52,6 +55,113 @@ pub fn composite_timeline_elements(
     let mut out = Vec::new();
     composite_timeline_elements_into(&mut out, width, height, elements, options, scratch);
     out
+}
+
+pub fn composite_timeline_elements_float_linear(
+    width: u32,
+    height: u32,
+    elements: &[TimelineCompositeElement<'_>],
+    options: TimelineCompositeOptions,
+    working_color_space: ColorSpace,
+    scratch: &mut TimelineCompositeScratch,
+) -> Vec<u8> {
+    if !can_float_linear_composite(elements) {
+        return composite_timeline_elements(width, height, elements, options, scratch);
+    }
+
+    let pixel_count = width as usize * height as usize;
+    if pixel_count == 0 {
+        return Vec::new();
+    }
+
+    let mut canvas = vec![[0.0, 0.0, 0.0, 1.0]; pixel_count];
+    let mut has_composited_media = false;
+
+    for element in elements {
+        let TimelineCompositeElement::Media(layer) = element else {
+            continue;
+        };
+        let src_rgba = if layer.effect_graph.graph.is_identity() {
+            layer.rgba
+        } else {
+            scratch.media_effect = apply_compiled_effect_graph(
+                layer.rgba,
+                layer.width,
+                layer.height,
+                &layer.effect_graph,
+                layer.frame_seed,
+            );
+            scratch.media_effect.as_slice()
+        };
+        let src = RgbaF32Frame::from_rgba8(
+            layer.width,
+            layer.height,
+            src_rgba,
+            working_color_space,
+            working_color_space,
+            false,
+        );
+        alpha_blend_f32_normal(
+            &mut canvas,
+            width as usize,
+            height as usize,
+            &src.data,
+            layer.width as usize,
+            layer.height as usize,
+            layer.opacity,
+        );
+        has_composited_media = true;
+    }
+
+    if !has_composited_media && options.empty_canvas_transparent {
+        canvas.fill([0.0, 0.0, 0.0, 0.0]);
+    }
+
+    RgbaF32Frame {
+        width,
+        height,
+        data: canvas,
+        color_space: working_color_space,
+    }
+    .to_rgba8(working_color_space, false)
+}
+
+fn can_float_linear_composite(elements: &[TimelineCompositeElement<'_>]) -> bool {
+    elements.iter().all(|element| match element {
+        TimelineCompositeElement::Media(layer) => {
+            layer.blend_mode == BlendMode::Normal && is_identity_transform(layer.transform)
+        }
+        TimelineCompositeElement::Adjustment(_) => false,
+    })
+}
+
+fn alpha_blend_f32_normal(
+    dst: &mut [[f32; 4]],
+    dst_w: usize,
+    dst_h: usize,
+    src: &[[f32; 4]],
+    src_w: usize,
+    src_h: usize,
+    opacity: f32,
+) {
+    let width = dst_w.min(src_w);
+    let height = dst_h.min(src_h);
+    let opacity = opacity.clamp(0.0, 1.0);
+    if opacity <= 1.0e-4 {
+        return;
+    }
+    for y in 0..height {
+        for x in 0..width {
+            let dst_px = &mut dst[y * dst_w + x];
+            let src_px = src[y * src_w + x];
+            let src_a = (src_px[3] * opacity).clamp(0.0, 1.0);
+            let inv = 1.0 - src_a;
+            dst_px[0] = src_px[0] * src_a + dst_px[0] * inv;
+            dst_px[1] = src_px[1] * src_a + dst_px[1] * inv;
+            dst_px[2] = src_px[2] * src_a + dst_px[2] * inv;
+            dst_px[3] = src_a + dst_px[3] * inv;
+        }
+    }
 }
 
 pub fn composite_timeline_elements_into(
@@ -433,5 +543,71 @@ mod tests {
         );
 
         assert_eq!(&output[0..4], &[32, 48, 16, 255]);
+    }
+
+    #[test]
+    fn float_linear_compositor_matches_normal_single_layer_and_preserves_alpha() {
+        let mut scratch = TimelineCompositeScratch::default();
+        let output = composite_timeline_elements_float_linear(
+            1,
+            1,
+            &[TimelineCompositeElement::Media(TimelineMediaLayer {
+                rgba: &[64, 128, 192, 255],
+                width: 1,
+                height: 1,
+                opacity: 1.0,
+                blend_mode: BlendMode::Normal,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_graph: get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
+                    .expect("compile identity graph"),
+                frame_seed: 0,
+            })],
+            TimelineCompositeOptions::default(),
+            mondrian_core::types::ColorSpace::Rec709,
+            &mut scratch,
+        );
+
+        assert_eq!(output[3], 255);
+        assert!((output[0] as i16 - 64).abs() <= 1);
+        assert!((output[1] as i16 - 128).abs() <= 1);
+        assert!((output[2] as i16 - 192).abs() <= 1);
+    }
+
+    #[test]
+    fn float_linear_compositor_falls_back_for_adjustments() {
+        let mut float_scratch = TimelineCompositeScratch::default();
+        let mut legacy_scratch = TimelineCompositeScratch::default();
+        let elements = [
+            identity_media(&[255, 0, 0, 255], 1, 1),
+            TimelineCompositeElement::Adjustment(TimelineAdjustmentLayer {
+                effect_graph: get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
+                    ops: vec![mondrian_effects::EffectRenderOp::ColorAdjust {
+                        exposure: 0.0,
+                        contrast: 1.0,
+                        saturation: 0.0,
+                    }],
+                })
+                .expect("compile adjustment"),
+                opacity: 1.0,
+                blend_mode: Some(BlendMode::Normal),
+                frame_seed: 0,
+            }),
+        ];
+        let float_output = composite_timeline_elements_float_linear(
+            1,
+            1,
+            &elements,
+            TimelineCompositeOptions::default(),
+            mondrian_core::types::ColorSpace::Rec709,
+            &mut float_scratch,
+        );
+        let legacy_output = composite_timeline_elements(
+            1,
+            1,
+            &elements,
+            TimelineCompositeOptions::default(),
+            &mut legacy_scratch,
+        );
+        assert_eq!(float_output, legacy_output);
     }
 }

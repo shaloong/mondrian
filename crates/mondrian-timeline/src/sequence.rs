@@ -3,26 +3,309 @@
 use crate::{clip::ActiveClip, track::Track};
 use mondrian_core::types::*;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum EditingMode {
+    #[default]
+    Custom,
+    Dslr1080p,
+    Dslr720p,
+    Avchd1080p,
+    DigitalCinema4k,
+    SocialVertical1080p,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub enum PixelAspectRatio {
+    #[default]
+    Square,
+    D1DvNtsc,
+    D1DvNtscWidescreen,
+    D1DvPal,
+    D1DvPalWidescreen,
+    Anamorphic2x,
+    HdAnamorphic1080,
+    DvcproHd,
+    Unknown,
+}
+
+impl PixelAspectRatio {
+    pub fn ratio(self) -> Option<f32> {
+        match self {
+            Self::Square => Some(1.0),
+            Self::D1DvNtsc => Some(0.9091),
+            Self::D1DvNtscWidescreen => Some(1.2121),
+            Self::D1DvPal => Some(1.0940),
+            Self::D1DvPalWidescreen => Some(1.4587),
+            Self::Anamorphic2x => Some(2.0),
+            Self::HdAnamorphic1080 => Some(1.333),
+            Self::DvcproHd => Some(1.5),
+            Self::Unknown => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum FieldOrder {
+    #[default]
+    Progressive,
+    UpperFirst,
+    LowerFirst,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum VideoDisplayFormat {
+    Timecode2997DropFrame,
+    Timecode2997NonDropFrame,
+    FeetAndFrames16mm,
+    FeetAndFrames35mm,
+    #[default]
+    Frames,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum AudioDisplayFormat {
+    #[default]
+    AudioSamples,
+    Milliseconds,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SequenceRole {
+    #[default]
+    Editorial,
+    NestedComposition,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ColorWorkflow {
+    #[default]
+    DisplayReferred,
+    SceneReferred,
+    Aces,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum MissingColorMetadataPolicy {
+    #[default]
+    AssumeRec709,
+    AssumeSequenceWorkingSpace,
+    RejectMedia,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum NestedColorProcessing {
+    /// Render the child sequence in its own working space, then convert to the parent space.
+    #[default]
+    PreserveChildWorkingSpace,
+    /// Interpret nested media directly in the parent working space.
+    ForceParentWorkingSpace,
+    /// Bake the child sequence output transform before compositing into the parent.
+    BakeChildOutputTransform,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum VideoRange {
+    #[default]
+    Full,
+    Legal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ExportBitDepth {
+    Eight,
+    Ten,
+    #[default]
+    SixteenFloat,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SequenceColorManagement {
+    #[serde(default)]
+    pub workflow: ColorWorkflow,
+    #[serde(default)]
+    pub missing_metadata_policy: MissingColorMetadataPolicy,
+    #[serde(default)]
+    pub nested_processing: NestedColorProcessing,
+    #[serde(default = "default_output_color_space")]
+    pub output_color_space: ColorSpace,
+    #[serde(default)]
+    pub video_range: VideoRange,
+    #[serde(default)]
+    pub export_bit_depth: ExportBitDepth,
+    #[serde(default = "default_preserve_hdr_metadata")]
+    pub preserve_hdr_metadata: bool,
+}
+
+impl Default for SequenceColorManagement {
+    fn default() -> Self {
+        Self {
+            workflow: ColorWorkflow::DisplayReferred,
+            missing_metadata_policy: MissingColorMetadataPolicy::AssumeRec709,
+            nested_processing: NestedColorProcessing::PreserveChildWorkingSpace,
+            output_color_space: ColorSpace::Rec709,
+            video_range: VideoRange::Full,
+            export_bit_depth: ExportBitDepth::SixteenFloat,
+            preserve_hdr_metadata: false,
+        }
+    }
+}
+
+const fn default_output_color_space() -> ColorSpace {
+    ColorSpace::Rec709
+}
+
+const fn default_preserve_hdr_metadata() -> bool {
+    false
+}
 
 /// 序列设置（帧率/分辨率/音频配置）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SequenceSettings {
+    #[serde(default)]
+    pub editing_mode: EditingMode,
     pub resolution: Resolution,
     pub frame_rate: Rational,
+    #[serde(default)]
+    pub pixel_aspect_ratio: PixelAspectRatio,
+    #[serde(default)]
+    pub field_order: FieldOrder,
+    #[serde(default)]
+    pub video_display_format: VideoDisplayFormat,
     pub audio_sample_rate: u32,
     pub audio_channels: u8,
+    #[serde(default)]
+    pub audio_display_format: AudioDisplayFormat,
     pub color_space: ColorSpace,
+    #[serde(default)]
+    pub auto_tone_map_media: bool,
+    #[serde(default)]
+    pub color_management: SequenceColorManagement,
 }
 
 impl Default for SequenceSettings {
     fn default() -> Self {
         Self {
+            editing_mode: EditingMode::Custom,
             resolution: Resolution::FHD,
             frame_rate: Rational::FPS_25,
+            pixel_aspect_ratio: PixelAspectRatio::Square,
+            field_order: FieldOrder::Progressive,
+            video_display_format: VideoDisplayFormat::Frames,
             audio_sample_rate: 48000,
             audio_channels: 2,
+            audio_display_format: AudioDisplayFormat::AudioSamples,
             color_space: ColorSpace::Rec709,
+            auto_tone_map_media: true,
+            color_management: SequenceColorManagement::default(),
         }
+    }
+}
+
+impl SequenceSettings {
+    pub const AUDIO_SAMPLE_RATES: [u32; 5] = [32_000, 44_100, 48_000, 88_200, 96_000];
+    pub const MIN_WIDTH: u32 = 16;
+    pub const MIN_HEIGHT: u32 = 16;
+    pub const MAX_WIDTH: u32 = 16_384;
+    pub const MAX_HEIGHT: u32 = 16_384;
+
+    pub fn validate(&self) -> mondrian_core::Result<()> {
+        if !Rational::SEQUENCE_FRAME_RATES.contains(&self.frame_rate) {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "sequence_settings_validate".to_string(),
+                reason: format!("不支持的序列时基: {} fps", self.frame_rate),
+            });
+        }
+        if !(Self::MIN_WIDTH..=Self::MAX_WIDTH).contains(&self.resolution.width)
+            || !(Self::MIN_HEIGHT..=Self::MAX_HEIGHT).contains(&self.resolution.height)
+        {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "sequence_settings_validate".to_string(),
+                reason: format!(
+                    "不支持的帧大小: {}x{}",
+                    self.resolution.width, self.resolution.height
+                ),
+            });
+        }
+        if !Self::AUDIO_SAMPLE_RATES.contains(&self.audio_sample_rate) {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "sequence_settings_validate".to_string(),
+                reason: format!("不支持的音频采样率: {} Hz", self.audio_sample_rate),
+            });
+        }
+        if self.color_management.workflow == ColorWorkflow::Aces
+            && !matches!(
+                self.color_space,
+                ColorSpace::Rec2020 | ColorSpace::Rec2100Hlg | ColorSpace::Rec2100Pq
+            )
+        {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "sequence_settings_validate".to_string(),
+                reason: "ACES 工作流需要宽色域或 HDR 工作色彩空间".to_string(),
+            });
+        }
+        if self.color_management.preserve_hdr_metadata
+            && !self.color_management.output_color_space.is_hdr()
+        {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "sequence_settings_validate".to_string(),
+                reason: "只有 HDR 输出色彩空间可以保留 HDR metadata".to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    pub fn with_resolution(mut self, width: u32, height: u32) -> Self {
+        self.resolution = Resolution { width, height };
+        self
+    }
+
+    pub fn from_editing_mode(mode: EditingMode) -> Self {
+        let mut settings = Self { editing_mode: mode, ..Default::default() };
+        match mode {
+            EditingMode::Custom => settings,
+            EditingMode::Dslr1080p => {
+                settings.resolution = Resolution::FHD;
+                settings.frame_rate = Rational::FPS_23976;
+                settings.video_display_format = VideoDisplayFormat::Frames;
+                settings
+            }
+            EditingMode::Dslr720p => {
+                settings.resolution = Resolution::HD;
+                settings.frame_rate = Rational::FPS_5994;
+                settings.video_display_format = VideoDisplayFormat::Frames;
+                settings
+            }
+            EditingMode::Avchd1080p => {
+                settings.resolution = Resolution::FHD;
+                settings.frame_rate = Rational::FPS_2997;
+                settings.video_display_format = VideoDisplayFormat::Timecode2997DropFrame;
+                settings
+            }
+            EditingMode::DigitalCinema4k => {
+                settings.resolution = Resolution::DCI4K;
+                settings.frame_rate = Rational::FPS_24;
+                settings.color_space = ColorSpace::DciP3;
+                settings
+            }
+            EditingMode::SocialVertical1080p => {
+                settings.resolution = Resolution { width: 1080, height: 1920 };
+                settings.frame_rate = Rational::FPS_30;
+                settings.video_display_format = VideoDisplayFormat::Frames;
+                settings
+            }
+        }
+    }
+
+    pub fn apply_editing_mode_preset(&mut self, mode: EditingMode) {
+        let audio_sample_rate = self.audio_sample_rate;
+        let audio_channels = self.audio_channels;
+        let audio_display_format = self.audio_display_format;
+        *self = Self::from_editing_mode(mode);
+        self.audio_sample_rate = audio_sample_rate;
+        self.audio_channels = audio_channels;
+        self.audio_display_format = audio_display_format;
     }
 }
 
@@ -31,10 +314,16 @@ impl Default for SequenceSettings {
 pub struct Sequence {
     pub id: SequenceId,
     pub name: String,
+    #[serde(default)]
+    pub role: SequenceRole,
     pub settings: SequenceSettings,
     pub video_tracks: Vec<Track>,
     pub audio_tracks: Vec<Track>,
     pub playhead: TimeCode,
+    #[serde(default)]
+    pub in_point_frame: Option<i64>,
+    #[serde(default)]
+    pub out_point_frame: Option<i64>,
 }
 
 impl Sequence {
@@ -44,6 +333,7 @@ impl Sequence {
         Self {
             id: SequenceId::new(),
             name: name.into(),
+            role: SequenceRole::Editorial,
             video_tracks: vec![
                 Track::new_video("V1"),
                 Track::new_video("V2"),
@@ -55,12 +345,76 @@ impl Sequence {
                 Track::new_audio("A3"),
             ],
             playhead: TimeCode::new(0, tb),
+            in_point_frame: None,
+            out_point_frame: None,
             settings,
         }
     }
 
     pub fn time_base(&self) -> Rational {
         Rational::new(self.settings.frame_rate.den, self.settings.frame_rate.num)
+    }
+
+    pub fn with_settings(
+        name: impl Into<String>,
+        settings: SequenceSettings,
+    ) -> mondrian_core::Result<Self> {
+        settings.validate()?;
+        let mut sequence = Self::new(name);
+        sequence.settings = settings;
+        sequence.playhead = TimeCode::new(0, sequence.time_base());
+        Ok(sequence)
+    }
+
+    pub fn apply_settings_preserve_frames(
+        &mut self,
+        settings: SequenceSettings,
+    ) -> mondrian_core::Result<()> {
+        settings.validate()?;
+        self.settings = settings;
+        let tb = self.time_base();
+        self.playhead.time_base = tb;
+        self.in_point_frame = self.in_point_frame.map(|frame| frame.max(0));
+        self.out_point_frame = self
+            .out_point_frame
+            .map(|frame| frame.max(0))
+            .filter(|frame| *frame >= self.in_point_frame.unwrap_or(0));
+        for track in self.video_tracks.iter_mut().chain(self.audio_tracks.iter_mut()) {
+            for clip in &mut track.clips {
+                clip.position.time_base = tb;
+                clip.duration.time_base = tb;
+                clip.source_in.time_base = tb;
+                clip.source_out.time_base = tb;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn in_point_frame(&self) -> i64 {
+        self.in_point_frame.unwrap_or(0).max(0)
+    }
+
+    pub fn out_point_frame(&self) -> Option<i64> {
+        self.out_point_frame
+            .map(|frame| frame.max(0))
+            .filter(|frame| *frame >= self.in_point_frame())
+    }
+
+    pub fn mark_in(&mut self, frame: i64) {
+        let frame = frame.max(0);
+        self.in_point_frame = Some(frame);
+        if self.out_point_frame.is_some_and(|out| out < frame) {
+            self.out_point_frame = Some(frame);
+        }
+    }
+
+    pub fn mark_out(&mut self, frame: i64) {
+        self.out_point_frame = Some(frame.max(self.in_point_frame()));
+    }
+
+    pub fn clear_in_out(&mut self) {
+        self.in_point_frame = None;
+        self.out_point_frame = None;
     }
 
     pub fn total_duration(&self) -> TimeCode {
@@ -192,6 +546,125 @@ impl Sequence {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SequenceCollection {
+    pub sequences: Vec<Sequence>,
+    pub default_sequence_id: SequenceId,
+    pub active_sequence_id: SequenceId,
+}
+
+impl SequenceCollection {
+    pub fn new(default_sequence: Sequence) -> Self {
+        let id = default_sequence.id;
+        Self {
+            sequences: vec![default_sequence],
+            default_sequence_id: id,
+            active_sequence_id: id,
+        }
+    }
+
+    pub fn active(&self) -> Option<&Sequence> {
+        self.sequence(self.active_sequence_id)
+    }
+
+    pub fn active_mut(&mut self) -> Option<&mut Sequence> {
+        self.sequence_mut(self.active_sequence_id)
+    }
+
+    pub fn sequence(&self, id: SequenceId) -> Option<&Sequence> {
+        self.sequences.iter().find(|sequence| sequence.id == id)
+    }
+
+    pub fn sequence_mut(&mut self, id: SequenceId) -> Option<&mut Sequence> {
+        self.sequences.iter_mut().find(|sequence| sequence.id == id)
+    }
+
+    pub fn add_sequence(&mut self, sequence: Sequence) -> mondrian_core::Result<SequenceId> {
+        if self.sequence(sequence.id).is_some() {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "add_sequence".to_string(),
+                reason: format!("序列 ID 已存在: {}", sequence.id),
+            });
+        }
+        let id = sequence.id;
+        self.sequences.push(sequence);
+        Ok(id)
+    }
+
+    pub fn set_active(&mut self, id: SequenceId) -> mondrian_core::Result<()> {
+        if self.sequence(id).is_none() {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "set_active_sequence".to_string(),
+                reason: format!("序列不存在: {id}"),
+            });
+        }
+        self.active_sequence_id = id;
+        Ok(())
+    }
+
+    pub fn validate_nested_sequences(&self) -> mondrian_core::Result<()> {
+        let sequence_ids: HashSet<SequenceId> = self.sequences.iter().map(|seq| seq.id).collect();
+        let graph = self.nested_sequence_graph();
+        for nested_id in graph.values().flatten() {
+            if !sequence_ids.contains(nested_id) {
+                return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "validate_nested_sequences".to_string(),
+                    reason: format!("嵌套序列不存在: {nested_id}"),
+                });
+            }
+        }
+        for root in &sequence_ids {
+            let mut visiting = HashSet::new();
+            let mut visited = HashSet::new();
+            if has_cycle(*root, &graph, &mut visiting, &mut visited) {
+                return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "validate_nested_sequences".to_string(),
+                    reason: format!("检测到序列嵌套循环: {root}"),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn nested_sequence_graph(&self) -> HashMap<SequenceId, Vec<SequenceId>> {
+        self.sequences
+            .iter()
+            .map(|seq| {
+                let nested = seq
+                    .video_tracks
+                    .iter()
+                    .chain(seq.audio_tracks.iter())
+                    .flat_map(|track| track.clips.iter())
+                    .filter_map(|clip| clip.nested_sequence_id)
+                    .collect();
+                (seq.id, nested)
+            })
+            .collect()
+    }
+}
+
+fn has_cycle(
+    node: SequenceId,
+    graph: &HashMap<SequenceId, Vec<SequenceId>>,
+    visiting: &mut HashSet<SequenceId>,
+    visited: &mut HashSet<SequenceId>,
+) -> bool {
+    if visited.contains(&node) {
+        return false;
+    }
+    if !visiting.insert(node) {
+        return true;
+    }
+    for child in graph.get(&node).into_iter().flatten() {
+        if has_cycle(*child, graph, visiting, visited) {
+            return true;
+        }
+    }
+    visiting.remove(&node);
+    visited.insert(node);
+    false
+}
+
 fn move_track_in_list(
     tracks: &mut Vec<Track>,
     id: TrackId,
@@ -312,6 +785,134 @@ mod tests {
         let active = seq.active_clips_at(TimeCode::new(5, tb));
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].blend_mode, BlendMode::Multiply);
+    }
+
+    #[test]
+    fn sequence_settings_validate_supported_presets() {
+        let settings = SequenceSettings {
+            frame_rate: Rational::FPS_23976,
+            pixel_aspect_ratio: PixelAspectRatio::D1DvNtscWidescreen,
+            field_order: FieldOrder::Progressive,
+            video_display_format: VideoDisplayFormat::Timecode2997DropFrame,
+            color_space: ColorSpace::Rec2100Pq,
+            audio_sample_rate: 96_000,
+            audio_display_format: AudioDisplayFormat::Milliseconds,
+            ..Default::default()
+        };
+
+        settings.validate().expect("professional sequence preset should validate");
+        assert!((settings.pixel_aspect_ratio.ratio().unwrap() - 1.2121).abs() < 0.0001);
+    }
+
+    #[test]
+    fn editing_mode_preset_materializes_sequence_settings() {
+        let vertical = SequenceSettings::from_editing_mode(EditingMode::SocialVertical1080p);
+        assert_eq!(
+            vertical.resolution,
+            Resolution { width: 1080, height: 1920 }
+        );
+        assert_eq!(vertical.frame_rate, Rational::FPS_30);
+
+        let cinema = SequenceSettings::from_editing_mode(EditingMode::DigitalCinema4k);
+        assert_eq!(cinema.resolution, Resolution::DCI4K);
+        assert_eq!(cinema.frame_rate, Rational::FPS_24);
+        assert_eq!(cinema.color_space, ColorSpace::DciP3);
+    }
+
+    #[test]
+    fn sequence_settings_reject_unsupported_fps_and_sample_rate() {
+        let unsupported_fps = SequenceSettings {
+            frame_rate: Rational::new(48, 1),
+            ..Default::default()
+        };
+        assert!(unsupported_fps.validate().is_err());
+
+        let unsupported_audio =
+            SequenceSettings { audio_sample_rate: 22_050, ..Default::default() };
+        assert!(unsupported_audio.validate().is_err());
+    }
+
+    #[test]
+    fn sequence_color_management_rejects_invalid_hdr_metadata_policy() {
+        let settings = SequenceSettings {
+            color_management: SequenceColorManagement {
+                output_color_space: ColorSpace::Rec709,
+                preserve_hdr_metadata: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(settings.validate().is_err());
+    }
+
+    #[test]
+    fn sequence_color_management_accepts_hdr_output_metadata_policy() {
+        let settings = SequenceSettings {
+            color_space: ColorSpace::Rec2100Pq,
+            color_management: SequenceColorManagement {
+                output_color_space: ColorSpace::Rec2100Pq,
+                preserve_hdr_metadata: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(settings.validate().is_ok());
+    }
+
+    #[test]
+    fn applying_sequence_settings_updates_existing_time_bases() {
+        let mut seq = Sequence::new("Settings");
+        let old_tb = seq.time_base();
+        seq.video_tracks[0]
+            .add_clip(Clip::new(
+                AssetId::new(),
+                TimeCode::new(10, old_tb),
+                TimeCode::new(20, old_tb),
+            ))
+            .expect("add clip");
+
+        let settings = SequenceSettings {
+            frame_rate: Rational::FPS_2997,
+            ..seq.settings.clone()
+        };
+        seq.apply_settings_preserve_frames(settings).expect("apply settings");
+
+        let new_tb = seq.time_base();
+        assert_eq!(new_tb, Rational::new(1001, 30000));
+        assert_eq!(seq.video_tracks[0].clips[0].position.frame, 10);
+        assert_eq!(seq.video_tracks[0].clips[0].position.time_base, new_tb);
+        assert_eq!(seq.video_tracks[0].clips[0].duration.time_base, new_tb);
+    }
+
+    #[test]
+    fn sequence_collection_detects_nested_sequence_cycles() {
+        let mut parent = Sequence::new("Parent");
+        let mut child = Sequence::new("Child");
+        let parent_id = parent.id;
+        let child_id = child.id;
+        let tb = parent.time_base();
+
+        parent.video_tracks[0]
+            .add_clip(Clip::new_nested_sequence(
+                child_id,
+                TimeCode::new(0, tb),
+                TimeCode::new(20, tb),
+                Some("Child".to_string()),
+            ))
+            .expect("add child nest");
+        child.video_tracks[0]
+            .add_clip(Clip::new_nested_sequence(
+                parent_id,
+                TimeCode::new(0, tb),
+                TimeCode::new(20, tb),
+                Some("Parent".to_string()),
+            ))
+            .expect("add parent nest");
+
+        let mut collection = SequenceCollection::new(parent);
+        collection.add_sequence(child).expect("add child sequence");
+
+        assert!(collection.validate_nested_sequences().is_err());
     }
 
     #[test]

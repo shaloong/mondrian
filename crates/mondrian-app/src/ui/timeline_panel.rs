@@ -5,7 +5,7 @@ use crate::{
 use egui::{Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use mondrian_core::types::{ClipId, Rational, TrackId};
 use mondrian_timeline::clip::TrimEdge;
-use mondrian_timeline::sequence::Sequence;
+use mondrian_timeline::sequence::{Sequence, VideoDisplayFormat};
 use std::collections::{HashMap, HashSet};
 
 fn corner_radius(value: f32) -> egui::CornerRadius {
@@ -979,6 +979,11 @@ impl TimelinePanel {
             .as_ref()
             .map(|s| s.settings.frame_rate)
             .unwrap_or(Rational::new(24, 1));
+        let display_format = state
+            .sequence
+            .as_ref()
+            .map(|s| s.settings.video_display_format)
+            .unwrap_or(VideoDisplayFormat::Frames);
         let ruler_scale = choose_ruler_scale(self.pixels_per_frame, fps);
 
         let start_frame = self.scroll_offset_frames as i64;
@@ -1025,7 +1030,7 @@ impl TimelinePanel {
                         rect.top() + tokens::timeline_ruler_label_inset_y(),
                     ),
                     egui::Align2::LEFT_TOP,
-                    format_ruler_label(f, fps, ruler_scale.granularity),
+                    format_ruler_label(f, fps, display_format, ruler_scale.granularity),
                     typography::mono_small(),
                     palette::text_muted(),
                 );
@@ -1584,6 +1589,25 @@ impl TimelinePanel {
                         self.roll_selected_cut_to_playhead(state);
                         ui.close();
                     }
+                    if ui.button("预合成为序列").clicked() {
+                        self.precompose_selected_clips(state);
+                        ui.close();
+                    }
+                    if let Some(nested_sequence_id) =
+                        selected_nested_sequence_id(state, self.selected_clip_ref())
+                    {
+                        if ui.button("打开嵌套序列").clicked() {
+                            match state.open_nested_sequence(nested_sequence_id) {
+                                Ok(()) => {
+                                    self.selected_clips.clear();
+                                }
+                                Err(err) => {
+                                    state.set_status_hint(format!("打开嵌套序列失败：{err}"), true);
+                                }
+                            }
+                            ui.close();
+                        }
+                    }
                     let all_disabled = self.selected_clips_all_disabled(state);
                     let toggle_label = if all_disabled {
                         "启用片段"
@@ -2061,6 +2085,45 @@ impl TimelinePanel {
         }
     }
 
+    fn precompose_selected_clips(&mut self, state: &mut AppState) {
+        if self.selected_clips.is_empty() {
+            return;
+        }
+
+        let selections: Vec<(TrackId, bool, ClipId)> = self
+            .selected_clips
+            .iter()
+            .map(|selection| {
+                (
+                    selection.track_id,
+                    selection.is_video_track,
+                    selection.clip_id,
+                )
+            })
+            .collect();
+        let name = format!("预合成 {}", state.sequences.len() + 1);
+        match state.precompose_clips_as_sequence(&selections, &name) {
+            Ok(nested_clip_id) => {
+                self.selected_clips.clear();
+                if let Some(seq) = state.sequence.as_ref() {
+                    if let Some((track_id, is_video_track, _)) =
+                        find_clip_track_ref(seq, nested_clip_id)
+                    {
+                        self.selected_clips.insert(ClipSelection {
+                            track_id,
+                            is_video_track,
+                            clip_id: nested_clip_id,
+                        });
+                    }
+                }
+                state.set_status_hint(format!("已创建嵌套序列：{name}"), false);
+            }
+            Err(err) => {
+                state.set_status_hint(format!("预合成失败：{err}"), true);
+            }
+        }
+    }
+
     fn trim_selected_clips_to_playhead(&mut self, state: &mut AppState, edge: TrimEdge) {
         if self.selected_clips.is_empty() {
             return;
@@ -2273,6 +2336,44 @@ fn clip_disabled_state(seq: &Sequence, sel: ClipSelection) -> Option<bool> {
     }
 }
 
+fn find_clip_track_ref(seq: &Sequence, clip_id: ClipId) -> Option<(TrackId, bool, usize)> {
+    for (index, track) in seq.video_tracks.iter().enumerate() {
+        if track.clips.iter().any(|clip| clip.id == clip_id) {
+            return Some((track.id, true, index));
+        }
+    }
+    for (index, track) in seq.audio_tracks.iter().enumerate() {
+        if track.clips.iter().any(|clip| clip.id == clip_id) {
+            return Some((track.id, false, index));
+        }
+    }
+    None
+}
+
+fn selected_nested_sequence_id(
+    state: &AppState,
+    selection: Option<SelectedClipRef>,
+) -> Option<mondrian_core::types::SequenceId> {
+    let selection = selection?;
+    let seq = state.sequence.as_ref()?;
+    let clip = if selection.is_video_track {
+        seq.video_tracks
+            .iter()
+            .find(|track| track.id == selection.track_id)
+            .and_then(|track| track.clips.iter().find(|clip| clip.id == selection.clip_id))
+    } else {
+        seq.audio_tracks
+            .iter()
+            .find(|track| track.id == selection.track_id)
+            .and_then(|track| track.clips.iter().find(|clip| clip.id == selection.clip_id))
+    }?;
+    if clip.is_nested_sequence() {
+        clip.nested_sequence_id
+    } else {
+        None
+    }
+}
+
 fn draw_single_line_ellipsis(
     painter: &egui::Painter,
     rect: Rect,
@@ -2409,22 +2510,95 @@ fn choose_minor_step(major_step_frames: i64, pixels_per_frame: f32) -> i64 {
     major_step_frames.max(1)
 }
 
-fn format_ruler_label(frame: i64, fps: Rational, granularity: RulerGranularity) -> String {
+fn format_ruler_label(
+    frame: i64,
+    fps: Rational,
+    display_format: VideoDisplayFormat,
+    granularity: RulerGranularity,
+) -> String {
+    if display_format == VideoDisplayFormat::Frames {
+        return match granularity {
+            RulerGranularity::Frame => frame.max(0).to_string(),
+            RulerGranularity::Second | RulerGranularity::Minute => {
+                let seconds = frame_to_seconds(frame, fps).floor() as i64;
+                format_seconds_label(seconds, granularity)
+            }
+        };
+    }
+
+    if display_format == VideoDisplayFormat::FeetAndFrames16mm {
+        return format_feet_and_frames(frame, 40);
+    }
+
+    if display_format == VideoDisplayFormat::FeetAndFrames35mm {
+        return format_feet_and_frames(frame, 16);
+    }
+
+    if display_format == VideoDisplayFormat::Timecode2997DropFrame {
+        return format_drop_frame_timecode(frame, 30);
+    }
+
     let fps_nominal = fps.to_f64().round().max(1.0) as i64;
     let total_seconds = frame.div_euclid(fps_nominal);
     let frame_in_second = frame.rem_euclid(fps_nominal);
 
+    match granularity {
+        RulerGranularity::Frame => {
+            let hours = total_seconds / 3600;
+            let minutes = (total_seconds % 3600) / 60;
+            let seconds = total_seconds % 60;
+            format!("{hours:02}:{minutes:02}:{seconds:02}:{frame_in_second:02}")
+        }
+        RulerGranularity::Second | RulerGranularity::Minute => {
+            format_seconds_label(total_seconds, granularity)
+        }
+    }
+}
+
+fn frame_to_seconds(frame: i64, fps: Rational) -> f64 {
+    frame.max(0) as f64 / fps.to_f64().max(1.0)
+}
+
+fn format_seconds_label(total_seconds: i64, granularity: RulerGranularity) -> String {
+    let total_seconds = total_seconds.max(0);
     let hours = total_seconds / 3600;
     let minutes = (total_seconds % 3600) / 60;
     let seconds = total_seconds % 60;
-
     match granularity {
-        RulerGranularity::Frame => {
-            format!("{hours:02}:{minutes:02}:{seconds:02}:{frame_in_second:02}")
+        RulerGranularity::Frame | RulerGranularity::Second => {
+            format!("{hours:02}:{minutes:02}:{seconds:02}")
         }
-        RulerGranularity::Second => format!("{hours:02}:{minutes:02}:{seconds:02}"),
         RulerGranularity::Minute => format!("{hours:02}:{minutes:02}"),
     }
+}
+
+fn format_feet_and_frames(frame: i64, frames_per_foot: i64) -> String {
+    let frame = frame.max(0);
+    let feet = frame / frames_per_foot;
+    let frames = frame % frames_per_foot;
+    format!("{feet}+{frames:02}")
+}
+
+fn format_drop_frame_timecode(frame: i64, nominal_fps: i64) -> String {
+    let frame = frame.max(0);
+    let drop_frames = ((nominal_fps as f64) * 0.066_666_666_7).round() as i64;
+    let frames_per_hour = nominal_fps * 60 * 60;
+    let frames_per_24_hours = frames_per_hour * 24;
+    let frames_per_10_minutes = nominal_fps * 60 * 10 - drop_frames * 9;
+    let frames_per_minute = nominal_fps * 60 - drop_frames;
+
+    let mut d = frame % frames_per_24_hours;
+    let hours = d / frames_per_hour;
+    d %= frames_per_hour;
+    let tens_of_minutes = d / frames_per_10_minutes;
+    d %= frames_per_10_minutes;
+    let minutes = tens_of_minutes * 10 + d / frames_per_minute;
+
+    let dropped = drop_frames * (minutes - minutes / 10);
+    let tc_frame = frame + dropped;
+    let seconds = (tc_frame / nominal_fps) % 60;
+    let frames = tc_frame % nominal_fps;
+    format!("{hours:02}:{minutes:02}:{seconds:02};{frames:02}")
 }
 
 fn collect_snap_candidates(
@@ -2783,6 +2957,39 @@ mod tests {
         let decision = decide_snap_target(-3, &[], 4.0, 10.0);
         assert_eq!(decision.frame, 0);
         assert!(!decision.snapped);
+    }
+
+    #[test]
+    fn ruler_label_formats_drop_frame_timecode() {
+        let label = format_ruler_label(
+            1800,
+            Rational::FPS_2997,
+            VideoDisplayFormat::Timecode2997DropFrame,
+            RulerGranularity::Frame,
+        );
+        assert_eq!(label, "00:01:00;02");
+    }
+
+    #[test]
+    fn ruler_label_formats_feet_and_frames() {
+        assert_eq!(
+            format_ruler_label(
+                41,
+                Rational::FPS_24,
+                VideoDisplayFormat::FeetAndFrames16mm,
+                RulerGranularity::Frame,
+            ),
+            "1+01"
+        );
+        assert_eq!(
+            format_ruler_label(
+                17,
+                Rational::FPS_24,
+                VideoDisplayFormat::FeetAndFrames35mm,
+                RulerGranularity::Frame,
+            ),
+            "1+01"
+        );
     }
 
     #[test]

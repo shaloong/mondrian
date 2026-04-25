@@ -2,6 +2,7 @@ use crate::app::AppState;
 use crate::ui::theme::{self, palette, tokens, typography};
 use egui::Ui;
 use mondrian_assets::AssetKind;
+use mondrian_core::types::SequenceId;
 use mondrian_export::{
     preset::{ExportConfig, ExportInput, ExportPreset, TimelineExportInput, VideoCodecConfig},
     queue::RenderJob,
@@ -19,6 +20,7 @@ pub struct ExportPanel {
     output_path: String,
     /// 状态消息
     status_msg: Option<(String, bool)>, // (消息, 是否错误)
+    selected_sequence_id: Option<SequenceId>,
 }
 
 impl ExportPanel {
@@ -114,7 +116,37 @@ impl ExportPanel {
             ui.add_space(tokens::panel_gap());
 
             ui.label("输入源");
-            if let Some(sequence) = state.sequence.as_ref() {
+            let sequences = state.export_sequences_snapshot();
+            if !sequences.is_empty() {
+                if self
+                    .selected_sequence_id
+                    .is_none_or(|id| !sequences.iter().any(|sequence| sequence.id == id))
+                {
+                    self.selected_sequence_id = state
+                        .active_sequence_id
+                        .or(state.default_sequence_id)
+                        .filter(|id| sequences.iter().any(|sequence| sequence.id == *id))
+                        .or_else(|| sequences.first().map(|sequence| sequence.id));
+                }
+                let selected_sequence_id = self.selected_sequence_id;
+                let selected_sequence = selected_sequence_id
+                    .and_then(|id| sequences.iter().find(|sequence| sequence.id == id))
+                    .or_else(|| sequences.first())
+                    .expect("non-empty sequences should have first sequence");
+                egui::ComboBox::from_id_salt("export_sequence")
+                    .selected_text(&selected_sequence.name)
+                    .show_ui(ui, |ui| {
+                        for sequence in &sequences {
+                            theme::checkmark_selectable_value(
+                                ui,
+                                &mut self.selected_sequence_id,
+                                Some(sequence.id),
+                                &sequence.name,
+                            );
+                        }
+                    });
+                ui.add_space(6.0);
+                let sequence = selected_sequence;
                 let video_clips =
                     sequence.video_tracks.iter().map(|t| t.clips.len()).sum::<usize>();
                 let audio_clips =
@@ -177,7 +209,7 @@ impl ExportPanel {
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let can_export = !self.output_path.is_empty() && state.sequence.is_some();
+                let can_export = !self.output_path.is_empty() && !sequences.is_empty();
                 let export_button = egui::Button::new(
                     egui::RichText::new("加入导出队列").color(palette::text_primary()).strong(),
                 )
@@ -191,31 +223,38 @@ impl ExportPanel {
     }
 
     fn enqueue(&mut self, state: &mut AppState, preset: ExportPreset) {
-        let Some(sequence) = state.sequence.clone() else {
+        let sequences = state.export_sequences_snapshot();
+        let Some(sequence) = self
+            .selected_sequence_id
+            .and_then(|id| sequences.iter().find(|sequence| sequence.id == id))
+            .cloned()
+            .or_else(|| state.sequence.clone())
+        else {
             self.status_msg = Some(("导出失败：当前无序列".to_owned(), true));
             return;
         };
 
-        let asset_paths = match collect_timeline_asset_paths(state, &sequence) {
-            Ok(paths) => paths,
-            Err(err) => {
-                if err == "素材库未连接" {
-                    self.status_msg = None;
+        let (asset_paths, asset_color_spaces) =
+            match collect_timeline_asset_paths(state, &sequence, &sequences) {
+                Ok(result) => result,
+                Err(err) => {
+                    if err == "素材库未连接" {
+                        self.status_msg = None;
+                        return;
+                    }
+                    self.status_msg = Some((format!("导出失败：{err}"), true));
                     return;
                 }
-                self.status_msg = Some((format!("导出失败：{err}"), true));
-                return;
-            }
-        };
+            };
 
         let path = PathBuf::from(&self.output_path);
         let config = ExportConfig {
             preset,
             input: ExportInput::Timeline(TimelineExportInput {
                 sequence,
+                sequences,
                 asset_paths,
-                in_point_frame: state.project_in_point,
-                out_point_frame: state.project_out_point,
+                asset_color_spaces,
             }),
             output_path: path,
         };
@@ -229,20 +268,22 @@ impl ExportPanel {
 fn collect_timeline_asset_paths(
     state: &AppState,
     sequence: &mondrian_timeline::sequence::Sequence,
-) -> Result<HashMap<mondrian_core::types::AssetId, PathBuf>, String> {
+    sequences: &[mondrian_timeline::sequence::Sequence],
+) -> Result<
+    (
+        HashMap<mondrian_core::types::AssetId, PathBuf>,
+        HashMap<mondrian_core::types::AssetId, mondrian_core::types::ColorSpace>,
+    ),
+    String,
+> {
     let library = state.asset_library.as_ref().ok_or_else(|| "素材库未连接".to_string())?;
 
     let mut asset_ids = HashSet::new();
-    for track in sequence.video_tracks.iter().chain(sequence.audio_tracks.iter()) {
-        for clip in &track.clips {
-            if clip.is_disabled {
-                continue;
-            }
-            asset_ids.insert(clip.asset_id);
-        }
-    }
+    let mut visited_sequences = HashSet::new();
+    collect_sequence_asset_ids(sequence, sequences, &mut visited_sequences, &mut asset_ids)?;
 
     let mut paths = HashMap::new();
+    let mut color_spaces = HashMap::new();
     for asset_id in asset_ids {
         let asset = library
             .get_asset(asset_id)
@@ -256,10 +297,53 @@ fn collect_timeline_asset_paths(
         if !asset.path.exists() {
             return Err(format!("素材离线: {}", asset.path.display()));
         }
+        let color_space = asset
+            .media_info
+            .primary_video()
+            .map(|video| video.color_space)
+            .unwrap_or(mondrian_core::types::ColorSpace::Rec709);
         paths.insert(asset_id, asset.path);
+        color_spaces.insert(asset_id, color_space);
     }
 
-    Ok(paths)
+    Ok((paths, color_spaces))
+}
+
+fn collect_sequence_asset_ids(
+    sequence: &mondrian_timeline::sequence::Sequence,
+    sequences: &[mondrian_timeline::sequence::Sequence],
+    visited_sequences: &mut HashSet<SequenceId>,
+    asset_ids: &mut HashSet<mondrian_core::types::AssetId>,
+) -> Result<(), String> {
+    if !visited_sequences.insert(sequence.id) {
+        return Ok(());
+    }
+
+    for track in sequence.video_tracks.iter().chain(sequence.audio_tracks.iter()) {
+        for clip in &track.clips {
+            if clip.is_disabled {
+                continue;
+            }
+            if clip.is_nested_sequence() {
+                let Some(nested_sequence_id) = clip.nested_sequence_id else {
+                    return Err(format!("嵌套序列片段缺少序列引用: {}", clip.id));
+                };
+                let nested_sequence = sequences
+                    .iter()
+                    .find(|sequence| sequence.id == nested_sequence_id)
+                    .ok_or_else(|| format!("嵌套序列不存在: {nested_sequence_id}"))?;
+                collect_sequence_asset_ids(
+                    nested_sequence,
+                    sequences,
+                    visited_sequences,
+                    asset_ids,
+                )?;
+                continue;
+            }
+            asset_ids.insert(clip.asset_id);
+        }
+    }
+    Ok(())
 }
 
 /// 内置预设列表（名称 + ExportPreset）
@@ -311,10 +395,45 @@ mod tests {
         }
 
         let seq = state.sequence.as_ref().expect("sequence should exist");
-        let paths = collect_timeline_asset_paths(&state, seq).expect("collect asset paths");
+        let (paths, color_spaces) =
+            collect_timeline_asset_paths(&state, seq, std::slice::from_ref(seq))
+                .expect("collect asset paths");
         assert!(!paths.contains_key(&asset_id));
+        assert!(!color_spaces.contains_key(&asset_id));
 
         let _ = std::fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn collect_sequence_asset_ids_recurses_into_nested_sequences() {
+        let mut parent = Sequence::new("parent");
+        let mut child = Sequence::new("child");
+        let tb = parent.time_base();
+        let asset_id = mondrian_core::types::AssetId::new();
+
+        child.video_tracks[0]
+            .add_clip(Clip::new(
+                asset_id,
+                TimeCode::new(0, tb),
+                TimeCode::new(12, tb),
+            ))
+            .expect("add media");
+        parent.video_tracks[0]
+            .add_clip(Clip::new_nested_sequence(
+                child.id,
+                TimeCode::new(0, tb),
+                TimeCode::new(12, tb),
+                Some("child".to_string()),
+            ))
+            .expect("add nested");
+
+        let sequences = vec![parent.clone(), child];
+        let mut visited = HashSet::new();
+        let mut assets = HashSet::new();
+        collect_sequence_asset_ids(&parent, &sequences, &mut visited, &mut assets)
+            .expect("collect nested assets");
+
+        assert!(assets.contains(&asset_id));
     }
 }
 

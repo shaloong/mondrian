@@ -20,9 +20,12 @@ use mondrian_core::{
         KeyframeInterpolation, KeyframeTemporalFlags, PropertyHost, PropertyMutation,
         PropertyValue, TimeTicks, SUBFRAME_TICKS_PER_FRAME,
     },
-    types::{ClipId, EffectId, KeyframeId, TimeCode},
+    types::{ClipId, ColorSpace, EffectId, KeyframeId, Rational, TimeCode},
 };
-use mondrian_timeline::clip::Clip;
+use mondrian_timeline::{
+    clip::{AlphaInterpretation, Clip, ClipKind},
+    sequence::{FieldOrder, PixelAspectRatio},
+};
 
 #[derive(Default)]
 pub struct EffectControlsPanel {
@@ -246,6 +249,12 @@ impl EffectControlsPanel {
 
         match self.view {
             EffectControlsView::Inspector => {
+                self.draw_media_interpretation(ui, app, selection, &clip);
+                if !inspector_groups.is_empty() {
+                    ui.add_space(tokens::panel_gap() * 0.4);
+                    ui.separator();
+                    ui.add_space(tokens::panel_gap() * 0.35);
+                }
                 for (index, group) in inspector_groups.iter().enumerate() {
                     if index > 0 {
                         ui.add_space(tokens::panel_gap() * 0.4);
@@ -2121,6 +2130,154 @@ impl EffectControlsPanel {
                 }
             }
             self.clear_graph_marquee();
+        }
+    }
+
+    fn draw_media_interpretation(
+        &mut self,
+        ui: &mut Ui,
+        app: &mut AppState,
+        selection: SelectedClipRef,
+        clip: &Clip,
+    ) {
+        if clip.kind != ClipKind::Media {
+            return;
+        }
+
+        let mut interpretation = clip.interpretation.clone();
+        let before = interpretation.clone();
+        ui.label(
+            RichText::new("素材解释")
+                .font(typography::body())
+                .color(palette::text_primary()),
+        );
+        ui.add_space(4.0);
+
+        Grid::new(("media_interpretation_grid", selection.clip_id))
+            .num_columns(2)
+            .spacing([10.0, 8.0])
+            .show(ui, |ui| {
+                ui.label(RichText::new("色彩空间").font(typography::body_small()));
+                ComboBox::from_id_salt(("media_interpret_color", selection.clip_id))
+                    .selected_text(match interpretation.color_space_override {
+                        Some(color_space) => color_space_label(color_space),
+                        None => "自动",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut interpretation.color_space_override, None, "自动");
+                        for color_space in color_space_options() {
+                            ui.selectable_value(
+                                &mut interpretation.color_space_override,
+                                Some(color_space),
+                                color_space_label(color_space),
+                            );
+                        }
+                    });
+                ui.end_row();
+
+                ui.label(RichText::new("Alpha").font(typography::body_small()));
+                ComboBox::from_id_salt(("media_interpret_alpha", selection.clip_id))
+                    .selected_text(alpha_interpretation_label(interpretation.alpha))
+                    .show_ui(ui, |ui| {
+                        for alpha in [
+                            AlphaInterpretation::Straight,
+                            AlphaInterpretation::Premultiplied,
+                            AlphaInterpretation::Ignore,
+                        ] {
+                            ui.selectable_value(
+                                &mut interpretation.alpha,
+                                alpha,
+                                alpha_interpretation_label(alpha),
+                            );
+                        }
+                    });
+                ui.end_row();
+
+                ui.label(RichText::new("像素长宽比").font(typography::body_small()));
+                ComboBox::from_id_salt(("media_interpret_par", selection.clip_id))
+                    .selected_text(match interpretation.pixel_aspect_ratio_override {
+                        Some(par) => pixel_aspect_ratio_label(par),
+                        None => "跟随素材",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut interpretation.pixel_aspect_ratio_override,
+                            None,
+                            "跟随素材",
+                        );
+                        for par in [
+                            PixelAspectRatio::Square,
+                            PixelAspectRatio::D1DvNtsc,
+                            PixelAspectRatio::D1DvNtscWidescreen,
+                            PixelAspectRatio::D1DvPal,
+                            PixelAspectRatio::D1DvPalWidescreen,
+                            PixelAspectRatio::Anamorphic2x,
+                            PixelAspectRatio::HdAnamorphic1080,
+                            PixelAspectRatio::DvcproHd,
+                            PixelAspectRatio::Unknown,
+                        ] {
+                            ui.selectable_value(
+                                &mut interpretation.pixel_aspect_ratio_override,
+                                Some(par),
+                                pixel_aspect_ratio_label(par),
+                            );
+                        }
+                    });
+                ui.end_row();
+
+                ui.label(RichText::new("场").font(typography::body_small()));
+                ComboBox::from_id_salt(("media_interpret_field", selection.clip_id))
+                    .selected_text(match interpretation.field_order_override {
+                        Some(field_order) => field_order_label(field_order),
+                        None => "跟随素材",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut interpretation.field_order_override,
+                            None,
+                            "跟随素材",
+                        );
+                        for field_order in [
+                            FieldOrder::Progressive,
+                            FieldOrder::UpperFirst,
+                            FieldOrder::LowerFirst,
+                        ] {
+                            ui.selectable_value(
+                                &mut interpretation.field_order_override,
+                                Some(field_order),
+                                field_order_label(field_order),
+                            );
+                        }
+                    });
+                ui.end_row();
+
+                ui.label(RichText::new("帧率").font(typography::body_small()));
+                ComboBox::from_id_salt(("media_interpret_fps", selection.clip_id))
+                    .selected_text(match interpretation.frame_rate_override {
+                        Some(frame_rate) => frame_rate_label(frame_rate),
+                        None => "跟随素材".to_string(),
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut interpretation.frame_rate_override,
+                            None,
+                            "跟随素材",
+                        );
+                        for frame_rate in Rational::SEQUENCE_FRAME_RATES {
+                            ui.selectable_value(
+                                &mut interpretation.frame_rate_override,
+                                Some(frame_rate),
+                                frame_rate_label(frame_rate),
+                            );
+                        }
+                    });
+                ui.end_row();
+            });
+
+        if interpretation != before {
+            let _ = app
+                .set_clip_media_interpretation(selection, interpretation)
+                .map_err(|err| app.set_status_hint(format!("解释素材失败：{err}"), true));
         }
     }
 
@@ -4558,6 +4715,75 @@ fn blend_mode_display_label(value: &str) -> String {
         "Add" => "相加".to_string(),
         "Subtract" => "相减".to_string(),
         _ => value.to_string(),
+    }
+}
+
+fn color_space_options() -> [ColorSpace; 9] {
+    [
+        ColorSpace::Rec709,
+        ColorSpace::Rec2100Hlg,
+        ColorSpace::Rec2100Pq,
+        ColorSpace::Srgb,
+        ColorSpace::Rec2020,
+        ColorSpace::DciP3,
+        ColorSpace::AppleLog,
+        ColorSpace::SLog3,
+        ColorSpace::ArriLogC4,
+    ]
+}
+
+fn color_space_label(value: ColorSpace) -> &'static str {
+    match value {
+        ColorSpace::Rec709 => "Rec. 709",
+        ColorSpace::Rec2100Hlg => "Rec. 2100 HLG",
+        ColorSpace::Rec2100Pq => "Rec. 2100 PQ",
+        ColorSpace::Srgb => "sRGB",
+        ColorSpace::Rec2020 => "Rec. 2020",
+        ColorSpace::DciP3 => "DCI-P3",
+        ColorSpace::AppleLog => "Apple Log",
+        ColorSpace::SLog3 => "S-Log3",
+        ColorSpace::ArriLogC4 => "ARRI LogC4",
+    }
+}
+
+fn pixel_aspect_ratio_label(value: PixelAspectRatio) -> &'static str {
+    match value {
+        PixelAspectRatio::Square => "方形像素",
+        PixelAspectRatio::D1DvNtsc => "D1/DV NTSC",
+        PixelAspectRatio::D1DvNtscWidescreen => "D1/DV NTSC 16:9",
+        PixelAspectRatio::D1DvPal => "D1/DV PAL",
+        PixelAspectRatio::D1DvPalWidescreen => "D1/DV PAL 16:9",
+        PixelAspectRatio::Anamorphic2x => "变形 2:1",
+        PixelAspectRatio::HdAnamorphic1080 => "HD 变形 1080",
+        PixelAspectRatio::DvcproHd => "DVCPRO HD",
+        PixelAspectRatio::Unknown => "未知 PAR",
+    }
+}
+
+fn field_order_label(value: FieldOrder) -> &'static str {
+    match value {
+        FieldOrder::Progressive => "逐行扫描",
+        FieldOrder::UpperFirst => "高场优先",
+        FieldOrder::LowerFirst => "低场优先",
+    }
+}
+
+fn alpha_interpretation_label(value: AlphaInterpretation) -> &'static str {
+    match value {
+        AlphaInterpretation::Straight => "直通 Alpha",
+        AlphaInterpretation::Premultiplied => "预乘 Alpha",
+        AlphaInterpretation::Ignore => "忽略 Alpha",
+    }
+}
+
+fn frame_rate_label(value: Rational) -> String {
+    let fps = value.to_f64();
+    if (fps.fract()).abs() < 0.001 {
+        format!("{fps:.0} fps")
+    } else if (fps * 10.0).fract().abs() < 0.001 {
+        format!("{fps:.1} fps")
+    } else {
+        format!("{fps:.3} fps")
     }
 }
 

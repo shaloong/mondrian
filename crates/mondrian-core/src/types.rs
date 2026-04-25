@@ -81,12 +81,33 @@ fn gcd(a: u64, b: u64) -> u64 {
 
 /// 常用帧率预设
 impl Rational {
+    pub const FPS_10: Self = Self::new(10, 1);
+    pub const FPS_12: Self = Self::new(12, 1);
+    pub const FPS_125: Self = Self::new(25, 2);
+    pub const FPS_15: Self = Self::new(15, 1);
     pub const FPS_24: Self = Self::new(24, 1);
     pub const FPS_23976: Self = Self::new(24000, 1001); // 23.976...
     pub const FPS_25: Self = Self::new(25, 1);
     pub const FPS_30: Self = Self::new(30, 1);
     pub const FPS_2997: Self = Self::new(30000, 1001); // 29.97 NTSC
+    pub const FPS_50: Self = Self::new(50, 1);
     pub const FPS_60: Self = Self::new(60, 1);
+    pub const FPS_5994: Self = Self::new(60000, 1001);
+
+    pub const SEQUENCE_FRAME_RATES: [Self; 12] = [
+        Self::FPS_10,
+        Self::FPS_12,
+        Self::FPS_125,
+        Self::FPS_15,
+        Self::FPS_23976,
+        Self::FPS_24,
+        Self::FPS_25,
+        Self::FPS_2997,
+        Self::FPS_30,
+        Self::FPS_50,
+        Self::FPS_5994,
+        Self::FPS_60,
+    ];
 }
 
 impl fmt::Display for Rational {
@@ -298,10 +319,12 @@ pub enum BlendMode {
 
 // ─── 色彩空间 ─────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum ColorSpace {
     #[default]
     Rec709,
+    Rec2100Hlg,
+    Rec2100Pq,
     Srgb,
     Rec2020,
     DciP3,

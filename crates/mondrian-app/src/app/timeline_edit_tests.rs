@@ -1,5 +1,6 @@
 use super::*;
 use mondrian_effects::EffectRenderOp;
+use mondrian_timeline::clip::{AlphaInterpretation, MediaInterpretation};
 
 fn create_state_with_sequence() -> AppState {
     let mut state = AppState::new();
@@ -13,6 +14,196 @@ fn primary_track_clip_lens(state: &AppState) -> (usize, usize) {
         seq.video_tracks[0].clips.len(),
         seq.audio_tracks[0].clips.len(),
     )
+}
+
+#[test]
+fn create_new_project_with_settings_preserves_sequence_color_management() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("mondrian-new-project-settings-{unique}"));
+    let project_file = root.join("project.mdp");
+
+    let mut state = AppState::new();
+    let mut settings = SequenceSettings::default();
+    settings.resolution = Resolution { width: 3840, height: 2160 };
+    settings.frame_rate = Rational::FPS_23976;
+    settings.color_space = ColorSpace::Rec2020;
+    settings.color_management.workflow = ColorWorkflow::SceneReferred;
+    settings.color_management.output_color_space = ColorSpace::Rec2100Pq;
+    settings.color_management.video_range = VideoRange::Legal;
+    settings.color_management.export_bit_depth = ExportBitDepth::Ten;
+    state
+        .create_new_project_with_settings_at(
+            project_file.clone(),
+            "Color Project",
+            settings.clone(),
+        )
+        .expect("create project");
+
+    let sequence = state.sequence.as_ref().expect("sequence");
+    assert_eq!(sequence.settings.resolution, settings.resolution);
+    assert_eq!(sequence.settings.frame_rate, Rational::FPS_23976);
+    assert_eq!(sequence.settings.color_space, ColorSpace::Rec2020);
+    assert_eq!(
+        sequence.settings.color_management.workflow,
+        ColorWorkflow::SceneReferred
+    );
+    assert_eq!(
+        sequence.settings.color_management.output_color_space,
+        ColorSpace::Rec2100Pq
+    );
+    assert_eq!(
+        sequence.settings.color_management.video_range,
+        VideoRange::Legal
+    );
+    assert_eq!(
+        sequence.settings.color_management.export_bit_depth,
+        ExportBitDepth::Ten
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn set_clip_media_interpretation_is_undoable() {
+    let mut state = create_state_with_sequence();
+    let seq = state.sequence.as_ref().expect("sequence");
+    let tb = seq.time_base();
+    let track_id = seq.video_tracks[0].id;
+    let clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+    let clip_id = clip.id;
+    state.sequence.as_mut().expect("sequence").video_tracks[0]
+        .add_clip(clip)
+        .expect("add clip");
+
+    let selection = SelectedClipRef { track_id, clip_id, is_video_track: true };
+    let interpretation = MediaInterpretation {
+        color_space_override: Some(ColorSpace::SLog3),
+        frame_rate_override: Some(Rational::FPS_23976),
+        pixel_aspect_ratio_override: Some(PixelAspectRatio::HdAnamorphic1080),
+        field_order_override: Some(FieldOrder::UpperFirst),
+        alpha: AlphaInterpretation::Premultiplied,
+    };
+    state
+        .set_clip_media_interpretation(selection, interpretation.clone())
+        .expect("interpretation");
+    assert_eq!(
+        state.clip_snapshot(selection).expect("clip").interpretation,
+        interpretation
+    );
+
+    state.undo_timeline().expect("undo");
+    assert_eq!(
+        state.clip_snapshot(selection).expect("clip").interpretation,
+        MediaInterpretation::default()
+    );
+}
+
+#[test]
+fn set_clip_media_interpretation_rejects_locked_tracks() {
+    let mut state = create_state_with_sequence();
+    let seq = state.sequence.as_ref().expect("sequence");
+    let tb = seq.time_base();
+    let track_id = seq.video_tracks[0].id;
+    let clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+    let clip_id = clip.id;
+    {
+        let seq = state.sequence.as_mut().expect("sequence");
+        seq.video_tracks[0].add_clip(clip).expect("add clip");
+        seq.video_tracks[0].is_locked = true;
+    }
+
+    let selection = SelectedClipRef { track_id, clip_id, is_video_track: true };
+    let err = state
+        .set_clip_media_interpretation(
+            selection,
+            MediaInterpretation {
+                color_space_override: Some(ColorSpace::DciP3),
+                ..Default::default()
+            },
+        )
+        .expect_err("locked track should reject interpretation change");
+    assert!(matches!(
+        err,
+        mondrian_core::MondrianError::TrackLocked { .. }
+    ));
+}
+
+#[test]
+fn switching_sequences_preserves_independent_timelines() {
+    let mut state = create_state_with_sequence();
+    let first = state.sequence.as_ref().expect("sequence should exist").id;
+    state.active_sequence_id = Some(first);
+    state.default_sequence_id = Some(first);
+    state.sync_current_sequence_into_collection();
+
+    let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
+    state.sequence.as_mut().expect("sequence should exist").video_tracks[0]
+        .add_clip(Clip::new(
+            AssetId::new(),
+            TimeCode::new(0, tb),
+            TimeCode::new(10, tb),
+        ))
+        .expect("add clip");
+    state.sync_current_sequence_into_collection();
+
+    state.new_sequence("second");
+    let second = state.sequence.as_ref().expect("sequence should exist").id;
+    let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
+    state.sequence.as_mut().expect("sequence should exist").video_tracks[0]
+        .add_clip(Clip::new(
+            AssetId::new(),
+            TimeCode::new(20, tb),
+            TimeCode::new(10, tb),
+        ))
+        .expect("add second clip");
+
+    state.switch_active_sequence(first).expect("switch to first");
+    let seq = state.sequence.as_ref().expect("first sequence should be active");
+    assert_eq!(seq.id, first);
+    assert_eq!(seq.video_tracks[0].clips[0].position.frame, 0);
+
+    state.switch_active_sequence(second).expect("switch to second");
+    let seq = state.sequence.as_ref().expect("second sequence should be active");
+    assert_eq!(seq.id, second);
+    assert_eq!(seq.video_tracks[0].clips[0].position.frame, 20);
+}
+
+#[test]
+fn precompose_clips_creates_nested_sequence_and_replacement_clip() {
+    let mut state = create_state_with_sequence();
+    let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
+    let track_id = state.sequence.as_ref().expect("sequence should exist").video_tracks[0].id;
+    let clip = Clip::new(AssetId::new(), TimeCode::new(12, tb), TimeCode::new(30, tb));
+    let clip_id = clip.id;
+    state.sequence.as_mut().expect("sequence should exist").video_tracks[0]
+        .add_clip(clip)
+        .expect("add clip");
+
+    let nested_clip_id = state
+        .precompose_clips_as_sequence(&[(track_id, true, clip_id)], "Precomp 01")
+        .expect("precompose");
+
+    let parent = state.sequence.as_ref().expect("sequence should exist");
+    let replacement = parent.video_tracks[0]
+        .clips
+        .iter()
+        .find(|clip| clip.id == nested_clip_id)
+        .expect("replacement nested clip");
+    assert!(replacement.is_nested_sequence());
+    assert_eq!(replacement.position.frame, 12);
+    assert_eq!(replacement.duration.frame, 30);
+
+    let nested_sequence_id = replacement.nested_sequence_id.expect("nested sequence id");
+    let nested = state.sequence_by_id(nested_sequence_id).expect("nested sequence");
+    assert_eq!(
+        nested.role,
+        mondrian_timeline::sequence::SequenceRole::NestedComposition
+    );
+    assert_eq!(nested.video_tracks[0].clips.len(), 1);
+    assert_eq!(nested.video_tracks[0].clips[0].position.frame, 0);
 }
 
 fn video_clip_is_disabled(state: &AppState, clip_id: ClipId) -> bool {
@@ -503,8 +694,8 @@ fn creating_adjustment_layer_on_track_also_creates_library_asset() {
             .as_nanos()
     ));
     state.asset_library = Some(AssetLibrary::open(temp_root.clone()).expect("open library"));
-    state.project_in_point = Some(10);
-    state.project_out_point = Some(40);
+    state.sequence.as_mut().expect("sequence should exist").in_point_frame = Some(10);
+    state.sequence.as_mut().expect("sequence should exist").out_point_frame = Some(40);
 
     let target_track_id =
         state.sequence.as_ref().expect("sequence should exist").video_tracks[0].id;

@@ -1,6 +1,120 @@
 use super::*;
 
 impl AppState {
+    pub fn sync_current_sequence_into_collection(&mut self) {
+        let Some(sequence) = self.sequence.clone() else {
+            return;
+        };
+        let active_sequence_id = self.active_sequence_id.unwrap_or(sequence.id);
+        if let Some(existing) =
+            self.sequences.iter_mut().find(|candidate| candidate.id == active_sequence_id)
+        {
+            *existing = sequence;
+        } else {
+            self.sequences.push(sequence);
+        }
+    }
+
+    pub fn sequence_by_id(&self, id: SequenceId) -> Option<&Sequence> {
+        if self.sequence.as_ref().is_some_and(|sequence| sequence.id == id) {
+            return self.sequence.as_ref();
+        }
+        self.sequences.iter().find(|sequence| sequence.id == id)
+    }
+
+    pub fn export_sequences_snapshot(&self) -> Vec<Sequence> {
+        let mut sequences = self.sequences.clone();
+        if let Some(current) = self.sequence.as_ref() {
+            if let Some(existing) = sequences.iter_mut().find(|sequence| sequence.id == current.id)
+            {
+                *existing = current.clone();
+            } else {
+                sequences.push(current.clone());
+            }
+        }
+        sequences
+    }
+
+    pub fn switch_active_sequence(&mut self, sequence_id: SequenceId) -> mondrian_core::Result<()> {
+        self.switch_active_sequence_internal(sequence_id, false)
+    }
+
+    fn switch_active_sequence_internal(
+        &mut self,
+        sequence_id: SequenceId,
+        push_current: bool,
+    ) -> mondrian_core::Result<()> {
+        self.sync_current_sequence_into_collection();
+        if push_current {
+            if let Some(current_id) = self.active_sequence_id {
+                if current_id != sequence_id {
+                    self.sequence_navigation_stack.push(current_id);
+                }
+            }
+        }
+        let next = self
+            .sequences
+            .iter()
+            .find(|sequence| sequence.id == sequence_id)
+            .cloned()
+            .ok_or_else(|| mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "switch_active_sequence".to_string(),
+                reason: format!("序列不存在: {sequence_id}"),
+            })?;
+
+        self.sequence = Some(next);
+        self.active_sequence_id = Some(sequence_id);
+        self.playback = PlaybackState::Stopped;
+        self.cmd_history = mondrian_timeline::command::CommandHistory::new(200);
+        Ok(())
+    }
+
+    pub fn open_nested_sequence(&mut self, sequence_id: SequenceId) -> mondrian_core::Result<()> {
+        self.switch_active_sequence_internal(sequence_id, true)
+    }
+
+    pub fn return_to_parent_sequence(&mut self) -> mondrian_core::Result<bool> {
+        let Some(parent_id) = self.sequence_navigation_stack.pop() else {
+            return Ok(false);
+        };
+        self.switch_active_sequence_internal(parent_id, false)?;
+        Ok(true)
+    }
+
+    pub fn set_default_sequence(&mut self, sequence_id: SequenceId) -> mondrian_core::Result<()> {
+        if self.sequence_by_id(sequence_id).is_none() {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "set_default_sequence".to_string(),
+                reason: format!("序列不存在: {sequence_id}"),
+            });
+        }
+        self.default_sequence_id = Some(sequence_id);
+        let _ = self.save_project_file();
+        Ok(())
+    }
+
+    pub fn update_active_sequence_settings(
+        &mut self,
+        settings: mondrian_timeline::sequence::SequenceSettings,
+    ) -> mondrian_core::Result<()> {
+        let (sequence_id, before, after) = {
+            let seq = self.sequence.as_mut().ok_or_else(|| {
+                mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "update_active_sequence_settings".to_string(),
+                    reason: "当前无项目".to_string(),
+                }
+            })?;
+            let before = seq.clone();
+            seq.apply_settings_preserve_frames(settings)?;
+            (seq.id, before, seq.clone())
+        };
+        self.sync_current_sequence_into_collection();
+        self.record_sequence_snapshot_command("修改序列设置", before, after);
+        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
+        let _ = self.save_project_file();
+        Ok(())
+    }
+
     pub(super) fn record_sequence_snapshot_command(
         &mut self,
         description: impl Into<String>,
@@ -69,10 +183,12 @@ impl AppState {
         }
 
         self.sequence = None;
+        self.sequences.clear();
+        self.active_sequence_id = None;
+        self.default_sequence_id = None;
+        self.sequence_navigation_stack.clear();
         self.current_project_path = None;
         self.project_runtime_dir = None;
-        self.project_in_point = None;
-        self.project_out_point = None;
         self.asset_library = None;
         self.playback = PlaybackState::Stopped;
         self.playback_buffering = false;
@@ -688,13 +804,163 @@ impl AppState {
 
     /// 创建新序列并替换当前序列
     pub fn new_sequence(&mut self, name: &str) {
-        self.sequence = Some(Sequence::new(name));
-        self.project_in_point = None;
-        self.project_out_point = None;
+        let sequence = Sequence::new(name);
+        let sequence_id = sequence.id;
+        self.sequence = Some(sequence.clone());
+        self.sequences.push(sequence);
+        self.active_sequence_id = Some(sequence_id);
+        if self.default_sequence_id.is_none() {
+            self.default_sequence_id = Some(sequence_id);
+        }
         self.ensure_minimum_tracks();
         self.cmd_history = mondrian_timeline::command::CommandHistory::new(200);
         let _ = self.save_project_file();
         tracing::info!("新建序列: {name}");
+    }
+
+    pub fn precompose_clips_as_sequence(
+        &mut self,
+        selections: &[(TrackId, bool, ClipId)],
+        name: &str,
+    ) -> mondrian_core::Result<ClipId> {
+        if selections.is_empty() {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "precompose_clips_as_sequence".to_string(),
+                reason: "没有选中的片段".to_string(),
+            });
+        }
+
+        self.sync_current_sequence_into_collection();
+
+        let (sequence_id, before, after, nested_sequence, nested_clip_id) = {
+            let source = self.sequence.as_ref().ok_or_else(|| {
+                mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "precompose_clips_as_sequence".to_string(),
+                    reason: "当前无项目".to_string(),
+                }
+            })?;
+            let mut parent = source.clone();
+            let before = parent.clone();
+
+            let mut selected_ids: HashSet<ClipId> =
+                selections.iter().map(|(_, _, clip_id)| *clip_id).collect();
+            for clip_id in selected_ids.clone() {
+                if let Some(linked) = find_clip(&parent, clip_id).and_then(|clip| clip.linked_clip)
+                {
+                    selected_ids.insert(linked);
+                }
+            }
+
+            let mut min_frame = i64::MAX;
+            let mut max_frame = 0i64;
+            let mut target_video_track_index = None;
+            for (track_index, track) in parent.video_tracks.iter().enumerate() {
+                if track.is_locked && track.clips.iter().any(|clip| selected_ids.contains(&clip.id))
+                {
+                    return Err(mondrian_core::MondrianError::TrackLocked {
+                        track_id: track.id.to_string(),
+                    });
+                }
+                for clip in &track.clips {
+                    if selected_ids.contains(&clip.id) {
+                        min_frame = min_frame.min(clip.position.frame);
+                        max_frame = max_frame.max(clip.end_position().frame);
+                        target_video_track_index.get_or_insert(track_index);
+                    }
+                }
+            }
+            for track in &parent.audio_tracks {
+                if track.is_locked && track.clips.iter().any(|clip| selected_ids.contains(&clip.id))
+                {
+                    return Err(mondrian_core::MondrianError::TrackLocked {
+                        track_id: track.id.to_string(),
+                    });
+                }
+                for clip in &track.clips {
+                    if selected_ids.contains(&clip.id) {
+                        min_frame = min_frame.min(clip.position.frame);
+                        max_frame = max_frame.max(clip.end_position().frame);
+                    }
+                }
+            }
+
+            if min_frame == i64::MAX || max_frame <= min_frame {
+                return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "precompose_clips_as_sequence".to_string(),
+                    reason: "选区没有有效时长".to_string(),
+                });
+            }
+
+            let mut nested_sequence = Sequence::with_settings(name, parent.settings.clone())
+                .map_err(|err| mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "precompose_clips_as_sequence".to_string(),
+                    reason: format!("创建嵌套序列失败: {err}"),
+                })?;
+            nested_sequence.role = mondrian_timeline::sequence::SequenceRole::NestedComposition;
+            while nested_sequence.video_tracks.len() < parent.video_tracks.len() {
+                nested_sequence.add_video_track();
+            }
+            while nested_sequence.audio_tracks.len() < parent.audio_tracks.len() {
+                nested_sequence.add_audio_track();
+            }
+
+            for (track_index, track) in parent.video_tracks.iter().enumerate() {
+                for clip in track.clips.iter().filter(|clip| selected_ids.contains(&clip.id)) {
+                    let mut nested_clip = clip.clone();
+                    nested_clip.position =
+                        TimeCode::new(clip.position.frame - min_frame, nested_sequence.time_base());
+                    if nested_clip.linked_clip.is_some_and(|linked| !selected_ids.contains(&linked))
+                    {
+                        nested_clip.linked_clip = None;
+                    }
+                    nested_sequence.video_tracks[track_index].add_clip(nested_clip)?;
+                }
+            }
+            for (track_index, track) in parent.audio_tracks.iter().enumerate() {
+                for clip in track.clips.iter().filter(|clip| selected_ids.contains(&clip.id)) {
+                    let mut nested_clip = clip.clone();
+                    nested_clip.position =
+                        TimeCode::new(clip.position.frame - min_frame, nested_sequence.time_base());
+                    if nested_clip.linked_clip.is_some_and(|linked| !selected_ids.contains(&linked))
+                    {
+                        nested_clip.linked_clip = None;
+                    }
+                    nested_sequence.audio_tracks[track_index].add_clip(nested_clip)?;
+                }
+            }
+
+            for track in &mut parent.video_tracks {
+                track.clips.retain(|clip| !selected_ids.contains(&clip.id));
+            }
+            for track in &mut parent.audio_tracks {
+                track.clips.retain(|clip| !selected_ids.contains(&clip.id));
+            }
+
+            let target_video_track_index = target_video_track_index.unwrap_or(0);
+            let duration = TimeCode::new(max_frame - min_frame, parent.time_base());
+            let nested_clip = Clip::new_nested_sequence(
+                nested_sequence.id,
+                TimeCode::new(min_frame, parent.time_base()),
+                duration,
+                Some(nested_sequence.name.clone()),
+            );
+            let nested_clip_id = nested_clip.id;
+            parent.video_tracks[target_video_track_index].add_clip(nested_clip)?;
+
+            (parent.id, before, parent, nested_sequence, nested_clip_id)
+        };
+
+        self.sequence = Some(after.clone());
+        if let Some(existing) = self.sequences.iter_mut().find(|sequence| sequence.id == after.id) {
+            *existing = after.clone();
+        } else {
+            self.sequences.push(after.clone());
+        }
+        self.sequences.push(nested_sequence);
+        self.record_sequence_snapshot_command("预合成为嵌套序列", before, after);
+        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
+        let _ = self.save_project_file();
+        Ok(nested_clip_id)
     }
 
     // ─── 播放控制 ────────────────────────────
@@ -777,19 +1043,19 @@ impl AppState {
 
     pub fn mark_in_at_current_frame(&mut self) {
         let current = self.current_frame().max(0);
-        self.project_in_point = Some(current);
-        if let Some(out) = self.project_out_point {
-            if out < current {
-                self.project_out_point = Some(current);
-            }
+        if let Some(seq) = self.sequence.as_mut() {
+            seq.mark_in(current);
+            self.sync_current_sequence_into_collection();
         }
         let _ = self.save_project_file();
     }
 
     pub fn mark_out_at_current_frame(&mut self) {
         let current = self.current_frame().max(0);
-        let in_point = self.project_in_point.unwrap_or(0).max(0);
-        self.project_out_point = Some(current.max(in_point));
+        if let Some(seq) = self.sequence.as_mut() {
+            seq.mark_out(current);
+            self.sync_current_sequence_into_collection();
+        }
         let _ = self.save_project_file();
     }
 

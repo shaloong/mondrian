@@ -126,6 +126,84 @@ impl MondrianApp {
                 }
             });
 
+            ui.menu_button("序列", |ui| {
+                ui.set_min_width(Self::MENU_POPUP_MIN_WIDTH);
+                if Self::menu_action(ui, "新建序列", None).clicked() {
+                    let next = self.state.sequences.len() + 1;
+                    self.state.new_sequence(&format!("序列 {next}"));
+                    ui.close();
+                }
+                if Self::menu_action_enabled(
+                    ui,
+                    "返回父序列",
+                    None,
+                    !self.state.sequence_navigation_stack.is_empty(),
+                )
+                .clicked()
+                {
+                    if let Err(err) = self.state.return_to_parent_sequence() {
+                        self.state.set_status_hint(format!("返回父序列失败：{err}"), true);
+                    }
+                    ui.close();
+                }
+                if let Some(active_id) = self.state.active_sequence_id {
+                    if Self::menu_action(ui, "设为默认序列", None).clicked() {
+                        if let Err(err) = self.state.set_default_sequence(active_id) {
+                            self.state.set_status_hint(format!("设置默认序列失败：{err}"), true);
+                        } else {
+                            self.state.set_status_hint("已设置默认序列", false);
+                        }
+                        ui.close();
+                    }
+                }
+                if Self::menu_action_enabled(ui, "序列设置...", None, self.state.sequence.is_some())
+                    .clicked()
+                {
+                    self.show_sequence_settings = true;
+                    ui.close();
+                }
+                ui.separator();
+                for sequence in self.state.export_sequences_snapshot() {
+                    let is_active =
+                        self.state.active_sequence_id.is_some_and(|id| id == sequence.id);
+                    let is_default =
+                        self.state.default_sequence_id.is_some_and(|id| id == sequence.id);
+                    let label = if is_default {
+                        format!("{}  默认", sequence.name)
+                    } else {
+                        sequence.name.clone()
+                    };
+                    let response = crate::ui::theme::checkmark_menu_action(ui, is_active, label);
+                    response.context_menu(|ui| {
+                        if Self::menu_action(ui, "序列设置...", None).clicked() {
+                            if let Err(err) = self.state.switch_active_sequence(sequence.id) {
+                                self.state.set_status_hint(format!("切换序列失败：{err}"), true);
+                            } else {
+                                self.show_sequence_settings = true;
+                            }
+                            ui.close();
+                        }
+                        if Self::menu_action(ui, "设为默认序列", None).clicked() {
+                            if let Err(err) = self.state.set_default_sequence(sequence.id) {
+                                self.state
+                                    .set_status_hint(format!("设置默认序列失败：{err}"), true);
+                            } else {
+                                self.state.set_status_hint("已设置默认序列", false);
+                            }
+                            ui.close();
+                        }
+                    });
+                    if response.clicked() {
+                        if let Err(err) = self.state.switch_active_sequence(sequence.id) {
+                            self.state.set_status_hint(format!("切换序列失败：{err}"), true);
+                        } else {
+                            self.state.set_status_hint("已切换序列", false);
+                        }
+                        ui.close();
+                    }
+                }
+            });
+
             ui.menu_button("导出", |ui| {
                 ui.set_min_width(Self::MENU_POPUP_MIN_WIDTH);
                 if Self::menu_action(ui, "导出视频…", None).clicked() {

@@ -205,6 +205,9 @@ pub(crate) fn apply_render_op(
                 );
             }
         }
+        EffectRenderOp::Lut3D { lut, intensity } => {
+            lut.apply_rgba8_in_place(working, *intensity);
+        }
         EffectRenderOp::Custom { key, params, .. } => {
             let contract = plugin_contract(key);
             if let Some(processor) = custom_render_processor_registry()
@@ -999,5 +1002,33 @@ mod tests {
         );
 
         assert_eq!(output, input);
+    }
+
+    #[test]
+    fn lut_render_op_preserves_alpha_and_changes_rgb() {
+        let lut = crate::Lut3D {
+            name: "red-to-blue".to_string(),
+            size: 2,
+            data: vec![
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 1.0, 1.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 0.0, 1.0],
+                [1.0, 1.0, 0.0],
+                [1.0, 1.0, 1.0],
+            ],
+        };
+        let output = apply_effect_render_plan(
+            &[255, 0, 0, 91],
+            1,
+            1,
+            &EffectRenderPlan {
+                ops: vec![EffectRenderOp::Lut3D { lut, intensity: 1.0 }],
+            },
+            0,
+        );
+        assert_eq!(&output, &[0, 0, 255, 91]);
     }
 }

@@ -250,10 +250,10 @@ impl AppState {
     }
 
     pub fn in_point_frame(&self) -> i64 {
-        self.project_in_point.unwrap_or(0).max(0)
+        self.sequence.as_ref().map(|sequence| sequence.in_point_frame()).unwrap_or(0)
     }
 
     pub fn out_point_frame(&self) -> Option<i64> {
-        self.project_out_point.map(|f| f.max(0)).filter(|&f| f >= self.in_point_frame())
+        self.sequence.as_ref().and_then(|sequence| sequence.out_point_frame())
     }
 }

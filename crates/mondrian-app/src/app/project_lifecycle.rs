@@ -117,11 +117,19 @@ impl AppState {
         let sequence = self.sequence.as_ref()?;
         let mut proxy_mode_assets: Vec<AssetId> = self.proxy_mode_assets.iter().copied().collect();
         proxy_mode_assets.sort_by_key(|id| id.to_string());
+        let active_sequence_id = self.active_sequence_id.unwrap_or(sequence.id);
+        let default_sequence_id = self.default_sequence_id.unwrap_or(active_sequence_id);
+        let mut sequences = self.sequences.clone();
+        if let Some(active) = sequences.iter_mut().find(|seq| seq.id == active_sequence_id) {
+            *active = sequence.clone();
+        } else {
+            sequences.push(sequence.clone());
+        }
+        sequences.sort_by_key(|seq| seq.name.clone());
+        let collection = SequenceCollection { sequences, default_sequence_id, active_sequence_id };
         Some(ProjectFile {
             name: sequence.name.clone(),
-            sequence: sequence.clone(),
-            in_point_frame: self.project_in_point,
-            out_point_frame: self.project_out_point,
+            sequences: collection,
             proxy_mode_assets,
         })
     }
@@ -283,14 +291,20 @@ impl AppState {
 
         let saved = Self::load_project_container(archive_file, &runtime_root)?;
 
-        self.sequence = Some(saved.sequence);
+        let project_sequences = saved.sequences;
+        project_sequences.validate_nested_sequences()?;
+        let active_sequence = project_sequences
+            .active()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("项目缺少活动序列"))?;
+
+        self.sequence = Some(active_sequence);
+        self.sequences = project_sequences.sequences;
+        self.active_sequence_id = Some(project_sequences.active_sequence_id);
+        self.default_sequence_id = Some(project_sequences.default_sequence_id);
+        self.sequence_navigation_stack.clear();
         self.current_project_path = Some(project_file.clone());
         self.project_runtime_dir = Some(runtime_root.clone());
-        self.project_in_point = saved.in_point_frame.map(|f| f.max(0));
-        self.project_out_point = saved
-            .out_point_frame
-            .map(|f| f.max(0))
-            .filter(|&f| f >= self.project_in_point.unwrap_or(0));
         self.proxy_mode_assets = saved.proxy_mode_assets.into_iter().collect();
         self.playback = PlaybackState::Stopped;
         self.dragging_asset = None;
@@ -335,17 +349,29 @@ impl AppState {
         height: u32,
         frame_rate: Rational,
     ) -> anyhow::Result<()> {
+        let mut settings = SequenceSettings::default();
+        settings.resolution = Resolution { width, height };
+        settings.frame_rate = frame_rate;
+        self.create_new_project_with_settings_at(project_file, name, settings)
+    }
+
+    pub fn create_new_project_with_settings_at(
+        &mut self,
+        project_file: PathBuf,
+        name: &str,
+        settings: SequenceSettings,
+    ) -> anyhow::Result<()> {
         if project_file.exists() {
             anyhow::bail!("项目文件已存在：{}", project_file.display());
         }
+        settings.validate()?;
 
         if let Some(parent) = project_file.parent() {
             fs::create_dir_all(parent)?;
         }
 
         let mut sequence = Sequence::new(name);
-        sequence.settings.resolution = Resolution { width, height };
-        sequence.settings.frame_rate = frame_rate;
+        sequence.settings = settings;
         sequence.playhead = TimeCode::new(0, sequence.time_base());
 
         let runtime_root = Self::project_runtime_root(&project_file);
@@ -355,10 +381,12 @@ impl AppState {
         fs::create_dir_all(runtime_root.join("library"))?;
 
         self.sequence = Some(sequence);
+        self.sequences = self.sequence.iter().cloned().collect();
+        self.active_sequence_id = self.sequence.as_ref().map(|seq| seq.id);
+        self.default_sequence_id = self.active_sequence_id;
+        self.sequence_navigation_stack.clear();
         self.current_project_path = Some(project_file.clone());
         self.project_runtime_dir = Some(runtime_root.clone());
-        self.project_in_point = None;
-        self.project_out_point = None;
         self.playback = PlaybackState::Stopped;
         self.cmd_history = mondrian_timeline::command::CommandHistory::new(200);
         self.proxy_mode_assets.clear();

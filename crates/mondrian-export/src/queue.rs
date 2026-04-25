@@ -8,16 +8,21 @@ use crate::validator::{
     ExportValidationExpectations,
 };
 use chrono::{DateTime, Utc};
-use mondrian_core::types::{AssetId, JobId, TimeCode};
+use mondrian_core::{
+    convert_rgba8_in_place,
+    types::{AssetId, ColorSpace, JobId, TimeCode},
+    ColorPipeline,
+};
 use mondrian_media::audio::{
     AudioBuffer, AudioMixer, AudioSourceCache, AudioTrackConfig, AudioTrackData,
 };
 use mondrian_media::decode_video_frame_at_time_rgba_scaled;
 use mondrian_renderer::{
-    build_timeline_render_plan, composite_timeline_elements_into, TimelineAdjustmentLayer,
+    build_timeline_render_plan, composite_timeline_elements_float_linear, TimelineAdjustmentLayer,
     TimelineCompositeElement, TimelineCompositeOptions, TimelineCompositeScratch,
     TimelineMediaLayer, TimelineRenderPlanElement,
 };
+use mondrian_timeline::sequence::{ExportBitDepth, SequenceSettings, VideoRange};
 use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -330,6 +335,11 @@ fn execute_timeline_export(
         }
 
         apply_video_codec_args(&mut cmd, &job.config.preset.video);
+        apply_sequence_video_format_args(&mut cmd, &timeline.sequence.settings);
+        apply_color_tag_args(
+            &mut cmd,
+            timeline.sequence.settings.color_management.output_color_space,
+        );
         if !matches!(&audio_input, TimelineAudioInput::Disabled) {
             apply_audio_codec_args(&mut cmd, &job.config.preset.audio);
         }
@@ -445,11 +455,27 @@ fn prepare_timeline_audio_input(
 }
 
 fn timeline_has_audio_content(timeline: &TimelineExportInput, range: TimelineRenderRange) -> bool {
-    let seq = &timeline.sequence;
-    let has_solo = seq.audio_tracks.iter().any(|t| t.is_solo && !t.is_muted);
-    let start = range.start_frame;
-    let end_exclusive = start.saturating_add(range.total_frames as i64);
+    sequence_has_audio_content(
+        timeline,
+        &timeline.sequence,
+        range.start_frame,
+        range.start_frame.saturating_add(range.total_frames as i64),
+        0,
+    )
+}
 
+fn sequence_has_audio_content(
+    timeline: &TimelineExportInput,
+    seq: &mondrian_timeline::sequence::Sequence,
+    start: i64,
+    end_exclusive: i64,
+    depth: usize,
+) -> bool {
+    if depth > 16 {
+        return false;
+    }
+
+    let has_solo = seq.audio_tracks.iter().any(|t| t.is_solo && !t.is_muted);
     for track in &seq.audio_tracks {
         if track.is_muted || (has_solo && !track.is_solo) {
             continue;
@@ -465,6 +491,38 @@ fn timeline_has_audio_content(timeline: &TimelineExportInput, range: TimelineRen
             let clip_start = clip.position.frame;
             let clip_end = clip.end_position().frame;
             if clip_end > start && clip_start < end_exclusive {
+                return true;
+            }
+        }
+    }
+
+    for track in seq.video_tracks.iter().chain(seq.audio_tracks.iter()) {
+        for clip in &track.clips {
+            if clip.is_disabled || !clip.is_nested_sequence() {
+                continue;
+            }
+            let clip_start = clip.position.frame;
+            let clip_end = clip.end_position().frame;
+            if clip_end <= start || clip_start >= end_exclusive {
+                continue;
+            }
+            let Some(nested_sequence_id) = clip.nested_sequence_id else {
+                continue;
+            };
+            let Some(nested_sequence) =
+                timeline.sequences.iter().find(|sequence| sequence.id == nested_sequence_id)
+            else {
+                continue;
+            };
+            let nested_start = start.saturating_sub(clip_start).max(0);
+            let nested_end = end_exclusive.saturating_sub(clip_start).max(nested_start);
+            if sequence_has_audio_content(
+                timeline,
+                nested_sequence,
+                nested_start,
+                nested_end,
+                depth + 1,
+            ) {
                 return true;
             }
         }
@@ -566,7 +624,34 @@ fn render_timeline_audio_chunk(
     sample_rate: u32,
     channels: u8,
 ) -> Result<AudioBuffer, String> {
-    let seq = &timeline.sequence;
+    render_sequence_audio_chunk(
+        timeline,
+        &timeline.sequence,
+        cache,
+        mixer,
+        window_start_secs,
+        chunk_frames,
+        sample_rate,
+        channels,
+        0,
+    )
+}
+
+fn render_sequence_audio_chunk(
+    timeline: &TimelineExportInput,
+    seq: &mondrian_timeline::sequence::Sequence,
+    cache: &AudioSourceCache,
+    mixer: &AudioMixer,
+    window_start_secs: f64,
+    chunk_frames: usize,
+    sample_rate: u32,
+    channels: u8,
+    depth: usize,
+) -> Result<AudioBuffer, String> {
+    if depth > 16 {
+        return Ok(AudioBuffer::silent(sample_rate, channels, chunk_frames));
+    }
+
     let chunk_duration_secs = chunk_frames as f64 / sample_rate.max(1) as f64;
     let window_end_secs = window_start_secs + chunk_duration_secs;
     let has_solo = seq.audio_tracks.iter().any(|t| t.is_solo && !t.is_muted);
@@ -628,6 +713,81 @@ fn render_timeline_audio_chunk(
                     let src_ch = ch.min(src_channels.saturating_sub(1));
                     let sample = segment.samples.get(src_base + src_ch).copied().unwrap_or(0.0);
                     placed.samples[dst_base + ch] = sample;
+                }
+            }
+
+            tracks.push(AudioTrackData {
+                buffer: placed,
+                config: AudioTrackConfig {
+                    volume: 1.0,
+                    pan: 0.0,
+                    is_muted: false,
+                    is_solo: false,
+                },
+            });
+        }
+    }
+
+    for track in seq.video_tracks.iter().chain(seq.audio_tracks.iter()) {
+        for clip in &track.clips {
+            if clip.is_disabled || !clip.is_nested_sequence() {
+                continue;
+            }
+
+            let Some(nested_sequence_id) = clip.nested_sequence_id else {
+                continue;
+            };
+            let Some(nested_sequence) =
+                timeline.sequences.iter().find(|sequence| sequence.id == nested_sequence_id)
+            else {
+                continue;
+            };
+
+            let clip_start_secs = clip.position.to_secs();
+            let clip_end_secs = clip.end_position().to_secs();
+            let overlap_start = window_start_secs.max(clip_start_secs);
+            let overlap_end = window_end_secs.min(clip_end_secs);
+            if overlap_end <= overlap_start {
+                continue;
+            }
+
+            let nested_start_secs = clip
+                .timeline_to_source_time(TimeCode::from_secs(
+                    overlap_start,
+                    seq.settings.frame_rate,
+                ))
+                .to_secs()
+                .max(0.0);
+            let nested_frames =
+                ((overlap_end - overlap_start) * sample_rate as f64).ceil().max(1.0) as usize;
+            let nested_chunk = render_sequence_audio_chunk(
+                timeline,
+                nested_sequence,
+                cache,
+                mixer,
+                nested_start_secs,
+                nested_frames,
+                sample_rate,
+                channels,
+                depth + 1,
+            )?;
+            if nested_chunk.samples.is_empty() {
+                continue;
+            }
+
+            let place_offset = ((overlap_start - window_start_secs) * sample_rate as f64)
+                .round()
+                .max(0.0) as usize;
+            let mut placed = AudioBuffer::silent(sample_rate, channels, chunk_frames);
+            let max_place_frames = chunk_frames.saturating_sub(place_offset);
+            let copy_frames = nested_chunk.frame_count().min(max_place_frames);
+            let channel_count = channels as usize;
+            for frame in 0..copy_frames {
+                let dst_base = (place_offset + frame) * channel_count;
+                let src_base = frame * channel_count;
+                for ch in 0..channel_count {
+                    placed.samples[dst_base + ch] =
+                        nested_chunk.samples.get(src_base + ch).copied().unwrap_or(0.0);
                 }
             }
 
@@ -730,7 +890,38 @@ fn render_timeline_frame_into(
         canvas.resize(required_len, 0);
     }
 
-    let render_plan = build_timeline_render_plan(&timeline.sequence, timeline_frame.max(0));
+    render_sequence_frame_into(
+        timeline,
+        &timeline.sequence,
+        timeline_frame,
+        width,
+        height,
+        timeline.sequence.settings.color_management.output_color_space,
+        canvas,
+        0,
+    )
+}
+
+fn render_sequence_frame_into(
+    timeline: &TimelineExportInput,
+    sequence: &mondrian_timeline::sequence::Sequence,
+    timeline_frame: i64,
+    width: u32,
+    height: u32,
+    output_color_space: ColorSpace,
+    canvas: &mut Vec<u8>,
+    depth: usize,
+) -> Result<(), String> {
+    if depth > 16 {
+        return Err("序列嵌套层级过深，已停止渲染以避免循环".to_string());
+    }
+
+    let required_len = width as usize * height as usize * 4;
+    if canvas.len() != required_len {
+        canvas.resize(required_len, 0);
+    }
+
+    let render_plan = build_timeline_render_plan(sequence, timeline_frame.max(0));
     if render_plan.is_empty() {
         clear_canvas_black_opaque(canvas);
         return Ok(());
@@ -740,6 +931,8 @@ fn render_timeline_frame_into(
         HashMap::<(AssetId, i64), Arc<DecodedVideoLayer>>::with_capacity(render_plan.len())
     });
     let mut decoded_media =
+        std::iter::repeat_with(|| None).take(render_plan.len()).collect::<Vec<_>>();
+    let mut nested_media =
         std::iter::repeat_with(|| None).take(render_plan.len()).collect::<Vec<_>>();
 
     for (index, element) in render_plan.iter().enumerate() {
@@ -756,6 +949,12 @@ fn render_timeline_frame_into(
                 let decoded = decode_video_layer_scaled(
                     media.asset_id,
                     path.as_path(),
+                    media
+                        .color_space_override
+                        .or_else(|| timeline.asset_color_spaces.get(&media.asset_id).copied())
+                        .unwrap_or(ColorSpace::Rec709),
+                    sequence.settings.color_space,
+                    sequence.settings.auto_tone_map_media,
                     media.source_secs,
                     width,
                     height,
@@ -767,12 +966,47 @@ fn render_timeline_frame_into(
             decode_video_layer_scaled(
                 media.asset_id,
                 path.as_path(),
+                media
+                    .color_space_override
+                    .or_else(|| timeline.asset_color_spaces.get(&media.asset_id).copied())
+                    .unwrap_or(ColorSpace::Rec709),
+                sequence.settings.color_space,
+                sequence.settings.auto_tone_map_media,
                 media.source_secs,
                 width,
                 height,
             )?
         };
         decoded_media[index] = Some(decoded);
+    }
+
+    for (index, element) in render_plan.iter().enumerate() {
+        let TimelineRenderPlanElement::NestedSequence(nested) = element else {
+            continue;
+        };
+        let Some(nested_sequence) =
+            timeline.sequences.iter().find(|sequence| sequence.id == nested.sequence_id)
+        else {
+            return Err(format!("嵌套序列不存在: {}", nested.sequence_id));
+        };
+        let nested_width = normalize_output_dimension(nested_sequence.settings.resolution.width);
+        let nested_height = normalize_output_dimension(nested_sequence.settings.resolution.height);
+        let nested_frame =
+            TimeCode::from_secs(nested.source_secs, nested_sequence.settings.frame_rate)
+                .frame
+                .max(0);
+        let mut nested_canvas = vec![0u8; nested_width as usize * nested_height as usize * 4];
+        render_sequence_frame_into(
+            timeline,
+            nested_sequence,
+            nested_frame,
+            nested_width,
+            nested_height,
+            sequence.settings.color_space,
+            &mut nested_canvas,
+            depth + 1,
+        )?;
+        nested_media[index] = Some((nested_canvas, nested_width, nested_height));
     }
 
     let mut composite_elements = Vec::with_capacity(render_plan.len());
@@ -803,17 +1037,43 @@ fn render_timeline_frame_into(
                     frame_seed: media.frame_seed,
                 }));
             }
+            TimelineRenderPlanElement::NestedSequence(nested) => {
+                let Some((rgba, nested_width, nested_height)) = nested_media[index].as_ref() else {
+                    continue;
+                };
+                composite_elements.push(TimelineCompositeElement::Media(TimelineMediaLayer {
+                    rgba,
+                    width: *nested_width,
+                    height: *nested_height,
+                    opacity: nested.opacity,
+                    blend_mode: nested.blend_mode,
+                    transform: nested.transform,
+                    effect_graph: nested.effect_graph.clone(),
+                    frame_seed: nested.frame_seed,
+                }));
+            }
         }
     }
 
     let mut scratch = TimelineCompositeScratch::default();
-    composite_timeline_elements_into(
-        canvas,
+    let rendered = composite_timeline_elements_float_linear(
         width,
         height,
         &composite_elements,
         TimelineCompositeOptions::default(),
+        sequence.settings.color_space,
         &mut scratch,
+    );
+    canvas.clear();
+    canvas.extend_from_slice(&rendered);
+    convert_rgba8_in_place(
+        canvas,
+        ColorPipeline::new(
+            sequence.settings.color_space,
+            sequence.settings.color_space,
+            output_color_space,
+            sequence.settings.auto_tone_map_media,
+        ),
     );
     Ok(())
 }
@@ -821,13 +1081,25 @@ fn render_timeline_frame_into(
 fn decode_video_layer_scaled(
     asset_id: AssetId,
     path: &Path,
+    input_color_space: ColorSpace,
+    working_color_space: ColorSpace,
+    tone_map: bool,
     source_secs: f64,
     width: u32,
     height: u32,
 ) -> Result<Arc<DecodedVideoLayer>, String> {
-    let decoded =
+    let mut decoded =
         decode_video_frame_at_time_rgba_scaled(path, source_secs, Some(width), Some(height))
             .map_err(|err| format!("asset={} path={} err={}", asset_id, path.display(), err))?;
+    convert_rgba8_in_place(
+        &mut decoded.data,
+        ColorPipeline::new(
+            input_color_space,
+            working_color_space,
+            working_color_space,
+            tone_map,
+        ),
+    );
     Ok(Arc::new(DecodedVideoLayer {
         width: decoded.width,
         height: decoded.height,
@@ -837,12 +1109,12 @@ fn decode_video_layer_scaled(
 
 fn compute_timeline_render_range(timeline: &TimelineExportInput) -> TimelineRenderRange {
     let sequence = &timeline.sequence;
-    let start = timeline.in_point_frame.unwrap_or(0).max(0);
+    let start = sequence.in_point_frame();
     let sequence_end_exclusive = sequence.total_duration().frame.max(1);
     let max_end_exclusive = sequence_end_exclusive.max(start.saturating_add(1));
 
-    let requested_end_exclusive = timeline
-        .out_point_frame
+    let requested_end_exclusive = sequence
+        .out_point_frame()
         .map(|frame| frame.saturating_add(1))
         .unwrap_or(sequence_end_exclusive);
     let end_exclusive = requested_end_exclusive.max(start.saturating_add(1)).min(max_end_exclusive);
@@ -1225,6 +1497,29 @@ fn apply_video_codec_args(cmd: &mut Command, codec: &VideoCodecConfig) {
     }
 }
 
+fn apply_color_tag_args(cmd: &mut Command, color_space: ColorSpace) {
+    let tags = color_space.ffmpeg_tags();
+    cmd.arg("-color_primaries")
+        .arg(tags.color_primaries)
+        .arg("-color_trc")
+        .arg(tags.color_trc)
+        .arg("-colorspace")
+        .arg(tags.colorspace);
+}
+
+fn apply_sequence_video_format_args(cmd: &mut Command, settings: &SequenceSettings) {
+    let pix_fmt = match settings.color_management.export_bit_depth {
+        ExportBitDepth::Eight => "yuv420p",
+        ExportBitDepth::Ten => "yuv420p10le",
+        ExportBitDepth::SixteenFloat => "yuv444p10le",
+    };
+    let range = match settings.color_management.video_range {
+        VideoRange::Full => "pc",
+        VideoRange::Legal => "tv",
+    };
+    cmd.arg("-pix_fmt").arg(pix_fmt).arg("-color_range").arg(range);
+}
+
 fn apply_audio_codec_args(cmd: &mut Command, codec: &AudioCodecConfig) {
     match codec {
         AudioCodecConfig::Aac { bitrate_kbps } => {
@@ -1477,12 +1772,14 @@ mod tests {
         let tb = seq.time_base();
         let clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(200, tb));
         seq.video_tracks[0].add_clip(clip).expect("add clip");
+        seq.in_point_frame = Some(40);
+        seq.out_point_frame = Some(99);
 
         let timeline = TimelineExportInput {
             sequence: seq,
+            sequences: Vec::new(),
             asset_paths: HashMap::new(),
-            in_point_frame: Some(40),
-            out_point_frame: Some(99),
+            asset_color_spaces: HashMap::new(),
         };
 
         let range = compute_timeline_render_range(&timeline);
@@ -1497,14 +1794,16 @@ mod tests {
         let asset_id = AssetId::new();
         let clip = Clip::new(asset_id, TimeCode::new(25, tb), TimeCode::new(20, tb));
         seq.audio_tracks[0].add_clip(clip).expect("add audio clip");
+        seq.in_point_frame = Some(30);
+        seq.out_point_frame = Some(40);
 
         let mut asset_paths = HashMap::new();
         asset_paths.insert(asset_id, PathBuf::from("dummy-audio.wav"));
         let timeline = TimelineExportInput {
             sequence: seq,
+            sequences: Vec::new(),
             asset_paths,
-            in_point_frame: Some(30),
-            out_point_frame: Some(40),
+            asset_color_spaces: HashMap::new(),
         };
 
         let range = compute_timeline_render_range(&timeline);
@@ -1523,13 +1822,40 @@ mod tests {
     }
 
     #[test]
+    fn sequence_video_format_args_follow_bit_depth_and_range() {
+        let mut settings = mondrian_timeline::sequence::SequenceSettings::default();
+        settings.color_management.export_bit_depth = ExportBitDepth::Ten;
+        settings.color_management.video_range = VideoRange::Legal;
+
+        let mut cmd = Command::new("ffmpeg");
+        apply_sequence_video_format_args(&mut cmd, &settings);
+        let args = cmd.get_args().map(|arg| arg.to_string_lossy().to_string()).collect::<Vec<_>>();
+
+        assert!(args.windows(2).any(|pair| pair == ["-pix_fmt", "yuv420p10le"]));
+        assert!(args.windows(2).any(|pair| pair == ["-color_range", "tv"]));
+    }
+
+    #[test]
+    fn color_tag_args_use_export_output_color_space() {
+        let mut cmd = Command::new("ffmpeg");
+        apply_color_tag_args(&mut cmd, ColorSpace::Rec2100Pq);
+        let args = cmd.get_args().map(|arg| arg.to_string_lossy().to_string()).collect::<Vec<_>>();
+
+        assert!(args.windows(2).any(|pair| pair == ["-color_primaries", "bt2020"]));
+        assert!(args.windows(2).any(|pair| pair == ["-color_trc", "smpte2084"]));
+        assert!(args.windows(2).any(|pair| pair == ["-colorspace", "bt2020nc"]));
+    }
+
+    #[test]
     fn render_timeline_frame_into_clears_canvas_when_no_layers() {
-        let seq = Sequence::new("empty");
+        let mut seq = Sequence::new("empty");
+        seq.in_point_frame = Some(0);
+        seq.out_point_frame = Some(10);
         let timeline = TimelineExportInput {
             sequence: seq,
+            sequences: Vec::new(),
             asset_paths: HashMap::new(),
-            in_point_frame: Some(0),
-            out_point_frame: Some(10),
+            asset_color_spaces: HashMap::new(),
         };
 
         let mut canvas = vec![77u8; 4 * 2 * 4];

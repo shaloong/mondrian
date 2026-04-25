@@ -271,6 +271,51 @@ impl AppState {
         find_clip_by_selection(seq, selection).cloned()
     }
 
+    pub fn set_clip_media_interpretation(
+        &mut self,
+        selection: SelectedClipRef,
+        interpretation: mondrian_timeline::clip::MediaInterpretation,
+    ) -> mondrian_core::Result<bool> {
+        let (sequence_id, before, after) = {
+            let seq = self.sequence.as_mut().ok_or_else(|| {
+                mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "set_clip_media_interpretation".to_string(),
+                    reason: "当前无项目".to_string(),
+                }
+            })?;
+
+            let before = seq.clone();
+            let Some((track_id, _is_video, is_locked)) =
+                find_clip_track_lock(seq, selection.clip_id)
+            else {
+                return Err(mondrian_core::MondrianError::ClipNotFound {
+                    clip_id: selection.clip_id.to_string(),
+                });
+            };
+            if is_locked {
+                return Err(mondrian_core::MondrianError::TrackLocked {
+                    track_id: track_id.to_string(),
+                });
+            }
+
+            let clip = find_clip_mut_by_selection(seq, selection).ok_or_else(|| {
+                mondrian_core::MondrianError::ClipNotFound {
+                    clip_id: selection.clip_id.to_string(),
+                }
+            })?;
+            if clip.interpretation == interpretation {
+                return Ok(false);
+            }
+            clip.interpretation = interpretation;
+            (seq.id, before, seq.clone())
+        };
+
+        self.record_sequence_snapshot_command("解释素材", before, after);
+        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
+        let _ = self.save_project_file();
+        Ok(true)
+    }
+
     pub fn mutate_clip_property(
         &mut self,
         selection: SelectedClipRef,

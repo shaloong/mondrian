@@ -240,6 +240,29 @@ pub enum ClipKind {
     #[default]
     Media,
     AdjustmentLayer,
+    NestedSequence,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum AlphaInterpretation {
+    #[default]
+    Straight,
+    Premultiplied,
+    Ignore,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct MediaInterpretation {
+    #[serde(default)]
+    pub color_space_override: Option<ColorSpace>,
+    #[serde(default)]
+    pub frame_rate_override: Option<Rational>,
+    #[serde(default)]
+    pub pixel_aspect_ratio_override: Option<crate::sequence::PixelAspectRatio>,
+    #[serde(default)]
+    pub field_order_override: Option<crate::sequence::FieldOrder>,
+    #[serde(default)]
+    pub alpha: AlphaInterpretation,
 }
 
 /// 时间线上的一个剪辑片段
@@ -251,6 +274,11 @@ pub struct Clip {
     pub kind: ClipKind,
     /// 关联的素材资产
     pub asset_id: AssetId,
+    /// 嵌套序列引用。只有 `ClipKind::NestedSequence` 使用。
+    #[serde(default)]
+    pub nested_sequence_id: Option<SequenceId>,
+    #[serde(default)]
+    pub interpretation: MediaInterpretation,
     /// 在时间线上的起始位置
     pub position: TimeCode,
     /// 在时间线上的持续时长
@@ -285,6 +313,8 @@ impl Clip {
             id: ClipId::new(),
             kind: ClipKind::Media,
             asset_id,
+            nested_sequence_id: None,
+            interpretation: MediaInterpretation::default(),
             position,
             duration,
             source_in: TimeCode::new(0, tb),
@@ -308,8 +338,27 @@ impl Clip {
         clip
     }
 
+    pub fn new_nested_sequence(
+        sequence_id: SequenceId,
+        position: TimeCode,
+        duration: TimeCode,
+        label: Option<String>,
+    ) -> Self {
+        let mut clip = Self::new(AssetId::new(), position, duration);
+        clip.kind = ClipKind::NestedSequence;
+        clip.nested_sequence_id = Some(sequence_id);
+        clip.source_in = TimeCode::new(0, position.time_base);
+        clip.source_out = duration;
+        clip.label = label.or_else(|| Some("嵌套序列".to_string()));
+        clip
+    }
+
     pub fn is_adjustment_layer(&self) -> bool {
         self.kind == ClipKind::AdjustmentLayer
+    }
+
+    pub fn is_nested_sequence(&self) -> bool {
+        self.kind == ClipKind::NestedSequence
     }
 
     /// Clip 在时间线上的结束位置
@@ -402,7 +451,7 @@ impl Clip {
 
 impl PropertyHost for Clip {
     fn property_bag(&self) -> Result<PropertyBag> {
-        let mut properties = if self.is_adjustment_layer() {
+        let mut properties = if self.is_adjustment_layer() || self.is_nested_sequence() {
             let mut bag = PropertyBag::default();
             if let Some(opacity) =
                 self.transform.to_property_bag().property(Transform2D::OPACITY_PATH).cloned()
@@ -428,7 +477,7 @@ impl PropertyHost for Clip {
         let mut blend_mode_property = AnimatedProperty::from_descriptor(blend_mode_descriptor);
         blend_mode_property.set_static_value(PropertyValue::Text(blend_mode_text));
         properties.upsert(blend_mode_property);
-        if !self.is_adjustment_layer() {
+        if !self.is_adjustment_layer() && !self.is_nested_sequence() {
             properties.upsert(self.speed.property().clone());
         }
         Ok(properties)
@@ -437,7 +486,9 @@ impl PropertyHost for Clip {
     fn apply_property_mutation(&mut self, mutation: PropertyMutation) -> Result<()> {
         let path = property_mutation_path(&mutation);
         if path == Transform2D::OPACITY_PATH
-            || (!self.is_adjustment_layer() && path.starts_with("transform."))
+            || (!self.is_adjustment_layer()
+                && !self.is_nested_sequence()
+                && path.starts_with("transform."))
         {
             self.transform.apply_property_mutation(mutation)
         } else if path == Self::BLEND_MODE_PATH {
@@ -464,7 +515,10 @@ impl PropertyHost for Clip {
             };
             self.blend_mode = blend_mode_from_text(value)?;
             Ok(())
-        } else if !self.is_adjustment_layer() && path == SpeedMap::MULTIPLIER_PATH {
+        } else if !self.is_adjustment_layer()
+            && !self.is_nested_sequence()
+            && path == SpeedMap::MULTIPLIER_PATH
+        {
             self.speed.apply_property_mutation(mutation)
         } else if path.starts_with("effect.") {
             if let Some(effect) = self.effects.iter_mut().find(|effect| {
@@ -596,6 +650,40 @@ mod tests {
         assert_eq!(clip.position, tc(12));
         assert_eq!(clip.duration, tc(30));
         assert!(clip.effects.is_empty());
+    }
+
+    #[test]
+    fn nested_sequence_constructor_marks_clip_kind() {
+        let nested_id = SequenceId::new();
+        let clip =
+            Clip::new_nested_sequence(nested_id, tc(12), tc(30), Some("Scene 02".to_string()));
+
+        assert!(clip.is_nested_sequence());
+        assert_eq!(clip.kind, ClipKind::NestedSequence);
+        assert_eq!(clip.nested_sequence_id, Some(nested_id));
+        assert_eq!(clip.label.as_deref(), Some("Scene 02"));
+        assert!(clip
+            .property_bag()
+            .expect("property bag")
+            .property(SpeedMap::MULTIPLIER_PATH)
+            .is_none());
+    }
+
+    #[test]
+    fn media_interpretation_defaults_to_source_metadata() {
+        let clip = Clip::new(AssetId::new(), tc(0), tc(10));
+        assert_eq!(clip.interpretation.color_space_override, None);
+        assert_eq!(clip.interpretation.alpha, AlphaInterpretation::Straight);
+    }
+
+    #[test]
+    fn media_interpretation_can_override_color_space() {
+        let mut clip = Clip::new(AssetId::new(), tc(0), tc(10));
+        clip.interpretation.color_space_override = Some(ColorSpace::Rec2100Hlg);
+        assert_eq!(
+            clip.interpretation.color_space_override,
+            Some(ColorSpace::Rec2100Hlg)
+        );
     }
 
     #[test]

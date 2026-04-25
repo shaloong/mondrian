@@ -3,6 +3,7 @@
 use crate::adjustment::AdjustmentLayerParams;
 use crate::execution::{register_custom_render_processor, CustomEffectRenderProcessor};
 use crate::graph::{EffectGraphBuilderState, EffectRenderGraph};
+use crate::lut::Lut3D;
 use crate::plugin_contract::{
     effect_plugin_is_library_visible, effect_plugin_is_runtime_available,
     record_plugin_runtime_failure, register_plugin_contract, EffectPluginContract,
@@ -19,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     panic::{catch_unwind, AssertUnwindSafe},
+    path::Path,
     sync::{Arc, OnceLock, RwLock},
 };
 
@@ -95,6 +97,10 @@ pub enum EffectRenderOp {
     Grain {
         amount: f32,
     },
+    Lut3D {
+        lut: Lut3D,
+        intensity: f32,
+    },
     Custom {
         key: String,
         params: serde_json::Value,
@@ -161,8 +167,19 @@ impl EffectRenderOp {
                 6u8.hash(state);
                 amount.to_bits().hash(state);
             }
-            EffectRenderOp::Custom { key, params, cache_key, cache_policy } => {
+            EffectRenderOp::Lut3D { lut, intensity } => {
                 7u8.hash(state);
+                lut.name.hash(state);
+                lut.size.hash(state);
+                intensity.to_bits().hash(state);
+                for rgb in &lut.data {
+                    rgb[0].to_bits().hash(state);
+                    rgb[1].to_bits().hash(state);
+                    rgb[2].to_bits().hash(state);
+                }
+            }
+            EffectRenderOp::Custom { key, params, cache_key, cache_policy } => {
+                8u8.hash(state);
                 key.hash(state);
                 cache_policy.hash(state);
                 if let Some(cache_key) = cache_key {
@@ -190,6 +207,7 @@ impl EffectRenderOp {
             EffectRenderOp::WhiteBalance { .. } => 1,
             EffectRenderOp::Vignette { .. } => 1,
             EffectRenderOp::Grain { .. } => 2,
+            EffectRenderOp::Lut3D { .. } => 2,
             EffectRenderOp::GaussianBlur { .. } => 4,
             EffectRenderOp::Sharpen { .. } => 4,
             EffectRenderOp::ChromaticAberration { .. } => 4,
@@ -546,6 +564,17 @@ impl EffectNode {
             .unwrap_or(fallback)
     }
 
+    pub fn evaluate_text_by_suffix(&self, suffix: &str, time: TimeCode) -> Option<String> {
+        self.properties
+            .iter()
+            .find(|(path, _)| path.ends_with(suffix))
+            .and_then(|(path, _)| self.evaluate_property(path, time))
+            .and_then(|value| match value {
+                PropertyValue::Text(text) if !text.trim().is_empty() => Some(text),
+                _ => None,
+            })
+    }
+
     pub fn set_static_value_by_suffix(&mut self, suffix: &str, value: PropertyValue) -> Result<()> {
         let path = self
             .properties
@@ -726,6 +755,17 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
             );
         }
         EffectType::Lut3D => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "path",
+                "LUT",
+                "LUT 文件",
+                PropertyValue::Text(String::new()),
+                None,
+                None,
+                None,
+            );
             define_builtin_property(
                 &mut properties,
                 &effect_type,
@@ -1149,6 +1189,25 @@ fn builtin_render_builder_for(effect_type: &EffectType) -> Option<EffectRenderBu
                 }
             }))
         }
+        EffectType::Lut3D => {
+            let path_suffix = effect_type.property_suffix("path");
+            let intensity_path = effect_type.property_suffix("intensity");
+            Some(Arc::new(move |effect, context, plan| {
+                let intensity = effect.evaluate_f32_by_suffix(&intensity_path, context.time, 1.0);
+                if intensity <= 1.0e-4 {
+                    return;
+                }
+                let Some(path) = effect.evaluate_text_by_suffix(&path_suffix, context.time) else {
+                    return;
+                };
+                match Lut3D::from_cube_file(Path::new(path.trim())) {
+                    Ok(lut) => plan.ops.push(EffectRenderOp::Lut3D { lut, intensity }),
+                    Err(err) => {
+                        tracing::warn!(path = %path, "failed to load LUT effect file: {err}")
+                    }
+                }
+            }))
+        }
         EffectType::GaussianBlur => {
             let radius_path = effect_type.property_suffix("radius");
             Some(Arc::new(move |effect, context, plan| {
@@ -1231,6 +1290,27 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 let tint = effect.evaluate_f32_by_suffix(&tint_path, context.time, 0.0);
                 if temperature.abs() > 1.0e-4 || tint.abs() > 1.0e-4 {
                     graph.append_unary(EffectRenderOp::WhiteBalance { temperature, tint });
+                }
+            }))
+        }
+        EffectType::Lut3D => {
+            let path_suffix = effect_type.property_suffix("path");
+            let intensity_path = effect_type.property_suffix("intensity");
+            Some(Arc::new(move |effect, context, graph| {
+                let intensity = effect.evaluate_f32_by_suffix(&intensity_path, context.time, 1.0);
+                if intensity <= 1.0e-4 {
+                    return;
+                }
+                let Some(path) = effect.evaluate_text_by_suffix(&path_suffix, context.time) else {
+                    return;
+                };
+                match Lut3D::from_cube_file(Path::new(path.trim())) {
+                    Ok(lut) => {
+                        graph.append_unary(EffectRenderOp::Lut3D { lut, intensity });
+                    }
+                    Err(err) => {
+                        tracing::warn!(path = %path, "failed to load LUT graph file: {err}")
+                    }
                 }
             }))
         }
@@ -1442,6 +1522,55 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn builtin_lut_effect_builds_render_op_from_cube_path() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("mondrian-effect-lut-{unique}.cube"));
+        std::fs::write(
+            &path,
+            "LUT_3D_SIZE 2
+0 0 0
+1 0 0
+0 1 0
+1 1 0
+0 0 1
+1 0 1
+0 1 1
+1 1 1
+",
+        )
+        .expect("cube");
+
+        let mut effect = EffectNode::new(EffectType::Lut3D);
+        effect
+            .set_static_value_by_suffix(
+                &EffectType::Lut3D.property_suffix("path"),
+                PropertyValue::Text(path.display().to_string()),
+            )
+            .expect("set lut path");
+        effect
+            .set_static_value_by_suffix(
+                &EffectType::Lut3D.property_suffix("intensity"),
+                PropertyValue::Float(0.75),
+            )
+            .expect("set intensity");
+
+        let plan = build_effect_render_plan(&[effect], tc(0));
+        assert_eq!(plan.ops.len(), 1);
+        match &plan.ops[0] {
+            EffectRenderOp::Lut3D { lut, intensity } => {
+                assert_eq!(lut.size, 2);
+                assert!((*intensity - 0.75).abs() < 1.0e-6);
+            }
+            other => panic!("expected LUT op, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! 导出格式预设
 
-use mondrian_core::types::AssetId;
+use mondrian_core::types::{AssetId, ColorSpace};
 use mondrian_timeline::sequence::Sequence;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -102,7 +102,9 @@ pub enum ExportInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimelineExportInput {
     pub sequence: Sequence,
+    #[serde(default)]
+    pub sequences: Vec<Sequence>,
     pub asset_paths: HashMap<AssetId, PathBuf>,
-    pub in_point_frame: Option<i64>,
-    pub out_point_frame: Option<i64>,
+    #[serde(default)]
+    pub asset_color_spaces: HashMap<AssetId, ColorSpace>,
 }

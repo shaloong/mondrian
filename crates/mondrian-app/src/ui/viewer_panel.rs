@@ -4,12 +4,16 @@ use crate::{
 };
 use egui::{Pos2, Rect, Sense, Ui, Vec2};
 
-use mondrian_core::types::{AssetId, BlendMode, Rational, TimeCode};
+use mondrian_core::{
+    apply_display_profile_rgba8_in_place, convert_rgba8_in_place,
+    types::{AssetId, BlendMode, ColorSpace, Rational, SequenceId, TimeCode},
+    ColorPipeline, DisplayColorProfile,
+};
 use mondrian_effects::CompiledEffectGraph;
 use mondrian_media::cache::FrameCacheConfig;
 use mondrian_media::{DecoderPool, FrameCache, RgbaFrame};
 use mondrian_renderer::{
-    build_timeline_render_plan, composite_timeline_elements, is_identity_transform,
+    build_timeline_render_plan, composite_timeline_elements_float_linear, is_identity_transform,
     quantize_transform_signature, CompositorConfig, CpuRgbaLayer, FrameCompositor, GpuContext,
     TimelineAdjustmentLayer, TimelineCompositeElement, TimelineCompositeOptions,
     TimelineCompositeScratch, TimelineMediaLayer, TimelineRenderPlanElement,
@@ -34,6 +38,9 @@ use std::{
 struct LayerDecodeRequest {
     frame_key: (AssetId, i64),
     path: PathBuf,
+    input_color_space: ColorSpace,
+    working_color_space: ColorSpace,
+    tone_map: bool,
     source_secs: f64,
     source_time_base: Rational,
     opacity: f32,
@@ -52,15 +59,36 @@ struct AdjustmentRenderRequest {
 }
 
 #[derive(Clone)]
+struct NestedSequenceRenderRequest {
+    sequence_id: SequenceId,
+    source_frame: i64,
+    width: u32,
+    height: u32,
+    working_color_space: ColorSpace,
+    tone_map: bool,
+    opacity: f32,
+    blend_mode: BlendMode,
+    transform: [f32; 6],
+    effect_graph: std::sync::Arc<CompiledEffectGraph>,
+    frame_seed: i64,
+    layers: Vec<RenderElement>,
+}
+
+#[derive(Clone)]
 enum RenderElement {
     Media(LayerDecodeRequest),
     Adjustment(AdjustmentRenderRequest),
+    NestedSequence(NestedSequenceRenderRequest),
 }
 
 #[derive(Clone)]
 struct DecodeRequest {
     signature: CompositeFrameSignature,
     layers: Vec<RenderElement>,
+    working_color_space: ColorSpace,
+    output_color_space: ColorSpace,
+    display_profile: DisplayColorProfile,
+    tone_map: bool,
     playback_mode: bool,
     target_width: u32,
     target_height: u32,
@@ -102,6 +130,9 @@ enum LayerSignature {
         transform_key: [i32; 6],
         frame_seed: i64,
         effect_hash: u64,
+        input_color_space: ColorSpace,
+        working_color_space: ColorSpace,
+        tone_map: bool,
     },
     Adjustment {
         opacity_u8: u8,
@@ -109,12 +140,26 @@ enum LayerSignature {
         frame_seed: i64,
         effect_hash: u64,
     },
+    NestedSequence {
+        sequence_id: SequenceId,
+        source_frame: i64,
+        opacity_u8: u8,
+        blend_mode: BlendMode,
+        transform_key: [i32; 6],
+        frame_seed: i64,
+        effect_hash: u64,
+        child_hash: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CompositeFrameSignature {
     width: u32,
     height: u32,
+    working_color_space: ColorSpace,
+    output_color_space: ColorSpace,
+    display_profile_key: u64,
+    tone_map: bool,
     layers: Vec<LayerSignature>,
 }
 
@@ -124,6 +169,9 @@ struct LayerFrameCacheKey {
     source_frame: i64,
     target_width: u32,
     target_height: u32,
+    input_color_space: ColorSpace,
+    working_color_space: ColorSpace,
+    tone_map: bool,
 }
 
 #[derive(Default)]
@@ -138,6 +186,7 @@ type SharedLayerFrameCache = Arc<Mutex<LayerFrameCache>>;
 struct CachedAssetPreview {
     is_video: bool,
     source_path: PathBuf,
+    color_space: ColorSpace,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -148,7 +197,7 @@ enum PreviewScaleMode {
     Quarter,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ViewerPreferences {
     preview_scale_mode: PreviewScaleMode,
     proxy_config: mondrian_media::ProxyConfig,
@@ -158,6 +207,8 @@ pub struct ViewerPreferences {
     prefetch_enabled: bool,
     #[serde(default = "default_layer_cache_enabled")]
     layer_cache_enabled: bool,
+    #[serde(default = "DisplayColorProfile::rec709_reference")]
+    display_profile: DisplayColorProfile,
 }
 
 const fn default_prefetch_enabled() -> bool {
@@ -194,6 +245,7 @@ impl Default for ViewerPreferences {
             decode_backend: mondrian_media::PreviewDecodeBackend::default(),
             prefetch_enabled: default_prefetch_enabled(),
             layer_cache_enabled: default_layer_cache_enabled(),
+            display_profile: DisplayColorProfile::rec709_reference(),
         }
     }
 }
@@ -220,6 +272,10 @@ impl Hash for CompositeFrameSignature {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.width.hash(state);
         self.height.hash(state);
+        self.working_color_space.hash(state);
+        self.output_color_space.hash(state);
+        self.display_profile_key.hash(state);
+        self.tone_map.hash(state);
         self.layers.hash(state);
     }
 }
@@ -260,6 +316,7 @@ pub struct ViewerPanel {
     decode_backend: mondrian_media::PreviewDecodeBackend,
     prefetch_enabled: bool,
     layer_cache_enabled: bool,
+    display_profile: DisplayColorProfile,
     proxy_jobs_in_flight: Arc<Mutex<HashSet<AssetId>>>,
     proxy_done_tx: Sender<AssetId>,
     proxy_done_rx: Receiver<AssetId>,
@@ -344,6 +401,7 @@ impl Default for ViewerPanel {
             decode_backend: mondrian_media::PreviewDecodeBackend::default(),
             prefetch_enabled: default_prefetch_enabled(),
             layer_cache_enabled: default_layer_cache_enabled(),
+            display_profile: DisplayColorProfile::rec709_reference(),
             proxy_jobs_in_flight: Arc::new(Mutex::new(HashSet::new())),
             proxy_done_tx,
             proxy_done_rx,
@@ -452,26 +510,8 @@ impl ViewerPanel {
                                 );
                             }
                         }
-                        let layer_signatures = layers
-                            .iter()
-                            .map(|layer| match layer {
-                                RenderElement::Media(layer) => LayerSignature::Media {
-                                    asset_id: layer.frame_key.0,
-                                    source_frame: layer.frame_key.1,
-                                    opacity_u8: (layer.opacity * 255.0).round() as u8,
-                                    blend_mode: layer.blend_mode,
-                                    transform_key: quantize_transform_signature(layer.transform),
-                                    frame_seed: layer.frame_seed,
-                                    effect_hash: layer.effect_graph.signature_hash,
-                                },
-                                RenderElement::Adjustment(layer) => LayerSignature::Adjustment {
-                                    opacity_u8: (layer.opacity * 255.0).round() as u8,
-                                    blend_mode: layer.blend_mode,
-                                    frame_seed: layer.frame_seed,
-                                    effect_hash: layer.effect_graph.signature_hash,
-                                },
-                            })
-                            .collect::<Vec<_>>();
+                        let layer_signatures =
+                            layers.iter().map(render_element_signature).collect::<Vec<_>>();
 
                         if layers.is_empty() {
                             self.invalidate_pending_decode();
@@ -485,6 +525,10 @@ impl ViewerPanel {
                             let signature = CompositeFrameSignature {
                                 width: target_width,
                                 height: target_height,
+                                working_color_space: seq.settings.color_space,
+                                output_color_space: ColorSpace::Rec709,
+                                display_profile_key: self.display_profile.signature_hash(),
+                                tone_map: seq.settings.auto_tone_map_media,
                                 layers: layer_signatures,
                             };
                             self.desired_signature = Some(signature.clone());
@@ -499,6 +543,10 @@ impl ViewerPanel {
                                         DecodeRequest {
                                             signature,
                                             layers,
+                                            working_color_space: seq.settings.color_space,
+                                            output_color_space: ColorSpace::Rec709,
+                                            display_profile: self.display_profile.clone(),
+                                            tone_map: seq.settings.auto_tone_map_media,
                                             playback_mode: is_playing,
                                             target_width,
                                             target_height,
@@ -1459,6 +1507,9 @@ impl ViewerPanel {
                     source_frame: layer.frame_key.1,
                     target_width,
                     target_height,
+                    input_color_space: layer.input_color_space,
+                    working_color_space: layer.working_color_space,
+                    tone_map: layer.tone_map,
                 };
 
                 if let Some(existing) = self.prefetch_tasks.get(&cache_key).cloned() {
@@ -1522,6 +1573,21 @@ impl ViewerPanel {
         state: &AppState,
         timeline_frame: i64,
     ) -> Vec<RenderElement> {
+        self.build_render_elements_with_depth(seq, lib, state, timeline_frame, 0)
+    }
+
+    fn build_render_elements_with_depth(
+        &mut self,
+        seq: &mondrian_timeline::sequence::Sequence,
+        lib: &mondrian_assets::AssetLibrary,
+        state: &AppState,
+        timeline_frame: i64,
+        depth: usize,
+    ) -> Vec<RenderElement> {
+        if depth > 16 {
+            return Vec::new();
+        }
+
         let mut layers: Vec<RenderElement> = Vec::new();
 
         for plan in build_timeline_render_plan(seq, timeline_frame) {
@@ -1540,9 +1606,15 @@ impl ViewerPanel {
                         hit.clone()
                     } else {
                         let loaded = lib.get_asset(asset_id).ok().flatten().map(|asset| {
+                            let color_space = asset
+                                .media_info
+                                .primary_video()
+                                .map(|video| video.color_space)
+                                .unwrap_or(ColorSpace::Rec709);
                             CachedAssetPreview {
                                 is_video: matches!(asset.kind, mondrian_assets::AssetKind::Video),
                                 source_path: asset.path,
+                                color_space,
                             }
                         });
                         self.asset_preview_cache.insert(asset_id, loaded.clone());
@@ -1564,6 +1636,9 @@ impl ViewerPanel {
                     layers.push(RenderElement::Media(LayerDecodeRequest {
                         frame_key: (asset_id, media.source_frame),
                         path,
+                        input_color_space: media.color_space_override.unwrap_or(asset.color_space),
+                        working_color_space: seq.settings.color_space,
+                        tone_map: seq.settings.auto_tone_map_media,
                         source_secs: media.source_secs,
                         source_time_base: media.source_time_base,
                         opacity: media.opacity,
@@ -1571,6 +1646,39 @@ impl ViewerPanel {
                         transform: media.transform,
                         effect_graph: media.effect_graph,
                         frame_seed: media.frame_seed,
+                    }));
+                }
+                TimelineRenderPlanElement::NestedSequence(nested) => {
+                    let Some(nested_sequence) = state.sequence_by_id(nested.sequence_id).cloned()
+                    else {
+                        continue;
+                    };
+                    let nested_frame = TimeCode::from_secs(
+                        nested.source_secs,
+                        nested_sequence.settings.frame_rate,
+                    )
+                    .frame
+                    .max(0);
+                    let child_layers = self.build_render_elements_with_depth(
+                        &nested_sequence,
+                        lib,
+                        state,
+                        nested_frame,
+                        depth + 1,
+                    );
+                    layers.push(RenderElement::NestedSequence(NestedSequenceRenderRequest {
+                        sequence_id: nested.sequence_id,
+                        source_frame: nested_frame,
+                        width: nested_sequence.settings.resolution.width.max(1),
+                        height: nested_sequence.settings.resolution.height.max(1),
+                        working_color_space: nested_sequence.settings.color_space,
+                        tone_map: nested_sequence.settings.auto_tone_map_media,
+                        opacity: nested.opacity,
+                        blend_mode: nested.blend_mode,
+                        transform: nested.transform,
+                        effect_graph: nested.effect_graph,
+                        frame_seed: nested.frame_seed,
+                        layers: child_layers,
                     }));
                 }
             }
@@ -1643,6 +1751,9 @@ impl ViewerPanel {
                     source_frame: layer.frame_key.1,
                     target_width,
                     target_height,
+                    input_color_space: layer.input_color_space,
+                    working_color_space: layer.working_color_space,
+                    tone_map: layer.tone_map,
                 };
 
                 let in_cache = layer_cache_get(&self.layer_frame_cache, &key).is_some();
@@ -1701,6 +1812,9 @@ impl ViewerPanel {
                     source_frame: layer.frame_key.1,
                     target_width,
                     target_height,
+                    input_color_space: layer.input_color_space,
+                    working_color_space: layer.working_color_space,
+                    tone_map: layer.tone_map,
                 };
 
                 let in_cache =
@@ -1903,6 +2017,7 @@ impl ViewerPanel {
             decode_backend: self.decode_backend,
             prefetch_enabled: self.prefetch_enabled,
             layer_cache_enabled: self.layer_cache_enabled,
+            display_profile: self.display_profile.clone(),
         }
     }
 
@@ -1913,6 +2028,9 @@ impl ViewerPanel {
         mondrian_media::set_preview_decode_backend(preferences.decode_backend);
         self.set_prefetch_enabled(preferences.prefetch_enabled);
         self.set_layer_cache_enabled(preferences.layer_cache_enabled);
+        if preferences.display_profile.validate().is_ok() {
+            self.display_profile = preferences.display_profile.clone();
+        }
     }
 
     pub fn preview_decode_backend(&self) -> mondrian_media::PreviewDecodeBackend {
@@ -2132,6 +2250,48 @@ fn composite_signature_hash(signature: &CompositeFrameSignature) -> u64 {
     hasher.finish()
 }
 
+fn render_element_signature(layer: &RenderElement) -> LayerSignature {
+    match layer {
+        RenderElement::Media(layer) => LayerSignature::Media {
+            asset_id: layer.frame_key.0,
+            source_frame: layer.frame_key.1,
+            opacity_u8: (layer.opacity * 255.0).round() as u8,
+            blend_mode: layer.blend_mode,
+            transform_key: quantize_transform_signature(layer.transform),
+            frame_seed: layer.frame_seed,
+            effect_hash: layer.effect_graph.signature_hash,
+            input_color_space: layer.input_color_space,
+            working_color_space: layer.working_color_space,
+            tone_map: layer.tone_map,
+        },
+        RenderElement::Adjustment(layer) => LayerSignature::Adjustment {
+            opacity_u8: (layer.opacity * 255.0).round() as u8,
+            blend_mode: layer.blend_mode,
+            frame_seed: layer.frame_seed,
+            effect_hash: layer.effect_graph.signature_hash,
+        },
+        RenderElement::NestedSequence(layer) => {
+            let child_hash = {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                for child in &layer.layers {
+                    render_element_signature(child).hash(&mut hasher);
+                }
+                hasher.finish()
+            };
+            LayerSignature::NestedSequence {
+                sequence_id: layer.sequence_id,
+                source_frame: layer.source_frame,
+                opacity_u8: (layer.opacity * 255.0).round() as u8,
+                blend_mode: layer.blend_mode,
+                transform_key: quantize_transform_signature(layer.transform),
+                frame_seed: layer.frame_seed,
+                effect_hash: layer.effect_graph.signature_hash,
+                child_hash,
+            }
+        }
+    }
+}
+
 fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> {
     let decode_started_at = Instant::now();
     if request.generation != request.latest_generation.load(Ordering::Relaxed) {
@@ -2191,13 +2351,82 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
             .collect::<Vec<_>>()
     });
 
+    let nested_outputs = request
+        .layers
+        .iter()
+        .cloned()
+        .enumerate()
+        .filter_map(|(index, layer)| {
+            let RenderElement::NestedSequence(layer) = layer else {
+                return None;
+            };
+            if decode_generation != latest_generation.load(Ordering::Relaxed) {
+                return Some((
+                    index,
+                    Err("decode cancelled by newer generation".to_string()),
+                ));
+            }
+            let signature = CompositeFrameSignature {
+                width: layer.width,
+                height: layer.height,
+                working_color_space: layer.working_color_space,
+                output_color_space: request.working_color_space,
+                display_profile_key: 0,
+                tone_map: layer.tone_map || request.tone_map,
+                layers: layer.layers.iter().map(render_element_signature).collect(),
+            };
+            let nested_request = DecodeRequest {
+                signature,
+                layers: layer.layers.clone(),
+                working_color_space: layer.working_color_space,
+                output_color_space: request.working_color_space,
+                display_profile: DisplayColorProfile::rec709_reference(),
+                tone_map: layer.tone_map || request.tone_map,
+                playback_mode,
+                target_width: layer.width,
+                target_height: layer.height,
+                layer_cache_enabled,
+                layer_cache: Arc::clone(&layer_cache),
+                decoder_pool: Arc::clone(&decoder_pool),
+                generation: decode_generation,
+                latest_generation: Arc::clone(&latest_generation),
+            };
+            Some((
+                index,
+                decode_composited_rgba(&nested_request).map_err(|e| e.to_string()),
+            ))
+        })
+        .collect::<Vec<_>>();
+
     let mut layer_results: Vec<Option<Result<RgbaFrame, String>>> =
         vec![None; request.layers.len()];
     let mut decoded_media_frames =
         std::iter::repeat_with(|| None).take(request.layers.len()).collect::<Vec<_>>();
+    let mut decoded_nested_frames =
+        std::iter::repeat_with(|| None).take(request.layers.len()).collect::<Vec<_>>();
     for (index, decoded) in layer_outputs {
         if index < layer_results.len() {
             layer_results[index] = Some(decoded);
+        }
+    }
+
+    for (index, decoded) in nested_outputs {
+        let Some(RenderElement::NestedSequence(layer)) = request.layers.get(index) else {
+            continue;
+        };
+        match decoded {
+            Ok(frame) => {
+                decoded_nested_frames[index] = Some((layer.clone(), frame));
+                decoded_layers += 1;
+            }
+            Err(err) => {
+                last_error = Some(anyhow::anyhow!(
+                    "nested sequence {}@{} 解码失败: {}",
+                    layer.sequence_id,
+                    layer.source_frame,
+                    err
+                ));
+            }
         }
     }
 
@@ -2246,6 +2475,7 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
                 || layer.blend_mode != BlendMode::Normal
         }
         RenderElement::Adjustment(_) => true,
+        RenderElement::NestedSequence(_) => true,
     });
 
     if !has_cpu_only_ops && decoded_layers == 1 {
@@ -2255,7 +2485,9 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
         if frame.width == width && frame.height == height {
             record_preview_perf_passthrough_frame();
             record_preview_perf_decode_total(decode_started_at.elapsed());
-            return Ok(RgbaFrame { width, height, data: frame.data.clone() });
+            let mut data = frame.data.clone();
+            apply_preview_output_color(&mut data, request);
+            return Ok(RgbaFrame { width, height, data });
         }
     }
 
@@ -2272,7 +2504,9 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
             .collect::<Vec<_>>();
         if let Some(gpu_rgba) = try_gpu_composite_rgba_layers(width, height, &rgba_layers_for_gpu) {
             record_preview_perf_decode_total(decode_started_at.elapsed());
-            return Ok(RgbaFrame { width, height, data: gpu_rgba });
+            let mut data = gpu_rgba;
+            apply_preview_output_color(&mut data, request);
+            return Ok(RgbaFrame { width, height, data });
         }
     }
 
@@ -2305,22 +2539,59 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
                     },
                 ));
             }
+            RenderElement::NestedSequence(_) => {
+                let Some((layer, frame)) = decoded_nested_frames[index].as_ref() else {
+                    continue;
+                };
+                composite_elements.push(TimelineCompositeElement::Media(TimelineMediaLayer {
+                    rgba: &frame.data,
+                    width: frame.width,
+                    height: frame.height,
+                    opacity: layer.opacity,
+                    blend_mode: layer.blend_mode,
+                    transform: layer.transform,
+                    effect_graph: std::sync::Arc::clone(&layer.effect_graph),
+                    frame_seed: layer.frame_seed,
+                }));
+            }
         }
     }
 
     let mut scratch = TimelineCompositeScratch::default();
-    let canvas = composite_timeline_elements(
+    let mut canvas = composite_timeline_elements_float_linear(
         width,
         height,
         &composite_elements,
         TimelineCompositeOptions { empty_canvas_transparent: true },
+        request.working_color_space,
         &mut scratch,
     );
+    apply_preview_output_color(&mut canvas, request);
 
     record_preview_perf_composite_ns(cpu_composite_started_at.elapsed().as_nanos() as u64, false);
     record_preview_perf_decode_total(decode_started_at.elapsed());
 
     Ok(RgbaFrame { width, height, data: canvas })
+}
+
+fn apply_preview_output_color(data: &mut [u8], request: &DecodeRequest) {
+    convert_rgba8_in_place(
+        data,
+        ColorPipeline::new(
+            request.working_color_space,
+            request.working_color_space,
+            request.output_color_space,
+            request.tone_map,
+        ),
+    );
+    if let Err(err) = apply_display_profile_rgba8_in_place(
+        data,
+        request.output_color_space,
+        &request.display_profile,
+        request.tone_map,
+    ) {
+        tracing::warn!("显示色彩配置无效，已跳过显示校准: {}", err);
+    }
 }
 
 fn try_gpu_composite_rgba_layers(
@@ -2433,6 +2704,9 @@ fn decode_layer_rgba(
         source_frame: layer.frame_key.1,
         target_width: width,
         target_height: height,
+        input_color_space: layer.input_color_space,
+        working_color_space: layer.working_color_space,
+        tone_map: layer.tone_map,
     };
 
     if layer_cache_enabled {
@@ -2484,7 +2758,8 @@ fn decode_layer_rgba(
     });
 
     if let Some(Ok(frame)) = async_result {
-        let frame = (*frame).clone();
+        let mut frame = (*frame).clone();
+        apply_layer_input_color(&mut frame.data, layer);
         if layer_cache_enabled {
             layer_cache_put(layer_cache, cache_key.clone(), frame.clone());
         }
@@ -2533,13 +2808,26 @@ fn decode_layer_rgba(
         Some(width),
         Some(height),
     )
-    .map(|frame| {
+    .map(|mut frame| {
+        apply_layer_input_color(&mut frame.data, layer);
         if layer_cache_enabled {
             layer_cache_put(layer_cache, cache_key, frame.clone());
         }
         record_preview_perf_layer_decode(started_at.elapsed(), false);
         frame
     })?)
+}
+
+fn apply_layer_input_color(data: &mut [u8], layer: &LayerDecodeRequest) {
+    convert_rgba8_in_place(
+        data,
+        ColorPipeline::new(
+            layer.input_color_space,
+            layer.working_color_space,
+            layer.working_color_space,
+            layer.tone_map,
+        ),
+    );
 }
 
 #[derive(Default)]

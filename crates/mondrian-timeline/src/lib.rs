@@ -18,5 +18,8 @@ pub mod track;
 pub use clip::{ActiveClip, Clip, ClipKind};
 pub use command::{Command, CommandHistory};
 pub use keyframe::{InterpolationType, Keyframe, KeyframeTrack};
-pub use sequence::{Sequence, SequenceSettings};
+pub use sequence::{
+    AudioDisplayFormat, EditingMode, FieldOrder, PixelAspectRatio, Sequence, SequenceCollection,
+    SequenceRole, SequenceSettings, VideoDisplayFormat,
+};
 pub use track::{Track, TrackType};

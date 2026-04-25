@@ -32,7 +32,7 @@ pub use graph::{
     EffectGraphBuilderState, EffectGraphNode, EffectGraphNodeId, EffectGraphNodeKind,
     EffectGraphValue, EffectRenderGraph,
 };
-pub use lut::Lut3D;
+pub use lut::{Lut3D, LutLibrary, LutLibraryEntry};
 pub use plugin_contract::{
     effect_plugin_is_library_visible, effect_plugin_is_runtime_available,
     effect_plugin_runtime_status, plugin_contract, record_plugin_runtime_failure,

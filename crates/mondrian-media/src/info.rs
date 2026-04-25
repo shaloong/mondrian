@@ -206,6 +206,29 @@ impl MediaInfo {
                             pixel_format = map_pixel_format(decoder.format());
                             bit_depth = pixel_format.bit_depth();
                             has_alpha = pixel_format.has_alpha();
+                            let color_space = map_color_space(
+                                decoder.color_primaries(),
+                                decoder.color_transfer_characteristic(),
+                                decoder.color_space(),
+                            );
+                            video_streams.push(VideoStreamInfo {
+                                index: stream.index() as u32,
+                                codec: map_video_codec(params.id()),
+                                width,
+                                height,
+                                frame_rate: map_rational(stream.avg_frame_rate()),
+                                pixel_format,
+                                color_space,
+                                bit_depth,
+                                has_alpha,
+                                avg_bitrate: 0,
+                                total_frames: if stream.frames() > 0 {
+                                    Some(stream.frames() as u64)
+                                } else {
+                                    None
+                                },
+                            });
+                            continue;
                         }
                     }
 
@@ -306,6 +329,38 @@ impl MediaInfo {
         let fps = video.frame_rate.to_f64();
         let secs = self.duration.as_secs_f64();
         Some((secs * fps).ceil() as u64)
+    }
+}
+
+fn map_color_space(
+    primaries: ffmpeg::util::color::Primaries,
+    transfer: ffmpeg::util::color::TransferCharacteristic,
+    matrix: ffmpeg::util::color::Space,
+) -> ColorSpace {
+    use ffmpeg::util::color::{Primaries, Space, TransferCharacteristic};
+
+    match transfer {
+        TransferCharacteristic::SMPTE2084 => return ColorSpace::Rec2100Pq,
+        TransferCharacteristic::ARIB_STD_B67 => return ColorSpace::Rec2100Hlg,
+        TransferCharacteristic::IEC61966_2_1 => return ColorSpace::Srgb,
+        _ => {}
+    }
+
+    match primaries {
+        Primaries::BT2020 => ColorSpace::Rec2020,
+        Primaries::SMPTE431 | Primaries::SMPTE432 => ColorSpace::DciP3,
+        Primaries::BT709 => {
+            if matrix == Space::RGB {
+                ColorSpace::Srgb
+            } else {
+                ColorSpace::Rec709
+            }
+        }
+        _ => match matrix {
+            Space::BT2020NCL | Space::BT2020CL => ColorSpace::Rec2020,
+            Space::RGB => ColorSpace::Srgb,
+            _ => ColorSpace::Rec709,
+        },
     }
 }
 
