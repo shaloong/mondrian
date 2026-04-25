@@ -1,0 +1,313 @@
+use super::*;
+
+impl MondrianApp {
+    pub(super) fn draw_menu_bar(&mut self, ui: &mut egui::Ui) {
+        ui.ctx().style_mut(|style| {
+            style.spacing.menu_width = Self::MENU_POPUP_WIDTH;
+        });
+        egui::MenuBar::new().ui(ui, |ui| {
+            ui.menu_button("文件", |ui| {
+                ui.set_min_width(Self::MENU_POPUP_MIN_WIDTH);
+
+                if Self::menu_action(ui, "新建项目...", None).clicked() {
+                    self.show_new_project_dialog = true;
+                    ui.close();
+                }
+                if Self::menu_action(
+                    ui,
+                    "打开项目...",
+                    Some(self.shortcuts.open_project_label().as_str()),
+                )
+                .clicked()
+                {
+                    self.open_project_dialog();
+                    ui.close();
+                }
+                if Self::menu_action(
+                    ui,
+                    "保存",
+                    Some(self.shortcuts.save_project_label().as_str()),
+                )
+                .clicked()
+                {
+                    if let Err(err) = self.state.save_project() {
+                        tracing::error!("保存项目失败: {err}");
+                        self.state.set_status_hint(format!("保存项目失败：{err}"), true);
+                    } else {
+                        self.state.set_status_hint("项目已保存", false);
+                    }
+                    ui.close();
+                }
+                if Self::menu_action(
+                    ui,
+                    "另存为...",
+                    Some(self.shortcuts.save_project_as_label().as_str()),
+                )
+                .clicked()
+                {
+                    self.save_project_as_dialog();
+                    ui.close();
+                }
+                if Self::menu_action(
+                    ui,
+                    "关闭项目",
+                    Some(self.shortcuts.close_project_label().as_str()),
+                )
+                .clicked()
+                {
+                    self.request_close_project();
+                    ui.close();
+                }
+                ui.separator();
+                if Self::menu_action(
+                    ui,
+                    "导入媒体",
+                    Some(self.shortcuts.import_media_label().as_str()),
+                )
+                .clicked()
+                {
+                    self.trigger_import_media();
+                    ui.close();
+                }
+                ui.separator();
+                if Self::menu_action(ui, "退出", Some(self.shortcuts.quit_app_label().as_str()))
+                    .clicked()
+                {
+                    self.request_quit_app(ui.ctx());
+                }
+            });
+
+            ui.menu_button("编辑", |ui| {
+                ui.set_min_width(Self::MENU_POPUP_MIN_WIDTH);
+                let can_undo = self.state.cmd_history.can_undo();
+                let can_redo = self.state.cmd_history.can_redo();
+
+                if Self::menu_action_enabled(ui, "撤销", Some("Ctrl+Z"), can_undo).clicked() {
+                    if let Err(err) = self.state.undo_timeline() {
+                        self.state.set_status_hint(format!("撤销失败：{err}"), true);
+                    }
+                    ui.close();
+                }
+                if Self::menu_action_enabled(ui, "重做", Some("Ctrl+Shift+Z"), can_redo).clicked()
+                {
+                    if let Err(err) = self.state.redo_timeline() {
+                        self.state.set_status_hint(format!("重做失败：{err}"), true);
+                    }
+                    ui.close();
+                }
+
+                ui.separator();
+                if Self::menu_action(ui, "首选项...", None).clicked() {
+                    self.show_preferences_dialog = true;
+                    ui.close();
+                }
+            });
+
+            ui.menu_button("视图", |ui| {
+                ui.set_min_width(Self::MENU_POPUP_MIN_WIDTH);
+                let _ = crate::ui::theme::checkmark_menu_toggle(
+                    ui,
+                    &mut self.show_effect_controls,
+                    "属性面板",
+                );
+                let _ = crate::ui::theme::checkmark_menu_toggle(
+                    ui,
+                    &mut self.show_effect_library,
+                    "特效库",
+                );
+                let _ =
+                    crate::ui::theme::checkmark_menu_toggle(ui, &mut self.show_library, "素材库");
+                if cfg!(debug_assertions) {
+                    let _ = crate::ui::theme::checkmark_menu_toggle(
+                        ui,
+                        &mut self.show_dev_metrics,
+                        "开发指标",
+                    );
+                }
+            });
+
+            ui.menu_button("导出", |ui| {
+                ui.set_min_width(Self::MENU_POPUP_MIN_WIDTH);
+                if Self::menu_action(ui, "导出视频…", None).clicked() {
+                    self.show_export = true;
+                    ui.close();
+                }
+            });
+
+            ui.menu_button("帮助", |ui| {
+                ui.set_min_width(Self::MENU_POPUP_MIN_WIDTH);
+                let _ = Self::menu_action(ui, "关于Mondrian", None);
+            });
+        });
+    }
+
+    fn menu_action(ui: &mut egui::Ui, label: &str, shortcut: Option<&str>) -> egui::Response {
+        Self::menu_action_enabled(ui, label, shortcut, true)
+    }
+
+    fn menu_action_enabled(
+        ui: &mut egui::Ui,
+        label: &str,
+        shortcut: Option<&str>,
+        enabled: bool,
+    ) -> egui::Response {
+        let label_width = ui
+            .painter()
+            .layout_no_wrap(
+                label.to_owned(),
+                crate::ui::theme::typography::body_small(),
+                crate::ui::theme::palette::text_primary(),
+            )
+            .size()
+            .x;
+        let shortcut_width = shortcut
+            .map(|shortcut| {
+                ui.painter()
+                    .layout_no_wrap(
+                        shortcut.to_owned(),
+                        crate::ui::theme::typography::body_small(),
+                        crate::ui::theme::palette::text_muted(),
+                    )
+                    .size()
+                    .x
+            })
+            .unwrap_or(0.0);
+        let content_width = 10.0
+            + label_width
+            + if shortcut.is_some() {
+                28.0 + shortcut_width
+            } else {
+                0.0
+            }
+            + 10.0;
+        let desired_size = egui::vec2(
+            ui.spacing().menu_width.max(content_width),
+            ui.spacing().interact_size.y,
+        );
+        let sense = if enabled {
+            egui::Sense::click()
+        } else {
+            egui::Sense::hover()
+        };
+        let (rect, response) = ui.allocate_exact_size(desired_size, sense);
+
+        if ui.is_rect_visible(rect) {
+            let visuals = ui.visuals();
+            let fill = if enabled && response.hovered() {
+                visuals.widgets.hovered.weak_bg_fill
+            } else {
+                egui::Color32::TRANSPARENT
+            };
+            let rounding = visuals.menu_corner_radius;
+            ui.painter().rect_filled(rect, rounding, fill);
+
+            let label_color = if enabled {
+                crate::ui::theme::palette::text_primary()
+            } else {
+                crate::ui::theme::palette::text_muted()
+            };
+            let shortcut_color = crate::ui::theme::palette::text_muted().gamma_multiply(0.78);
+
+            ui.painter().text(
+                rect.left_center() + egui::vec2(10.0, 0.0),
+                egui::Align2::LEFT_CENTER,
+                label,
+                crate::ui::theme::typography::body_small(),
+                label_color,
+            );
+
+            if let Some(shortcut) = shortcut {
+                ui.painter().text(
+                    rect.right_center() - egui::vec2(10.0, 0.0),
+                    egui::Align2::RIGHT_CENTER,
+                    shortcut,
+                    crate::ui::theme::typography::body_small(),
+                    shortcut_color,
+                );
+            }
+        }
+
+        response
+    }
+
+    pub(super) fn draw_status_bar(&self, ui: &mut egui::Ui) {
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), ui.available_height()),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let (status_text, is_error, is_busy) = self.status_bar_text();
+                let status_color = if is_error {
+                    crate::ui::theme::palette::status_error()
+                } else if is_busy {
+                    crate::ui::theme::palette::interaction_highlight()
+                } else {
+                    crate::ui::theme::palette::text_muted()
+                };
+
+                let _ = crate::ui::theme::icon(
+                    ui,
+                    crate::ui::theme::UiIcon::Info,
+                    crate::ui::theme::palette::text_muted(),
+                );
+                ui.add(
+                    egui::Label::new(egui::RichText::new(status_text).color(status_color))
+                        .truncate(),
+                );
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let project_name = self
+                        .state
+                        .sequence
+                        .as_ref()
+                        .map(|seq| seq.name.as_str())
+                        .unwrap_or("未命名项目");
+                    ui.label(
+                        egui::RichText::new(project_name)
+                            .color(crate::ui::theme::palette::text_muted()),
+                    );
+                });
+            },
+        );
+    }
+
+    fn status_bar_text(&self) -> (String, bool, bool) {
+        let jobs = self.state.render_queue.list_jobs();
+        let active_jobs: Vec<_> = jobs
+            .into_iter()
+            .filter(|job| {
+                matches!(
+                    job.status,
+                    JobStatus::Pending | JobStatus::Rendering { .. } | JobStatus::Encoding
+                )
+            })
+            .collect();
+
+        if let Some(job) = active_jobs.first() {
+            let label = match &job.status {
+                JobStatus::Pending => format!("导出队列处理中（{}）", active_jobs.len()),
+                JobStatus::Rendering { frame, total_frames } => {
+                    format!(
+                        "正在导出帧 {}/{}（队列 {}）",
+                        frame,
+                        total_frames,
+                        active_jobs.len()
+                    )
+                }
+                JobStatus::Encoding => format!("正在编码（队列 {}）", active_jobs.len()),
+                _ => "导出处理中".to_string(),
+            };
+            return (label, false, true);
+        }
+
+        if self.state.is_playing() && self.state.is_playback_buffering() {
+            return ("预览缓冲中…".to_string(), false, true);
+        }
+
+        if let Some((message, is_error)) = &self.state.status_hint {
+            return (message.clone(), *is_error, false);
+        }
+
+        ("就绪".to_string(), false, false)
+    }
+}
