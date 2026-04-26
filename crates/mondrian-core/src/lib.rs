@@ -7,6 +7,7 @@ pub mod automation;
 pub mod color;
 pub mod error;
 pub mod events;
+pub mod icc;
 pub mod project;
 pub mod types;
 

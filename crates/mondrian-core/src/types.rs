@@ -333,6 +333,17 @@ pub enum ColorSpace {
     ArriLogC4,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum ColorManagementBackend {
+    /// Mondrian 默认智能路径：基于标准曲线、矩阵和缓存节点的确定性实现。
+    #[default]
+    MondrianSmart,
+    /// ACES 标准管理路径。
+    AcesStandard,
+    /// OCIO 配置驱动路径。
+    Ocio,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

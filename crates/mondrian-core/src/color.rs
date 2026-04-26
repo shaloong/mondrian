@@ -1,7 +1,13 @@
 //! Color management primitives shared by preview, render and export.
 
-use crate::types::ColorSpace;
+use crate::icc::parse_icc_display_profile;
+use crate::types::{ColorManagementBackend, ColorSpace};
+use moxcms::{
+    CicpColorPrimaries, CicpProfile, ColorProfile as CmsColorProfile, Layout as CmsLayout,
+    MatrixCoefficients, TransferCharacteristics, TransformOptions,
+};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ColorPipeline {
@@ -9,6 +15,7 @@ pub struct ColorPipeline {
     pub working: ColorSpace,
     pub output: ColorSpace,
     pub tone_map: bool,
+    pub backend: ColorManagementBackend,
 }
 
 impl ColorPipeline {
@@ -18,13 +25,306 @@ impl ColorPipeline {
         output: ColorSpace,
         tone_map: bool,
     ) -> Self {
-        Self { input, working, output, tone_map }
+        Self {
+            input,
+            working,
+            output,
+            tone_map,
+            backend: ColorManagementBackend::MondrianSmart,
+        }
+    }
+
+    pub const fn with_backend(mut self, backend: ColorManagementBackend) -> Self {
+        self.backend = backend;
+        self
     }
 
     pub fn is_noop(self) -> bool {
         self.input == self.output
             && self.working == self.output
             && !(self.tone_map && self.input.is_hdr() && !self.output.is_hdr())
+    }
+
+    pub fn transform_plan(self) -> ColorTransformPlan {
+        ColorTransformPlan::from_pipeline(self)
+    }
+
+    pub fn signature_hash(self) -> u64 {
+        self.transform_plan().signature_hash()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ColorLut3D {
+    pub name: String,
+    pub size: u32,
+    pub data: Vec<[f32; 3]>,
+}
+
+impl ColorLut3D {
+    pub fn identity(size: u32) -> Result<Self, String> {
+        if !(2..=129).contains(&size) {
+            return Err(format!("unsupported 3D LUT size: {size}"));
+        }
+        let mut data = Vec::with_capacity((size * size * size) as usize);
+        let denom = (size - 1) as f32;
+        for b in 0..size {
+            for g in 0..size {
+                for r in 0..size {
+                    data.push([r as f32 / denom, g as f32 / denom, b as f32 / denom]);
+                }
+            }
+        }
+        Ok(Self { name: format!("identity-{size}"), size, data })
+    }
+
+    pub fn sample(&self, rgb: [f32; 3]) -> [f32; 3] {
+        if self.size < 2 || self.data.is_empty() {
+            return rgb;
+        }
+
+        let max = (self.size - 1) as f32;
+        let r = rgb[0].clamp(0.0, 1.0) * max;
+        let g = rgb[1].clamp(0.0, 1.0) * max;
+        let b = rgb[2].clamp(0.0, 1.0) * max;
+        let r0 = r.floor() as u32;
+        let g0 = g.floor() as u32;
+        let b0 = b.floor() as u32;
+        let r1 = (r0 + 1).min(self.size - 1);
+        let g1 = (g0 + 1).min(self.size - 1);
+        let b1 = (b0 + 1).min(self.size - 1);
+        let fr = r - r0 as f32;
+        let fg = g - g0 as f32;
+        let fb = b - b0 as f32;
+
+        let c000 = self.at(r0, g0, b0);
+        let c100 = self.at(r1, g0, b0);
+        let c010 = self.at(r0, g1, b0);
+        let c110 = self.at(r1, g1, b0);
+        let c001 = self.at(r0, g0, b1);
+        let c101 = self.at(r1, g0, b1);
+        let c011 = self.at(r0, g1, b1);
+        let c111 = self.at(r1, g1, b1);
+
+        lerp3(
+            lerp3(lerp3(c000, c100, fr), lerp3(c010, c110, fr), fg),
+            lerp3(lerp3(c001, c101, fr), lerp3(c011, c111, fr), fg),
+            fb,
+        )
+    }
+
+    pub fn apply_rgba8_in_place(&self, rgba: &mut [u8], intensity: f32) {
+        let intensity = intensity.clamp(0.0, 1.0);
+        if intensity <= 1.0e-4 {
+            return;
+        }
+        for px in rgba.chunks_exact_mut(4) {
+            let src = [
+                px[0] as f32 / 255.0,
+                px[1] as f32 / 255.0,
+                px[2] as f32 / 255.0,
+            ];
+            let graded = self.sample(src);
+            let out = lerp3(src, graded, intensity);
+            px[0] = (out[0].clamp(0.0, 1.0) * 255.0).round() as u8;
+            px[1] = (out[1].clamp(0.0, 1.0) * 255.0).round() as u8;
+            px[2] = (out[2].clamp(0.0, 1.0) * 255.0).round() as u8;
+        }
+    }
+
+    pub fn signature_hash(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.name.hash(&mut hasher);
+        self.size.hash(&mut hasher);
+        for rgb in &self.data {
+            rgb[0].to_bits().hash(&mut hasher);
+            rgb[1].to_bits().hash(&mut hasher);
+            rgb[2].to_bits().hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    fn at(&self, r: u32, g: u32, b: u32) -> [f32; 3] {
+        let idx = (b * self.size * self.size + g * self.size + r) as usize;
+        self.data.get(idx).copied().unwrap_or([0.0, 0.0, 0.0])
+    }
+}
+
+fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+    ]
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ColorTransformNode {
+    ManagementBackend(ColorManagementBackend),
+    DecodeTransfer(ColorSpace),
+    ConvertPrimaries { from: ColorSpace, to: ColorSpace },
+    ToneMapAces,
+    Lut3D { lut: ColorLut3D, intensity: f32 },
+    DisplayProfile(DisplayColorProfile),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ColorTransformPlan {
+    pub source: ColorSpace,
+    pub working: ColorSpace,
+    pub output: ColorSpace,
+    pub tone_map: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<ColorTransformNode>,
+}
+
+impl ColorTransformPlan {
+    pub fn from_pipeline(pipeline: ColorPipeline) -> Self {
+        let mut nodes = vec![
+            ColorTransformNode::ManagementBackend(pipeline.backend),
+            ColorTransformNode::DecodeTransfer(pipeline.input),
+            ColorTransformNode::ConvertPrimaries { from: pipeline.input, to: pipeline.working },
+        ];
+        if pipeline.tone_map && pipeline.working.is_hdr() && !pipeline.output.is_hdr() {
+            nodes.push(ColorTransformNode::ToneMapAces);
+        }
+        nodes.push(ColorTransformNode::ConvertPrimaries {
+            from: pipeline.working,
+            to: pipeline.output,
+        });
+
+        Self {
+            source: pipeline.input,
+            working: pipeline.working,
+            output: pipeline.output,
+            tone_map: pipeline.tone_map,
+            nodes,
+        }
+    }
+
+    pub fn with_display_profile(mut self, profile: DisplayColorProfile) -> Self {
+        self.nodes.push(ColorTransformNode::DisplayProfile(profile));
+        self
+    }
+
+    pub fn with_lut(mut self, lut: ColorLut3D, intensity: f32) -> Self {
+        self.nodes.push(ColorTransformNode::Lut3D { lut, intensity });
+        self
+    }
+
+    pub fn nodes(&self) -> &[ColorTransformNode] {
+        &self.nodes
+    }
+
+    pub fn signature_hash(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.source.hash(&mut hasher);
+        self.working.hash(&mut hasher);
+        self.output.hash(&mut hasher);
+        self.tone_map.hash(&mut hasher);
+        for node in &self.nodes {
+            node.hash_signature(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    pub fn apply_rgba8_in_place(&self, data: &mut [u8]) -> Result<(), String> {
+        if data.is_empty() {
+            return Ok(());
+        }
+
+        let mut frame = RgbaF32Frame::from_rgba8(
+            1,
+            (data.len() / 4) as u32,
+            data,
+            self.source,
+            self.working,
+            false,
+        );
+
+        for node in &self.nodes {
+            match node {
+                ColorTransformNode::ManagementBackend(_) => {}
+                ColorTransformNode::DecodeTransfer(_) => {}
+                ColorTransformNode::ConvertPrimaries { from: _, to } => {
+                    frame.convert_to(*to, false);
+                }
+                ColorTransformNode::ToneMapAces => {
+                    if frame.color_space.is_hdr() && !self.output.is_hdr() {
+                        for px in &mut frame.data {
+                            px[0] = aces_tone_map(px[0]);
+                            px[1] = aces_tone_map(px[1]);
+                            px[2] = aces_tone_map(px[2]);
+                        }
+                    }
+                }
+                ColorTransformNode::Lut3D { lut, intensity } => {
+                    let mut rgba = frame.to_rgba8(frame.color_space, false);
+                    lut.apply_rgba8_in_place(&mut rgba, *intensity);
+                    frame = RgbaF32Frame::from_rgba8(
+                        1,
+                        (rgba.len() / 4) as u32,
+                        &rgba,
+                        frame.color_space,
+                        frame.color_space,
+                        false,
+                    );
+                }
+                ColorTransformNode::DisplayProfile(profile) => {
+                    let mut rgba = frame.to_rgba8(frame.color_space, self.tone_map);
+                    apply_display_profile_rgba8_in_place(
+                        &mut rgba,
+                        frame.color_space,
+                        profile,
+                        self.tone_map,
+                    )?;
+                    data.copy_from_slice(&rgba[..data.len()]);
+                    return Ok(());
+                }
+            }
+        }
+
+        let converted = frame.to_rgba8(self.output, false);
+        data.copy_from_slice(&converted[..data.len()]);
+        Ok(())
+    }
+}
+
+impl ColorTransformNode {
+    pub fn hash_signature<H: std::hash::Hasher>(&self, state: &mut H) {
+        use std::hash::Hash;
+
+        match self {
+            ColorTransformNode::ManagementBackend(backend) => {
+                0u8.hash(state);
+                backend.hash(state);
+            }
+            ColorTransformNode::DecodeTransfer(space) => {
+                1u8.hash(state);
+                space.hash(state);
+            }
+            ColorTransformNode::ConvertPrimaries { from, to } => {
+                2u8.hash(state);
+                from.hash(state);
+                to.hash(state);
+            }
+            ColorTransformNode::ToneMapAces => {
+                3u8.hash(state);
+            }
+            ColorTransformNode::Lut3D { lut, intensity } => {
+                4u8.hash(state);
+                lut.signature_hash().hash(state);
+                intensity.to_bits().hash(state);
+            }
+            ColorTransformNode::DisplayProfile(profile) => {
+                5u8.hash(state);
+                profile.signature_hash().hash(state);
+            }
+        }
     }
 }
 
@@ -113,6 +413,8 @@ pub struct DisplayColorProfile {
     pub gamma: f32,
     pub black_luminance_nits: f32,
     pub white_luminance_nits: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icc_bytes: Option<Vec<u8>>,
 }
 
 impl DisplayColorProfile {
@@ -124,6 +426,7 @@ impl DisplayColorProfile {
             gamma: 1.0,
             black_luminance_nits: 0.0,
             white_luminance_nits: 100.0,
+            icc_bytes: None,
         }
     }
 
@@ -135,7 +438,35 @@ impl DisplayColorProfile {
             gamma: 1.0,
             black_luminance_nits: 0.0,
             white_luminance_nits: 100.0,
+            icc_bytes: None,
         }
+    }
+
+    pub fn from_icc_file(path: &Path) -> Result<Self, String> {
+        let data = std::fs::read(path)
+            .map_err(|err| format!("failed to read ICC profile {}: {err}", path.display()))?;
+        let mut profile = Self::from_icc_bytes(&data)?;
+        if profile.name.trim().is_empty() {
+            profile.name =
+                path.file_stem().and_then(|s| s.to_str()).unwrap_or("ICC Profile").to_string();
+        }
+        Ok(profile)
+    }
+
+    pub fn from_icc_bytes(bytes: &[u8]) -> Result<Self, String> {
+        let parsed = parse_icc_display_profile(bytes)?;
+
+        let profile = Self {
+            name: parsed.name,
+            color_space: parsed.color_space,
+            linear_matrix: parsed.linear_matrix,
+            gamma: parsed.gamma_compensation,
+            black_luminance_nits: 0.0,
+            white_luminance_nits: 100.0,
+            icc_bytes: Some(bytes.to_vec()),
+        };
+        profile.validate()?;
+        Ok(profile)
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -160,6 +491,11 @@ impl DisplayColorProfile {
                 }
             }
         }
+        if let Some(icc) = &self.icc_bytes {
+            if icc.is_empty() {
+                return Err("display profile ICC payload is empty".to_string());
+            }
+        }
         Ok(())
     }
 
@@ -174,6 +510,11 @@ impl DisplayColorProfile {
         for row in self.linear_matrix {
             for value in row {
                 value.to_bits().hash(&mut hasher);
+            }
+        }
+        if let Some(icc) = &self.icc_bytes {
+            for b in icc {
+                b.hash(&mut hasher);
             }
         }
         hasher.finish()
@@ -227,6 +568,15 @@ pub fn apply_display_profile_rgba8_in_place(
     let mut frame =
         RgbaF32Frame::from_rgba8(1, (data.len() / 4) as u32, data, source, source, tone_map);
     frame.convert_to(profile.color_space, tone_map);
+
+    if let Some(icc_bytes) = profile.icc_bytes.as_deref() {
+        let mut converted = frame.to_rgba8(profile.color_space, tone_map);
+        if apply_icc_transform_rgba8(&mut converted, profile.color_space, icc_bytes).is_ok() {
+            data.copy_from_slice(&converted[..data.len()]);
+            return Ok(());
+        }
+    }
+
     for px in &mut frame.data {
         let rgb = mul3(profile.linear_matrix, [px[0], px[1], px[2]]);
         px[0] = rgb[0].max(0.0).powf(profile.gamma);
@@ -236,6 +586,63 @@ pub fn apply_display_profile_rgba8_in_place(
     let converted = frame.to_rgba8(profile.color_space, tone_map);
     data.copy_from_slice(&converted[..data.len()]);
     Ok(())
+}
+
+fn apply_icc_transform_rgba8(
+    rgba: &mut [u8],
+    source_color_space: ColorSpace,
+    display_icc: &[u8],
+) -> Result<(), String> {
+    let src_profile = cms_profile_for_color_space(source_color_space).ok_or_else(|| {
+        format!("unsupported source color space for ICC transform: {source_color_space:?}")
+    })?;
+    let dst_profile = CmsColorProfile::new_from_slice(display_icc)
+        .map_err(|err| format!("invalid ICC profile payload: {err}"))?;
+
+    let transform = src_profile
+        .create_transform_8bit(
+            CmsLayout::Rgb,
+            &dst_profile,
+            CmsLayout::Rgb,
+            TransformOptions::default(),
+        )
+        .map_err(|err| format!("failed to build ICC transform: {err}"))?;
+
+    let pixels = rgba.len() / 4;
+    let mut src_rgb = Vec::with_capacity(pixels * 3);
+    for px in rgba.chunks_exact(4) {
+        src_rgb.push(px[0]);
+        src_rgb.push(px[1]);
+        src_rgb.push(px[2]);
+    }
+    let mut dst_rgb = vec![0_u8; src_rgb.len()];
+    transform
+        .transform(&src_rgb, &mut dst_rgb)
+        .map_err(|err| format!("failed to apply ICC transform: {err}"))?;
+
+    for (px, rgb) in rgba.chunks_exact_mut(4).zip(dst_rgb.chunks_exact(3)) {
+        px[0] = rgb[0];
+        px[1] = rgb[1];
+        px[2] = rgb[2];
+    }
+    Ok(())
+}
+
+fn cms_profile_for_color_space(color_space: ColorSpace) -> Option<CmsColorProfile> {
+    match color_space {
+        ColorSpace::Srgb => Some(CmsColorProfile::new_srgb()),
+        ColorSpace::Rec709 => Some(CmsColorProfile::new_from_cicp(CicpProfile {
+            color_primaries: CicpColorPrimaries::Bt709,
+            transfer_characteristics: TransferCharacteristics::Bt709,
+            matrix_coefficients: MatrixCoefficients::Bt709,
+            full_range: false,
+        })),
+        ColorSpace::Rec2020 => Some(CmsColorProfile::new_bt2020()),
+        ColorSpace::Rec2100Pq => Some(CmsColorProfile::new_bt2020_pq()),
+        ColorSpace::Rec2100Hlg => Some(CmsColorProfile::new_bt2020_hlg()),
+        ColorSpace::DciP3 => Some(CmsColorProfile::new_dci_p3()),
+        ColorSpace::AppleLog | ColorSpace::SLog3 | ColorSpace::ArriLogC4 => None,
+    }
 }
 
 pub fn compute_color_scopes(
@@ -354,26 +761,7 @@ pub fn convert_rgba8_in_place(data: &mut [u8], pipeline: ColorPipeline) {
     if data.is_empty() || pipeline.is_noop() {
         return;
     }
-
-    for px in data.chunks_exact_mut(4) {
-        let a = px[3];
-        let mut rgb = [
-            decode_transfer(pipeline.input, px[0] as f32 / 255.0),
-            decode_transfer(pipeline.input, px[1] as f32 / 255.0),
-            decode_transfer(pipeline.input, px[2] as f32 / 255.0),
-        ];
-
-        rgb = convert_primaries(rgb, pipeline.input, pipeline.working);
-        if pipeline.tone_map && pipeline.working.is_hdr() && !pipeline.output.is_hdr() {
-            rgb = rgb.map(aces_tone_map);
-        }
-        rgb = convert_primaries(rgb, pipeline.working, pipeline.output);
-
-        px[0] = encode_u8(pipeline.output, rgb[0]);
-        px[1] = encode_u8(pipeline.output, rgb[1]);
-        px[2] = encode_u8(pipeline.output, rgb[2]);
-        px[3] = a;
-    }
+    let _ = pipeline.transform_plan().apply_rgba8_in_place(data);
 }
 
 pub fn convert_rgba8(data: &[u8], pipeline: ColorPipeline) -> Vec<u8> {
@@ -783,6 +1171,12 @@ mod tests {
         )
         .expect("valid display profile");
         assert_eq!(rgba[3], 17);
+    }
+
+    #[test]
+    fn display_profile_from_icc_rejects_invalid_payload() {
+        let bad_payload = vec![0_u8; 16];
+        assert!(DisplayColorProfile::from_icc_bytes(&bad_payload).is_err());
     }
 
     #[test]

@@ -522,6 +522,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
+name = "bin-rs"
+version = "0.0.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e62e12dae19127152eee5b5ff249a86100a01e388abbac4c22e9f97eb33d9c3d"
+
+[[package]]
 name = "bindgen"
 version = "0.72.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2469,6 +2475,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "icc-profile"
+version = "0.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19120817e35e9b81ea5d79bd559ef73a7a20ad02c1136b72372313a3d5a40e6a"
+dependencies = [
+ "bin-rs",
+]
+
+[[package]]
 name = "icu_collections"
 version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3144,6 +3159,8 @@ dependencies = [
  "crossbeam-channel",
  "dashmap",
  "glam",
+ "icc-profile",
+ "moxcms",
  "parking_lot",
  "proptest",
  "serde",
