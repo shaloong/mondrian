@@ -6,7 +6,9 @@ use egui::{Pos2, Rect, Sense, Ui, Vec2};
 
 use mondrian_core::{
     apply_display_profile_rgba8_in_place, convert_rgba8_in_place,
-    types::{AssetId, BlendMode, ColorSpace, Rational, SequenceId, TimeCode},
+    types::{
+        AssetId, BlendMode, ColorManagementBackend, ColorSpace, Rational, SequenceId, TimeCode,
+    },
     ColorPipeline, DisplayColorProfile,
 };
 use mondrian_effects::CompiledEffectGraph;
@@ -18,6 +20,7 @@ use mondrian_renderer::{
     TimelineAdjustmentLayer, TimelineCompositeElement, TimelineCompositeOptions,
     TimelineCompositeScratch, TimelineMediaLayer, TimelineRenderPlanElement,
 };
+use mondrian_timeline::sequence::{NestedColorProcessing, SequenceRenderColorContext};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -40,6 +43,7 @@ struct LayerDecodeRequest {
     path: PathBuf,
     input_color_space: ColorSpace,
     working_color_space: ColorSpace,
+    backend: ColorManagementBackend,
     tone_map: bool,
     source_secs: f64,
     source_time_base: Rational,
@@ -64,7 +68,9 @@ struct NestedSequenceRenderRequest {
     source_frame: i64,
     width: u32,
     height: u32,
+    nested_processing: NestedColorProcessing,
     working_color_space: ColorSpace,
+    backend: ColorManagementBackend,
     tone_map: bool,
     opacity: f32,
     blend_mode: BlendMode,
@@ -87,6 +93,7 @@ struct DecodeRequest {
     layers: Vec<RenderElement>,
     working_color_space: ColorSpace,
     output_color_space: ColorSpace,
+    backend: ColorManagementBackend,
     display_profile: DisplayColorProfile,
     tone_map: bool,
     playback_mode: bool,
@@ -150,6 +157,8 @@ enum LayerSignature {
         frame_seed: i64,
         effect_hash: u64,
         child_hash: u64,
+        nested_processing: NestedColorProcessing,
+        backend: ColorManagementBackend,
     },
 }
 
@@ -173,6 +182,7 @@ struct LayerFrameCacheKey {
     target_height: u32,
     input_color_space: ColorSpace,
     working_color_space: ColorSpace,
+    backend: ColorManagementBackend,
     tone_map: bool,
 }
 
@@ -547,6 +557,7 @@ impl ViewerPanel {
                                             layers,
                                             working_color_space: seq.settings.color_space,
                                             output_color_space: ColorSpace::Rec709,
+                                            backend: seq.settings.color_management.backend,
                                             display_profile: self.display_profile.clone(),
                                             tone_map: seq.settings.auto_tone_map_media,
                                             playback_mode: is_playing,
@@ -1512,6 +1523,7 @@ impl ViewerPanel {
                     target_height,
                     input_color_space: layer.input_color_space,
                     working_color_space: layer.working_color_space,
+                    backend: layer.backend,
                     tone_map: layer.tone_map,
                 };
 
@@ -1641,6 +1653,7 @@ impl ViewerPanel {
                         path,
                         input_color_space: media.color_space_override.unwrap_or(asset.color_space),
                         working_color_space: seq.settings.color_space,
+                        backend: seq.settings.color_management.backend,
                         tone_map: seq.settings.auto_tone_map_media,
                         source_secs: media.source_secs,
                         source_time_base: media.source_time_base,
@@ -1674,7 +1687,9 @@ impl ViewerPanel {
                         source_frame: nested_frame,
                         width: nested_sequence.settings.resolution.width.max(1),
                         height: nested_sequence.settings.resolution.height.max(1),
+                        nested_processing: nested.nested_processing,
                         working_color_space: nested_sequence.settings.color_space,
+                        backend: nested_sequence.settings.color_management.backend,
                         tone_map: nested_sequence.settings.auto_tone_map_media,
                         opacity: nested.opacity,
                         blend_mode: nested.blend_mode,
@@ -1757,6 +1772,7 @@ impl ViewerPanel {
                     target_height,
                     input_color_space: layer.input_color_space,
                     working_color_space: layer.working_color_space,
+                    backend: layer.backend,
                     tone_map: layer.tone_map,
                 };
 
@@ -1819,6 +1835,7 @@ impl ViewerPanel {
                     target_height,
                     input_color_space: layer.input_color_space,
                     working_color_space: layer.working_color_space,
+                    backend: layer.backend,
                     tone_map: layer.tone_map,
                 };
 
@@ -2035,6 +2052,16 @@ impl ViewerPanel {
         self.set_layer_cache_enabled(preferences.layer_cache_enabled);
         if preferences.display_profile.validate().is_ok() {
             self.display_profile = preferences.display_profile.clone();
+        }
+    }
+
+    pub fn display_profile_snapshot(&self) -> DisplayColorProfile {
+        self.display_profile.clone()
+    }
+
+    pub fn set_display_profile(&mut self, profile: DisplayColorProfile) {
+        if profile.validate().is_ok() {
+            self.display_profile = profile;
         }
     }
 
@@ -2293,6 +2320,8 @@ fn render_element_signature(layer: &RenderElement) -> LayerSignature {
                 frame_seed: layer.frame_seed,
                 effect_hash: layer.effect_graph.signature_hash,
                 child_hash,
+                nested_processing: layer.nested_processing,
+                backend: layer.backend,
             }
         }
     }
@@ -2372,22 +2401,57 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
                     Err("decode cancelled by newer generation".to_string()),
                 ));
             }
+            let parent_context = SequenceRenderColorContext {
+                working_color_space: request.working_color_space,
+                output_color_space: request.output_color_space,
+                tone_map: request.tone_map,
+                nested_processing: layer.nested_processing,
+                backend: request.backend,
+                ocio_config_path: None,
+            };
+            let nested_context = match layer.nested_processing {
+                NestedColorProcessing::PreserveChildWorkingSpace => SequenceRenderColorContext {
+                    working_color_space: layer.working_color_space,
+                    output_color_space: parent_context.working_color_space,
+                    tone_map: layer.tone_map,
+                    nested_processing: layer.nested_processing,
+                    backend: layer.backend,
+                    ocio_config_path: None,
+                },
+                NestedColorProcessing::ForceParentWorkingSpace => SequenceRenderColorContext {
+                    working_color_space: parent_context.working_color_space,
+                    output_color_space: parent_context.working_color_space,
+                    tone_map: parent_context.tone_map,
+                    nested_processing: layer.nested_processing,
+                    backend: parent_context.backend,
+                    ocio_config_path: None,
+                },
+                NestedColorProcessing::BakeChildOutputTransform => SequenceRenderColorContext {
+                    working_color_space: layer.working_color_space,
+                    output_color_space: parent_context.working_color_space,
+                    tone_map: layer.tone_map || parent_context.tone_map,
+                    nested_processing: layer.nested_processing,
+                    backend: layer.backend,
+                    ocio_config_path: None,
+                },
+            };
             let signature = CompositeFrameSignature {
                 width: layer.width,
                 height: layer.height,
-                working_color_space: layer.working_color_space,
-                output_color_space: request.working_color_space,
+                working_color_space: nested_context.working_color_space,
+                output_color_space: nested_context.output_color_space,
                 display_profile_key: 0,
-                tone_map: layer.tone_map || request.tone_map,
+                tone_map: nested_context.tone_map,
                 layers: layer.layers.iter().map(render_element_signature).collect(),
             };
             let nested_request = DecodeRequest {
                 signature,
                 layers: layer.layers.clone(),
-                working_color_space: layer.working_color_space,
-                output_color_space: request.working_color_space,
+                working_color_space: nested_context.working_color_space,
+                output_color_space: nested_context.output_color_space,
+                backend: nested_context.backend,
                 display_profile: DisplayColorProfile::rec709_reference(),
-                tone_map: layer.tone_map || request.tone_map,
+                tone_map: nested_context.tone_map,
                 playback_mode,
                 target_width: layer.width,
                 target_height: layer.height,
@@ -2588,7 +2652,8 @@ fn apply_preview_output_color(data: &mut [u8], request: &DecodeRequest) {
             request.working_color_space,
             request.output_color_space,
             request.tone_map,
-        ),
+        )
+        .with_backend(request.backend),
     );
     if let Err(err) = apply_display_profile_rgba8_in_place(
         data,
@@ -2713,6 +2778,7 @@ fn decode_layer_rgba(
         target_height: height,
         input_color_space: layer.input_color_space,
         working_color_space: layer.working_color_space,
+        backend: layer.backend,
         tone_map: layer.tone_map,
     };
 
@@ -2833,7 +2899,8 @@ fn apply_layer_input_color(data: &mut [u8], layer: &LayerDecodeRequest) {
             layer.working_color_space,
             layer.working_color_space,
             layer.tone_map,
-        ),
+        )
+        .with_backend(layer.backend),
     );
 }
 

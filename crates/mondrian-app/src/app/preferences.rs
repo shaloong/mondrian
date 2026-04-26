@@ -1,4 +1,5 @@
 use super::*;
+use mondrian_core::DisplayColorProfile;
 
 fn corner_radius(radius: f32) -> egui::CornerRadius {
     egui::CornerRadius::same(radius.round().clamp(0.0, u8::MAX as f32) as u8)
@@ -689,6 +690,155 @@ fn draw_media_preferences(app: &mut MondrianApp, ui: &mut egui::Ui) {
         );
     });
 
+    draw_preferences_section(ui, "显示器 profile", |ui| {
+        let mut display_profile = app.viewer_panel.display_profile_snapshot();
+        let mut changed = false;
+        let mut profile_kind = if display_profile == DisplayColorProfile::rec709_reference() {
+            0usize
+        } else if display_profile == DisplayColorProfile::display_p3_reference() {
+            1usize
+        } else {
+            2usize
+        };
+
+        preference_labeled_row(
+            ui,
+            "预置",
+            Some("Rec.709 / Display P3 是内置参考 profile；自定义模式保留手动编辑参数。"),
+            |ui| {
+                egui::ComboBox::from_id_salt("display_profile_preset")
+                    .selected_text(match profile_kind {
+                        0 => "Rec.709 参考",
+                        1 => "Display P3 参考",
+                        _ => "自定义",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut profile_kind, 0, "Rec.709 参考");
+                        ui.selectable_value(&mut profile_kind, 1, "Display P3 参考");
+                        ui.selectable_value(&mut profile_kind, 2, "自定义");
+                    });
+            },
+        );
+
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            if ui.button("导入 ICC/ICM").clicked() {
+                if let Some(path) =
+                    FileDialog::new().add_filter("ICC Profile", &["icc", "icm"]).pick_file()
+                {
+                    match DisplayColorProfile::from_icc_file(&path) {
+                        Ok(profile) => {
+                            let profile_name = profile.name.clone();
+                            app.viewer_panel.set_display_profile(profile);
+                            app.state.set_status_hint(
+                                format!("ICC 已导入：{}（{}）", path.display(), profile_name),
+                                false,
+                            );
+                        }
+                        Err(err) => {
+                            app.state.set_status_hint(format!("ICC 解析失败：{err}"), true);
+                        }
+                    }
+                }
+            }
+        });
+
+        if profile_kind == 0 {
+            let preset_profile = DisplayColorProfile::rec709_reference();
+            if display_profile != preset_profile {
+                display_profile = preset_profile;
+                changed = true;
+            }
+        } else if profile_kind == 1 {
+            let preset_profile = DisplayColorProfile::display_p3_reference();
+            if display_profile != preset_profile {
+                display_profile = preset_profile;
+                changed = true;
+            }
+        } else {
+            preference_labeled_row(ui, "名称", None, |ui| {
+                changed |= ui.text_edit_singleline(&mut display_profile.name).changed();
+            });
+
+            preference_labeled_row(ui, "显示色彩空间", None, |ui| {
+                let mut selected_space = display_profile.color_space;
+                egui::ComboBox::from_id_salt("display_profile_color_space")
+                    .selected_text(color_space_label(selected_space))
+                    .show_ui(ui, |ui| {
+                        for color_space in color_space_options() {
+                            ui.selectable_value(
+                                &mut selected_space,
+                                color_space,
+                                color_space_label(color_space),
+                            );
+                        }
+                    });
+                if selected_space != display_profile.color_space {
+                    display_profile.color_space = selected_space;
+                    changed = true;
+                }
+            });
+
+            preference_labeled_row(ui, "Gamma", None, |ui| {
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut display_profile.gamma)
+                            .range(0.1..=10.0)
+                            .speed(0.01),
+                    )
+                    .changed();
+            });
+
+            preference_labeled_row(ui, "黑位亮度", None, |ui| {
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut display_profile.black_luminance_nits)
+                            .range(0.0..=1000.0)
+                            .speed(0.1)
+                            .suffix(" nits"),
+                    )
+                    .changed();
+            });
+
+            preference_labeled_row(ui, "白位亮度", None, |ui| {
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut display_profile.white_luminance_nits)
+                            .range(0.1..=10_000.0)
+                            .speed(0.5)
+                            .suffix(" nits"),
+                    )
+                    .changed();
+            });
+
+            preference_labeled_row(ui, "校正矩阵", None, |ui| {
+                ui.vertical(|ui| {
+                    egui::Grid::new("display_profile_matrix").spacing([8.0, 4.0]).show(ui, |ui| {
+                        for row in 0..3 {
+                            for col in 0..3 {
+                                changed |= ui
+                                    .add(
+                                        egui::DragValue::new(
+                                            &mut display_profile.linear_matrix[row][col],
+                                        )
+                                        .speed(0.01)
+                                        .range(-4.0..=4.0),
+                                    )
+                                    .changed();
+                            }
+                            ui.end_row();
+                        }
+                    });
+                });
+            });
+        }
+
+        if changed {
+            app.viewer_panel.set_display_profile(display_profile);
+            app.state.set_status_hint("显示器 profile 已更新", false);
+        }
+    });
+
     draw_preferences_section(ui, "LUT 库", |ui| {
         let library = mondrian_effects::LutLibrary::new(app_lut_library_dir());
         preference_status_line(
@@ -697,6 +847,26 @@ fn draw_media_preferences(app: &mut MondrianApp, ui: &mut egui::Ui) {
             Some("导入的 .cube 文件会被复制到应用数据目录，项目中的 LUT 效果可以直接引用这里的文件。"),
         );
         ui.add_space(10.0);
+
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            ui.label("搜索");
+            if ui
+                .add(
+                    egui::TextEdit::singleline(&mut app.lut_library_filter)
+                        .hint_text("按名称、路径或尺寸过滤"),
+                )
+                .changed()
+            {
+                app.state.set_status_hint("LUT 列表已更新过滤条件", false);
+            }
+            if ui.button("清空").clicked() {
+                app.lut_library_filter.clear();
+            }
+            if ui.button("刷新目录").clicked() {
+                app.state.set_status_hint("已刷新 LUT 库目录", false);
+            }
+        });
 
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 10.0;
@@ -714,26 +884,41 @@ fn draw_media_preferences(app: &mut MondrianApp, ui: &mut egui::Ui) {
                             .state
                             .set_status_hint(format!("LUT 已导入：{}", imported.display()), false),
                         Err(err) => {
-                            app.state.set_status_hint(format!("导入 LUT 失败：{err}"), true);
+                            app.state.set_status_hint(format!("导入 LUT 失败：{err}"), true)
                         }
                     }
                 }
             }
         });
 
-        match library.list_luts() {
+        match library.search_luts(&app.lut_library_filter) {
             Ok(entries) if entries.is_empty() => {
                 preference_status_line(ui, "当前没有已导入的 LUT", None);
             }
             Ok(entries) => {
                 preference_status_line(ui, &format!("已导入 {} 个 LUT", entries.len()), None);
-                for entry in entries.iter().take(8) {
+                for entry in entries.iter().take(16) {
                     let path_text = entry.path.display().to_string();
-                    preference_status_line(
-                        ui,
-                        &format!("{} · {}³", entry.name, entry.size),
-                        Some(&path_text),
-                    );
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            preference_status_line(
+                                ui,
+                                &format!("{} · {}³", entry.name, entry.size),
+                                Some(&path_text),
+                            );
+                        });
+                        if ui.button("删除").clicked() {
+                            match library.remove_lut(&entry.path) {
+                                Ok(()) => app.state.set_status_hint(
+                                    format!("已删除 LUT：{}", entry.path.display()),
+                                    false,
+                                ),
+                                Err(err) => {
+                                    app.state.set_status_hint(format!("删除 LUT 失败：{err}"), true)
+                                }
+                            }
+                        }
+                    });
                 }
             }
             Err(err) => {
