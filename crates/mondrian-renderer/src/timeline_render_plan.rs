@@ -1,7 +1,7 @@
 use mondrian_core::types::{AssetId, BlendMode, ColorSpace, Rational, SequenceId, TimeCode};
 use mondrian_effects::CompiledEffectGraph;
 use mondrian_timeline::clip::AlphaInterpretation;
-use mondrian_timeline::sequence::{FieldOrder, PixelAspectRatio, Sequence};
+use mondrian_timeline::sequence::{FieldOrder, NestedColorProcessing, PixelAspectRatio, Sequence};
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -34,6 +34,7 @@ pub struct TimelineNestedSequencePlan {
     pub sequence_id: SequenceId,
     pub source_frame: i64,
     pub source_secs: f64,
+    pub nested_processing: NestedColorProcessing,
     pub opacity: f32,
     pub blend_mode: BlendMode,
     pub transform: [f32; 6],
@@ -114,6 +115,7 @@ pub fn build_timeline_render_plan(
                     sequence_id,
                     source_frame: active_clip.source_time.frame.max(0),
                     source_secs: active_clip.source_time.to_secs().max(0.0),
+                    nested_processing: sequence.settings.color_management.nested_processing,
                     opacity,
                     blend_mode: active_clip.blend_mode,
                     transform: mat3_to_affine(active_clip.transform_matrix.to_cols_array()),
@@ -300,5 +302,33 @@ mod tests {
         assert_eq!(media.source_frame, 15);
         assert_eq!(media.source_time_base, Rational::new(1, 30));
         assert!((media.source_secs - 0.5).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn render_plan_carries_nested_processing_mode() {
+        let mut seq = Sequence::new("render-plan-nested-processing");
+        seq.settings.color_management.nested_processing =
+            NestedColorProcessing::BakeChildOutputTransform;
+        let tb = seq.time_base();
+        let child = Sequence::new("child");
+        let child_id = child.id;
+
+        seq.video_tracks[0]
+            .add_clip(Clip::new_nested_sequence(
+                child_id,
+                TimeCode::new(0, tb),
+                TimeCode::new(20, tb),
+                Some("child".to_string()),
+            ))
+            .expect("add nested sequence");
+
+        let plan = build_timeline_render_plan(&seq, 0);
+        let TimelineRenderPlanElement::NestedSequence(nested) = &plan[0] else {
+            panic!("expected nested sequence plan");
+        };
+        assert_eq!(
+            nested.nested_processing,
+            NestedColorProcessing::BakeChildOutputTransform
+        );
     }
 }

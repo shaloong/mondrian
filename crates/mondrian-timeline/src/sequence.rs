@@ -4,6 +4,7 @@ use crate::{clip::ActiveClip, track::Track};
 use mondrian_core::types::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum EditingMode {
@@ -94,7 +95,7 @@ pub enum MissingColorMetadataPolicy {
     RejectMedia,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum NestedColorProcessing {
     /// Render the child sequence in its own working space, then convert to the parent space.
     #[default]
@@ -125,11 +126,15 @@ pub struct SequenceColorManagement {
     #[serde(default)]
     pub workflow: ColorWorkflow,
     #[serde(default)]
+    pub backend: ColorManagementBackend,
+    #[serde(default)]
     pub missing_metadata_policy: MissingColorMetadataPolicy,
     #[serde(default)]
     pub nested_processing: NestedColorProcessing,
     #[serde(default = "default_output_color_space")]
     pub output_color_space: ColorSpace,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ocio_config_path: Option<PathBuf>,
     #[serde(default)]
     pub video_range: VideoRange,
     #[serde(default)]
@@ -138,13 +143,25 @@ pub struct SequenceColorManagement {
     pub preserve_hdr_metadata: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SequenceRenderColorContext {
+    pub working_color_space: ColorSpace,
+    pub output_color_space: ColorSpace,
+    pub tone_map: bool,
+    pub nested_processing: NestedColorProcessing,
+    pub backend: ColorManagementBackend,
+    pub ocio_config_path: Option<PathBuf>,
+}
+
 impl Default for SequenceColorManagement {
     fn default() -> Self {
         Self {
             workflow: ColorWorkflow::DisplayReferred,
+            backend: ColorManagementBackend::MondrianSmart,
             missing_metadata_policy: MissingColorMetadataPolicy::AssumeRec709,
             nested_processing: NestedColorProcessing::PreserveChildWorkingSpace,
             output_color_space: ColorSpace::Rec709,
+            ocio_config_path: None,
             video_range: VideoRange::Full,
             export_bit_depth: ExportBitDepth::SixteenFloat,
             preserve_hdr_metadata: false,
@@ -254,6 +271,49 @@ impl SequenceSettings {
             });
         }
         Ok(())
+    }
+
+    pub fn root_render_color_context(&self) -> SequenceRenderColorContext {
+        SequenceRenderColorContext {
+            working_color_space: self.color_space,
+            output_color_space: self.color_management.output_color_space,
+            tone_map: self.auto_tone_map_media,
+            nested_processing: self.color_management.nested_processing,
+            backend: self.color_management.backend,
+            ocio_config_path: self.color_management.ocio_config_path.clone(),
+        }
+    }
+
+    pub fn nested_render_color_context(
+        &self,
+        parent: SequenceRenderColorContext,
+    ) -> SequenceRenderColorContext {
+        match self.color_management.nested_processing {
+            NestedColorProcessing::PreserveChildWorkingSpace => SequenceRenderColorContext {
+                working_color_space: self.color_space,
+                output_color_space: parent.working_color_space,
+                tone_map: self.auto_tone_map_media,
+                nested_processing: self.color_management.nested_processing,
+                backend: self.color_management.backend,
+                ocio_config_path: self.color_management.ocio_config_path.clone(),
+            },
+            NestedColorProcessing::ForceParentWorkingSpace => SequenceRenderColorContext {
+                working_color_space: parent.working_color_space,
+                output_color_space: parent.working_color_space,
+                tone_map: parent.tone_map,
+                nested_processing: self.color_management.nested_processing,
+                backend: parent.backend,
+                ocio_config_path: parent.ocio_config_path.clone(),
+            },
+            NestedColorProcessing::BakeChildOutputTransform => SequenceRenderColorContext {
+                working_color_space: self.color_space,
+                output_color_space: parent.working_color_space,
+                tone_map: self.auto_tone_map_media || parent.tone_map,
+                nested_processing: self.color_management.nested_processing,
+                backend: self.color_management.backend,
+                ocio_config_path: self.color_management.ocio_config_path.clone(),
+            },
+        }
     }
 
     pub fn with_resolution(mut self, width: u32, height: u32) -> Self {
