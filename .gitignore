@@ -23,6 +23,10 @@ Thumbs.db
 *.wav
 *.aac
 !tests/fixtures/small/*.mp4
+!tests/fixtures/color/**
+!tests/fixtures/lut/**
+!tests/fixtures/export/**
+!tests/fixtures/sequence/**
 
 # API 密钥 / 环境变量
 .env
@@ -49,4 +53,5 @@ logs/
 
 # 工作区 AI 数据
 .codex/
+.claude/
 CLAUDE.md
