@@ -31,6 +31,8 @@
 
 ## 2. LUT 调色
 
+LUT 在运行时被视为独立 transform node，可进入统一的颜色变换计划并参与缓存签名；这样 preview、导出和插件效果可以共享同一套语义，而不是各自实现一份近似逻辑。
+
 ```rust
 pub struct Lut3D {
     pub size: u32,             // 16 / 33 / 65 (LUT cube 边长)

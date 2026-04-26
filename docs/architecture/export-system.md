@@ -178,6 +178,21 @@ impl EncoderBackend {
 
 ---
 
+## 5. 序列色彩与导出合法性
+
+导出队列在进入编码前，会先基于 `SequenceSettings` 解析统一的渲染色彩上下文，并对输出组合做前置校验。
+
+当前约束包含：
+
+- HDR 输出不能落到 8-bit
+- 保留 HDR metadata 需要 HDR 输出色彩空间
+- GIF 仅允许 8-bit SDR
+- ProRes 与 WebM / MP4 等容器组合需要符合预期的专业容器策略
+
+嵌套序列会继承相同的 color context 解析规则，避免 preview/export 两条链路在 nested 场景下出现色彩解释分叉。
+
+---
+
 ## 5. 导出性能目标
 
 | 场景                     | 目标速度               |

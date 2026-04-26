@@ -136,3 +136,22 @@ powershell -File scripts/perf/run-perf-suite.ps1 -OutputDir target/perf/current
 # 3) 自动输出各环节对比（project/preview/export/audio）
 powershell -File scripts/perf/compare-perf.ps1 -BeforeDir target/perf/baseline -AfterDir target/perf/current
 ```
+
+### 样片与 golden fixtures 约定
+
+下载的专业样片请统一放在 `tests/fixtures/` 下，按用途分目录：
+
+- `tests/fixtures/color/`：色彩 golden samples、参考帧、HDR/SDR 对照样片
+- `tests/fixtures/lut/`：`.cube` LUT 文件、缓存命中/失效样片
+- `tests/fixtures/export/`：导出编码合法性、metadata、range/bit-depth 组合样片
+- `tests/fixtures/sequence/`：嵌套序列、PAR、场序、帧率覆盖样片
+
+建议命名规则：
+
+- `*_src.*`：输入样片
+- `*_golden.*`：参考输出
+- `*_hdr.*` / `*_sdr.*`：动态范围变体
+- `*_legal.*` / `*_full.*`：range 变体
+- `*_rec709.*` / `*_rec2020.*` / `*_hlg.*` / `*_pq.*` / `*_log.*`：色彩空间变体
+
+如果样片体积很大，不建议直接塞进主线历史；优先放小尺寸裁剪样片，或配套 manifest + 下载脚本。

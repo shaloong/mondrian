@@ -178,6 +178,23 @@ fn normal_blend(src: vec4<f32>, dst: vec4<f32>) -> vec4<f32> {
 | ------------------- | --------------------------------------- |
 | 脏区域更新          | 只重绘变化的 Layer，跳过未变化层        |
 | 纹理缓存            | LRU，容量 = GPU 显存的 30%（约 2GB）    |
+
+---
+
+## 7. 色彩显示链路
+
+预览合成输出不会直接以“源素材空间”显示，而是经过两级转换：
+
+1. 序列工作空间 -> 序列输出色彩空间
+2. 序列输出色彩空间 -> 显示器 profile
+
+`DisplayColorProfile` 负责表示显示端的参考校准信息，当前以 Rec.709 / Display P3 的参考配置为起点，并支持导入 `.icc/.icm` 作为显示器目标 profile。
+
+核心颜色管理不再只依赖单个函数，而是通过可哈希的 `ColorTransformPlan` 描述节点链路：`DecodeTransfer`、`ConvertPrimaries`、`ToneMapAces`、`Lut3D`、`DisplayProfile`。preview 和 export 共用同一套计划与签名语义，因此缓存、测试和导出结果不会因为路径不同而漂移。
+
+导入阶段仍会解析 `desc/mluc`、`rXYZ/gXYZ/bXYZ`、`rTRC/gTRC/bTRC`、`A2B/B2A` 等 tag 来生成名称、基础矩阵和 gamma 补偿（用于回退路径与签名）。渲染阶段优先走 `moxcms` 的标准 ICC transform（源工作色域 profile -> 目标显示器 ICC），由 CMS 执行完整 LUT/CLUT/mAB/mBA 链路；仅在 transform 构建失败或色域不支持时，才回退到矩阵 + gamma 近似路径。ICC 在这里是可派生的显示 profile 表示，不是唯一真相。
+
+当 nested sequence 进入 preview 时，也会先解析自己的序列色彩上下文，再回到父序列工作空间参与合成，避免把子序列的显示意图直接混进父序列。
 | 分辨率降采样预览    | 编辑时用 1/2 分辨率预览，回放时全分辨率 |
 | 帧预渲染队列        | 播放时提前预渲染 4 帧（lookahead）      |
 | Compute Shader 并行 | 多个效果节点并行执行 compute pass       |

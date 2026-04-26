@@ -238,6 +238,29 @@ impl Sequence {
 属性按类别分组展示，当前内建分组为：
 
 - 运动：位置、缩放、旋转、锚点
+
+---
+
+## 10. 序列级色彩上下文
+
+`SequenceSettings` 现在不仅保存静态参数，还会派生一个统一的渲染色彩上下文，用于 preview / export 共享：
+
+```rust
+pub struct SequenceRenderColorContext {
+    pub working_color_space: ColorSpace,
+    pub output_color_space: ColorSpace,
+    pub tone_map: bool,
+    pub nested_processing: NestedColorProcessing,
+}
+```
+
+根序列使用 `root_render_color_context()` 生成上下文；嵌套序列则通过 `nested_render_color_context(parent)` 解析。当前支持三种嵌套策略：
+
+- `PreserveChildWorkingSpace`：保持子序列工作空间，再在父序列空间中继续合成
+- `ForceParentWorkingSpace`：直接把子序列解释到父序列工作空间
+- `BakeChildOutputTransform`：先按子序列自己的输出意图渲染，再烘焙到父序列空间
+
+这套解析是 preview 与 export 共享的唯一入口，避免 nested sequence 在不同管线里出现不同解释。
 - 不透明度：不透明度、混合模式
 
 编辑行为约定：
