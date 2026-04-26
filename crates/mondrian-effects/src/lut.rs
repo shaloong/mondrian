@@ -82,6 +82,28 @@ impl LutLibrary {
         entries.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
         Ok(entries)
     }
+
+    pub fn search_luts(&self, query: &str) -> Result<Vec<LutLibraryEntry>> {
+        let query = query.trim().to_ascii_lowercase();
+        let mut entries = self.list_luts()?;
+        if query.is_empty() {
+            return Ok(entries);
+        }
+
+        entries.retain(|entry| {
+            entry.name.to_ascii_lowercase().contains(&query)
+                || entry.path.display().to_string().to_ascii_lowercase().contains(&query)
+                || entry.size.to_string().contains(&query)
+        });
+        Ok(entries)
+    }
+
+    pub fn remove_lut(&self, path: &Path) -> Result<()> {
+        if path.exists() {
+            std::fs::remove_file(path)?;
+        }
+        Ok(())
+    }
 }
 
 impl Lut3D {
@@ -384,6 +406,30 @@ mod tests {
 
         let library = LutLibrary::new(root.join("library"));
         assert!(library.import_cube_file(&source).is_err());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn lut_library_supports_search_and_remove() {
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH).expect("clock").as_nanos();
+        let root = std::env::temp_dir().join(format!("mondrian-lut-library-search-{unique}"));
+        let source_dir = root.join("source");
+        let library_dir = root.join("library");
+        std::fs::create_dir_all(&source_dir).expect("source dir");
+
+        let source = source_dir.join("identity.cube");
+        std::fs::write(&source, cube_identity_2()).expect("cube file");
+
+        let library = LutLibrary::new(&library_dir);
+        let imported = library.import_cube_file(&source).expect("imported");
+        let filtered = library.search_luts("identity").expect("search");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].path, imported);
+
+        library.remove_lut(&imported).expect("remove");
+        let remaining = library.search_luts("").expect("list after remove");
+        assert!(remaining.is_empty());
 
         let _ = std::fs::remove_dir_all(root);
     }
