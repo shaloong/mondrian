@@ -612,6 +612,61 @@ impl Exp10 for f32 {
 mod tests {
     use super::*;
 
+    #[derive(Debug, Clone, Copy)]
+    struct ColorReferenceSample {
+        name: &'static str,
+        input: ColorSpace,
+        working: ColorSpace,
+        output: ColorSpace,
+        tone_map: bool,
+        rgba: [u8; 4],
+        expected: [u8; 4],
+        tolerance: u8,
+    }
+
+    const COLOR_REFERENCE_SAMPLES: [ColorReferenceSample; 4] = [
+        ColorReferenceSample {
+            name: "rec709 identity gray",
+            input: ColorSpace::Rec709,
+            working: ColorSpace::Rec709,
+            output: ColorSpace::Rec709,
+            tone_map: false,
+            rgba: [128, 128, 128, 77],
+            expected: [128, 128, 128, 77],
+            tolerance: 1,
+        },
+        ColorReferenceSample {
+            name: "srgb identity red ramp",
+            input: ColorSpace::Srgb,
+            working: ColorSpace::Srgb,
+            output: ColorSpace::Srgb,
+            tone_map: false,
+            rgba: [204, 32, 16, 201],
+            expected: [204, 32, 16, 201],
+            tolerance: 1,
+        },
+        ColorReferenceSample {
+            name: "rec2020 green primary to rec709 clips predictably",
+            input: ColorSpace::Rec2020,
+            working: ColorSpace::Rec2020,
+            output: ColorSpace::Rec709,
+            tone_map: false,
+            rgba: [0, 255, 0, 255],
+            expected: [0, 255, 0, 255],
+            tolerance: 1,
+        },
+        ColorReferenceSample {
+            name: "pq white tone maps to sdr white without alpha change",
+            input: ColorSpace::Rec2100Pq,
+            working: ColorSpace::Rec2100Pq,
+            output: ColorSpace::Rec709,
+            tone_map: true,
+            rgba: [255, 255, 255, 33],
+            expected: [255, 255, 255, 33],
+            tolerance: 1,
+        },
+    ];
+
     #[test]
     fn identity_pipeline_keeps_rgba() {
         let mut rgba = vec![12, 34, 56, 78, 200, 210, 220, 230];
@@ -626,6 +681,34 @@ mod tests {
             ),
         );
         assert_eq!(rgba, original);
+    }
+
+    #[test]
+    fn color_reference_samples_stay_within_expected_tolerance() {
+        for sample in COLOR_REFERENCE_SAMPLES {
+            let mut rgba = sample.rgba.to_vec();
+            convert_rgba8_in_place(
+                &mut rgba,
+                ColorPipeline::new(sample.input, sample.working, sample.output, sample.tone_map),
+            );
+            for (index, (actual, expected)) in rgba.iter().zip(sample.expected).enumerate() {
+                assert!(
+                    (*actual as i16 - expected as i16).unsigned_abs() <= sample.tolerance as u16,
+                    "{} channel {index}: expected {expected}, got {actual}",
+                    sample.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn log_curve_reference_values_are_stable() {
+        let apple_mid = linear_to_apple_log(0.18);
+        let slog_mid = linear_to_slog3(0.18);
+        let logc_mid = linear_to_logc4(0.18);
+        assert!((apple_mid - 0.385_537).abs() < 1.0e-6);
+        assert!((slog3_to_linear(slog_mid) - 0.18).abs() < 1.0e-5);
+        assert!((logc4_to_linear(logc_mid) - 0.18).abs() < 1.0e-5);
     }
 
     #[test]

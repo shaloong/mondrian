@@ -1,12 +1,16 @@
 use mondrian_core::types::{AssetId, BlendMode, ColorSpace, Rational, SequenceId, TimeCode};
 use mondrian_effects::CompiledEffectGraph;
-use mondrian_timeline::sequence::Sequence;
+use mondrian_timeline::clip::AlphaInterpretation;
+use mondrian_timeline::sequence::{FieldOrder, PixelAspectRatio, Sequence};
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct TimelineMediaPlan {
     pub asset_id: AssetId,
     pub color_space_override: Option<ColorSpace>,
+    pub pixel_aspect_ratio_override: Option<PixelAspectRatio>,
+    pub field_order_override: Option<FieldOrder>,
+    pub alpha_interpretation: AlphaInterpretation,
     pub source_frame: i64,
     pub source_secs: f64,
     pub source_time_base: Rational,
@@ -42,6 +46,45 @@ pub enum TimelineRenderPlanElement {
     Media(TimelineMediaPlan),
     Adjustment(TimelineAdjustmentPlan),
     NestedSequence(TimelineNestedSequencePlan),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimelineColorDiagnostic {
+    pub asset_id: AssetId,
+    pub input_color_space_override: Option<ColorSpace>,
+    pub working_color_space: ColorSpace,
+    pub output_color_space: ColorSpace,
+    pub tone_map: bool,
+    pub pixel_aspect_ratio_override: Option<PixelAspectRatio>,
+    pub field_order_override: Option<FieldOrder>,
+    pub alpha_interpretation: AlphaInterpretation,
+    pub source_frame: i64,
+    pub source_secs: f64,
+}
+
+pub fn collect_timeline_color_diagnostics(
+    sequence: &Sequence,
+    timeline_frame: i64,
+    output_color_space: ColorSpace,
+) -> Vec<TimelineColorDiagnostic> {
+    build_timeline_render_plan(sequence, timeline_frame)
+        .into_iter()
+        .filter_map(|element| match element {
+            TimelineRenderPlanElement::Media(media) => Some(TimelineColorDiagnostic {
+                asset_id: media.asset_id,
+                input_color_space_override: media.color_space_override,
+                working_color_space: sequence.settings.color_space,
+                output_color_space,
+                tone_map: sequence.settings.auto_tone_map_media,
+                pixel_aspect_ratio_override: media.pixel_aspect_ratio_override,
+                field_order_override: media.field_order_override,
+                alpha_interpretation: media.alpha_interpretation,
+                source_frame: media.source_frame,
+                source_secs: media.source_secs,
+            }),
+            _ => None,
+        })
+        .collect()
 }
 
 pub fn build_timeline_render_plan(
@@ -100,15 +143,32 @@ pub fn build_timeline_render_plan(
         let Some(effect_graph) = active_clip.clip.evaluate_compiled_effect_graph(current) else {
             continue;
         };
+        let source_frame = active_clip.source_time.frame.max(0);
+        let source_time_base = active_clip
+            .clip
+            .interpretation
+            .frame_rate_override
+            .map(|fps| Rational::new(fps.den, fps.num))
+            .unwrap_or(active_clip.source_time.time_base);
+        let transform = apply_pixel_aspect_to_affine(
+            mat3_to_affine(active_clip.transform_matrix.to_cols_array()),
+            active_clip.clip.interpretation.pixel_aspect_ratio_override,
+        );
         elements.push(TimelineRenderPlanElement::Media(TimelineMediaPlan {
             asset_id: active_clip.clip.asset_id,
             color_space_override: active_clip.clip.interpretation.color_space_override,
-            source_frame: active_clip.source_time.frame.max(0),
-            source_secs: active_clip.source_time.to_secs().max(0.0),
-            source_time_base: active_clip.source_time.time_base,
+            pixel_aspect_ratio_override: active_clip
+                .clip
+                .interpretation
+                .pixel_aspect_ratio_override,
+            field_order_override: active_clip.clip.interpretation.field_order_override,
+            alpha_interpretation: active_clip.clip.interpretation.alpha,
+            source_frame,
+            source_secs: TimeCode::new(source_frame, source_time_base).to_secs().max(0.0),
+            source_time_base,
             opacity,
             blend_mode: active_clip.blend_mode,
-            transform: mat3_to_affine(active_clip.transform_matrix.to_cols_array()),
+            transform,
             effect_graph,
             frame_seed: timeline_frame.max(0),
         }));
@@ -119,6 +179,21 @@ pub fn build_timeline_render_plan(
 
 pub fn mat3_to_affine(cols: [f32; 9]) -> [f32; 6] {
     [cols[0], cols[3], cols[6], cols[1], cols[4], cols[7]]
+}
+
+fn apply_pixel_aspect_to_affine(
+    mut transform: [f32; 6],
+    pixel_aspect_ratio: Option<PixelAspectRatio>,
+) -> [f32; 6] {
+    let Some(ratio) = pixel_aspect_ratio.and_then(PixelAspectRatio::ratio) else {
+        return transform;
+    };
+    if (ratio - 1.0).abs() <= f32::EPSILON {
+        return transform;
+    }
+    transform[0] *= ratio;
+    transform[3] *= ratio;
+    transform
 }
 
 #[cfg(test)]
@@ -180,11 +255,14 @@ mod tests {
     }
 
     #[test]
-    fn render_plan_carries_clip_color_space_override() {
-        let mut seq = Sequence::new("render-plan-color-override");
+    fn render_plan_carries_clip_media_interpretation() {
+        let mut seq = Sequence::new("render-plan-interpretation");
         let tb = seq.time_base();
         let mut clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(20, tb));
         clip.interpretation.color_space_override = Some(mondrian_core::types::ColorSpace::Srgb);
+        clip.interpretation.pixel_aspect_ratio_override = Some(PixelAspectRatio::Anamorphic2x);
+        clip.interpretation.field_order_override = Some(FieldOrder::UpperFirst);
+        clip.interpretation.alpha = AlphaInterpretation::Premultiplied;
         seq.video_tracks[0].add_clip(clip).expect("add clip");
 
         let plan = build_timeline_render_plan(&seq, 0);
@@ -195,5 +273,32 @@ mod tests {
             media.color_space_override,
             Some(mondrian_core::types::ColorSpace::Srgb)
         );
+        assert_eq!(
+            media.pixel_aspect_ratio_override,
+            Some(PixelAspectRatio::Anamorphic2x)
+        );
+        assert_eq!(media.field_order_override, Some(FieldOrder::UpperFirst));
+        assert_eq!(
+            media.alpha_interpretation,
+            AlphaInterpretation::Premultiplied
+        );
+        assert!((media.transform[0] - 2.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn render_plan_uses_frame_rate_override_for_decode_seconds() {
+        let mut seq = Sequence::new("render-plan-frame-rate-override");
+        let tb = seq.time_base();
+        let mut clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(30, tb));
+        clip.interpretation.frame_rate_override = Some(Rational::FPS_30);
+        seq.video_tracks[0].add_clip(clip).expect("add clip");
+
+        let plan = build_timeline_render_plan(&seq, 15);
+        let TimelineRenderPlanElement::Media(media) = &plan[0] else {
+            panic!("expected media plan");
+        };
+        assert_eq!(media.source_frame, 15);
+        assert_eq!(media.source_time_base, Rational::new(1, 30));
+        assert!((media.source_secs - 0.5).abs() < 1.0e-9);
     }
 }

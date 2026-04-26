@@ -125,6 +125,7 @@ enum LayerSignature {
     Media {
         asset_id: AssetId,
         source_frame: i64,
+        source_time_base: Rational,
         opacity_u8: u8,
         blend_mode: BlendMode,
         transform_key: [i32; 6],
@@ -167,6 +168,7 @@ struct CompositeFrameSignature {
 struct LayerFrameCacheKey {
     asset_id: AssetId,
     source_frame: i64,
+    source_time_base: Rational,
     target_width: u32,
     target_height: u32,
     input_color_space: ColorSpace,
@@ -1505,6 +1507,7 @@ impl ViewerPanel {
                 let cache_key = LayerFrameCacheKey {
                     asset_id: layer.frame_key.0,
                     source_frame: layer.frame_key.1,
+                    source_time_base: layer.source_time_base,
                     target_width,
                     target_height,
                     input_color_space: layer.input_color_space,
@@ -1749,6 +1752,7 @@ impl ViewerPanel {
                 let key = LayerFrameCacheKey {
                     asset_id: layer.frame_key.0,
                     source_frame: layer.frame_key.1,
+                    source_time_base: layer.source_time_base,
                     target_width,
                     target_height,
                     input_color_space: layer.input_color_space,
@@ -1810,6 +1814,7 @@ impl ViewerPanel {
                 let key = LayerFrameCacheKey {
                     asset_id: layer.frame_key.0,
                     source_frame: layer.frame_key.1,
+                    source_time_base: layer.source_time_base,
                     target_width,
                     target_height,
                     input_color_space: layer.input_color_space,
@@ -2255,6 +2260,7 @@ fn render_element_signature(layer: &RenderElement) -> LayerSignature {
         RenderElement::Media(layer) => LayerSignature::Media {
             asset_id: layer.frame_key.0,
             source_frame: layer.frame_key.1,
+            source_time_base: layer.source_time_base,
             opacity_u8: (layer.opacity * 255.0).round() as u8,
             blend_mode: layer.blend_mode,
             transform_key: quantize_transform_signature(layer.transform),
@@ -2702,6 +2708,7 @@ fn decode_layer_rgba(
     let cache_key = LayerFrameCacheKey {
         asset_id: layer.frame_key.0,
         source_frame: layer.frame_key.1,
+        source_time_base: layer.source_time_base,
         target_width: width,
         target_height: height,
         input_color_space: layer.input_color_space,

@@ -2,7 +2,10 @@
 
 use mondrian_core::{MondrianError, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{OnceLock, RwLock};
+use std::time::SystemTime;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Lut3D {
@@ -101,6 +104,10 @@ impl Lut3D {
         let content = std::fs::read_to_string(path)?;
         let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown").to_string();
         Self::from_cube_str(name, &content)
+    }
+
+    pub fn from_cube_file_cached(path: &Path) -> Result<Self> {
+        LutCache::global().load_cube(path)
     }
 
     pub fn from_cube_str(name: impl Into<String>, content: &str) -> Result<Self> {
@@ -225,6 +232,71 @@ impl Lut3D {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LutCacheFingerprint {
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+#[derive(Debug, Clone)]
+struct LutCacheEntry {
+    fingerprint: LutCacheFingerprint,
+    lut: Lut3D,
+}
+
+#[derive(Debug, Default)]
+pub struct LutCache {
+    entries: RwLock<HashMap<PathBuf, LutCacheEntry>>,
+}
+
+impl LutCache {
+    pub fn global() -> &'static Self {
+        static CACHE: OnceLock<LutCache> = OnceLock::new();
+        CACHE.get_or_init(LutCache::default)
+    }
+
+    pub fn load_cube(&self, path: &Path) -> Result<Lut3D> {
+        let key = cache_key_for_path(path);
+        let fingerprint = lut_file_fingerprint(path)?;
+        if let Some(entry) = self
+            .entries
+            .read()
+            .expect("LUT cache read lock")
+            .get(&key)
+            .filter(|entry| entry.fingerprint == fingerprint)
+        {
+            return Ok(entry.lut.clone());
+        }
+
+        let lut = Lut3D::from_cube_file(path)?;
+        self.entries
+            .write()
+            .expect("LUT cache write lock")
+            .insert(key, LutCacheEntry { fingerprint, lut: lut.clone() });
+        Ok(lut)
+    }
+
+    pub fn clear(&self) {
+        self.entries.write().expect("LUT cache write lock").clear();
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.read().expect("LUT cache read lock").len()
+    }
+}
+
+fn cache_key_for_path(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
+fn lut_file_fingerprint(path: &Path) -> Result<LutCacheFingerprint> {
+    let metadata = std::fs::metadata(path)?;
+    Ok(LutCacheFingerprint {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+    })
+}
+
 fn validate_lut_size(size: u32) -> Result<()> {
     if !(2..=129).contains(&size) {
         return Err(lut_error(format!("unsupported 3D LUT size: {size}")));
@@ -310,6 +382,50 @@ mod tests {
         assert!(library.import_cube_file(&source).is_err());
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn lut_cache_reuses_entries_and_invalidates_on_file_change() {
+        use std::time::UNIX_EPOCH;
+
+        LutCache::global().clear();
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH).expect("clock").as_nanos();
+        let root = std::env::temp_dir().join(format!("mondrian-lut-cache-{unique}"));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("root");
+        let path = root.join("look.cube");
+        std::fs::write(&path, cube_identity_2()).expect("cube");
+
+        let first = Lut3D::from_cube_file_cached(&path).expect("first");
+        let second = Lut3D::from_cube_file_cached(&path).expect("second");
+        assert_eq!(first, second);
+        assert_eq!(LutCache::global().len(), 1);
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(
+            &path,
+            "LUT_3D_SIZE 2
+1 1 1
+0 1 1
+1 0 1
+0 0 1
+1 1 0
+0 1 0
+1 0 0
+0 0 0
+",
+        )
+        .expect("changed cube");
+        let changed = Lut3D::from_cube_file_cached(&path).expect("changed");
+        assert_ne!(first.data, changed.data);
+        assert_eq!(
+            LutCache::global().len(),
+            1,
+            "cache should still have 1 entry after file modification"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+        LutCache::global().clear();
     }
 
     #[test]

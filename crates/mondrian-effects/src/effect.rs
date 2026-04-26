@@ -3,7 +3,7 @@
 use crate::adjustment::AdjustmentLayerParams;
 use crate::execution::{register_custom_render_processor, CustomEffectRenderProcessor};
 use crate::graph::{EffectGraphBuilderState, EffectRenderGraph};
-use crate::lut::Lut3D;
+use crate::lut::{Lut3D, LutCache};
 use crate::plugin_contract::{
     effect_plugin_is_library_visible, effect_plugin_is_runtime_available,
     record_plugin_runtime_failure, register_plugin_contract, EffectPluginContract,
@@ -1200,7 +1200,7 @@ fn builtin_render_builder_for(effect_type: &EffectType) -> Option<EffectRenderBu
                 let Some(path) = effect.evaluate_text_by_suffix(&path_suffix, context.time) else {
                     return;
                 };
-                match Lut3D::from_cube_file(Path::new(path.trim())) {
+                match Lut3D::from_cube_file_cached(Path::new(path.trim())) {
                     Ok(lut) => plan.ops.push(EffectRenderOp::Lut3D { lut, intensity }),
                     Err(err) => {
                         tracing::warn!(path = %path, "failed to load LUT effect file: {err}")
@@ -1304,7 +1304,7 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 let Some(path) = effect.evaluate_text_by_suffix(&path_suffix, context.time) else {
                     return;
                 };
-                match Lut3D::from_cube_file(Path::new(path.trim())) {
+                match Lut3D::from_cube_file_cached(Path::new(path.trim())) {
                     Ok(lut) => {
                         graph.append_unary(EffectRenderOp::Lut3D { lut, intensity });
                     }
@@ -1526,6 +1526,7 @@ mod tests {
 
     #[test]
     fn builtin_lut_effect_builds_render_op_from_cube_path() {
+        LutCache::global().clear();
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock")
@@ -1571,6 +1572,7 @@ mod tests {
         }
 
         let _ = std::fs::remove_file(path);
+        LutCache::global().clear();
     }
 
     #[test]

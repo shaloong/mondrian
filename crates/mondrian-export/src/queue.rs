@@ -10,7 +10,7 @@ use crate::validator::{
 use chrono::{DateTime, Utc};
 use mondrian_core::{
     convert_rgba8_in_place,
-    types::{AssetId, ColorSpace, JobId, TimeCode},
+    types::{AssetId, ColorSpace, JobId, Rational, TimeCode},
     ColorPipeline,
 };
 use mondrian_media::audio::{
@@ -253,6 +253,9 @@ fn execute_timeline_export(
                     path.display()
                 ));
             }
+        }
+        if let Err(err) = validate_timeline_export_color_compatibility(&job.config, timeline) {
+            return JobExecutionResult::Failed(err);
         }
 
         let range = compute_timeline_render_range(timeline);
@@ -928,7 +931,9 @@ fn render_sequence_frame_into(
     }
 
     let mut decode_cache = (render_plan.len() > 1).then(|| {
-        HashMap::<(AssetId, i64), Arc<DecodedVideoLayer>>::with_capacity(render_plan.len())
+        HashMap::<(AssetId, i64, Rational, ColorSpace), Arc<DecodedVideoLayer>>::with_capacity(
+            render_plan.len(),
+        )
     });
     let mut decoded_media =
         std::iter::repeat_with(|| None).take(render_plan.len()).collect::<Vec<_>>();
@@ -942,34 +947,38 @@ fn render_sequence_frame_into(
         let Some(path) = timeline.asset_paths.get(&media.asset_id) else {
             continue;
         };
+        let input_color_space = media
+            .color_space_override
+            .or_else(|| timeline.asset_color_spaces.get(&media.asset_id).copied())
+            .unwrap_or(ColorSpace::Rec709);
+        let cache_key = (
+            media.asset_id,
+            media.source_frame,
+            media.source_time_base,
+            input_color_space,
+        );
         let decoded = if let Some(cache) = decode_cache.as_mut() {
-            if let Some(hit) = cache.get(&(media.asset_id, media.source_frame)) {
+            if let Some(hit) = cache.get(&cache_key) {
                 Arc::clone(hit)
             } else {
                 let decoded = decode_video_layer_scaled(
                     media.asset_id,
                     path.as_path(),
-                    media
-                        .color_space_override
-                        .or_else(|| timeline.asset_color_spaces.get(&media.asset_id).copied())
-                        .unwrap_or(ColorSpace::Rec709),
+                    input_color_space,
                     sequence.settings.color_space,
                     sequence.settings.auto_tone_map_media,
                     media.source_secs,
                     width,
                     height,
                 )?;
-                cache.insert((media.asset_id, media.source_frame), Arc::clone(&decoded));
+                cache.insert(cache_key, Arc::clone(&decoded));
                 decoded
             }
         } else {
             decode_video_layer_scaled(
                 media.asset_id,
                 path.as_path(),
-                media
-                    .color_space_override
-                    .or_else(|| timeline.asset_color_spaces.get(&media.asset_id).copied())
-                    .unwrap_or(ColorSpace::Rec709),
+                input_color_space,
                 sequence.settings.color_space,
                 sequence.settings.auto_tone_map_media,
                 media.source_secs,
@@ -1537,6 +1546,54 @@ fn apply_audio_codec_args(cmd: &mut Command, codec: &AudioCodecConfig) {
             cmd.arg("-c:a").arg("libmp3lame").arg("-b:a").arg(format!("{}k", bitrate_kbps));
         }
     }
+}
+
+fn validate_timeline_export_color_compatibility(
+    config: &ExportConfig,
+    timeline: &TimelineExportInput,
+) -> Result<(), String> {
+    let settings = &timeline.sequence.settings;
+    let output = settings.color_management.output_color_space;
+    let bit_depth = settings.color_management.export_bit_depth;
+    let preserve_hdr = settings.color_management.preserve_hdr_metadata;
+
+    if output.is_hdr() && bit_depth == ExportBitDepth::Eight {
+        return Err("HDR 输出不能使用 8-bit 导出位深".to_string());
+    }
+    if preserve_hdr && !output.is_hdr() {
+        return Err("只有 HDR 输出色彩空间可以保留 HDR metadata".to_string());
+    }
+    if preserve_hdr && bit_depth == ExportBitDepth::Eight {
+        return Err("保留 HDR metadata 需要 10-bit 或更高位深".to_string());
+    }
+
+    match (&config.preset.container, &config.preset.video) {
+        (Container::Gif, _) | (_, VideoCodecConfig::Gif { .. }) => {
+            if output.is_hdr() || preserve_hdr || bit_depth != ExportBitDepth::Eight {
+                return Err("GIF 导出仅支持 8-bit SDR 输出".to_string());
+            }
+        }
+        (Container::Webm, VideoCodecConfig::H264 { .. } | VideoCodecConfig::H265 { .. }) => {
+            return Err("WebM 容器不支持 H.264/H.265 视频编码".to_string());
+        }
+        (Container::Mp4, VideoCodecConfig::ProRes { .. }) => {
+            return Err("ProRes 应使用 MOV/MXF 等专业容器导出".to_string());
+        }
+        (_, VideoCodecConfig::H264 { .. }) if output.is_hdr() || preserve_hdr => {
+            return Err("HDR 输出建议使用 H.265、AV1 或 ProRes，当前 H.264 配置已拒绝".to_string());
+        }
+        (_, VideoCodecConfig::H264 { .. }) if bit_depth == ExportBitDepth::SixteenFloat => {
+            return Err("H.264 不支持 16-bit float 导出位深".to_string());
+        }
+        (_, VideoCodecConfig::H265 { .. } | VideoCodecConfig::Av1 { .. })
+            if bit_depth == ExportBitDepth::SixteenFloat =>
+        {
+            return Err("H.265/AV1 应使用 8-bit 或 10-bit YUV 导出位深".to_string());
+        }
+        _ => {}
+    }
+
+    Ok(())
 }
 
 fn prores_profile_variant(variant: &str) -> &'static str {
