@@ -27,6 +27,7 @@ Thumbs.db
 !tests/fixtures/lut/**
 !tests/fixtures/export/**
 !tests/fixtures/sequence/**
+tests/fixtures/color/source/
 
 # API 密钥 / 环境变量
 .env
