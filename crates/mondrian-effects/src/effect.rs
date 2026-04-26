@@ -3,7 +3,7 @@
 use crate::adjustment::AdjustmentLayerParams;
 use crate::execution::{register_custom_render_processor, CustomEffectRenderProcessor};
 use crate::graph::{EffectGraphBuilderState, EffectRenderGraph};
-use crate::lut::{Lut3D, LutCache};
+use crate::lut::Lut3D;
 use crate::plugin_contract::{
     effect_plugin_is_library_visible, effect_plugin_is_runtime_available,
     record_plugin_runtime_failure, register_plugin_contract, EffectPluginContract,
@@ -1472,6 +1472,7 @@ impl EffectType {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::LutCache;
     use mondrian_core::{automation::Keyframe, types::Rational};
 
     fn tc(frame: i64) -> TimeCode {

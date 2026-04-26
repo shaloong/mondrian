@@ -349,9 +349,11 @@ impl AppState {
         height: u32,
         frame_rate: Rational,
     ) -> anyhow::Result<()> {
-        let mut settings = SequenceSettings::default();
-        settings.resolution = Resolution { width, height };
-        settings.frame_rate = frame_rate;
+        let settings = SequenceSettings {
+            resolution: Resolution { width, height },
+            frame_rate,
+            ..SequenceSettings::default()
+        };
         self.create_new_project_with_settings_at(project_file, name, settings)
     }
 

@@ -283,6 +283,10 @@ impl LutCache {
     pub fn len(&self) -> usize {
         self.entries.read().expect("LUT cache read lock").len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.read().expect("LUT cache read lock").is_empty()
+    }
 }
 
 fn cache_key_for_path(path: &Path) -> PathBuf {

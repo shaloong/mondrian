@@ -118,9 +118,10 @@ impl ExportPanel {
             ui.label("输入源");
             let sequences = state.export_sequences_snapshot();
             if !sequences.is_empty() {
-                if self
+                if !self
                     .selected_sequence_id
-                    .is_none_or(|id| !sequences.iter().any(|sequence| sequence.id == id))
+                    .map(|id| sequences.iter().any(|sequence| sequence.id == id))
+                    .unwrap_or(false)
                 {
                     self.selected_sequence_id = state
                         .active_sequence_id
@@ -250,12 +251,12 @@ impl ExportPanel {
         let path = PathBuf::from(&self.output_path);
         let config = ExportConfig {
             preset,
-            input: ExportInput::Timeline(TimelineExportInput {
+            input: ExportInput::Timeline(Box::new(TimelineExportInput {
                 sequence,
                 sequences,
                 asset_paths,
                 asset_color_spaces,
-            }),
+            })),
             output_path: path,
         };
         let job = RenderJob::new(config);
@@ -269,13 +270,7 @@ fn collect_timeline_asset_paths(
     state: &AppState,
     sequence: &mondrian_timeline::sequence::Sequence,
     sequences: &[mondrian_timeline::sequence::Sequence],
-) -> Result<
-    (
-        HashMap<mondrian_core::types::AssetId, PathBuf>,
-        HashMap<mondrian_core::types::AssetId, mondrian_core::types::ColorSpace>,
-    ),
-    String,
-> {
+) -> Result<TimelineAssetPaths, String> {
     let library = state.asset_library.as_ref().ok_or_else(|| "素材库未连接".to_string())?;
 
     let mut asset_ids = HashSet::new();
@@ -308,6 +303,11 @@ fn collect_timeline_asset_paths(
 
     Ok((paths, color_spaces))
 }
+
+type TimelineAssetPaths = (
+    HashMap<mondrian_core::types::AssetId, PathBuf>,
+    HashMap<mondrian_core::types::AssetId, mondrian_core::types::ColorSpace>,
+);
 
 fn collect_sequence_asset_ids(
     sequence: &mondrian_timeline::sequence::Sequence,
@@ -344,6 +344,18 @@ fn collect_sequence_asset_ids(
         }
     }
     Ok(())
+}
+
+fn default_output_filename(preset: &ExportPreset) -> String {
+    let ext = match preset.container {
+        mondrian_export::preset::Container::Mp4 => "mp4",
+        mondrian_export::preset::Container::Mov => "mov",
+        mondrian_export::preset::Container::Mkv => "mkv",
+        mondrian_export::preset::Container::Gif => "gif",
+        mondrian_export::preset::Container::Mxf => "mxf",
+        mondrian_export::preset::Container::Webm => "webm",
+    };
+    format!("mondrian-export.{}", ext)
 }
 
 /// 内置预设列表（名称 + ExportPreset）
@@ -435,16 +447,4 @@ mod tests {
 
         assert!(assets.contains(&asset_id));
     }
-}
-
-fn default_output_filename(preset: &ExportPreset) -> String {
-    let ext = match preset.container {
-        mondrian_export::preset::Container::Mp4 => "mp4",
-        mondrian_export::preset::Container::Mov => "mov",
-        mondrian_export::preset::Container::Mkv => "mkv",
-        mondrian_export::preset::Container::Gif => "gif",
-        mondrian_export::preset::Container::Mxf => "mxf",
-        mondrian_export::preset::Container::Webm => "webm",
-    };
-    format!("mondrian-export.{}", ext)
 }

@@ -96,7 +96,7 @@ pub enum ExportInput {
         out_point: Option<String>,
     },
     /// 从时间线逐帧渲染后再编码输出
-    Timeline(TimelineExportInput),
+    Timeline(Box<TimelineExportInput>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

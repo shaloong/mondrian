@@ -683,7 +683,7 @@ impl MondrianApp {
         let mut app = Self {
             state,
             timeline_panel: TimelinePanel::default(),
-            effect_library_panel: EffectLibraryPanel::default(),
+            effect_library_panel: EffectLibraryPanel,
             effect_controls_panel: EffectControlsPanel::default(),
             viewer_panel: ViewerPanel::default(),
             library_panel: LibraryPanel::default(),

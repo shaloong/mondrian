@@ -26,14 +26,19 @@ fn create_new_project_with_settings_preserves_sequence_color_management() {
     let project_file = root.join("project.mdp");
 
     let mut state = AppState::new();
-    let mut settings = SequenceSettings::default();
-    settings.resolution = Resolution { width: 3840, height: 2160 };
-    settings.frame_rate = Rational::FPS_23976;
-    settings.color_space = ColorSpace::Rec2020;
-    settings.color_management.workflow = ColorWorkflow::SceneReferred;
-    settings.color_management.output_color_space = ColorSpace::Rec2100Pq;
-    settings.color_management.video_range = VideoRange::Legal;
-    settings.color_management.export_bit_depth = ExportBitDepth::Ten;
+    let settings = SequenceSettings {
+        resolution: Resolution { width: 3840, height: 2160 },
+        frame_rate: Rational::FPS_23976,
+        color_space: ColorSpace::Rec2020,
+        color_management: mondrian_timeline::sequence::SequenceColorManagement {
+            workflow: ColorWorkflow::SceneReferred,
+            output_color_space: ColorSpace::Rec2100Pq,
+            video_range: VideoRange::Legal,
+            export_bit_depth: ExportBitDepth::Ten,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
     state
         .create_new_project_with_settings_at(
             project_file.clone(),

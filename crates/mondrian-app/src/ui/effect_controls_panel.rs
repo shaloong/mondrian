@@ -1470,8 +1470,7 @@ impl EffectControlsPanel {
             ui.ctx(),
             selection,
             current_time_ticks,
-            &selected_points,
-            &handle_points,
+            (&selected_points, &handle_points),
             plot_rect,
             active_path.as_str(),
             channel_index,
@@ -1589,7 +1588,7 @@ impl EffectControlsPanel {
 
         let new_selection = selected_on_active
             .iter()
-            .zip(new_times.into_iter())
+            .zip(new_times)
             .map(|(selected, (_, new_time))| AnimationKeyframeSelection {
                 clip_id: selected.clip_id,
                 path: selected.path.clone(),
@@ -1814,8 +1813,7 @@ impl EffectControlsPanel {
         ctx: &egui::Context,
         selection: SelectedClipRef,
         current_time_ticks: TimeTicks,
-        selected_points: &[Pos2],
-        handle_points: &[Pos2],
+        point_sets: (&[Pos2], &[Pos2]),
         plot_rect: Rect,
         active_path: &str,
         channel_index: usize,
@@ -1825,6 +1823,7 @@ impl EffectControlsPanel {
         graph_mode: GraphEditorMode,
         app: &mut AppState,
     ) {
+        let (selected_points, handle_points) = point_sets;
         if selected_points.is_empty()
             || self.graph_handle_drag.is_some()
             || self.graph_keyframe_drag.is_some()
@@ -3189,8 +3188,8 @@ fn nice_frame_step(raw_step_frames: f64, time_base: mondrian_core::types::Ration
 fn format_graph_time_label(time: TimeTicks, time_base: mondrian_core::types::Rational) -> String {
     let frame = (time as f64 / SUBFRAME_TICKS_PER_FRAME as f64).round() as i64;
     let smpte = TimeCode::new(frame.max(0), time_base).to_smpte();
-    if smpte.starts_with("00:") {
-        smpte[3..].to_string()
+    if let Some(stripped) = smpte.strip_prefix("00:") {
+        stripped.to_string()
     } else {
         smpte
     }
@@ -4000,13 +3999,15 @@ fn graph_selection_scale_mutations(
                     });
                 }
             }
-            selections.extend(drag.entries.iter().zip(remapped.into_iter()).map(
-                |(entry, (_, new_time))| AnimationKeyframeSelection {
-                    clip_id,
-                    path: entry.selection.path.clone(),
-                    time: new_time,
-                },
-            ));
+            selections.extend(
+                drag.entries.iter().zip(remapped).map(|(entry, (_, new_time))| {
+                    AnimationKeyframeSelection {
+                        clip_id,
+                        path: entry.selection.path.clone(),
+                        time: new_time,
+                    }
+                }),
+            );
         }
         GraphSelectionScaleAxis::Value => {
             for entry in &drag.entries {
@@ -4151,25 +4152,27 @@ fn interpolations_for_target_speed(
         ));
     }
 
-    if temporal_flags.continuous && !temporal_flags.broken_handles {
-        if index > 0 && index + 1 < keyframes.len() {
-            let previous = &keyframes[index - 1];
-            let next = &keyframes[index + 1];
-            interp_in = KeyframeInterpolation::Bezier(speed_handle_for_segment(
-                previous,
-                keyframe,
-                clip,
-                target_speed,
-                handle_time_offset_in(keyframe.interp_in),
-            ));
-            interp_out = KeyframeInterpolation::Bezier(speed_handle_for_segment(
-                keyframe,
-                next,
-                clip,
-                target_speed,
-                handle_time_offset_out(keyframe.interp_out),
-            ));
-        }
+    if temporal_flags.continuous
+        && !temporal_flags.broken_handles
+        && index > 0
+        && index + 1 < keyframes.len()
+    {
+        let previous = &keyframes[index - 1];
+        let next = &keyframes[index + 1];
+        interp_in = KeyframeInterpolation::Bezier(speed_handle_for_segment(
+            previous,
+            keyframe,
+            clip,
+            target_speed,
+            handle_time_offset_in(keyframe.interp_in),
+        ));
+        interp_out = KeyframeInterpolation::Bezier(speed_handle_for_segment(
+            keyframe,
+            next,
+            clip,
+            target_speed,
+            handle_time_offset_out(keyframe.interp_out),
+        ));
     }
 
     Some((interp_in, interp_out))
@@ -4247,7 +4250,7 @@ fn snap_graph_time_delta(
             if diff > threshold_ticks {
                 continue;
             }
-            if best.as_ref().is_none_or(|(_, best_diff)| diff < *best_diff) {
+            if best.as_ref().map(|(_, best_diff)| diff < *best_diff).unwrap_or(true) {
                 best = Some((delta, diff));
             }
         }
@@ -4331,7 +4334,7 @@ fn snap_graph_value_delta(
             if diff > threshold_value {
                 continue;
             }
-            if best.as_ref().is_none_or(|(_, best_diff)| diff < *best_diff) {
+            if best.as_ref().map(|(_, best_diff)| diff < *best_diff).unwrap_or(true) {
                 best = Some((delta, diff));
             }
         }
