@@ -22,7 +22,9 @@ use mondrian_renderer::{
     TimelineCompositeElement, TimelineCompositeOptions, TimelineCompositeScratch,
     TimelineMediaLayer, TimelineRenderPlanElement,
 };
-use mondrian_timeline::sequence::{ExportBitDepth, SequenceSettings, VideoRange};
+use mondrian_timeline::sequence::{
+    ExportBitDepth, SequenceRenderColorContext, SequenceSettings, VideoRange,
+};
 use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -899,7 +901,7 @@ fn render_timeline_frame_into(
         timeline_frame,
         width,
         height,
-        timeline.sequence.settings.color_management.output_color_space,
+        timeline.sequence.settings.root_render_color_context(),
         canvas,
         0,
     )
@@ -911,7 +913,7 @@ fn render_sequence_frame_into(
     timeline_frame: i64,
     width: u32,
     height: u32,
-    output_color_space: ColorSpace,
+    color_context: SequenceRenderColorContext,
     canvas: &mut Vec<u8>,
     depth: usize,
 ) -> Result<(), String> {
@@ -965,8 +967,9 @@ fn render_sequence_frame_into(
                     media.asset_id,
                     path.as_path(),
                     input_color_space,
-                    sequence.settings.color_space,
-                    sequence.settings.auto_tone_map_media,
+                    color_context.working_color_space,
+                    color_context.backend,
+                    color_context.tone_map,
                     media.source_secs,
                     width,
                     height,
@@ -979,8 +982,9 @@ fn render_sequence_frame_into(
                 media.asset_id,
                 path.as_path(),
                 input_color_space,
-                sequence.settings.color_space,
-                sequence.settings.auto_tone_map_media,
+                color_context.working_color_space,
+                color_context.backend,
+                color_context.tone_map,
                 media.source_secs,
                 width,
                 height,
@@ -1005,13 +1009,14 @@ fn render_sequence_frame_into(
                 .frame
                 .max(0);
         let mut nested_canvas = vec![0u8; nested_width as usize * nested_height as usize * 4];
+        let nested_context = nested_sequence.settings.nested_render_color_context(color_context.clone());
         render_sequence_frame_into(
             timeline,
             nested_sequence,
             nested_frame,
             nested_width,
             nested_height,
-            sequence.settings.color_space,
+            nested_context,
             &mut nested_canvas,
             depth + 1,
         )?;
@@ -1070,7 +1075,7 @@ fn render_sequence_frame_into(
         height,
         &composite_elements,
         TimelineCompositeOptions::default(),
-        sequence.settings.color_space,
+        color_context.working_color_space,
         &mut scratch,
     );
     canvas.clear();
@@ -1078,11 +1083,12 @@ fn render_sequence_frame_into(
     convert_rgba8_in_place(
         canvas,
         ColorPipeline::new(
-            sequence.settings.color_space,
-            sequence.settings.color_space,
-            output_color_space,
-            sequence.settings.auto_tone_map_media,
-        ),
+            color_context.working_color_space,
+            color_context.working_color_space,
+            color_context.output_color_space,
+            color_context.tone_map,
+        )
+        .with_backend(color_context.backend),
     );
     Ok(())
 }
@@ -1092,6 +1098,7 @@ fn decode_video_layer_scaled(
     path: &Path,
     input_color_space: ColorSpace,
     working_color_space: ColorSpace,
+    backend: mondrian_core::ColorManagementBackend,
     tone_map: bool,
     source_secs: f64,
     width: u32,
@@ -1107,7 +1114,8 @@ fn decode_video_layer_scaled(
             working_color_space,
             working_color_space,
             tone_map,
-        ),
+        )
+        .with_backend(backend),
     );
     Ok(Arc::new(DecodedVideoLayer {
         width: decoded.width,
