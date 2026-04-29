@@ -61,9 +61,12 @@ fn draw_new_project_panel(app: &mut MondrianApp, ui: &mut egui::Ui) {
 
     ui.spacing_mut().item_spacing = egui::vec2(8.0, 10.0);
 
+    let footer_height = 56.0;
+    let settings_height = (ui.available_height() - footer_height).max(260.0);
     egui::ScrollArea::vertical()
         .id_salt("new_project_sequence_settings_scroll")
         .auto_shrink([false, false])
+        .max_height(settings_height)
         .show(ui, |ui| {
             egui::Grid::new("new_project_grid").num_columns(2).spacing([12.0, 10.0]).show(
                 ui,

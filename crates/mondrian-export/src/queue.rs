@@ -1009,7 +1009,8 @@ fn render_sequence_frame_into(
                 .frame
                 .max(0);
         let mut nested_canvas = vec![0u8; nested_width as usize * nested_height as usize * 4];
-        let nested_context = nested_sequence.settings.nested_render_color_context(color_context.clone());
+        let nested_context =
+            nested_sequence.settings.nested_render_color_context(color_context.clone());
         render_sequence_frame_into(
             timeline,
             nested_sequence,

@@ -326,14 +326,20 @@ mod tests {
         assert_eq!(diagnostics.len(), 1);
         let diagnostic = &diagnostics[0];
         assert_eq!(diagnostic.asset_id, asset_id);
-        assert_eq!(diagnostic.input_color_space_override, Some(ColorSpace::AppleLog));
+        assert_eq!(
+            diagnostic.input_color_space_override,
+            Some(ColorSpace::AppleLog)
+        );
         assert_eq!(diagnostic.working_color_space, ColorSpace::Rec2020);
         assert_eq!(diagnostic.output_color_space, ColorSpace::Rec2100Pq);
         assert_eq!(
             diagnostic.pixel_aspect_ratio_override,
             Some(PixelAspectRatio::DvcproHd)
         );
-        assert_eq!(diagnostic.field_order_override, Some(FieldOrder::LowerFirst));
+        assert_eq!(
+            diagnostic.field_order_override,
+            Some(FieldOrder::LowerFirst)
+        );
         assert_eq!(diagnostic.alpha_interpretation, AlphaInterpretation::Ignore);
     }
 
