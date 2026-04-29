@@ -73,6 +73,61 @@ pub enum AudioDisplayFormat {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum AudioChannelLayout {
+    Mono,
+    #[default]
+    Stereo,
+    Surround51,
+}
+
+impl AudioChannelLayout {
+    pub const fn channels(self) -> u8 {
+        match self {
+            Self::Mono => 1,
+            Self::Stereo => 2,
+            Self::Surround51 => 6,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PreviewRenderFormat {
+    #[default]
+    IFrameOnly,
+    ProResProxy,
+    DnxHrLb,
+    LosslessRgba,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SequencePreviewSettings {
+    #[serde(default)]
+    pub format: PreviewRenderFormat,
+    #[serde(default = "default_preview_resolution_scale")]
+    pub resolution_scale: f32,
+    #[serde(default = "default_preview_cache_enabled")]
+    pub cache_enabled: bool,
+}
+
+impl Default for SequencePreviewSettings {
+    fn default() -> Self {
+        Self {
+            format: PreviewRenderFormat::IFrameOnly,
+            resolution_scale: default_preview_resolution_scale(),
+            cache_enabled: default_preview_cache_enabled(),
+        }
+    }
+}
+
+const fn default_preview_resolution_scale() -> f32 {
+    0.5
+}
+
+const fn default_preview_cache_enabled() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SequenceRole {
     #[default]
     Editorial,
@@ -178,7 +233,7 @@ const fn default_preserve_hdr_metadata() -> bool {
 }
 
 /// 序列设置（帧率/分辨率/音频配置）
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SequenceSettings {
     #[serde(default)]
     pub editing_mode: EditingMode,
@@ -194,6 +249,12 @@ pub struct SequenceSettings {
     pub audio_channels: u8,
     #[serde(default)]
     pub audio_display_format: AudioDisplayFormat,
+    #[serde(default)]
+    pub audio_channel_layout: AudioChannelLayout,
+    #[serde(default)]
+    pub start_timecode_frame: i64,
+    #[serde(default)]
+    pub preview: SequencePreviewSettings,
     pub color_space: ColorSpace,
     #[serde(default)]
     pub auto_tone_map_media: bool,
@@ -211,8 +272,11 @@ impl Default for SequenceSettings {
             field_order: FieldOrder::Progressive,
             video_display_format: VideoDisplayFormat::Frames,
             audio_sample_rate: 48000,
-            audio_channels: 2,
+            audio_channels: AudioChannelLayout::Stereo.channels(),
             audio_display_format: AudioDisplayFormat::AudioSamples,
+            audio_channel_layout: AudioChannelLayout::Stereo,
+            start_timecode_frame: 0,
+            preview: SequencePreviewSettings::default(),
             color_space: ColorSpace::Rec709,
             auto_tone_map_media: true,
             color_management: SequenceColorManagement::default(),
@@ -249,6 +313,27 @@ impl SequenceSettings {
             return Err(mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "sequence_settings_validate".to_string(),
                 reason: format!("不支持的音频采样率: {} Hz", self.audio_sample_rate),
+            });
+        }
+        if self.audio_channels != self.audio_channel_layout.channels() {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "sequence_settings_validate".to_string(),
+                reason: format!(
+                    "音频声道数 {} 与声道布局 {:?} 不匹配",
+                    self.audio_channels, self.audio_channel_layout
+                ),
+            });
+        }
+        if self.start_timecode_frame < 0 {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "sequence_settings_validate".to_string(),
+                reason: "序列起始时间码不能为负数".to_string(),
+            });
+        }
+        if !(0.125..=1.0).contains(&self.preview.resolution_scale) {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "sequence_settings_validate".to_string(),
+                reason: format!("预览分辨率比例无效: {}", self.preview.resolution_scale),
             });
         }
         if self.color_management.workflow == ColorWorkflow::Aces
@@ -362,10 +447,36 @@ impl SequenceSettings {
         let audio_sample_rate = self.audio_sample_rate;
         let audio_channels = self.audio_channels;
         let audio_display_format = self.audio_display_format;
+        let audio_channel_layout = self.audio_channel_layout;
+        let start_timecode_frame = self.start_timecode_frame;
+        let preview = self.preview.clone();
         *self = Self::from_editing_mode(mode);
         self.audio_sample_rate = audio_sample_rate;
         self.audio_channels = audio_channels;
         self.audio_display_format = audio_display_format;
+        self.audio_channel_layout = audio_channel_layout;
+        self.start_timecode_frame = start_timecode_frame;
+        self.preview = preview;
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SequencePreset {
+    pub name: String,
+    pub settings: SequenceSettings,
+}
+
+impl SequencePreset {
+    pub fn new(name: impl Into<String>, settings: SequenceSettings) -> mondrian_core::Result<Self> {
+        let name = name.into();
+        if name.trim().is_empty() {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "sequence_preset_new".to_string(),
+                reason: "序列预设名称不能为空".to_string(),
+            });
+        }
+        settings.validate()?;
+        Ok(Self { name, settings })
     }
 }
 
@@ -857,6 +968,14 @@ mod tests {
             color_space: ColorSpace::Rec2100Pq,
             audio_sample_rate: 96_000,
             audio_display_format: AudioDisplayFormat::Milliseconds,
+            audio_channel_layout: AudioChannelLayout::Surround51,
+            audio_channels: AudioChannelLayout::Surround51.channels(),
+            start_timecode_frame: 24 * 60 * 60,
+            preview: SequencePreviewSettings {
+                format: PreviewRenderFormat::ProResProxy,
+                resolution_scale: 0.5,
+                cache_enabled: true,
+            },
             ..Default::default()
         };
 
@@ -890,6 +1009,27 @@ mod tests {
         let unsupported_audio =
             SequenceSettings { audio_sample_rate: 22_050, ..Default::default() };
         assert!(unsupported_audio.validate().is_err());
+
+        let mismatched_channels = SequenceSettings {
+            audio_channel_layout: AudioChannelLayout::Surround51,
+            audio_channels: 2,
+            ..Default::default()
+        };
+        assert!(mismatched_channels.validate().is_err());
+
+        let bad_preview = SequenceSettings {
+            preview: SequencePreviewSettings { resolution_scale: 2.0, ..Default::default() },
+            ..Default::default()
+        };
+        assert!(bad_preview.validate().is_err());
+    }
+
+    #[test]
+    fn sequence_preset_validates_name_and_settings() {
+        assert!(SequencePreset::new("", SequenceSettings::default()).is_err());
+        let preset = SequencePreset::new("Editorial 25p", SequenceSettings::default())
+            .expect("valid preset");
+        assert_eq!(preset.name, "Editorial 25p");
     }
 
     #[test]

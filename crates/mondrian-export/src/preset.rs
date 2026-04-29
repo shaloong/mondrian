@@ -99,6 +99,17 @@ pub enum ExportInput {
     Timeline(Box<TimelineExportInput>),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum TimelineExportRange {
+    #[default]
+    SequenceInOut,
+    EntireSequence,
+    WorkArea {
+        start_frame: i64,
+        end_frame_exclusive: i64,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimelineExportInput {
     pub sequence: Sequence,
@@ -107,4 +118,6 @@ pub struct TimelineExportInput {
     pub asset_paths: HashMap<AssetId, PathBuf>,
     #[serde(default)]
     pub asset_color_spaces: HashMap<AssetId, ColorSpace>,
+    #[serde(default)]
+    pub range: TimelineExportRange,
 }

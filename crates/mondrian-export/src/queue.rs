@@ -1,7 +1,8 @@
 //! 后台渲染队列
 
 use crate::preset::{
-    AudioCodecConfig, Container, ExportConfig, ExportInput, TimelineExportInput, VideoCodecConfig,
+    AudioCodecConfig, Container, ExportConfig, ExportInput, TimelineExportInput,
+    TimelineExportRange, VideoCodecConfig,
 };
 use crate::validator::{
     probe_media_summary, validate_export_output, ExpectedVideoConstraints,
@@ -321,7 +322,7 @@ fn execute_timeline_export(
                     .arg("-shortest");
             }
             TimelineAudioInput::Silent { sample_rate, channels } => {
-                let channel_layout = if *channels <= 1 { "mono" } else { "stereo" };
+                let channel_layout = ffmpeg_channel_layout(*channels);
                 cmd.arg("-f")
                     .arg("lavfi")
                     .arg("-i")
@@ -431,7 +432,7 @@ fn prepare_timeline_audio_input(
     }
 
     let sample_rate = timeline.sequence.settings.audio_sample_rate.max(8_000);
-    let channels = timeline.sequence.settings.audio_channels.clamp(1, 2);
+    let channels = timeline.sequence.settings.audio_channel_layout.channels().max(1);
     if !timeline_has_audio_content(timeline, range) {
         return Ok(TimelineAudioInput::Silent { sample_rate, channels });
     }
@@ -1127,14 +1128,24 @@ fn decode_video_layer_scaled(
 
 fn compute_timeline_render_range(timeline: &TimelineExportInput) -> TimelineRenderRange {
     let sequence = &timeline.sequence;
-    let start = sequence.in_point_frame();
     let sequence_end_exclusive = sequence.total_duration().frame.max(1);
+    let (start, requested_end_exclusive) = match timeline.range {
+        TimelineExportRange::EntireSequence => (0, sequence_end_exclusive),
+        TimelineExportRange::SequenceInOut => {
+            let start = sequence.in_point_frame();
+            (
+                start,
+                sequence
+                    .out_point_frame()
+                    .map(|frame| frame.saturating_add(1))
+                    .unwrap_or(sequence_end_exclusive),
+            )
+        }
+        TimelineExportRange::WorkArea { start_frame, end_frame_exclusive } => {
+            (start_frame.max(0), end_frame_exclusive.max(0))
+        }
+    };
     let max_end_exclusive = sequence_end_exclusive.max(start.saturating_add(1));
-
-    let requested_end_exclusive = sequence
-        .out_point_frame()
-        .map(|frame| frame.saturating_add(1))
-        .unwrap_or(sequence_end_exclusive);
     let end_exclusive = requested_end_exclusive.max(start.saturating_add(1)).min(max_end_exclusive);
     let total_frames = end_exclusive.saturating_sub(start) as u64;
 
@@ -1155,6 +1166,15 @@ fn timeline_output_resolution(job: &RenderJob, timeline: &TimelineExportInput) -
         normalize_output_dimension(timeline.sequence.settings.resolution.width),
         normalize_output_dimension(timeline.sequence.settings.resolution.height),
     )
+}
+
+fn ffmpeg_channel_layout(channels: u8) -> &'static str {
+    match channels {
+        0 | 1 => "mono",
+        2 => "stereo",
+        6 => "5.1",
+        _ => "stereo",
+    }
 }
 
 fn normalize_output_dimension(value: u32) -> u32 {
@@ -1846,11 +1866,34 @@ mod tests {
             sequences: Vec::new(),
             asset_paths: HashMap::new(),
             asset_color_spaces: HashMap::new(),
+            range: TimelineExportRange::SequenceInOut,
         };
 
         let range = compute_timeline_render_range(&timeline);
         assert_eq!(range.start_frame, 40);
         assert_eq!(range.total_frames, 60);
+    }
+
+    #[test]
+    fn timeline_render_range_can_export_entire_sequence() {
+        let mut seq = Sequence::new("range-entire-test");
+        let tb = seq.time_base();
+        let clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(200, tb));
+        seq.video_tracks[0].add_clip(clip).expect("add clip");
+        seq.in_point_frame = Some(40);
+        seq.out_point_frame = Some(99);
+
+        let timeline = TimelineExportInput {
+            sequence: seq,
+            sequences: Vec::new(),
+            asset_paths: HashMap::new(),
+            asset_color_spaces: HashMap::new(),
+            range: TimelineExportRange::EntireSequence,
+        };
+
+        let range = compute_timeline_render_range(&timeline);
+        assert_eq!(range.start_frame, 0);
+        assert_eq!(range.total_frames, 200);
     }
 
     #[test]
@@ -1870,6 +1913,7 @@ mod tests {
             sequences: Vec::new(),
             asset_paths,
             asset_color_spaces: HashMap::new(),
+            range: TimelineExportRange::SequenceInOut,
         };
 
         let range = compute_timeline_render_range(&timeline);
@@ -1922,6 +1966,7 @@ mod tests {
             sequences: Vec::new(),
             asset_paths: HashMap::new(),
             asset_color_spaces: HashMap::new(),
+            range: TimelineExportRange::SequenceInOut,
         };
 
         let mut canvas = vec![77u8; 4 * 2 * 4];

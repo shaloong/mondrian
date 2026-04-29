@@ -28,9 +28,9 @@ use mondrian_media::audio::{
 use mondrian_timeline::clip::{Clip, TrimEdge};
 use mondrian_timeline::command::SequenceSnapshotCommand;
 use mondrian_timeline::sequence::{
-    AudioDisplayFormat, ColorWorkflow, EditingMode, ExportBitDepth, FieldOrder,
-    MissingColorMetadataPolicy, NestedColorProcessing, PixelAspectRatio, Sequence,
-    SequenceCollection, SequenceSettings, VideoDisplayFormat, VideoRange,
+    AudioChannelLayout, AudioDisplayFormat, ColorWorkflow, EditingMode, ExportBitDepth, FieldOrder,
+    MissingColorMetadataPolicy, NestedColorProcessing, PixelAspectRatio, PreviewRenderFormat,
+    Sequence, SequenceCollection, SequencePreset, SequenceSettings, VideoDisplayFormat, VideoRange,
 };
 use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
@@ -196,6 +196,8 @@ struct NewProjectDraft {
     #[serde(default = "default_new_project_fps_den")]
     fps_den: i64,
     #[serde(default)]
+    start_timecode_frame: i64,
+    #[serde(default)]
     editing_mode: EditingMode,
     #[serde(default)]
     pixel_aspect_ratio: PixelAspectRatio,
@@ -207,6 +209,14 @@ struct NewProjectDraft {
     audio_sample_rate: u32,
     #[serde(default)]
     audio_display_format: AudioDisplayFormat,
+    #[serde(default)]
+    audio_channel_layout: AudioChannelLayout,
+    #[serde(default)]
+    preview_format: PreviewRenderFormat,
+    #[serde(default = "default_new_project_preview_resolution_scale")]
+    preview_resolution_scale: f32,
+    #[serde(default = "default_new_project_preview_cache_enabled")]
+    preview_cache_enabled: bool,
     #[serde(default)]
     color_space: ColorSpace,
     #[serde(default = "default_new_project_auto_tone_map_media")]
@@ -257,6 +267,8 @@ struct AppPreferences {
     av_clock_role: ClockRole,
     new_project_draft: NewProjectDraft,
     #[serde(default)]
+    sequence_presets: Vec<SequencePreset>,
+    #[serde(default)]
     shortcuts: ShortcutPreferences,
     #[serde(default = "default_media_cache_auto_cleanup")]
     media_cache_auto_cleanup: bool,
@@ -295,6 +307,7 @@ impl Default for AppPreferences {
             show_dev_metrics: false,
             av_clock_role: ClockRole::AudioMaster,
             new_project_draft: NewProjectDraft::default(),
+            sequence_presets: builtin_sequence_presets(),
             shortcuts: ShortcutPreferences::default(),
             media_cache_auto_cleanup: default_media_cache_auto_cleanup(),
             media_cache_max_size_gb: default_media_cache_max_size_gb(),
@@ -320,12 +333,17 @@ impl Default for NewProjectDraft {
             height: default_new_project_height(),
             fps_num: default_new_project_fps_num(),
             fps_den: default_new_project_fps_den(),
+            start_timecode_frame: 0,
             editing_mode: EditingMode::Custom,
             pixel_aspect_ratio: PixelAspectRatio::Square,
             field_order: FieldOrder::Progressive,
             video_display_format: VideoDisplayFormat::Frames,
             audio_sample_rate: default_new_project_audio_sample_rate(),
             audio_display_format: AudioDisplayFormat::AudioSamples,
+            audio_channel_layout: AudioChannelLayout::Stereo,
+            preview_format: PreviewRenderFormat::IFrameOnly,
+            preview_resolution_scale: default_new_project_preview_resolution_scale(),
+            preview_cache_enabled: default_new_project_preview_cache_enabled(),
             color_space: ColorSpace::Rec709,
             auto_tone_map_media: default_new_project_auto_tone_map_media(),
             color_workflow: ColorWorkflow::DisplayReferred,
@@ -359,8 +377,31 @@ const fn default_new_project_audio_sample_rate() -> u32 {
     48_000
 }
 
+const fn default_new_project_preview_resolution_scale() -> f32 {
+    0.5
+}
+
+const fn default_new_project_preview_cache_enabled() -> bool {
+    true
+}
+
 const fn default_new_project_auto_tone_map_media() -> bool {
     true
+}
+
+fn builtin_sequence_presets() -> Vec<SequencePreset> {
+    [
+        (EditingMode::Dslr1080p, "DSLR 1080p"),
+        (EditingMode::Dslr720p, "DSLR 720p"),
+        (EditingMode::Avchd1080p, "AVCHD 1080p"),
+        (EditingMode::DigitalCinema4k, "Digital Cinema 4K"),
+        (EditingMode::SocialVertical1080p, "社媒竖屏 1080p"),
+    ]
+    .into_iter()
+    .filter_map(|(mode, name)| {
+        SequencePreset::new(name, SequenceSettings::from_editing_mode(mode)).ok()
+    })
+    .collect()
 }
 
 const fn default_media_cache_auto_cleanup() -> bool {
@@ -643,6 +684,11 @@ pub struct MondrianApp {
     pending_close_action: Option<PendingCloseAction>,
     allow_next_viewport_close: bool,
     new_project_draft: NewProjectDraft,
+    sequence_presets: Vec<SequencePreset>,
+    sequence_settings_sequence_id: Option<SequenceId>,
+    sequence_settings_name_buffer: String,
+    sequence_settings_draft: Option<SequenceSettings>,
+    sequence_settings_preset_name: String,
     playback_last_tick: Option<std::time::Instant>,
     playback_subframe_accum: f64,
     playback_buffering_last_frame: bool,
@@ -705,6 +751,11 @@ impl MondrianApp {
             pending_close_action: None,
             allow_next_viewport_close: false,
             new_project_draft: NewProjectDraft::default(),
+            sequence_presets: builtin_sequence_presets(),
+            sequence_settings_sequence_id: None,
+            sequence_settings_name_buffer: String::new(),
+            sequence_settings_draft: None,
+            sequence_settings_preset_name: String::new(),
             playback_last_tick: None,
             playback_subframe_accum: 0.0,
             playback_buffering_last_frame: false,
@@ -1269,13 +1320,63 @@ impl MondrianApp {
             return;
         };
 
-        let mut settings = sequence.settings.clone();
+        let sequence_id = sequence.id;
+        let sequence_name = sequence.name.clone();
+        let sequence_settings = sequence.settings.clone();
+        if self.sequence_settings_sequence_id != Some(sequence_id) {
+            self.sequence_settings_sequence_id = Some(sequence_id);
+            self.sequence_settings_name_buffer = sequence_name.clone();
+            self.sequence_settings_draft = Some(sequence_settings.clone());
+            self.sequence_settings_preset_name = format!("{} 预设", sequence_name);
+        }
+
+        let mut settings = self.sequence_settings_draft.clone().unwrap_or(sequence_settings);
         ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+
+        ui.horizontal(|ui| {
+            ui.label("序列预设");
+            egui::ComboBox::from_id_salt("sequence_settings_preset")
+                .selected_text("选择预设")
+                .show_ui(ui, |ui| {
+                    for preset in self.sequence_presets.clone() {
+                        if ui.button(&preset.name).clicked() {
+                            settings = preset.settings.clone();
+                            ui.close();
+                        }
+                    }
+                });
+            ui.add(
+                egui::TextEdit::singleline(&mut self.sequence_settings_preset_name)
+                    .desired_width(150.0)
+                    .hint_text("预设名称"),
+            );
+            if ui.button("保存当前为预设").clicked() {
+                let preset_name = self.sequence_settings_preset_name.trim().to_string();
+                match SequencePreset::new(preset_name, settings.clone()) {
+                    Ok(preset) => {
+                        self.sequence_presets.retain(|item| item.name != preset.name);
+                        self.sequence_presets.push(preset);
+                        self.state.set_status_hint("序列预设已保存", false);
+                    }
+                    Err(err) => {
+                        self.state.set_status_hint(format!("保存序列预设失败：{err}"), true);
+                    }
+                }
+            }
+        });
+        ui.add_space(8.0);
 
         egui::Grid::new("sequence_settings_grid")
             .num_columns(2)
             .spacing([14.0, 8.0])
             .show(ui, |ui| {
+                ui.label("序列名称");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.sequence_settings_name_buffer)
+                        .desired_width(220.0),
+                );
+                ui.end_row();
+
                 ui.label("编辑模式");
                 egui::ComboBox::from_id_salt("sequence_editing_mode")
                     .selected_text(editing_mode_label(settings.editing_mode))
@@ -1389,6 +1490,15 @@ impl MondrianApp {
                             );
                         }
                     });
+                ui.end_row();
+
+                ui.label("起始时间码帧");
+                ui.add(
+                    egui::DragValue::new(&mut settings.start_timecode_frame)
+                        .range(0..=24 * 60 * 60 * 240)
+                        .speed(1)
+                        .suffix(" f"),
+                );
                 ui.end_row();
 
                 ui.label("工作色彩空间");
@@ -1535,6 +1645,30 @@ impl MondrianApp {
                     });
                 ui.end_row();
 
+                ui.label("声道布局");
+                egui::ComboBox::from_id_salt("sequence_audio_channel_layout")
+                    .selected_text(audio_channel_layout_label(settings.audio_channel_layout))
+                    .show_ui(ui, |ui| {
+                        for layout in [
+                            AudioChannelLayout::Mono,
+                            AudioChannelLayout::Stereo,
+                            AudioChannelLayout::Surround51,
+                        ] {
+                            if ui
+                                .selectable_value(
+                                    &mut settings.audio_channel_layout,
+                                    layout,
+                                    audio_channel_layout_label(layout),
+                                )
+                                .clicked()
+                            {
+                                settings.audio_channels = layout.channels();
+                            }
+                        }
+                    });
+                settings.audio_channels = settings.audio_channel_layout.channels();
+                ui.end_row();
+
                 ui.label("音频显示格式");
                 egui::ComboBox::from_id_salt("sequence_audio_display_format")
                     .selected_text(audio_display_format_label(settings.audio_display_format))
@@ -1551,12 +1685,49 @@ impl MondrianApp {
                         }
                     });
                 ui.end_row();
+
+                ui.label("预览格式");
+                egui::ComboBox::from_id_salt("sequence_preview_format")
+                    .selected_text(preview_render_format_label(settings.preview.format))
+                    .show_ui(ui, |ui| {
+                        for format in [
+                            PreviewRenderFormat::IFrameOnly,
+                            PreviewRenderFormat::ProResProxy,
+                            PreviewRenderFormat::DnxHrLb,
+                            PreviewRenderFormat::LosslessRgba,
+                        ] {
+                            ui.selectable_value(
+                                &mut settings.preview.format,
+                                format,
+                                preview_render_format_label(format),
+                            );
+                        }
+                    });
+                ui.end_row();
+
+                ui.label("预览分辨率");
+                ui.add(
+                    egui::Slider::new(&mut settings.preview.resolution_scale, 0.125..=1.0)
+                        .text("")
+                        .custom_formatter(|value, _| format!("{:.0}%", value * 100.0)),
+                );
+                ui.end_row();
+
+                ui.label("预览缓存");
+                ui.checkbox(&mut settings.preview.cache_enabled, "");
+                ui.end_row();
             });
 
         ui.add_space(12.0);
+        self.sequence_settings_draft = Some(settings.clone());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button("应用").clicked() {
-                match self.state.update_active_sequence_settings(settings) {
+                let rename_result = self
+                    .state
+                    .rename_sequence(sequence_id, self.sequence_settings_name_buffer.clone());
+                match rename_result
+                    .and_then(|()| self.state.update_active_sequence_settings(settings))
+                {
                     Ok(()) => {
                         self.state.set_status_hint("序列设置已更新", false);
                         self.show_sequence_settings = false;
@@ -2053,6 +2224,23 @@ fn audio_display_format_label(value: AudioDisplayFormat) -> &'static str {
     match value {
         AudioDisplayFormat::AudioSamples => "音频采样",
         AudioDisplayFormat::Milliseconds => "毫秒",
+    }
+}
+
+fn audio_channel_layout_label(value: AudioChannelLayout) -> &'static str {
+    match value {
+        AudioChannelLayout::Mono => "单声道",
+        AudioChannelLayout::Stereo => "立体声",
+        AudioChannelLayout::Surround51 => "5.1 环绕声",
+    }
+}
+
+fn preview_render_format_label(value: PreviewRenderFormat) -> &'static str {
+    match value {
+        PreviewRenderFormat::IFrameOnly => "I-frame Only",
+        PreviewRenderFormat::ProResProxy => "ProRes Proxy",
+        PreviewRenderFormat::DnxHrLb => "DNxHR LB",
+        PreviewRenderFormat::LosslessRgba => "无损 RGBA",
     }
 }
 

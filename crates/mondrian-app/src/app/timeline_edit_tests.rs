@@ -177,6 +177,51 @@ fn switching_sequences_preserves_independent_timelines() {
 }
 
 #[test]
+fn sequence_management_duplicate_rename_delete_updates_collection() {
+    let mut state = create_state_with_sequence();
+    let first = state.sequence.as_ref().expect("sequence").id;
+    state.active_sequence_id = Some(first);
+    state.default_sequence_id = Some(first);
+    state.sync_current_sequence_into_collection();
+
+    let duplicate = state.duplicate_sequence(first, "Duplicate").expect("duplicate sequence");
+    assert_ne!(duplicate, first);
+    assert_eq!(state.active_sequence_id, Some(duplicate));
+    assert_eq!(state.sequence.as_ref().expect("active").name, "Duplicate");
+
+    state.rename_sequence(duplicate, "Renamed").expect("rename");
+    assert_eq!(state.sequence.as_ref().expect("active").name, "Renamed");
+
+    state.delete_sequence(duplicate).expect("delete duplicate");
+    assert_eq!(state.active_sequence_id, Some(first));
+    assert_eq!(state.export_sequences_snapshot().len(), 1);
+}
+
+#[test]
+fn delete_sequence_rejects_nested_references() {
+    let mut state = create_state_with_sequence();
+    let parent_id = state.sequence.as_ref().expect("parent").id;
+    state.active_sequence_id = Some(parent_id);
+    state.default_sequence_id = Some(parent_id);
+    state.sync_current_sequence_into_collection();
+    state.new_sequence("child");
+    let child_id = state.sequence.as_ref().expect("child").id;
+    state.switch_active_sequence(parent_id).expect("switch parent");
+    let tb = state.sequence.as_ref().expect("parent").time_base();
+    state.sequence.as_mut().expect("parent").video_tracks[0]
+        .add_clip(Clip::new_nested_sequence(
+            child_id,
+            TimeCode::new(0, tb),
+            TimeCode::new(10, tb),
+            Some("child".to_string()),
+        ))
+        .expect("add nested");
+
+    let err = state.delete_sequence(child_id).expect_err("nested delete rejected");
+    assert!(format!("{err}").contains("嵌套引用"));
+}
+
+#[test]
 fn precompose_clips_creates_nested_sequence_and_replacement_clip() {
     let mut state = create_state_with_sequence();
     let tb = state.sequence.as_ref().expect("sequence should exist").time_base();

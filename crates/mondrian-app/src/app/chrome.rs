@@ -192,6 +192,32 @@ impl MondrianApp {
                             }
                             ui.close();
                         }
+                        if Self::menu_action(ui, "复制序列", None).clicked() {
+                            let name = format!("{} 副本", sequence.name);
+                            match self.state.duplicate_sequence(sequence.id, name) {
+                                Ok(_) => self.state.set_status_hint("已复制序列", false),
+                                Err(err) => {
+                                    self.state.set_status_hint(format!("复制序列失败：{err}"), true)
+                                }
+                            }
+                            ui.close();
+                        }
+                        if Self::menu_action_enabled(
+                            ui,
+                            "删除序列",
+                            None,
+                            self.state.export_sequences_snapshot().len() > 1,
+                        )
+                        .clicked()
+                        {
+                            match self.state.delete_sequence(sequence.id) {
+                                Ok(()) => self.state.set_status_hint("已删除序列", false),
+                                Err(err) => {
+                                    self.state.set_status_hint(format!("删除序列失败：{err}"), true)
+                                }
+                            }
+                            ui.close();
+                        }
                     });
                     if response.clicked() {
                         if let Err(err) = self.state.switch_active_sequence(sequence.id) {

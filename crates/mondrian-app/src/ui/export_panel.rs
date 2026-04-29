@@ -4,7 +4,10 @@ use egui::Ui;
 use mondrian_assets::AssetKind;
 use mondrian_core::types::SequenceId;
 use mondrian_export::{
-    preset::{ExportConfig, ExportInput, ExportPreset, TimelineExportInput, VideoCodecConfig},
+    preset::{
+        ExportConfig, ExportInput, ExportPreset, TimelineExportInput, TimelineExportRange,
+        VideoCodecConfig,
+    },
     queue::RenderJob,
 };
 use rfd::FileDialog;
@@ -21,6 +24,7 @@ pub struct ExportPanel {
     /// 状态消息
     status_msg: Option<(String, bool)>, // (消息, 是否错误)
     selected_sequence_id: Option<SequenceId>,
+    selected_range: TimelineExportRange,
 }
 
 impl ExportPanel {
@@ -164,6 +168,21 @@ impl ExportPanel {
                     "时间线渲染（V{} / A{}，范围 {}）",
                     video_clips, audio_clips, frame_range
                 ));
+                ui.add_space(6.0);
+                egui::ComboBox::from_id_salt("export_range")
+                    .selected_text(export_range_label(self.selected_range))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.selected_range,
+                            TimelineExportRange::SequenceInOut,
+                            export_range_label(TimelineExportRange::SequenceInOut),
+                        );
+                        ui.selectable_value(
+                            &mut self.selected_range,
+                            TimelineExportRange::EntireSequence,
+                            export_range_label(TimelineExportRange::EntireSequence),
+                        );
+                    });
             } else {
                 ui.horizontal(|ui| {
                     let _ = theme::icon(ui, theme::UiIcon::Warning, palette::status_warning());
@@ -256,6 +275,7 @@ impl ExportPanel {
                 sequences,
                 asset_paths,
                 asset_color_spaces,
+                range: self.selected_range,
             })),
             output_path: path,
         };
@@ -263,6 +283,14 @@ impl ExportPanel {
         state.render_queue.enqueue(job);
         self.status_msg = Some(("已加入导出队列".to_owned(), false));
         tracing::info!("导出任务已加入队列: {}", self.output_path);
+    }
+}
+
+fn export_range_label(range: TimelineExportRange) -> &'static str {
+    match range {
+        TimelineExportRange::SequenceInOut => "序列入点/出点",
+        TimelineExportRange::EntireSequence => "整个序列",
+        TimelineExportRange::WorkArea { .. } => "工作区",
     }
 }
 

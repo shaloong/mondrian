@@ -33,6 +33,11 @@ pub(super) fn load_app_preferences(app: &mut MondrianApp) {
     let _ = preferences.av_clock_role;
     app.state.audio_sync.role = ClockRole::AudioMaster;
     app.new_project_draft = preferences.new_project_draft.clone();
+    app.sequence_presets = if preferences.sequence_presets.is_empty() {
+        builtin_sequence_presets()
+    } else {
+        preferences.sequence_presets.clone()
+    };
     app.shortcuts = preferences.shortcuts.clone();
     app.media_cache_auto_cleanup = preferences.media_cache_auto_cleanup;
     app.media_cache_max_size_gb = preferences.media_cache_max_size_gb.max(1);
@@ -64,6 +69,7 @@ pub(super) fn capture_preferences(app: &MondrianApp) -> AppPreferences {
         },
         av_clock_role: ClockRole::AudioMaster,
         new_project_draft: app.new_project_draft.clone(),
+        sequence_presets: app.sequence_presets.clone(),
         shortcuts: app.shortcuts.clone(),
         media_cache_auto_cleanup: app.media_cache_auto_cleanup,
         media_cache_max_size_gb: app.media_cache_max_size_gb.max(1),

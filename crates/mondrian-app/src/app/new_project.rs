@@ -115,6 +115,14 @@ fn draw_new_project_panel(app: &mut MondrianApp, ui: &mut egui::Ui) {
                         });
                     ui.end_row();
 
+                    ui.label(egui::RichText::new("起始时间码帧").color(text_primary).size(12.5));
+                    ui.add(
+                        egui::DragValue::new(&mut app.new_project_draft.start_timecode_frame)
+                            .range(0..=24 * 60 * 60 * 240)
+                            .suffix(" f"),
+                    );
+                    ui.end_row();
+
                     ui.label(egui::RichText::new("编辑模式").color(text_primary).size(12.5));
                     egui::ComboBox::from_id_salt("new_project_editing_mode")
                         .selected_text(editing_mode_label(app.new_project_draft.editing_mode))
@@ -334,6 +342,26 @@ fn draw_new_project_panel(app: &mut MondrianApp, ui: &mut egui::Ui) {
                         });
                     ui.end_row();
 
+                    ui.label(egui::RichText::new("声道布局").color(text_primary).size(12.5));
+                    egui::ComboBox::from_id_salt("new_project_audio_channel_layout")
+                        .selected_text(audio_channel_layout_label(
+                            app.new_project_draft.audio_channel_layout,
+                        ))
+                        .show_ui(ui, |ui| {
+                            for layout in [
+                                AudioChannelLayout::Mono,
+                                AudioChannelLayout::Stereo,
+                                AudioChannelLayout::Surround51,
+                            ] {
+                                ui.selectable_value(
+                                    &mut app.new_project_draft.audio_channel_layout,
+                                    layout,
+                                    audio_channel_layout_label(layout),
+                                );
+                            }
+                        });
+                    ui.end_row();
+
                     ui.label(egui::RichText::new("音频显示格式").color(text_primary).size(12.5));
                     egui::ComboBox::from_id_salt("new_project_audio_display_format")
                         .selected_text(audio_display_format_label(
@@ -351,6 +379,41 @@ fn draw_new_project_panel(app: &mut MondrianApp, ui: &mut egui::Ui) {
                                 );
                             }
                         });
+                    ui.end_row();
+
+                    ui.label(egui::RichText::new("预览格式").color(text_primary).size(12.5));
+                    egui::ComboBox::from_id_salt("new_project_preview_format")
+                        .selected_text(preview_render_format_label(
+                            app.new_project_draft.preview_format,
+                        ))
+                        .show_ui(ui, |ui| {
+                            for format in [
+                                PreviewRenderFormat::IFrameOnly,
+                                PreviewRenderFormat::ProResProxy,
+                                PreviewRenderFormat::DnxHrLb,
+                                PreviewRenderFormat::LosslessRgba,
+                            ] {
+                                ui.selectable_value(
+                                    &mut app.new_project_draft.preview_format,
+                                    format,
+                                    preview_render_format_label(format),
+                                );
+                            }
+                        });
+                    ui.end_row();
+
+                    ui.label(egui::RichText::new("预览分辨率").color(text_primary).size(12.5));
+                    ui.add(
+                        egui::Slider::new(
+                            &mut app.new_project_draft.preview_resolution_scale,
+                            0.125..=1.0,
+                        )
+                        .custom_formatter(|value, _| format!("{:.0}%", value * 100.0)),
+                    );
+                    ui.end_row();
+
+                    ui.label(egui::RichText::new("预览缓存").color(text_primary).size(12.5));
+                    ui.checkbox(&mut app.new_project_draft.preview_cache_enabled, "");
                     ui.end_row();
                 },
             );
@@ -403,11 +466,17 @@ fn commit_new_project(app: &mut MondrianApp) {
         settings.resolution.width = app.new_project_draft.width.max(1);
         settings.resolution.height = app.new_project_draft.height.max(1);
         settings.frame_rate = fps;
+        settings.start_timecode_frame = app.new_project_draft.start_timecode_frame.max(0);
         settings.pixel_aspect_ratio = app.new_project_draft.pixel_aspect_ratio;
         settings.field_order = app.new_project_draft.field_order;
         settings.video_display_format = app.new_project_draft.video_display_format;
         settings.audio_sample_rate = app.new_project_draft.audio_sample_rate;
         settings.audio_display_format = app.new_project_draft.audio_display_format;
+        settings.audio_channel_layout = app.new_project_draft.audio_channel_layout;
+        settings.audio_channels = app.new_project_draft.audio_channel_layout.channels();
+        settings.preview.format = app.new_project_draft.preview_format;
+        settings.preview.resolution_scale = app.new_project_draft.preview_resolution_scale;
+        settings.preview.cache_enabled = app.new_project_draft.preview_cache_enabled;
         settings.color_space = app.new_project_draft.color_space;
         settings.auto_tone_map_media = app.new_project_draft.auto_tone_map_media;
         settings.color_management.workflow = app.new_project_draft.color_workflow;

@@ -93,6 +93,116 @@ impl AppState {
         Ok(())
     }
 
+    pub fn rename_sequence(
+        &mut self,
+        sequence_id: SequenceId,
+        name: impl Into<String>,
+    ) -> mondrian_core::Result<()> {
+        let name = name.into();
+        if name.trim().is_empty() {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "rename_sequence".to_string(),
+                reason: "序列名称不能为空".to_string(),
+            });
+        }
+        self.sync_current_sequence_into_collection();
+        let sequence = self
+            .sequences
+            .iter_mut()
+            .find(|sequence| sequence.id == sequence_id)
+            .ok_or_else(|| mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "rename_sequence".to_string(),
+                reason: format!("序列不存在: {sequence_id}"),
+            })?;
+        sequence.name = name.trim().to_string();
+        if self.active_sequence_id == Some(sequence_id) {
+            self.sequence = Some(sequence.clone());
+        }
+        let _ = self.save_project_file();
+        Ok(())
+    }
+
+    pub fn duplicate_sequence(
+        &mut self,
+        sequence_id: SequenceId,
+        name: impl Into<String>,
+    ) -> mondrian_core::Result<SequenceId> {
+        self.sync_current_sequence_into_collection();
+        let mut duplicated = self
+            .sequences
+            .iter()
+            .find(|sequence| sequence.id == sequence_id)
+            .cloned()
+            .ok_or_else(|| mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "duplicate_sequence".to_string(),
+                reason: format!("序列不存在: {sequence_id}"),
+            })?;
+        let fallback_name = format!("{} 副本", duplicated.name);
+        duplicated.id = SequenceId::new();
+        duplicated.name = name.into();
+        if duplicated.name.trim().is_empty() {
+            duplicated.name = fallback_name;
+        }
+        let duplicated_id = duplicated.id;
+        self.sequences.push(duplicated);
+        self.switch_active_sequence(duplicated_id)?;
+        let _ = self.save_project_file();
+        Ok(duplicated_id)
+    }
+
+    pub fn delete_sequence(&mut self, sequence_id: SequenceId) -> mondrian_core::Result<()> {
+        self.sync_current_sequence_into_collection();
+        if self.sequences.len() <= 1 {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "delete_sequence".to_string(),
+                reason: "至少保留一个序列".to_string(),
+            });
+        }
+        if self.sequence_is_nested_reference(sequence_id) {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "delete_sequence".to_string(),
+                reason: "序列正被嵌套引用，不能删除".to_string(),
+            });
+        }
+        let Some(index) = self.sequences.iter().position(|sequence| sequence.id == sequence_id)
+        else {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "delete_sequence".to_string(),
+                reason: format!("序列不存在: {sequence_id}"),
+            });
+        };
+        self.sequences.remove(index);
+        let fallback_id = self.sequences.first().map(|sequence| sequence.id).ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "delete_sequence".to_string(),
+                reason: "删除后没有可用序列".to_string(),
+            }
+        })?;
+        if self.default_sequence_id == Some(sequence_id) {
+            self.default_sequence_id = Some(fallback_id);
+        }
+        if self.active_sequence_id == Some(sequence_id) {
+            self.active_sequence_id = Some(fallback_id);
+            self.sequence = self.sequences.first().cloned();
+            self.playback = PlaybackState::Stopped;
+            self.cmd_history = mondrian_timeline::command::CommandHistory::new(200);
+        }
+        self.sequence_navigation_stack.retain(|id| *id != sequence_id);
+        let _ = self.save_project_file();
+        Ok(())
+    }
+
+    fn sequence_is_nested_reference(&self, sequence_id: SequenceId) -> bool {
+        self.sequences.iter().any(|sequence| {
+            sequence
+                .video_tracks
+                .iter()
+                .chain(sequence.audio_tracks.iter())
+                .flat_map(|track| track.clips.iter())
+                .any(|clip| clip.nested_sequence_id == Some(sequence_id))
+        })
+    }
+
     pub fn update_active_sequence_settings(
         &mut self,
         settings: mondrian_timeline::sequence::SequenceSettings,

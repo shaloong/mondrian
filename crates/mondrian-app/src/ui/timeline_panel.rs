@@ -984,6 +984,8 @@ impl TimelinePanel {
             .as_ref()
             .map(|s| s.settings.video_display_format)
             .unwrap_or(VideoDisplayFormat::Frames);
+        let start_timecode_frame =
+            state.sequence.as_ref().map(|s| s.settings.start_timecode_frame).unwrap_or(0);
         let ruler_scale = choose_ruler_scale(self.pixels_per_frame, fps);
 
         let start_frame = self.scroll_offset_frames as i64;
@@ -1030,7 +1032,13 @@ impl TimelinePanel {
                         rect.top() + tokens::timeline_ruler_label_inset_y(),
                     ),
                     egui::Align2::LEFT_TOP,
-                    format_ruler_label(f, fps, display_format, ruler_scale.granularity),
+                    format_ruler_label(
+                        f,
+                        fps,
+                        display_format,
+                        ruler_scale.granularity,
+                        start_timecode_frame,
+                    ),
                     typography::mono_small(),
                     palette::text_muted(),
                 );
@@ -2515,32 +2523,34 @@ fn format_ruler_label(
     fps: Rational,
     display_format: VideoDisplayFormat,
     granularity: RulerGranularity,
+    start_timecode_frame: i64,
 ) -> String {
+    let display_frame = frame.saturating_add(start_timecode_frame.max(0));
     if display_format == VideoDisplayFormat::Frames {
         return match granularity {
-            RulerGranularity::Frame => frame.max(0).to_string(),
+            RulerGranularity::Frame => display_frame.max(0).to_string(),
             RulerGranularity::Second | RulerGranularity::Minute => {
-                let seconds = frame_to_seconds(frame, fps).floor() as i64;
+                let seconds = frame_to_seconds(display_frame, fps).floor() as i64;
                 format_seconds_label(seconds, granularity)
             }
         };
     }
 
     if display_format == VideoDisplayFormat::FeetAndFrames16mm {
-        return format_feet_and_frames(frame, 40);
+        return format_feet_and_frames(display_frame, 40);
     }
 
     if display_format == VideoDisplayFormat::FeetAndFrames35mm {
-        return format_feet_and_frames(frame, 16);
+        return format_feet_and_frames(display_frame, 16);
     }
 
     if display_format == VideoDisplayFormat::Timecode2997DropFrame {
-        return format_drop_frame_timecode(frame, 30);
+        return format_drop_frame_timecode(display_frame, 30);
     }
 
     let fps_nominal = fps.to_f64().round().max(1.0) as i64;
-    let total_seconds = frame.div_euclid(fps_nominal);
-    let frame_in_second = frame.rem_euclid(fps_nominal);
+    let total_seconds = display_frame.div_euclid(fps_nominal);
+    let frame_in_second = display_frame.rem_euclid(fps_nominal);
 
     match granularity {
         RulerGranularity::Frame => {
@@ -2966,8 +2976,21 @@ mod tests {
             Rational::FPS_2997,
             VideoDisplayFormat::Timecode2997DropFrame,
             RulerGranularity::Frame,
+            0,
         );
         assert_eq!(label, "00:01:00;02");
+    }
+
+    #[test]
+    fn ruler_label_applies_sequence_start_timecode_offset() {
+        let label = format_ruler_label(
+            0,
+            Rational::FPS_25,
+            VideoDisplayFormat::Timecode2997NonDropFrame,
+            RulerGranularity::Frame,
+            25 * 60 * 60,
+        );
+        assert_eq!(label, "01:00:00:00");
     }
 
     #[test]
@@ -2978,6 +3001,7 @@ mod tests {
                 Rational::FPS_24,
                 VideoDisplayFormat::FeetAndFrames16mm,
                 RulerGranularity::Frame,
+                0,
             ),
             "1+01"
         );
@@ -2987,6 +3011,7 @@ mod tests {
                 Rational::FPS_24,
                 VideoDisplayFormat::FeetAndFrames35mm,
                 RulerGranularity::Frame,
+                0,
             ),
             "1+01"
         );
