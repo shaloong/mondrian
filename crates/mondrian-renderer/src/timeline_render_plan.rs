@@ -305,6 +305,39 @@ mod tests {
     }
 
     #[test]
+    fn color_diagnostics_expose_media_interpretation_and_sequence_output() {
+        let mut seq = Sequence::new("color-diagnostics");
+        let tb = seq.time_base();
+        seq.settings.color_space = ColorSpace::Rec2020;
+        seq.settings.color_management.output_color_space = ColorSpace::Rec2100Pq;
+        let mut clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(20, tb));
+        let asset_id = clip.asset_id;
+        clip.interpretation.color_space_override = Some(ColorSpace::AppleLog);
+        clip.interpretation.pixel_aspect_ratio_override = Some(PixelAspectRatio::DvcproHd);
+        clip.interpretation.field_order_override = Some(FieldOrder::LowerFirst);
+        clip.interpretation.alpha = AlphaInterpretation::Ignore;
+        seq.video_tracks[0].add_clip(clip).expect("add clip");
+
+        let diagnostics = collect_timeline_color_diagnostics(
+            &seq,
+            4,
+            seq.settings.color_management.output_color_space,
+        );
+        assert_eq!(diagnostics.len(), 1);
+        let diagnostic = &diagnostics[0];
+        assert_eq!(diagnostic.asset_id, asset_id);
+        assert_eq!(diagnostic.input_color_space_override, Some(ColorSpace::AppleLog));
+        assert_eq!(diagnostic.working_color_space, ColorSpace::Rec2020);
+        assert_eq!(diagnostic.output_color_space, ColorSpace::Rec2100Pq);
+        assert_eq!(
+            diagnostic.pixel_aspect_ratio_override,
+            Some(PixelAspectRatio::DvcproHd)
+        );
+        assert_eq!(diagnostic.field_order_override, Some(FieldOrder::LowerFirst));
+        assert_eq!(diagnostic.alpha_interpretation, AlphaInterpretation::Ignore);
+    }
+
+    #[test]
     fn render_plan_carries_nested_processing_mode() {
         let mut seq = Sequence::new("render-plan-nested-processing");
         seq.settings.color_management.nested_processing =
