@@ -120,4 +120,7 @@ pub struct TimelineExportInput {
     pub asset_color_spaces: HashMap<AssetId, ColorSpace>,
     #[serde(default)]
     pub range: TimelineExportRange,
+    /// 项目级色彩管理设置（所有序列默认继承）。
+    #[serde(default)]
+    pub project_color_management: mondrian_core::ProjectColorManagement,
 }

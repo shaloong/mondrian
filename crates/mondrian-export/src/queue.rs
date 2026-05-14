@@ -11,7 +11,7 @@ use crate::validator::{
 use chrono::{DateTime, Utc};
 use mondrian_core::{
     convert_rgba8_in_place,
-    types::{AssetId, ColorSpace, JobId, Rational, TimeCode},
+    types::{AssetId, ColorEngine, ColorSpace, JobId, Rational, TimeCode},
     ColorPipeline,
 };
 use mondrian_media::audio::{
@@ -23,9 +23,7 @@ use mondrian_renderer::{
     TimelineCompositeElement, TimelineCompositeOptions, TimelineCompositeScratch,
     TimelineMediaLayer, TimelineRenderPlanElement,
 };
-use mondrian_timeline::sequence::{
-    ExportBitDepth, SequenceRenderColorContext, SequenceSettings, VideoRange,
-};
+use mondrian_timeline::sequence::{ColorContext, ExportBitDepth, SequenceSettings, VideoRange};
 use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -346,6 +344,9 @@ fn execute_timeline_export(
             &mut cmd,
             timeline.sequence.settings.color_management.output_color_space,
         );
+        if timeline.sequence.settings.color_management.preserve_hdr_metadata {
+            apply_hdr_metadata_args(&mut cmd, &timeline.sequence.settings);
+        }
         if !matches!(&audio_input, TimelineAudioInput::Disabled) {
             apply_audio_codec_args(&mut cmd, &job.config.preset.audio);
         }
@@ -896,13 +897,21 @@ fn render_timeline_frame_into(
         canvas.resize(required_len, 0);
     }
 
+    let color_context = timeline
+        .sequence
+        .settings
+        .root_render_color_context(&timeline.project_color_management);
+
+    // Ensure the color engine is ready before rendering.
+    color_context.engine.ensure_loaded().map_err(|e| format!("OCIO: {e}"))?;
+
     render_sequence_frame_into(
         timeline,
         &timeline.sequence,
         timeline_frame,
         width,
         height,
-        timeline.sequence.settings.root_render_color_context(),
+        color_context,
         canvas,
         0,
     )
@@ -914,13 +923,16 @@ fn render_sequence_frame_into(
     timeline_frame: i64,
     width: u32,
     height: u32,
-    color_context: SequenceRenderColorContext,
+    color_context: ColorContext,
     canvas: &mut Vec<u8>,
     depth: usize,
 ) -> Result<(), String> {
     if depth > 16 {
         return Err("序列嵌套层级过深，已停止渲染以避免循环".to_string());
     }
+
+    // Ensure the color engine is ready.
+    color_context.engine.ensure_loaded().map_err(|e| format!("OCIO: {e}"))?;
 
     let required_len = width as usize * height as usize * 4;
     if canvas.len() != required_len {
@@ -969,7 +981,7 @@ fn render_sequence_frame_into(
                     path.as_path(),
                     input_color_space,
                     color_context.working_color_space,
-                    color_context.backend,
+                    &color_context.engine,
                     color_context.tone_map,
                     media.source_secs,
                     width,
@@ -984,7 +996,7 @@ fn render_sequence_frame_into(
                 path.as_path(),
                 input_color_space,
                 color_context.working_color_space,
-                color_context.backend,
+                &color_context.engine,
                 color_context.tone_map,
                 media.source_secs,
                 width,
@@ -1090,7 +1102,7 @@ fn render_sequence_frame_into(
             color_context.output_color_space,
             color_context.tone_map,
         )
-        .with_backend(color_context.backend),
+        .with_engine(color_context.engine.clone()),
     );
     Ok(())
 }
@@ -1100,7 +1112,7 @@ fn decode_video_layer_scaled(
     path: &Path,
     input_color_space: ColorSpace,
     working_color_space: ColorSpace,
-    backend: mondrian_core::ColorManagementBackend,
+    engine: &ColorEngine,
     tone_map: bool,
     source_secs: f64,
     width: u32,
@@ -1117,7 +1129,7 @@ fn decode_video_layer_scaled(
             working_color_space,
             tone_map,
         )
-        .with_backend(backend),
+        .with_engine(engine.clone()),
     );
     Ok(Arc::new(DecodedVideoLayer {
         width: decoded.width,
@@ -1545,6 +1557,20 @@ fn apply_color_tag_args(cmd: &mut Command, color_space: ColorSpace) {
         .arg(tags.colorspace);
 }
 
+/// 写入 HDR10 元数据（母版显示色彩体积 + 内容光级别）。
+///
+/// 当序列设置中 `preserve_hdr_metadata` 为 true 且输出为 HDR 色彩空间时调用。
+fn apply_hdr_metadata_args(cmd: &mut Command, settings: &SequenceSettings) {
+    let cm = &settings.color_management;
+    let mastering = cm
+        .hdr_mastering_display
+        .as_deref()
+        .unwrap_or("G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1)");
+    let cll = cm.hdr_max_cll.as_deref().unwrap_or("1000,400");
+    cmd.arg("-x265-params").arg(format!("master-display={mastering}"));
+    cmd.arg("-x265-params").arg(format!("max-cll={cll}"));
+}
+
 fn apply_sequence_video_format_args(cmd: &mut Command, settings: &SequenceSettings) {
     let pix_fmt = match settings.color_management.export_bit_depth {
         ExportBitDepth::Eight => "yuv420p",
@@ -1867,6 +1893,7 @@ mod tests {
             asset_paths: HashMap::new(),
             asset_color_spaces: HashMap::new(),
             range: TimelineExportRange::SequenceInOut,
+            project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
 
         let range = compute_timeline_render_range(&timeline);
@@ -1889,6 +1916,7 @@ mod tests {
             asset_paths: HashMap::new(),
             asset_color_spaces: HashMap::new(),
             range: TimelineExportRange::EntireSequence,
+            project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
 
         let range = compute_timeline_render_range(&timeline);
@@ -1914,6 +1942,7 @@ mod tests {
             asset_paths,
             asset_color_spaces: HashMap::new(),
             range: TimelineExportRange::SequenceInOut,
+            project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
 
         let range = compute_timeline_render_range(&timeline);
@@ -1967,6 +1996,7 @@ mod tests {
             asset_paths: HashMap::new(),
             asset_color_spaces: HashMap::new(),
             range: TimelineExportRange::SequenceInOut,
+            project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
 
         let mut canvas = vec![77u8; 4 * 2 * 4];
