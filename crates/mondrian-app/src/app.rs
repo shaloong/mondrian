@@ -399,7 +399,7 @@ impl NewProjectDraft {
             ColorMode::Aces => {
                 self.color_workflow = ColorWorkflow::Aces;
                 self.engine = ColorEngine::Ocio {
-                    source: OcioConfigSource::Builtin("aces_1.2".into()),
+                    source: OcioConfigSource::Builtin { name: "aces_1.2".into() },
                 };
                 self.preserve_hdr_metadata = false;
             }

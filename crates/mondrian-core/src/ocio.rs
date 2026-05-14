@@ -80,14 +80,14 @@ pub fn ocio_available() -> bool {
 /// calling it again with the same effective source is a no-op.
 pub fn ensure_ocio_loaded(source: &OcioConfigSource) -> Result<(), String> {
     match source {
-        OcioConfigSource::Builtin(name) => {
+        OcioConfigSource::Builtin { name } => {
             let virtual_path = PathBuf::from(format!("builtin:{name}"));
             if already_loaded_with(&virtual_path) {
                 return Ok(());
             }
             init_ocio_builtin(name)
         }
-        OcioConfigSource::Path(path) => {
+        OcioConfigSource::Path { path } => {
             if already_loaded_with(path) {
                 return Ok(());
             }

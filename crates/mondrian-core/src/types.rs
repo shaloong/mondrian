@@ -365,18 +365,18 @@ pub enum OcioConfigSource {
     /// 使用内置 OCIO 配置（如 ACES 1.2、CG Config）。
     /// 名称可通过 [`crate::ocio::builtin_config_names`] 获取。
     #[serde(rename = "builtin")]
-    Builtin(String),
+    Builtin { name: String },
     /// 显式指定 `config.ocio` 文件路径。
     #[serde(rename = "path")]
-    Path(PathBuf),
+    Path { path: PathBuf },
 }
 
 impl fmt::Display for OcioConfigSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Environment => write!(f, "$OCIO"),
-            Self::Builtin(name) => write!(f, "内置: {name}"),
-            Self::Path(p) => write!(f, "{}", p.display()),
+            Self::Builtin { name } => write!(f, "内置: {name}"),
+            Self::Path { path } => write!(f, "{}", path.display()),
         }
     }
 }
@@ -406,5 +406,39 @@ mod tests {
         );
         assert!(range.contains(TimeCode::new(15, Rational::new(1, 25))));
         assert!(!range.contains(TimeCode::new(5, Rational::new(1, 25))));
+    }
+
+    // ── OCIO config source / color engine serde ────────────────────────────
+
+    #[test]
+    fn ocio_config_source_round_trip() {
+        let sources = vec![
+            OcioConfigSource::Environment,
+            OcioConfigSource::Builtin { name: "aces_1.2".into() },
+            OcioConfigSource::Path { path: PathBuf::from("/tmp/config.ocio") },
+        ];
+        for source in &sources {
+            let json = serde_json::to_string(source).expect("serialize");
+            let back: OcioConfigSource = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(
+                &back, source,
+                "round-trip failed for {source:?}: json={json}"
+            );
+        }
+    }
+
+    #[test]
+    fn color_engine_with_ocio_source_round_trip() {
+        let engine = ColorEngine::Ocio {
+            source: OcioConfigSource::Builtin { name: "aces_1.2".into() },
+        };
+        let json = serde_json::to_string(&engine).expect("serialize ColorEngine::Ocio");
+        let back: ColorEngine = serde_json::from_str(&json).expect("deserialize ColorEngine::Ocio");
+        assert_eq!(back, engine);
+
+        let smart = ColorEngine::MondrianSmart;
+        let json2 = serde_json::to_string(&smart).expect("serialize MondrianSmart");
+        let back2: ColorEngine = serde_json::from_str(&json2).expect("deserialize MondrianSmart");
+        assert_eq!(back2, smart);
     }
 }

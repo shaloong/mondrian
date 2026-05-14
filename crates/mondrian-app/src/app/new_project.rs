@@ -447,7 +447,7 @@ fn draw_advanced_tab(
                             ui.selectable_value(
                                 &mut app.new_project_draft.engine,
                                 ColorEngine::Ocio {
-                                    source: OcioConfigSource::Builtin(name.clone()),
+                                    source: OcioConfigSource::Builtin { name: name.clone() },
                                 },
                                 format!("OCIO: {ui_name}"),
                             );
@@ -456,7 +456,7 @@ fn draw_advanced_tab(
                 ui.end_row();
 
                 // OCIO path input
-                if let ColorEngine::Ocio { source: OcioConfigSource::Path(ref mut p) } =
+                if let ColorEngine::Ocio { source: OcioConfigSource::Path { path: ref mut p } } =
                     &mut app.new_project_draft.engine
                 {
                     ui.label(egui::RichText::new("OCIO 路径").color(text_primary));

@@ -1372,7 +1372,7 @@ mod tests {
     fn inherit_flag_controls_engine_source() {
         let project_cm = ProjectColorManagement {
             engine: ColorEngine::Ocio {
-                source: OcioConfigSource::Builtin("aces_1.2".into()),
+                source: OcioConfigSource::Builtin { name: String::from("aces_1.2") },
             },
         };
 
@@ -1384,7 +1384,7 @@ mod tests {
         assert_eq!(
             ctx.engine,
             ColorEngine::Ocio {
-                source: OcioConfigSource::Builtin("aces_1.2".into())
+                source: OcioConfigSource::Builtin { name: String::from("aces_1.2") },
             }
         );
 
