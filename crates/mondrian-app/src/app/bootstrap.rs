@@ -122,6 +122,14 @@ impl MondrianApp {
     }
 
     pub(super) fn open_project_by_path(&mut self, project_file: PathBuf) -> anyhow::Result<()> {
+        if !project_file.exists() {
+            let msg = format!(
+                "项目文件不存在，已从最近记录中移除：{}",
+                project_file.display()
+            );
+            self.recent_projects.retain(|p| p != &project_file);
+            return Err(anyhow::anyhow!(msg));
+        }
         self.state.open_project_file(project_file.clone())?;
         self.finish_project_opened();
         self.record_recent_project(project_file);

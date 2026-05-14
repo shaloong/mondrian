@@ -893,6 +893,7 @@ impl eframe::App for MondrianApp {
             let recent_items = self
                 .recent_projects
                 .iter()
+                .filter(|p| p.exists())
                 .map(|project_path| {
                     let (last_edited_label, project_size_label) =
                         Self::bootstrap_recent_project_meta(project_path.as_path());

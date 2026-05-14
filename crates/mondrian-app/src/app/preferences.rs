@@ -46,7 +46,8 @@ pub(super) fn load_app_preferences(app: &mut MondrianApp) {
     app.auto_save_interval_secs = preferences.auto_save_interval_secs.max(10);
     app.auto_save_max_recovery_points = preferences.auto_save_max_recovery_points.max(1);
     app.auto_save_retention_days = preferences.auto_save_retention_days.max(1);
-    app.recent_projects = preferences.recent_projects.clone();
+    app.recent_projects =
+        preferences.recent_projects.iter().filter(|p| p.exists()).cloned().collect();
     app.show_video_metrics = preferences.show_video_metrics;
     app.show_audio_metrics = preferences.show_audio_metrics;
     app.timeline_panel_height = preferences.timeline_panel_height.max(160.0);
@@ -78,7 +79,7 @@ pub(super) fn capture_preferences(app: &MondrianApp) -> AppPreferences {
         auto_save_interval_secs: app.auto_save_interval_secs.max(10),
         auto_save_max_recovery_points: app.auto_save_max_recovery_points.max(1),
         auto_save_retention_days: app.auto_save_retention_days.max(1),
-        recent_projects: app.recent_projects.clone(),
+        recent_projects: app.recent_projects.iter().filter(|p| p.exists()).cloned().collect(),
         show_video_metrics: app.show_video_metrics,
         show_audio_metrics: app.show_audio_metrics,
         timeline_panel_height: app.timeline_panel_height.max(160.0),
