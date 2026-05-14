@@ -61,7 +61,7 @@ impl EffectLibraryPanel {
                 for effect_type in effect_library_types() {
                     let clicked = ui
                         .add_sized(
-                            [ui.available_width(), 34.0],
+                            [ui.available_width(), tokens::effect_item_height()],
                             egui::Button::new(effect_type.display_name()),
                         )
                         .clicked();
@@ -79,7 +79,7 @@ impl EffectLibraryPanel {
                             }
                         }
                     }
-                    ui.add_space(6.0);
+                    ui.add_space(tokens::spacing_sm());
                 }
             });
     }

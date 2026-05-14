@@ -138,23 +138,28 @@ pub fn show_project_bootstrap_window(
                 ui.painter().rect_stroke(
                     close_rect,
                     corner_radius(crate::ui::theme::tokens::button_rounding()),
-                    egui::Stroke::new(1.0, bg_surface_hover),
+                    egui::Stroke::new(
+                        crate::ui::theme::tokens::border_standard(),
+                        bg_surface_hover,
+                    ),
                     egui::StrokeKind::Inside,
                 );
             }
             let x_color = text_primary;
-            let x_stroke = egui::Stroke::new(2.0, x_color);
+            let x_inset = crate::ui::theme::tokens::startup_close_button_size() * 0.285;
+            let x_stroke =
+                egui::Stroke::new(crate::ui::theme::tokens::border_standard() * 2.0, x_color);
             ui.painter().line_segment(
                 [
-                    close_rect.left_top() + egui::vec2(8.0, 8.0),
-                    close_rect.right_bottom() - egui::vec2(8.0, 8.0),
+                    close_rect.left_top() + egui::vec2(x_inset, x_inset),
+                    close_rect.right_bottom() - egui::vec2(x_inset, x_inset),
                 ],
                 x_stroke,
             );
             ui.painter().line_segment(
                 [
-                    close_rect.left_bottom() + egui::vec2(8.0, -8.0),
-                    close_rect.right_top() + egui::vec2(-8.0, 8.0),
+                    close_rect.left_bottom() + egui::vec2(x_inset, -x_inset),
+                    close_rect.right_top() + egui::vec2(-x_inset, x_inset),
                 ],
                 x_stroke,
             );
@@ -203,19 +208,25 @@ fn paint_action_card(
     ));
     ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| {
         ui.set_clip_rect(content.expand(2.0));
-        ui.spacing_mut().item_spacing = egui::vec2(10.0, 12.0);
+        let sp = crate::ui::theme::tokens::spacing_md();
+        ui.spacing_mut().item_spacing = egui::vec2(sp, sp + 2.0);
 
         ui.add_space(startup_right_content_top_offset);
 
-        ui.label(egui::RichText::new("开始工作").size(17.0).strong().color(text_primary));
-        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new("开始工作")
+                .size(17.0)
+                .strong()
+                .color(text_primary),
+        );
+        ui.add_space(crate::ui::theme::tokens::spacing_sm());
 
         ui.horizontal(|ui| {
             let gap = crate::ui::theme::tokens::panel_gap();
             let icon_size = crate::ui::theme::tokens::icon_size();
-            let button_h = 34.0;
-            let text_font = egui::FontId::proportional(12.5);
-            let horizontal_padding = 12.0;
+            let button_h = crate::ui::theme::tokens::effect_item_height();
+            let text_font = crate::ui::theme::typography::button();
+            let horizontal_padding = crate::ui::theme::tokens::panel_inner_margin_x();
             let available = ui.available_width().max(160.0);
             let max_per_button = ((available - gap).max(120.0) * 0.5).floor();
 
@@ -263,7 +274,7 @@ fn paint_action_card(
                 "打开项目",
                 crate::ui::theme::UiIcon::FolderOpen,
                 bg_surface_raised,
-                egui::Stroke::new(1.0, border_subtle),
+                egui::Stroke::new(crate::ui::theme::tokens::border_standard(), border_subtle),
                 button_rounding,
                 text_primary,
                 text_font,
@@ -274,18 +285,26 @@ fn paint_action_card(
             }
         });
 
-        ui.add_space(28.0);
-        ui.label(egui::RichText::new("最近项目").size(11.0).strong().color(text_muted));
+        ui.add_space(crate::ui::theme::tokens::spacing_lg());
+        ui.label(
+            egui::RichText::new("最近项目")
+                .font(crate::ui::theme::typography::metadata())
+                .strong()
+                .color(text_muted),
+        );
 
-        // 统一卡片垂直节奏，避免出现“上紧下松”的视觉错觉。
+        // 统一卡片垂直节奏，避免出现”上紧下松”的视觉错觉。
+        let item_card_margin_x = crate::ui::theme::tokens::search_bar_margin_x();
+        let item_card_margin_y_loose = crate::ui::theme::tokens::search_bar_margin_y() + 5.0;
+        let item_card_margin_y_tight = crate::ui::theme::tokens::search_bar_margin_y() - 1.0;
         let startup_item_card_inner_margin = egui::Margin {
-            left: margin_px(10.0),
-            right: margin_px(10.0),
-            top: margin_px(9.0),
-            bottom: margin_px(3.0),
+            left: margin_px(item_card_margin_x),
+            right: margin_px(item_card_margin_x),
+            top: margin_px(item_card_margin_y_loose),
+            bottom: margin_px(item_card_margin_y_tight),
         };
         let startup_item_line_gap = 0.0;
-        let startup_meta_icon_size = 11.0;
+        let startup_meta_icon_size = crate::ui::theme::tokens::font_metadata();
 
         let recent_list_max_h = (content.height() * 0.34).clamp(120.0, 180.0);
         egui::ScrollArea::vertical()
@@ -302,7 +321,10 @@ fn paint_action_card(
                         ui.set_max_width(recent_card_width);
                         egui::Frame::new()
                             .fill(bg_surface_raised)
-                            .stroke(egui::Stroke::new(1.0, border_subtle))
+                            .stroke(egui::Stroke::new(
+                                crate::ui::theme::tokens::border_standard(),
+                                border_subtle,
+                            ))
                             .corner_radius(corner_radius(section_rounding))
                             .inner_margin(startup_item_card_inner_margin)
                             .show(ui, |ui| {
@@ -310,7 +332,7 @@ fn paint_action_card(
                                 ui.add(
                                     egui::Label::new(
                                         egui::RichText::new("暂无最近项目")
-                                            .size(12.0)
+                                            .font(crate::ui::theme::typography::body_small())
                                             .color(text_muted),
                                     )
                                     .selectable(false),
@@ -323,7 +345,10 @@ fn paint_action_card(
                 for item in recent_items {
                     let card = egui::Frame::new()
                         .fill(bg_surface_raised)
-                        .stroke(egui::Stroke::new(1.0, border_subtle))
+                        .stroke(egui::Stroke::new(
+                            crate::ui::theme::tokens::border_standard(),
+                            border_subtle,
+                        ))
                         .corner_radius(corner_radius(list_row_radius.min(section_rounding + 2.0)))
                         .inner_margin(startup_item_card_inner_margin);
 
@@ -337,14 +362,15 @@ fn paint_action_card(
                                 ui.add(
                                     egui::Label::new(
                                         egui::RichText::new(&item.project_name)
-                                            .size(13.0)
+                                            .font(crate::ui::theme::typography::body())
                                             .color(text_primary),
                                     )
                                     .truncate()
                                     .selectable(false),
                                 );
                                 ui.horizontal(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 4.0;
+                                    ui.spacing_mut().item_spacing.x =
+                                        crate::ui::theme::tokens::spacing_xs();
                                     let (icon_rect, _) = ui.allocate_exact_size(
                                         egui::vec2(startup_meta_icon_size, startup_meta_icon_size),
                                         egui::Sense::hover(),
@@ -361,7 +387,7 @@ fn paint_action_card(
                                                 "{} · {}",
                                                 item.last_edited_label, item.project_size_label
                                             ))
-                                            .size(10.5)
+                                            .font(crate::ui::theme::typography::metadata())
                                             .color(text_muted),
                                         )
                                         .selectable(false),
@@ -378,7 +404,10 @@ fn paint_action_card(
                         ui.painter().rect_stroke(
                             response.rect,
                             corner_radius(list_row_radius.min(section_rounding + 2.0)),
-                            egui::Stroke::new(1.0, bg_surface_hover),
+                            egui::Stroke::new(
+                                crate::ui::theme::tokens::border_standard(),
+                                bg_surface_hover,
+                            ),
                             egui::StrokeKind::Inside,
                         );
                     }
@@ -389,13 +418,18 @@ fn paint_action_card(
                         )));
                     }
 
-                    ui.add_space(8.0);
+                    ui.add_space(crate::ui::theme::tokens::spacing_sm() + 2.0);
                 }
             });
 
         if !recovery_items.is_empty() {
-            ui.add_space(14.0);
-            ui.label(egui::RichText::new("崩溃恢复").size(11.0).strong().color(text_muted));
+            ui.add_space(crate::ui::theme::tokens::spacing_md() + 4.0);
+            ui.label(
+                egui::RichText::new("崩溃恢复")
+                    .font(crate::ui::theme::typography::metadata())
+                    .strong()
+                    .color(text_muted),
+            );
 
             let recovery_list_max_h = (content.height() * 0.22).clamp(96.0, 140.0);
             egui::ScrollArea::vertical()
@@ -409,7 +443,10 @@ fn paint_action_card(
                     for (idx, item) in recovery_items.iter().enumerate() {
                         let card = egui::Frame::new()
                             .fill(bg_surface_raised)
-                            .stroke(egui::Stroke::new(1.0, border_subtle))
+                            .stroke(egui::Stroke::new(
+                                crate::ui::theme::tokens::border_standard(),
+                                border_subtle,
+                            ))
                             .corner_radius(corner_radius(
                                 list_row_radius.min(section_rounding + 2.0),
                             ))
@@ -425,7 +462,7 @@ fn paint_action_card(
                                     ui.add(
                                         egui::Label::new(
                                             egui::RichText::new(&item.project_name)
-                                                .size(13.0)
+                                                .font(crate::ui::theme::typography::body())
                                                 .color(text_primary),
                                         )
                                         .truncate()
@@ -440,7 +477,8 @@ fn paint_action_card(
                                         item.age_label.clone()
                                     };
                                     ui.horizontal(|ui| {
-                                        ui.spacing_mut().item_spacing.x = 4.0;
+                                        ui.spacing_mut().item_spacing.x =
+                                            crate::ui::theme::tokens::spacing_xs();
                                         let (icon_rect, _) = ui.allocate_exact_size(
                                             egui::vec2(
                                                 startup_meta_icon_size,
@@ -457,7 +495,7 @@ fn paint_action_card(
                                         ui.add(
                                             egui::Label::new(
                                                 egui::RichText::new(detail)
-                                                    .size(10.5)
+                                                    .font(crate::ui::theme::typography::metadata())
                                                     .color(text_muted),
                                             )
                                             .selectable(false),
@@ -474,7 +512,10 @@ fn paint_action_card(
                             ui.painter().rect_stroke(
                                 response.rect,
                                 corner_radius(list_row_radius.min(section_rounding + 2.0)),
-                                egui::Stroke::new(1.0, bg_surface_hover),
+                                egui::Stroke::new(
+                                    crate::ui::theme::tokens::border_standard(),
+                                    bg_surface_hover,
+                                ),
                                 egui::StrokeKind::Inside,
                             );
                         }
@@ -483,7 +524,7 @@ fn paint_action_card(
                             *action = Some(BootstrapAction::Recover(idx));
                         }
 
-                        ui.add_space(8.0);
+                        ui.add_space(crate::ui::theme::tokens::spacing_sm() + 2.0);
                     }
                 });
         }

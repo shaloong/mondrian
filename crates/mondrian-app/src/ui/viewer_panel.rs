@@ -763,7 +763,7 @@ impl ViewerPanel {
         ui.painter().rect_stroke(
             overlay_rect,
             tokens::section_rounding(),
-            egui::Stroke::new(1.0, palette::overlay_stroke()),
+            egui::Stroke::new(tokens::border_standard(), palette::overlay_stroke()),
             egui::StrokeKind::Inside,
         );
 
@@ -854,7 +854,7 @@ impl ViewerPanel {
         ui.painter().rect_stroke(
             overlay_rect,
             tokens::section_rounding(),
-            egui::Stroke::new(1.0, palette::overlay_stroke()),
+            egui::Stroke::new(tokens::border_standard(), palette::overlay_stroke()),
             egui::StrokeKind::Inside,
         );
 
@@ -926,9 +926,9 @@ impl ViewerPanel {
         ui.scope_builder(egui::UiBuilder::new().max_rect(center_rect), |ui| {
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 let btn_w = 34.0;
-                let btn_h = 22.0;
-                let mark_w = 30.0;
-                let gap = 6.0;
+                let btn_h = tokens::playback_button_height();
+                let mark_w = tokens::playback_marker_width();
+                let gap = tokens::playback_button_gap();
                 let group_w = mark_w * 2.0 + btn_w * 5.0 + gap * 6.0;
                 let left_pad = ((center_rect.width() - group_w) * 0.5).max(0.0);
 

@@ -68,7 +68,7 @@ impl ExportPanel {
                     });
             });
 
-            ui.add_space(10.0);
+            ui.add_space(tokens::spacing_md());
             egui::Grid::new("preset_details")
                 .num_columns(2)
                 .spacing(tokens::export_grid_spacing())
@@ -150,7 +150,7 @@ impl ExportPanel {
                             );
                         }
                     });
-                ui.add_space(6.0);
+                ui.add_space(tokens::spacing_sm());
                 let sequence = selected_sequence;
                 let video_clips =
                     sequence.video_tracks.iter().map(|t| t.clips.len()).sum::<usize>();
@@ -168,7 +168,7 @@ impl ExportPanel {
                     "时间线渲染（V{} / A{}，范围 {}）",
                     video_clips, audio_clips, frame_range
                 ));
-                ui.add_space(6.0);
+                ui.add_space(tokens::spacing_sm());
                 egui::ComboBox::from_id_salt("export_range")
                     .selected_text(export_range_label(self.selected_range))
                     .show_ui(ui, |ui| {
@@ -209,7 +209,7 @@ impl ExportPanel {
             });
 
             if self.output_path.is_empty() {
-                ui.add_space(4.0);
+                ui.add_space(tokens::spacing_xs());
                 ui.horizontal(|ui| {
                     let _ = theme::icon(ui, theme::UiIcon::Warning, palette::status_warning());
                     ui.colored_label(palette::status_warning(), "请指定输出路径");

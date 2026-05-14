@@ -424,7 +424,7 @@ impl TimelinePanel {
                         },
                     );
 
-                    ui.add_space(6.0);
+                    ui.add_space(tokens::spacing_sm());
                     ui.allocate_ui_with_layout(
                         Vec2::new(vertical_bar_w, ui.available_height()),
                         egui::Layout::top_down(egui::Align::Min),
@@ -579,7 +579,10 @@ impl TimelinePanel {
         painter.rect_stroke(
             track_rect,
             corner_radius(4.0),
-            Stroke::new(1.0, palette::border_subtle().gamma_multiply(0.9)),
+            Stroke::new(
+                tokens::border_standard(),
+                palette::border_subtle().gamma_multiply(0.9),
+            ),
             egui::StrokeKind::Inside,
         );
 
@@ -702,7 +705,10 @@ impl TimelinePanel {
         painter.rect_stroke(
             thumb_rect,
             corner_radius(4.0),
-            Stroke::new(1.0, palette::interaction_highlight().gamma_multiply(0.8)),
+            Stroke::new(
+                tokens::border_standard(),
+                palette::interaction_highlight().gamma_multiply(0.8),
+            ),
             egui::StrokeKind::Inside,
         );
         for (center, active) in [
@@ -729,7 +735,10 @@ impl TimelinePanel {
             painter.circle_stroke(
                 center,
                 handle_radius,
-                Stroke::new(1.0, palette::text_primary().gamma_multiply(0.7)),
+                Stroke::new(
+                    tokens::border_standard(),
+                    palette::text_primary().gamma_multiply(0.7),
+                ),
             );
         }
     }
@@ -784,7 +793,10 @@ impl TimelinePanel {
         painter.rect_stroke(
             track_rect,
             corner_radius(4.0),
-            Stroke::new(1.0, palette::border_subtle().gamma_multiply(0.9)),
+            Stroke::new(
+                tokens::border_standard(),
+                palette::border_subtle().gamma_multiply(0.9),
+            ),
             egui::StrokeKind::Inside,
         );
 
@@ -906,7 +918,10 @@ impl TimelinePanel {
         painter.rect_stroke(
             thumb_rect,
             corner_radius(4.0),
-            Stroke::new(1.0, palette::interaction_highlight().gamma_multiply(0.8)),
+            Stroke::new(
+                tokens::border_standard(),
+                palette::interaction_highlight().gamma_multiply(0.8),
+            ),
             egui::StrokeKind::Inside,
         );
 
@@ -934,7 +949,10 @@ impl TimelinePanel {
             painter.circle_stroke(
                 center,
                 handle_radius,
-                Stroke::new(1.0, palette::text_primary().gamma_multiply(0.7)),
+                Stroke::new(
+                    tokens::border_standard(),
+                    palette::text_primary().gamma_multiply(0.7),
+                ),
             );
         }
     }
@@ -1009,7 +1027,10 @@ impl TimelinePanel {
                                 ),
                                 Pos2::new(x, rect.bottom()),
                             ],
-                            Stroke::new(1.0, palette::border_subtle().gamma_multiply(0.75)),
+                            Stroke::new(
+                                tokens::border_standard(),
+                                palette::border_subtle().gamma_multiply(0.75),
+                            ),
                         );
                     }
                 }
@@ -1024,7 +1045,7 @@ impl TimelinePanel {
             if x >= rect.left() + track_label_w && x <= rect.right() {
                 painter.line_segment(
                     [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
-                    Stroke::new(1.0, palette::border_subtle()),
+                    Stroke::new(tokens::border_standard(), palette::border_subtle()),
                 );
                 painter.text(
                     Pos2::new(
@@ -1171,7 +1192,10 @@ impl TimelinePanel {
                 let snap_x = left + snap_frame as f32 * self.pixels_per_frame;
                 ui.painter().line_segment(
                     [Pos2::new(snap_x, top), Pos2::new(snap_x, bottom)],
-                    Stroke::new(1.4, palette::interaction_highlight()),
+                    Stroke::new(
+                        tokens::border_standard() * 1.4,
+                        palette::interaction_highlight(),
+                    ),
                 );
             }
 
@@ -1194,7 +1218,10 @@ impl TimelinePanel {
                     ui.painter().rect_stroke(
                         target_row.rect.shrink(1.0),
                         corner_radius(2.0),
-                        Stroke::new(2.0, palette::interaction_highlight()),
+                        Stroke::new(
+                            tokens::border_standard() * 2.0,
+                            palette::interaction_highlight(),
+                        ),
                         egui::StrokeKind::Inside,
                     );
                 }
@@ -1215,7 +1242,7 @@ impl TimelinePanel {
                 {
                     ui.painter().line_segment(
                         [Pos2::new(pos.x, top), Pos2::new(pos.x, bottom)],
-                        Stroke::new(1.0, palette::interaction_highlight()),
+                        Stroke::new(tokens::border_standard(), palette::interaction_highlight()),
                     );
                 }
             }
@@ -1306,14 +1333,20 @@ impl TimelinePanel {
                 Pos2::new(rect.left(), rect.bottom()),
                 Pos2::new(rect.right(), rect.bottom()),
             ],
-            Stroke::new(1.0, palette::border_subtle().gamma_multiply(0.8)),
+            Stroke::new(
+                tokens::border_standard(),
+                palette::border_subtle().gamma_multiply(0.8),
+            ),
         );
         painter.line_segment(
             [
                 Pos2::new(label_rect.right(), rect.top()),
                 Pos2::new(label_rect.right(), rect.bottom()),
             ],
-            Stroke::new(1.0, palette::border_subtle().gamma_multiply(0.8)),
+            Stroke::new(
+                tokens::border_standard(),
+                palette::border_subtle().gamma_multiply(0.8),
+            ),
         );
 
         let icon_size = Vec2::new(
@@ -1421,7 +1454,7 @@ impl TimelinePanel {
             painter.rect_stroke(
                 rect.shrink(1.0),
                 corner_radius(2.0),
-                Stroke::new(1.5, palette::status_warning()),
+                Stroke::new(tokens::border_standard() * 1.5, palette::status_warning()),
                 egui::StrokeKind::Inside,
             );
         }
@@ -1761,7 +1794,10 @@ impl TimelinePanel {
             painter.rect_stroke(
                 rect.shrink(1.0),
                 corner_radius(2.0),
-                Stroke::new(1.5, palette::interaction_highlight()),
+                Stroke::new(
+                    tokens::border_standard() * 1.5,
+                    palette::interaction_highlight(),
+                ),
                 egui::StrokeKind::Inside,
             );
         }
@@ -1770,7 +1806,10 @@ impl TimelinePanel {
             painter.rect_stroke(
                 rect.shrink(1.0),
                 corner_radius(2.0),
-                Stroke::new(1.5, palette::interaction_highlight()),
+                Stroke::new(
+                    tokens::border_standard() * 1.5,
+                    palette::interaction_highlight(),
+                ),
                 egui::StrokeKind::Inside,
             );
 
@@ -2036,7 +2075,10 @@ impl TimelinePanel {
                 ui.painter().rect_stroke(
                     rect,
                     corner_radius(2.0),
-                    Stroke::new(1.2, palette::interaction_highlight()),
+                    Stroke::new(
+                        tokens::border_standard() * 1.2,
+                        palette::interaction_highlight(),
+                    ),
                     egui::StrokeKind::Inside,
                 );
             }

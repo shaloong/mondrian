@@ -107,9 +107,15 @@ impl LibraryPanel {
                     |ui| {
                         egui::Frame::new()
                             .fill(palette::bg_surface_raised())
-                            .stroke(Stroke::new(1.0, palette::border_subtle()))
+                            .stroke(Stroke::new(
+                                tokens::border_standard(),
+                                palette::border_subtle(),
+                            ))
                             .corner_radius(corner_radius(tokens::button_rounding()))
-                            .inner_margin(egui::Margin::symmetric(margin_px(10.0), margin_px(4.0)))
+                            .inner_margin(egui::Margin::symmetric(
+                                margin_px(tokens::search_bar_margin_x()),
+                                margin_px(tokens::search_bar_margin_y()),
+                            ))
                             .show(ui, |ui| {
                                 ui.with_layout(
                                     egui::Layout::left_to_right(egui::Align::Center),
@@ -318,7 +324,7 @@ impl LibraryPanel {
             ui.painter().rect_stroke(
                 empty_rect,
                 corner_radius(tokens::card_rounding()),
-                Stroke::new(1.0, palette::border_subtle()),
+                Stroke::new(tokens::border_standard(), palette::border_subtle()),
                 egui::StrokeKind::Inside,
             );
             ui.painter().text(
@@ -402,9 +408,12 @@ impl LibraryPanel {
             egui::Color32::TRANSPARENT
         };
         let card_stroke = if is_selected {
-            Stroke::new(1.0, palette::interaction_highlight())
+            Stroke::new(tokens::border_standard(), palette::interaction_highlight())
         } else if card_response.hovered() {
-            Stroke::new(1.0, palette::border_subtle().gamma_multiply(0.7))
+            Stroke::new(
+                tokens::border_standard(),
+                palette::border_subtle().gamma_multiply(0.7),
+            )
         } else {
             Stroke::NONE
         };
@@ -675,7 +684,7 @@ impl LibraryPanel {
         ui.painter().rect_stroke(
             rect,
             corner_radius(tokens::badge_rounding()),
-            Stroke::new(1.0, fg.gamma_multiply(0.18)),
+            Stroke::new(tokens::border_standard(), fg.gamma_multiply(0.18)),
             egui::StrokeKind::Inside,
         );
         ui.painter().text(
@@ -699,7 +708,10 @@ impl LibraryPanel {
         ui.painter().rect_stroke(
             rect,
             corner_radius(tokens::section_rounding()),
-            Stroke::new(1.0, palette::border_subtle().gamma_multiply(0.7)),
+            Stroke::new(
+                tokens::border_standard(),
+                palette::border_subtle().gamma_multiply(0.7),
+            ),
             egui::StrokeKind::Inside,
         );
 

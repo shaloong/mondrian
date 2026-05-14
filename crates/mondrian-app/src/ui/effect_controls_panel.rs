@@ -526,11 +526,12 @@ impl EffectControlsPanel {
             Pos2::new(plot_rect.left(), plot_rect.bottom() + 6.0),
             Pos2::new(plot_rect.right(), rect.bottom() - 6.0),
         );
-        painter.rect_filled(plot_rect, 6.0, palette::bg_surface_raised());
+        let plot_rounding = theme::corner_radius(tokens::section_rounding());
+        painter.rect_filled(plot_rect, plot_rounding, palette::bg_surface_raised());
         painter.rect_stroke(
             plot_rect,
-            egui::CornerRadius::same(6),
-            Stroke::new(1.0, palette::border_subtle()),
+            plot_rounding,
+            Stroke::new(tokens::border_standard(), palette::border_subtle()),
             egui::StrokeKind::Inside,
         );
         let Some(channel) = property.channel(channel_index) else {
@@ -578,7 +579,10 @@ impl EffectControlsPanel {
                 Pos2::new(ruler_rect.left(), ruler_rect.bottom()),
                 Pos2::new(ruler_rect.right(), ruler_rect.bottom()),
             ],
-            Stroke::new(1.0, palette::border_subtle().gamma_multiply(0.7)),
+            Stroke::new(
+                tokens::border_standard(),
+                palette::border_subtle().gamma_multiply(0.7),
+            ),
         );
         for row in 0..=4 {
             let t = row as f32 / 4.0;
@@ -588,7 +592,10 @@ impl EffectControlsPanel {
                     Pos2::new(plot_rect.left(), y),
                     Pos2::new(plot_rect.right(), y),
                 ],
-                Stroke::new(1.0, palette::border_subtle().gamma_multiply(0.5)),
+                Stroke::new(
+                    tokens::border_standard(),
+                    palette::border_subtle().gamma_multiply(0.5),
+                ),
             );
         }
         let time_label_positions = graph_time_label_positions(
@@ -606,14 +613,20 @@ impl EffectControlsPanel {
                     Pos2::new(x, plot_rect.top()),
                     Pos2::new(x, plot_rect.bottom()),
                 ],
-                Stroke::new(1.0, palette::border_subtle().gamma_multiply(0.35)),
+                Stroke::new(
+                    tokens::border_standard(),
+                    palette::border_subtle().gamma_multiply(0.35),
+                ),
             );
             painter.line_segment(
                 [
                     Pos2::new(x, ruler_rect.bottom() - 6.0),
                     Pos2::new(x, ruler_rect.bottom()),
                 ],
-                Stroke::new(1.0, palette::border_subtle().gamma_multiply(0.6)),
+                Stroke::new(
+                    tokens::border_standard(),
+                    palette::border_subtle().gamma_multiply(0.6),
+                ),
             );
         }
         for label in &time_label_positions {
@@ -653,7 +666,10 @@ impl EffectControlsPanel {
                     Pos2::new(plot_rect.left(), zero_y),
                     Pos2::new(plot_rect.right(), zero_y),
                 ],
-                Stroke::new(1.2, palette::border_emphasis().gamma_multiply(0.85)),
+                Stroke::new(
+                    tokens::border_standard() * 1.2,
+                    palette::border_emphasis().gamma_multiply(0.85),
+                ),
             );
         }
 
@@ -858,7 +874,10 @@ impl EffectControlsPanel {
                     Pos2::new(guide_x, plot_rect.top()),
                     Pos2::new(guide_x, plot_rect.bottom()),
                 ],
-                Stroke::new(1.0, palette::timeline_playhead().gamma_multiply(0.85)),
+                Stroke::new(
+                    tokens::border_standard(),
+                    palette::timeline_playhead().gamma_multiply(0.85),
+                ),
             );
         }
         if let Some(snapped_value) = snap_guides.value {
@@ -868,7 +887,10 @@ impl EffectControlsPanel {
                     Pos2::new(plot_rect.left(), guide_y),
                     Pos2::new(plot_rect.right(), guide_y),
                 ],
-                Stroke::new(1.0, palette::interaction_highlight().gamma_multiply(0.75)),
+                Stroke::new(
+                    tokens::border_standard(),
+                    palette::interaction_highlight().gamma_multiply(0.75),
+                ),
             );
         }
 
@@ -879,14 +901,20 @@ impl EffectControlsPanel {
                     Pos2::new(playhead_x, plot_rect.top()),
                     Pos2::new(playhead_x, plot_rect.bottom()),
                 ],
-                Stroke::new(1.2, palette::timeline_playhead()),
+                Stroke::new(
+                    tokens::border_standard() * 1.2,
+                    palette::timeline_playhead(),
+                ),
             );
             painter.line_segment(
                 [
                     Pos2::new(playhead_x, ruler_rect.top()),
                     Pos2::new(playhead_x, ruler_rect.bottom()),
                 ],
-                Stroke::new(1.2, palette::timeline_playhead()),
+                Stroke::new(
+                    tokens::border_standard() * 1.2,
+                    palette::timeline_playhead(),
+                ),
             );
             let badge_text = format_graph_time_label(current_time_ticks, clip.position.time_base);
             let badge_size = painter
@@ -1269,7 +1297,10 @@ impl EffectControlsPanel {
 
                     painter.line_segment(
                         [point, handle_position],
-                        Stroke::new(1.0, graph_channel_color(channel_index).gamma_multiply(0.7)),
+                        Stroke::new(
+                            tokens::border_standard(),
+                            graph_channel_color(channel_index).gamma_multiply(0.7),
+                        ),
                     );
                     let handle_rect = Rect::from_center_size(
                         handle_position,
@@ -1311,7 +1342,7 @@ impl EffectControlsPanel {
                     painter.circle_stroke(
                         handle_position,
                         tokens::graph_editor_handle_size() * 0.5,
-                        Stroke::new(1.0, palette::interaction_highlight()),
+                        Stroke::new(tokens::border_standard(), palette::interaction_highlight()),
                     );
                 }
             }
@@ -1719,8 +1750,11 @@ impl EffectControlsPanel {
 
         ui.painter().rect_stroke(
             bounds.expand(6.0),
-            egui::CornerRadius::same(4),
-            Stroke::new(1.0, palette::interaction_highlight().gamma_multiply(0.55)),
+            theme::corner_radius(tokens::badge_rounding()),
+            Stroke::new(
+                tokens::border_standard(),
+                palette::interaction_highlight().gamma_multiply(0.55),
+            ),
             egui::StrokeKind::Inside,
         );
 
@@ -1800,8 +1834,8 @@ impl EffectControlsPanel {
             );
             ui.painter().rect_stroke(
                 rect,
-                egui::CornerRadius::same(2),
-                Stroke::new(1.0, palette::text_primary()),
+                theme::corner_radius(tokens::border_standard() * 2.0),
+                Stroke::new(tokens::border_standard(), palette::text_primary()),
                 egui::StrokeKind::Inside,
             );
         }
@@ -2079,8 +2113,11 @@ impl EffectControlsPanel {
                 );
                 ui.painter().rect_stroke(
                     rect,
-                    egui::CornerRadius::same(2),
-                    Stroke::new(1.2, palette::interaction_highlight()),
+                    theme::corner_radius(tokens::border_standard() * 2.0),
+                    Stroke::new(
+                        tokens::border_standard() * 1.2,
+                        palette::interaction_highlight(),
+                    ),
                     egui::StrokeKind::Inside,
                 );
             }
@@ -2150,7 +2187,7 @@ impl EffectControlsPanel {
                 .font(typography::body())
                 .color(palette::text_primary()),
         );
-        ui.add_space(4.0);
+        ui.add_space(tokens::spacing_xs());
 
         Grid::new(("media_interpretation_grid", selection.clip_id))
             .num_columns(2)
@@ -2684,14 +2721,22 @@ impl EffectControlsPanel {
                 }
             }
             PropertyValue::Color(value) => {
-                ui.label(
-                    RichText::new(format!(
-                        "r:{:.2} g:{:.2} b:{:.2} a:{:.2}",
-                        value.r, value.g, value.b, value.a
-                    ))
-                    .font(typography::body_small())
-                    .color(palette::text_muted()),
+                let mut color = *value;
+                let picker_resp = super::color_picker::color_picker_button(
+                    ui,
+                    &mut color,
+                    super::color_picker::ColorPickerVariant::Inline,
                 );
+                if picker_resp.changed {
+                    self.commit_value(
+                        app,
+                        selection,
+                        path,
+                        PropertyValue::Color(color),
+                        interpolation,
+                        is_animatable,
+                    );
+                }
             }
         }
     }

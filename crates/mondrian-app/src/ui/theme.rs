@@ -195,6 +195,19 @@ pub struct MetricsTokens {
     pub font_large: f32,
     pub font_mono_small: f32,
     pub font_mono_large: f32,
+    pub font_button: f32,
+    pub font_metadata: f32,
+    pub border_standard: f32,
+    pub spacing_xs: f32,
+    pub spacing_sm: f32,
+    pub spacing_md: f32,
+    pub spacing_lg: f32,
+    pub playback_button_height: f32,
+    pub playback_marker_width: f32,
+    pub playback_button_gap: f32,
+    pub effect_item_height: f32,
+    pub search_bar_margin_x: f32,
+    pub search_bar_margin_y: f32,
     pub list_row_radius: f32,
     pub list_compact_spacing_x: f32,
     pub list_row_height: f32,
@@ -308,6 +321,19 @@ impl Default for MetricsTokens {
             font_large: 16.0,
             font_mono_small: 12.0,
             font_mono_large: 24.0,
+            font_button: 12.5,
+            font_metadata: 11.0,
+            border_standard: 1.0,
+            spacing_xs: 4.0,
+            spacing_sm: 6.0,
+            spacing_md: 10.0,
+            spacing_lg: 28.0,
+            playback_button_height: 22.0,
+            playback_marker_width: 30.0,
+            playback_button_gap: 6.0,
+            effect_item_height: 34.0,
+            search_bar_margin_x: 10.0,
+            search_bar_margin_y: 4.0,
             list_row_radius: 12.0,
             list_compact_spacing_x: 4.0,
             list_row_height: 36.0,
@@ -427,6 +453,12 @@ fn px_i8(value: f32) -> i8 {
 
 fn px_corner(value: f32) -> egui::CornerRadius {
     egui::CornerRadius::same(value.round().clamp(0.0, 255.0) as u8)
+}
+
+/// Convert a radius in logical pixels to an egui `CornerRadius`.
+/// Prefer a [`tokens`] value or one of the semantic frames (e.g. [`panel_frame`]).
+pub fn corner_radius(value: f32) -> egui::CornerRadius {
+    px_corner(value)
 }
 
 fn resolve_tokens(preference: Theme, resolved: egui::Theme) -> ThemeTokens {
@@ -1189,6 +1221,14 @@ pub mod typography {
     pub fn mono_large() -> egui::FontId {
         super::with_active_tokens(|tokens| egui::FontId::monospace(tokens.metrics.font_mono_large))
     }
+
+    pub fn button() -> egui::FontId {
+        super::with_active_tokens(|tokens| egui::FontId::proportional(tokens.metrics.font_button))
+    }
+
+    pub fn metadata() -> egui::FontId {
+        super::with_active_tokens(|tokens| egui::FontId::proportional(tokens.metrics.font_metadata))
+    }
 }
 
 pub mod tokens {
@@ -1584,6 +1624,58 @@ pub mod tokens {
     pub fn startup_panel_margin_y() -> f32 {
         super::with_active_tokens(|tokens| tokens.metrics.startup_panel_margin_y)
     }
+
+    pub fn border_standard() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.border_standard)
+    }
+
+    pub fn font_button() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.font_button)
+    }
+
+    pub fn font_metadata() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.font_metadata)
+    }
+
+    pub fn spacing_xs() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.spacing_xs)
+    }
+
+    pub fn spacing_sm() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.spacing_sm)
+    }
+
+    pub fn spacing_md() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.spacing_md)
+    }
+
+    pub fn spacing_lg() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.spacing_lg)
+    }
+
+    pub fn playback_button_height() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.playback_button_height)
+    }
+
+    pub fn playback_marker_width() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.playback_marker_width)
+    }
+
+    pub fn playback_button_gap() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.playback_button_gap)
+    }
+
+    pub fn effect_item_height() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.effect_item_height)
+    }
+
+    pub fn search_bar_margin_x() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.search_bar_margin_x)
+    }
+
+    pub fn search_bar_margin_y() -> f32 {
+        super::with_active_tokens(|tokens| tokens.metrics.search_bar_margin_y)
+    }
 }
 
 #[cfg(test)]
@@ -1779,4 +1871,5 @@ pub mod palette {
     pub fn overlay_stroke() -> egui::Color32 {
         super::with_active_tokens(|tokens| tokens.palette.overlay_stroke)
     }
+
 }
