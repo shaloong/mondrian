@@ -4,7 +4,6 @@ use crate::{clip::ActiveClip, track::Track};
 use mondrian_core::types::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum EditingMode {
@@ -144,10 +143,34 @@ pub enum ColorWorkflow {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum MissingColorMetadataPolicy {
+    /// 无标签素材视为 Rec.709（行业默认）。
     #[default]
     AssumeRec709,
+    /// 无标签素材直接视为序列工作空间（跳过输入变换）。
     AssumeSequenceWorkingSpace,
+    /// 无标签素材拒绝导入 / 跳过渲染。
     RejectMedia,
+}
+
+impl MissingColorMetadataPolicy {
+    /// 根据策略和检测到的色彩空间，解析有效的输入色彩空间。
+    ///
+    /// `detected` 来自媒体探测（FFmpeg 标签），`working` 是序列工作空间。
+    /// 当素材无色彩标签时（`detected == None`），按策略行事。
+    pub fn resolve_input(
+        self,
+        detected: Option<ColorSpace>,
+        working: ColorSpace,
+    ) -> Option<ColorSpace> {
+        match detected {
+            Some(cs) => Some(cs),
+            None => match self {
+                Self::AssumeRec709 => Some(ColorSpace::Rec709),
+                Self::AssumeSequenceWorkingSpace => Some(working),
+                Self::RejectMedia => None,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -180,48 +203,72 @@ pub enum ExportBitDepth {
 pub struct SequenceColorManagement {
     #[serde(default)]
     pub workflow: ColorWorkflow,
+    /// `true` 时使用项目级色彩管理设置（引擎 + 策略）。
+    /// `false` 时使用此结构体中的独立设置。
+    #[serde(default = "default_inherit_color_management")]
+    pub inherit: bool,
     #[serde(default)]
-    pub backend: ColorManagementBackend,
+    pub engine: ColorEngine,
     #[serde(default)]
     pub missing_metadata_policy: MissingColorMetadataPolicy,
     #[serde(default)]
     pub nested_processing: NestedColorProcessing,
     #[serde(default = "default_output_color_space")]
     pub output_color_space: ColorSpace,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ocio_config_path: Option<PathBuf>,
     #[serde(default)]
     pub video_range: VideoRange,
     #[serde(default)]
     pub export_bit_depth: ExportBitDepth,
     #[serde(default = "default_preserve_hdr_metadata")]
     pub preserve_hdr_metadata: bool,
+    /// HDR 母版显示色彩体积（SMPTE ST 2086），如 `"G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1)"`。
+    /// 未设置时使用 Rec.2100 PQ 默认值。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hdr_mastering_display: Option<String>,
+    /// HDR 内容光级别（MaxCLL,MaxFALL），如 `"1000,400"`。
+    /// 未设置时使用默认值 `"1000,400"`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hdr_max_cll: Option<String>,
 }
 
+/// 渲染色彩上下文 —— 单帧渲染所需的全部色彩信息。
+///
+/// 由序列设置 + 项目设置合并生成，贯穿整个渲染管线。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SequenceRenderColorContext {
+pub struct ColorContext {
     pub working_color_space: ColorSpace,
     pub output_color_space: ColorSpace,
     pub tone_map: bool,
+    pub workflow: ColorWorkflow,
     pub nested_processing: NestedColorProcessing,
-    pub backend: ColorManagementBackend,
-    pub ocio_config_path: Option<PathBuf>,
+    pub engine: ColorEngine,
+    pub missing_metadata_policy: MissingColorMetadataPolicy,
+    /// OCIO 显示设备名（仅在 OCIO 引擎 + 预览路径使用）。
+    pub ocio_display: Option<String>,
+    /// OCIO 视图名（仅在 OCIO 引擎 + 预览路径使用）。
+    pub ocio_view: Option<String>,
 }
 
 impl Default for SequenceColorManagement {
     fn default() -> Self {
         Self {
             workflow: ColorWorkflow::DisplayReferred,
-            backend: ColorManagementBackend::MondrianSmart,
+            inherit: default_inherit_color_management(),
+            engine: ColorEngine::default(),
             missing_metadata_policy: MissingColorMetadataPolicy::AssumeRec709,
             nested_processing: NestedColorProcessing::PreserveChildWorkingSpace,
             output_color_space: ColorSpace::Rec709,
-            ocio_config_path: None,
             video_range: VideoRange::Full,
             export_bit_depth: ExportBitDepth::SixteenFloat,
             preserve_hdr_metadata: false,
+            hdr_mastering_display: None,
+            hdr_max_cll: None,
         }
     }
+}
+
+const fn default_inherit_color_management() -> bool {
+    true
 }
 
 const fn default_output_color_space() -> ColorSpace {
@@ -358,46 +405,100 @@ impl SequenceSettings {
         Ok(())
     }
 
-    pub fn root_render_color_context(&self) -> SequenceRenderColorContext {
-        SequenceRenderColorContext {
+    /// Build the render color context for the root sequence.
+    ///
+    /// When the sequence inherits color management from the project
+    /// (`color_management.inherit == true`), the `engine` is taken from
+    /// `project_cm` instead of the per-sequence settings.
+    pub fn root_render_color_context(
+        &self,
+        project_cm: &mondrian_core::ProjectColorManagement,
+    ) -> ColorContext {
+        let engine = if self.color_management.inherit {
+            project_cm.engine.clone()
+        } else {
+            self.color_management.engine.clone()
+        };
+
+        // SceneReferred and Aces workflows always need a view transform
+        // (tone map) when output is display-referred (SDR).
+        let tone_map = self.auto_tone_map_media
+            || matches!(
+                self.color_management.workflow,
+                ColorWorkflow::SceneReferred | ColorWorkflow::Aces
+            );
+
+        // Auto-populate OCIO display/view from config defaults.
+        let (ocio_display, ocio_view) = if matches!(engine, ColorEngine::Ocio { .. }) {
+            mondrian_core::ocio_default_display_view()
+                .map(|(d, v)| (Some(d), Some(v)))
+                .unwrap_or((None, None))
+        } else {
+            (None, None)
+        };
+
+        ColorContext {
             working_color_space: self.color_space,
             output_color_space: self.color_management.output_color_space,
-            tone_map: self.auto_tone_map_media,
+            tone_map,
             nested_processing: self.color_management.nested_processing,
-            backend: self.color_management.backend,
-            ocio_config_path: self.color_management.ocio_config_path.clone(),
+            engine,
+            missing_metadata_policy: self.color_management.missing_metadata_policy,
+            ocio_display,
+            ocio_view,
+            workflow: self.color_management.workflow,
         }
     }
 
-    pub fn nested_render_color_context(
-        &self,
-        parent: SequenceRenderColorContext,
-    ) -> SequenceRenderColorContext {
+    pub fn nested_render_color_context(&self, parent: ColorContext) -> ColorContext {
         match self.color_management.nested_processing {
-            NestedColorProcessing::PreserveChildWorkingSpace => SequenceRenderColorContext {
-                working_color_space: self.color_space,
-                output_color_space: parent.working_color_space,
-                tone_map: self.auto_tone_map_media,
-                nested_processing: self.color_management.nested_processing,
-                backend: self.color_management.backend,
-                ocio_config_path: self.color_management.ocio_config_path.clone(),
-            },
-            NestedColorProcessing::ForceParentWorkingSpace => SequenceRenderColorContext {
+            NestedColorProcessing::PreserveChildWorkingSpace => {
+                let engine = if self.color_management.inherit {
+                    parent.engine.clone()
+                } else {
+                    self.color_management.engine.clone()
+                };
+                ColorContext {
+                    working_color_space: self.color_space,
+                    output_color_space: parent.working_color_space,
+                    tone_map: self.auto_tone_map_media,
+                    nested_processing: self.color_management.nested_processing,
+                    engine,
+                    missing_metadata_policy: self.color_management.missing_metadata_policy,
+                    ocio_display: parent.ocio_display.clone(),
+                    ocio_view: parent.ocio_view.clone(),
+                    workflow: self.color_management.workflow,
+                }
+            }
+            NestedColorProcessing::ForceParentWorkingSpace => ColorContext {
                 working_color_space: parent.working_color_space,
                 output_color_space: parent.working_color_space,
                 tone_map: parent.tone_map,
                 nested_processing: self.color_management.nested_processing,
-                backend: parent.backend,
-                ocio_config_path: parent.ocio_config_path.clone(),
+                engine: parent.engine.clone(),
+                missing_metadata_policy: parent.missing_metadata_policy,
+                ocio_display: parent.ocio_display.clone(),
+                ocio_view: parent.ocio_view.clone(),
+                workflow: parent.workflow,
             },
-            NestedColorProcessing::BakeChildOutputTransform => SequenceRenderColorContext {
-                working_color_space: self.color_space,
-                output_color_space: parent.working_color_space,
-                tone_map: self.auto_tone_map_media || parent.tone_map,
-                nested_processing: self.color_management.nested_processing,
-                backend: self.color_management.backend,
-                ocio_config_path: self.color_management.ocio_config_path.clone(),
-            },
+            NestedColorProcessing::BakeChildOutputTransform => {
+                let engine = if self.color_management.inherit {
+                    parent.engine.clone()
+                } else {
+                    self.color_management.engine.clone()
+                };
+                ColorContext {
+                    working_color_space: self.color_space,
+                    output_color_space: parent.working_color_space,
+                    tone_map: self.auto_tone_map_media || parent.tone_map,
+                    nested_processing: self.color_management.nested_processing,
+                    engine,
+                    missing_metadata_policy: self.color_management.missing_metadata_policy,
+                    ocio_display: parent.ocio_display.clone(),
+                    ocio_view: parent.ocio_view.clone(),
+                    workflow: self.color_management.workflow,
+                }
+            }
         }
     }
 
@@ -869,6 +970,7 @@ mod tests {
     use mondrian_core::automation::{
         timecode_to_ticks, Keyframe, PropertyHost, PropertyMutation, PropertyValue,
     };
+    use mondrian_core::ProjectColorManagement;
 
     #[test]
     fn sequence_active_clips() {
@@ -1168,5 +1270,127 @@ mod tests {
         assert_eq!(seq.video_tracks[0].clips[0].id, clip_id);
         assert_eq!(seq.video_tracks[1].name, "V2");
         assert_eq!(seq.video_tracks[2].name, "V3");
+    }
+
+    // ── ColorEngine / ColorContext tests ──────────────────────────────────────
+
+    #[test]
+    fn nested_sequence_respects_engine_inherit() {
+        let mut parent = SequenceSettings::default();
+        parent.color_management.engine =
+            ColorEngine::Ocio { source: OcioConfigSource::Environment };
+        parent.color_management.inherit = false;
+
+        // Child with inherit=true should get parent's engine
+        let mut child = SequenceSettings::default();
+        child.color_management.engine = ColorEngine::MondrianSmart;
+        child.color_management.inherit = true;
+        child.color_management.nested_processing = NestedColorProcessing::ForceParentWorkingSpace;
+
+        let parent_ctx = parent.root_render_color_context(&ProjectColorManagement::default());
+        let child_ctx = child.nested_render_color_context(parent_ctx.clone());
+
+        // ForceParentWorkingSpace uses parent's engine
+        assert_eq!(
+            child_ctx.engine,
+            ColorEngine::Ocio { source: OcioConfigSource::Environment }
+        );
+
+        // PreserveChildWorkingSpace with inherit should also use parent engine
+        child.color_management.nested_processing = NestedColorProcessing::PreserveChildWorkingSpace;
+        let child_ctx2 = child.nested_render_color_context(parent_ctx);
+        assert_eq!(
+            child_ctx2.engine,
+            ColorEngine::Ocio { source: OcioConfigSource::Environment }
+        );
+    }
+
+    #[test]
+    fn scene_referred_workflow_forces_tone_map() {
+        let settings = SequenceSettings {
+            auto_tone_map_media: false,
+            color_management: SequenceColorManagement {
+                workflow: ColorWorkflow::SceneReferred,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let ctx = settings.root_render_color_context(&ProjectColorManagement::default());
+        assert!(
+            ctx.tone_map,
+            "SceneReferred should always enable tone mapping"
+        );
+
+        let aces_settings = SequenceSettings {
+            auto_tone_map_media: false,
+            color_management: SequenceColorManagement {
+                workflow: ColorWorkflow::Aces,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let ctx2 = aces_settings.root_render_color_context(&ProjectColorManagement::default());
+        assert!(ctx2.tone_map, "ACES should always enable tone mapping");
+
+        let display_settings = SequenceSettings {
+            auto_tone_map_media: false,
+            color_management: SequenceColorManagement {
+                workflow: ColorWorkflow::DisplayReferred,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let ctx3 = display_settings.root_render_color_context(&ProjectColorManagement::default());
+        assert!(
+            !ctx3.tone_map,
+            "DisplayReferred with auto_tone_map=false should not tone map"
+        );
+    }
+
+    #[test]
+    fn ocio_engine_populates_display_view_in_context() {
+        let mut settings = SequenceSettings::default();
+        settings.color_management.inherit = false;
+        settings.color_management.engine =
+            ColorEngine::Ocio { source: OcioConfigSource::Environment };
+
+        let ctx = settings.root_render_color_context(&ProjectColorManagement::default());
+        assert!(matches!(ctx.engine, ColorEngine::Ocio { .. }));
+    }
+
+    #[test]
+    fn mondrian_smart_engine_leaves_display_view_none() {
+        let settings = SequenceSettings::default();
+        let ctx = settings.root_render_color_context(&ProjectColorManagement::default());
+        assert_eq!(ctx.engine, ColorEngine::MondrianSmart);
+        assert_eq!(ctx.ocio_display, None);
+        assert_eq!(ctx.ocio_view, None);
+    }
+
+    #[test]
+    fn inherit_flag_controls_engine_source() {
+        let project_cm = ProjectColorManagement {
+            engine: ColorEngine::Ocio {
+                source: OcioConfigSource::Builtin("aces_1.2".into()),
+            },
+        };
+
+        // inherit=true → use project engine
+        let mut settings = SequenceSettings::default();
+        settings.color_management.inherit = true;
+        settings.color_management.engine = ColorEngine::MondrianSmart;
+        let ctx = settings.root_render_color_context(&project_cm);
+        assert_eq!(
+            ctx.engine,
+            ColorEngine::Ocio {
+                source: OcioConfigSource::Builtin("aces_1.2".into())
+            }
+        );
+
+        // inherit=false → use sequence's own engine
+        settings.color_management.inherit = false;
+        let ctx2 = settings.root_render_color_context(&project_cm);
+        assert_eq!(ctx2.engine, ColorEngine::MondrianSmart);
     }
 }
