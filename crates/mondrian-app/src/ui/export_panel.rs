@@ -276,6 +276,7 @@ impl ExportPanel {
                 asset_paths,
                 asset_color_spaces,
                 range: self.selected_range,
+                project_color_management: state.project_settings.color_management.clone(),
             })),
             output_path: path,
         };

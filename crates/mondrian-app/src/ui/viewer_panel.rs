@@ -6,21 +6,22 @@ use egui::{Pos2, Rect, Sense, Ui, Vec2};
 
 use mondrian_core::{
     apply_display_profile_rgba8_in_place, convert_rgba8_in_place,
-    types::{
-        AssetId, BlendMode, ColorManagementBackend, ColorSpace, Rational, SequenceId, TimeCode,
-    },
+    types::{AssetId, BlendMode, ColorEngine, ColorSpace, Rational, SequenceId, TimeCode},
     ColorPipeline, DisplayColorProfile,
 };
 use mondrian_effects::CompiledEffectGraph;
 use mondrian_media::cache::FrameCacheConfig;
 use mondrian_media::{DecoderPool, FrameCache, RgbaFrame};
 use mondrian_renderer::{
-    build_timeline_render_plan, composite_timeline_elements_float_linear, is_identity_transform,
-    quantize_transform_signature, CompositorConfig, CpuRgbaLayer, FrameCompositor, GpuContext,
-    TimelineAdjustmentLayer, TimelineCompositeElement, TimelineCompositeOptions,
-    TimelineCompositeScratch, TimelineMediaLayer, TimelineRenderPlanElement,
+    build_timeline_render_plan, collect_timeline_color_diagnostics,
+    composite_timeline_elements_float_linear, is_identity_transform, quantize_transform_signature,
+    CompositorConfig, CpuRgbaLayer, FrameCompositor, GpuContext, TimelineAdjustmentLayer,
+    TimelineCompositeElement, TimelineCompositeOptions, TimelineCompositeScratch,
+    TimelineMediaLayer, TimelineRenderPlanElement,
 };
-use mondrian_timeline::sequence::{NestedColorProcessing, SequenceRenderColorContext};
+use mondrian_timeline::sequence::{
+    ColorContext, ColorWorkflow, MissingColorMetadataPolicy, NestedColorProcessing,
+};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -43,7 +44,7 @@ struct LayerDecodeRequest {
     path: PathBuf,
     input_color_space: ColorSpace,
     working_color_space: ColorSpace,
-    backend: ColorManagementBackend,
+    engine: ColorEngine,
     tone_map: bool,
     source_secs: f64,
     source_time_base: Rational,
@@ -70,7 +71,7 @@ struct NestedSequenceRenderRequest {
     height: u32,
     nested_processing: NestedColorProcessing,
     working_color_space: ColorSpace,
-    backend: ColorManagementBackend,
+    engine: ColorEngine,
     tone_map: bool,
     opacity: f32,
     blend_mode: BlendMode,
@@ -93,8 +94,10 @@ struct DecodeRequest {
     layers: Vec<RenderElement>,
     working_color_space: ColorSpace,
     output_color_space: ColorSpace,
-    backend: ColorManagementBackend,
+    engine: ColorEngine,
     display_profile: DisplayColorProfile,
+    ocio_display: Option<String>,
+    ocio_view: Option<String>,
     tone_map: bool,
     playback_mode: bool,
     target_width: u32,
@@ -158,7 +161,7 @@ enum LayerSignature {
         effect_hash: u64,
         child_hash: u64,
         nested_processing: NestedColorProcessing,
-        backend: ColorManagementBackend,
+        engine: ColorEngine,
     },
 }
 
@@ -182,7 +185,7 @@ struct LayerFrameCacheKey {
     target_height: u32,
     input_color_space: ColorSpace,
     working_color_space: ColorSpace,
-    backend: ColorManagementBackend,
+    engine: ColorEngine,
     tone_map: bool,
 }
 
@@ -332,6 +335,9 @@ pub struct ViewerPanel {
     proxy_jobs_in_flight: Arc<Mutex<HashSet<AssetId>>>,
     proxy_done_tx: Sender<AssetId>,
     proxy_done_rx: Receiver<AssetId>,
+    show_color_diagnostics: bool,
+    ocio_display: Option<String>,
+    ocio_view: Option<String>,
 }
 
 impl Default for ViewerPanel {
@@ -417,11 +423,18 @@ impl Default for ViewerPanel {
             proxy_jobs_in_flight: Arc::new(Mutex::new(HashSet::new())),
             proxy_done_tx,
             proxy_done_rx,
+            show_color_diagnostics: false,
+            ocio_display: None,
+            ocio_view: None,
         }
     }
 }
 
 impl ViewerPanel {
+    pub fn toggle_color_diagnostics(&mut self) {
+        self.show_color_diagnostics = !self.show_color_diagnostics;
+    }
+
     pub fn media_cache_dir(&self) -> PathBuf {
         self.proxy_config.cache_dir.clone()
     }
@@ -551,14 +564,22 @@ impl ViewerPanel {
                                     self.preview_signature = Some(signature.clone());
                                     self.preview_error = None;
                                 } else {
+                                    let engine =
+                                        if seq.settings.color_management.inherit {
+                                            state.project_settings.color_management.engine.clone()
+                                        } else {
+                                            seq.settings.color_management.engine.clone()
+                                        };
                                     self.request_decode(
                                         DecodeRequest {
                                             signature,
                                             layers,
                                             working_color_space: seq.settings.color_space,
                                             output_color_space: ColorSpace::Rec709,
-                                            backend: seq.settings.color_management.backend,
+                                            engine,
                                             display_profile: self.display_profile.clone(),
+                                            ocio_display: self.ocio_display.clone(),
+                                            ocio_view: self.ocio_view.clone(),
                                             tone_map: seq.settings.auto_tone_map_media,
                                             playback_mode: is_playing,
                                             target_width,
@@ -636,6 +657,12 @@ impl ViewerPanel {
                         show_audio_metrics,
                         show_preview_perf_metrics,
                     );
+                }
+
+                if self.show_color_diagnostics {
+                    if let Some(seq) = state.sequence.as_ref() {
+                        self.draw_color_diagnostics_overlay(ui, canvas_rect, seq, current_frame);
+                    }
                 }
 
             let controls_rect = Rect::from_min_size(
@@ -726,6 +753,97 @@ impl ViewerPanel {
         let overlay_rect = Rect::from_min_size(
             canvas_rect.min + Vec2::new(margin, margin),
             Vec2::new(max_w.max(120.0), (canvas_rect.height() * 0.55).max(120.0)),
+        );
+
+        ui.painter().rect_filled(
+            overlay_rect,
+            tokens::section_rounding(),
+            palette::overlay_fill(),
+        );
+        ui.painter().rect_stroke(
+            overlay_rect,
+            tokens::section_rounding(),
+            egui::Stroke::new(1.0, palette::overlay_stroke()),
+            egui::StrokeKind::Inside,
+        );
+
+        ui.scope_builder(
+            egui::UiBuilder::new().max_rect(overlay_rect.shrink(8.0)),
+            |ui| {
+                ui.set_clip_rect(overlay_rect.shrink(8.0));
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(text)
+                            .font(typography::mono_small())
+                            .color(palette::text_primary()),
+                    )
+                    .wrap(),
+                );
+            },
+        );
+    }
+
+    fn draw_color_diagnostics_overlay(
+        &self,
+        ui: &mut Ui,
+        canvas_rect: Rect,
+        seq: &mondrian_timeline::sequence::Sequence,
+        current_frame: i64,
+    ) {
+        let diagnostics = collect_timeline_color_diagnostics(
+            seq,
+            current_frame,
+            seq.settings.color_management.output_color_space,
+        );
+        if diagnostics.is_empty() {
+            return;
+        }
+
+        let mut lines: Vec<String> = Vec::new();
+        lines.push(format!(
+            "工作空间: {:?}  输出: {:?}  色调映射: {}",
+            seq.settings.color_space,
+            seq.settings.color_management.output_color_space,
+            if seq.settings.auto_tone_map_media {
+                "是"
+            } else {
+                "否"
+            },
+        ));
+        lines.push(format!(
+            "引擎: {}  工作流: {:?}  元数据策略: {:?}",
+            seq.settings.color_management.engine.name(),
+            seq.settings.color_management.workflow,
+            seq.settings.color_management.missing_metadata_policy,
+        ));
+        lines.push(String::new());
+
+        for (i, d) in diagnostics.iter().take(8).enumerate() {
+            let input = d
+                .input_color_space_override
+                .map(|cs| format!("{:?}", cs))
+                .unwrap_or_else(|| "自动检测".to_string());
+            lines.push(format!(
+                "L{}  asset={}  in={}  work={:?}  out={:?}  tonemap={}",
+                i + 1,
+                d.asset_id,
+                input,
+                d.working_color_space,
+                d.output_color_space,
+                if d.tone_map { "✓" } else { "—" },
+            ));
+        }
+
+        if diagnostics.len() > 8 {
+            lines.push(format!("... 还有 {} 层", diagnostics.len() - 8));
+        }
+
+        let text = lines.join("\n");
+        let margin = 10.0;
+        let overlay_w = (canvas_rect.width() * 0.40).clamp(280.0, 420.0);
+        let overlay_rect = Rect::from_min_size(
+            canvas_rect.min + Vec2::new(canvas_rect.width() - overlay_w - margin, margin),
+            Vec2::new(overlay_w, (canvas_rect.height() * 0.60).max(160.0)),
         );
 
         ui.painter().rect_filled(
@@ -1523,7 +1641,7 @@ impl ViewerPanel {
                     target_height,
                     input_color_space: layer.input_color_space,
                     working_color_space: layer.working_color_space,
-                    backend: layer.backend,
+                    engine: layer.engine.clone(),
                     tone_map: layer.tone_map,
                 };
 
@@ -1648,12 +1766,37 @@ impl ViewerPanel {
                         asset.source_path.as_path(),
                         state.is_asset_proxy_mode(asset_id),
                     );
+                    let layer_engine = if seq.settings.color_management.inherit {
+                        state.project_settings.color_management.engine.clone()
+                    } else {
+                        seq.settings.color_management.engine.clone()
+                    };
+                    // Resolve input color space respecting the missing-metadata policy.
+                    let input_color_space = match media.color_space_override {
+                        Some(cs) => cs,
+                        None => {
+                            let policy = seq.settings.color_management.missing_metadata_policy;
+                            match policy {
+                                MissingColorMetadataPolicy::AssumeRec709 => asset.color_space,
+                                MissingColorMetadataPolicy::AssumeSequenceWorkingSpace => {
+                                    seq.settings.color_space
+                                }
+                                MissingColorMetadataPolicy::RejectMedia => {
+                                    tracing::warn!(
+                                        asset_id = %asset_id,
+                                        "素材缺少色彩元数据，已按项目策略跳过渲染"
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
+                    };
                     layers.push(RenderElement::Media(LayerDecodeRequest {
                         frame_key: (asset_id, media.source_frame),
                         path,
-                        input_color_space: media.color_space_override.unwrap_or(asset.color_space),
+                        input_color_space,
                         working_color_space: seq.settings.color_space,
-                        backend: seq.settings.color_management.backend,
+                        engine: layer_engine,
                         tone_map: seq.settings.auto_tone_map_media,
                         source_secs: media.source_secs,
                         source_time_base: media.source_time_base,
@@ -1682,6 +1825,16 @@ impl ViewerPanel {
                         nested_frame,
                         depth + 1,
                     );
+                    let nested_engine = if nested_sequence.settings.color_management.inherit {
+                        // Use parent's effective engine (already resolved for inherit).
+                        if seq.settings.color_management.inherit {
+                            state.project_settings.color_management.engine.clone()
+                        } else {
+                            seq.settings.color_management.engine.clone()
+                        }
+                    } else {
+                        nested_sequence.settings.color_management.engine.clone()
+                    };
                     layers.push(RenderElement::NestedSequence(NestedSequenceRenderRequest {
                         sequence_id: nested.sequence_id,
                         source_frame: nested_frame,
@@ -1689,7 +1842,7 @@ impl ViewerPanel {
                         height: nested_sequence.settings.resolution.height.max(1),
                         nested_processing: nested.nested_processing,
                         working_color_space: nested_sequence.settings.color_space,
-                        backend: nested_sequence.settings.color_management.backend,
+                        engine: nested_engine,
                         tone_map: nested_sequence.settings.auto_tone_map_media,
                         opacity: nested.opacity,
                         blend_mode: nested.blend_mode,
@@ -1772,7 +1925,7 @@ impl ViewerPanel {
                     target_height,
                     input_color_space: layer.input_color_space,
                     working_color_space: layer.working_color_space,
-                    backend: layer.backend,
+                    engine: layer.engine.clone(),
                     tone_map: layer.tone_map,
                 };
 
@@ -1835,7 +1988,7 @@ impl ViewerPanel {
                     target_height,
                     input_color_space: layer.input_color_space,
                     working_color_space: layer.working_color_space,
-                    backend: layer.backend,
+                    engine: layer.engine.clone(),
                     tone_map: layer.tone_map,
                 };
 
@@ -2321,7 +2474,7 @@ fn render_element_signature(layer: &RenderElement) -> LayerSignature {
                 effect_hash: layer.effect_graph.signature_hash,
                 child_hash,
                 nested_processing: layer.nested_processing,
-                backend: layer.backend,
+                engine: layer.engine.clone(),
             }
         }
     }
@@ -2331,6 +2484,11 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
     let decode_started_at = Instant::now();
     if request.generation != request.latest_generation.load(Ordering::Relaxed) {
         return Err(anyhow::anyhow!("decode cancelled by newer generation"));
+    }
+
+    // Ensure the color engine is ready.
+    if let Err(e) = request.engine.ensure_loaded() {
+        tracing::warn!("色彩引擎加载失败: {}", e);
     }
 
     let width = request.target_width.max(1);
@@ -2401,38 +2559,50 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
                     Err("decode cancelled by newer generation".to_string()),
                 ));
             }
-            let parent_context = SequenceRenderColorContext {
+            let parent_context = ColorContext {
                 working_color_space: request.working_color_space,
                 output_color_space: request.output_color_space,
                 tone_map: request.tone_map,
+                workflow: ColorWorkflow::DisplayReferred,
                 nested_processing: layer.nested_processing,
-                backend: request.backend,
-                ocio_config_path: None,
+                engine: request.engine.clone(),
+                missing_metadata_policy: MissingColorMetadataPolicy::default(),
+                ocio_display: None,
+                ocio_view: None,
             };
             let nested_context = match layer.nested_processing {
-                NestedColorProcessing::PreserveChildWorkingSpace => SequenceRenderColorContext {
+                NestedColorProcessing::PreserveChildWorkingSpace => ColorContext {
                     working_color_space: layer.working_color_space,
                     output_color_space: parent_context.working_color_space,
                     tone_map: layer.tone_map,
+                    workflow: parent_context.workflow,
                     nested_processing: layer.nested_processing,
-                    backend: layer.backend,
-                    ocio_config_path: None,
+                    engine: layer.engine.clone(),
+                    missing_metadata_policy: parent_context.missing_metadata_policy,
+                    ocio_display: parent_context.ocio_display.clone(),
+                    ocio_view: parent_context.ocio_view.clone(),
                 },
-                NestedColorProcessing::ForceParentWorkingSpace => SequenceRenderColorContext {
+                NestedColorProcessing::ForceParentWorkingSpace => ColorContext {
                     working_color_space: parent_context.working_color_space,
                     output_color_space: parent_context.working_color_space,
                     tone_map: parent_context.tone_map,
+                    workflow: parent_context.workflow,
                     nested_processing: layer.nested_processing,
-                    backend: parent_context.backend,
-                    ocio_config_path: None,
+                    engine: parent_context.engine.clone(),
+                    missing_metadata_policy: parent_context.missing_metadata_policy,
+                    ocio_display: parent_context.ocio_display.clone(),
+                    ocio_view: parent_context.ocio_view.clone(),
                 },
-                NestedColorProcessing::BakeChildOutputTransform => SequenceRenderColorContext {
+                NestedColorProcessing::BakeChildOutputTransform => ColorContext {
                     working_color_space: layer.working_color_space,
                     output_color_space: parent_context.working_color_space,
                     tone_map: layer.tone_map || parent_context.tone_map,
+                    workflow: parent_context.workflow,
                     nested_processing: layer.nested_processing,
-                    backend: layer.backend,
-                    ocio_config_path: None,
+                    engine: layer.engine.clone(),
+                    missing_metadata_policy: parent_context.missing_metadata_policy,
+                    ocio_display: parent_context.ocio_display.clone(),
+                    ocio_view: parent_context.ocio_view.clone(),
                 },
             };
             let signature = CompositeFrameSignature {
@@ -2449,8 +2619,10 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
                 layers: layer.layers.clone(),
                 working_color_space: nested_context.working_color_space,
                 output_color_space: nested_context.output_color_space,
-                backend: nested_context.backend,
+                engine: nested_context.engine.clone(),
                 display_profile: DisplayColorProfile::rec709_reference(),
+                ocio_display: nested_context.ocio_display.clone(),
+                ocio_view: nested_context.ocio_view.clone(),
                 tone_map: nested_context.tone_map,
                 playback_mode,
                 target_width: layer.width,
@@ -2653,8 +2825,30 @@ fn apply_preview_output_color(data: &mut [u8], request: &DecodeRequest) {
             request.output_color_space,
             request.tone_map,
         )
-        .with_backend(request.backend),
+        .with_engine(request.engine.clone()),
     );
+
+    // Use explicit display/view from viewer settings, or fall back to OCIO defaults.
+    let ocio_defaults = mondrian_core::ocio_default_display_view();
+    let display = request
+        .ocio_display
+        .as_deref()
+        .or_else(|| ocio_defaults.as_ref().map(|(d, _)| d.as_str()));
+    let view = request
+        .ocio_view
+        .as_deref()
+        .or_else(|| ocio_defaults.as_ref().map(|(_, v)| v.as_str()));
+
+    if let (Some(display), Some(view)) = (display, view) {
+        if request
+            .engine
+            .display_transform(data, request.output_color_space, display, view)
+            .is_ok()
+        {
+            return;
+        }
+    }
+
     if let Err(err) = apply_display_profile_rgba8_in_place(
         data,
         request.output_color_space,
@@ -2778,7 +2972,7 @@ fn decode_layer_rgba(
         target_height: height,
         input_color_space: layer.input_color_space,
         working_color_space: layer.working_color_space,
-        backend: layer.backend,
+        engine: layer.engine.clone(),
         tone_map: layer.tone_map,
     };
 
@@ -2900,7 +3094,7 @@ fn apply_layer_input_color(data: &mut [u8], layer: &LayerDecodeRequest) {
             layer.working_color_space,
             layer.tone_map,
         )
-        .with_backend(layer.backend),
+        .with_engine(layer.engine.clone()),
     );
 }
 

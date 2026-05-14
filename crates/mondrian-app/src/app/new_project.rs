@@ -284,6 +284,75 @@ fn draw_new_project_panel(app: &mut MondrianApp, ui: &mut egui::Ui) {
                         });
                     ui.end_row();
 
+                    ui.label(egui::RichText::new("色彩引擎").color(text_primary).size(12.5));
+                    egui::ComboBox::from_id_salt("new_project_color_engine")
+                        .selected_text(color_engine_label(&app.new_project_draft.engine))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut app.new_project_draft.engine,
+                                ColorEngine::MondrianSmart,
+                                "Mondrian Smart (内置数学)",
+                            );
+                            ui.selectable_value(
+                                &mut app.new_project_draft.engine,
+                                ColorEngine::Ocio { source: OcioConfigSource::Environment },
+                                "OpenColorIO ($OCIO 环境变量)",
+                            );
+                        });
+                    ui.end_row();
+
+                    // OCIO source selector (only shown when OCIO engine is selected)
+                    if let ColorEngine::Ocio { ref mut source } = app.new_project_draft.engine {
+                        ui.label(egui::RichText::new("OCIO 来源").color(text_primary).size(12.5));
+                        egui::ComboBox::from_id_salt("new_project_ocio_source")
+                            .selected_text(ocio_source_label(source))
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    source,
+                                    OcioConfigSource::Environment,
+                                    "$OCIO 环境变量",
+                                );
+                                let builtins = mondrian_core::builtin_config_entries();
+                                for (name, ui_name) in &builtins {
+                                    ui.selectable_value(
+                                        source,
+                                        OcioConfigSource::Builtin(name.clone()),
+                                        format!("内置: {ui_name}"),
+                                    );
+                                }
+                            });
+                        if matches!(
+                            source,
+                            OcioConfigSource::Path(_) | OcioConfigSource::Builtin(_)
+                        ) {
+                            ui.selectable_value(
+                                source,
+                                OcioConfigSource::Environment,
+                                "↩ 切换为 $OCIO",
+                            );
+                        }
+                        ui.end_row();
+
+                        // File path input when Path source is selected
+                        if let OcioConfigSource::Path(ref mut path_buf) = source {
+                            ui.label(
+                                egui::RichText::new("OCIO 路径").color(text_primary).size(12.5),
+                            );
+                            let mut path_str = path_buf.to_string_lossy().into_owned();
+                            if ui
+                                .add(
+                                    egui::TextEdit::singleline(&mut path_str)
+                                        .hint_text("config.ocio 文件路径")
+                                        .desired_width(f32::INFINITY),
+                                )
+                                .changed()
+                            {
+                                *path_buf = PathBuf::from(path_str);
+                            }
+                            ui.end_row();
+                        }
+                    }
+
                     ui.label(egui::RichText::new("视频电平").color(text_primary).size(12.5));
                     egui::ComboBox::from_id_salt("new_project_video_range")
                         .selected_text(video_range_label(app.new_project_draft.video_range))
@@ -489,10 +558,19 @@ fn commit_new_project(app: &mut MondrianApp) {
         settings.color_management.preserve_hdr_metadata =
             app.new_project_draft.preserve_hdr_metadata;
 
-        if let Err(err) =
-            app.state
-                .create_new_project_with_settings_at(project_path.clone(), name, settings)
-        {
+        let project_settings = ProjectSettings {
+            color_management: ProjectColorManagement {
+                engine: app.new_project_draft.engine.clone(),
+            },
+            ..ProjectSettings::default()
+        };
+
+        if let Err(err) = app.state.create_new_project_with_settings_at(
+            project_path.clone(),
+            name,
+            settings,
+            project_settings,
+        ) {
             app.state.set_status_hint(format!("新建项目失败：{err}"), true);
             tracing::error!("新建项目失败: {err}");
         } else {
@@ -500,6 +578,21 @@ fn commit_new_project(app: &mut MondrianApp) {
             app.record_recent_project(project_path);
             app.show_new_project_dialog = false;
         }
+    }
+}
+
+fn color_engine_label(engine: &ColorEngine) -> &str {
+    match engine {
+        ColorEngine::MondrianSmart => "Mondrian Smart (内置数学)",
+        ColorEngine::Ocio { .. } => "OpenColorIO",
+    }
+}
+
+fn ocio_source_label(source: &OcioConfigSource) -> String {
+    match source {
+        OcioConfigSource::Environment => "$OCIO 环境变量".to_string(),
+        OcioConfigSource::Builtin(name) => format!("内置: {name}"),
+        OcioConfigSource::Path(p) => p.to_string_lossy().into_owned(),
     }
 }
 

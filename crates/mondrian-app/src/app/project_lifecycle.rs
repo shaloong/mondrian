@@ -130,6 +130,7 @@ impl AppState {
         Some(ProjectFile {
             name: sequence.name.clone(),
             sequences: collection,
+            project_settings: self.project_settings.clone(),
             proxy_mode_assets,
         })
     }
@@ -306,6 +307,7 @@ impl AppState {
         self.current_project_path = Some(project_file.clone());
         self.project_runtime_dir = Some(runtime_root.clone());
         self.proxy_mode_assets = saved.proxy_mode_assets.into_iter().collect();
+        self.project_settings = saved.project_settings;
         self.playback = PlaybackState::Stopped;
         self.dragging_asset = None;
         self.cmd_history = mondrian_timeline::command::CommandHistory::new(200);
@@ -354,7 +356,12 @@ impl AppState {
             frame_rate,
             ..SequenceSettings::default()
         };
-        self.create_new_project_with_settings_at(project_file, name, settings)
+        self.create_new_project_with_settings_at(
+            project_file,
+            name,
+            settings,
+            ProjectSettings::default(),
+        )
     }
 
     pub fn create_new_project_with_settings_at(
@@ -362,6 +369,7 @@ impl AppState {
         project_file: PathBuf,
         name: &str,
         settings: SequenceSettings,
+        project_settings: ProjectSettings,
     ) -> anyhow::Result<()> {
         if project_file.exists() {
             anyhow::bail!("项目文件已存在：{}", project_file.display());
@@ -389,6 +397,7 @@ impl AppState {
         self.sequence_navigation_stack.clear();
         self.current_project_path = Some(project_file.clone());
         self.project_runtime_dir = Some(runtime_root.clone());
+        self.project_settings = project_settings;
         self.playback = PlaybackState::Stopped;
         self.cmd_history = mondrian_timeline::command::CommandHistory::new(200);
         self.proxy_mode_assets.clear();

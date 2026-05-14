@@ -15,9 +15,10 @@ use mondrian_core::{
     },
     events::{AppEvent, EventBus},
     types::{
-        AssetId, ClipId, ColorSpace, EffectId, KeyframeId, Rational, Resolution, SequenceId,
-        TimeCode, TrackId,
+        AssetId, ClipId, ColorEngine, ColorSpace, EffectId, KeyframeId, OcioConfigSource, Rational,
+        Resolution, SequenceId, TimeCode, TrackId,
     },
+    ProjectColorManagement, ProjectSettings,
 };
 use mondrian_effects::EffectType;
 use mondrian_export::queue::{JobStatus, RenderQueue};
@@ -138,6 +139,8 @@ pub enum ClipOverlapMode {
 struct ProjectFile {
     pub name: String,
     pub sequences: SequenceCollection,
+    #[serde(default)]
+    pub project_settings: ProjectSettings,
     pub proxy_mode_assets: Vec<AssetId>,
 }
 
@@ -235,6 +238,9 @@ struct NewProjectDraft {
     export_bit_depth: ExportBitDepth,
     #[serde(default)]
     preserve_hdr_metadata: bool,
+    /// 新建项目时默认的色彩引擎。
+    #[serde(default)]
+    engine: ColorEngine,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -353,6 +359,7 @@ impl Default for NewProjectDraft {
             video_range: VideoRange::Full,
             export_bit_depth: ExportBitDepth::SixteenFloat,
             preserve_hdr_metadata: false,
+            engine: ColorEngine::default(),
         }
     }
 }
@@ -485,6 +492,9 @@ pub struct AppState {
     // 当前项目运行时工作目录（用于素材库 SQLite）
     pub project_runtime_dir: Option<PathBuf>,
 
+    // 项目级色彩管理设置（所有序列默认继承）
+    pub project_settings: ProjectSettings,
+
     // 撤销/重做历史（封装在 timeline crate 中）
     pub cmd_history: mondrian_timeline::command::CommandHistory,
 
@@ -582,6 +592,7 @@ impl AppState {
             sequence_navigation_stack: Vec::new(),
             current_project_path: None,
             project_runtime_dir: None,
+            project_settings: ProjectSettings::default(),
             cmd_history: mondrian_timeline::command::CommandHistory::new(200),
             playback: PlaybackState::default(),
             playback_reached_end: false,
