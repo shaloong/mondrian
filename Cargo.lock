@@ -928,6 +928,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cmake"
+version = "0.1.58"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0f78a02292a74a88ac736019ab962ece0bc380e3f977bf72e376c5d78ff0678"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "codespan-reporting"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3161,6 +3170,7 @@ dependencies = [
  "glam",
  "icc-profile",
  "moxcms",
+ "ocio-rs",
  "parking_lot",
  "proptest",
  "serde",
@@ -3831,6 +3841,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c8bb09a4a2b1d668170cfe0a7d5bc103f8999fb316c98099b6a9939c9f2e79d"
 dependencies = [
  "cc",
+]
+
+[[package]]
+name = "ocio-rs"
+version = "0.1.0"
+source = "git+https://github.com/shaloong/ocio-rs#fc5d68c39a66873d264f13e56408be42268e49cb"
+dependencies = [
+ "ocio-sys",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "ocio-sys"
+version = "0.1.0"
+source = "git+https://github.com/shaloong/ocio-rs#fc5d68c39a66873d264f13e56408be42268e49cb"
+dependencies = [
+ "cc",
+ "cmake",
 ]
 
 [[package]]

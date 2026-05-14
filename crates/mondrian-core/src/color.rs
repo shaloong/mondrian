@@ -1,7 +1,7 @@
 //! Color management primitives shared by preview, render and export.
 
 use crate::icc::parse_icc_display_profile;
-use crate::types::{ColorManagementBackend, ColorSpace};
+use crate::types::{ColorEngine, ColorSpace};
 use moxcms::{
     CicpColorPrimaries, CicpProfile, ColorProfile as CmsColorProfile, Layout as CmsLayout,
     MatrixCoefficients, TransferCharacteristics, TransformOptions,
@@ -9,37 +9,32 @@ use moxcms::{
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ColorPipeline {
     pub input: ColorSpace,
     pub working: ColorSpace,
     pub output: ColorSpace,
     pub tone_map: bool,
-    pub backend: ColorManagementBackend,
+    pub engine: ColorEngine,
 }
 
 impl ColorPipeline {
-    pub const fn new(
-        input: ColorSpace,
-        working: ColorSpace,
-        output: ColorSpace,
-        tone_map: bool,
-    ) -> Self {
+    pub fn new(input: ColorSpace, working: ColorSpace, output: ColorSpace, tone_map: bool) -> Self {
         Self {
             input,
             working,
             output,
             tone_map,
-            backend: ColorManagementBackend::MondrianSmart,
+            engine: ColorEngine::default(),
         }
     }
 
-    pub const fn with_backend(mut self, backend: ColorManagementBackend) -> Self {
-        self.backend = backend;
+    pub fn with_engine(mut self, engine: ColorEngine) -> Self {
+        self.engine = engine;
         self
     }
 
-    pub fn is_noop(self) -> bool {
+    pub fn is_noop(&self) -> bool {
         self.input == self.output
             && self.working == self.output
             && !(self.tone_map && self.input.is_hdr() && !self.output.is_hdr())
@@ -54,119 +49,114 @@ impl ColorPipeline {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ColorLut3D {
-    pub name: String,
-    pub size: u32,
-    pub data: Vec<[f32; 3]>,
+// ── ColorEngine: centralized dispatch ─────────────────────────────────────────
+
+/// MondrianSmart engine: pure-Rust color math.
+///
+/// Called directly (not through `ColorPipeline`) to avoid the recursive loop
+/// that would occur if `ColorEngine::convert()` created a pipeline whose plan
+/// calls back into `ColorEngine::convert()`.
+fn mondrian_smart_convert(
+    data: &mut [u8],
+    src: ColorSpace,
+    dst: ColorSpace,
+    tone_map: bool,
+) -> Result<(), String> {
+    if data.is_empty() || src == dst {
+        return Ok(());
+    }
+    // Build a plan WITHOUT a ManagementEngine node to avoid recursion.
+    let plan = ColorTransformPlan {
+        source: src,
+        working: src,
+        output: dst,
+        tone_map,
+        nodes: vec![
+            ColorTransformNode::DecodeTransfer(src),
+            ColorTransformNode::ConvertPrimaries { from: src, to: src },
+        ],
+    };
+    plan.apply_rgba8_in_place(data)
 }
 
-impl ColorLut3D {
-    pub fn identity(size: u32) -> Result<Self, String> {
-        if !(2..=129).contains(&size) {
-            return Err(format!("unsupported 3D LUT size: {size}"));
-        }
-        let mut data = Vec::with_capacity((size * size * size) as usize);
-        let denom = (size - 1) as f32;
-        for b in 0..size {
-            for g in 0..size {
-                for r in 0..size {
-                    data.push([r as f32 / denom, g as f32 / denom, b as f32 / denom]);
+impl ColorEngine {
+    /// Apply a color space conversion to the given rgba8 data.
+    ///
+    /// This is the single dispatch point for all color space transforms.
+    /// The engine handles the entire chain: decode → primaries → tone map → encode.
+    pub fn convert(
+        &self,
+        data: &mut [u8],
+        src: ColorSpace,
+        dst: ColorSpace,
+        tone_map: bool,
+    ) -> Result<(), String> {
+        match self {
+            Self::MondrianSmart => mondrian_smart_convert(data, src, dst, tone_map),
+            Self::Ocio { .. } => {
+                if crate::ocio::ocio_available() {
+                    crate::ocio::apply_ocio_rgba8(data, src, dst)
+                } else {
+                    tracing::warn!(
+                        "OCIO engine selected but no config loaded; falling back to MondrianSmart"
+                    );
+                    mondrian_smart_convert(data, src, dst, tone_map)
                 }
             }
         }
-        Ok(Self { name: format!("identity-{size}"), size, data })
     }
 
-    pub fn sample(&self, rgb: [f32; 3]) -> [f32; 3] {
-        if self.size < 2 || self.data.is_empty() {
-            return rgb;
-        }
-
-        let max = (self.size - 1) as f32;
-        let r = rgb[0].clamp(0.0, 1.0) * max;
-        let g = rgb[1].clamp(0.0, 1.0) * max;
-        let b = rgb[2].clamp(0.0, 1.0) * max;
-        let r0 = r.floor() as u32;
-        let g0 = g.floor() as u32;
-        let b0 = b.floor() as u32;
-        let r1 = (r0 + 1).min(self.size - 1);
-        let g1 = (g0 + 1).min(self.size - 1);
-        let b1 = (b0 + 1).min(self.size - 1);
-        let fr = r - r0 as f32;
-        let fg = g - g0 as f32;
-        let fb = b - b0 as f32;
-
-        let c000 = self.at(r0, g0, b0);
-        let c100 = self.at(r1, g0, b0);
-        let c010 = self.at(r0, g1, b0);
-        let c110 = self.at(r1, g1, b0);
-        let c001 = self.at(r0, g0, b1);
-        let c101 = self.at(r1, g0, b1);
-        let c011 = self.at(r0, g1, b1);
-        let c111 = self.at(r1, g1, b1);
-
-        lerp3(
-            lerp3(lerp3(c000, c100, fr), lerp3(c010, c110, fr), fg),
-            lerp3(lerp3(c001, c101, fr), lerp3(c011, c111, fr), fg),
-            fb,
-        )
-    }
-
-    pub fn apply_rgba8_in_place(&self, rgba: &mut [u8], intensity: f32) {
-        let intensity = intensity.clamp(0.0, 1.0);
-        if intensity <= 1.0e-4 {
-            return;
-        }
-        for px in rgba.chunks_exact_mut(4) {
-            let src = [
-                px[0] as f32 / 255.0,
-                px[1] as f32 / 255.0,
-                px[2] as f32 / 255.0,
-            ];
-            let graded = self.sample(src);
-            let out = lerp3(src, graded, intensity);
-            px[0] = (out[0].clamp(0.0, 1.0) * 255.0).round() as u8;
-            px[1] = (out[1].clamp(0.0, 1.0) * 255.0).round() as u8;
-            px[2] = (out[2].clamp(0.0, 1.0) * 255.0).round() as u8;
+    /// Apply a display transform (scene → display).
+    ///
+    /// For OCIO this uses the configured display/view pair. For MondrianSmart this
+    /// falls back to ICC-based display profiles.
+    pub fn display_transform(
+        &self,
+        data: &mut [u8],
+        src: ColorSpace,
+        display: &str,
+        view: &str,
+    ) -> Result<(), String> {
+        match self {
+            Self::MondrianSmart => Err(
+                "MondrianSmart engine uses ICC display profiles, not OCIO display transforms"
+                    .to_string(),
+            ),
+            Self::Ocio { .. } => crate::ocio::apply_ocio_display_rgba8(data, src, display, view),
         }
     }
 
-    pub fn signature_hash(&self) -> u64 {
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        self.name.hash(&mut hasher);
-        self.size.hash(&mut hasher);
-        for rgb in &self.data {
-            rgb[0].to_bits().hash(&mut hasher);
-            rgb[1].to_bits().hash(&mut hasher);
-            rgb[2].to_bits().hash(&mut hasher);
+    /// Whether the engine is ready to process data.
+    pub fn is_available(&self) -> bool {
+        match self {
+            Self::MondrianSmart => true,
+            Self::Ocio { .. } => crate::ocio::ocio_available(),
         }
-        hasher.finish()
     }
 
-    fn at(&self, r: u32, g: u32, b: u32) -> [f32; 3] {
-        let idx = (b * self.size * self.size + g * self.size + r) as usize;
-        self.data.get(idx).copied().unwrap_or([0.0, 0.0, 0.0])
+    /// Ensure any required external config is loaded.
+    pub fn ensure_loaded(&self) -> Result<(), String> {
+        match self {
+            Self::MondrianSmart => Ok(()),
+            Self::Ocio { source } => crate::ocio::ensure_ocio_loaded(source),
+        }
     }
-}
 
-fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
-    [
-        a[0] + (b[0] - a[0]) * t,
-        a[1] + (b[1] - a[1]) * t,
-        a[2] + (b[2] - a[2]) * t,
-    ]
+    /// Human-readable name for diagnostics / UI.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::MondrianSmart => "Mondrian Smart",
+            Self::Ocio { .. } => "OpenColorIO",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ColorTransformNode {
-    ManagementBackend(ColorManagementBackend),
+    ManagementEngine(ColorEngine),
     DecodeTransfer(ColorSpace),
     ConvertPrimaries { from: ColorSpace, to: ColorSpace },
     ToneMapAces,
-    Lut3D { lut: ColorLut3D, intensity: f32 },
     DisplayProfile(DisplayColorProfile),
 }
 
@@ -183,7 +173,7 @@ pub struct ColorTransformPlan {
 impl ColorTransformPlan {
     pub fn from_pipeline(pipeline: ColorPipeline) -> Self {
         let mut nodes = vec![
-            ColorTransformNode::ManagementBackend(pipeline.backend),
+            ColorTransformNode::ManagementEngine(pipeline.engine),
             ColorTransformNode::DecodeTransfer(pipeline.input),
             ColorTransformNode::ConvertPrimaries { from: pipeline.input, to: pipeline.working },
         ];
@@ -206,11 +196,6 @@ impl ColorTransformPlan {
 
     pub fn with_display_profile(mut self, profile: DisplayColorProfile) -> Self {
         self.nodes.push(ColorTransformNode::DisplayProfile(profile));
-        self
-    }
-
-    pub fn with_lut(mut self, lut: ColorLut3D, intensity: f32) -> Self {
-        self.nodes.push(ColorTransformNode::Lut3D { lut, intensity });
         self
     }
 
@@ -237,6 +222,12 @@ impl ColorTransformPlan {
             return Ok(());
         }
 
+        // If the first node declares an engine, use its centralized dispatch.
+        if let Some(ColorTransformNode::ManagementEngine(engine)) = self.nodes.first() {
+            let tone_map = self.tone_map && self.source.is_hdr() && !self.output.is_hdr();
+            return engine.convert(data, self.source, self.output, tone_map);
+        }
+
         let mut frame = RgbaF32Frame::from_rgba8(
             1,
             (data.len() / 4) as u32,
@@ -248,7 +239,7 @@ impl ColorTransformPlan {
 
         for node in &self.nodes {
             match node {
-                ColorTransformNode::ManagementBackend(_) => {}
+                ColorTransformNode::ManagementEngine(_) => {}
                 ColorTransformNode::DecodeTransfer(_) => {}
                 ColorTransformNode::ConvertPrimaries { from: _, to } => {
                     frame.convert_to(*to, false);
@@ -261,18 +252,6 @@ impl ColorTransformPlan {
                             px[2] = aces_tone_map(px[2]);
                         }
                     }
-                }
-                ColorTransformNode::Lut3D { lut, intensity } => {
-                    let mut rgba = frame.to_rgba8(frame.color_space, false);
-                    lut.apply_rgba8_in_place(&mut rgba, *intensity);
-                    frame = RgbaF32Frame::from_rgba8(
-                        1,
-                        (rgba.len() / 4) as u32,
-                        &rgba,
-                        frame.color_space,
-                        frame.color_space,
-                        false,
-                    );
                 }
                 ColorTransformNode::DisplayProfile(profile) => {
                     let mut rgba = frame.to_rgba8(frame.color_space, self.tone_map);
@@ -299,9 +278,9 @@ impl ColorTransformNode {
         use std::hash::Hash;
 
         match self {
-            ColorTransformNode::ManagementBackend(backend) => {
+            ColorTransformNode::ManagementEngine(engine) => {
                 0u8.hash(state);
-                backend.hash(state);
+                engine.hash(state);
             }
             ColorTransformNode::DecodeTransfer(space) => {
                 1u8.hash(state);
@@ -315,13 +294,8 @@ impl ColorTransformNode {
             ColorTransformNode::ToneMapAces => {
                 3u8.hash(state);
             }
-            ColorTransformNode::Lut3D { lut, intensity } => {
-                4u8.hash(state);
-                lut.signature_hash().hash(state);
-                intensity.to_bits().hash(state);
-            }
             ColorTransformNode::DisplayProfile(profile) => {
-                5u8.hash(state);
+                4u8.hash(state);
                 profile.signature_hash().hash(state);
             }
         }

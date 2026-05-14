@@ -7,30 +7,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// 序列（Sequence）设置
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SequenceSettings {
-    pub resolution: Resolution,
-    pub frame_rate: Rational,
-    pub sample_rate: u32,   // 音频采样率（Hz），通常 48000
-    pub audio_channels: u8, // 声道数（2 = 立体声）
-    pub color_space: ColorSpace,
-    pub pixel_aspect: Rational, // 像素宽高比（通常 1:1）
-}
-
-impl Default for SequenceSettings {
-    fn default() -> Self {
-        Self {
-            resolution: Resolution::FHD,
-            frame_rate: Rational::FPS_25,
-            sample_rate: 48_000,
-            audio_channels: 2,
-            color_space: ColorSpace::Rec709,
-            pixel_aspect: Rational::new(1, 1),
-        }
-    }
-}
-
 /// 项目元数据
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectMeta {
@@ -64,18 +40,19 @@ impl ProjectMeta {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
     pub meta: ProjectMeta,
-    pub sequences: Vec<SequenceRef>, // 序列引用（完整数据在 timeline crate）
-    pub active_sequence: Option<SequenceId>,
     pub settings: ProjectSettings,
     pub save_path: Option<PathBuf>,
 }
 
-/// 序列引用（轻量）
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SequenceRef {
-    pub id: SequenceId,
-    pub name: String,
-    pub settings: SequenceSettings,
+/// 项目色彩管理设置
+///
+/// 所有序列默认继承此配置，序列可以单独覆盖。
+/// 类似于达芬奇项目设置中的色彩科学选择器。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ProjectColorManagement {
+    /// 色彩引擎。默认 [`ColorEngine::MondrianSmart`]。
+    #[serde(default)]
+    pub engine: ColorEngine,
 }
 
 /// 项目全局设置
@@ -84,8 +61,10 @@ pub struct ProjectSettings {
     pub proxy_enabled: bool,
     pub proxy_resolution: Resolution,
     pub cache_dir: Option<PathBuf>,
-    pub auto_save_interval: u32, // 自动保存间隔（秒）
-    pub color_management: bool,
+    pub auto_save_interval: u32,
+    /// 项目级色彩管理（所有序列默认继承）。
+    #[serde(default)]
+    pub color_management: ProjectColorManagement,
 }
 
 impl Default for ProjectSettings {
@@ -94,8 +73,8 @@ impl Default for ProjectSettings {
             proxy_enabled: true,
             proxy_resolution: Resolution::HD,
             cache_dir: None,
-            auto_save_interval: 300, // 5 分钟
-            color_management: true,
+            auto_save_interval: 300,
+            color_management: ProjectColorManagement::default(),
         }
     }
 }
@@ -104,24 +83,9 @@ impl Project {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             meta: ProjectMeta::new(name),
-            sequences: Vec::new(),
-            active_sequence: None,
             settings: ProjectSettings::default(),
             save_path: None,
         }
-    }
-
-    pub fn add_sequence(
-        &mut self,
-        name: impl Into<String>,
-        settings: SequenceSettings,
-    ) -> SequenceId {
-        let id = SequenceId::new();
-        self.sequences.push(SequenceRef { id, name: name.into(), settings });
-        if self.active_sequence.is_none() {
-            self.active_sequence = Some(id);
-        }
-        id
     }
 
     pub fn touch(&mut self) {

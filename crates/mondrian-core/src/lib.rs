@@ -8,6 +8,7 @@ pub mod color;
 pub mod error;
 pub mod events;
 pub mod icc;
+pub mod ocio;
 pub mod project;
 pub mod types;
 
@@ -15,4 +16,6 @@ pub use automation::*;
 pub use color::*;
 pub use error::{MondrianError, Result};
 pub use events::{AppEvent, EventBus};
+pub use ocio::*;
+pub use project::*;
 pub use types::*;

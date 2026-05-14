@@ -4,6 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::path::PathBuf;
 use uuid::Uuid;
 
 // ─── 强类型 ID ────────────────────────────────────────────────────────────────
@@ -333,15 +334,51 @@ pub enum ColorSpace {
     ArriLogC4,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-pub enum ColorManagementBackend {
-    /// Mondrian 默认智能路径：基于标准曲线、矩阵和缓存节点的确定性实现。
+/// 色彩引擎 —— 色彩空间转换的统一分发点。
+///
+/// 所有色彩转换都通过此枚举的方法进行，编译器保证穷尽 match 分发，不会出现
+/// "选了变体但无实现"的静默 bug。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum ColorEngine {
+    /// Mondrian 内置数学管线：标准 OETF/EOTF 曲线 + 色域矩阵 + ACES tone map。
     #[default]
     MondrianSmart,
-    /// ACES 标准管理路径。
-    AcesStandard,
-    /// OCIO 配置驱动路径。
-    Ocio,
+    /// OpenColorIO v2.5.1 配置驱动管线。
+    Ocio {
+        /// OCIO 配置来源。`ensure_ocio_loaded` 在首次转换前根据此来源加载配置。
+        source: OcioConfigSource,
+    },
+}
+
+/// 如何定位 OCIO 配置。
+///
+/// 类似达芬奇的色彩科学选择器（预设）和 Nuke 的 OCIO 解析顺序
+///（`$OCIO` → 内置 → 自定义路径）。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum OcioConfigSource {
+    /// 使用 `OCIO` 环境变量（行业标准）。
+    /// 未设置时自动回退到系统标准路径。
+    #[default]
+    #[serde(rename = "environment")]
+    Environment,
+    /// 使用内置 OCIO 配置（如 ACES 1.2、CG Config）。
+    /// 名称可通过 [`crate::ocio::builtin_config_names`] 获取。
+    #[serde(rename = "builtin")]
+    Builtin(String),
+    /// 显式指定 `config.ocio` 文件路径。
+    #[serde(rename = "path")]
+    Path(PathBuf),
+}
+
+impl fmt::Display for OcioConfigSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Environment => write!(f, "$OCIO"),
+            Self::Builtin(name) => write!(f, "内置: {name}"),
+            Self::Path(p) => write!(f, "{}", p.display()),
+        }
+    }
 }
 
 #[cfg(test)]
