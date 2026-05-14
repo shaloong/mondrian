@@ -186,8 +186,29 @@ impl AutosaveManifest {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum NewProjectTab {
+    #[default]
+    Basic,
+    Timeline,
+    Color,
+    Audio,
+    Advanced,
+}
+
+/// User-facing colour preset that drives all derived colour settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+enum ColorMode {
+    #[default]
+    Sdr,
+    HdrPq,
+    HdrHlg,
+    Aces,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct NewProjectDraft {
+    // ── 基础 ──
     #[serde(default)]
     name: String,
     #[serde(default = "default_new_project_width")]
@@ -198,49 +219,48 @@ struct NewProjectDraft {
     fps_num: i64,
     #[serde(default = "default_new_project_fps_den")]
     fps_den: i64,
+
+    // ── 色彩（用户可见） ──
+    #[serde(default)]
+    color_mode: ColorMode,
+
+    // ── 音频 ──
+    #[serde(default = "default_new_project_audio_sample_rate")]
+    audio_sample_rate: u32,
+    #[serde(default)]
+    audio_channel_layout: AudioChannelLayout,
+
+    // ── 高级：时间线 ──
     #[serde(default)]
     start_timecode_frame: i64,
     #[serde(default)]
-    editing_mode: EditingMode,
+    video_display_format: VideoDisplayFormat,
     #[serde(default)]
     pixel_aspect_ratio: PixelAspectRatio,
     #[serde(default)]
     field_order: FieldOrder,
+
+    // ── 高级：色彩 ──
     #[serde(default)]
-    video_display_format: VideoDisplayFormat,
-    #[serde(default = "default_new_project_audio_sample_rate")]
-    audio_sample_rate: u32,
+    color_workflow: ColorWorkflow,
     #[serde(default)]
-    audio_display_format: AudioDisplayFormat,
+    engine: ColorEngine,
     #[serde(default)]
-    audio_channel_layout: AudioChannelLayout,
+    missing_color_metadata_policy: MissingColorMetadataPolicy,
+    #[serde(default)]
+    nested_color_processing: NestedColorProcessing,
+    #[serde(default)]
+    preserve_hdr_metadata: bool,
+    #[serde(default)]
+    video_range: VideoRange,
+
+    // ── 高级：性能 ──
     #[serde(default)]
     preview_format: PreviewRenderFormat,
     #[serde(default = "default_new_project_preview_resolution_scale")]
     preview_resolution_scale: f32,
     #[serde(default = "default_new_project_preview_cache_enabled")]
     preview_cache_enabled: bool,
-    #[serde(default)]
-    color_space: ColorSpace,
-    #[serde(default = "default_new_project_auto_tone_map_media")]
-    auto_tone_map_media: bool,
-    #[serde(default)]
-    color_workflow: ColorWorkflow,
-    #[serde(default)]
-    missing_color_metadata_policy: MissingColorMetadataPolicy,
-    #[serde(default)]
-    nested_color_processing: NestedColorProcessing,
-    #[serde(default)]
-    output_color_space: ColorSpace,
-    #[serde(default)]
-    video_range: VideoRange,
-    #[serde(default)]
-    export_bit_depth: ExportBitDepth,
-    #[serde(default)]
-    preserve_hdr_metadata: bool,
-    /// 新建项目时默认的色彩引擎。
-    #[serde(default)]
-    engine: ColorEngine,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -339,27 +359,73 @@ impl Default for NewProjectDraft {
             height: default_new_project_height(),
             fps_num: default_new_project_fps_num(),
             fps_den: default_new_project_fps_den(),
+            color_mode: ColorMode::default(),
+            audio_sample_rate: default_new_project_audio_sample_rate(),
+            audio_channel_layout: AudioChannelLayout::Stereo,
             start_timecode_frame: 0,
-            editing_mode: EditingMode::Custom,
+            video_display_format: VideoDisplayFormat::Frames,
             pixel_aspect_ratio: PixelAspectRatio::Square,
             field_order: FieldOrder::Progressive,
-            video_display_format: VideoDisplayFormat::Frames,
-            audio_sample_rate: default_new_project_audio_sample_rate(),
-            audio_display_format: AudioDisplayFormat::AudioSamples,
-            audio_channel_layout: AudioChannelLayout::Stereo,
+            color_workflow: ColorWorkflow::DisplayReferred,
+            engine: ColorEngine::default(),
+            missing_color_metadata_policy: MissingColorMetadataPolicy::AssumeRec709,
+            nested_color_processing: NestedColorProcessing::PreserveChildWorkingSpace,
+            preserve_hdr_metadata: false,
+            video_range: VideoRange::Full,
             preview_format: PreviewRenderFormat::IFrameOnly,
             preview_resolution_scale: default_new_project_preview_resolution_scale(),
             preview_cache_enabled: default_new_project_preview_cache_enabled(),
-            color_space: ColorSpace::Rec709,
-            auto_tone_map_media: default_new_project_auto_tone_map_media(),
-            color_workflow: ColorWorkflow::DisplayReferred,
-            missing_color_metadata_policy: MissingColorMetadataPolicy::AssumeRec709,
-            nested_color_processing: NestedColorProcessing::PreserveChildWorkingSpace,
-            output_color_space: ColorSpace::Rec709,
-            video_range: VideoRange::Full,
-            export_bit_depth: ExportBitDepth::SixteenFloat,
-            preserve_hdr_metadata: false,
-            engine: ColorEngine::default(),
+        }
+    }
+}
+
+impl NewProjectDraft {
+    /// Apply `ColorMode`-driven defaults to this draft.
+    fn apply_color_mode_defaults(&mut self) {
+        match self.color_mode {
+            ColorMode::Sdr => {
+                self.color_workflow = ColorWorkflow::DisplayReferred;
+                self.engine = ColorEngine::MondrianSmart;
+                self.preserve_hdr_metadata = false;
+            }
+            ColorMode::HdrPq => {
+                self.color_workflow = ColorWorkflow::SceneReferred;
+                self.preserve_hdr_metadata = true;
+            }
+            ColorMode::HdrHlg => {
+                self.color_workflow = ColorWorkflow::SceneReferred;
+                self.preserve_hdr_metadata = true;
+            }
+            ColorMode::Aces => {
+                self.color_workflow = ColorWorkflow::Aces;
+                self.engine = ColorEngine::Ocio {
+                    source: OcioConfigSource::Builtin("aces_1.2".into()),
+                };
+                self.preserve_hdr_metadata = false;
+            }
+        }
+    }
+
+    /// Resolve the working colour space from the colour mode.
+    fn working_color_space(&self) -> ColorSpace {
+        match self.color_mode {
+            ColorMode::Sdr => ColorSpace::Rec709,
+            ColorMode::HdrPq => ColorSpace::Rec2100Pq,
+            ColorMode::HdrHlg => ColorSpace::Rec2100Hlg,
+            ColorMode::Aces => ColorSpace::Rec2020,
+        }
+    }
+
+    /// Resolve the output colour space from the colour mode.
+    fn output_color_space(&self) -> ColorSpace {
+        self.working_color_space()
+    }
+
+    /// Resolve the export bit depth from the colour mode.
+    fn export_bit_depth(&self) -> ExportBitDepth {
+        match self.color_mode {
+            ColorMode::Sdr => ExportBitDepth::Eight,
+            ColorMode::HdrPq | ColorMode::HdrHlg | ColorMode::Aces => ExportBitDepth::SixteenFloat,
         }
     }
 }
@@ -389,10 +455,6 @@ const fn default_new_project_preview_resolution_scale() -> f32 {
 }
 
 const fn default_new_project_preview_cache_enabled() -> bool {
-    true
-}
-
-const fn default_new_project_auto_tone_map_media() -> bool {
     true
 }
 
@@ -690,6 +752,7 @@ pub struct MondrianApp {
     preferences_tab: PreferencesTab,
     capturing_shortcut: Option<ShortcutAction>,
     show_new_project_dialog: bool,
+    new_project_active_tab: NewProjectTab,
     show_project_bootstrap_dialog: bool,
     startup_viewport_mode: bool,
     pending_close_action: Option<PendingCloseAction>,
@@ -757,6 +820,7 @@ impl MondrianApp {
             preferences_tab: PreferencesTab::default(),
             capturing_shortcut: None,
             show_new_project_dialog: false,
+            new_project_active_tab: NewProjectTab::default(),
             show_project_bootstrap_dialog: true,
             startup_viewport_mode: false,
             pending_close_action: None,
