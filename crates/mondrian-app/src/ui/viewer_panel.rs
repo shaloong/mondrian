@@ -478,6 +478,10 @@ impl ViewerPanel {
             ui.ctx().request_repaint_after(Duration::from_millis(8));
         }
 
+        // Minimum width to keep the transport bar legible.
+        // Left timecode (160) + center controls (~210) + right info (170) ≈ 540.
+        ui.set_min_width(540.0);
+
         ui.vertical(|ui| {
             let controls_height = tokens::viewer_transport_height();
             let transport_gap = 4.0;
