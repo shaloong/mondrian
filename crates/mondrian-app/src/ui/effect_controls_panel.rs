@@ -317,7 +317,7 @@ impl EffectControlsPanel {
         ui.scope_builder(egui::UiBuilder::new().max_rect(label_rect), |ui| {
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.set_max_width(label_rect.width());
-                let subtitle_response = ui.add(
+                let _subtitle_response = ui.add(
                     egui::Label::new(
                         RichText::new(subtitle)
                             .font(typography::body_small())
@@ -325,9 +325,6 @@ impl EffectControlsPanel {
                     )
                     .truncate(),
                 );
-                if !subtitle.is_empty() {
-                    subtitle_response.on_hover_text(subtitle);
-                }
             });
         });
 

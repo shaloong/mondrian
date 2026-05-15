@@ -4,6 +4,7 @@ use crate::{
 };
 use egui::{Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use mondrian_core::types::{ClipId, Rational, TrackId};
+use mondrian_effects::EffectType;
 use mondrian_timeline::clip::TrimEdge;
 use mondrian_timeline::sequence::{Sequence, VideoDisplayFormat};
 use std::collections::{HashMap, HashSet};
@@ -1604,6 +1605,62 @@ impl TimelinePanel {
                             is_video_track,
                             pointer_offset_frames: pointer_frame - anchor_start,
                         });
+                    }
+                }
+
+                // Effect drag-and-drop target
+                let effect_drag_id = egui::Id::new(super::effect_library_panel::EFFECT_DRAG_ID);
+                let (effect_dragging, should_clear) = ui.ctx().data_mut(|d| {
+                    let payload = d.get_persisted::<EffectType>(effect_drag_id);
+                    let mut clear = false;
+                    if let Some(ref effect_type) = payload {
+                        let pointer_in_clip = clip_resp
+                            .interact_pointer_pos()
+                            .map(|p| clip_draw_rect.contains(p))
+                            .unwrap_or(false);
+                        if pointer_in_clip && clip_resp.drag_stopped() {
+                            let sel_ref = SelectedClipRef {
+                                track_id: selection.track_id,
+                                is_video_track: selection.is_video_track,
+                                clip_id: selection.clip_id,
+                            };
+                            match state.add_effect_to_clip(sel_ref, effect_type.clone()) {
+                                Ok(true) => {
+                                    state.set_status_hint(
+                                        format!("已添加{}", effect_type.display_name()),
+                                        false,
+                                    );
+                                }
+                                Ok(false) => {}
+                                Err(err) => {
+                                    state.set_status_hint(
+                                        format!("添加特效失败：{err}"),
+                                        true,
+                                    );
+                                }
+                            }
+                            d.remove::<EffectType>(effect_drag_id);
+                            clear = true;
+                        }
+                    }
+                    (payload, clear)
+                });
+                // Show drop highlight if effect is being dragged over this clip
+                if effect_dragging.is_some() && !should_clear {
+                    let pointer_in_clip = clip_resp
+                        .interact_pointer_pos()
+                        .map(|p| clip_draw_rect.contains(p))
+                        .unwrap_or(false);
+                    if pointer_in_clip {
+                        ui.painter().rect_stroke(
+                            clip_draw_rect.shrink(1.0),
+                            tokens::timeline_clip_radius(),
+                            egui::Stroke::new(
+                                tokens::border_standard() * 2.0,
+                                palette::interaction_highlight(),
+                            ),
+                            egui::StrokeKind::Inside,
+                        );
                     }
                 }
 

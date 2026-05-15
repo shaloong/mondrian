@@ -5,18 +5,23 @@ use crate::{
         timeline_panel::SelectedClipRef,
     },
 };
-use egui::{RichText, Ui};
+use egui::Ui;
 use mondrian_effects::{effect_category_tree, EffectCategoryNode, EffectType};
+use std::collections::HashSet;
+
+pub const EFFECT_DRAG_ID: &str = "mondrian_effect_drag";
 
 #[derive(Default)]
-pub struct EffectLibraryPanel;
+pub struct EffectLibraryPanel {
+    collapsed_categories: HashSet<String>,
+}
 
 impl EffectLibraryPanel {
     pub fn show(
         &mut self,
         ui: &mut Ui,
-        app: &mut AppState,
-        selected_clip: Option<SelectedClipRef>,
+        _app: &mut AppState,
+        _selected_clip: Option<SelectedClipRef>,
     ) {
         theme::panel_header(ui, "特效库", "", |_| ());
         ui.add_space(tokens::panel_gap() * 0.65);
@@ -36,87 +41,95 @@ impl EffectLibraryPanel {
             .id_salt("effect_library_panel_scroll")
             .show(ui, |ui| {
                 for node in &tree {
-                    Self::draw_category_node(ui, app, selected_clip, node, 0);
+                    self.draw_category(ui, node, 0);
                 }
             });
     }
 
-    fn draw_category_node(
+    fn draw_category(
+        &mut self,
         ui: &mut Ui,
-        app: &mut AppState,
-        selected_clip: Option<SelectedClipRef>,
         node: &EffectCategoryNode,
         depth: usize,
     ) {
         let indent = depth as f32 * tokens::inspector_group_indent();
-        let header_id = ui.id().with(&node.name).with("cat_header");
-        let mut collapsed = ui
-            .memory_mut(|mem| mem.data.get_temp::<bool>(header_id))
-            .unwrap_or(false);
+        let row_h = tokens::inspector_group_header_height();
+        let collapsed = self.collapsed_categories.contains(&node.name);
 
-        ui.horizontal(|ui| {
-            ui.add_space(indent + 4.0);
-            let caret = if collapsed {
-                theme::UiIcon::ArrowRight
-            } else {
-                theme::UiIcon::ArrowDown
-            };
-            theme::icon(ui, caret, palette::text_muted());
-            ui.add_space(tokens::spacing_xs());
+        // Full-width clickable category header
+        let available_w = ui.available_width();
+        let (rect, resp) = ui.allocate_exact_size(
+            egui::vec2(available_w, row_h),
+            egui::Sense::click(),
+        );
 
-            let header_resp = ui
-                .add_sized(
-                    [ui.available_width() - 4.0, tokens::inspector_group_header_height()],
-                    egui::Button::selectable(false, RichText::new(&node.name)
-                        .font(typography::body_small())
-                        .color(palette::text_primary()))
-                    .frame(false),
+        if ui.is_rect_visible(rect) {
+            if resp.hovered() {
+                ui.painter().rect_filled(
+                    rect,
+                    theme::corner_radius(tokens::section_rounding()),
+                    palette::bg_surface_hover(),
                 );
-            if header_resp.clicked() {
-                collapsed = !collapsed;
-                ui.memory_mut(|mem| mem.data.insert_temp(header_id, collapsed));
             }
-        });
+            let caret = if collapsed { theme::UiIcon::ArrowRight } else { theme::UiIcon::ArrowDown };
+            let caret_x = rect.left() + indent + 4.0;
+            let caret_rect = egui::Rect::from_center_size(
+                egui::pos2(caret_x + tokens::icon_size() * 0.5, rect.center().y),
+                egui::vec2(tokens::icon_size(), tokens::icon_size()),
+            );
+            theme::draw_icon(ui.painter(), caret_rect, caret, palette::text_muted());
+
+            ui.painter().text(
+                egui::pos2(caret_rect.right() + tokens::spacing_xs(), rect.center().y),
+                egui::Align2::LEFT_CENTER,
+                &node.name,
+                typography::body_small(),
+                palette::text_primary(),
+            );
+        }
+
+        if resp.clicked() {
+            if collapsed {
+                self.collapsed_categories.remove(&node.name);
+            } else {
+                self.collapsed_categories.insert(node.name.clone());
+            }
+        }
 
         if !collapsed {
             for child in &node.children {
-                Self::draw_category_node(ui, app, selected_clip, child, depth + 1);
+                self.draw_category(ui, child, depth + 1);
             }
-        }
-        // Effects always visible under their category
-        let item_indent = indent + tokens::inspector_group_indent() + tokens::icon_size() + tokens::spacing_xs();
-        for effect_type in &node.effects {
-            ui.horizontal(|ui| {
-                ui.add_space(item_indent);
-                Self::draw_effect_item(ui, app, selected_clip, effect_type);
-            });
+            let item_indent = indent + tokens::inspector_group_indent() + tokens::icon_size() + tokens::spacing_xs() + 4.0;
+            for effect_type in &node.effects {
+                self.draw_effect_item(ui, effect_type, item_indent);
+            }
         }
     }
 
     fn draw_effect_item(
+        &self,
         ui: &mut Ui,
-        app: &mut AppState,
-        selected_clip: Option<SelectedClipRef>,
         effect_type: &EffectType,
+        indent: f32,
     ) {
-        let desired = egui::vec2(ui.available_width(), tokens::effect_item_height());
-        let (rect, response) = ui.allocate_exact_size(desired, egui::Sense::click_and_drag());
+        let row_h = tokens::effect_item_height();
+        let available_w = ui.available_width();
+        let desired = egui::vec2(available_w, row_h);
+
+        let (rect, response) = ui.allocate_exact_size(desired, egui::Sense::drag());
 
         if ui.is_rect_visible(rect) {
-            let fill = if response.hovered() {
-                palette::bg_surface_hover()
-            } else {
-                palette::bg_surface_raised()
-            };
-            ui.painter().rect_filled(
-                rect,
-                theme::corner_radius(tokens::button_rounding()),
-                fill,
-            );
+            if response.hovered() || response.dragged() {
+                ui.painter().rect_filled(
+                    rect,
+                    theme::corner_radius(tokens::section_rounding()),
+                    palette::bg_surface_hover(),
+                );
+            }
 
-            let text_pos = egui::pos2(rect.left() + tokens::spacing_sm(), rect.center().y);
             ui.painter().text(
-                text_pos,
+                egui::pos2(rect.left() + indent, rect.center().y),
                 egui::Align2::LEFT_CENTER,
                 effect_type.display_name(),
                 typography::body_small(),
@@ -124,27 +137,11 @@ impl EffectLibraryPanel {
             );
         }
 
-        if response.clicked() {
-            if let Some(selection) = selected_clip {
-                if selection.is_video_track {
-                    match app.add_effect_to_clip(selection, effect_type.clone()) {
-                        Ok(true) => {
-                            app.set_status_hint(
-                                format!("已添加{}", effect_type.display_name()),
-                                false,
-                            );
-                        }
-                        Ok(false) => {}
-                        Err(err) => {
-                            app.set_status_hint(format!("添加特效失败：{err}"), true);
-                        }
-                    }
-                }
-            } else {
-                app.set_status_hint("请先在时间线中选择一个视频片段", false);
-            }
+        if response.drag_started() {
+            let drag_id = egui::Id::new(EFFECT_DRAG_ID);
+            ui.ctx().data_mut(|d| {
+                d.insert_persisted(drag_id, effect_type.clone());
+            });
         }
-
-        ui.add_space(tokens::spacing_xs());
     }
 }

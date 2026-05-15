@@ -86,7 +86,7 @@ impl LibraryPanel {
 
         let content = ui.vertical(|ui| {
             ui.add_space(SEARCH_MARGIN_TOP);
-            let search_height = ui.spacing().interact_size.y + 8.0;
+            let search_height = ui.spacing().interact_size.y + 4.0;
             let import_button_width = 28.0;
             let search_gap = 8.0;
             ui.horizontal(|ui| {

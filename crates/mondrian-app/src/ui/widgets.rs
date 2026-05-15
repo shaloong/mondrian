@@ -64,7 +64,7 @@ pub fn search_bar(ui: &mut egui::Ui, query: &mut String, hint: &str) -> egui::Re
         .corner_radius(corner_radius(tokens::button_rounding()))
         .inner_margin(egui::Margin::symmetric(
             theme::margin_px(tokens::search_bar_margin_x()),
-            theme::margin_px(tokens::search_bar_margin_y()),
+            theme::margin_px(tokens::search_bar_margin_y().min(2.0)),
         ))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
