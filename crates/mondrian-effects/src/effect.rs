@@ -269,6 +269,7 @@ pub struct EffectCapabilities {
 pub struct EffectDefinition {
     key: String,
     display_name: String,
+    category_path: Vec<String>,
     default_properties: PropertyBag,
     evaluator: Option<EffectEvaluator>,
     graph_builder: Option<EffectGraphBuilder>,
@@ -286,6 +287,7 @@ impl EffectDefinition {
         Self {
             key: key.into(),
             display_name: display_name.into(),
+            category_path: Vec::new(),
             default_properties,
             evaluator: None,
             graph_builder: None,
@@ -293,6 +295,11 @@ impl EffectDefinition {
             capabilities: EffectCapabilities::default(),
             plugin_contract: None,
         }
+    }
+
+    pub fn with_category(mut self, category_path: Vec<String>) -> Self {
+        self.category_path = category_path;
+        self
     }
 
     pub fn with_evaluator(mut self, evaluator: EffectEvaluator) -> Self {
@@ -404,6 +411,10 @@ impl EffectDefinition {
         &self.display_name
     }
 
+    pub fn category_path(&self) -> &[String] {
+        &self.category_path
+    }
+
     pub fn capabilities(&self) -> EffectCapabilities {
         self.capabilities
     }
@@ -481,6 +492,83 @@ pub fn effect_library_types() -> Vec<EffectType> {
         .collect::<Vec<_>>();
     effects.sort_by_key(|effect_type| effect_type.display_name());
     effects
+}
+
+/// A node in the effect category tree.
+#[derive(Debug, Clone)]
+pub struct EffectCategoryNode {
+    pub name: String,
+    pub children: Vec<EffectCategoryNode>,
+    pub effects: Vec<EffectType>,
+}
+
+/// Build a hierarchical category tree from all registered effects.
+pub fn effect_category_tree() -> Vec<EffectCategoryNode> {
+    let registry = effect_registry().read().expect("effect registry poisoned");
+    let mut roots: Vec<EffectCategoryNode> = Vec::new();
+
+    for definition in registry.values() {
+        if !definition.supports_visual_evaluation() {
+            continue;
+        }
+        let effect_type = EffectType::from_key(definition.key());
+        let path = definition.category_path();
+
+        if path.is_empty() {
+            // No category: add to a default "其他" root
+            insert_effect_into_tree(&mut roots, &["其他".to_string()], &effect_type);
+        } else {
+            insert_effect_into_tree(&mut roots, path, &effect_type);
+        }
+    }
+
+    // Sort each level alphabetically
+    sort_category_tree(&mut roots);
+    roots
+}
+
+fn insert_effect_into_tree(
+    nodes: &mut Vec<EffectCategoryNode>,
+    path: &[String],
+    effect_type: &EffectType,
+) {
+    if path.is_empty() {
+        return;
+    }
+    let head = &path[0];
+    let tail = &path[1..];
+
+    let node = nodes.iter_mut().find(|n| n.name == *head);
+    if tail.is_empty() {
+        // Leaf: add effect to this category
+        if let Some(node) = node {
+            node.effects.push(effect_type.clone());
+        } else {
+            nodes.push(EffectCategoryNode {
+                name: head.clone(),
+                children: Vec::new(),
+                effects: vec![effect_type.clone()],
+            });
+        }
+    } else if let Some(node) = node {
+        insert_effect_into_tree(&mut node.children, tail, effect_type);
+    } else {
+        let mut new_node = EffectCategoryNode {
+            name: head.clone(),
+            children: Vec::new(),
+            effects: Vec::new(),
+        };
+        insert_effect_into_tree(&mut new_node.children, tail, effect_type);
+        nodes.push(new_node);
+    }
+}
+
+fn sort_category_tree(nodes: &mut Vec<EffectCategoryNode>) {
+    nodes.sort_by(|a, b| a.name.cmp(&b.name));
+    for node in nodes.iter_mut() {
+        node.effects.sort_by_key(|e| e.display_name());
+        sort_category_tree(&mut node.children);
+    }
 }
 
 pub fn evaluate_effect_stack(effects: &[EffectNode], time: TimeCode) -> EffectStackEvaluation {
@@ -1039,12 +1127,31 @@ fn define_builtin_property(
     properties.define(descriptor);
 }
 
+fn builtin_effect_category(effect_type: &EffectType) -> Vec<String> {
+    match effect_type {
+        EffectType::BasicCorrection
+        | EffectType::WhiteBalance
+        | EffectType::ColorWheel
+        | EffectType::Curves
+        | EffectType::HueSaturationLightness => vec!["颜色".to_string()],
+        EffectType::Lut3D => vec!["颜色".to_string(), "LUT".to_string()],
+        EffectType::GaussianBlur | EffectType::Sharpen => vec!["模糊与锐化".to_string()],
+        EffectType::Vignette
+        | EffectType::ChromaticAberration
+        | EffectType::Grain => vec!["风格化".to_string()],
+        EffectType::ChromaKey | EffectType::LumaKey => vec!["抠像".to_string()],
+        EffectType::Plugin(_) => vec!["插件".to_string()],
+    }
+}
+
 fn builtin_effect_definition(effect_type: EffectType) -> EffectDefinition {
+    let category = builtin_effect_category(&effect_type);
     let definition = EffectDefinition::new(
         effect_type.key(),
         builtin_display_name(&effect_type),
         default_properties_for(effect_type.clone()),
-    );
+    )
+    .with_category(category);
     let definition = if let Some(evaluator) = builtin_evaluator_for(&effect_type) {
         definition.with_evaluator(evaluator)
     } else {

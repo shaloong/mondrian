@@ -249,7 +249,6 @@ impl EffectControlsPanel {
 
         match self.view {
             EffectControlsView::Inspector => {
-                self.draw_media_interpretation(ui, app, selection, &clip);
                 if !inspector_groups.is_empty() {
                     ui.add_space(tokens::panel_gap() * 0.4);
                     ui.separator();
