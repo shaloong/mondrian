@@ -52,45 +52,36 @@ pub fn empty_state(ui: &mut egui::Ui, icon: Option<UiIcon>, title: &str, subtitl
 /// A search input with icon, styled consistently.
 ///
 /// Returns the `TextEdit` response so callers can check `.changed()`.
+/// The caller is responsible for constraining the available width
+/// (e.g. via `ui.allocate_ui_with_layout` or a horizontal layout).
 pub fn search_bar(ui: &mut egui::Ui, query: &mut String, hint: &str) -> egui::Response {
-    let height = ui.spacing().interact_size.y + 8.0;
-    let available = ui.available_width();
-
-    let response = ui.allocate_ui_with_layout(
-        egui::vec2(available, height),
-        egui::Layout::left_to_right(egui::Align::Center),
-        |ui| {
-            egui::Frame::new()
-                .fill(palette::bg_surface_raised())
-                .stroke(egui::Stroke::new(
-                    tokens::border_standard(),
-                    palette::border_subtle(),
-                ))
-                .corner_radius(corner_radius(tokens::button_rounding()))
-                .inner_margin(egui::Margin::symmetric(
-                    theme::margin_px(tokens::search_bar_margin_x()),
-                    theme::margin_px(tokens::search_bar_margin_y()),
-                ))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        theme::icon(ui, UiIcon::Search, palette::text_muted());
-                        let input_width = ui.available_width().max(24.0);
-                        ui.add_sized(
-                            [input_width, ui.spacing().interact_size.y],
-                            egui::TextEdit::singleline(query)
-                                .hint_text(hint)
-                                .frame(false)
-                                .margin(egui::Margin::ZERO)
-                                .vertical_align(egui::Align::Center),
-                        )
-                    })
-                    .inner
-                })
-                .inner
-        },
-    );
-
-    response.inner
+    egui::Frame::new()
+        .fill(palette::bg_surface_raised())
+        .stroke(egui::Stroke::new(
+            tokens::border_standard(),
+            palette::border_subtle(),
+        ))
+        .corner_radius(corner_radius(tokens::button_rounding()))
+        .inner_margin(egui::Margin::symmetric(
+            theme::margin_px(tokens::search_bar_margin_x()),
+            theme::margin_px(tokens::search_bar_margin_y()),
+        ))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                theme::icon(ui, UiIcon::Search, palette::text_muted());
+                let input_width = ui.available_width().max(24.0);
+                ui.add_sized(
+                    [input_width, ui.spacing().interact_size.y],
+                    egui::TextEdit::singleline(query)
+                        .hint_text(hint)
+                        .frame(false)
+                        .margin(egui::Margin::ZERO)
+                        .vertical_align(egui::Align::Center),
+                )
+            })
+            .inner
+        })
+        .inner
 }
 
 // ── ConfirmationDialog ────────────────────────────────────────────────────
@@ -246,7 +237,7 @@ pub fn segmented_control<V: PartialEq + Clone>(
             egui::Rect::from_min_size(egui::pos2(x, rect.top()), egui::vec2(w, rect.height()));
 
         let selected = *current == opt.value;
-        let seg_id = ui.next_auto_id();
+        let seg_id = ui.id().with(i);
         let seg_response = ui.interact(seg_rect, seg_id, egui::Sense::click());
 
         let seg_rounding = if n == 1 {

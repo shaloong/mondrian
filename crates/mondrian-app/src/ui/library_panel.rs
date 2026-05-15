@@ -90,6 +90,7 @@ impl LibraryPanel {
             let import_button_width = 28.0;
             let search_gap = 8.0;
             ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
                 let search_width =
                     (ui.available_width() - import_button_width - search_gap).max(48.0);
                 ui.allocate_ui_with_layout(
