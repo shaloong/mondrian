@@ -39,6 +39,8 @@ pub struct TimelinePanel {
     track_drag_target: Option<TrackDragTarget>,
     scrollbar_drag: Option<TimelineScrollbarDragState>,
     vertical_scrollbar_drag: Option<TimelineVerticalScrollbarDragState>,
+    right_scrollbar_rect: Option<Rect>,
+    bottom_scrollbar_rect: Option<Rect>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -200,6 +202,11 @@ impl TimelinePanel {
         self.active_snap_guide_frame = None;
         self.active_insert_guide_frame = None;
 
+        if self.active_tool == TimelineTool::Blade {
+            ui.ctx()
+                .output_mut(|o| o.cursor_icon = egui::CursorIcon::Crosshair);
+        }
+
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
                 self.draw_timeline_tools_toolbar(ui);
@@ -274,6 +281,16 @@ impl TimelinePanel {
                                                 self.timeline_total_track_height(state);
 
                                             if !ui.ctx().wants_keyboard_input() {
+                                                // Tool shortcuts
+                                                if ui.input(|i| i.key_pressed(egui::Key::V) && !i.modifiers.command)
+                                                {
+                                                    self.active_tool = TimelineTool::Select;
+                                                }
+                                                if ui.input(|i| i.key_pressed(egui::Key::B) && !i.modifiers.command)
+                                                {
+                                                    self.active_tool = TimelineTool::Blade;
+                                                }
+
                                                 if ui.input(|i| {
                                                     i.key_pressed(egui::Key::I)
                                                         && !i.modifiers.command
@@ -546,6 +563,7 @@ impl TimelinePanel {
         let handle_radius = (tokens::timeline_scrollbar_width() * 0.5).min(5.0);
         let (rect, _) =
             ui.allocate_exact_size(Vec2::new(gutter_width, visible_height), Sense::hover());
+        self.right_scrollbar_rect = Some(rect);
         let track_rect = Rect::from_min_max(
             Pos2::new(
                 rect.left() + 2.0 + side_padding,
@@ -751,6 +769,7 @@ impl TimelinePanel {
                 Sense::hover(),
             )
             .0;
+        self.bottom_scrollbar_rect = Some(full_rect);
         let track_label_w = tokens::timeline_track_label_width();
         let right_scrollbar_gutter_w = tokens::timeline_scrollbar_width() + 10.0;
         let track_rect = Rect::from_min_max(
@@ -1170,9 +1189,10 @@ impl TimelinePanel {
         if let (Some(top), Some(bottom), Some(left)) =
             (first_track_top, last_track_bottom, content_left)
         {
+            let right_edge = ui.max_rect().right() - tokens::timeline_scrollbar_width() - 4.0;
             self.track_area_bounds = Some(Rect::from_min_max(
                 Pos2::new(left, top),
-                Pos2::new(ui.max_rect().right(), bottom),
+                Pos2::new(right_edge, bottom - tokens::timeline_scrollbar_height() - 4.0),
             ));
 
             let playhead_x = left + state.current_frame() as f32 * self.pixels_per_frame;
@@ -1542,6 +1562,28 @@ impl TimelinePanel {
                     .on_hover_text(clip_name);
 
                 if self.active_tool == TimelineTool::Blade {
+                    // Draw cut preview line at pointer position
+                    if let Some(pointer) = clip_resp.interact_pointer_pos() {
+                        let cut_x = pointer.x;
+                        let line_top = egui::pos2(cut_x, clip_draw_rect.top());
+                        let line_bot = egui::pos2(cut_x, clip_draw_rect.bottom());
+                        painter.line_segment(
+                            [line_top, line_bot],
+                            egui::Stroke::new(tokens::border_standard(), palette::interaction_highlight()),
+                        );
+                        // Frame label near the cut line
+                        let cut_frame = ((pointer.x - rect.left() - track_label_w)
+                            / self.pixels_per_frame)
+                            .round() as i64;
+                        painter.text(
+                            line_top + egui::vec2(4.0, -2.0),
+                            egui::Align2::LEFT_BOTTOM,
+                            format!("{}", cut_frame.max(0)),
+                            typography::body_small(),
+                            palette::interaction_highlight(),
+                        );
+                    }
+
                     if clip_resp.clicked() {
                         let split_frame = clip_resp
                             .interact_pointer_pos()
@@ -2104,6 +2146,11 @@ impl TimelinePanel {
 
         if primary_pressed {
             if let Some(pos) = pointer_pos {
+                let on_scrollbar = self.right_scrollbar_rect.map_or(false, |r| r.contains(pos))
+                    || self.bottom_scrollbar_rect.map_or(false, |r| r.contains(pos));
+                if on_scrollbar {
+                    return;
+                }
                 let in_bounds = bounds.contains(pos) && pos.x >= bounds.left();
                 let on_clip = visible_clips.iter().any(|visual| visual.rect.contains(pos));
                 if in_bounds && !on_clip {
