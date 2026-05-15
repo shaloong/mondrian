@@ -1106,9 +1106,15 @@ impl eframe::App for MondrianApp {
         // ── 左侧：素材库 ──
         if self.show_library {
             let library_started_at = std::time::Instant::now();
+            let viewer_min = 540.0;
+            let right_reserved = crate::ui::theme::tokens::inspector_panel_min_width()
+                + 208.0; // effect_library min
+            let library_max =
+                (ctx.content_rect().width() - viewer_min - right_reserved).max(220.0);
             egui::SidePanel::left("library_panel")
                 .default_width(296.0)
                 .min_width(220.0)
+                .max_width(library_max)
                 .resizable(true)
                 .frame(
                     egui::Frame::new()
@@ -1154,9 +1160,15 @@ impl eframe::App for MondrianApp {
         }
         if self.show_effect_controls {
             let effect_controls_started_at = std::time::Instant::now();
+            let viewer_min = 540.0;
+            let left_reserved = 220.0; // library min
+            let other_right = if self.show_effect_library { 208.0 } else { 0.0 };
+            let ec_max = (ctx.content_rect().width() - viewer_min - left_reserved - other_right)
+                .max(crate::ui::theme::tokens::inspector_panel_min_width());
             egui::SidePanel::right("effect_controls_panel")
                 .default_width(crate::ui::theme::tokens::inspector_panel_width())
                 .min_width(crate::ui::theme::tokens::inspector_panel_min_width())
+                .max_width(ec_max)
                 .resizable(true)
                 .frame(
                     egui::Frame::new()
@@ -1176,9 +1188,19 @@ impl eframe::App for MondrianApp {
         }
         if self.show_effect_library {
             let effect_library_started_at = std::time::Instant::now();
+            let viewer_min = 540.0;
+            let left_reserved = 220.0; // library min
+            let other_right = if self.show_effect_controls {
+                crate::ui::theme::tokens::inspector_panel_min_width()
+            } else {
+                0.0
+            };
+            let el_max = (ctx.content_rect().width() - viewer_min - left_reserved - other_right)
+                .max(208.0);
             egui::SidePanel::right("effect_library_panel")
                 .default_width(252.0)
                 .min_width(208.0)
+                .max_width(el_max)
                 .resizable(true)
                 .frame(
                     egui::Frame::new()

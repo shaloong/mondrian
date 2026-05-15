@@ -1527,11 +1527,18 @@ impl TimelinePanel {
             }
 
             if state.dragging_asset().is_none() && self.track_drag.is_none() {
-                let clip_resp = ui.interact(
-                    clip_draw_rect,
-                    ui.make_persistent_id(("timeline_clip_drag", track.id, clip.id)),
-                    Sense::click_and_drag(),
-                );
+                let clip_name = clip.label.as_deref().unwrap_or(if clip.is_adjustment_layer() {
+                    "调整图层"
+                } else {
+                    "clip"
+                });
+                let clip_resp = ui
+                    .interact(
+                        clip_draw_rect,
+                        ui.make_persistent_id(("timeline_clip_drag", track.id, clip.id)),
+                        Sense::click_and_drag(),
+                    )
+                    .on_hover_text(clip_name);
 
                 if self.active_tool == TimelineTool::Blade {
                     if clip_resp.clicked() {

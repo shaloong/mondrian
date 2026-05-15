@@ -1664,7 +1664,7 @@ impl AppState {
                     TimeCode::new(start_frame, time_base),
                     TimeCode::new(duration_frames, time_base),
                 );
-                audio_clip.label = Some(format!("{} (Audio)", dragging.name));
+                audio_clip.label = Some(dragging.name.clone());
                 let audio_clip_id = audio_clip.id;
                 clip.linked_clip = Some(audio_clip_id);
                 audio_clip.linked_clip = Some(clip.id);

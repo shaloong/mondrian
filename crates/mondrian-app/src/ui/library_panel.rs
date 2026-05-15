@@ -465,7 +465,7 @@ impl LibraryPanel {
                         .max_rect(name_rect)
                         .layout(egui::Layout::left_to_right(egui::Align::Center)),
                     |ui| {
-                        ui.add(
+                        let name_resp = ui.add(
                             egui::Label::new(
                                 egui::RichText::new(asset_name.trim_start())
                                     .font(typography::body_small())
@@ -474,6 +474,7 @@ impl LibraryPanel {
                             .truncate()
                             .halign(egui::Align::LEFT),
                         );
+                        name_resp.on_hover_text(asset_name.clone());
                     },
                 );
                 if let (Some(duration_rect), Some(duration_text)) =

@@ -69,6 +69,7 @@ pub fn search_bar(ui: &mut egui::Ui, query: &mut String, hint: &str) -> egui::Re
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 theme::icon(ui, UiIcon::Search, palette::text_muted());
+                ui.add_space(tokens::spacing_sm());
                 let input_width = ui.available_width().max(24.0);
                 ui.add_sized(
                     [input_width, ui.spacing().interact_size.y],
