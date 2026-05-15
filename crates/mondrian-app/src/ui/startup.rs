@@ -1,13 +1,7 @@
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-fn corner_radius(value: f32) -> egui::CornerRadius {
-    egui::CornerRadius::same(value.round().clamp(0.0, 255.0) as u8)
-}
-
-fn margin_px(value: f32) -> i8 {
-    value.round().clamp(i8::MIN as f32, i8::MAX as f32) as i8
-}
+use crate::ui::theme::{corner_radius, margin_px};
 
 #[derive(Debug, Clone)]
 pub struct BootstrapRecentProjectItem {
@@ -213,12 +207,7 @@ fn paint_action_card(
 
         ui.add_space(startup_right_content_top_offset);
 
-        ui.label(
-            egui::RichText::new("开始工作")
-                .size(17.0)
-                .strong()
-                .color(text_primary),
-        );
+        ui.label(egui::RichText::new("开始工作").size(17.0).strong().color(text_primary));
         ui.add_space(crate::ui::theme::tokens::spacing_sm());
 
         ui.horizontal(|ui| {

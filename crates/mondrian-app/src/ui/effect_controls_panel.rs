@@ -331,8 +331,20 @@ impl EffectControlsPanel {
         ui.scope_builder(egui::UiBuilder::new().max_rect(controls_rect), |ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.set_width(controls_rect.width());
-                ui.selectable_value(&mut self.view, EffectControlsView::Inspector, "属性");
-                ui.selectable_value(&mut self.view, EffectControlsView::Graph, "曲线");
+                let _ = super::widgets::segmented_control(
+                    ui,
+                    &mut self.view,
+                    &[
+                        super::widgets::SegmentedOption {
+                            value: EffectControlsView::Inspector,
+                            label: "属性".to_string(),
+                        },
+                        super::widgets::SegmentedOption {
+                            value: EffectControlsView::Graph,
+                            label: "曲线".to_string(),
+                        },
+                    ],
+                );
             });
         });
     }
@@ -410,13 +422,12 @@ impl EffectControlsPanel {
         properties: &[(&str, &mondrian_core::automation::AnimatedProperty)],
     ) {
         if properties.is_empty() {
-            ui.centered_and_justified(|ui| {
-                ui.label(
-                    RichText::new("当前片段没有可动画属性")
-                        .font(typography::body())
-                        .color(palette::text_muted()),
-                );
-            });
+            super::widgets::empty_state(
+                ui,
+                Some(theme::UiIcon::Info),
+                "当前片段没有可动画属性",
+                "在特效面板中为片段添加特效后将显示可编辑属性",
+            );
             return;
         }
 

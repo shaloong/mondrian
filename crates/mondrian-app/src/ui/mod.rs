@@ -9,3 +9,4 @@ pub mod startup;
 pub mod theme;
 pub mod timeline_panel;
 pub mod viewer_panel;
+pub mod widgets;

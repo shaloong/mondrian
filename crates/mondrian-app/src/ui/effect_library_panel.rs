@@ -38,10 +38,11 @@ impl EffectLibraryPanel {
         ui.add_space(tokens::panel_gap() * 0.65);
 
         let Some(selection) = selected_clip else {
-            ui.label(
-                RichText::new("选择一个视频片段或调整图层后，可在这里添加特效")
-                    .font(typography::body())
-                    .color(palette::text_muted()),
+            super::widgets::empty_state(
+                ui,
+                Some(theme::UiIcon::Video),
+                "选择一个片段以添加特效",
+                "在时间线中选择视频片段或调整图层",
             );
             return;
         };

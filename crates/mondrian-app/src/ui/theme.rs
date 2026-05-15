@@ -451,6 +451,11 @@ fn px_i8(value: f32) -> i8 {
     value.round().clamp(i8::MIN as f32, i8::MAX as f32) as i8
 }
 
+/// Convert a pixel value to `i8` for egui margin/padding APIs.
+pub fn margin_px(value: f32) -> i8 {
+    px_i8(value)
+}
+
 fn px_corner(value: f32) -> egui::CornerRadius {
     egui::CornerRadius::same(value.round().clamp(0.0, 255.0) as u8)
 }
@@ -1871,5 +1876,4 @@ pub mod palette {
     pub fn overlay_stroke() -> egui::Color32 {
         super::with_active_tokens(|tokens| tokens.palette.overlay_stroke)
     }
-
 }

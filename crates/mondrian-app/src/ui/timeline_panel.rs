@@ -1,16 +1,12 @@
 use crate::{
     app::{AppState, ClipOverlapMode},
-    ui::theme::{self, palette, tokens, typography},
+    ui::theme::{self, corner_radius, palette, tokens, typography},
 };
 use egui::{Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use mondrian_core::types::{ClipId, Rational, TrackId};
 use mondrian_timeline::clip::TrimEdge;
 use mondrian_timeline::sequence::{Sequence, VideoDisplayFormat};
 use std::collections::{HashMap, HashSet};
-
-fn corner_radius(value: f32) -> egui::CornerRadius {
-    egui::CornerRadius::same(value.round().clamp(0.0, 255.0) as u8)
-}
 
 // ─── TimelinePanel ──────────────────────────
 
@@ -210,13 +206,12 @@ impl TimelinePanel {
             ui.add_space(tokens::panel_gap());
 
             if state.sequence.is_none() {
-                ui.centered_and_justified(|ui| {
-                    ui.label(
-                        egui::RichText::new("暂无序列")
-                            .font(typography::body())
-                            .color(palette::text_muted()),
-                    );
-                });
+                super::widgets::empty_state(
+                    ui,
+                    Some(theme::UiIcon::Video),
+                    "暂无序列",
+                    "新建或打开一个序列以开始编辑",
+                );
                 return;
             }
 

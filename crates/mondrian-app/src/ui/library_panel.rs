@@ -1,6 +1,6 @@
 use crate::{
     app::AppState,
-    ui::theme::{self, palette, tokens, typography},
+    ui::theme::{self, corner_radius, palette, tokens, typography},
 };
 use egui::{Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use mondrian_assets::{AssetKind, AssetRecord};
@@ -51,14 +51,6 @@ const CARD_PADDING_TOP: f32 = 8.0;
 const CARD_PADDING_BOTTOM: f32 = 10.0;
 const CARD_INFO_GAP_Y: f32 = 6.0;
 
-fn corner_radius(value: f32) -> egui::CornerRadius {
-    egui::CornerRadius::same(value.round().clamp(0.0, 255.0) as u8)
-}
-
-fn margin_px(value: f32) -> i8 {
-    value.round().clamp(i8::MIN as f32, i8::MAX as f32) as i8
-}
-
 /// 左侧素材库面板
 #[derive(Default)]
 pub struct LibraryPanel {
@@ -98,44 +90,13 @@ impl LibraryPanel {
             let import_button_width = 28.0;
             let search_gap = 8.0;
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
                 let search_width =
                     (ui.available_width() - import_button_width - search_gap).max(48.0);
                 ui.allocate_ui_with_layout(
                     Vec2::new(search_width, search_height),
                     egui::Layout::left_to_right(egui::Align::Center),
                     |ui| {
-                        egui::Frame::new()
-                            .fill(palette::bg_surface_raised())
-                            .stroke(Stroke::new(
-                                tokens::border_standard(),
-                                palette::border_subtle(),
-                            ))
-                            .corner_radius(corner_radius(tokens::button_rounding()))
-                            .inner_margin(egui::Margin::symmetric(
-                                margin_px(tokens::search_bar_margin_x()),
-                                margin_px(tokens::search_bar_margin_y()),
-                            ))
-                            .show(ui, |ui| {
-                                ui.with_layout(
-                                    egui::Layout::left_to_right(egui::Align::Center),
-                                    |ui| {
-                                        let _ = theme::icon(
-                                            ui,
-                                            theme::UiIcon::Search,
-                                            palette::text_muted(),
-                                        );
-                                        let input_width = ui.available_width().max(24.0);
-                                        ui.add_sized(
-                                            [input_width, ui.spacing().interact_size.y],
-                                            egui::TextEdit::singleline(&mut self.search_query)
-                                                .frame(false)
-                                                .margin(egui::Margin::ZERO)
-                                                .vertical_align(egui::Align::Center),
-                                        );
-                                    },
-                                );
-                            });
+                        super::widgets::search_bar(ui, &mut self.search_query, "搜索素材…");
                     },
                 );
                 ui.add_space(search_gap);
