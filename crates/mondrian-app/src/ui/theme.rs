@@ -554,7 +554,10 @@ fn apply_style(ctx: &egui::Context, tokens: &ThemeTokens) {
 pub fn panel_frame() -> egui::Frame {
     egui::Frame::new()
         .fill(palette::bg_surface())
-        .stroke(egui::Stroke::new(1.0, palette::panel_divider_strong()))
+        .stroke(egui::Stroke::new(
+            tokens::border_standard(),
+            palette::panel_divider_strong(),
+        ))
         .corner_radius(px_corner(tokens::panel_rounding()))
         .inner_margin(egui::Margin::symmetric(
             px_i8(tokens::panel_inner_margin_x()),
@@ -565,7 +568,10 @@ pub fn panel_frame() -> egui::Frame {
 pub fn section_frame() -> egui::Frame {
     egui::Frame::new()
         .fill(palette::bg_surface_raised())
-        .stroke(egui::Stroke::new(1.0, palette::border_subtle()))
+        .stroke(egui::Stroke::new(
+            tokens::border_standard(),
+            palette::border_subtle(),
+        ))
         .corner_radius(px_corner(tokens::section_rounding()))
         .inner_margin(egui::Margin::symmetric(
             px_i8(tokens::section_inner_margin_x()),
@@ -576,7 +582,10 @@ pub fn section_frame() -> egui::Frame {
 pub fn toolbar_frame() -> egui::Frame {
     egui::Frame::new()
         .fill(palette::bg_surface_hover())
-        .stroke(egui::Stroke::new(1.0, palette::border_subtle()))
+        .stroke(egui::Stroke::new(
+            tokens::border_standard(),
+            palette::border_subtle(),
+        ))
         .corner_radius(px_corner(tokens::section_rounding()))
         .inner_margin(egui::Margin::symmetric(
             px_i8(tokens::section_inner_margin_x()),
@@ -587,12 +596,29 @@ pub fn toolbar_frame() -> egui::Frame {
 pub fn dialog_frame() -> egui::Frame {
     egui::Frame::new()
         .fill(palette::bg_surface())
-        .stroke(egui::Stroke::new(1.0, palette::panel_divider_strong()))
+        .stroke(egui::Stroke::new(
+            tokens::border_standard(),
+            palette::panel_divider_strong(),
+        ))
         .corner_radius(px_corner(tokens::panel_rounding()))
         .inner_margin(egui::Margin::symmetric(
             px_i8(tokens::panel_inner_margin_x()),
             px_i8(tokens::panel_inner_margin_y()),
         ))
+}
+
+/// A raised card with configurable inner margin.
+///
+/// Suitable for list items, asset cards, and empty-state placeholders.
+pub fn card_frame(margin_x: f32, margin_y: f32) -> egui::Frame {
+    egui::Frame::new()
+        .fill(palette::bg_surface_raised())
+        .stroke(egui::Stroke::new(
+            tokens::border_standard(),
+            palette::border_subtle(),
+        ))
+        .corner_radius(px_corner(tokens::card_rounding()))
+        .inner_margin(egui::Margin::symmetric(px_i8(margin_x), px_i8(margin_y)))
 }
 
 pub fn panel_header<R>(
