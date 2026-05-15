@@ -327,12 +327,11 @@ impl AssetLibrary {
             });
         }
 
-        let now = chrono::Utc::now().to_rfc3339();
         let db = self.db.lock();
         let changed = db
             .execute(
-                "UPDATE assets SET name = ?1, updated_at = ?2 WHERE id = ?3",
-                rusqlite::params![trimmed, now, asset_id.0.to_string()],
+                "UPDATE assets SET name = ?1 WHERE id = ?2",
+                rusqlite::params![trimmed, asset_id.0.to_string()],
             )
             .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
 

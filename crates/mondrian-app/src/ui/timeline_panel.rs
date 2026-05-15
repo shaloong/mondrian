@@ -2146,8 +2146,8 @@ impl TimelinePanel {
 
         if primary_pressed {
             if let Some(pos) = pointer_pos {
-                let on_scrollbar = self.right_scrollbar_rect.map_or(false, |r| r.contains(pos))
-                    || self.bottom_scrollbar_rect.map_or(false, |r| r.contains(pos));
+                let on_scrollbar = self.right_scrollbar_rect.is_some_and(|r| r.contains(pos))
+                    || self.bottom_scrollbar_rect.is_some_and(|r| r.contains(pos));
                 if on_scrollbar {
                     return;
                 }

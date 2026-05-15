@@ -350,6 +350,8 @@ impl LibraryPanel {
         thumb_h: f32,
     ) {
         let asset_name = asset.name.clone();
+        let mut name_tooltip: Option<String> = None;
+        let mut name_rect_for_click: Option<Rect> = None;
         let proxy_generator =
             mondrian_media::ProxyGenerator::new(mondrian_media::ProxyConfig::default());
         let has_proxy = proxy_generator.proxy_exists(asset.path.as_path());
@@ -358,7 +360,7 @@ impl LibraryPanel {
         let is_editing = self.editing_asset == Some(asset.id);
         let is_selected = self.selected_asset == Some(asset.id);
 
-        let (card_rect, card_response) =
+        let (card_rect, mut card_response) =
             ui.allocate_exact_size(Vec2::new(card_w, card_h), Sense::click_and_drag());
 
         let card_rounding = tokens::card_rounding();
@@ -421,12 +423,28 @@ impl LibraryPanel {
             ui.set_min_width(info_rect.width());
             ui.set_max_width(info_rect.width());
             if is_editing {
+                let edit_rect = info_rect;
                 let edit_resp = ui.add_sized(
                     [info_rect.width(), tokens::list_row_content_height()],
                     egui::TextEdit::singleline(&mut self.editing_name),
                 );
-                let submit =
-                    edit_resp.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter));
+                edit_resp.request_focus();
+                // Esc: cancel without saving
+                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    self.editing_asset = None;
+                    self.editing_name.clear();
+                    return;
+                }
+                // Click outside the edit rect submits
+                let ptr_in_edit = ui.input(|i| {
+                    i.pointer.interact_pos()
+                        .map(|p| edit_rect.contains(p))
+                        .unwrap_or(false)
+                });
+                let clicked_outside = ui.input(|i| i.pointer.primary_released()) && !ptr_in_edit;
+                let submit = edit_resp.lost_focus()
+                    || ui.input(|i| i.key_pressed(egui::Key::Enter))
+                    || clicked_outside;
                 if submit {
                     match library.rename_asset(asset.id, &self.editing_name) {
                         Ok(_) => {
@@ -460,22 +478,48 @@ impl LibraryPanel {
                         (info_rect, None)
                     };
 
-                ui.scope_builder(
-                    egui::UiBuilder::new()
-                        .max_rect(name_rect)
-                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                    |ui| {
-                        let name_resp = ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(asset_name.trim_start())
-                                    .font(typography::body_small())
-                                    .color(palette::text_primary()),
-                            )
-                            .truncate()
-                            .halign(egui::Align::LEFT),
-                        );
-                        name_resp.on_hover_text(asset_name.clone());
-                    },
+                // Draw name with painter — no widget to intercept card_response clicks
+                let name_text = asset_name.trim_start();
+                let name_galley = ui.painter().layout_no_wrap(
+                    name_text.to_string(),
+                    typography::body_small(),
+                    palette::text_primary(),
+                );
+                name_rect_for_click = Some(name_rect);
+                let name_fits = name_galley.size().x <= name_rect.width();
+                if !name_fits {
+                    name_tooltip = Some(asset_name.clone());
+                }
+                let display_name: String = if name_fits {
+                    name_text.to_string()
+                } else {
+                    // Manual character-by-character truncation with "..."
+                    let dots = "...";
+                    let dots_w = ui.painter()
+                        .layout_no_wrap(dots.to_string(), typography::body_small(), palette::text_primary())
+                        .size()
+                        .x;
+                    let limit = (name_rect.width() - dots_w).max(0.0);
+                    let mut chars: Vec<char> = name_text.chars().collect();
+                    while !chars.is_empty() {
+                        let s: String = chars.iter().collect();
+                        let w = ui.painter()
+                            .layout_no_wrap(s.clone(), typography::body_small(), palette::text_primary())
+                            .size()
+                            .x;
+                        if w <= limit {
+                            break;
+                        }
+                        chars.pop();
+                    }
+                    format!("{}{dots}", chars.iter().collect::<String>())
+                };
+                ui.painter().text(
+                    name_rect.left_center(),
+                    egui::Align2::LEFT_CENTER,
+                    &display_name,
+                    typography::body_small(),
+                    palette::text_primary(),
                 );
                 if let (Some(duration_rect), Some(duration_text)) =
                     (duration_rect, presentation.duration_text.as_ref())
@@ -499,11 +543,36 @@ impl LibraryPanel {
             }
         });
 
+        // Tooltip: use card's hover but only when pointer is inside name rect
+        if let Some(name_r) = name_rect_for_click {
+            let in_name = ui.input(|i| {
+                i.pointer.interact_pos()
+                    .map(|p| name_r.contains(p))
+                    .unwrap_or(false)
+            });
+            if in_name {
+                card_response = card_response.on_hover_text(asset_name.clone());
+            }
+        }
+
         if card_response.clicked() {
             self.selected_asset = Some(asset.id);
         }
 
         card_response.context_menu(|ui| {
+            // Rename
+            if ui.button("重命名").clicked() {
+                self.editing_asset = Some(asset.id);
+                self.editing_name = asset_name.clone();
+                ui.close();
+            }
+            // Reveal in file manager
+            if ui.button("在文件管理器中显示").clicked() {
+                reveal_in_file_manager(&asset.path);
+                ui.close();
+            }
+            ui.separator();
+
             if matches!(asset.kind, AssetKind::Video) {
                 let mut proxy_mode_toggle = proxy_mode;
                 if theme::checkmark_menu_toggle(ui, &mut proxy_mode_toggle, "代理模式").clicked()
@@ -581,7 +650,15 @@ impl LibraryPanel {
             }
         });
 
-        if card_response.double_clicked() {
+        // Double-click on name area only — matches Pr/Ae/DaVinci behavior
+        // where thumbnail double-click has different meaning (open in viewer)
+        let double_clicked = ui.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary))
+            && name_rect_for_click.is_some_and(|nr| ui.input(|i| {
+                i.pointer.interact_pos()
+                    .map(|p| nr.contains(p))
+                    .unwrap_or(false)
+            }));
+        if double_clicked {
             self.editing_asset = Some(asset.id);
             self.editing_name = asset_name.clone();
         }
@@ -879,6 +956,26 @@ fn format_duration_hhmmss(duration: Duration) -> String {
         format!("{h:02}:{m:02}:{s:02}")
     } else {
         format!("{m:02}:{s:02}")
+    }
+}
+
+fn reveal_in_file_manager(path: &std::path::Path) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("explorer")
+            .arg("/select,")
+            .arg(path)
+            .spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(parent) = path.parent() {
+            let _ = std::process::Command::new("xdg-open").arg(parent).spawn();
+        }
     }
 }
 
