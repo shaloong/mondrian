@@ -482,6 +482,44 @@ impl ViewerPanel {
         // Left timecode (160) + center controls (~210) + right info (170) ≈ 540.
         ui.set_min_width(540.0);
 
+        // ── Keyboard shortcuts ──
+        if !ui.ctx().wants_keyboard_input() {
+            let current_frame = state.current_frame();
+            if ui.input(|i| i.key_pressed(egui::Key::Space)) {
+                if state.is_playing() {
+                    state.pause();
+                } else {
+                    state.play();
+                }
+            }
+            // JKL shuttle
+            if ui.input(|i| i.key_pressed(egui::Key::K)) {
+                state.pause();
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::J) && !i.modifiers.command) {
+                state.seek(current_frame - 1);
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::L) && !i.modifiers.command) {
+                state.seek(current_frame + 1);
+            }
+            // Arrow keys
+            if ui.input(|i| i.key_pressed(egui::Key::ArrowLeft) && !i.modifiers.alt) {
+                let step = if ui.input(|i| i.modifiers.shift) { 10 } else { 1 };
+                state.seek((current_frame - step).max(0));
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::ArrowRight) && !i.modifiers.alt) {
+                let step = if ui.input(|i| i.modifiers.shift) { 10 } else { 1 };
+                state.seek(current_frame + step);
+            }
+            // Home / End
+            if ui.input(|i| i.key_pressed(egui::Key::Home)) {
+                state.seek(0);
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::End)) {
+                state.seek(state.last_content_frame().max(0));
+            }
+        }
+
         ui.vertical(|ui| {
             let controls_height = tokens::viewer_transport_height();
             let transport_gap = 4.0;
