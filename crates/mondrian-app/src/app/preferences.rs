@@ -231,21 +231,23 @@ pub(super) fn process_global_shortcuts(app: &mut MondrianApp, ctx: &egui::Contex
         Some(ShortcutAction::QuitApp) => {
             app.request_quit_app(ctx);
         }
-        None => {}
+        // Non-editable shortcuts are handled inline in their panels
+        _ => {}
     }
 }
 
 pub(super) fn shortcut_binding(
     app: &MondrianApp,
     action: ShortcutAction,
-) -> Option<&ShortcutBinding> {
+) -> Option<ShortcutBinding> {
     match action {
-        ShortcutAction::ImportMedia => app.shortcuts.import_media.as_ref(),
-        ShortcutAction::OpenProject => app.shortcuts.open_project.as_ref(),
-        ShortcutAction::SaveProject => app.shortcuts.save_project.as_ref(),
-        ShortcutAction::SaveProjectAs => app.shortcuts.save_project_as.as_ref(),
-        ShortcutAction::CloseProject => app.shortcuts.close_project.as_ref(),
-        ShortcutAction::QuitApp => app.shortcuts.quit_app.as_ref(),
+        ShortcutAction::ImportMedia => app.shortcuts.import_media.clone(),
+        ShortcutAction::OpenProject => app.shortcuts.open_project.clone(),
+        ShortcutAction::SaveProject => app.shortcuts.save_project.clone(),
+        ShortcutAction::SaveProjectAs => app.shortcuts.save_project_as.clone(),
+        ShortcutAction::CloseProject => app.shortcuts.close_project.clone(),
+        ShortcutAction::QuitApp => app.shortcuts.quit_app.clone(),
+        _ => action.hardcoded_binding(),
     }
 }
 
@@ -260,18 +262,12 @@ pub(super) fn shortcut_binding_mut(
         ShortcutAction::SaveProjectAs => &mut app.shortcuts.save_project_as,
         ShortcutAction::CloseProject => &mut app.shortcuts.close_project,
         ShortcutAction::QuitApp => &mut app.shortcuts.quit_app,
+        _ => unreachable!("non-editable shortcuts are not mutable"),
     }
 }
 
 pub(super) fn shortcut_action_title(action: ShortcutAction) -> &'static str {
-    match action {
-        ShortcutAction::ImportMedia => "导入媒体",
-        ShortcutAction::OpenProject => "打开项目",
-        ShortcutAction::SaveProject => "保存项目",
-        ShortcutAction::SaveProjectAs => "另存为",
-        ShortcutAction::CloseProject => "关闭项目",
-        ShortcutAction::QuitApp => "退出",
-    }
+    action.display_name()
 }
 
 pub(super) fn shortcut_action_label(app: &MondrianApp, action: ShortcutAction) -> String {
@@ -1026,14 +1022,7 @@ fn draw_media_preferences(app: &mut MondrianApp, ui: &mut egui::Ui) {
 fn draw_shortcut_preferences(app: &mut MondrianApp, ui: &mut egui::Ui) {
     draw_preferences_header(ui, "快捷键", None);
 
-    let actions = [
-        ShortcutAction::ImportMedia,
-        ShortcutAction::OpenProject,
-        ShortcutAction::SaveProject,
-        ShortcutAction::SaveProjectAs,
-        ShortcutAction::CloseProject,
-        ShortcutAction::QuitApp,
-    ];
+    let actions = ShortcutAction::editable_actions();
     let action_count = actions.len();
 
     ui.add_space(4.0);

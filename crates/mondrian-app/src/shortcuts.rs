@@ -1,68 +1,114 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ShortcutAction {
+    // ── File (editable) ──
     ImportMedia,
     OpenProject,
     SaveProject,
     SaveProjectAs,
     CloseProject,
     QuitApp,
+    // ── Transport (non-editable) ──
+    PlayPause,
+    ShuttleBack,
+    Pause,
+    ShuttleForward,
+    StepBack,
+    StepForward,
+    JumpStart,
+    JumpEnd,
+    MarkIn,
+    MarkOut,
+    // ── Tools (non-editable) ──
+    SelectTool,
+    BladeTool,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+impl ShortcutAction {
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::ImportMedia => "导入素材",
+            Self::OpenProject => "打开项目",
+            Self::SaveProject => "保存项目",
+            Self::SaveProjectAs => "另存为",
+            Self::CloseProject => "关闭项目",
+            Self::QuitApp => "退出",
+            Self::PlayPause => "播放/暂停",
+            Self::ShuttleBack => "倒放",
+            Self::Pause => "暂停",
+            Self::ShuttleForward => "快进",
+            Self::StepBack => "后退一帧",
+            Self::StepForward => "前进一帧",
+            Self::JumpStart => "跳到开头",
+            Self::JumpEnd => "跳到结尾",
+            Self::MarkIn => "标记入点",
+            Self::MarkOut => "标记出点",
+            Self::SelectTool => "选择工具",
+            Self::BladeTool => "剪刀工具",
+        }
+    }
+
+    /// Whether this shortcut can be customized in Preferences.
+    pub fn is_editable(self) -> bool {
+        matches!(
+            self,
+            Self::ImportMedia
+                | Self::OpenProject
+                | Self::SaveProject
+                | Self::SaveProjectAs
+                | Self::CloseProject
+                | Self::QuitApp
+        )
+    }
+
+    /// Hardcoded default binding. Returns `None` only for editable actions
+    /// whose default is unset (handled by `ShortcutPreferences`).
+    pub fn hardcoded_binding(self) -> Option<ShortcutBinding> {
+        match self {
+            // Transport
+            Self::PlayPause => Some(ShortcutBinding::key(ShortcutKey::Space)),
+            Self::ShuttleBack => Some(ShortcutBinding::key(ShortcutKey::J)),
+            Self::Pause => Some(ShortcutBinding::key(ShortcutKey::K)),
+            Self::ShuttleForward => Some(ShortcutBinding::key(ShortcutKey::L)),
+            Self::StepBack => Some(ShortcutBinding::key(ShortcutKey::ArrowLeft)),
+            Self::StepForward => Some(ShortcutBinding::key(ShortcutKey::ArrowRight)),
+            Self::JumpStart => Some(ShortcutBinding::key(ShortcutKey::Home)),
+            Self::JumpEnd => Some(ShortcutBinding::key(ShortcutKey::End)),
+            Self::MarkIn => Some(ShortcutBinding::key(ShortcutKey::I)),
+            Self::MarkOut => Some(ShortcutBinding::key(ShortcutKey::O)),
+            // Tools
+            Self::SelectTool => Some(ShortcutBinding::key(ShortcutKey::V)),
+            Self::BladeTool => Some(ShortcutBinding::key(ShortcutKey::B)),
+            // Editable: delegate to preferences
+            _ => None,
+        }
+    }
+
+    /// All non-editable actions (for conflict detection).
+    pub fn non_editable_actions() -> Vec<Self> {
+        use ShortcutAction::*;
+        vec![
+            PlayPause, ShuttleBack, Pause, ShuttleForward, StepBack, StepForward,
+            JumpStart, JumpEnd, MarkIn, MarkOut, SelectTool, BladeTool,
+        ]
+    }
+
+    /// Editable actions shown in preferences.
+    pub fn editable_actions() -> Vec<Self> {
+        use ShortcutAction::*;
+        vec![ImportMedia, OpenProject, SaveProject, SaveProjectAs, CloseProject, QuitApp]
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum ShortcutKey {
-    A,
-    B,
-    C,
-    D,
-    E,
-    F,
-    G,
-    H,
-    I,
-    J,
-    K,
-    L,
-    M,
-    N,
-    O,
-    P,
-    Q,
-    R,
-    S,
-    T,
-    U,
-    V,
-    W,
-    X,
-    Y,
-    Z,
-    Num0,
-    Num1,
-    Num2,
-    Num3,
-    Num4,
-    Num5,
-    Num6,
-    Num7,
-    Num8,
-    Num9,
-    F1,
-    F2,
-    F3,
-    F4,
-    F5,
-    F6,
-    F7,
-    F8,
-    F9,
-    F10,
-    F11,
-    F12,
-    Enter,
-    Space,
-    Delete,
+    A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z,
+    Num0, Num1, Num2, Num3, Num4, Num5, Num6, Num7, Num8, Num9,
+    F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12,
+    Enter, Space, Delete,
+    ArrowLeft, ArrowRight, ArrowUp, ArrowDown,
+    Home, End,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -74,6 +120,10 @@ pub struct ShortcutBinding {
 }
 
 impl ShortcutBinding {
+    pub fn key(key: ShortcutKey) -> Self {
+        Self { command: false, shift: false, alt: false, key }
+    }
+
     pub fn matches_input(&self, input: &egui::InputState) -> bool {
         if input.modifiers.command != self.command {
             return false;
@@ -254,6 +304,12 @@ impl ShortcutKey {
             Self::Enter => "Enter",
             Self::Space => "Space",
             Self::Delete => "Delete",
+            Self::ArrowLeft => "←",
+            Self::ArrowRight => "→",
+            Self::ArrowUp => "↑",
+            Self::ArrowDown => "↓",
+            Self::Home => "Home",
+            Self::End => "End",
         }
     }
 
@@ -310,6 +366,12 @@ impl ShortcutKey {
             Self::Enter => egui::Key::Enter,
             Self::Space => egui::Key::Space,
             Self::Delete => egui::Key::Delete,
+            Self::ArrowLeft => egui::Key::ArrowLeft,
+            Self::ArrowRight => egui::Key::ArrowRight,
+            Self::ArrowUp => egui::Key::ArrowUp,
+            Self::ArrowDown => egui::Key::ArrowDown,
+            Self::Home => egui::Key::Home,
+            Self::End => egui::Key::End,
         }
     }
 
@@ -366,6 +428,12 @@ impl ShortcutKey {
             egui::Key::Enter => Self::Enter,
             egui::Key::Space => Self::Space,
             egui::Key::Delete => Self::Delete,
+            egui::Key::ArrowLeft => Self::ArrowLeft,
+            egui::Key::ArrowRight => Self::ArrowRight,
+            egui::Key::ArrowUp => Self::ArrowUp,
+            egui::Key::ArrowDown => Self::ArrowDown,
+            egui::Key::Home => Self::Home,
+            egui::Key::End => Self::End,
             _ => return None,
         })
     }
