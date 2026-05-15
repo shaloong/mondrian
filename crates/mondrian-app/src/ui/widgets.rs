@@ -106,11 +106,13 @@ pub enum ConfirmButton {
 /// Show a modal confirmation dialog.
 ///
 /// Returns `true` when the confirm action is clicked.
+/// `cancel_label` is used when `buttons` is `CancelConfirm`.
 pub fn confirmation_dialog(
     ctx: &egui::Context,
     title: &str,
     message: &str,
     confirm_label: &str,
+    cancel_label: &str,
     buttons: ConfirmButton,
     open: &mut bool,
 ) -> bool {
@@ -170,7 +172,7 @@ pub fn confirmation_dialog(
                             .add_sized(
                                 [80.0, ui.spacing().interact_size.y],
                                 egui::Button::new(
-                                    egui::RichText::new("取消").font(typography::button()),
+                                    egui::RichText::new(cancel_label).font(typography::button()),
                                 ),
                             )
                             .clicked()
@@ -193,6 +195,12 @@ pub struct SegmentedOption<V> {
     pub label: String,
 }
 
+impl<V> SegmentedOption<V> {
+    pub fn new(value: V, label: impl Into<String>) -> Self {
+        Self { value, label: label.into() }
+    }
+}
+
 /// Horizontal segmented control (like iOS/macOS segmented picker).
 ///
 /// Renders a row of adjacent selectable buttons with connected corners.
@@ -213,7 +221,7 @@ pub fn segmented_control<V: PartialEq + Clone>(
                 typography::body_small(),
                 palette::text_primary(),
             );
-            galley.size().x + 24.0
+            galley.size().x + tokens::panel_inner_margin_x() * 2.0
         })
         .sum();
 
@@ -233,7 +241,7 @@ pub fn segmented_control<V: PartialEq + Clone>(
             typography::body_small(),
             palette::text_primary(),
         );
-        let w = galley.size().x + 24.0;
+        let w = galley.size().x + tokens::panel_inner_margin_x() * 2.0;
         let seg_rect =
             egui::Rect::from_min_size(egui::pos2(x, rect.top()), egui::vec2(w, rect.height()));
 
