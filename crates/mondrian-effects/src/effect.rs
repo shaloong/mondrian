@@ -563,7 +563,7 @@ fn insert_effect_into_tree(
     }
 }
 
-fn sort_category_tree(nodes: &mut Vec<EffectCategoryNode>) {
+fn sort_category_tree(nodes: &mut [EffectCategoryNode]) {
     nodes.sort_by(|a, b| a.name.cmp(&b.name));
     for node in nodes.iter_mut() {
         node.effects.sort_by_key(|e| e.display_name());

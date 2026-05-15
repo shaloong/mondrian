@@ -254,14 +254,18 @@ impl EffectControlsPanel {
                     ui.separator();
                     ui.add_space(tokens::panel_gap() * 0.35);
                 }
-                for (index, group) in inspector_groups.iter().enumerate() {
-                    if index > 0 {
-                        ui.add_space(tokens::panel_gap() * 0.4);
-                        ui.separator();
-                        ui.add_space(tokens::panel_gap() * 0.35);
-                    }
-                    self.draw_property_group(ui, app, selection, current_time, group);
-                }
+                egui::ScrollArea::vertical()
+                    .id_salt("effect_controls_scroll")
+                    .show(ui, |ui| {
+                        for (index, group) in inspector_groups.iter().enumerate() {
+                            if index > 0 {
+                                ui.add_space(tokens::panel_gap() * 0.4);
+                                ui.separator();
+                                ui.add_space(tokens::panel_gap() * 0.35);
+                            }
+                            self.draw_property_group(ui, app, selection, current_time, group);
+                        }
+                    });
             }
             EffectControlsView::Graph => {
                 let animatable_properties = inspector_groups
@@ -2179,6 +2183,7 @@ impl EffectControlsPanel {
         }
     }
 
+    #[allow(dead_code)]
     fn draw_media_interpretation(
         &mut self,
         ui: &mut Ui,
@@ -4776,6 +4781,7 @@ fn blend_mode_display_label(value: &str) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn color_space_options() -> [ColorSpace; 9] {
     [
         ColorSpace::Rec709,

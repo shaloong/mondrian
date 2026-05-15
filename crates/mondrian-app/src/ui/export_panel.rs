@@ -29,7 +29,10 @@ pub struct ExportPanel {
 
 impl ExportPanel {
     pub fn show(&mut self, ui: &mut Ui, state: &mut AppState) {
-        ui.vertical(|ui| {
+        egui::ScrollArea::vertical()
+            .id_salt("export_panel_scroll")
+            .show(ui, |ui| {
+            ui.vertical(|ui| {
             let presets = builtin_presets();
             let preset = &presets[self.selected_preset_idx].1;
             let pending = state.render_queue.list_jobs().len();
@@ -240,6 +243,7 @@ impl ExportPanel {
                 }
             });
         });
+            });
     }
 
     fn enqueue(&mut self, state: &mut AppState, preset: ExportPreset) {
