@@ -1608,6 +1608,48 @@ impl TimelinePanel {
                     continue;
                 }
 
+                // Effect drag-and-drop: highlight + apply on release over clip
+                let effect_drag_id = egui::Id::new(super::effect_library_panel::EFFECT_DRAG_ID);
+                let effect_payload = ui.ctx().data_mut(|d| {
+                    d.get_persisted::<EffectType>(effect_drag_id)
+                });
+                if let Some(ref effect_type) = effect_payload {
+                    let pointer_pos = ui.input(|i| i.pointer.interact_pos());
+                    let on_clip = pointer_pos.is_some_and(|p| clip_draw_rect.contains(p));
+                    if on_clip {
+                        // Drop highlight
+                        painter.rect_stroke(
+                            clip_draw_rect.shrink(1.0),
+                            tokens::timeline_clip_radius(),
+                            egui::Stroke::new(2.0, palette::interaction_highlight()),
+                            egui::StrokeKind::Inside,
+                        );
+                        // Apply on release
+                        if ui.input(|i| i.pointer.primary_released()) {
+                            let sel_ref = SelectedClipRef {
+                                track_id: selection.track_id,
+                                is_video_track: selection.is_video_track,
+                                clip_id: selection.clip_id,
+                            };
+                            match state.add_effect_to_clip(sel_ref, effect_type.clone()) {
+                                Ok(true) => {
+                                    state.set_status_hint(
+                                        format!("已添加{}", effect_type.display_name()),
+                                        false,
+                                    );
+                                }
+                                Ok(false) => {}
+                                Err(err) => {
+                                    state.set_status_hint(format!("添加特效失败：{err}"), true);
+                                }
+                            }
+                            ui.ctx().data_mut(|d| {
+                                d.remove::<EffectType>(effect_drag_id);
+                            });
+                        }
+                    }
+                }
+
                 if clip_resp.clicked() {
                     let shift_pressed = ui.input(|i| i.modifiers.shift);
                     if shift_pressed {
