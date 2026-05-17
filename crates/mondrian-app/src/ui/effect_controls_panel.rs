@@ -2810,7 +2810,17 @@ impl EffectControlsPanel {
                     if *buffer != *value {
                         *buffer = value.clone();
                     }
-                    if ui.text_edit_singleline(buffer).changed() {
+                    // Use add_sized to force exact width — the grid measures the
+                    // allocated rect, and a 150px cap prevents the panel from
+                    // auto-expanding while still being wide enough for a file path.
+                    let text_w = 120.0;
+                    if ui
+                        .add_sized(
+                            [text_w, ui.spacing().interact_size.y],
+                            egui::TextEdit::singleline(buffer),
+                        )
+                        .changed()
+                    {
                         next_text = Some(buffer.clone());
                     }
                 }
