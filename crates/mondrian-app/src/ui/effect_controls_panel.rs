@@ -236,7 +236,33 @@ impl EffectControlsPanel {
             }
         };
 
-        let inspector_groups = collect_inspector_groups(&property_bag);
+        let mut inspector_groups = collect_inspector_groups(&property_bag);
+        // Sort effect groups by insertion order. Fixed builtins (Motion, Opacity,
+        // etc.) have allows_effect_controls=false and sort before effects.
+        let effect_index: std::collections::HashMap<String, usize> = clip
+            .effects
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                let base = e.effect_type.display_name();
+                let n = clip.effects[..i]
+                    .iter()
+                    .filter(|prev| prev.effect_type == e.effect_type)
+                    .count();
+                let label = if n == 0 { base.to_string() } else { format!("{base} {}", n + 1) };
+                (label, i)
+            })
+            .collect();
+        inspector_groups.sort_by(|a, b| {
+            let is_fx_a = a.meta.allows_effect_controls;
+            let is_fx_b = b.meta.allows_effect_controls;
+            // Fixed builtins: use original meta.order (0=Motion, 1=Opacity, 2=TimeRemap).
+            // Effects: use position in clip.effects (offset above builtin range).
+            let ord_a = if is_fx_a { effect_index.get(&a.meta.title).copied().unwrap_or(0) + 10 } else { a.meta.order };
+            let ord_b = if is_fx_b { effect_index.get(&b.meta.title).copied().unwrap_or(0) + 10 } else { b.meta.order };
+            ord_a.cmp(&ord_b)
+                .then_with(|| a.meta.title.cmp(&b.meta.title))
+        });
         if app.active_animation_property_path(selection.clip_id).is_none() {
             if let Some((path, _)) = inspector_groups
                 .iter()
@@ -254,18 +280,76 @@ impl EffectControlsPanel {
                     ui.separator();
                     ui.add_space(tokens::panel_gap() * 0.35);
                 }
+                // Track group Y positions (screen-space) for effect drag insertion
+                let mut group_tops: Vec<f32> = Vec::new();
+                let mut group_bottoms: Vec<f32> = Vec::new();
+                let mut is_effect_group: Vec<bool> = Vec::new();
                 egui::ScrollArea::vertical()
                     .id_salt("effect_controls_scroll")
                     .show(ui, |ui| {
                         for (index, group) in inspector_groups.iter().enumerate() {
+                            let top = ui.next_widget_position().y;
+                            group_tops.push(top);
+                            is_effect_group.push(group.meta.allows_effect_controls);
                             if index > 0 {
                                 ui.add_space(tokens::panel_gap() * 0.4);
                                 ui.separator();
                                 ui.add_space(tokens::panel_gap() * 0.35);
                             }
                             self.draw_property_group(ui, app, selection, current_time, group);
+                            group_bottoms.push(ui.next_widget_position().y);
                         }
                     });
+                // Effect drag insertion indicator
+                let effect_drag_id = egui::Id::new(super::effect_library_panel::EFFECT_DRAG_ID);
+                if let Some(effect_type) = ui.ctx().data_mut(|d| {
+                    d.get_persisted::<mondrian_effects::EffectType>(effect_drag_id)
+                }) {
+                    if let Some(ptr) = ui.input(|i| i.pointer.interact_pos()) {
+                        let panel_r = ui.max_rect();
+                        if panel_r.contains(ptr) && !group_tops.is_empty() {
+                            // Build (y, insert_index) pairs at valid effect boundaries
+                            let mut slots: Vec<(f32, usize)> = Vec::new();
+                            for i in 0..group_tops.len() {
+                                if is_effect_group[i] {
+                                    // Before this effect group → insert at its effect index
+                                    let fx_idx = is_effect_group[..=i].iter().filter(|&&e| e).count() - 1;
+                                    slots.push((group_tops[i], fx_idx));
+                                    // After this group = midpoint to next, insert at fx_idx + 1
+                                    if i + 1 < group_tops.len() {
+                                        let mid = (group_bottoms[i] + group_tops[i + 1]) * 0.5;
+                                        slots.push((mid, fx_idx + 1));
+                                    }
+                                }
+                            }
+                            // Append at end — clamp y to visible area
+                            let total_fx = is_effect_group.iter().filter(|&&e| e).count();
+                            let raw_end = group_bottoms.last().copied().unwrap_or(0.0) + 4.0;
+                            let end_y = raw_end.min(panel_r.bottom() - 2.0);
+                            slots.push((end_y, total_fx));
+                            // Snap to nearest slot
+                            let (slot_y, insert_idx) = slots
+                                .iter()
+                                .min_by(|a, b| (ptr.y - a.0).abs().partial_cmp(&(ptr.y - b.0).abs()).unwrap())
+                                .copied()
+                                .unwrap_or((end_y, total_fx));
+                            // Draw snapped line
+                            ui.painter().line_segment(
+                                [egui::pos2(panel_r.left(), slot_y), egui::pos2(panel_r.right(), slot_y)],
+                                egui::Stroke::new(2.0, palette::interaction_highlight()),
+                            );
+                            // Apply on release with correct index
+                            if ui.input(|i| i.pointer.primary_released()) {
+                                if selection.is_video_track {
+                                    let _ = app.insert_effect_at_index(selection, effect_type.clone(), insert_idx);
+                                }
+                                ui.ctx().data_mut(|d| {
+                                    d.remove::<mondrian_effects::EffectType>(effect_drag_id);
+                                });
+                            }
+                        }
+                    }
+                }
             }
             EffectControlsView::Graph => {
                 let animatable_properties = inspector_groups
