@@ -237,29 +237,38 @@ impl EffectControlsPanel {
         };
 
         let mut inspector_groups = collect_inspector_groups(&property_bag);
-        // Sort effect groups by insertion order. Fixed builtins (Motion, Opacity,
-        // etc.) have allows_effect_controls=false and sort before effects.
+        // Sort effect groups by insertion order. Use effect UUID (from group ID
+        // suffix) to map each group to its position in clip.effects.
         let effect_index: std::collections::HashMap<String, usize> = clip
             .effects
             .iter()
             .enumerate()
-            .map(|(i, e)| {
-                let base = e.effect_type.display_name();
-                let n = clip.effects[..i]
-                    .iter()
-                    .filter(|prev| prev.effect_type == e.effect_type)
-                    .count();
-                let label = if n == 0 { base.to_string() } else { format!("{base} {}", n + 1) };
-                (label, i)
-            })
+            .map(|(i, e)| (e.id.to_string(), i))
             .collect();
         inspector_groups.sort_by(|a, b| {
             let is_fx_a = a.meta.allows_effect_controls;
             let is_fx_b = b.meta.allows_effect_controls;
             // Fixed builtins: use original meta.order (0=Motion, 1=Opacity, 2=TimeRemap).
-            // Effects: use position in clip.effects (offset above builtin range).
-            let ord_a = if is_fx_a { effect_index.get(&a.meta.title).copied().unwrap_or(0) + 10 } else { a.meta.order };
-            let ord_b = if is_fx_b { effect_index.get(&b.meta.title).copied().unwrap_or(0) + 10 } else { b.meta.order };
+            // Effects: use position in clip.effects via UUID lookup (offset above builtins).
+            let ord_a = if is_fx_a {
+                // Extract UUID tail from group ID: "effect.<slug>.<uuid8>" → "<uuid8>"
+                let uuid = a.meta.id.rsplit('.').next().unwrap_or("0");
+                effect_index.iter()
+                    .find(|(full_id, _)| full_id.starts_with(uuid))
+                    .map(|(_, &idx)| idx + 10)
+                    .unwrap_or(0)
+            } else {
+                a.meta.order
+            };
+            let ord_b = if is_fx_b {
+                let uuid = b.meta.id.rsplit('.').next().unwrap_or("0");
+                effect_index.iter()
+                    .find(|(full_id, _)| full_id.starts_with(uuid))
+                    .map(|(_, &idx)| idx + 10)
+                    .unwrap_or(0)
+            } else {
+                b.meta.order
+            };
             ord_a.cmp(&ord_b)
                 .then_with(|| a.meta.title.cmp(&b.meta.title))
         });

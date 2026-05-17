@@ -444,13 +444,7 @@ impl Clip {
     }
 
     fn next_effect_group_label(&self, effect_type: &EffectType) -> String {
-        let base = effect_type.display_name();
-        let count = self.effects.iter().filter(|effect| effect.effect_type == *effect_type).count();
-        if count == 0 {
-            base.to_string()
-        } else {
-            format!("{base} {}", count + 1)
-        }
+        effect_type.display_name().to_string()
     }
 }
 

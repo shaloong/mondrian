@@ -68,8 +68,14 @@ pub fn property_group_meta(path: &str, property: &AnimatedProperty) -> Animation
             .clone()
             .unwrap_or_else(|| "效果".to_string());
         let slug = sanitize_group_id(&title);
+        // Include UUID from path for uniqueness: "effect.<uuid>.<prop>" → id = "effect.<slug>.<uuid_tail>"
+        let uuid_tail = path
+            .split('.')
+            .nth(1)
+            .map(|s| if s.len() > 8 { &s[..8] } else { s })
+            .unwrap_or("0");
         return AnimationGroupMeta {
-            id: format!("effect.{slug}"),
+            id: format!("effect.{slug}.{uuid_tail}"),
             title,
             kind: AnimationGroupKind::Effect,
             order: 10,
