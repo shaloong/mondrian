@@ -379,6 +379,15 @@ impl AppState {
         selection: SelectedClipRef,
         effect_type: EffectType,
     ) -> mondrian_core::Result<bool> {
+        self.insert_effect_at_index(selection, effect_type, usize::MAX)
+    }
+
+    pub fn insert_effect_at_index(
+        &mut self,
+        selection: SelectedClipRef,
+        effect_type: EffectType,
+        index: usize,
+    ) -> mondrian_core::Result<bool> {
         if !selection.is_video_track {
             return Err(mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "add_effect_to_clip".to_string(),
@@ -412,7 +421,7 @@ impl AppState {
                     clip_id: selection.clip_id.to_string(),
                 }
             })?;
-            clip.add_effect(effect_type.clone());
+            clip.insert_effect_at(index, effect_type.clone());
             (seq.id, before, seq.clone())
         };
 

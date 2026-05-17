@@ -391,11 +391,16 @@ impl Clip {
     }
 
     pub fn add_effect(&mut self, effect_type: EffectType) -> EffectId {
+        self.insert_effect_at(self.effects.len(), effect_type)
+    }
+
+    pub fn insert_effect_at(&mut self, index: usize, effect_type: EffectType) -> EffectId {
         let label = self.next_effect_group_label(&effect_type);
         let mut effect = EffectNode::new(effect_type);
         effect.instantiate_for_clip(label);
         let effect_id = effect.id;
-        self.effects.push(effect);
+        let idx = index.min(self.effects.len());
+        self.effects.insert(idx, effect);
         effect_id
     }
 
