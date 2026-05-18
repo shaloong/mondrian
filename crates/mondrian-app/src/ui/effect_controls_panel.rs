@@ -4897,7 +4897,6 @@ fn blend_mode_display_label(value: &str) -> String {
         "SoftLight" => "柔光".to_string(),
         "Difference" => "差值".to_string(),
         "Exclusion" => "排除".to_string(),
-        "Add" => "线性减淡(添加)".to_string(),
         "Subtract" => "相减".to_string(),
         "DarkerColor" => "深色".to_string(),
         "LighterColor" => "浅色".to_string(),

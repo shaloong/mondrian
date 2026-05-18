@@ -651,7 +651,7 @@ fn blend_mode_channel(mode: BlendMode, base: f32, blend: f32) -> f32 {
         }
         BlendMode::Difference => (base - blend).abs(),
         BlendMode::Exclusion => base + blend - 2.0 * base * blend,
-        BlendMode::Add | BlendMode::LinearDodge => (base + blend).clamp(0.0, 1.0),
+        BlendMode::LinearDodge => (base + blend).clamp(0.0, 1.0),
         BlendMode::Subtract => (base - blend).clamp(0.0, 1.0),
         BlendMode::Divide => {
             if blend <= 0.001 {

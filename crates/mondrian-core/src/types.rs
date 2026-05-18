@@ -315,7 +315,6 @@ pub enum BlendMode {
     SoftLight,
     Difference,
     Exclusion,
-    Add,
     Subtract,
     DarkerColor,
     LighterColor,
