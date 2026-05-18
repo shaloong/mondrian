@@ -947,13 +947,9 @@ impl TimelinePanel {
             return;
         }
 
-        let mut egui_color = egui::Color32::from_rgba_unmultiplied(
-            (picker.color[0] * 255.0) as u8,
-            (picker.color[1] * 255.0) as u8,
-            (picker.color[2] * 255.0) as u8,
-            (picker.color[3] * 255.0) as u8,
-        );
-
+        let mut r = (picker.color[0] * 255.0).round() as i32;
+        let mut g = (picker.color[1] * 255.0).round() as i32;
+        let mut b = (picker.color[2] * 255.0).round() as i32;
         let mut confirmed = false;
         let mut cancelled = false;
 
@@ -962,9 +958,24 @@ impl TimelinePanel {
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
+                let preview = egui::Color32::from_rgb(r.clamp(0, 255) as u8, g.clamp(0, 255) as u8, b.clamp(0, 255) as u8);
                 ui.horizontal(|ui| {
-                    ui.label("颜色:");
-                    ui.color_edit_button_srgba(&mut egui_color);
+                    ui.label("预览:");
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::hover());
+                    ui.painter().rect_filled(rect, egui::CornerRadius::same(4), preview);
+                });
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label("R:");
+                    ui.add(egui::Slider::new(&mut r, 0..=255));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("G:");
+                    ui.add(egui::Slider::new(&mut g, 0..=255));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("B:");
+                    ui.add(egui::Slider::new(&mut b, 0..=255));
                 });
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -977,12 +988,11 @@ impl TimelinePanel {
                 });
             });
 
-        let c = egui_color.to_srgba_unmultiplied();
         picker.color = [
-            c[0] as f32 / 255.0,
-            c[1] as f32 / 255.0,
-            c[2] as f32 / 255.0,
-            c[3] as f32 / 255.0,
+            r.clamp(0, 255) as f32 / 255.0,
+            g.clamp(0, 255) as f32 / 255.0,
+            b.clamp(0, 255) as f32 / 255.0,
+            1.0,
         ];
 
         if confirmed {
@@ -990,7 +1000,7 @@ impl TimelinePanel {
                 r: picker.color[0],
                 g: picker.color[1],
                 b: picker.color[2],
-                a: picker.color[3],
+                a: 1.0,
             };
             let _ = state.create_solid_color_on_video_track_with_color(
                 picker.track_id,
