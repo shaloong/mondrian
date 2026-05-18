@@ -46,6 +46,7 @@ pub struct TimelinePanel {
     vertical_scrollbar_drag: Option<TimelineVerticalScrollbarDragState>,
     right_scrollbar_rect: Option<Rect>,
     bottom_scrollbar_rect: Option<Rect>,
+    waveform_cache: mondrian_media::WaveformCache,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -934,6 +935,56 @@ impl TimelinePanel {
         }
 
         track_label_w + self.timeline_total_frame_span(state) as f32 * self.pixels_per_frame
+    }
+
+    fn draw_waveform_for_clip(
+        &mut self,
+        painter: &egui::Painter,
+        state: &AppState,
+        clip_rect: Rect,
+        clip: &mondrian_timeline::clip::Clip,
+        clip_w: f32,
+    ) {
+        let Some(library) = state.asset_library.as_ref() else {
+            return;
+        };
+        let Some(asset) = library.get_asset(clip.asset_id).ok().flatten() else {
+            return;
+        };
+        let buffer = match state.audio_source_cache.get_or_decode(&asset.path) {
+            Ok(buf) => buf,
+            Err(_) => return,
+        };
+
+        let pixel_width = clip_w.ceil() as u32;
+        if pixel_width < 2 {
+            return;
+        }
+
+        let waveform = self.waveform_cache.get_or_compute(
+            clip.asset_id,
+            &buffer,
+            pixel_width,
+        );
+
+        let bottom_y = clip_rect.bottom() - 1.0;
+        let max_height = clip_rect.height() * 0.85;
+        let wave_color = egui::Color32::from_rgba_premultiplied(180, 220, 140, 140);
+        let x_start = clip_rect.left();
+
+        // Draw only the upper half (like Premiere): peaks rise from the bottom.
+        let scale_x = pixel_width as f32 / waveform.peaks.len() as f32;
+        for (col, &peak) in waveform.peaks.iter().enumerate() {
+            let x = x_start + col as f32 * scale_x;
+            if x >= clip_rect.right() {
+                break;
+            }
+            let h = peak.clamp(0.0, 1.0) * max_height;
+            painter.line_segment(
+                [egui::Pos2::new(x, bottom_y - h), egui::Pos2::new(x, bottom_y)],
+                egui::Stroke::new(1.0, wave_color),
+            );
+        }
     }
 
     fn draw_timeline_tools_toolbar(&mut self, ui: &mut Ui) {
@@ -2068,6 +2119,10 @@ impl TimelinePanel {
             };
             painter.rect_filled(clip_draw_rect, tokens::timeline_clip_radius(), clip_fill);
             clip_outlines.push((clip_draw_rect, self.selected_clips.contains(&selection)));
+
+            if !is_video_track {
+                self.draw_waveform_for_clip(&painter, state, clip_draw_rect, clip, clip_w);
+            }
 
             if clip_w > tokens::timeline_clip_label_min_width() {
                 let label_rect = Rect::from_min_max(
