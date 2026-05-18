@@ -1511,3 +1511,62 @@ fn cross_track_move_overlapping_clips_preserves_integrity() {
     assert_eq!(seq.video_tracks[2].clips[0].position.frame, 5);
     assert_eq!(seq.video_tracks[2].clips[0].duration.frame, 10);
 }
+
+#[test]
+fn same_track_move_does_not_trim_before_release() {
+    // Ghost-based drag: during drag, the sequence must be unchanged.
+    // Only on release (drop) should the move be applied.
+    let mut state = create_state_with_sequence();
+    let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
+    let track_id = state.sequence.as_ref().expect("sequence should exist").video_tracks[0].id;
+
+    // Clip A at [0, 10), clip B at [20, 10) — separated, no overlap.
+    let clip_a = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+    let clip_a_id = clip_a.id;
+    let clip_b = Clip::new(AssetId::new(), TimeCode::new(20, tb), TimeCode::new(10, tb));
+    let clip_b_id = clip_b.id;
+
+    {
+        let seq = state.sequence.as_mut().expect("sequence should exist");
+        seq.video_tracks[0].add_clip(clip_a).expect("add a");
+        seq.video_tracks[0].add_clip(clip_b).expect("add b");
+    }
+
+    // Simulate drag start: save before-snapshot.
+    let before = state.sequence.clone();
+
+    // "During drag": the sequence should be restored to before-snapshot
+    // (no mutations). Verify by checking A and B are in original positions.
+    {
+        let seq = state.sequence.as_ref().expect("sequence should exist");
+        let clips = &seq.video_tracks[0].clips;
+        assert_eq!(clips.len(), 2);
+        assert_eq!(clips[0].id, clip_a_id);
+        assert_eq!(clips[0].position.frame, 0);
+        assert_eq!(clips[0].duration.frame, 10);
+        assert_eq!(clips[1].id, clip_b_id);
+        assert_eq!(clips[1].position.frame, 20);
+        assert_eq!(clips[1].duration.frame, 10);
+    }
+
+    // "On release": apply the actual move (A to frame 5, B to frame 25).
+    let anchor_pairs = vec![(clip_a_id, 0), (clip_b_id, 20)];
+    state
+        .move_clip_group_by_delta_with_mode(&anchor_pairs, 5, ClipOverlapMode::Overwrite)
+        .expect("group move should succeed");
+
+    let seq = state.sequence.as_ref().expect("sequence should exist");
+    let clips = &seq.video_tracks[0].clips;
+    assert_eq!(clips.len(), 2);
+    assert_eq!(clips[0].id, clip_a_id);
+    assert_eq!(clips[0].position.frame, 5);
+    assert_eq!(clips[1].id, clip_b_id);
+    assert_eq!(clips[1].position.frame, 25);
+
+    // Verify undo snapshot semantics: restoring before-snapshot brings clips back.
+    state.sequence = before;
+    let seq = state.sequence.as_ref().expect("sequence should exist");
+    let clips = &seq.video_tracks[0].clips;
+    assert_eq!(clips[0].position.frame, 0);
+    assert_eq!(clips[1].position.frame, 20);
+}

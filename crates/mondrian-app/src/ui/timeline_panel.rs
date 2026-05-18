@@ -28,6 +28,9 @@ pub struct TimelinePanel {
     clip_drag_before_sequence: Option<Sequence>,
     clip_drag_target: Option<ClipDragTarget>,
     previous_track_rows: Vec<TrackRowVisual>,
+    clip_drag_ghosts: Vec<ClipGhost>,
+    clip_drag_raw_target_frame: Option<i64>,
+    clip_drag_overlap_mode: ClipOverlapMode,
     selected_clips: HashSet<ClipSelection>,
     track_area_bounds: Option<Rect>,
     marquee_anchor: Option<Pos2>,
@@ -105,6 +108,15 @@ struct ClipDragTarget {
     track_id: TrackId,
     is_video_track: bool,
     track_index: usize,
+}
+
+/// Ghost preview of a clip's predicted position during drag.
+#[derive(Clone)]
+struct ClipGhost {
+    track_id: TrackId,
+    is_video_track: bool,
+    start_frame: i64,
+    duration_frames: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -801,7 +813,9 @@ impl TimelinePanel {
                                                         }
                                                         }
                                                     } else if self.clip_drag_moved {
-                                                        // Branch B: Same-track drop
+                                                        // Branch B: Same-track drop.
+                                                        // Moves were NOT applied during drag
+                                                        // (ghost-only). Apply them now.
                                                         let dropped_outside =
                                                             match (pointer, self.track_area_bounds)
                                                             {
@@ -818,15 +832,67 @@ impl TimelinePanel {
                                                             {
                                                                 state.sequence = Some(before);
                                                             }
-                                                        } else if let Some(before) =
-                                                            self.clip_drag_before_sequence.take()
-                                                        {
-                                                            state.record_timeline_edit_snapshot(
-                                                                "移动片段",
-                                                                before,
-                                                            );
                                                         } else {
-                                                            let _ = state.save_project();
+                                                            // Apply the actual move.
+                                                            let anchor_start = self
+                                                                .clip_drag_anchors
+                                                                .iter()
+                                                                .find(|a| a.clip_id == drag.clip_id)
+                                                                .map(|a| a.start_frame)
+                                                                .unwrap_or(0);
+                                                            let raw_target = self
+                                                                .clip_drag_raw_target_frame
+                                                                .unwrap_or(0);
+                                                            let time_delta =
+                                                                raw_target - anchor_start;
+                                                            let min_anchor = self
+                                                                .clip_drag_anchors
+                                                                .iter()
+                                                                .map(|a| a.start_frame)
+                                                                .min()
+                                                                .unwrap_or(0)
+                                                                .max(0);
+                                                            let clamped_delta =
+                                                                time_delta.max(-min_anchor);
+                                                            let anchor_pairs: Vec<(ClipId, i64)> =
+                                                                self.clip_drag_anchors
+                                                                    .iter()
+                                                                    .map(|a| {
+                                                                        (a.clip_id, a.start_frame)
+                                                                    })
+                                                                    .collect();
+                                                            let overlap_mode =
+                                                                self.clip_drag_overlap_mode;
+                                                            // Restore original before applying.
+                                                            if let Some(ref before) = self
+                                                                .clip_drag_before_sequence
+                                                            {
+                                                                state.sequence =
+                                                                    Some(before.clone());
+                                                            }
+                                                            if state
+                                                                .move_clip_group_by_delta_with_mode(
+                                                                    &anchor_pairs,
+                                                                    clamped_delta,
+                                                                    overlap_mode,
+                                                                )
+                                                                .is_ok()
+                                                            {
+                                                                if let Some(before) = self
+                                                                    .clip_drag_before_sequence
+                                                                    .take()
+                                                                {
+                                                                    state.record_timeline_edit_snapshot(
+                                                                        "移动片段",
+                                                                        before,
+                                                                    );
+                                                                }
+                                                            } else if let Some(before) = self
+                                                                .clip_drag_before_sequence
+                                                                .take()
+                                                            {
+                                                                state.sequence = Some(before);
+                                                            }
                                                         }
                                                     }
 
@@ -834,6 +900,8 @@ impl TimelinePanel {
                                                     self.clip_drag_before_sequence = None;
                                                     self.clip_drag_moved = false;
                                                     self.clip_drag_target = None;
+                                                    self.clip_drag_ghosts.clear();
+                                                    self.clip_drag_raw_target_frame = None;
                                                     self.active_snap_guide_frame = None;
                                                     self.active_insert_guide_frame = None;
                                                 }
@@ -1611,6 +1679,9 @@ impl TimelinePanel {
         };
         self.previous_track_rows = track_rows.clone();
 
+        // Compute ghost previews for the current drag.
+        self.compute_clip_drag_ghosts(state, &track_rows);
+
         if let (Some(top), Some(bottom), Some(left)) =
             (first_track_top, last_track_bottom, content_left)
         {
@@ -1710,6 +1781,42 @@ impl TimelinePanel {
             }
 
             self.handle_marquee(ui, state, &visible_clips);
+        }
+
+        // Draw clip drag ghosts (predicted clip positions during drag).
+        if !self.clip_drag_ghosts.is_empty() {
+            if let Some(left) = content_left {
+                let ghost_color = palette::interaction_highlight().gamma_multiply(0.35);
+                let ghost_stroke = Stroke::new(
+                    tokens::border_standard(),
+                    palette::interaction_highlight().gamma_multiply(0.55),
+                );
+                for ghost in &self.clip_drag_ghosts {
+                    if let Some(row) = track_rows.iter().find(|r| {
+                        r.track_id == ghost.track_id && r.is_video_track == ghost.is_video_track
+                    }) {
+                        let clip_top = row.rect.top() + tokens::timeline_clip_top_inset();
+                        let clip_bottom = row.rect.bottom() - tokens::timeline_clip_bottom_inset();
+                        let x = left + ghost.start_frame as f32 * self.pixels_per_frame;
+                        let w = ghost.duration_frames as f32 * self.pixels_per_frame;
+                        let ghost_rect = Rect::from_min_max(
+                            Pos2::new(x, clip_top),
+                            Pos2::new(x + w, clip_bottom),
+                        );
+                        ui.painter().rect_filled(
+                            ghost_rect,
+                            tokens::timeline_clip_radius(),
+                            ghost_color,
+                        );
+                        ui.painter().rect_stroke(
+                            ghost_rect.shrink(0.5),
+                            tokens::timeline_clip_radius(),
+                            ghost_stroke,
+                            egui::StrokeKind::Inside,
+                        );
+                    }
+                }
+            }
         }
 
         if first_track_top.is_none() || last_track_bottom.is_none() || content_left.is_none() {
@@ -2258,72 +2365,43 @@ impl TimelinePanel {
                 if let Some(drag) = self.clip_drag {
                     if drag.clip_id == clip.id && drag.is_video_track == is_video_track {
                         if let Some(pointer) = ui.input(|i| i.pointer.interact_pos()) {
-                            // Cross-track gate: when hovering over a different track,
-                            // suppress within-track move preview and snap back.
-                            let is_cross_track = self
-                                .clip_drag_target
-                                .is_some_and(|target| target.track_id != drag.source_track_id);
-                            if is_cross_track {
-                                if self.clip_drag_moved {
-                                    if let Some(ref before) = self.clip_drag_before_sequence {
-                                        state.sequence = Some(before.clone());
-                                    }
-                                    self.clip_drag_moved = false;
+                            // Always restore the original sequence during drag.
+                            // Moves are only applied on release (drop handler).
+                            // Ghosts show the predicted result.
+                            if self.clip_drag_moved {
+                                if let Some(ref before) = self.clip_drag_before_sequence {
+                                    state.sequence = Some(before.clone());
                                 }
-                                self.active_snap_guide_frame = None;
-                                self.active_insert_guide_frame = None;
-                                continue;
                             }
 
                             let pointer_frame = ((pointer.x - rect.left() - track_label_w)
                                 / self.pixels_per_frame)
                                 .round() as i64;
                             let raw_target = (pointer_frame - drag.pointer_offset_frames).max(0);
-                            let target_frame = self.resolve_snap_target_frame(
-                                state,
-                                raw_target,
-                                Some(drag.clip_id),
-                            );
                             let overlap_mode = Self::current_overlap_mode(ui);
-                            if overlap_mode == ClipOverlapMode::Insert {
-                                self.active_insert_guide_frame = Some(target_frame);
-                            }
 
-                            let anchors = if self.clip_drag_anchors.is_empty() {
-                                vec![ClipDragAnchor {
-                                    clip_id: drag.clip_id,
-                                    start_frame: clip.position.frame,
-                                }]
+                            self.clip_drag_overlap_mode = overlap_mode;
+                            self.clip_drag_moved = true;
+
+                            let is_cross_track = self
+                                .clip_drag_target
+                                .is_some_and(|target| target.track_id != drag.source_track_id);
+                            if is_cross_track {
+                                self.clip_drag_raw_target_frame = Some(raw_target);
+                                self.active_snap_guide_frame = None;
+                                self.active_insert_guide_frame = None;
                             } else {
-                                self.clip_drag_anchors.clone()
-                            };
-                            let Some(drag_anchor) =
-                                anchors.iter().find(|anchor| anchor.clip_id == drag.clip_id)
-                            else {
-                                continue;
-                            };
-
-                            let min_start = anchors
-                                .iter()
-                                .map(|anchor| anchor.start_frame)
-                                .min()
-                                .unwrap_or(drag_anchor.start_frame)
-                                .max(0);
-                            let clamped_delta =
-                                (target_frame - drag_anchor.start_frame).max(-min_start);
-                            let anchor_pairs: Vec<(ClipId, i64)> = anchors
-                                .iter()
-                                .map(|anchor| (anchor.clip_id, anchor.start_frame))
-                                .collect();
-
-                            if let Err(err) = state.move_clip_group_by_delta_with_mode(
-                                &anchor_pairs,
-                                clamped_delta,
-                                overlap_mode,
-                            ) {
-                                let _ = err;
-                            } else {
-                                self.clip_drag_moved = true;
+                                let target_frame = self.resolve_snap_target_frame(
+                                    state,
+                                    raw_target,
+                                    Some(drag.clip_id),
+                                );
+                                // Ghosts follow the snapped position.
+                                self.clip_drag_raw_target_frame = Some(target_frame);
+                                if overlap_mode == ClipOverlapMode::Insert {
+                                    self.active_insert_guide_frame = Some(target_frame);
+                                }
+                                self.active_snap_guide_frame = Some(target_frame);
                             }
                         }
                     }
@@ -2899,6 +2977,142 @@ impl TimelinePanel {
         }
 
         anchors
+    }
+
+    fn compute_clip_drag_ghosts(&mut self, state: &AppState, _track_rows: &[TrackRowVisual]) {
+        self.clip_drag_ghosts.clear();
+        let Some(drag) = self.clip_drag else {
+            return;
+        };
+        let Some(raw_target) = self.clip_drag_raw_target_frame else {
+            return;
+        };
+        let Some(seq) = state.sequence.as_ref() else {
+            return;
+        };
+
+        let is_cross_track = self
+            .clip_drag_target
+            .is_some_and(|target| target.track_id != drag.source_track_id);
+
+        if is_cross_track {
+            // ── Cross-track ghosts ──
+            let Some(target) = self.clip_drag_target else {
+                return;
+            };
+
+            // Collect source indices of matching-media anchors.
+            let mut source_indices: Vec<usize> = Vec::new();
+            for anchor in &self.clip_drag_anchors {
+                if let Some((_, is_video, idx)) = find_clip_track_ref(seq, anchor.clip_id) {
+                    if is_video == target.is_video_track {
+                        source_indices.push(idx);
+                    }
+                }
+            }
+            if source_indices.is_empty() {
+                return;
+            }
+            let min_src = *source_indices.iter().min().unwrap_or(&0);
+            let max_src = *source_indices.iter().max().unwrap_or(&0);
+            let track_count = if target.is_video_track {
+                seq.video_tracks.len()
+            } else {
+                seq.audio_tracks.len()
+            };
+            let max_delta = (track_count.saturating_sub(1) as isize) - max_src as isize;
+            let min_delta = -(min_src as isize);
+
+            let raw_track_delta = target.track_index as isize - drag.source_track_index as isize;
+            let constrained_delta = raw_track_delta.clamp(min_delta, max_delta);
+
+            // Time delta from the dragged clip's anchor.
+            let anchor_start = self
+                .clip_drag_anchors
+                .iter()
+                .find(|a| a.clip_id == drag.clip_id)
+                .map(|a| a.start_frame)
+                .unwrap_or(0);
+            let time_delta = raw_target - anchor_start;
+
+            for anchor in &self.clip_drag_anchors {
+                if let Some((_, is_video, source_index)) = find_clip_track_ref(seq, anchor.clip_id)
+                {
+                    if is_video != target.is_video_track {
+                        continue;
+                    }
+                    let target_index =
+                        (source_index as isize + constrained_delta).clamp(0, isize::MAX) as usize;
+                    if target_index >= track_count {
+                        continue;
+                    }
+                    let target_track_id = if is_video {
+                        seq.video_tracks.get(target_index).map(|t| t.id)
+                    } else {
+                        seq.audio_tracks.get(target_index).map(|t| t.id)
+                    };
+                    let Some(target_track_id) = target_track_id else {
+                        continue;
+                    };
+                    let ghost_frame = (anchor.start_frame + time_delta).max(0);
+                    let duration = seq
+                        .video_tracks
+                        .iter()
+                        .chain(seq.audio_tracks.iter())
+                        .find_map(|track| {
+                            track.clips.iter().find_map(|clip| {
+                                (clip.id == anchor.clip_id).then_some(clip.duration.frame)
+                            })
+                        })
+                        .unwrap_or(0);
+                    self.clip_drag_ghosts.push(ClipGhost {
+                        track_id: target_track_id,
+                        is_video_track: is_video,
+                        start_frame: ghost_frame,
+                        duration_frames: duration,
+                    });
+                }
+            }
+        } else {
+            // ── Same-track ghosts ──
+            let anchor_start = self
+                .clip_drag_anchors
+                .iter()
+                .find(|a| a.clip_id == drag.clip_id)
+                .map(|a| a.start_frame)
+                .unwrap_or(0);
+            let time_delta = raw_target - anchor_start;
+
+            // Clamp so no clip goes below frame 0.
+            let min_anchor_start =
+                self.clip_drag_anchors.iter().map(|a| a.start_frame).min().unwrap_or(0).max(0);
+            let clamped_delta = time_delta.max(-min_anchor_start);
+
+            for anchor in &self.clip_drag_anchors {
+                let ghost_frame = (anchor.start_frame + clamped_delta).max(0);
+                // Find which track this clip is on.
+                let track_info = find_clip_track_ref(seq, anchor.clip_id);
+                let Some((track_id, is_video, _)) = track_info else {
+                    continue;
+                };
+                let duration = seq
+                    .video_tracks
+                    .iter()
+                    .chain(seq.audio_tracks.iter())
+                    .find_map(|track| {
+                        track.clips.iter().find_map(|clip| {
+                            (clip.id == anchor.clip_id).then_some(clip.duration.frame)
+                        })
+                    })
+                    .unwrap_or(0);
+                self.clip_drag_ghosts.push(ClipGhost {
+                    track_id,
+                    is_video_track: is_video,
+                    start_frame: ghost_frame,
+                    duration_frames: duration,
+                });
+            }
+        }
     }
 
     fn current_overlap_mode(ui: &Ui) -> ClipOverlapMode {
