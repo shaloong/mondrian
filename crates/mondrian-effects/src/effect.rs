@@ -1136,9 +1136,9 @@ fn builtin_effect_category(effect_type: &EffectType) -> Vec<String> {
         | EffectType::HueSaturationLightness => vec!["颜色".to_string()],
         EffectType::Lut3D => vec!["颜色".to_string(), "LUT".to_string()],
         EffectType::GaussianBlur | EffectType::Sharpen => vec!["模糊与锐化".to_string()],
-        EffectType::Vignette
-        | EffectType::ChromaticAberration
-        | EffectType::Grain => vec!["风格化".to_string()],
+        EffectType::Vignette | EffectType::ChromaticAberration | EffectType::Grain => {
+            vec!["风格化".to_string()]
+        }
         EffectType::ChromaKey | EffectType::LumaKey => vec!["抠像".to_string()],
         EffectType::Plugin(_) => vec!["插件".to_string()],
     }

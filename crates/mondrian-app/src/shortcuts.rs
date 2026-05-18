@@ -89,26 +89,94 @@ impl ShortcutAction {
     pub fn non_editable_actions() -> Vec<Self> {
         use ShortcutAction::*;
         vec![
-            PlayPause, ShuttleBack, Pause, ShuttleForward, StepBack, StepForward,
-            JumpStart, JumpEnd, MarkIn, MarkOut, SelectTool, BladeTool,
+            PlayPause,
+            ShuttleBack,
+            Pause,
+            ShuttleForward,
+            StepBack,
+            StepForward,
+            JumpStart,
+            JumpEnd,
+            MarkIn,
+            MarkOut,
+            SelectTool,
+            BladeTool,
         ]
     }
 
     /// Editable actions shown in preferences.
     pub fn editable_actions() -> Vec<Self> {
         use ShortcutAction::*;
-        vec![ImportMedia, OpenProject, SaveProject, SaveProjectAs, CloseProject, QuitApp]
+        vec![
+            ImportMedia,
+            OpenProject,
+            SaveProject,
+            SaveProjectAs,
+            CloseProject,
+            QuitApp,
+        ]
     }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum ShortcutKey {
-    A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z,
-    Num0, Num1, Num2, Num3, Num4, Num5, Num6, Num7, Num8, Num9,
-    F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12,
-    Enter, Space, Delete,
-    ArrowLeft, ArrowRight, ArrowUp, ArrowDown,
-    Home, End,
+    A,
+    B,
+    C,
+    D,
+    E,
+    F,
+    G,
+    H,
+    I,
+    J,
+    K,
+    L,
+    M,
+    N,
+    O,
+    P,
+    Q,
+    R,
+    S,
+    T,
+    U,
+    V,
+    W,
+    X,
+    Y,
+    Z,
+    Num0,
+    Num1,
+    Num2,
+    Num3,
+    Num4,
+    Num5,
+    Num6,
+    Num7,
+    Num8,
+    Num9,
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
+    F11,
+    F12,
+    Enter,
+    Space,
+    Delete,
+    ArrowLeft,
+    ArrowRight,
+    ArrowUp,
+    ArrowDown,
+    Home,
+    End,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

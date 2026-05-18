@@ -504,11 +504,19 @@ impl ViewerPanel {
             }
             // Arrow keys
             if ui.input(|i| i.key_pressed(egui::Key::ArrowLeft) && !i.modifiers.alt) {
-                let step = if ui.input(|i| i.modifiers.shift) { 10 } else { 1 };
+                let step = if ui.input(|i| i.modifiers.shift) {
+                    10
+                } else {
+                    1
+                };
                 state.seek((current_frame - step).max(0));
             }
             if ui.input(|i| i.key_pressed(egui::Key::ArrowRight) && !i.modifiers.alt) {
-                let step = if ui.input(|i| i.modifiers.shift) { 10 } else { 1 };
+                let step = if ui.input(|i| i.modifiers.shift) {
+                    10
+                } else {
+                    1
+                };
                 state.seek(current_frame + step);
             }
             // Home / End

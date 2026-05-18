@@ -437,9 +437,7 @@ impl LibraryPanel {
                 }
                 // Click outside the edit rect submits
                 let ptr_in_edit = ui.input(|i| {
-                    i.pointer.interact_pos()
-                        .map(|p| edit_rect.contains(p))
-                        .unwrap_or(false)
+                    i.pointer.interact_pos().map(|p| edit_rect.contains(p)).unwrap_or(false)
                 });
                 let clicked_outside = ui.input(|i| i.pointer.primary_released()) && !ptr_in_edit;
                 let submit = edit_resp.lost_focus()
@@ -495,16 +493,26 @@ impl LibraryPanel {
                 } else {
                     // Manual character-by-character truncation with "..."
                     let dots = "...";
-                    let dots_w = ui.painter()
-                        .layout_no_wrap(dots.to_string(), typography::body_small(), palette::text_primary())
+                    let dots_w = ui
+                        .painter()
+                        .layout_no_wrap(
+                            dots.to_string(),
+                            typography::body_small(),
+                            palette::text_primary(),
+                        )
                         .size()
                         .x;
                     let limit = (name_rect.width() - dots_w).max(0.0);
                     let mut chars: Vec<char> = name_text.chars().collect();
                     while !chars.is_empty() {
                         let s: String = chars.iter().collect();
-                        let w = ui.painter()
-                            .layout_no_wrap(s.clone(), typography::body_small(), palette::text_primary())
+                        let w = ui
+                            .painter()
+                            .layout_no_wrap(
+                                s.clone(),
+                                typography::body_small(),
+                                palette::text_primary(),
+                            )
                             .size()
                             .x;
                         if w <= limit {
@@ -545,11 +553,8 @@ impl LibraryPanel {
 
         // Tooltip: use card's hover but only when pointer is inside name rect
         if let Some(name_r) = name_rect_for_click {
-            let in_name = ui.input(|i| {
-                i.pointer.interact_pos()
-                    .map(|p| name_r.contains(p))
-                    .unwrap_or(false)
-            });
+            let in_name =
+                ui.input(|i| i.pointer.interact_pos().map(|p| name_r.contains(p)).unwrap_or(false));
             if in_name {
                 card_response = card_response.on_hover_text(asset_name.clone());
             }
@@ -652,12 +657,11 @@ impl LibraryPanel {
 
         // Double-click on name area only — matches Pr/Ae/DaVinci behavior
         // where thumbnail double-click has different meaning (open in viewer)
-        let double_clicked = ui.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary))
-            && name_rect_for_click.is_some_and(|nr| ui.input(|i| {
-                i.pointer.interact_pos()
-                    .map(|p| nr.contains(p))
-                    .unwrap_or(false)
-            }));
+        let double_clicked = ui
+            .input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary))
+            && name_rect_for_click.is_some_and(|nr| {
+                ui.input(|i| i.pointer.interact_pos().map(|p| nr.contains(p)).unwrap_or(false))
+            });
         if double_clicked {
             self.editing_asset = Some(asset.id);
             self.editing_name = asset_name.clone();
@@ -962,10 +966,7 @@ fn format_duration_hhmmss(duration: Duration) -> String {
 fn reveal_in_file_manager(path: &std::path::Path) {
     #[cfg(target_os = "windows")]
     {
-        let _ = std::process::Command::new("explorer")
-            .arg("/select,")
-            .arg(path)
-            .spawn();
+        let _ = std::process::Command::new("explorer").arg("/select,").arg(path).spawn();
     }
     #[cfg(target_os = "macos")]
     {

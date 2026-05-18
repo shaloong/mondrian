@@ -1107,10 +1107,8 @@ impl eframe::App for MondrianApp {
         if self.show_library {
             let library_started_at = std::time::Instant::now();
             let viewer_min = 540.0;
-            let right_reserved = crate::ui::theme::tokens::inspector_panel_min_width()
-                + 208.0; // effect_library min
-            let library_max =
-                (ctx.content_rect().width() - viewer_min - right_reserved).max(220.0);
+            let right_reserved = crate::ui::theme::tokens::inspector_panel_min_width() + 208.0; // effect_library min
+            let library_max = (ctx.content_rect().width() - viewer_min - right_reserved).max(220.0);
             egui::SidePanel::left("library_panel")
                 .default_width(296.0)
                 .min_width(220.0)
@@ -1195,8 +1193,8 @@ impl eframe::App for MondrianApp {
             } else {
                 0.0
             };
-            let el_max = (ctx.content_rect().width() - viewer_min - left_reserved - other_right)
-                .max(208.0);
+            let el_max =
+                (ctx.content_rect().width() - viewer_min - left_reserved - other_right).max(208.0);
             egui::SidePanel::right("effect_library_panel")
                 .default_width(252.0)
                 .min_width(208.0)

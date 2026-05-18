@@ -64,22 +64,15 @@ impl EffectLibraryPanel {
         self.scroll_offset = self.scroll_offset.clamp(-max_scroll, 0.0);
     }
 
-    fn draw_category(
-        &mut self,
-        ui: &mut Ui,
-        node: &EffectCategoryNode,
-        depth: usize,
-    ) {
+    fn draw_category(&mut self, ui: &mut Ui, node: &EffectCategoryNode, depth: usize) {
         let indent = depth as f32 * tokens::inspector_group_indent();
         let row_h = tokens::inspector_group_header_height();
         let collapsed = self.collapsed_categories.contains(&node.name);
 
         // Full-width clickable category header
         let available_w = ui.available_width();
-        let (rect, resp) = ui.allocate_exact_size(
-            egui::vec2(available_w, row_h),
-            egui::Sense::click(),
-        );
+        let (rect, resp) =
+            ui.allocate_exact_size(egui::vec2(available_w, row_h), egui::Sense::click());
 
         if ui.is_rect_visible(rect) {
             if resp.hovered() {
@@ -89,7 +82,11 @@ impl EffectLibraryPanel {
                     palette::bg_surface_hover(),
                 );
             }
-            let caret = if collapsed { theme::UiIcon::ArrowRight } else { theme::UiIcon::ArrowDown };
+            let caret = if collapsed {
+                theme::UiIcon::ArrowRight
+            } else {
+                theme::UiIcon::ArrowDown
+            };
             let caret_x = rect.left() + indent + 4.0;
             let caret_rect = egui::Rect::from_center_size(
                 egui::pos2(caret_x + tokens::icon_size() * 0.5, rect.center().y),
@@ -118,19 +115,18 @@ impl EffectLibraryPanel {
             for child in &node.children {
                 self.draw_category(ui, child, depth + 1);
             }
-            let item_indent = indent + tokens::inspector_group_indent() + tokens::icon_size() + tokens::spacing_xs() + 4.0;
+            let item_indent = indent
+                + tokens::inspector_group_indent()
+                + tokens::icon_size()
+                + tokens::spacing_xs()
+                + 4.0;
             for effect_type in &node.effects {
                 self.draw_effect_item(ui, effect_type, item_indent);
             }
         }
     }
 
-    fn draw_effect_item(
-        &self,
-        ui: &mut Ui,
-        effect_type: &EffectType,
-        indent: f32,
-    ) {
+    fn draw_effect_item(&self, ui: &mut Ui, effect_type: &EffectType, indent: f32) {
         let row_h = tokens::effect_item_height();
         let available_w = ui.available_width();
         let desired = egui::vec2(available_w, row_h);
