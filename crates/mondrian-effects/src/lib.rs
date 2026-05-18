@@ -13,7 +13,7 @@ pub mod plugin_sdk;
 pub mod text;
 pub mod transition;
 
-pub use adjustment::blend_rgba_pixel;
+pub use adjustment::{blend_rgba_pixel, blend_rgba_pixel_seeded};
 pub use effect::{
     build_effect_render_graph, build_effect_render_plan, effect_category_tree, effect_definition,
     effect_library_types, evaluate_effect_stack, register_effect_definition, EffectCacheKeyBuilder,

@@ -265,10 +265,13 @@ pub fn blend_adjustment_result(
     }
 
     let mode = blend_mode.unwrap_or(BlendMode::Normal);
-    for ((base_px, processed_px), out_px) in
-        base.chunks_exact(4).zip(processed.chunks_exact(4)).zip(out.chunks_exact_mut(4))
+    for (i, ((base_px, processed_px), out_px)) in base
+        .chunks_exact(4)
+        .zip(processed.chunks_exact(4))
+        .zip(out.chunks_exact_mut(4))
+        .enumerate()
     {
-        let blended = blend_rgba_pixel(
+        let blended = blend_rgba_pixel_seeded(
             [base_px[0], base_px[1], base_px[2], base_px[3]],
             [
                 processed_px[0],
@@ -278,6 +281,7 @@ pub fn blend_adjustment_result(
             ],
             opacity,
             mode,
+            i as u32,
         );
         out_px.copy_from_slice(&blended);
     }
@@ -288,6 +292,16 @@ pub fn blend_rgba_pixel(
     blend_px: [u8; 4],
     opacity: f32,
     blend_mode: BlendMode,
+) -> [u8; 4] {
+    blend_rgba_pixel_seeded(base_px, blend_px, opacity, blend_mode, 0)
+}
+
+pub fn blend_rgba_pixel_seeded(
+    base_px: [u8; 4],
+    blend_px: [u8; 4],
+    opacity: f32,
+    blend_mode: BlendMode,
+    dither_seed: u32,
 ) -> [u8; 4] {
     let opacity = opacity.clamp(0.0, 1.0);
     if opacity <= 1.0e-4 {
@@ -300,6 +314,19 @@ pub fn blend_rgba_pixel(
         return base_px;
     }
     if base_alpha <= 1.0e-4 {
+        return [
+            blend_px[0],
+            blend_px[1],
+            blend_px[2],
+            unit_to_u8(blend_alpha),
+        ];
+    }
+
+    if blend_mode == BlendMode::Dissolve {
+        let threshold = hash_u32(dither_seed) as f32 / u32::MAX as f32;
+        if threshold > opacity {
+            return base_px;
+        }
         return [
             blend_px[0],
             blend_px[1],
@@ -324,6 +351,15 @@ pub fn blend_rgba_pixel(
     }
     out[3] = unit_to_u8(out_alpha);
     out
+}
+
+fn hash_u32(mut x: u32) -> u32 {
+    x ^= x >> 16;
+    x = x.wrapping_mul(0x7feb352d);
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x846ca68b);
+    x ^= x >> 16;
+    x
 }
 
 pub fn apply_adjustment_pass(
@@ -539,16 +575,36 @@ fn apply_grain(buffer: &mut [u8], width: usize, height: usize, amount: f32, fram
 }
 
 fn blend_mode_rgb(mode: BlendMode, base: [f32; 3], blend: [f32; 3]) -> [f32; 3] {
-    [
-        blend_mode_channel(mode, base[0], blend[0]),
-        blend_mode_channel(mode, base[1], blend[1]),
-        blend_mode_channel(mode, base[2], blend[2]),
-    ]
+    match mode {
+        BlendMode::Hue => set_lum(set_sat(blend, sat(base)), lum(base)),
+        BlendMode::Saturation => set_lum(set_sat(base, sat(blend)), lum(base)),
+        BlendMode::Color => set_lum(blend, lum(base)),
+        BlendMode::Luminosity => set_lum(base, lum(blend)),
+        BlendMode::DarkerColor => {
+            if lum(blend) < lum(base) {
+                blend
+            } else {
+                base
+            }
+        }
+        BlendMode::LighterColor => {
+            if lum(blend) > lum(base) {
+                blend
+            } else {
+                base
+            }
+        }
+        _ => [
+            blend_mode_channel(mode, base[0], blend[0]),
+            blend_mode_channel(mode, base[1], blend[1]),
+            blend_mode_channel(mode, base[2], blend[2]),
+        ],
+    }
 }
 
 fn blend_mode_channel(mode: BlendMode, base: f32, blend: f32) -> f32 {
     match mode {
-        BlendMode::Normal => blend,
+        BlendMode::Normal | BlendMode::Dissolve => blend,
         BlendMode::Multiply => base * blend,
         BlendMode::Screen => 1.0 - (1.0 - base) * (1.0 - blend),
         BlendMode::Overlay => {
@@ -595,9 +651,105 @@ fn blend_mode_channel(mode: BlendMode, base: f32, blend: f32) -> f32 {
         }
         BlendMode::Difference => (base - blend).abs(),
         BlendMode::Exclusion => base + blend - 2.0 * base * blend,
-        BlendMode::Add => (base + blend).clamp(0.0, 1.0),
+        BlendMode::Add | BlendMode::LinearDodge => (base + blend).clamp(0.0, 1.0),
         BlendMode::Subtract => (base - blend).clamp(0.0, 1.0),
+        BlendMode::Divide => {
+            if blend <= 0.001 {
+                1.0
+            } else {
+                (base / blend).clamp(0.0, 1.0)
+            }
+        }
+        BlendMode::LinearBurn => (base + blend - 1.0).clamp(0.0, 1.0),
+        BlendMode::VividLight => {
+            if blend <= 0.5 {
+                if blend <= 0.001 {
+                    0.0
+                } else {
+                    (1.0 - (1.0 - base) / (2.0 * blend)).clamp(0.0, 1.0)
+                }
+            } else if blend >= 0.999 {
+                1.0
+            } else {
+                (base / (2.0 * (1.0 - blend))).clamp(0.0, 1.0)
+            }
+        }
+        BlendMode::LinearLight => (base + 2.0 * blend - 1.0).clamp(0.0, 1.0),
+        BlendMode::PinLight => {
+            if blend <= 0.5 {
+                base.min(2.0 * blend)
+            } else {
+                base.max(2.0 * (blend - 0.5))
+            }
+        }
+        BlendMode::HardMix => {
+            if base + blend < 1.0 {
+                0.0
+            } else {
+                1.0
+            }
+        }
+        // Non-separable modes handled in blend_mode_rgb, unreachable here
+        BlendMode::Hue
+        | BlendMode::Saturation
+        | BlendMode::Color
+        | BlendMode::Luminosity
+        | BlendMode::DarkerColor
+        | BlendMode::LighterColor => blend,
     }
+}
+
+fn lum(c: [f32; 3]) -> f32 {
+    0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]
+}
+
+fn clip_color(c: [f32; 3]) -> [f32; 3] {
+    let l = lum(c);
+    let n = c[0].min(c[1]).min(c[2]);
+    let x = c[0].max(c[1]).max(c[2]);
+    if n < 0.0 {
+        let t = l / (l - n);
+        [
+            (l + (c[0] - l) * t),
+            (l + (c[1] - l) * t),
+            (l + (c[2] - l) * t),
+        ]
+    } else if x > 1.0 {
+        let t = (1.0 - l) / (x - l);
+        [
+            (l + (c[0] - l) * t),
+            (l + (c[1] - l) * t),
+            (l + (c[2] - l) * t),
+        ]
+    } else {
+        c
+    }
+}
+
+fn set_lum(c: [f32; 3], target_lum: f32) -> [f32; 3] {
+    let d = target_lum - lum(c);
+    clip_color([c[0] + d, c[1] + d, c[2] + d])
+}
+
+fn sat(c: [f32; 3]) -> f32 {
+    c[0].max(c[1]).max(c[2]) - c[0].min(c[1]).min(c[2])
+}
+
+fn set_sat(c: [f32; 3], target_sat: f32) -> [f32; 3] {
+    let mut result = c;
+    let mut idx: [usize; 3] = [0, 1, 2];
+    idx.sort_by(|&a, &b| c[a].partial_cmp(&c[b]).unwrap_or(std::cmp::Ordering::Equal));
+    let min_ch = idx[0];
+    let mid_ch = idx[1];
+    let max_ch = idx[2];
+    if c[max_ch] > c[min_ch] {
+        result[mid_ch] = (c[mid_ch] - c[min_ch]) * target_sat / (c[max_ch] - c[min_ch]);
+        result[max_ch] = target_sat;
+        result[min_ch] = 0.0;
+    } else {
+        result = [0.0, 0.0, 0.0];
+    }
+    result
 }
 
 fn rgb_to_unit(px: &[u8]) -> [f32; 3] {
