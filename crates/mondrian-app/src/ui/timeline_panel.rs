@@ -2650,6 +2650,18 @@ impl TimelinePanel {
                         }
                         ui.close();
                     }
+                    if ui.button("纯色层").clicked() {
+                        let start_frame = state.current_frame().max(0);
+                        let overlap_mode = Self::current_overlap_mode(ui);
+                        if let Err(err) = state.create_solid_color_on_video_track(
+                            track.id,
+                            Some(start_frame),
+                            overlap_mode,
+                        ) {
+                            state.set_status_hint(format!("创建纯色层失败：{err}"), true);
+                        }
+                        ui.close();
+                    }
                 });
                 ui.separator();
             }

@@ -1518,7 +1518,7 @@ fn same_track_move_does_not_trim_before_release() {
     // Only on release (drop) should the move be applied.
     let mut state = create_state_with_sequence();
     let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
-    let track_id = state.sequence.as_ref().expect("sequence should exist").video_tracks[0].id;
+    let _track_id = state.sequence.as_ref().expect("sequence should exist").video_tracks[0].id;
 
     // Clip A at [0, 10), clip B at [20, 10) — separated, no overlap.
     let clip_a = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));

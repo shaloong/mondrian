@@ -148,6 +148,19 @@ impl MediaInfo {
         }
     }
 
+    pub fn synthetic_solid_color() -> Self {
+        Self {
+            path: PathBuf::from("mondrian://solid-color"),
+            duration: Duration::ZERO,
+            file_size: 0,
+            container: "solid-color".to_string(),
+            video_streams: Vec::new(),
+            audio_streams: Vec::new(),
+            has_video: false,
+            has_audio: false,
+        }
+    }
+
     /// 探针媒体文件（同步，通过 FFmpeg AVFormatContext）
     ///
     /// # 注意

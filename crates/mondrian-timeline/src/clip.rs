@@ -241,6 +241,7 @@ pub enum ClipKind {
     Media,
     AdjustmentLayer,
     NestedSequence,
+    SolidColor,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -302,10 +303,14 @@ pub struct Clip {
     pub blend_mode: Option<BlendMode>,
     /// 显示标签（可选）
     pub label: Option<String>,
+    /// 纯色层颜色（仅 ClipKind::SolidColor 使用）
+    #[serde(default)]
+    pub solid_color: Option<Color>,
 }
 
 impl Clip {
     pub const BLEND_MODE_PATH: &'static str = "clip.blend_mode";
+    pub const SOLID_COLOR_PATH: &'static str = "clip.solid_color";
 
     pub fn new(asset_id: AssetId, position: TimeCode, duration: TimeCode) -> Self {
         let tb = position.time_base;
@@ -326,7 +331,23 @@ impl Clip {
             is_disabled: false,
             blend_mode: None,
             label: None,
+            solid_color: None,
         }
+    }
+
+    pub fn new_solid_color(
+        asset_id: AssetId,
+        color: Color,
+        position: TimeCode,
+        duration: TimeCode,
+    ) -> Self {
+        let mut clip = Self::new(asset_id, position, duration);
+        clip.kind = ClipKind::SolidColor;
+        clip.solid_color = Some(color);
+        clip.source_in = TimeCode::new(0, position.time_base);
+        clip.source_out = duration;
+        clip.label = Some("纯色层".to_string());
+        clip
     }
 
     pub fn new_adjustment_layer(asset_id: AssetId, position: TimeCode, duration: TimeCode) -> Self {
@@ -355,6 +376,10 @@ impl Clip {
 
     pub fn is_adjustment_layer(&self) -> bool {
         self.kind == ClipKind::AdjustmentLayer
+    }
+
+    pub fn is_solid_color(&self) -> bool {
+        self.kind == ClipKind::SolidColor
     }
 
     pub fn is_nested_sequence(&self) -> bool {

@@ -22,10 +22,10 @@ pub use timeline_composite::{
     composite_timeline_elements, composite_timeline_elements_float_linear,
     composite_timeline_elements_into, is_identity_transform, quantize_transform_signature,
     TimelineAdjustmentLayer, TimelineCompositeElement, TimelineCompositeOptions,
-    TimelineCompositeScratch, TimelineMediaLayer,
+    TimelineCompositeScratch, TimelineMediaLayer, TimelineSolidColorLayer,
 };
 pub use timeline_render_plan::{
     build_timeline_render_plan, collect_timeline_color_diagnostics, mat3_to_affine,
     TimelineAdjustmentPlan, TimelineColorDiagnostic, TimelineMediaPlan, TimelineNestedSequencePlan,
-    TimelineRenderPlanElement,
+    TimelineRenderPlanElement, TimelineSolidColorPlan,
 };

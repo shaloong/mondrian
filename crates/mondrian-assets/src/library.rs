@@ -16,6 +16,7 @@ pub enum AssetKind {
     Video,
     Audio,
     AdjustmentLayer,
+    SolidColor,
 }
 
 impl AssetKind {
@@ -24,6 +25,7 @@ impl AssetKind {
             Self::Video => "video",
             Self::Audio => "audio",
             Self::AdjustmentLayer => "adjustment_layer",
+            Self::SolidColor => "solid_color",
         }
     }
 
@@ -31,6 +33,7 @@ impl AssetKind {
         match value {
             "audio" => Self::Audio,
             "adjustment_layer" => Self::AdjustmentLayer,
+            "solid_color" => Self::SolidColor,
             _ => Self::Video,
         }
     }
@@ -155,6 +158,37 @@ impl AssetLibrary {
                 asset_id.0.to_string(),
                 asset_name,
                 AssetKind::AdjustmentLayer.as_str(),
+                synthetic_path.to_string_lossy().to_string(),
+                "[]",
+                metadata_json,
+                now
+            ],
+        )
+        .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
+
+        Ok(asset_id)
+    }
+
+    pub fn create_solid_color_asset(&self, name: Option<&str>) -> Result<AssetId> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let asset_id = AssetId::new();
+        let asset_name = name
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| self.next_solid_color_name());
+        let synthetic_path = synthetic_solid_color_path(asset_id);
+        let metadata_json = serde_json::to_string(&MediaInfo::synthetic_solid_color())?;
+        let db = self.db.lock();
+
+        db.execute(
+            "INSERT INTO assets \
+             (id, name, asset_type, path, tags, metadata, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+            rusqlite::params![
+                asset_id.0.to_string(),
+                asset_name,
+                AssetKind::SolidColor.as_str(),
                 synthetic_path.to_string_lossy().to_string(),
                 "[]",
                 metadata_json,
@@ -399,10 +433,45 @@ impl AssetLibrary {
 
         format!("调整图层 {next_index}")
     }
+
+    fn next_solid_color_name(&self) -> String {
+        let db = self.db.lock();
+        let mut stmt = match db
+            .prepare("SELECT name FROM assets WHERE asset_type = ?1 ORDER BY created_at ASC")
+        {
+            Ok(stmt) => stmt,
+            Err(_) => return "纯色层 1".to_string(),
+        };
+
+        let rows = match stmt.query_map(
+            rusqlite::params![AssetKind::SolidColor.as_str()],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(rows) => rows,
+            Err(_) => return "纯色层 1".to_string(),
+        };
+
+        let mut next_index = 1usize;
+        for name in rows.filter_map(std::result::Result::ok) {
+            let Some(suffix) = name.strip_prefix("纯色层 ") else {
+                continue;
+            };
+            let Ok(index) = suffix.trim().parse::<usize>() else {
+                continue;
+            };
+            next_index = next_index.max(index + 1);
+        }
+
+        format!("纯色层 {next_index}")
+    }
 }
 
 fn synthetic_adjustment_layer_path(asset_id: AssetId) -> PathBuf {
     PathBuf::from(format!("mondrian://adjustment-layer/{asset_id}"))
+}
+
+fn synthetic_solid_color_path(asset_id: AssetId) -> PathBuf {
+    PathBuf::from(format!("mondrian://solid-color/{asset_id}"))
 }
 
 fn has_meaningful_video_stream(info: &MediaInfo) -> bool {

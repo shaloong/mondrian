@@ -15,8 +15,8 @@ use mondrian_core::{
     },
     events::{AppEvent, EventBus},
     types::{
-        AssetId, ClipId, ColorEngine, ColorSpace, EffectId, KeyframeId, OcioConfigSource, Rational,
-        Resolution, SequenceId, TimeCode, TrackId,
+        AssetId, ClipId, Color, ColorEngine, ColorSpace, EffectId, KeyframeId,
+        OcioConfigSource, Rational, Resolution, SequenceId, TimeCode, TrackId,
     },
     ProjectColorManagement, ProjectSettings,
 };

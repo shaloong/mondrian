@@ -1,5 +1,5 @@
 use mondrian_core::{
-    types::{BlendMode, ColorSpace},
+    types::{BlendMode, Color, ColorSpace},
     RgbaF32Frame,
 };
 use mondrian_effects::{
@@ -29,9 +29,20 @@ pub struct TimelineAdjustmentLayer {
 }
 
 #[derive(Debug, Clone)]
+pub struct TimelineSolidColorLayer {
+    pub color: Color,
+    pub opacity: f32,
+    pub blend_mode: BlendMode,
+    pub transform: [f32; 6],
+    pub effect_graph: Arc<CompiledEffectGraph>,
+    pub frame_seed: i64,
+}
+
+#[derive(Debug, Clone)]
 pub enum TimelineCompositeElement<'a> {
     Media(TimelineMediaLayer<'a>),
     Adjustment(TimelineAdjustmentLayer),
+    SolidColor(TimelineSolidColorLayer),
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -43,6 +54,7 @@ pub struct TimelineCompositeOptions {
 pub struct TimelineCompositeScratch {
     media_effect: Vec<u8>,
     adjustment: Vec<u8>,
+    solid_fill: Vec<u8>,
 }
 
 pub fn composite_timeline_elements(
@@ -132,6 +144,7 @@ fn can_float_linear_composite(elements: &[TimelineCompositeElement<'_>]) -> bool
             layer.blend_mode == BlendMode::Normal && is_identity_transform(layer.transform)
         }
         TimelineCompositeElement::Adjustment(_) => false,
+        TimelineCompositeElement::SolidColor(_) => false,
     })
 }
 
@@ -212,6 +225,38 @@ pub fn composite_timeline_elements_into(
                 );
                 has_composited_media = true;
             }
+            TimelineCompositeElement::SolidColor(layer) => {
+                fill_solid_rgba(
+                    &mut scratch.solid_fill,
+                    width as usize,
+                    height as usize,
+                    layer.color,
+                );
+                let src_rgba = if layer.effect_graph.graph.is_identity() {
+                    scratch.solid_fill.as_slice()
+                } else {
+                    scratch.media_effect = apply_compiled_effect_graph(
+                        &scratch.solid_fill,
+                        width,
+                        height,
+                        &layer.effect_graph,
+                        layer.frame_seed,
+                    );
+                    scratch.media_effect.as_slice()
+                };
+                alpha_blend_layer(
+                    out,
+                    width,
+                    height,
+                    src_rgba,
+                    width,
+                    height,
+                    layer.opacity,
+                    layer.blend_mode,
+                    layer.transform,
+                );
+                has_composited_media = true;
+            }
             TimelineCompositeElement::Adjustment(layer) => {
                 if !has_composited_media
                     || layer.opacity <= 1.0e-4
@@ -236,6 +281,18 @@ pub fn composite_timeline_elements_into(
 
     if !has_composited_media && options.empty_canvas_transparent {
         out.fill(0);
+    }
+}
+
+fn fill_solid_rgba(buf: &mut Vec<u8>, width: usize, height: usize, color: Color) {
+    let r = (color.r.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let g = (color.g.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let b = (color.b.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let a = (color.a.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let pixel = [r, g, b, a];
+    buf.resize(width * height * 4, 0);
+    for chunk in buf.chunks_exact_mut(4) {
+        chunk.copy_from_slice(&pixel);
     }
 }
 
