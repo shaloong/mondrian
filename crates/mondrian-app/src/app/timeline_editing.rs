@@ -935,16 +935,17 @@ pub(super) fn find_clip(seq: &Sequence, clip_id: ClipId) -> Option<&Clip> {
 }
 
 pub(super) fn find_clip_by_selection(seq: &Sequence, selection: SelectedClipRef) -> Option<&Clip> {
+    // Search all tracks of the matching type, not just the one specified by
+    // track_id. After cross-track moves (or undo/redo), the clip may be on a
+    // different track than the selection's stored track_id.
     if selection.is_video_track {
         seq.video_tracks
             .iter()
-            .find(|track| track.id == selection.track_id)
-            .and_then(|track| track.clips.iter().find(|clip| clip.id == selection.clip_id))
+            .find_map(|track| track.clips.iter().find(|clip| clip.id == selection.clip_id))
     } else {
         seq.audio_tracks
             .iter()
-            .find(|track| track.id == selection.track_id)
-            .and_then(|track| track.clips.iter().find(|clip| clip.id == selection.clip_id))
+            .find_map(|track| track.clips.iter().find(|clip| clip.id == selection.clip_id))
     }
 }
 
@@ -1006,16 +1007,15 @@ pub(super) fn find_clip_mut_by_selection(
     seq: &mut Sequence,
     selection: SelectedClipRef,
 ) -> Option<&mut Clip> {
+    // Search all tracks of matching type, not just the one from selection.track_id.
     if selection.is_video_track {
         seq.video_tracks
             .iter_mut()
-            .find(|track| track.id == selection.track_id)
-            .and_then(|track| track.clips.iter_mut().find(|clip| clip.id == selection.clip_id))
+            .find_map(|track| track.clips.iter_mut().find(|clip| clip.id == selection.clip_id))
     } else {
         seq.audio_tracks
             .iter_mut()
-            .find(|track| track.id == selection.track_id)
-            .and_then(|track| track.clips.iter_mut().find(|clip| clip.id == selection.clip_id))
+            .find_map(|track| track.clips.iter_mut().find(|clip| clip.id == selection.clip_id))
     }
 }
 

@@ -26,6 +26,8 @@ pub struct TimelinePanel {
     clip_drag_anchors: Vec<ClipDragAnchor>,
     clip_drag_moved: bool,
     clip_drag_before_sequence: Option<Sequence>,
+    clip_drag_target: Option<ClipDragTarget>,
+    previous_track_rows: Vec<TrackRowVisual>,
     selected_clips: HashSet<ClipSelection>,
     track_area_bounds: Option<Rect>,
     marquee_anchor: Option<Pos2>,
@@ -75,6 +77,8 @@ struct ClipDragState {
     clip_id: ClipId,
     is_video_track: bool,
     pointer_offset_frames: i64,
+    source_track_id: TrackId,
+    source_track_index: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -94,6 +98,13 @@ struct TrackDragState {
 struct TrackDragTarget {
     is_video_track: bool,
     target_index: usize,
+}
+
+#[derive(Clone, Copy)]
+struct ClipDragTarget {
+    track_id: TrackId,
+    is_video_track: bool,
+    track_index: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -203,8 +214,7 @@ impl TimelinePanel {
         self.active_insert_guide_frame = None;
 
         if self.active_tool == TimelineTool::Blade {
-            ui.ctx()
-                .output_mut(|o| o.cursor_icon = egui::CursorIcon::Crosshair);
+            ui.ctx().output_mut(|o| o.cursor_icon = egui::CursorIcon::Crosshair);
         }
 
         ui.vertical(|ui| {
@@ -282,12 +292,16 @@ impl TimelinePanel {
 
                                             if !ui.ctx().wants_keyboard_input() {
                                                 // Tool shortcuts
-                                                if ui.input(|i| i.key_pressed(egui::Key::V) && !i.modifiers.command)
-                                                {
+                                                if ui.input(|i| {
+                                                    i.key_pressed(egui::Key::V)
+                                                        && !i.modifiers.command
+                                                }) {
                                                     self.active_tool = TimelineTool::Select;
                                                 }
-                                                if ui.input(|i| i.key_pressed(egui::Key::B) && !i.modifiers.command)
-                                                {
+                                                if ui.input(|i| {
+                                                    i.key_pressed(egui::Key::B)
+                                                        && !i.modifiers.command
+                                                }) {
                                                     self.active_tool = TimelineTool::Blade;
                                                 }
 
@@ -401,21 +415,410 @@ impl TimelinePanel {
                                                     }
                                                 }
 
-                                                if self.clip_drag.take().is_some() {
+                                                if let Some(drag) = self.clip_drag.take() {
                                                     let pointer =
                                                         ui.input(|i| i.pointer.interact_pos());
-                                                    let dropped_outside =
-                                                        match (pointer, self.track_area_bounds) {
-                                                            (Some(p), Some(bounds)) => {
-                                                                !bounds.contains(p)
-                                                            }
-                                                            _ => false,
-                                                        };
+                                                    let overlap_mode =
+                                                        Self::current_overlap_mode(ui);
 
-                                                    if dropped_outside && self.clip_drag_moved {
-                                                        self.delete_selected_clips(state, false);
+                                                    let cross_track_target =
+                                                        self.clip_drag_target.filter(|target| {
+                                                            target.track_id != drag.source_track_id
+                                                        });
+
+                                                    if let Some(target) = cross_track_target {
+                                                        // Branch A: Cross-track drop.
+                                                        // Restore original positions first.
+                                                        let mut cross_track_applied = false;
+                                                        if let Some(ref before) =
+                                                            self.clip_drag_before_sequence
+                                                        {
+                                                            state.sequence = Some(before.clone());
+                                                        } else {
+                                                            // Safety guard: no snapshot → cancel.
+                                                            self.clip_drag_anchors.clear();
+                                                            self.clip_drag_before_sequence = None;
+                                                            self.clip_drag_moved = false;
+                                                            self.clip_drag_target = None;
+                                                            self.active_snap_guide_frame = None;
+                                                            self.active_insert_guide_frame = None;
+                                                            // Continue to cleanup (skip the rest
+                                                            // of this branch).
+                                                        }
+
+                                                        if self
+                                                            .clip_drag_before_sequence
+                                                            .is_some()
+                                                        {
+                                                            if let (Some(pointer), Some(bounds)) =
+                                                                (pointer, self.track_area_bounds)
+                                                            {
+                                                            // ---- time delta ----
+                                                            let pointer_frame = ((pointer.x
+                                                                - bounds.left())
+                                                                / self.pixels_per_frame)
+                                                                .round()
+                                                                as i64;
+                                                            let raw_target = (pointer_frame
+                                                                - drag.pointer_offset_frames)
+                                                                .max(0);
+                                                            let anchor_start = self
+                                                                .clip_drag_anchors
+                                                                .iter()
+                                                                .find(|a| a.clip_id == drag.clip_id)
+                                                                .map(|a| a.start_frame)
+                                                                .unwrap_or(0);
+                                                            let time_delta =
+                                                                raw_target - anchor_start;
+
+                                                            // ---- track delta (constrained) ----
+                                                            // Collect source indices of all
+                                                            // matching-media anchors to determine
+                                                            // the valid relative-offset range.
+                                                            let mut source_indices: Vec<usize> =
+                                                                Vec::new();
+                                                            for anchor in
+                                                                &self.clip_drag_anchors
+                                                            {
+                                                                let info = state
+                                                                    .sequence
+                                                                    .as_ref()
+                                                                    .and_then(|s| {
+                                                                        find_clip_track_ref(
+                                                                            s,
+                                                                            anchor.clip_id,
+                                                                        )
+                                                                    });
+                                                                if let Some((
+                                                                    _,
+                                                                    is_video,
+                                                                    idx,
+                                                                )) = info
+                                                                {
+                                                                    if is_video
+                                                                        == target.is_video_track
+                                                                    {
+                                                                        source_indices.push(idx);
+                                                                    }
+                                                                }
+                                                            }
+
+                                                            let raw_track_delta =
+                                                                target.track_index as isize
+                                                                    - drag.source_track_index
+                                                                        as isize;
+
+                                                            // Constrain delta so no clip goes
+                                                            // out of bounds.
+                                                            let constrained_delta =
+                                                                if source_indices.is_empty() {
+                                                                    raw_track_delta
+                                                                } else {
+                                                                    let min_src = *source_indices
+                                                                        .iter()
+                                                                        .min()
+                                                                        .unwrap_or(&0);
+                                                                    let max_src = *source_indices
+                                                                        .iter()
+                                                                        .max()
+                                                                        .unwrap_or(&0);
+                                                                    let track_count =
+                                                                        if target.is_video_track {
+                                                                            state
+                                                                                .sequence
+                                                                                .as_ref()
+                                                                                .map(|s| {
+                                                                                    s.video_tracks
+                                                                                        .len()
+                                                                                })
+                                                                                .unwrap_or(0)
+                                                                        } else {
+                                                                            state
+                                                                                .sequence
+                                                                                .as_ref()
+                                                                                .map(|s| {
+                                                                                    s.audio_tracks
+                                                                                        .len()
+                                                                                })
+                                                                                .unwrap_or(0)
+                                                                        };
+                                                                    let max_delta =
+                                                                        (track_count.saturating_sub(
+                                                                            1,
+                                                                        ) as isize)
+                                                                            - max_src as isize;
+                                                                    let min_delta =
+                                                                        -(min_src as isize);
+                                                                    raw_track_delta
+                                                                        .clamp(
+                                                                            min_delta,
+                                                                            max_delta,
+                                                                        )
+                                                                };
+
+                                                            // ---- collect & apply moves ----
+                                                            // Sort moves so clips "further"
+                                                            // in the delta direction move first.
+                                                            // This prevents a moved clip from
+                                                            // conflicting with a clip that
+                                                            // hasn't moved yet (e.g. V1→V2
+                                                            // trims V2 clip before it can move
+                                                            // to V3).
+                                                            let mut pending: Vec<(
+                                                                TrackId,
+                                                                bool,
+                                                                ClipId,
+                                                                i64,
+                                                                usize,
+                                                            )> = Vec::new();
+                                                            {
+                                                                let mut seen: HashSet<ClipId> =
+                                                                    HashSet::new();
+                                                                for anchor in
+                                                                    &self.clip_drag_anchors
+                                                                {
+                                                                    if seen.contains(
+                                                                        &anchor.clip_id,
+                                                                    ) {
+                                                                        continue;
+                                                                    }
+                                                                    let source = state
+                                                                        .sequence
+                                                                        .as_ref()
+                                                                        .and_then(|s| {
+                                                                            find_clip_track_ref(
+                                                                                s,
+                                                                                anchor.clip_id,
+                                                                            )
+                                                                        });
+                                                                    let Some((
+                                                                        _,
+                                                                        is_video,
+                                                                        source_index,
+                                                                    )) = source
+                                                                    else {
+                                                                        continue;
+                                                                    };
+                                                                    if is_video
+                                                                        != target.is_video_track
+                                                                    {
+                                                                        continue;
+                                                                    }
+                                                                    let target_index =
+                                                                        (source_index as isize
+                                                                            + constrained_delta)
+                                                                            .clamp(
+                                                                                0,
+                                                                                isize::MAX,
+                                                                            )
+                                                                            as usize;
+                                                                    let track_count =
+                                                                        if is_video {
+                                                                            state
+                                                                                .sequence
+                                                                                .as_ref()
+                                                                                .map(|s| {
+                                                                                    s.video_tracks
+                                                                                        .len()
+                                                                                })
+                                                                                .unwrap_or(0)
+                                                                        } else {
+                                                                            state
+                                                                                .sequence
+                                                                                .as_ref()
+                                                                                .map(|s| {
+                                                                                    s.audio_tracks
+                                                                                        .len()
+                                                                                })
+                                                                                .unwrap_or(0)
+                                                                        };
+                                                                    if target_index
+                                                                        >= track_count
+                                                                    {
+                                                                        continue;
+                                                                    }
+                                                                    let target_id =
+                                                                        if is_video {
+                                                                            state
+                                                                                .sequence
+                                                                                .as_ref()
+                                                                                .and_then(|s| {
+                                                                                    s.video_tracks
+                                                                                        .get(
+                                                                                            target_index,
+                                                                                        )
+                                                                                        .map(
+                                                                                            |t| t.id,
+                                                                                        )
+                                                                                })
+                                                                        } else {
+                                                                            state
+                                                                                .sequence
+                                                                                .as_ref()
+                                                                                .and_then(|s| {
+                                                                                    s.audio_tracks
+                                                                                        .get(
+                                                                                            target_index,
+                                                                                        )
+                                                                                        .map(
+                                                                                            |t| t.id,
+                                                                                        )
+                                                                                })
+                                                                        };
+                                                                    let Some(target_id) =
+                                                                        target_id
+                                                                    else {
+                                                                        continue;
+                                                                    };
+                                                                    let target_frame =
+                                                                        (anchor.start_frame
+                                                                            + time_delta)
+                                                                            .max(0);
+                                                                    pending.push((
+                                                                        target_id,
+                                                                        is_video,
+                                                                        anchor.clip_id,
+                                                                        target_frame,
+                                                                        source_index,
+                                                                    ));
+                                                                    seen.insert(anchor.clip_id);
+                                                                }
+                                                            }
+
+                                                            // Sort: delta>0 → high index
+                                                            // first; delta<0 → low index first.
+                                                            if constrained_delta >= 0 {
+                                                                pending.sort_by(|a, b| {
+                                                                    b.4.cmp(&a.4)
+                                                                });
+                                                            } else {
+                                                                pending.sort_by(|a, b| {
+                                                                    a.4.cmp(&b.4)
+                                                                });
+                                                            }
+
+                                                            let moves_snapshot =
+                                                                state.sequence.clone();
+                                                            let mut applied: Vec<(
+                                                                TrackId,
+                                                                bool,
+                                                                ClipId,
+                                                                i64,
+                                                            )> = Vec::new();
+
+                                                            for (
+                                                                target_id,
+                                                                is_video,
+                                                                clip_id,
+                                                                target_frame,
+                                                                _,
+                                                            ) in &pending
+                                                            {
+                                                                if state
+                                                                    .move_clip_to_track_with_mode(
+                                                                        *target_id,
+                                                                        *is_video,
+                                                                        *clip_id,
+                                                                        *target_frame,
+                                                                        overlap_mode,
+                                                                    )
+                                                                    .is_err()
+                                                                {
+                                                                    state.sequence =
+                                                                        moves_snapshot;
+                                                                    applied.clear();
+                                                                    break;
+                                                                }
+                                                                applied.push((
+                                                                    *target_id,
+                                                                    *is_video,
+                                                                    *clip_id,
+                                                                    *target_frame,
+                                                                ));
+                                                            }
+                                                            cross_track_applied =
+                                                                !applied.is_empty();
+
+                                                            // Update selections to reflect
+                                                            // new track assignments.
+                                                            if cross_track_applied {
+                                                                let mut updated:
+                                                                    HashSet<ClipSelection> =
+                                                                    HashSet::new();
+                                                                let moved_ids: HashSet<ClipId> =
+                                                                    applied
+                                                                        .iter()
+                                                                        .map(|(_, _, id, _)| *id)
+                                                                        .collect();
+                                                                // Remove old entries for
+                                                                // moved clips.
+                                                                self.selected_clips
+                                                                    .retain(|sel| {
+                                                                        !moved_ids
+                                                                            .contains(
+                                                                                &sel.clip_id,
+                                                                            )
+                                                                    });
+                                                                // Insert updated entries.
+                                                                for (
+                                                                    target_id,
+                                                                    is_video,
+                                                                    clip_id,
+                                                                    _,
+                                                                ) in &applied
+                                                                {
+                                                                    updated.insert(
+                                                                        ClipSelection {
+                                                                            track_id:
+                                                                                *target_id,
+                                                                            is_video_track:
+                                                                                *is_video,
+                                                                            clip_id:
+                                                                                *clip_id,
+                                                                        },
+                                                                    );
+                                                                }
+                                                                self.selected_clips
+                                                                    .extend(updated);
+                                                            }
+                                                        }
+
+                                                        if cross_track_applied {
+                                                            if let Some(before) = self
+                                                                .clip_drag_before_sequence
+                                                                .take()
+                                                            {
+                                                                state.record_timeline_edit_snapshot(
+                                                                    "移动片段",
+                                                                    before,
+                                                                );
+                                                            }
+                                                        } else if let Some(before) =
+                                                            self.clip_drag_before_sequence.take()
+                                                        {
+                                                            // Nothing applied — restore original.
+                                                            state.sequence = Some(before);
+                                                        }
+                                                        }
                                                     } else if self.clip_drag_moved {
-                                                        if let Some(before) =
+                                                        // Branch B: Same-track drop
+                                                        let dropped_outside =
+                                                            match (pointer, self.track_area_bounds)
+                                                            {
+                                                                (Some(p), Some(bounds)) => {
+                                                                    !bounds.contains(p)
+                                                                }
+                                                                _ => false,
+                                                            };
+
+                                                        if dropped_outside {
+                                                            if let Some(before) = self
+                                                                .clip_drag_before_sequence
+                                                                .take()
+                                                            {
+                                                                state.sequence = Some(before);
+                                                            }
+                                                        } else if let Some(before) =
                                                             self.clip_drag_before_sequence.take()
                                                         {
                                                             state.record_timeline_edit_snapshot(
@@ -426,11 +829,14 @@ impl TimelinePanel {
                                                             let _ = state.save_project();
                                                         }
                                                     }
+
+                                                    self.clip_drag_anchors.clear();
+                                                    self.clip_drag_before_sequence = None;
+                                                    self.clip_drag_moved = false;
+                                                    self.clip_drag_target = None;
+                                                    self.active_snap_guide_frame = None;
+                                                    self.active_insert_guide_frame = None;
                                                 }
-                                                self.clip_drag_anchors.clear();
-                                                self.clip_drag_before_sequence = None;
-                                                self.clip_drag_moved = false;
-                                                self.track_drag_target = None;
                                             }
                                         });
                                 });
@@ -1135,6 +1541,17 @@ impl TimelinePanel {
         let track_height = self.track_height;
         let mut visual_row_index = 0usize;
 
+        // Detect cross-track target *before* rendering, using previous frame's
+        // track rows (eliminates the one-frame delay in the cross-track gate).
+        if !self.previous_track_rows.is_empty() {
+            self.clip_drag_target = match (self.clip_drag, ui.input(|i| i.pointer.interact_pos())) {
+                (Some(drag), Some(pointer)) => {
+                    choose_clip_drag_target(pointer, &self.previous_track_rows, drag.is_video_track)
+                }
+                _ => None,
+            };
+        }
+
         for track_index in (0..video_tracks.len()).rev() {
             let track = &video_tracks[track_index];
             dropped |= self.draw_track_row(
@@ -1186,13 +1603,24 @@ impl TimelinePanel {
             _ => None,
         };
 
+        self.clip_drag_target = match (self.clip_drag, ui.input(|i| i.pointer.interact_pos())) {
+            (Some(drag), Some(pointer)) => {
+                choose_clip_drag_target(pointer, &track_rows, drag.is_video_track)
+            }
+            _ => None,
+        };
+        self.previous_track_rows = track_rows.clone();
+
         if let (Some(top), Some(bottom), Some(left)) =
             (first_track_top, last_track_bottom, content_left)
         {
             let right_edge = ui.max_rect().right() - tokens::timeline_scrollbar_width() - 4.0;
             self.track_area_bounds = Some(Rect::from_min_max(
                 Pos2::new(left, top),
-                Pos2::new(right_edge, bottom - tokens::timeline_scrollbar_height() - 4.0),
+                Pos2::new(
+                    right_edge,
+                    bottom - tokens::timeline_scrollbar_height() - 4.0,
+                ),
             ));
 
             let playhead_x = left + state.current_frame() as f32 * self.pixels_per_frame;
@@ -1238,6 +1666,24 @@ impl TimelinePanel {
                             tokens::border_standard() * 2.0,
                             palette::interaction_highlight(),
                         ),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+            }
+
+            if let Some(clip_target) = self.clip_drag_target {
+                if let Some(target_row) = track_rows.iter().find(|row| {
+                    row.is_video_track == clip_target.is_video_track
+                        && row.track_index == clip_target.track_index
+                }) {
+                    let clip_target_stroke = Stroke::new(
+                        tokens::border_standard() * 2.0,
+                        palette::interaction_highlight(),
+                    );
+                    ui.painter().rect_stroke(
+                        target_row.rect.shrink(1.0),
+                        corner_radius(2.0),
+                        clip_target_stroke,
                         egui::StrokeKind::Inside,
                     );
                 }
@@ -1569,7 +2015,10 @@ impl TimelinePanel {
                         let line_bot = egui::pos2(cut_x, clip_draw_rect.bottom());
                         painter.line_segment(
                             [line_top, line_bot],
-                            egui::Stroke::new(tokens::border_standard(), palette::interaction_highlight()),
+                            egui::Stroke::new(
+                                tokens::border_standard(),
+                                palette::interaction_highlight(),
+                            ),
                         );
                         // Frame label near the cut line
                         let cut_frame = ((pointer.x - rect.left() - track_label_w)
@@ -1610,9 +2059,8 @@ impl TimelinePanel {
 
                 // Effect drag-and-drop: highlight + apply on release over clip
                 let effect_drag_id = egui::Id::new(super::effect_library_panel::EFFECT_DRAG_ID);
-                let effect_payload = ui.ctx().data_mut(|d| {
-                    d.get_persisted::<EffectType>(effect_drag_id)
-                });
+                let effect_payload =
+                    ui.ctx().data_mut(|d| d.get_persisted::<EffectType>(effect_drag_id));
                 if let Some(ref effect_type) = effect_payload {
                     let pointer_pos = ui.input(|i| i.pointer.interact_pos());
                     let on_clip = pointer_pos.is_some_and(|p| clip_draw_rect.contains(p));
@@ -1688,6 +2136,8 @@ impl TimelinePanel {
                             clip_id: clip.id,
                             is_video_track,
                             pointer_offset_frames: pointer_frame - anchor_start,
+                            source_track_id: track.id,
+                            source_track_index: track_index,
                         });
                     }
                 }
@@ -1717,10 +2167,7 @@ impl TimelinePanel {
                                 }
                                 Ok(false) => {}
                                 Err(err) => {
-                                    state.set_status_hint(
-                                        format!("添加特效失败：{err}"),
-                                        true,
-                                    );
+                                    state.set_status_hint(format!("添加特效失败：{err}"), true);
                                 }
                             }
                             d.remove::<EffectType>(effect_drag_id);
@@ -1811,6 +2258,23 @@ impl TimelinePanel {
                 if let Some(drag) = self.clip_drag {
                     if drag.clip_id == clip.id && drag.is_video_track == is_video_track {
                         if let Some(pointer) = ui.input(|i| i.pointer.interact_pos()) {
+                            // Cross-track gate: when hovering over a different track,
+                            // suppress within-track move preview and snap back.
+                            let is_cross_track = self
+                                .clip_drag_target
+                                .is_some_and(|target| target.track_id != drag.source_track_id);
+                            if is_cross_track {
+                                if self.clip_drag_moved {
+                                    if let Some(ref before) = self.clip_drag_before_sequence {
+                                        state.sequence = Some(before.clone());
+                                    }
+                                    self.clip_drag_moved = false;
+                                }
+                                self.active_snap_guide_frame = None;
+                                self.active_insert_guide_frame = None;
+                                continue;
+                            }
+
                             let pointer_frame = ((pointer.x - rect.left() - track_label_w)
                                 / self.pixels_per_frame)
                                 .round() as i64;
@@ -2518,6 +2982,42 @@ fn choose_track_drag_target(
     })
 }
 
+/// Hit-test track rows to find which track of matching type the pointer is over.
+/// Returns None if the pointer is outside all tracks of the given type.
+fn choose_clip_drag_target(
+    pointer: Pos2,
+    rows: &[TrackRowVisual],
+    is_video_track: bool,
+) -> Option<ClipDragTarget> {
+    let same_type_rows: Vec<_> =
+        rows.iter().filter(|row| row.is_video_track == is_video_track).collect();
+    if same_type_rows.is_empty() {
+        return None;
+    }
+
+    let top = same_type_rows.iter().map(|row| row.rect.top()).fold(f32::INFINITY, f32::min);
+    let bottom = same_type_rows
+        .iter()
+        .map(|row| row.rect.bottom())
+        .fold(f32::NEG_INFINITY, f32::max);
+    if pointer.y < top || pointer.y > bottom {
+        return None;
+    }
+
+    same_type_rows
+        .iter()
+        .min_by(|a, b| {
+            let a_dist = (a.rect.center().y - pointer.y).abs();
+            let b_dist = (b.rect.center().y - pointer.y).abs();
+            a_dist.partial_cmp(&b_dist).unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|row| ClipDragTarget {
+            track_id: row.track_id,
+            is_video_track: row.is_video_track,
+            track_index: row.track_index,
+        })
+}
+
 fn clip_disabled_state(seq: &Sequence, sel: ClipSelection) -> Option<bool> {
     if sel.is_video_track {
         seq.video_tracks
@@ -2557,13 +3057,11 @@ fn selected_nested_sequence_id(
     let clip = if selection.is_video_track {
         seq.video_tracks
             .iter()
-            .find(|track| track.id == selection.track_id)
-            .and_then(|track| track.clips.iter().find(|clip| clip.id == selection.clip_id))
+            .find_map(|track| track.clips.iter().find(|clip| clip.id == selection.clip_id))
     } else {
         seq.audio_tracks
             .iter()
-            .find(|track| track.id == selection.track_id)
-            .and_then(|track| track.clips.iter().find(|clip| clip.id == selection.clip_id))
+            .find_map(|track| track.clips.iter().find(|clip| clip.id == selection.clip_id))
     }?;
     if clip.is_nested_sequence() {
         clip.nested_sequence_id

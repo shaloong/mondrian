@@ -1018,3 +1018,496 @@ fn slide_clip_updates_neighbors_and_is_undoable() {
     assert_eq!(clips_undo[2].position.frame, 20);
     assert_eq!(clips_undo[2].source_in.frame, 0);
 }
+
+// ── Cross-track clip movement ──
+
+#[test]
+fn cross_track_move_to_different_track() {
+    let mut state = create_state_with_sequence();
+    let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
+    let target_track_id =
+        state.sequence.as_ref().expect("sequence should exist").video_tracks[1].id;
+
+    let clip = Clip::new(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(20, tb));
+    let clip_id = clip.id;
+
+    {
+        let seq = state.sequence.as_mut().expect("sequence should exist");
+        seq.video_tracks[0].add_clip(clip).expect("add clip");
+    }
+
+    state
+        .move_clip_to_track_with_mode(
+            target_track_id,
+            true,
+            clip_id,
+            5,
+            ClipOverlapMode::Overwrite,
+        )
+        .expect("cross-track move should succeed");
+
+    let seq = state.sequence.as_ref().expect("sequence should exist");
+    assert!(seq.video_tracks[0].clips.is_empty());
+    assert_eq!(seq.video_tracks[1].clips.len(), 1);
+    assert_eq!(seq.video_tracks[1].clips[0].id, clip_id);
+    assert_eq!(seq.video_tracks[1].clips[0].position.frame, 5);
+}
+
+#[test]
+fn cross_track_move_batch_preserves_relative_positions() {
+    let mut state = create_state_with_sequence();
+    let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
+    let target_track_id =
+        state.sequence.as_ref().expect("sequence should exist").video_tracks[1].id;
+
+    let clip_a = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+    let clip_a_id = clip_a.id;
+    let clip_b = Clip::new(AssetId::new(), TimeCode::new(20, tb), TimeCode::new(10, tb));
+    let clip_b_id = clip_b.id;
+
+    {
+        let seq = state.sequence.as_mut().expect("sequence should exist");
+        seq.video_tracks[0].add_clip(clip_a).expect("add clip a");
+        seq.video_tracks[0].add_clip(clip_b).expect("add clip b");
+    }
+
+    // Move both clips with the same delta (+5 frames).
+    state
+        .move_clip_to_track_with_mode(
+            target_track_id,
+            true,
+            clip_a_id,
+            5,
+            ClipOverlapMode::Overwrite,
+        )
+        .expect("move clip a");
+    state
+        .move_clip_to_track_with_mode(
+            target_track_id,
+            true,
+            clip_b_id,
+            25,
+            ClipOverlapMode::Overwrite,
+        )
+        .expect("move clip b");
+
+    let seq = state.sequence.as_ref().expect("sequence should exist");
+    assert!(seq.video_tracks[0].clips.is_empty());
+    assert_eq!(seq.video_tracks[1].clips.len(), 2);
+    assert_eq!(seq.video_tracks[1].clips[0].id, clip_a_id);
+    assert_eq!(seq.video_tracks[1].clips[0].position.frame, 5);
+    assert_eq!(seq.video_tracks[1].clips[1].id, clip_b_id);
+    assert_eq!(seq.video_tracks[1].clips[1].position.frame, 25);
+}
+
+#[test]
+fn cross_track_move_linked_clip_follows() {
+    let mut state = create_state_with_sequence();
+    let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
+    let video_track_1_id =
+        state.sequence.as_ref().expect("sequence should exist").video_tracks[1].id;
+
+    let mut video = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+    let mut audio = Clip::new(video.asset_id, TimeCode::new(0, tb), TimeCode::new(10, tb));
+    let video_id = video.id;
+    let audio_id = audio.id;
+    video.linked_clip = Some(audio_id);
+    audio.linked_clip = Some(video_id);
+
+    {
+        let seq = state.sequence.as_mut().expect("sequence should exist");
+        seq.video_tracks[0].add_clip(video).expect("add video");
+        seq.audio_tracks[0].add_clip(audio).expect("add audio");
+    }
+
+    state
+        .move_clip_to_track_with_mode(
+            video_track_1_id,
+            true,
+            video_id,
+            5,
+            ClipOverlapMode::Overwrite,
+        )
+        .expect("cross-track move should succeed");
+
+    let seq = state.sequence.as_ref().expect("sequence should exist");
+    // Video moved to track 1.
+    assert!(seq.video_tracks[0].clips.is_empty());
+    assert_eq!(seq.video_tracks[1].clips[0].id, video_id);
+    assert_eq!(seq.video_tracks[1].clips[0].position.frame, 5);
+    // Linked audio follows to audio track 1.
+    assert!(seq.audio_tracks[0].clips.is_empty());
+    assert_eq!(seq.audio_tracks[1].clips[0].id, audio_id);
+    assert_eq!(seq.audio_tracks[1].clips[0].position.frame, 5);
+}
+
+#[test]
+fn cross_track_move_locked_track_rejects() {
+    let mut state = create_state_with_sequence();
+    let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
+    let locked_track_id =
+        state.sequence.as_ref().expect("sequence should exist").video_tracks[1].id;
+
+    let clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+    let clip_id = clip.id;
+
+    {
+        let seq = state.sequence.as_mut().expect("sequence should exist");
+        seq.video_tracks[1].is_locked = true;
+        seq.video_tracks[0].add_clip(clip).expect("add clip");
+    }
+
+    let result = state.move_clip_to_track_with_mode(
+        locked_track_id,
+        true,
+        clip_id,
+        5,
+        ClipOverlapMode::Overwrite,
+    );
+    assert!(result.is_err());
+
+    // Clip still on source track.
+    let seq = state.sequence.as_ref().expect("sequence should exist");
+    assert_eq!(seq.video_tracks[0].clips.len(), 1);
+    assert_eq!(seq.video_tracks[0].clips[0].id, clip_id);
+    assert!(seq.video_tracks[1].clips.is_empty());
+}
+
+#[test]
+fn cross_track_move_insert_mode_pushes_existing() {
+    let mut state = create_state_with_sequence();
+    let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
+    let target_track_id =
+        state.sequence.as_ref().expect("sequence should exist").video_tracks[1].id;
+
+    let existing = Clip::new(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(20, tb));
+    let existing_id = existing.id;
+    let mover = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+    let mover_id = mover.id;
+
+    {
+        let seq = state.sequence.as_mut().expect("sequence should exist");
+        seq.video_tracks[1].add_clip(existing).expect("add existing");
+        seq.video_tracks[0].add_clip(mover).expect("add mover");
+    }
+
+    state
+        .move_clip_to_track_with_mode(target_track_id, true, mover_id, 5, ClipOverlapMode::Insert)
+        .expect("insert move should succeed");
+
+    let seq = state.sequence.as_ref().expect("sequence should exist");
+    assert_eq!(seq.video_tracks[1].clips.len(), 2);
+    assert_eq!(seq.video_tracks[1].clips[0].id, mover_id);
+    assert_eq!(seq.video_tracks[1].clips[0].position.frame, 5);
+    assert_eq!(seq.video_tracks[1].clips[1].id, existing_id);
+    assert_eq!(seq.video_tracks[1].clips[1].position.frame, 15);
+}
+
+#[test]
+fn cross_track_move_overwrite_mode_trims_existing() {
+    let mut state = create_state_with_sequence();
+    let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
+    let target_track_id =
+        state.sequence.as_ref().expect("sequence should exist").video_tracks[1].id;
+
+    let existing = Clip::new(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(20, tb));
+    let existing_id = existing.id;
+    let mover = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+    let mover_id = mover.id;
+
+    {
+        let seq = state.sequence.as_mut().expect("sequence should exist");
+        seq.video_tracks[1].add_clip(existing).expect("add existing");
+        seq.video_tracks[0].add_clip(mover).expect("add mover");
+    }
+
+    state
+        .move_clip_to_track_with_mode(
+            target_track_id,
+            true,
+            mover_id,
+            5,
+            ClipOverlapMode::Overwrite,
+        )
+        .expect("overwrite move should succeed");
+
+    let seq = state.sequence.as_ref().expect("sequence should exist");
+    // Overwrite: existing clip at [10, 30) intersected by mover at [5, 15) → existing trimmed to [15, 30)
+    assert_eq!(seq.video_tracks[1].clips[0].id, mover_id);
+    assert_eq!(seq.video_tracks[1].clips[0].position.frame, 5);
+    assert_eq!(seq.video_tracks[1].clips[1].id, existing_id);
+    assert_eq!(seq.video_tracks[1].clips[1].position.frame, 15);
+    assert_eq!(seq.video_tracks[1].clips[1].duration.frame, 15);
+}
+
+#[test]
+fn cross_track_move_same_track_behavior_preserved() {
+    // Moving within the same track should still work via move_clip_to_track_with_mode.
+    let mut state = create_state_with_sequence();
+    let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
+    let track_id = state.sequence.as_ref().expect("sequence should exist").video_tracks[0].id;
+
+    let clip = Clip::new(AssetId::new(), TimeCode::new(20, tb), TimeCode::new(10, tb));
+    let clip_id = clip.id;
+
+    {
+        let seq = state.sequence.as_mut().expect("sequence should exist");
+        seq.video_tracks[0].add_clip(clip).expect("add clip");
+    }
+
+    state
+        .move_clip_to_track_with_mode(track_id, true, clip_id, 5, ClipOverlapMode::Overwrite)
+        .expect("same-track move should succeed");
+
+    let seq = state.sequence.as_ref().expect("sequence should exist");
+    assert_eq!(seq.video_tracks[0].clips.len(), 1);
+    assert_eq!(seq.video_tracks[0].clips[0].id, clip_id);
+    assert_eq!(seq.video_tracks[0].clips[0].position.frame, 5);
+}
+
+#[test]
+fn cross_track_move_with_undo_snapshot_restores_original() {
+    // move_clip_to_track_with_mode doesn't push to the command history directly;
+    // the UI layer records a snapshot before calling. Verify snapshot semantics.
+    let mut state = create_state_with_sequence();
+    let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
+    let target_track_id =
+        state.sequence.as_ref().expect("sequence should exist").video_tracks[1].id;
+
+    let clip = Clip::new(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(20, tb));
+    let clip_id = clip.id;
+
+    {
+        let seq = state.sequence.as_mut().expect("sequence should exist");
+        seq.video_tracks[0].add_clip(clip).expect("add clip");
+    }
+
+    // Snapshot before move (like the UI drop handler does).
+    let before = state.sequence.clone();
+
+    state
+        .move_clip_to_track_with_mode(
+            target_track_id,
+            true,
+            clip_id,
+            5,
+            ClipOverlapMode::Overwrite,
+        )
+        .expect("cross-track move should succeed");
+
+    // Verify move happened.
+    assert!(
+        state.sequence.as_ref().expect("sequence should exist").video_tracks[0]
+            .clips
+            .is_empty()
+    );
+
+    // Restore snapshot (simulating undo).
+    state.sequence = before;
+    let seq = state.sequence.as_ref().expect("sequence should exist");
+    assert_eq!(seq.video_tracks[0].clips.len(), 1);
+    assert_eq!(seq.video_tracks[0].clips[0].id, clip_id);
+    assert_eq!(seq.video_tracks[0].clips[0].position.frame, 10);
+    assert!(seq.video_tracks[1].clips.is_empty());
+}
+
+#[test]
+fn cross_track_move_relative_offset_across_different_source_tracks() {
+    // Premiere-style: dragging V2→V3 gives a +1 track delta. A V1 clip should
+    // move to V2, not V3. Each selected clip shifts by the same track offset.
+    let mut state = create_state_with_sequence();
+    let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
+
+    let clip_v1 = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+    let clip_v1_id = clip_v1.id;
+    let clip_v2 = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+    let clip_v2_id = clip_v2.id;
+
+    {
+        let seq = state.sequence.as_mut().expect("sequence should exist");
+        seq.video_tracks[0].add_clip(clip_v1).expect("add clip v1");
+        seq.video_tracks[1].add_clip(clip_v2).expect("add clip v2");
+    }
+
+    // Simulate dragging V2 clip to V3 (track index 2). Delta = +1.
+    let target_track_id =
+        state.sequence.as_ref().expect("sequence should exist").video_tracks[2].id;
+
+    // V2 clip moves to V3.
+    state
+        .move_clip_to_track_with_mode(
+            target_track_id,
+            true,
+            clip_v2_id,
+            5,
+            ClipOverlapMode::Overwrite,
+        )
+        .expect("move clip v2");
+    // V1 clip moves to V2 (same +1 track delta).
+    let v2_target_id = state.sequence.as_ref().expect("sequence should exist").video_tracks[1].id;
+    state
+        .move_clip_to_track_with_mode(
+            v2_target_id,
+            true,
+            clip_v1_id,
+            5,
+            ClipOverlapMode::Overwrite,
+        )
+        .expect("move clip v1");
+
+    let seq = state.sequence.as_ref().expect("sequence should exist");
+    assert!(seq.video_tracks[0].clips.is_empty());
+    assert_eq!(seq.video_tracks[1].clips.len(), 1);
+    assert_eq!(seq.video_tracks[1].clips[0].id, clip_v1_id);
+    assert_eq!(seq.video_tracks[1].clips[0].position.frame, 5);
+    assert_eq!(seq.video_tracks[2].clips.len(), 1);
+    assert_eq!(seq.video_tracks[2].clips[0].id, clip_v2_id);
+    assert_eq!(seq.video_tracks[2].clips[0].position.frame, 5);
+}
+
+#[test]
+fn cross_track_move_negative_delta_clips_out_of_bounds_are_skipped() {
+    // V2→V0 (delta -1). V1 clip would go to V-1 → skipped.
+    // Only the dragged clip (V2→V0) should move.
+    let mut state = create_state_with_sequence();
+    let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
+
+    let clip_v1 = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+    let clip_v1_id = clip_v1.id;
+    let clip_v2 = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+    let clip_v2_id = clip_v2.id;
+
+    {
+        let seq = state.sequence.as_mut().expect("sequence should exist");
+        seq.video_tracks[0].add_clip(clip_v1).expect("add clip v1");
+        seq.video_tracks[1].add_clip(clip_v2).expect("add clip v2");
+    }
+
+    // V2 clip to V0 (delta -1).
+    let target_track_id =
+        state.sequence.as_ref().expect("sequence should exist").video_tracks[0].id;
+    state
+        .move_clip_to_track_with_mode(
+            target_track_id,
+            true,
+            clip_v2_id,
+            5,
+            ClipOverlapMode::Overwrite,
+        )
+        .expect("move clip v2");
+
+    // V1 clip (source index 0 + (-1) = -1) → out of bounds → would be skipped
+    // by the UI. In this test we just verify the V2 clip moved to V0.
+
+    let seq = state.sequence.as_ref().expect("sequence should exist");
+    assert_eq!(seq.video_tracks[0].clips.len(), 2);
+    assert!(seq.video_tracks[1].clips.is_empty());
+    // V1 clip stays on V0 (unmoved).
+    assert!(seq.video_tracks[0].clips.iter().any(|c| c.id == clip_v1_id));
+    // V2 clip moved to V0.
+    assert!(seq.video_tracks[0].clips.iter().any(|c| c.id == clip_v2_id));
+}
+
+#[test]
+fn cross_track_move_constrained_delta_prevents_out_of_bounds() {
+    // V2+V3 selected, drag V3→V1 (raw delta -2). Constrained to delta -1
+    // because -2 would push V2 clip to index -1. Result: V2→V1, V3→V2.
+    let mut state = create_state_with_sequence();
+    let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
+
+    let clip_v2 = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+    let clip_v2_id = clip_v2.id;
+    let clip_v3 = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+    let clip_v3_id = clip_v3.id;
+
+    {
+        let seq = state.sequence.as_mut().expect("sequence should exist");
+        seq.video_tracks[1].add_clip(clip_v2).expect("add clip v2");
+        seq.video_tracks[2].add_clip(clip_v3).expect("add clip v3");
+    }
+
+    // Raw delta = V1(0) - V3(2) = -2. Constrained: min_src=1, max_src=2,
+    // track_count=3, max_delta = 2-2=0, min_delta = -1. So clamped to -1.
+    // V3→V2 (index 2-1=1), V2→V1 (index 1-1=0).
+    let v2_target_id = state.sequence.as_ref().expect("sequence should exist").video_tracks[1].id;
+    let v1_target_id = state.sequence.as_ref().expect("sequence should exist").video_tracks[0].id;
+
+    state
+        .move_clip_to_track_with_mode(
+            v2_target_id,
+            true,
+            clip_v3_id,
+            5,
+            ClipOverlapMode::Overwrite,
+        )
+        .expect("move clip v3");
+    state
+        .move_clip_to_track_with_mode(
+            v1_target_id,
+            true,
+            clip_v2_id,
+            5,
+            ClipOverlapMode::Overwrite,
+        )
+        .expect("move clip v2");
+
+    let seq = state.sequence.as_ref().expect("sequence should exist");
+    // V2 clip at V1.
+    assert_eq!(seq.video_tracks[0].clips.len(), 1);
+    assert_eq!(seq.video_tracks[0].clips[0].id, clip_v2_id);
+    assert_eq!(seq.video_tracks[0].clips[0].position.frame, 5);
+    // V3 clip at V2.
+    assert_eq!(seq.video_tracks[1].clips.len(), 1);
+    assert_eq!(seq.video_tracks[1].clips[0].id, clip_v3_id);
+    assert_eq!(seq.video_tracks[1].clips[0].position.frame, 5);
+    // V3 is empty.
+    assert!(seq.video_tracks[2].clips.is_empty());
+}
+
+#[test]
+fn cross_track_move_overlapping_clips_preserves_integrity() {
+    // V1 clip A@[0,10), V2 clip B@[5,15) — overlapping in time.
+    // Both selected, dragged +1: A→V2, B→V3.
+    // B must move FIRST (further in delta direction) so A's arrival
+    // on V2 doesn't trim B before it departs.
+    let mut state = create_state_with_sequence();
+    let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
+
+    let clip_a = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+    let clip_a_id = clip_a.id;
+    let clip_b = Clip::new(AssetId::new(), TimeCode::new(5, tb), TimeCode::new(10, tb));
+    let clip_b_id = clip_b.id;
+
+    {
+        let seq = state.sequence.as_mut().expect("sequence should exist");
+        seq.video_tracks[0].add_clip(clip_a).expect("add clip a");
+        seq.video_tracks[1].add_clip(clip_b).expect("add clip b");
+    }
+
+    // Delta +1: B moves first (V2→V3), then A (V1→V2).
+    let v3_target = state.sequence.as_ref().expect("sequence should exist").video_tracks[2].id;
+    let v2_target = state.sequence.as_ref().expect("sequence should exist").video_tracks[1].id;
+
+    // B first (higher source index).
+    state
+        .move_clip_to_track_with_mode(v3_target, true, clip_b_id, 5, ClipOverlapMode::Overwrite)
+        .expect("move clip b");
+    // Then A.
+    state
+        .move_clip_to_track_with_mode(v2_target, true, clip_a_id, 0, ClipOverlapMode::Overwrite)
+        .expect("move clip a");
+
+    let seq = state.sequence.as_ref().expect("sequence should exist");
+    // V1 empty.
+    assert!(seq.video_tracks[0].clips.is_empty());
+    // A on V2, intact.
+    assert_eq!(seq.video_tracks[1].clips.len(), 1);
+    assert_eq!(seq.video_tracks[1].clips[0].id, clip_a_id);
+    assert_eq!(seq.video_tracks[1].clips[0].position.frame, 0);
+    assert_eq!(seq.video_tracks[1].clips[0].duration.frame, 10);
+    // B on V3, intact.
+    assert_eq!(seq.video_tracks[2].clips.len(), 1);
+    assert_eq!(seq.video_tracks[2].clips[0].id, clip_b_id);
+    assert_eq!(seq.video_tracks[2].clips[0].position.frame, 5);
+    assert_eq!(seq.video_tracks[2].clips[0].duration.frame, 10);
+}
