@@ -453,7 +453,21 @@ impl AppState {
         timeline_frame: Option<i64>,
         overlap_mode: ClipOverlapMode,
     ) -> mondrian_core::Result<ClipId> {
-        let color = Color::from_hex(0x808080);
+        self.create_solid_color_on_video_track_with_color(
+            track_id,
+            timeline_frame,
+            overlap_mode,
+            Color::from_hex(0x808080),
+        )
+    }
+
+    pub fn create_solid_color_on_video_track_with_color(
+        &mut self,
+        track_id: TrackId,
+        timeline_frame: Option<i64>,
+        overlap_mode: ClipOverlapMode,
+        color: Color,
+    ) -> mondrian_core::Result<ClipId> {
         let (asset_id, asset_name) = {
             let library = self.asset_library.as_ref().ok_or_else(|| {
                 mondrian_core::MondrianError::WorkflowStepFailed {

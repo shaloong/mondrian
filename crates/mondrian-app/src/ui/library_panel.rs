@@ -870,7 +870,8 @@ impl LibraryPanel {
 }
 
 fn asset_is_offline(asset: &AssetRecord) -> bool {
-    !matches!(asset.kind, AssetKind::AdjustmentLayer) && !asset.path.exists()
+    !matches!(asset.kind, AssetKind::AdjustmentLayer | AssetKind::SolidColor)
+        && !asset.path.exists()
 }
 
 fn asset_card_presentation(
