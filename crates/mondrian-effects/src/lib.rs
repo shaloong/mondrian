@@ -8,6 +8,7 @@ pub mod execution;
 pub mod graph;
 pub mod lut;
 pub mod mask;
+pub mod mask_raster;
 pub mod plugin_contract;
 pub mod plugin_sdk;
 pub mod text;
@@ -43,4 +44,5 @@ pub use plugin_contract::{
 };
 pub use plugin_sdk::{EffectGraphDsl, EffectPluginDefinitionBuilder};
 pub use mask::{BezierPoint, MaskComponent, MaskId, MaskKeyframe, MaskOp, MaskShape};
+pub use mask_raster::rasterize_mask_shape;
 pub use transition::Transition;
