@@ -294,6 +294,9 @@ pub struct Clip {
     /// 效果链（实例级，属性路径已按 effect id 做命名空间隔离）
     #[serde(default)]
     pub effects: Vec<EffectNode>,
+    /// 蒙版列表（按顺序叠加渲染）
+    #[serde(default)]
+    pub masks: Vec<mondrian_effects::mask::MaskComponent>,
     /// 关联的音频/视频 Clip（保持同步）
     pub linked_clip: Option<ClipId>,
     /// 是否禁用
@@ -322,6 +325,7 @@ impl Clip {
             transform: Transform2D::identity(),
             speed: SpeedMap::new(),
             effects: vec![],
+            masks: vec![],
             linked_clip: None,
             is_disabled: false,
             blend_mode: None,

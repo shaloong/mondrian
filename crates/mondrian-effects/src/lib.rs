@@ -42,4 +42,5 @@ pub use plugin_contract::{
     CURRENT_EFFECT_PLUGIN_API_VERSION,
 };
 pub use plugin_sdk::{EffectGraphDsl, EffectPluginDefinitionBuilder};
+pub use mask::{BezierPoint, MaskComponent, MaskId, MaskKeyframe, MaskOp, MaskShape};
 pub use transition::Transition;
