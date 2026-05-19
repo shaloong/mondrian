@@ -11,7 +11,8 @@ use mondrian_core::{
 };
 use mondrian_effects::{
     build_effect_render_graph, build_effect_render_plan, get_or_compile_scheduled_render_graph,
-    CompiledEffectGraph, EffectNode, EffectRenderPlan, EffectType,
+    CompiledEffectGraph, EffectGraphNode, EffectGraphNodeId, EffectGraphNodeKind, EffectNode,
+    EffectRenderPlan, EffectType,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -390,7 +391,48 @@ impl Clip {
         &self,
         time: TimeCode,
     ) -> Option<Arc<CompiledEffectGraph>> {
-        let graph = build_effect_render_graph(&self.effects, time);
+        let mut graph = build_effect_render_graph(&self.effects, time);
+
+        // Inject mask nodes after effects for each enabled mask.
+        let mut current_output = graph.output;
+        let mut next_id = graph.nodes.len() as u32;
+        let ticks = timecode_to_ticks(time);
+
+        for mask in &self.masks {
+            if !mask.enabled {
+                continue;
+            }
+            let params = mask.evaluate_at(ticks);
+
+            // MaskSource — rasterizes the shape into an alpha buffer.
+            let src_id = EffectGraphNodeId(next_id);
+            next_id += 1;
+            graph.nodes.push(EffectGraphNode {
+                id: src_id,
+                kind: EffectGraphNodeKind::MaskSource {
+                    shape: params.shape,
+                    feather: params.feather,
+                    expansion: params.expansion,
+                    opacity: params.opacity,
+                },
+            });
+
+            // Mask — applies the alpha buffer to the current output.
+            let mask_id = EffectGraphNodeId(next_id);
+            next_id += 1;
+            let input_id = current_output.unwrap_or(EffectGraphNodeId(0));
+            graph.nodes.push(EffectGraphNode {
+                id: mask_id,
+                kind: EffectGraphNodeKind::Mask {
+                    input: input_id,
+                    mask: src_id,
+                    invert: params.invert,
+                },
+            });
+            current_output = Some(mask_id);
+        }
+
+        graph.output = current_output;
         get_or_compile_scheduled_render_graph(graph)
     }
 
