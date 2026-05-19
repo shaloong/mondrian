@@ -363,6 +363,34 @@ impl AppState {
         Duration::from_secs_f64(secs.max(1.0 / fps.max(1.0)))
     }
 
+    pub fn create_folder_in_library(&mut self, name: &str) -> mondrian_core::Result<String> {
+        let library = self.asset_library.as_ref().ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "create_folder".to_string(),
+                reason: "素材库未连接".to_string(),
+            }
+        })?;
+        let folder_id = library.create_folder(name, None)?;
+        self.set_status_hint(format!("已新建文件夹：{}", name), false);
+        let _ = self.save_project_file();
+        Ok(folder_id)
+    }
+
+    pub fn delete_asset_from_library(&mut self, asset_id: AssetId) -> mondrian_core::Result<()> {
+        // Remove clips referencing this asset from the timeline first,
+        // then delete from the library. Order matters for borrow reasons.
+        let _removed = self.delete_asset_and_cleanup_timeline(asset_id)?;
+        let library = self.asset_library.as_ref().ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "delete_asset".to_string(),
+                reason: "素材库未连接".to_string(),
+            }
+        })?;
+        library.delete_asset(asset_id)?;
+        let _ = self.save_project_file();
+        Ok(())
+    }
+
     fn create_adjustment_layer_asset_internal(
         &mut self,
         name: Option<&str>,

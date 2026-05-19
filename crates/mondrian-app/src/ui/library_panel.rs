@@ -52,6 +52,7 @@ const CARD_PADDING_BOTTOM: f32 = 10.0;
 const CARD_INFO_GAP_Y: f32 = 6.0;
 
 /// 左侧素材库面板
+#[derive(Clone)]
 #[derive(Default)]
 pub struct LibraryPanel {
     search_query: String,
@@ -77,6 +78,22 @@ impl LibraryPanel {
                 state.set_status_hint(format!("新建调整图层失败：{err}"), true);
             }
         }
+    }
+
+    fn next_folder_name(&self, state: &AppState) -> String {
+        let Some(library) = state.asset_library.as_ref() else {
+            return "文件夹 1".to_string();
+        };
+        let folders = library.list_folders().unwrap_or_default();
+        let mut next = 1usize;
+        for folder in &folders {
+            if let Some(suffix) = folder.name.strip_prefix("文件夹 ") {
+                if let Ok(n) = suffix.trim().parse::<usize>() {
+                    next = next.max(n + 1);
+                }
+            }
+        }
+        format!("文件夹 {next}")
     }
 
     pub fn show(&mut self, ui: &mut Ui, state: &mut AppState) {
@@ -114,22 +131,35 @@ impl LibraryPanel {
             });
             ui.add_space(SEARCH_MARGIN_BOTTOM);
 
+            // Blank-area context menu: response created BEFORE the ScrollArea
+            // so cards (rendered later, higher z-order) consume clicks first.
+            // Right-click on blank space → this response gets it.
+            let blank_rect = ui.available_rect_before_wrap();
+            let blank_resp = ui.interact(
+                blank_rect,
+                ui.id().with("library_blank_context"),
+                Sense::click(),
+            );
+
             let list_h = ui.available_height().max(tokens::list_min_height());
-            let scroll_area = egui::ScrollArea::vertical()
+            egui::ScrollArea::vertical()
                 .id_salt("library_scroll")
                 .max_height(list_h)
                 .show(ui, |ui| {
                     self.show_assets(ui, state);
                 });
-            let scroll_response = ui.interact(
-                scroll_area.inner_rect,
-                ui.id().with("library_scroll_context"),
-                Sense::click(),
-            );
-            scroll_response.context_menu(|ui| {
-                ui.menu_button("新建图层", |ui| {
+
+            blank_resp.context_menu(|ui| {
+                ui.menu_button("新建", |ui| {
                     if ui.button("调整图层").clicked() {
                         self.create_adjustment_layer(state);
+                        ui.close();
+                    }
+                    if ui.button("文件夹").clicked() {
+                        let name = self.next_folder_name(state);
+                        if let Err(err) = state.create_folder_in_library(&name) {
+                            state.set_status_hint(format!("创建文件夹失败：{err}"), true);
+                        }
                         ui.close();
                     }
                 });
@@ -352,9 +382,6 @@ impl LibraryPanel {
         let asset_name = asset.name.clone();
         let mut name_tooltip: Option<String> = None;
         let mut name_rect_for_click: Option<Rect> = None;
-        let proxy_generator =
-            mondrian_media::ProxyGenerator::new(mondrian_media::ProxyConfig::default());
-        let has_proxy = proxy_generator.proxy_exists(asset.path.as_path());
         let proxy_mode = state.is_asset_proxy_mode(asset.id);
         let is_offline = asset_is_offline(asset);
         let is_editing = self.editing_asset == Some(asset.id);
@@ -362,7 +389,6 @@ impl LibraryPanel {
 
         let (card_rect, mut card_response) =
             ui.allocate_exact_size(Vec2::new(card_w, card_h), Sense::click_and_drag());
-
         let card_rounding = tokens::card_rounding();
         let card_fill = if is_selected {
             palette::accent_secondary().gamma_multiply(0.42)
@@ -564,48 +590,56 @@ impl LibraryPanel {
             self.selected_asset = Some(asset.id);
         }
 
+
+        // Double-click on name area only — matches Pr/Ae/DaVinci behavior
+        // where thumbnail double-click has different meaning (open in viewer)
+        let double_clicked = ui
+            .input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary))
+            && name_rect_for_click.is_some_and(|nr| {
+                ui.input(|i| i.pointer.interact_pos().map(|p| nr.contains(p)).unwrap_or(false))
+            });
+        if double_clicked {
+            self.editing_asset = Some(asset.id);
+            self.editing_name = asset_name.clone();
+        }
+
+        // Standard egui context menu per card.
+        let is_offline2 = is_offline;
         card_response.context_menu(|ui| {
-            // Rename
             if ui.button("重命名").clicked() {
                 self.editing_asset = Some(asset.id);
                 self.editing_name = asset_name.clone();
                 ui.close();
             }
-            // Reveal in file manager
             if ui.button("在文件管理器中显示").clicked() {
                 reveal_in_file_manager(&asset.path);
                 ui.close();
             }
             ui.separator();
-
             if matches!(asset.kind, AssetKind::Video) {
-                let mut proxy_mode_toggle = proxy_mode;
-                if theme::checkmark_menu_toggle(ui, &mut proxy_mode_toggle, "代理模式").clicked()
-                {
-                    state.set_asset_proxy_mode(asset.id, proxy_mode_toggle);
+                let proxy_gen =
+                    mondrian_media::ProxyGenerator::new(mondrian_media::ProxyConfig::default());
+                let has_proxy = proxy_gen.proxy_exists(asset.path.as_path());
+                let mut proxy_toggle = state.is_asset_proxy_mode(asset.id);
+                if theme::checkmark_menu_toggle(ui, &mut proxy_toggle, "代理模式").clicked() {
+                    state.set_asset_proxy_mode(asset.id, proxy_toggle);
                     let _ = state.save_project_file();
-
-                    if proxy_mode_toggle {
-                        if !has_proxy {
-                            self.spawn_proxy_generation(asset.id, asset.path.clone());
-                            state.set_status_hint(
-                                format!("已开启代理模式：{}（后台生成中）", asset_name),
-                                false,
-                            );
-                        } else {
-                            state.set_status_hint(format!("已开启代理模式：{}", asset_name), false);
-                        }
+                    if proxy_toggle && !has_proxy {
+                        self.spawn_proxy_generation(asset.id, asset.path.clone());
+                        state.set_status_hint(
+                            format!("已开启代理模式：{}（后台生成中）", asset_name),
+                            false,
+                        );
                     } else {
-                        state.set_status_hint(format!("已关闭代理模式：{}", asset_name), false);
+                        state.set_status_hint(
+                            format!("已开启代理模式：{}", asset_name), false
+                        );
                     }
-
                     ui.close();
                 }
-
                 ui.separator();
             }
-
-            if is_offline {
+            if is_offline2 {
                 if ui.button("重新链接素材…").clicked() {
                     if let Some(path) = FileDialog::new().pick_file() {
                         match state.relink_asset(asset.id, &path) {
@@ -626,46 +660,23 @@ impl LibraryPanel {
                 }
                 ui.separator();
             }
-
             if ui.button("删除素材").clicked() {
-                match library.delete_asset(asset.id) {
-                    Ok(_) => {
-                        let removed_timeline_clips =
-                            state.delete_asset_and_cleanup_timeline(asset.id).unwrap_or(0);
-                        state.event_bus.publish(mondrian_core::events::AppEvent::AssetDeleted {
-                            asset_id: asset.id,
-                        });
-                        let _ = state.save_project_file();
+                match state.delete_asset_from_library(asset.id) {
+                    Ok(()) => {
                         self.thumbnail_cache.remove(&asset.id);
                         self.thumbnail_failures.remove(&asset.id);
-                        self.selected_asset = self.selected_asset.filter(|id| *id != asset.id);
-                        state.set_status_hint(
-                            format!(
-                                "已删除：{}（时间轴移除 {} 个片段）",
-                                asset_name, removed_timeline_clips
-                            ),
-                            false,
-                        );
+                        if self.selected_asset == Some(asset.id) {
+                            self.selected_asset = None;
+                        }
+                        state.set_status_hint(format!("已删除素材：{}", asset_name), false);
                     }
                     Err(err) => {
-                        state.set_status_hint(format!("删除失败：{err}"), true);
+                        state.set_status_hint(format!("删除素材失败：{err}"), true);
                     }
                 }
                 ui.close();
             }
         });
-
-        // Double-click on name area only — matches Pr/Ae/DaVinci behavior
-        // where thumbnail double-click has different meaning (open in viewer)
-        let double_clicked = ui
-            .input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary))
-            && name_rect_for_click.is_some_and(|nr| {
-                ui.input(|i| i.pointer.interact_pos().map(|p| nr.contains(p)).unwrap_or(false))
-            });
-        if double_clicked {
-            self.editing_asset = Some(asset.id);
-            self.editing_name = asset_name.clone();
-        }
 
         if card_response.drag_started() && !is_editing {
             self.selected_asset = Some(asset.id);
@@ -998,6 +1009,7 @@ mod tests {
             name: "Test".to_string(),
             kind,
             path: PathBuf::from("test"),
+            folder_id: None,
             media_info,
             created_at: "now".to_string(),
             updated_at: "now".to_string(),
