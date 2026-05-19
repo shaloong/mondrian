@@ -2058,4 +2058,86 @@ impl AppState {
         clear_broken_links(seq);
         Ok(changed_count)
     }
+
+    // ── Mask manipulation ──────────────────────────────────────────────
+
+    pub fn add_mask_to_clip(&mut self, selection: SelectedClipRef, name: &str) -> mondrian_core::Result<MaskId> {
+        let seq = self.sequence.as_mut().ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "add_mask".to_string(),
+                reason: "当前无序列".to_string(),
+            }
+        })?;
+        let before = seq.clone();
+        let clip = find_clip_mut_by_selection(seq, selection).ok_or_else(|| {
+            mondrian_core::MondrianError::ClipNotFound {
+                clip_id: selection.clip_id.to_string(),
+            }
+        })?;
+        let component = MaskComponent::new(name.to_string(), MaskKeyframe::default());
+        let id = component.id;
+        clip.masks.push(component);
+        let after = seq.clone();
+        let sequence_id = seq.id;
+        self.record_sequence_snapshot_command("添加蒙版", before, after);
+        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
+        let _ = self.save_project_file();
+        Ok(id)
+    }
+
+    pub fn remove_mask_from_clip(
+        &mut self, selection: SelectedClipRef, mask_id: MaskId,
+    ) -> mondrian_core::Result<()> {
+        let seq = self.sequence.as_mut().ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "remove_mask".to_string(),
+                reason: "当前无序列".to_string(),
+            }
+        })?;
+        let before = seq.clone();
+        let clip = find_clip_mut_by_selection(seq, selection).ok_or_else(|| {
+            mondrian_core::MondrianError::ClipNotFound {
+                clip_id: selection.clip_id.to_string(),
+            }
+        })?;
+        let removed = {
+            let len_before = clip.masks.len();
+            clip.masks.retain(|m| m.id != mask_id);
+            clip.masks.len() < len_before
+        };
+        if removed {
+            let after = seq.clone();
+            let sequence_id = seq.id;
+            self.record_sequence_snapshot_command("删除蒙版", before, after);
+            self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
+            let _ = self.save_project_file();
+        }
+        Ok(())
+    }
+
+    pub fn set_mask_enabled(
+        &mut self, selection: SelectedClipRef, mask_id: MaskId, enabled: bool,
+    ) -> mondrian_core::Result<()> {
+        let seq = self.sequence.as_mut().ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "set_mask_enabled".to_string(),
+                reason: "当前无序列".to_string(),
+            }
+        })?;
+        let before = seq.clone();
+        let clip = find_clip_mut_by_selection(seq, selection).ok_or_else(|| {
+            mondrian_core::MondrianError::ClipNotFound {
+                clip_id: selection.clip_id.to_string(),
+            }
+        })?;
+        if let Some(mask) = clip.masks.iter_mut().find(|m| m.id == mask_id) {
+            mask.enabled = enabled;
+        }
+        let after = seq.clone();
+        let sequence_id = seq.id;
+        self.record_sequence_snapshot_command("切换蒙版启用", before, after);
+        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
+        let _ = self.save_project_file();
+        Ok(())
+    }
 }
