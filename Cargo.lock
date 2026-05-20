@@ -3112,6 +3112,7 @@ dependencies = [
  "egui",
  "egui-wgpu",
  "egui_extras",
+ "glam",
  "image",
  "mondrian-assets",
  "mondrian-core",
