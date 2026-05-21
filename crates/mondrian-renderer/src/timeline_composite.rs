@@ -3,7 +3,7 @@ use mondrian_core::{
     RgbaF32Frame,
 };
 use mondrian_effects::{
-    apply_compiled_effect_graph, apply_compiled_effect_graph_pass, blend_rgba_pixel,
+    apply_compiled_effect_graph, apply_compiled_effect_graph_pass, blend_rgba_pixel_seeded,
     CompiledEffectGraph,
 };
 use std::sync::Arc;
@@ -293,14 +293,15 @@ fn alpha_blend_layer(
         for y in 0..height {
             let dst_row = &mut dst_rgba[y * dst_stride..(y + 1) * dst_stride];
             let src_row = &src_rgba[y * src_stride..(y + 1) * src_stride];
-            for (dst_px, src_px) in
-                dst_row.chunks_exact_mut(4).zip(src_row.chunks_exact(4)).take(width)
+            for (x, (dst_px, src_px)) in
+                dst_row.chunks_exact_mut(4).zip(src_row.chunks_exact(4)).take(width).enumerate()
             {
-                let blended = blend_rgba_pixel(
+                let blended = blend_rgba_pixel_seeded(
                     [dst_px[0], dst_px[1], dst_px[2], dst_px[3]],
                     [src_px[0], src_px[1], src_px[2], src_px[3]],
                     opacity,
                     blend_mode,
+                    (y * dst_w as usize + x) as u32,
                 );
                 dst_px.copy_from_slice(&blended);
             }
@@ -332,11 +333,12 @@ fn alpha_blend_layer(
                 continue;
             }
             let dst_px = &mut dst_rgba[dst_idx..dst_idx + 4];
-            let blended = blend_rgba_pixel(
+            let blended = blend_rgba_pixel_seeded(
                 [dst_px[0], dst_px[1], dst_px[2], dst_px[3]],
                 src_px,
                 opacity,
                 blend_mode,
+                (dy * dst_width + dx) as u32,
             );
             dst_px.copy_from_slice(&blended);
         }

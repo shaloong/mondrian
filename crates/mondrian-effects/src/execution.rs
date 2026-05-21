@@ -1,4 +1,6 @@
-use crate::adjustment::{apply_render_op, blend_adjustment_result, blend_rgba_pixel, unit_to_u8};
+use crate::adjustment::{
+    apply_render_op, blend_adjustment_result, blend_rgba_pixel_seeded, unit_to_u8,
+};
 use crate::{
     get_or_compile_scheduled_effect_graph, graph::effect_graph_node_use_counts,
     CompiledEffectGraph, EffectExecutionSchedule, EffectGraphNodeId, EffectGraphNodeKind,
@@ -775,12 +777,15 @@ fn blend_graph_inputs_in_place(
     opacity: f32,
     blend_mode: BlendMode,
 ) {
-    for (base_px, overlay_px) in base.chunks_exact_mut(4).zip(overlay.chunks_exact(4)) {
-        let blended = blend_rgba_pixel(
+    for (i, (base_px, overlay_px)) in
+        base.chunks_exact_mut(4).zip(overlay.chunks_exact(4)).enumerate()
+    {
+        let blended = blend_rgba_pixel_seeded(
             [base_px[0], base_px[1], base_px[2], base_px[3]],
             [overlay_px[0], overlay_px[1], overlay_px[2], overlay_px[3]],
             opacity,
             blend_mode,
+            i as u32,
         );
         base_px.copy_from_slice(&blended);
     }

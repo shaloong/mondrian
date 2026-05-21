@@ -303,6 +303,7 @@ impl Rect {
 pub enum BlendMode {
     #[default]
     Normal,
+    Dissolve,
     Multiply,
     Screen,
     Overlay,
@@ -314,8 +315,20 @@ pub enum BlendMode {
     SoftLight,
     Difference,
     Exclusion,
-    Add,
     Subtract,
+    DarkerColor,
+    LighterColor,
+    LinearBurn,
+    LinearDodge,
+    VividLight,
+    LinearLight,
+    PinLight,
+    HardMix,
+    Divide,
+    Hue,
+    Saturation,
+    Color,
+    Luminosity,
 }
 
 // ─── 色彩空间 ─────────────────────────────────────────────────────────────────
