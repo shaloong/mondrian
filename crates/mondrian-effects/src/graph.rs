@@ -886,4 +886,70 @@ mod tests {
         assert!(compiled.output_cache_enabled);
         assert!(compiled.estimated_cost >= 6);
     }
+
+    #[test]
+    fn mask_source_node_has_no_dependencies() {
+        let graph = EffectRenderGraph {
+            nodes: vec![
+                EffectGraphNode {
+                    id: EffectGraphNodeId(0),
+                    kind: EffectGraphNodeKind::MaskSource {
+                        shape: crate::mask::MaskShape::Rectangle {
+                            x: 0.0, y: 0.0, width: 1.0, height: 1.0, corner_radius: 0.0,
+                        },
+                        feather: 0.0,
+                        expansion: 0.0,
+                        opacity: 1.0,
+                    },
+                },
+            ],
+            output: Some(EffectGraphNodeId(0)),
+        };
+
+        let node = graph.node(EffectGraphNodeId(0)).unwrap();
+        assert!(node.input_ids().is_empty());
+
+        // Compile and verify profile.
+        let compiled = get_or_compile_scheduled_render_graph(graph).expect("compile");
+        let profile = compiled.node_profiles.get(&EffectGraphNodeId(0)).unwrap();
+        assert_eq!(profile.cache_policy, EffectCachePolicy::Deterministic);
+        assert!(!profile.output_cache_enabled);
+    }
+
+    #[test]
+    fn mask_node_connected_to_mask_source_compiles() {
+        let graph = EffectRenderGraph {
+            nodes: vec![
+                EffectGraphNode {
+                    id: EffectGraphNodeId(0),
+                    kind: EffectGraphNodeKind::Source,
+                },
+                EffectGraphNode {
+                    id: EffectGraphNodeId(1),
+                    kind: EffectGraphNodeKind::MaskSource {
+                        shape: crate::mask::MaskShape::Ellipse {
+                            center: glam::Vec2::new(0.5, 0.5),
+                            radii: glam::Vec2::new(0.25, 0.25),
+                        },
+                        feather: 2.0,
+                        expansion: 0.0,
+                        opacity: 1.0,
+                    },
+                },
+                EffectGraphNode {
+                    id: EffectGraphNodeId(2),
+                    kind: EffectGraphNodeKind::Mask {
+                        input: EffectGraphNodeId(0),
+                        mask: EffectGraphNodeId(1),
+                        invert: false,
+                    },
+                },
+            ],
+            output: Some(EffectGraphNodeId(2)),
+        };
+
+        let compiled = get_or_compile_scheduled_render_graph(graph).expect("compile");
+        // Verify the graph was compiled (non-zero cost).
+        assert!(compiled.graph.nodes.len() == 3);
+    }
 }
