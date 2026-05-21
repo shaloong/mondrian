@@ -177,7 +177,6 @@ impl LibraryPanel {
                         self.create_solid_color_layer(state);
                         ui.close();
                     }
-                    }
                 });
             });
         });
