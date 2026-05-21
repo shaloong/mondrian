@@ -986,6 +986,84 @@ mod tests {
     }
 
     #[test]
+    fn mask_source_and_mask_pipeline_applies_alpha() {
+        // Build: Source(0) → MaskSource(1, full-rect, opaque) → Mask(2, input=0, mask=1)
+        // Result: output alpha should be modulated by mask (all opaque → no change from mask)
+        let graph = EffectRenderGraph {
+            nodes: vec![
+                EffectGraphNode { id: EffectGraphNodeId(0), kind: EffectGraphNodeKind::Source },
+                EffectGraphNode {
+                    id: EffectGraphNodeId(1),
+                    kind: EffectGraphNodeKind::MaskSource {
+                        shape: crate::mask::MaskShape::Rectangle {
+                            x: 0.0, y: 0.0, width: 1.0, height: 1.0, corner_radius: 0.0,
+                        },
+                        feather: 0.0,
+                        expansion: 0.0,
+                        opacity: 0.5,
+                    },
+                },
+                EffectGraphNode {
+                    id: EffectGraphNodeId(2),
+                    kind: EffectGraphNodeKind::Mask {
+                        input: EffectGraphNodeId(0),
+                        mask: EffectGraphNodeId(1),
+                        invert: false,
+                    },
+                },
+            ],
+            output: Some(EffectGraphNodeId(2)),
+        };
+
+        let schedule = crate::schedule_effect_render_graph(&graph).expect("schedule graph");
+        let input = vec![100u8, 150, 200, 200];
+        let output = apply_effect_render_graph(&input, 1, 1, &graph, &schedule, 0);
+        // RGB unchanged, alpha halved (200 * 0.5 = 100)
+        assert_eq!(&output[0..3], &input[0..3]);
+        assert!((output[3] as i32 - 100).abs() <= 1,
+            "expected alpha ~100, got {}", output[3]);
+    }
+
+    #[test]
+    fn mask_source_half_rect_produces_partial_mask() {
+        // Rectangle covering left half of canvas at 50% opacity.
+        let graph = EffectRenderGraph {
+            nodes: vec![
+                EffectGraphNode { id: EffectGraphNodeId(0), kind: EffectGraphNodeKind::Source },
+                EffectGraphNode {
+                    id: EffectGraphNodeId(1),
+                    kind: EffectGraphNodeKind::MaskSource {
+                        shape: crate::mask::MaskShape::Rectangle {
+                            x: 0.0, y: 0.0, width: 0.5, height: 1.0, corner_radius: 0.0,
+                        },
+                        feather: 0.0,
+                        expansion: 0.0,
+                        opacity: 1.0,
+                    },
+                },
+                EffectGraphNode {
+                    id: EffectGraphNodeId(2),
+                    kind: EffectGraphNodeKind::Mask {
+                        input: EffectGraphNodeId(0),
+                        mask: EffectGraphNodeId(1),
+                        invert: false,
+                    },
+                },
+            ],
+            output: Some(EffectGraphNodeId(2)),
+        };
+
+        let schedule = crate::schedule_effect_render_graph(&graph).expect("schedule graph");
+        // 2x1 image: left pixel inside rect, right pixel outside.
+        let input = vec![255u8, 255, 255, 255, 255, 255, 255, 255];
+        let output = apply_effect_render_graph(&input, 2, 1, &graph, &schedule, 0);
+        // Left pixel: alpha modulated (inside mask → opaque → alpha = 255)
+        assert_eq!(output[3], 255, "left pixel should stay opaque");
+        // Right pixel: alpha = 0 (outside mask, feather=0)
+        assert_eq!(output[7], 0, "right pixel should be transparent");
+    }
+
+    #[test]
     fn blend_graph_node_supports_shared_input_branch() {
         let graph = EffectRenderGraph {
             nodes: vec![

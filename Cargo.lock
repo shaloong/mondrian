@@ -3112,6 +3112,7 @@ dependencies = [
  "egui",
  "egui-wgpu",
  "egui_extras",
+ "glam",
  "image",
  "mondrian-assets",
  "mondrian-core",
@@ -3190,6 +3191,7 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

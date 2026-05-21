@@ -418,6 +418,20 @@ fn execute_effect_graph(
                 }
                 outputs.insert(node.id, base_frame);
             }
+            EffectGraphNodeKind::MaskSource { ref shape, feather, expansion, opacity } => {
+                let alpha = crate::mask_raster::rasterize_mask_shape(
+                    shape, width, height, *feather, *expansion, *opacity,
+                );
+                // Convert alpha-only buffer to RGBA (white RGB, mask-derived alpha).
+                let mut rgba = vec![0u8; required_len];
+                for (i, &a) in alpha.iter().enumerate() {
+                    rgba[i * 4] = 255;
+                    rgba[i * 4 + 1] = 255;
+                    rgba[i * 4 + 2] = 255;
+                    rgba[i * 4 + 3] = a;
+                }
+                outputs.insert(node.id, rgba);
+            }
             EffectGraphNodeKind::Mask { input: input_id, mask, invert } => {
                 if let (Some(compiled), Some(input_signature)) = (compiled, source_input_signature)
                 {

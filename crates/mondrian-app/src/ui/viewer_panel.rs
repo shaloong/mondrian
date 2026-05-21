@@ -5,11 +5,12 @@ use crate::{
 use egui::{Pos2, Rect, Sense, Ui, Vec2};
 
 use mondrian_core::{
-    apply_display_profile_rgba8_in_place, convert_rgba8_in_place,
+    apply_display_profile_rgba8_in_place, automation::timecode_to_ticks, convert_rgba8_in_place,
     types::{AssetId, BlendMode, Color, ColorEngine, ColorSpace, Rational, SequenceId, TimeCode},
     ColorPipeline, DisplayColorProfile,
 };
 use mondrian_effects::CompiledEffectGraph;
+use mondrian_effects::mask::{BezierPoint, MaskShape};
 use mondrian_media::cache::FrameCacheConfig;
 use mondrian_media::{DecoderPool, FrameCache, RgbaFrame};
 use mondrian_renderer::{
@@ -704,6 +705,7 @@ impl ViewerPanel {
                                     palette::status_error(),
                                 );
                             }
+                            draw_mask_overlays(&painter, canvas_rect, state, current_frame);
                         }
                     } else {
                         self.invalidate_pending_decode();
@@ -3940,6 +3942,122 @@ fn draw_empty_canvas_meta(
         typography::body(),
         palette::text_muted().gamma_multiply(0.6),
     );
+}
+
+fn draw_mask_overlays(
+    painter: &egui::Painter,
+    canvas_rect: Rect,
+    state: &AppState,
+    timeline_frame: i64,
+    ) {
+        let Some(seq) = state.sequence.as_ref() else { return };
+        let active = seq.active_clips_at(TimeCode::new(timeline_frame.max(0), seq.time_base()));
+        if active.is_empty() { return; }
+        let seq_res = seq.settings.resolution;
+        if seq_res.width == 0 || seq_res.height == 0 { return; }
+        let sx = canvas_rect.width() / seq_res.width as f32;
+        let sy = canvas_rect.height() / seq_res.height as f32;
+        let ox = canvas_rect.left();
+        let oy = canvas_rect.top();
+        let to_scr = |nx: f32, ny: f32| Pos2::new(
+            ox + nx * seq_res.width as f32 * sx,
+            oy + ny * seq_res.height as f32 * sy,
+        );
+        let ticks = timecode_to_ticks(TimeCode::new(timeline_frame.max(0), seq.time_base()));
+        let colors = [
+            egui::Color32::from_rgb(0, 180, 240),
+            egui::Color32::from_rgb(220, 120, 0),
+            egui::Color32::from_rgb(120, 200, 80),
+            egui::Color32::from_rgb(200, 80, 200),
+        ];
+        for ac in &active {
+            if ac.clip.masks.is_empty() { continue; }
+            let mat = ac.transform_matrix;
+            for (i, mask) in ac.clip.masks.iter().enumerate() {
+                if !mask.enabled { continue; }
+                let p = mask.evaluate_at(ticks);
+                let c = colors[i % colors.len()];
+                let st = egui::Stroke::new(2.0, c);
+                match &p.shape {
+                    MaskShape::Rectangle { x, y, width, height, .. } => {
+                        let crn = [
+                            glam::Vec2::new(*x, *y),
+                            glam::Vec2::new(x + width, *y),
+                            glam::Vec2::new(x + width, y + height),
+                            glam::Vec2::new(*x, y + height),
+                        ];
+                        draw_mask_polygon(painter, &crn, &mat, &to_scr, st, true);
+                    }
+                    MaskShape::Ellipse { center, radii } => {
+                        let n = 64usize;
+                        let mut pts = Vec::with_capacity(n + 1);
+                        for s in 0..=n {
+                            let a = s as f32 * std::f32::consts::TAU / n as f32;
+                            pts.push(glam::Vec2::new(
+                                center.x + radii.x * a.cos(),
+                                center.y + radii.y * a.sin(),
+                            ));
+                        }
+                        draw_mask_polygon(painter, &pts, &mat, &to_scr, st, false);
+                    }
+                    MaskShape::Path { points, closed } => {
+                        let segs = mask_path_segments(points, *closed);
+                        for &(a, b) in &segs {
+                            let ta = mask_xform(a, &mat, &to_scr);
+                            let tb = mask_xform(b, &mat, &to_scr);
+                            painter.line_segment([ta, tb], st);
+                        }
+                        for pt in points {
+                            let p = mask_xform(pt.position, &mat, &to_scr);
+                            painter.circle_filled(p, 3.0, c);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+fn mask_path_segments(points: &[BezierPoint], closed: bool) -> Vec<(glam::Vec2, glam::Vec2)> {
+    let mut out = Vec::new();
+    let n = points.len();
+    for i in 0..n {
+        let ni = if i + 1 < n { i + 1 } else if closed { 0 } else { break };
+        let a = points[i]; let b = points[ni];
+        let s = 8usize;
+        let mut prev = a.position;
+        for k in 1..=s {
+            let t = k as f32 / s as f32;
+            let u = 1.0 - t;
+            let pt = a.position * u * u * u
+                + (a.position + a.control_out) * (3.0 * u * u * t)
+                + (b.position + b.control_in) * (3.0 * u * t * t)
+                + b.position * t * t * t;
+            out.push((prev, pt));
+            prev = pt;
+        }
+    }
+    out
+}
+
+fn mask_xform(pt: glam::Vec2, mat: &glam::Mat3, to_scr: &impl Fn(f32, f32) -> Pos2) -> Pos2 {
+    let t = *mat * pt.extend(1.0);
+    to_scr(t.x, t.y)
+}
+
+fn draw_mask_polygon(
+    painter: &egui::Painter,
+    pts: &[glam::Vec2],
+    mat: &glam::Mat3,
+    to_scr: &impl Fn(f32, f32) -> Pos2,
+    stroke: egui::Stroke,
+    closed: bool,
+) {
+    if pts.len() < 2 { return; }
+    let cp: Vec<Pos2> = pts.iter().map(|&p| mask_xform(p, mat, to_scr)).collect();
+    let n = if closed { cp.len() } else { cp.len() - 1 };
+    for i in 0..n {
+        painter.line_segment([cp[i], cp[(i + 1) % cp.len()]], stroke);
+    }
 }
 
 #[cfg(test)]

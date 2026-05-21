@@ -29,6 +29,13 @@ pub enum EffectGraphNodeKind {
         mask: EffectGraphNodeId,
         invert: bool,
     },
+    /// Synthetic source node that rasterizes a mask shape into an alpha buffer.
+    MaskSource {
+        shape: crate::mask::MaskShape,
+        feather: f32,
+        expansion: f32,
+        opacity: f32,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +51,7 @@ impl EffectGraphNode {
             EffectGraphNodeKind::UnaryEffect { input, .. } => vec![input],
             EffectGraphNodeKind::Blend { base, overlay, .. } => vec![base, overlay],
             EffectGraphNodeKind::Mask { input, mask, .. } => vec![input, mask],
+            EffectGraphNodeKind::MaskSource { .. } => Vec::new(),
         }
     }
 }
@@ -103,6 +111,13 @@ impl EffectRenderGraph {
                     input.hash(&mut hasher);
                     mask.hash(&mut hasher);
                     invert.hash(&mut hasher);
+                }
+                EffectGraphNodeKind::MaskSource { ref shape, feather, expansion, opacity } => {
+                    6u8.hash(&mut hasher);
+                    shape_variant_hash(shape, &mut hasher);
+                    feather.to_bits().hash(&mut hasher);
+                    expansion.to_bits().hash(&mut hasher);
+                    opacity.to_bits().hash(&mut hasher);
                 }
             }
         }
@@ -585,6 +600,20 @@ pub fn compile_effect_node_profiles(
                     output_cache_enabled,
                 }
             }
+            EffectGraphNodeKind::MaskSource { ref shape, feather, expansion, opacity } => {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                6u8.hash(&mut hasher);
+                shape_variant_hash(shape, &mut hasher);
+                feather.to_bits().hash(&mut hasher);
+                expansion.to_bits().hash(&mut hasher);
+                opacity.to_bits().hash(&mut hasher);
+                CompiledEffectNodeProfile {
+                    subtree_signature: hasher.finish(),
+                    cache_policy: EffectCachePolicy::Deterministic,
+                    estimated_cost: 4,
+                    output_cache_enabled: false,
+                }
+            }
         };
         profiles.insert(node.id, profile);
     }
@@ -609,6 +638,31 @@ fn collect_reachable_nodes(
 
 fn hash_render_op(op: &EffectRenderOp, state: &mut impl std::hash::Hasher) {
     op.hash_signature(state);
+}
+
+fn shape_variant_hash(shape: &crate::mask::MaskShape, state: &mut impl std::hash::Hasher) {
+    match shape {
+        crate::mask::MaskShape::Rectangle { x, y, width, height, corner_radius } => {
+            state.write_u8(0);
+            state.write_u32(x.to_bits());
+            state.write_u32(y.to_bits());
+            state.write_u32(width.to_bits());
+            state.write_u32(height.to_bits());
+            state.write_u32(corner_radius.to_bits());
+        }
+        crate::mask::MaskShape::Ellipse { center, radii } => {
+            state.write_u8(1);
+            state.write_u32(center.x.to_bits());
+            state.write_u32(center.y.to_bits());
+            state.write_u32(radii.x.to_bits());
+            state.write_u32(radii.y.to_bits());
+        }
+        crate::mask::MaskShape::Path { points, closed } => {
+            state.write_u8(2);
+            state.write_usize(points.len());
+            state.write_u8(if *closed { 1 } else { 0 });
+        }
+    }
 }
 
 #[cfg(test)]
@@ -831,5 +885,71 @@ mod tests {
         );
         assert!(compiled.output_cache_enabled);
         assert!(compiled.estimated_cost >= 6);
+    }
+
+    #[test]
+    fn mask_source_node_has_no_dependencies() {
+        let graph = EffectRenderGraph {
+            nodes: vec![
+                EffectGraphNode {
+                    id: EffectGraphNodeId(0),
+                    kind: EffectGraphNodeKind::MaskSource {
+                        shape: crate::mask::MaskShape::Rectangle {
+                            x: 0.0, y: 0.0, width: 1.0, height: 1.0, corner_radius: 0.0,
+                        },
+                        feather: 0.0,
+                        expansion: 0.0,
+                        opacity: 1.0,
+                    },
+                },
+            ],
+            output: Some(EffectGraphNodeId(0)),
+        };
+
+        let node = graph.node(EffectGraphNodeId(0)).unwrap();
+        assert!(node.input_ids().is_empty());
+
+        // Compile and verify profile.
+        let compiled = get_or_compile_scheduled_render_graph(graph).expect("compile");
+        let profile = compiled.node_profiles.get(&EffectGraphNodeId(0)).unwrap();
+        assert_eq!(profile.cache_policy, EffectCachePolicy::Deterministic);
+        assert!(!profile.output_cache_enabled);
+    }
+
+    #[test]
+    fn mask_node_connected_to_mask_source_compiles() {
+        let graph = EffectRenderGraph {
+            nodes: vec![
+                EffectGraphNode {
+                    id: EffectGraphNodeId(0),
+                    kind: EffectGraphNodeKind::Source,
+                },
+                EffectGraphNode {
+                    id: EffectGraphNodeId(1),
+                    kind: EffectGraphNodeKind::MaskSource {
+                        shape: crate::mask::MaskShape::Ellipse {
+                            center: glam::Vec2::new(0.5, 0.5),
+                            radii: glam::Vec2::new(0.25, 0.25),
+                        },
+                        feather: 2.0,
+                        expansion: 0.0,
+                        opacity: 1.0,
+                    },
+                },
+                EffectGraphNode {
+                    id: EffectGraphNodeId(2),
+                    kind: EffectGraphNodeKind::Mask {
+                        input: EffectGraphNodeId(0),
+                        mask: EffectGraphNodeId(1),
+                        invert: false,
+                    },
+                },
+            ],
+            output: Some(EffectGraphNodeId(2)),
+        };
+
+        let compiled = get_or_compile_scheduled_render_graph(graph).expect("compile");
+        // Verify the graph was compiled (non-zero cost).
+        assert!(compiled.graph.nodes.len() == 3);
     }
 }
