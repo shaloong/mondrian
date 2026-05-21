@@ -14,6 +14,7 @@ pub mod info;
 pub mod multilevel_cache;
 pub mod preview;
 pub mod proxy;
+pub mod waveform;
 
 pub use audio::{
     AudioBuffer, AudioMixer, AudioSourceCache, AudioTrackConfig, AudioTrackData, ClockRole,
@@ -29,3 +30,4 @@ pub use preview::{
     preview_decode_backend, set_preview_decode_backend, PreviewDecodeBackend, RgbaFrame,
 };
 pub use proxy::{ProxyConfig, ProxyGenerator};
+pub use waveform::{compute_waveform, WaveformCache, WaveformData};
