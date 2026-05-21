@@ -1,4 +1,4 @@
-use mondrian_core::types::{AssetId, BlendMode, ColorSpace, Rational, SequenceId, TimeCode};
+use mondrian_core::types::{AssetId, BlendMode, Color, ColorSpace, Rational, SequenceId, TimeCode};
 use mondrian_effects::CompiledEffectGraph;
 use mondrian_timeline::clip::AlphaInterpretation;
 use mondrian_timeline::sequence::{FieldOrder, NestedColorProcessing, PixelAspectRatio, Sequence};
@@ -30,6 +30,16 @@ pub struct TimelineAdjustmentPlan {
 }
 
 #[derive(Debug, Clone)]
+pub struct TimelineSolidColorPlan {
+    pub color: Color,
+    pub opacity: f32,
+    pub blend_mode: BlendMode,
+    pub transform: [f32; 6],
+    pub effect_graph: Arc<CompiledEffectGraph>,
+    pub frame_seed: i64,
+}
+
+#[derive(Debug, Clone)]
 pub struct TimelineNestedSequencePlan {
     pub sequence_id: SequenceId,
     pub source_frame: i64,
@@ -46,6 +56,7 @@ pub struct TimelineNestedSequencePlan {
 pub enum TimelineRenderPlanElement {
     Media(TimelineMediaPlan),
     Adjustment(TimelineAdjustmentPlan),
+    SolidColor(TimelineSolidColorPlan),
     NestedSequence(TimelineNestedSequencePlan),
 }
 
@@ -136,6 +147,25 @@ pub fn build_timeline_render_plan(
                     effect_graph,
                     opacity,
                     blend_mode: active_clip.blend_mode,
+                    frame_seed: timeline_frame.max(0),
+                },
+            ));
+            continue;
+        }
+
+        if active_clip.clip.is_solid_color() {
+            let Some(effect_graph) = active_clip.clip.evaluate_compiled_effect_graph(current)
+            else {
+                continue;
+            };
+            let color = active_clip.clip.solid_color.unwrap_or(Color::BLACK);
+            elements.push(TimelineRenderPlanElement::SolidColor(
+                TimelineSolidColorPlan {
+                    color,
+                    opacity,
+                    blend_mode: active_clip.blend_mode,
+                    transform: mat3_to_affine(active_clip.transform_matrix.to_cols_array()),
+                    effect_graph,
                     frame_seed: timeline_frame.max(0),
                 },
             ));

@@ -398,6 +398,28 @@ impl AppState {
             .map(|(asset_id, _)| asset_id)
     }
 
+    pub fn create_solid_color_asset(
+        &mut self,
+        name: Option<&str>,
+    ) -> mondrian_core::Result<AssetId> {
+        let library = self.asset_library.as_ref().ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "create_solid_color_asset".to_string(),
+                reason: "素材库未连接".to_string(),
+            }
+        })?;
+        let asset_id = library.create_solid_color_asset(name)?;
+        let asset_name = library
+            .get_asset(asset_id)?
+            .map(|asset| asset.name)
+            .unwrap_or_else(|| "纯色层".to_string());
+        self.event_bus
+            .publish(mondrian_core::events::AppEvent::AssetImported { asset_id });
+        let _ = self.save_project_file();
+        self.set_status_hint(format!("已新建：{}", asset_name), false);
+        Ok(asset_id)
+    }
+
     pub fn create_adjustment_layer_on_video_track(
         &mut self,
         track_id: TrackId,
@@ -422,6 +444,91 @@ impl AppState {
         let clip_id =
             self.drop_dragging_asset_to_video_track_with_mode(track_id, start_frame, overlap_mode)?;
         self.set_status_hint(format!("已创建调整图层：{}", asset_name), false);
+        Ok(clip_id)
+    }
+
+    pub fn create_solid_color_on_video_track(
+        &mut self,
+        track_id: TrackId,
+        timeline_frame: Option<i64>,
+        overlap_mode: ClipOverlapMode,
+    ) -> mondrian_core::Result<ClipId> {
+        self.create_solid_color_on_video_track_with_color(
+            track_id,
+            timeline_frame,
+            overlap_mode,
+            Color::from_hex(0x808080),
+        )
+    }
+
+    pub fn create_solid_color_on_video_track_with_color(
+        &mut self,
+        track_id: TrackId,
+        timeline_frame: Option<i64>,
+        overlap_mode: ClipOverlapMode,
+        color: Color,
+    ) -> mondrian_core::Result<ClipId> {
+        let (asset_id, asset_name) = {
+            let library = self.asset_library.as_ref().ok_or_else(|| {
+                mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "create_solid_color".to_string(),
+                    reason: "素材库未连接".to_string(),
+                }
+            })?;
+            let asset_id = library.create_solid_color_asset(None)?;
+            let asset_name = library
+                .get_asset(asset_id)?
+                .map(|asset| asset.name)
+                .unwrap_or_else(|| "纯色层".to_string());
+            (asset_id, asset_name)
+        };
+
+        let selection_start = self
+            .out_point_frame()
+            .filter(|out| *out > self.in_point_frame())
+            .map(|_| self.in_point_frame());
+        let start_frame = timeline_frame
+            .or(selection_start)
+            .unwrap_or_else(|| self.current_frame().max(0));
+        let default_duration_secs = self
+            .default_adjustment_layer_drag_duration()
+            .as_secs_f64();
+
+        let (sequence_id, clip_id) = {
+            let seq = self.sequence.as_mut().ok_or_else(|| {
+                mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "create_solid_color".to_string(),
+                    reason: "当前无序列".to_string(),
+                }
+            })?;
+            let before = seq.clone();
+            let time_base = seq.time_base();
+            let fps = seq.settings.frame_rate.to_f64();
+            let duration_frames = (default_duration_secs * fps).ceil() as i64;
+            let duration_frames = duration_frames.max(1);
+            let mut clip = Clip::new_solid_color(
+                asset_id,
+                color,
+                TimeCode::new(start_frame, time_base),
+                TimeCode::new(duration_frames, time_base),
+            );
+            clip.label = Some(asset_name.clone());
+            let clip_id = clip.id;
+            let track = seq.video_track_mut(track_id).ok_or_else(|| {
+                mondrian_core::MondrianError::TrackNotFound {
+                    track_id: track_id.to_string(),
+                }
+            })?;
+            track.add_clip(clip)?;
+            resolve_track_conflicts(track, clip_id, overlap_mode);
+            let sequence_id = seq.id;
+            self.record_timeline_edit_snapshot("创建纯色层", before);
+            (sequence_id, clip_id)
+        };
+
+        self.set_status_hint(format!("已创建纯色层: {}", asset_name), false);
+        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
+        let _ = self.save_project_file();
         Ok(clip_id)
     }
 
@@ -1619,7 +1726,7 @@ impl AppState {
         let dragging =
             self.dragging_asset.clone().ok_or(mondrian_core::MondrianError::Cancelled)?;
 
-        if !matches!(dragging.kind, AssetKind::Video | AssetKind::AdjustmentLayer) {
+        if !matches!(dragging.kind, AssetKind::Video | AssetKind::AdjustmentLayer | AssetKind::SolidColor) {
             return Err(mondrian_core::MondrianError::UnsupportedFormat {
                 format: "仅支持将视频素材或调整图层拖到视频轨".to_string(),
             });
@@ -1642,6 +1749,13 @@ impl AppState {
             let mut clip = if dragging.kind == AssetKind::AdjustmentLayer {
                 Clip::new_adjustment_layer(
                     dragging.asset_id,
+                    TimeCode::new(start_frame, time_base),
+                    TimeCode::new(duration_frames, time_base),
+                )
+            } else if dragging.kind == AssetKind::SolidColor {
+                Clip::new_solid_color(
+                    dragging.asset_id,
+                    Color::from_hex(0x808080),
                     TimeCode::new(start_frame, time_base),
                     TimeCode::new(duration_frames, time_base),
                 )

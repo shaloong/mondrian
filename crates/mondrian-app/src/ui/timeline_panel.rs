@@ -47,6 +47,15 @@ pub struct TimelinePanel {
     right_scrollbar_rect: Option<Rect>,
     bottom_scrollbar_rect: Option<Rect>,
     waveform_cache: mondrian_media::WaveformCache,
+    solid_color_picker: Option<SolidColorPickerState>,
+}
+
+struct SolidColorPickerState {
+    track_id: TrackId,
+    start_frame: i64,
+    overlap_mode: ClipOverlapMode,
+    color: [f32; 4],
+    open: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -926,6 +935,85 @@ impl TimelinePanel {
             ui.add_space(scrollbar_gap);
             self.draw_bottom_scrollbar(ui, state);
         });
+
+        self.show_solid_color_picker(ui.ctx(), state);
+    }
+
+    fn show_solid_color_picker(&mut self, ctx: &egui::Context, state: &mut AppState) {
+        let Some(ref mut picker) = self.solid_color_picker else {
+            return;
+        };
+        if !picker.open {
+            self.solid_color_picker = None;
+            return;
+        }
+
+        let mut r = (picker.color[0] * 255.0).round() as i32;
+        let mut g = (picker.color[1] * 255.0).round() as i32;
+        let mut b = (picker.color[2] * 255.0).round() as i32;
+        let mut confirmed = false;
+        let mut cancelled = false;
+
+        egui::Window::new("选择纯色层颜色")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                let preview = egui::Color32::from_rgb(r.clamp(0, 255) as u8, g.clamp(0, 255) as u8, b.clamp(0, 255) as u8);
+                ui.horizontal(|ui| {
+                    ui.label("预览:");
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::hover());
+                    ui.painter().rect_filled(rect, egui::CornerRadius::same(4), preview);
+                });
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label("R:");
+                    ui.add(egui::Slider::new(&mut r, 0..=255));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("G:");
+                    ui.add(egui::Slider::new(&mut g, 0..=255));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("B:");
+                    ui.add(egui::Slider::new(&mut b, 0..=255));
+                });
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("确定").clicked() {
+                        confirmed = true;
+                    }
+                    if ui.button("取消").clicked() {
+                        cancelled = true;
+                    }
+                });
+            });
+
+        picker.color = [
+            r.clamp(0, 255) as f32 / 255.0,
+            g.clamp(0, 255) as f32 / 255.0,
+            b.clamp(0, 255) as f32 / 255.0,
+            1.0,
+        ];
+
+        if confirmed {
+            let mondrian_color = mondrian_core::types::Color {
+                r: picker.color[0],
+                g: picker.color[1],
+                b: picker.color[2],
+                a: 1.0,
+            };
+            let _ = state.create_solid_color_on_video_track_with_color(
+                picker.track_id,
+                Some(picker.start_frame),
+                picker.overlap_mode,
+                mondrian_color,
+            );
+            picker.open = false;
+        }
+        if cancelled {
+            picker.open = false;
+        }
     }
 
     fn timeline_content_width(&self, state: &AppState) -> f32 {
@@ -2703,6 +2791,18 @@ impl TimelinePanel {
                         ) {
                             state.set_status_hint(format!("创建调整图层失败：{err}"), true);
                         }
+                        ui.close();
+                    }
+                    if ui.button("纯色层").clicked() {
+                        let start_frame = state.current_frame().max(0);
+                        let overlap_mode = Self::current_overlap_mode(ui);
+                        self.solid_color_picker = Some(SolidColorPickerState {
+                            track_id: track.id,
+                            start_frame,
+                            overlap_mode,
+                            color: [0.5, 0.5, 0.5, 1.0],
+                            open: true,
+                        });
                         ui.close();
                     }
                 });

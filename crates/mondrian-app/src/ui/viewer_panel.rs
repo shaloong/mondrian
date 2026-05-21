@@ -6,7 +6,7 @@ use egui::{Pos2, Rect, Sense, Ui, Vec2};
 
 use mondrian_core::{
     apply_display_profile_rgba8_in_place, convert_rgba8_in_place,
-    types::{AssetId, BlendMode, ColorEngine, ColorSpace, Rational, SequenceId, TimeCode},
+    types::{AssetId, BlendMode, Color, ColorEngine, ColorSpace, Rational, SequenceId, TimeCode},
     ColorPipeline, DisplayColorProfile,
 };
 use mondrian_effects::CompiledEffectGraph;
@@ -17,7 +17,7 @@ use mondrian_renderer::{
     composite_timeline_elements_float_linear, is_identity_transform, quantize_transform_signature,
     CompositorConfig, CpuRgbaLayer, FrameCompositor, GpuContext, TimelineAdjustmentLayer,
     TimelineCompositeElement, TimelineCompositeOptions, TimelineCompositeScratch,
-    TimelineMediaLayer, TimelineRenderPlanElement,
+    TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
 };
 use mondrian_timeline::sequence::{
     ColorContext, ColorWorkflow, MissingColorMetadataPolicy, NestedColorProcessing,
@@ -82,9 +82,20 @@ struct NestedSequenceRenderRequest {
 }
 
 #[derive(Clone)]
+struct SolidColorRenderRequest {
+    color: Color,
+    opacity: f32,
+    blend_mode: BlendMode,
+    transform: [f32; 6],
+    effect_graph: std::sync::Arc<CompiledEffectGraph>,
+    frame_seed: i64,
+}
+
+#[derive(Clone)]
 enum RenderElement {
     Media(LayerDecodeRequest),
     Adjustment(AdjustmentRenderRequest),
+    SolidColor(SolidColorRenderRequest),
     NestedSequence(NestedSequenceRenderRequest),
 }
 
@@ -148,6 +159,14 @@ enum LayerSignature {
     Adjustment {
         opacity_u8: u8,
         blend_mode: Option<BlendMode>,
+        frame_seed: i64,
+        effect_hash: u64,
+    },
+    SolidColor {
+        color_bits: [u32; 4],
+        opacity_u8: u8,
+        blend_mode: BlendMode,
+        transform_key: [i32; 6],
         frame_seed: i64,
         effect_hash: u64,
     },
@@ -1783,6 +1802,16 @@ impl ViewerPanel {
                         frame_seed: adjustment.frame_seed,
                     }));
                 }
+                TimelineRenderPlanElement::SolidColor(solid) => {
+                    layers.push(RenderElement::SolidColor(SolidColorRenderRequest {
+                        color: solid.color,
+                        opacity: solid.opacity,
+                        blend_mode: solid.blend_mode,
+                        transform: solid.transform,
+                        effect_graph: solid.effect_graph,
+                        frame_seed: solid.frame_seed,
+                    }));
+                }
                 TimelineRenderPlanElement::Media(media) => {
                     let asset_id = media.asset_id;
                     let cached = if let Some(hit) = self.asset_preview_cache.get(&asset_id) {
@@ -2506,6 +2535,19 @@ fn render_element_signature(layer: &RenderElement) -> LayerSignature {
             frame_seed: layer.frame_seed,
             effect_hash: layer.effect_graph.signature_hash,
         },
+        RenderElement::SolidColor(layer) => LayerSignature::SolidColor {
+            color_bits: [
+                layer.color.r.to_bits(),
+                layer.color.g.to_bits(),
+                layer.color.b.to_bits(),
+                layer.color.a.to_bits(),
+            ],
+            opacity_u8: (layer.opacity * 255.0).round() as u8,
+            blend_mode: layer.blend_mode,
+            transform_key: quantize_transform_signature(layer.transform),
+            frame_seed: layer.frame_seed,
+            effect_hash: layer.effect_graph.signature_hash,
+        },
         RenderElement::NestedSequence(layer) => {
             let child_hash = {
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -2767,6 +2809,7 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
                 || layer.blend_mode != BlendMode::Normal
         }
         RenderElement::Adjustment(_) => true,
+        RenderElement::SolidColor(_) => true,
         RenderElement::NestedSequence(_) => true,
     });
 
@@ -2828,6 +2871,18 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
                         opacity: adjustment.opacity,
                         blend_mode: adjustment.blend_mode,
                         frame_seed: adjustment.frame_seed,
+                    },
+                ));
+            }
+            RenderElement::SolidColor(solid) => {
+                composite_elements.push(TimelineCompositeElement::SolidColor(
+                    TimelineSolidColorLayer {
+                        color: solid.color,
+                        opacity: solid.opacity,
+                        blend_mode: solid.blend_mode,
+                        transform: solid.transform,
+                        effect_graph: std::sync::Arc::clone(&solid.effect_graph),
+                        frame_seed: solid.frame_seed,
                     },
                 ));
             }

@@ -21,7 +21,7 @@ use mondrian_media::decode_video_frame_at_time_rgba_scaled;
 use mondrian_renderer::{
     build_timeline_render_plan, composite_timeline_elements_float_linear, TimelineAdjustmentLayer,
     TimelineCompositeElement, TimelineCompositeOptions, TimelineCompositeScratch,
-    TimelineMediaLayer, TimelineRenderPlanElement,
+    TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
 };
 use mondrian_timeline::sequence::{ColorContext, ExportBitDepth, SequenceSettings, VideoRange};
 use parking_lot::{Condvar, Mutex};
@@ -1079,6 +1079,18 @@ fn render_sequence_frame_into(
                     effect_graph: nested.effect_graph.clone(),
                     frame_seed: nested.frame_seed,
                 }));
+            }
+            TimelineRenderPlanElement::SolidColor(solid) => {
+                composite_elements.push(TimelineCompositeElement::SolidColor(
+                    TimelineSolidColorLayer {
+                        color: solid.color,
+                        opacity: solid.opacity,
+                        blend_mode: solid.blend_mode,
+                        transform: solid.transform,
+                        effect_graph: solid.effect_graph.clone(),
+                        frame_seed: solid.frame_seed,
+                    },
+                ));
             }
         }
     }

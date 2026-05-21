@@ -79,6 +79,17 @@ impl LibraryPanel {
         }
     }
 
+    fn create_solid_color_layer(&mut self, state: &mut AppState) {
+        match state.create_solid_color_asset(None) {
+            Ok(asset_id) => {
+                self.selected_asset = Some(asset_id);
+            }
+            Err(err) => {
+                state.set_status_hint(format!("新建纯色层失败：{err}"), true);
+            }
+        }
+    }
+
     pub fn show(&mut self, ui: &mut Ui, state: &mut AppState) {
         let panel_rect = ui.max_rect();
         const SEARCH_MARGIN_TOP: f32 = 6.0;
@@ -130,6 +141,10 @@ impl LibraryPanel {
                 ui.menu_button("新建图层", |ui| {
                     if ui.button("调整图层").clicked() {
                         self.create_adjustment_layer(state);
+                        ui.close();
+                    }
+                    if ui.button("纯色层").clicked() {
+                        self.create_solid_color_layer(state);
                         ui.close();
                     }
                 });
@@ -855,7 +870,8 @@ impl LibraryPanel {
 }
 
 fn asset_is_offline(asset: &AssetRecord) -> bool {
-    !matches!(asset.kind, AssetKind::AdjustmentLayer) && !asset.path.exists()
+    !matches!(asset.kind, AssetKind::AdjustmentLayer | AssetKind::SolidColor)
+        && !asset.path.exists()
 }
 
 fn asset_card_presentation(
@@ -916,6 +932,11 @@ fn asset_kind_badge(kind: &AssetKind) -> AssetCardBadge {
             palette::accent_secondary().gamma_multiply(0.22),
             palette::text_primary(),
         ),
+        AssetKind::SolidColor => (
+            "纯色",
+            palette::accent_audio().gamma_multiply(0.22),
+            palette::text_primary(),
+        ),
     };
     AssetCardBadge { text: text.to_string(), bg, fg, align_right: true }
 }
@@ -925,13 +946,14 @@ fn asset_placeholder_icon(kind: &AssetKind) -> theme::UiIcon {
         AssetKind::Video => theme::UiIcon::Video,
         AssetKind::Audio => theme::UiIcon::Audio,
         AssetKind::AdjustmentLayer => theme::UiIcon::Plus,
+        AssetKind::SolidColor => theme::UiIcon::Plus,
     }
 }
 
 fn asset_target_lane_label(kind: &AssetKind) -> &'static str {
     match kind {
         AssetKind::Audio => "音频轨",
-        AssetKind::Video | AssetKind::AdjustmentLayer => "视频轨",
+        AssetKind::Video | AssetKind::AdjustmentLayer | AssetKind::SolidColor => "视频轨",
     }
 }
 
