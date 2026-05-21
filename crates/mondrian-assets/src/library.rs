@@ -1,6 +1,6 @@
 //! 素材库主入口
 
-use crate::schema::INIT_SQL;
+use crate::schema::{INIT_SQL, MIGRATE_FOLDERS_SQL};
 use mondrian_core::{types::AssetId, MondrianError, Result};
 use mondrian_media::MediaInfo;
 use parking_lot::Mutex;
@@ -45,7 +45,20 @@ pub struct AssetRecord {
     pub name: String,
     pub kind: AssetKind,
     pub path: PathBuf,
+    #[serde(default)]
+    pub folder_id: Option<String>,
     pub media_info: MediaInfo,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// A folder / bin in the asset library.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FolderRecord {
+    pub id: String,
+    pub name: String,
+    pub parent_id: Option<String>,
+    pub sort_order: i32,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -64,6 +77,9 @@ impl AssetLibrary {
             .map_err(|e| mondrian_core::MondrianError::AssetDbError { reason: e.to_string() })?;
         conn.execute_batch(INIT_SQL)
             .map_err(|e| mondrian_core::MondrianError::AssetDbError { reason: e.to_string() })?;
+
+        // Migrate existing databases that lack folder support.
+        let _ = conn.execute_batch(MIGRATE_FOLDERS_SQL);
 
         info!("Asset library opened at {:?}", root);
         Ok(Arc::new(Self { root, db: Arc::new(Mutex::new(conn)) }))
@@ -251,102 +267,49 @@ impl AssetLibrary {
     }
 
     pub fn list_assets(&self) -> Result<Vec<AssetRecord>> {
+        self.list_assets_in_folder(None)
+    }
+
+    pub fn list_assets_in_folder(&self, folder_id: Option<&str>) -> Result<Vec<AssetRecord>> {
         let db = self.db.lock();
-        let mut stmt = db
-            .prepare(
-                "SELECT id, name, asset_type, path, metadata, created_at, updated_at \
-                 FROM assets ORDER BY updated_at DESC",
-            )
-            .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
-
-        let records = stmt
-            .query_map([], |row| {
-                let id_raw: String = row.get(0)?;
-                let name: String = row.get(1)?;
-                let kind_raw: String = row.get(2)?;
-                let path_raw: String = row.get(3)?;
-                let metadata_raw: String = row.get(4)?;
-                let created_at: String = row.get(5)?;
-                let updated_at: String = row.get(6)?;
-
-                let asset_id = Uuid::parse_str(&id_raw).map(AssetId).map_err(|e| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        0,
-                        rusqlite::types::Type::Text,
-                        Box::new(e),
-                    )
-                })?;
-
-                let media_info = serde_json::from_str::<MediaInfo>(&metadata_raw).map_err(|e| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        4,
-                        rusqlite::types::Type::Text,
-                        Box::new(e),
-                    )
-                })?;
-
-                Ok(AssetRecord {
-                    id: asset_id,
-                    name,
-                    kind: AssetKind::from_str(&kind_raw),
-                    path: PathBuf::from(path_raw),
-                    media_info,
-                    created_at,
-                    updated_at,
-                })
-            })
-            .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?
-            .filter_map(std::result::Result::ok)
-            .collect();
-
-        Ok(records)
+        if let Some(fid) = folder_id {
+            let mut stmt = db
+                .prepare(
+                    "SELECT id, name, asset_type, path, folder_id, metadata, created_at, updated_at \
+                     FROM assets WHERE folder_id = ?1 ORDER BY updated_at DESC",
+                )
+                .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
+            let rows = stmt
+                .query_map(rusqlite::params![fid], parse_asset_row)
+                .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
+            let records: Vec<_> = rows.flatten().collect();
+            Ok(records)
+        } else {
+            let mut stmt = db
+                .prepare(
+                    "SELECT id, name, asset_type, path, folder_id, metadata, created_at, updated_at \
+                     FROM assets ORDER BY updated_at DESC",
+                )
+                .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
+            let rows = stmt
+                .query_map([], parse_asset_row)
+                .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
+            let records: Vec<_> = rows.flatten().collect();
+            Ok(records)
+        }
     }
 
     pub fn get_asset(&self, asset_id: AssetId) -> Result<Option<AssetRecord>> {
         let db = self.db.lock();
         let mut stmt = db
             .prepare(
-                "SELECT id, name, asset_type, path, metadata, created_at, updated_at \
+                "SELECT id, name, asset_type, path, folder_id, metadata, created_at, updated_at \
                  FROM assets WHERE id = ?1 LIMIT 1",
             )
             .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
 
         let result = stmt
-            .query_row(rusqlite::params![asset_id.0.to_string()], |row| {
-                let id_raw: String = row.get(0)?;
-                let name: String = row.get(1)?;
-                let kind_raw: String = row.get(2)?;
-                let path_raw: String = row.get(3)?;
-                let metadata_raw: String = row.get(4)?;
-                let created_at: String = row.get(5)?;
-                let updated_at: String = row.get(6)?;
-
-                let parsed_id = Uuid::parse_str(&id_raw).map(AssetId).map_err(|e| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        0,
-                        rusqlite::types::Type::Text,
-                        Box::new(e),
-                    )
-                })?;
-
-                let media_info = serde_json::from_str::<MediaInfo>(&metadata_raw).map_err(|e| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        4,
-                        rusqlite::types::Type::Text,
-                        Box::new(e),
-                    )
-                })?;
-
-                Ok(AssetRecord {
-                    id: parsed_id,
-                    name,
-                    kind: AssetKind::from_str(&kind_raw),
-                    path: PathBuf::from(path_raw),
-                    media_info,
-                    created_at,
-                    updated_at,
-                })
-            })
+            .query_row(rusqlite::params![asset_id.0.to_string()], parse_asset_row)
             .optional()
             .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
 
@@ -401,6 +364,108 @@ impl AssetLibrary {
 
     pub fn library_root(&self) -> &Path {
         &self.root
+    }
+
+    // ── Folder / Bin CRUD ──────────────────────────────────────────────
+
+    pub fn create_folder(
+        &self,
+        name: &str,
+        parent_id: Option<&str>,
+    ) -> Result<String> {
+        let id = Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        let db = self.db.lock();
+        db.execute(
+            "INSERT INTO folders (id, name, parent_id, sort_order, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, 0, ?4, ?4)",
+            rusqlite::params![id, name.trim(), parent_id, now],
+        )
+        .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
+        Ok(id)
+    }
+
+    pub fn rename_folder(&self, folder_id: &str, new_name: &str) -> Result<()> {
+        let trimmed = new_name.trim();
+        if trimmed.is_empty() {
+            return Err(MondrianError::AssetDbError { reason: "文件夹名不能为空".to_string() });
+        }
+        let db = self.db.lock();
+        db.execute(
+            "UPDATE folders SET name = ?1, updated_at = ?2 WHERE id = ?3",
+            rusqlite::params![trimmed, chrono::Utc::now().to_rfc3339(), folder_id],
+        )
+        .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
+        Ok(())
+    }
+
+    pub fn delete_folder(&self, folder_id: &str) -> Result<()> {
+        let db = self.db.lock();
+        // Unlink assets from this folder before deleting.
+        db.execute(
+            "UPDATE assets SET folder_id = NULL WHERE folder_id = ?1",
+            rusqlite::params![folder_id],
+        )
+        .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
+        // Child folders cascade via ON DELETE CASCADE.
+        db.execute("DELETE FROM folders WHERE id = ?1", rusqlite::params![folder_id])
+            .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
+        Ok(())
+    }
+
+    pub fn list_folders(&self) -> Result<Vec<FolderRecord>> {
+        let db = self.db.lock();
+        let mut stmt = db
+            .prepare(
+                "SELECT id, name, parent_id, sort_order, created_at, updated_at \
+                 FROM folders ORDER BY sort_order, name",
+            )
+            .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
+        let records: Vec<_> = stmt
+            .query_map([], |row| {
+                Ok(FolderRecord {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    parent_id: row.get(2)?,
+                    sort_order: row.get(3)?,
+                    created_at: row.get(4)?,
+                    updated_at: row.get(5)?,
+                })
+            })
+            .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(records)
+    }
+
+    pub fn move_asset_to_folder(
+        &self,
+        asset_id: AssetId,
+        folder_id: Option<&str>,
+    ) -> Result<()> {
+        let db = self.db.lock();
+        db.execute(
+            "UPDATE assets SET folder_id = ?1 WHERE id = ?2",
+            rusqlite::params![folder_id, asset_id.0.to_string()],
+        )
+        .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
+        Ok(())
+    }
+
+    /// Find which timeline clips reference this asset (position reverse lookup).
+    /// Returns a list of (asset_id, asset_name) for the UI to select and navigate to.
+    pub fn get_asset_location(&self, asset_id: AssetId) -> Result<Option<(Option<String>, Option<String>)>> {
+        let db = self.db.lock();
+        let mut stmt = db
+            .prepare("SELECT folder_id, name FROM assets WHERE id = ?1")
+            .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
+        let result = stmt
+            .query_row(rusqlite::params![asset_id.0.to_string()], |row| {
+                Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?))
+            })
+            .optional()
+            .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
+        Ok(result)
     }
 
     fn next_adjustment_layer_name(&self) -> String {
@@ -464,6 +529,35 @@ impl AssetLibrary {
 
         format!("纯色层 {next_index}")
     }
+}
+
+fn parse_asset_row(row: &rusqlite::Row) -> rusqlite::Result<AssetRecord> {
+    let id_raw: String = row.get(0)?;
+    let name: String = row.get(1)?;
+    let kind_raw: String = row.get(2)?;
+    let path_raw: String = row.get(3)?;
+    let folder_id: Option<String> = row.get(4)?;
+    let metadata_raw: String = row.get(5)?;
+    let created_at: String = row.get(6)?;
+    let updated_at: String = row.get(7)?;
+
+    let asset_id = Uuid::parse_str(&id_raw).map(AssetId).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+    })?;
+    let media_info = serde_json::from_str::<MediaInfo>(&metadata_raw).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(e))
+    })?;
+
+    Ok(AssetRecord {
+        id: asset_id,
+        name,
+        kind: AssetKind::from_str(&kind_raw),
+        path: PathBuf::from(path_raw),
+        folder_id,
+        media_info,
+        created_at,
+        updated_at,
+    })
 }
 
 fn synthetic_adjustment_layer_path(asset_id: AssetId) -> PathBuf {
