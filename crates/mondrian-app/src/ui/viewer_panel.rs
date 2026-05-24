@@ -5,14 +5,20 @@ use crate::{
 use egui::{Pos2, Rect, Sense, Ui, Vec2};
 
 use mondrian_core::{
-    apply_display_profile_rgba8_in_place, automation::timecode_to_ticks, convert_rgba8_in_place,
-    types::{AssetId, BlendMode, Color, ColorEngine, ColorSpace, Rational, SequenceId, TimeCode},
+    apply_display_profile_rgba8_in_place,
+    automation::timecode_to_ticks,
+    convert_rgba8_in_place,
+    types::{
+        AssetId, BlendMode, Color, ColorEngine, ColorSpace, Rational, Resolution, SequenceId,
+        TimeCode,
+    },
     ColorPipeline, DisplayColorProfile,
 };
-use mondrian_effects::CompiledEffectGraph;
 use mondrian_effects::mask::{BezierPoint, MaskShape};
+use mondrian_effects::CompiledEffectGraph;
 use mondrian_media::cache::FrameCacheConfig;
 use mondrian_media::{DecoderPool, FrameCache, RgbaFrame};
+use crate::ui::timeline_panel::SelectedClipRef;
 use mondrian_renderer::{
     build_timeline_render_plan, collect_timeline_color_diagnostics,
     composite_timeline_elements_float_linear, is_identity_transform, quantize_transform_signature,
@@ -21,7 +27,7 @@ use mondrian_renderer::{
     TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
 };
 use mondrian_timeline::sequence::{
-    ColorContext, ColorWorkflow, MissingColorMetadataPolicy, NestedColorProcessing,
+    ColorContext, ColorWorkflow, MissingColorMetadataPolicy, NestedColorProcessing, Sequence,
 };
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -114,6 +120,8 @@ struct DecodeRequest {
     playback_mode: bool,
     target_width: u32,
     target_height: u32,
+    seq_width: u32,
+    seq_height: u32,
     layer_cache_enabled: bool,
     layer_cache: SharedLayerFrameCache,
     decoder_pool: Arc<DecoderPool>,
@@ -244,6 +252,20 @@ pub struct ViewerPreferences {
     layer_cache_enabled: bool,
     #[serde(default = "DisplayColorProfile::rec709_reference")]
     display_profile: DisplayColorProfile,
+    /// Canvas background color (letterbox/pillarbox), stored as 0xRRGGBB hex.
+    #[serde(default = "default_canvas_bg")]
+    canvas_bg_hex: u32,
+}
+
+fn default_canvas_bg() -> u32 {
+    0x2a2a2a
+}
+
+fn hex_to_bg(hex: u32) -> egui::Color32 {
+    let r = ((hex >> 16) & 0xFF) as u8;
+    let g = ((hex >> 8) & 0xFF) as u8;
+    let b = (hex & 0xFF) as u8;
+    egui::Color32::from_rgb(r, g, b)
 }
 
 const fn default_prefetch_enabled() -> bool {
@@ -281,6 +303,7 @@ impl Default for ViewerPreferences {
             prefetch_enabled: default_prefetch_enabled(),
             layer_cache_enabled: default_layer_cache_enabled(),
             display_profile: DisplayColorProfile::rec709_reference(),
+            canvas_bg_hex: default_canvas_bg(),
         }
     }
 }
@@ -358,6 +381,24 @@ pub struct ViewerPanel {
     show_color_diagnostics: bool,
     ocio_display: Option<String>,
     ocio_view: Option<String>,
+    canvas_bg_hex: u32,
+    canvas_transform: crate::ui::viewer::canvas::CanvasTransform,
+    /// Clip currently selected via canvas click (track_id, is_video, clip_id).
+    canvas_selected_clip: Option<(mondrian_core::types::TrackId, bool, mondrian_core::types::ClipId)>,
+    /// Drag state for canvas move/resize.
+    canvas_drag: Option<CanvasDragState>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum DragMode { Move, Scale }
+
+struct CanvasDragState {
+    track_id: mondrian_core::types::TrackId,
+    is_video: bool,
+    clip_id: mondrian_core::types::ClipId,
+    mode: DragMode,
+    start_pos: glam::Vec2,
+    start_mouse: Pos2,
 }
 
 impl Default for ViewerPanel {
@@ -446,6 +487,13 @@ impl Default for ViewerPanel {
             show_color_diagnostics: false,
             ocio_display: None,
             ocio_view: None,
+            canvas_bg_hex: default_canvas_bg(),
+            canvas_selected_clip: None,
+            canvas_drag: None,
+            canvas_transform: crate::ui::viewer::canvas::CanvasTransform::fit(
+                (1920, 1080),
+                egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(960.0, 540.0)),
+            ),
         }
     }
 }
@@ -471,6 +519,9 @@ impl ViewerPanel {
         let show_started_at = Instant::now();
         let diag_enabled = preview_diag_enabled();
         let is_playing = state.is_playing();
+        // Reset canvas selection at start of each frame. Interaction code
+        // re-sets it when the user clicks a clip.
+        state.canvas_selected_clip = None;
         let current_frame = state.current_frame();
         let playback_fps = state
             .sequence
@@ -558,17 +609,159 @@ impl ViewerPanel {
                 Sense::hover(),
             );
 
-            let aspect = state
+            // Canvas: slot is fixed, content may extend beyond (clipped to slot).
+            let canvas_rect = canvas_slot_rect;
+            let seq_res = state
                 .sequence
                 .as_ref()
-                .map(|s| s.settings.resolution.aspect_ratio())
-                .unwrap_or(16.0 / 9.0)
-                .max(0.01);
-            let fitted = fit_aspect(canvas_slot_rect, aspect);
-            let canvas_rect = fitted;
+                .map(|s| s.settings.resolution)
+                .unwrap_or(Resolution { width: 1920, height: 1080 });
+            self.canvas_transform.update_canvas_rect(canvas_rect);
+            if self.canvas_transform.seq_size != (seq_res.width, seq_res.height) {
+                self.canvas_transform = crate::ui::viewer::canvas::CanvasTransform::fit(
+                    (seq_res.width, seq_res.height),
+                    canvas_rect,
+                );
+                self.canvas_transform.background = hex_to_bg(self.canvas_bg_hex);
+            }
+            let content_rect = self.canvas_transform.content_rect();
+
+            // Canvas interaction: Ctrl+scroll zoom, middle-drag pan, select, drag.
+            let ctx = ui.ctx();
+            let canvas_hovered = ctx.input(|inp| {
+                inp.pointer
+                    .interact_pos()
+                    .is_some_and(|p| canvas_rect.contains(p))
+            });
+            if canvas_hovered {
+                // Ctrl+scroll wheel zoom from center.
+                if ctx.input(|inp| inp.modifiers.command) {
+                    let scroll = ctx.input(|inp| inp.raw_scroll_delta.y);
+                    if scroll.abs() > 0.1 {
+                        let factor = 1.0 + scroll.abs().min(10.0) * 0.001 * scroll.signum();
+                        let ctr = self.canvas_transform.canvas_rect.center();
+                        self.canvas_transform.zoom_at_screen(ctr, factor);
+                    }
+                }
+                // Middle-button drag to pan.
+                if ctx.input(|inp| inp.pointer.button_down(egui::PointerButton::Middle)) {
+                    let delta = ctx.input(|inp| inp.pointer.delta());
+                    self.canvas_transform.pan_by_screen(Vec2::new(-delta.x, -delta.y));
+                }
+                // Handle drag state.
+                let ptr = ctx.input(|inp| inp.pointer.interact_pos());
+                let primary_down = ctx.input(|inp| inp.pointer.button_down(egui::PointerButton::Primary));
+
+                if let Some(ref mut drag) = self.canvas_drag {
+                    if primary_down {
+                        if let Some(now) = ctx.input(|inp| inp.pointer.interact_pos()) {
+                            match drag.mode {
+                                DragMode::Move => {
+                                    let screen_delta = now - drag.start_mouse;
+                                    let zoom = self.canvas_transform.zoom();
+                                    let seq_delta = glam::Vec2::new(
+                                        screen_delta.x / zoom.max(0.001),
+                                        screen_delta.y / zoom.max(0.001),
+                                    );
+                                    let new_pos = drag.start_pos + seq_delta;
+                                    let _ = state.set_clip_position_direct(
+                                        SelectedClipRef {
+                                            track_id: drag.track_id,
+                                            is_video_track: drag.is_video,
+                                            clip_id: drag.clip_id,
+                                        },
+                                        new_pos,
+                                    );
+                                }
+                                DragMode::Scale => { /* TODO: scale via direct setter */ }
+                            }
+                        }
+                    } else {
+                        self.canvas_drag = None;
+                    }
+                } else if ptr.is_some_and(|p| canvas_rect.contains(p)) {
+                    if let Some(pos) = ptr {
+                        if ctx.input(|inp| inp.pointer.button_pressed(egui::PointerButton::Primary)) {
+                            if let Some(seq) = state.sequence.as_ref() {
+                                let current = TimeCode::new(
+                                    state.current_frame().max(0),
+                                    seq.time_base(),
+                                );
+                                let active = seq.active_clips_at(current);
+                                // Check if click is near corner of already-selected clip.
+                                let mut hit = None;
+                                if let Some((_tid, _iv, sel_cid)) = self.canvas_selected_clip {
+                                    if let Some(ac) = active.iter().find(|a| a.clip.id == sel_cid) {
+                                        let bb = clip_screen_bounds_with_media(
+                                            &ac.clip, ac.transform_matrix,
+                                            &self.canvas_transform, state,
+                                        );
+                                        if is_near_corner(bb, pos, 14.0) {
+                                            let track_id = seq.video_tracks
+                                                .get(ac.track_index)
+                                                .map(|t| t.id)
+                                                .unwrap_or_default();
+                                            let mat = ac.clip.transform.evaluate_matrix(current);
+                                            let pos_v = glam::Vec2::new(mat.col(2).x, mat.col(2).y);
+                                            let scale = glam::Vec2::new(
+                                                mat.col(0).truncate().length(),
+                                                mat.col(1).truncate().length(),
+                                            );
+                                            let center_ss = bb.map(|r| r.center()).unwrap_or(pos);
+                                            hit = Some((track_id, ac.clip.id, pos_v, scale, center_ss, true));
+                                        }
+                                    }
+                                }
+                                // Otherwise find clip under cursor.
+                                if hit.is_none() {
+                                    for ac in active.iter().rev() {
+                                        let bb_rect = clip_screen_bounds_with_media(
+                                            &ac.clip, ac.transform_matrix,
+                                            &self.canvas_transform, state,
+                                        );
+                                        if bb_rect.is_some_and(|r| r.contains(pos)) {
+                                            let track_id = seq.video_tracks
+                                                .get(ac.track_index)
+                                                .map(|t| t.id)
+                                                .unwrap_or_default();
+                                            let mat = ac.clip.transform.evaluate_matrix(current);
+                                            let pos_v = glam::Vec2::new(mat.col(2).x, mat.col(2).y);
+                                            let scale = glam::Vec2::new(
+                                                mat.col(0).truncate().length(),
+                                                mat.col(1).truncate().length(),
+                                            );
+                                            let bb2 = clip_screen_bounds_with_media(
+                                                &ac.clip, ac.transform_matrix,
+                                                &self.canvas_transform, state,
+                                            );
+                                            let center_ss = bb2.as_ref().map(|r| r.center()).unwrap_or(pos);
+                                            let near_corner = is_near_corner(bb2, pos, 14.0);
+                                            hit = Some((track_id, ac.clip.id, pos_v, scale, center_ss, near_corner));
+                                            break;
+                                        }
+                                    }
+                                }
+                                if let Some((track_id, cid, pos_v, _scale, _center_ss, near_corner)) = hit {
+                                    let sel = (track_id, true, cid);
+                                    self.canvas_selected_clip = Some(sel);
+                                    state.canvas_selected_clip = Some(sel);
+                                    self.canvas_drag = Some(CanvasDragState {
+                                        track_id, is_video: true, clip_id: cid,
+                                        mode: if near_corner { DragMode::Scale } else { DragMode::Move },
+                                        start_pos: pos_v,
+                                        start_mouse: pos,
+                                    });
+                                } else {
+                                    self.canvas_selected_clip = None;
+                                    state.canvas_selected_clip = None;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
 
             let painter = ui.painter_at(canvas_rect);
-            painter.rect_filled(canvas_rect, 0.0, palette::canvas_bg());
 
                 if state.sequence.is_none() {
                     self.invalidate_pending_decode();
@@ -581,11 +774,13 @@ impl ViewerPanel {
                 if let Some(seq) = state.sequence.as_ref() {
                     if let Some(lib) = state.asset_library.as_ref() {
                         let resolution = seq.settings.resolution;
+                        // Decode at fixed resolution based on canvas slot, not zoom.
+                        // Zoom is purely a display transform.
                         let (target_width, target_height) = playback_adjusted_target_size(
                             sequence_preview_target_size(
                                 resolution,
-                                canvas_rect.width(),
-                                canvas_rect.height(),
+                                canvas_rect.width().max(1.0),
+                                canvas_rect.height().max(1.0),
                                 self.preview_scale_mode.factor(),
                             ),
                             is_playing,
@@ -615,7 +810,9 @@ impl ViewerPanel {
                             self.desired_signature = None;
                             self.preview_error = None;
                             self.clear_prefetch_in_flight();
-                            draw_checkerboard(&painter, canvas_rect);
+                            let visible = content_rect
+                                .intersect(self.canvas_transform.canvas_rect);
+                            draw_checkerboard(&painter, visible);
                         } else {
                             let signature = CompositeFrameSignature {
                                 width: target_width,
@@ -650,6 +847,8 @@ impl ViewerPanel {
                                             display_profile: self.display_profile.clone(),
                                             ocio_display: self.ocio_display.clone(),
                                             ocio_view: self.ocio_view.clone(),
+                                            seq_width: resolution.width,
+                                            seq_height: resolution.height,
                                             tone_map: seq.settings.auto_tone_map_media,
                                             playback_mode: is_playing,
                                             target_width,
@@ -685,16 +884,24 @@ impl ViewerPanel {
                             }
 
                             if let Some(texture) = &self.preview_texture {
-                                painter.image(
-                                    texture.id(),
-                                    canvas_rect,
-                                    Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
-                                    palette::image_tint(),
+                                // Render only the visible portion of content_rect,
+                                // adjusting UV to clip correctly when zoomed in.
+                                let visible =
+                                    content_rect.intersect(self.canvas_transform.canvas_rect);
+                                let cr = content_rect;
+                                let uv = Rect::from_min_max(
+                                    Pos2::new(
+                                        (visible.left() - cr.left()) / cr.width(),
+                                        (visible.top() - cr.top()) / cr.height(),
+                                    ),
+                                    Pos2::new(
+                                        (visible.right() - cr.left()) / cr.width(),
+                                        (visible.bottom() - cr.top()) / cr.height(),
+                                    ),
                                 );
-                            } else {
-                                draw_checkerboard(&painter, canvas_rect);
-                                draw_empty_canvas_meta(&painter, canvas_rect, state, current_frame);
+                                painter.image(texture.id(), visible, uv, palette::image_tint());
                             }
+                            // When no texture yet, just show the background (no checkerboard).
 
                             if let Some(err) = &self.preview_error {
                                 painter.text(
@@ -705,7 +912,30 @@ impl ViewerPanel {
                                     palette::status_error(),
                                 );
                             }
-                            draw_mask_overlays(&painter, canvas_rect, state, current_frame);
+                            draw_mask_overlays(&painter, content_rect, state, current_frame);
+
+                            // Transform handles for canvas-selected clip.
+                            if let Some((_tid, _is_vid, clip_id)) = self.canvas_selected_clip {
+                                draw_transform_handles(
+                                    &painter, state, &self.canvas_transform, clip_id,
+                                );
+                            }
+
+                            // Safe margins overlay.
+                            if let Some(seq) = state.sequence.as_ref() {
+                                draw_safe_margins(&painter, &self.canvas_transform, seq);
+                            }
+
+                            // Zoom indicator at bottom-right of slot.
+                            let zoom_label = self.canvas_transform.zoom_mode.display_label();
+                            painter.text(
+                                canvas_rect.right_bottom() + Vec2::new(-8.0, -6.0),
+                                egui::Align2::RIGHT_BOTTOM,
+                                zoom_label,
+                                typography::body_small(),
+                                palette::text_muted(),
+                            );
+
                         }
                     } else {
                         self.invalidate_pending_decode();
@@ -714,8 +944,10 @@ impl ViewerPanel {
                         self.desired_signature = None;
                         self.preview_error = None;
                         self.clear_prefetch_in_flight();
-                        draw_checkerboard(&painter, canvas_rect);
-                        draw_empty_canvas_meta(&painter, canvas_rect, state, current_frame);
+                        let visible = content_rect
+                            .intersect(self.canvas_transform.canvas_rect);
+                        draw_checkerboard(&painter, visible);
+                        draw_empty_canvas_meta(&painter, visible, state, current_frame);
                     }
                 }
 
@@ -991,6 +1223,35 @@ impl ViewerPanel {
                         .font(typography::mono_small())
                         .color(palette::text_primary()),
                 );
+                ui.add_space(6.0);
+                let selected_zoom = self.canvas_transform.zoom_mode.display_label();
+                egui::ComboBox::from_id_salt("viewer_zoom")
+                    .width(60.0)
+                    .selected_text(&selected_zoom)
+                    .show_ui(ui, |ui| {
+                        let items: &[(&str, f32)] = &[
+                            ("Fit", -1.0),
+                            ("10%", 0.1),
+                            ("25%", 0.25),
+                            ("50%", 0.5),
+                            ("100%", 1.0),
+                            ("200%", 2.0),
+                            ("400%", 4.0),
+                        ];
+                        for &(label, zoom) in items {
+                            if ui.selectable_label(false, label).clicked() {
+                                if zoom < 0.0 {
+                                    self.canvas_transform.set_zoom_mode(
+                                        crate::ui::viewer::canvas::CanvasZoomMode::Fit,
+                                    );
+                                } else {
+                                    self.canvas_transform.set_zoom_mode(
+                                        crate::ui::viewer::canvas::CanvasZoomMode::Fixed(zoom),
+                                    );
+                                }
+                            }
+                        }
+                    });
             });
         });
 
@@ -2274,6 +2535,7 @@ impl ViewerPanel {
             prefetch_enabled: self.prefetch_enabled,
             layer_cache_enabled: self.layer_cache_enabled,
             display_profile: self.display_profile.clone(),
+            canvas_bg_hex: self.canvas_bg_hex,
         }
     }
 
@@ -2284,6 +2546,8 @@ impl ViewerPanel {
         mondrian_media::set_preview_decode_backend(preferences.decode_backend);
         self.set_prefetch_enabled(preferences.prefetch_enabled);
         self.set_layer_cache_enabled(preferences.layer_cache_enabled);
+        self.canvas_bg_hex = preferences.canvas_bg_hex;
+        self.canvas_transform.background = hex_to_bg(self.canvas_bg_hex);
         if preferences.display_profile.validate().is_ok() {
             self.display_profile = preferences.display_profile.clone();
         }
@@ -2606,6 +2870,10 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
     let layer_cache = Arc::clone(&request.layer_cache);
     let decoder_pool = Arc::clone(&request.decoder_pool);
 
+    // Decode at native resolution — the transform maps canvas→media-native
+    // coordinates, so the decoded frame must be at the source's native size.
+    let decode_w = u32::MAX;
+    let decode_h = u32::MAX;
     let layer_outputs = preview_decode_pool().install(|| {
         request
             .layers
@@ -2625,8 +2893,8 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
 
                 let decoded = decode_layer_rgba(
                     &layer,
-                    width,
-                    height,
+                    decode_w,
+                    decode_h,
                     playback_mode,
                     layer_cache_enabled,
                     &layer_cache,
@@ -2721,6 +2989,8 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
                 playback_mode,
                 target_width: layer.width,
                 target_height: layer.height,
+                seq_width: layer.width,
+                seq_height: layer.height,
                 layer_cache_enabled,
                 layer_cache: Arc::clone(&layer_cache),
                 decoder_pool: Arc::clone(&decoder_pool),
@@ -2848,6 +3118,10 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
     }
 
     let cpu_composite_started_at = Instant::now();
+    // Convert transforms from sequence space to canvas space.
+    // The compositor canvas may differ from the sequence resolution.
+    let seq_to_canvas = (width as f32 / request.seq_width.max(1) as f32)
+        .min(height as f32 / request.seq_height.max(1) as f32);
     let mut composite_elements = Vec::with_capacity(request.layers.len());
     for (index, layer) in request.layers.iter().enumerate() {
         match layer {
@@ -2861,7 +3135,7 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
                     height: frame.height,
                     opacity: layer.opacity,
                     blend_mode: layer.blend_mode,
-                    transform: layer.transform,
+                    transform: scale_affine(layer.transform, seq_to_canvas),
                     effect_graph: std::sync::Arc::clone(&layer.effect_graph),
                     frame_seed: layer.frame_seed,
                 }));
@@ -2882,7 +3156,7 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
                         color: solid.color,
                         opacity: solid.opacity,
                         blend_mode: solid.blend_mode,
-                        transform: solid.transform,
+                        transform: scale_affine(solid.transform, seq_to_canvas),
                         effect_graph: std::sync::Arc::clone(&solid.effect_graph),
                         frame_seed: solid.frame_seed,
                     },
@@ -2898,7 +3172,7 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
                     height: frame.height,
                     opacity: layer.opacity,
                     blend_mode: layer.blend_mode,
-                    transform: layer.transform,
+                    transform: scale_affine(layer.transform, seq_to_canvas),
                     effect_graph: std::sync::Arc::clone(&layer.effect_graph),
                     frame_seed: layer.frame_seed,
                 }));
@@ -3179,8 +3453,8 @@ fn decode_layer_rgba(
     Ok(mondrian_media::decode_video_frame_at_time_rgba_scaled(
         layer.path.as_path(),
         layer.source_secs,
-        Some(width),
-        Some(height),
+        None,
+        None,
     )
     .map(|mut frame| {
         apply_layer_input_color(&mut frame.data, layer);
@@ -3867,19 +4141,184 @@ fn quantize_dimension(value: u32, step: u32) -> u32 {
     }
 }
 
-/// 将矩形按指定宽高比居中裁剪（letterbox / pillarbox）
-fn fit_aspect(outer: Rect, aspect: f32) -> Rect {
-    let outer_aspect = outer.width() / outer.height();
-    if outer_aspect > aspect {
-        // 左右留黑边
-        let w = outer.height() * aspect;
-        let x = outer.left() + (outer.width() - w) * 0.5;
-        Rect::from_min_size(Pos2::new(x, outer.top()), Vec2::new(w, outer.height()))
-    } else {
-        // 上下留黑边
-        let h = outer.width() / aspect;
-        let y = outer.top() + (outer.height() - h) * 0.5;
-        Rect::from_min_size(Pos2::new(outer.left(), y), Vec2::new(outer.width(), h))
+/// Draw action-safe (90%) and title-safe (80%) overlays.
+fn draw_safe_margins(
+    painter: &egui::Painter,
+    ct: &crate::ui::viewer::canvas::CanvasTransform,
+    seq: &Sequence,
+) {
+    let w = seq.settings.resolution.width as f32;
+    let h = seq.settings.resolution.height as f32;
+    let action_margin = seq.settings.action_safe_margin * 0.5;
+    let title_margin = seq.settings.title_safe_margin * 0.5;
+
+    let action_rect = Rect::from_min_max(
+        ct.seq_to_screen(w * action_margin, h * action_margin),
+        ct.seq_to_screen(w * (1.0 - action_margin), h * (1.0 - action_margin)),
+    );
+    let title_rect = Rect::from_min_max(
+        ct.seq_to_screen(w * title_margin, h * title_margin),
+        ct.seq_to_screen(w * (1.0 - title_margin), h * (1.0 - title_margin)),
+    );
+
+    let action_color = egui::Color32::from_white_alpha(40);
+    let title_color = egui::Color32::from_white_alpha(30);
+
+    painter.rect_stroke(
+        action_rect,
+        egui::CornerRadius::same(0),
+        egui::Stroke::new(1.0, action_color),
+        egui::StrokeKind::Inside,
+    );
+    painter.rect_stroke(
+        title_rect,
+        egui::CornerRadius::same(0),
+        egui::Stroke::new(1.0, title_color),
+        egui::StrokeKind::Inside,
+    );
+}
+
+/// Uniformly scale an affine matrix [a, b, tx, c, d, ty] by factor.
+fn scale_affine(t: [f32; 6], factor: f32) -> [f32; 6] {
+    [t[0] * factor, t[1] * factor, t[2] * factor,
+     t[3] * factor, t[4] * factor, t[5] * factor]
+}
+
+fn is_near_corner(rect: Option<Rect>, point: Pos2, radius: f32) -> bool {
+    rect.is_some_and(|r| {
+        let corners = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom()];
+        corners.iter().any(|&c| c.distance(point) <= radius)
+    })
+}
+
+/// Screen bounds for a clip, using actual media dimensions from the asset library.
+fn clip_screen_bounds_with_media(
+    clip: &mondrian_timeline::clip::Clip,
+    mat: glam::Mat3,
+    ct: &crate::ui::viewer::canvas::CanvasTransform,
+    state: &AppState,
+) -> Option<Rect> {
+    let (mw, mh) = state
+        .asset_library
+        .as_ref()
+        .and_then(|lib| lib.get_asset(clip.asset_id).ok().flatten())
+        .and_then(|a| a.media_info.primary_video().cloned())
+        .map(|v| (v.width as f32, v.height as f32))
+        .unwrap_or((1.0, 1.0));
+    let corners = [
+        glam::Vec2::new(0.0, 0.0),
+        glam::Vec2::new(mw, 0.0),
+        glam::Vec2::new(mw, mh),
+        glam::Vec2::new(0.0, mh),
+    ];
+    let mut min_x = f32::MAX;
+    let mut min_y = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut max_y = f32::MIN;
+    for &c in &corners {
+        let t = mat * c.extend(1.0);
+        let p = ct.seq_to_screen(t.x, t.y);
+        min_x = min_x.min(p.x);
+        min_y = min_y.min(p.y);
+        max_x = max_x.max(p.x);
+        max_y = max_y.max(p.y);
+    }
+    if min_x >= max_x || min_y >= max_y { None }
+    else { Some(Rect::from_min_max(Pos2::new(min_x, min_y), Pos2::new(max_x, max_y))) }
+}
+
+#[allow(dead_code)]
+fn clip_screen_bounds(
+    _clip: &mondrian_timeline::clip::Clip,
+    mat: glam::Mat3,
+    ct: &crate::ui::viewer::canvas::CanvasTransform,
+) -> Option<Rect> {
+    let corners = [
+        glam::Vec2::new(0.0, 0.0),
+        glam::Vec2::new(1.0, 0.0),
+        glam::Vec2::new(1.0, 1.0),
+        glam::Vec2::new(0.0, 1.0),
+    ];
+    let mut min_x = f32::MAX;
+    let mut min_y = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut max_y = f32::MIN;
+    for c in &corners {
+        let t = mat * c.extend(1.0);
+        let p = ct.seq_to_screen(t.x, t.y);
+        min_x = min_x.min(p.x);
+        min_y = min_y.min(p.y);
+        max_x = max_x.max(p.x);
+        max_y = max_y.max(p.y);
+    }
+    if min_x >= max_x || min_y >= max_y {
+        return None;
+    }
+    Some(Rect::from_min_max(
+        Pos2::new(min_x, min_y),
+        Pos2::new(max_x, max_y),
+    ))
+}
+
+/// Draw corner handles for the selected clip on the canvas.
+fn draw_transform_handles(
+    painter: &egui::Painter,
+    state: &AppState,
+    ct: &crate::ui::viewer::canvas::CanvasTransform,
+    clip_id: mondrian_core::types::ClipId,
+) {
+    let Some(seq) = state.sequence.as_ref() else { return };
+    let Some(library) = state.asset_library.as_ref() else { return };
+    let current = TimeCode::new(state.current_frame().max(0), seq.time_base());
+    let active = seq.active_clips_at(current);
+    let Some(ac) = active.iter().find(|a| a.clip.id == clip_id) else { return };
+
+    // Get media dimensions for the bounding box.
+    let (mw, mh) = library
+        .get_asset(ac.clip.asset_id)
+        .ok()
+        .flatten()
+        .and_then(|a| a.media_info.primary_video().cloned())
+        .map(|v| (v.width as f32, v.height as f32))
+        .unwrap_or((1.0, 1.0));
+
+    let corners = [
+        glam::Vec2::new(0.0, 0.0),
+        glam::Vec2::new(mw, 0.0),
+        glam::Vec2::new(mw, mh),
+        glam::Vec2::new(0.0, mh),
+    ];
+    let mut min_x = f32::MAX;
+    let mut min_y = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut max_y = f32::MIN;
+    for &c in &corners {
+        let t = ac.transform_matrix * c.extend(1.0);
+        let p = ct.seq_to_screen(t.x, t.y);
+        min_x = min_x.min(p.x);
+        min_y = min_y.min(p.y);
+        max_x = max_x.max(p.x);
+        max_y = max_y.max(p.y);
+    }
+    if min_x >= max_x || min_y >= max_y { return; }
+    let rect = Rect::from_min_max(Pos2::new(min_x, min_y), Pos2::new(max_x, max_y));
+
+    let handle_color = egui::Color32::from_rgb(0, 180, 255);
+    let handle_radius = 5.0;
+    let corners = [
+        rect.left_top(),
+        rect.right_top(),
+        rect.right_bottom(),
+        rect.left_bottom(),
+    ];
+    painter.rect_stroke(
+        rect,
+        egui::CornerRadius::same(0),
+        egui::Stroke::new(2.0, handle_color),
+        egui::StrokeKind::Inside,
+    );
+    for &c in &corners {
+        painter.circle_filled(c, handle_radius, handle_color);
     }
 }
 
@@ -3949,80 +4388,99 @@ fn draw_mask_overlays(
     canvas_rect: Rect,
     state: &AppState,
     timeline_frame: i64,
-    ) {
-        let Some(seq) = state.sequence.as_ref() else { return };
-        let active = seq.active_clips_at(TimeCode::new(timeline_frame.max(0), seq.time_base()));
-        if active.is_empty() { return; }
-        let seq_res = seq.settings.resolution;
-        if seq_res.width == 0 || seq_res.height == 0 { return; }
-        let sx = canvas_rect.width() / seq_res.width as f32;
-        let sy = canvas_rect.height() / seq_res.height as f32;
-        let ox = canvas_rect.left();
-        let oy = canvas_rect.top();
-        let to_scr = |nx: f32, ny: f32| Pos2::new(
+) {
+    let Some(seq) = state.sequence.as_ref() else {
+        return;
+    };
+    let active = seq.active_clips_at(TimeCode::new(timeline_frame.max(0), seq.time_base()));
+    if active.is_empty() {
+        return;
+    }
+    let seq_res = seq.settings.resolution;
+    if seq_res.width == 0 || seq_res.height == 0 {
+        return;
+    }
+    let sx = canvas_rect.width() / seq_res.width as f32;
+    let sy = canvas_rect.height() / seq_res.height as f32;
+    let ox = canvas_rect.left();
+    let oy = canvas_rect.top();
+    let to_scr = |nx: f32, ny: f32| {
+        Pos2::new(
             ox + nx * seq_res.width as f32 * sx,
             oy + ny * seq_res.height as f32 * sy,
-        );
-        let ticks = timecode_to_ticks(TimeCode::new(timeline_frame.max(0), seq.time_base()));
-        let colors = [
-            egui::Color32::from_rgb(0, 180, 240),
-            egui::Color32::from_rgb(220, 120, 0),
-            egui::Color32::from_rgb(120, 200, 80),
-            egui::Color32::from_rgb(200, 80, 200),
-        ];
-        for ac in &active {
-            if ac.clip.masks.is_empty() { continue; }
-            let mat = ac.transform_matrix;
-            for (i, mask) in ac.clip.masks.iter().enumerate() {
-                if !mask.enabled { continue; }
-                let p = mask.evaluate_at(ticks);
-                let c = colors[i % colors.len()];
-                let st = egui::Stroke::new(2.0, c);
-                match &p.shape {
-                    MaskShape::Rectangle { x, y, width, height, .. } => {
-                        let crn = [
-                            glam::Vec2::new(*x, *y),
-                            glam::Vec2::new(x + width, *y),
-                            glam::Vec2::new(x + width, y + height),
-                            glam::Vec2::new(*x, y + height),
-                        ];
-                        draw_mask_polygon(painter, &crn, &mat, &to_scr, st, true);
+        )
+    };
+    let ticks = timecode_to_ticks(TimeCode::new(timeline_frame.max(0), seq.time_base()));
+    let colors = [
+        egui::Color32::from_rgb(0, 180, 240),
+        egui::Color32::from_rgb(220, 120, 0),
+        egui::Color32::from_rgb(120, 200, 80),
+        egui::Color32::from_rgb(200, 80, 200),
+    ];
+    for ac in &active {
+        if ac.clip.masks.is_empty() {
+            continue;
+        }
+        let mat = ac.transform_matrix;
+        for (i, mask) in ac.clip.masks.iter().enumerate() {
+            if !mask.enabled {
+                continue;
+            }
+            let p = mask.evaluate_at(ticks);
+            let c = colors[i % colors.len()];
+            let st = egui::Stroke::new(2.0, c);
+            match &p.shape {
+                MaskShape::Rectangle { x, y, width, height, .. } => {
+                    let crn = [
+                        glam::Vec2::new(*x, *y),
+                        glam::Vec2::new(x + width, *y),
+                        glam::Vec2::new(x + width, y + height),
+                        glam::Vec2::new(*x, y + height),
+                    ];
+                    draw_mask_polygon(painter, &crn, &mat, &to_scr, st, true);
+                }
+                MaskShape::Ellipse { center, radii } => {
+                    let n = 64usize;
+                    let mut pts = Vec::with_capacity(n + 1);
+                    for s in 0..=n {
+                        let a = s as f32 * std::f32::consts::TAU / n as f32;
+                        pts.push(glam::Vec2::new(
+                            center.x + radii.x * a.cos(),
+                            center.y + radii.y * a.sin(),
+                        ));
                     }
-                    MaskShape::Ellipse { center, radii } => {
-                        let n = 64usize;
-                        let mut pts = Vec::with_capacity(n + 1);
-                        for s in 0..=n {
-                            let a = s as f32 * std::f32::consts::TAU / n as f32;
-                            pts.push(glam::Vec2::new(
-                                center.x + radii.x * a.cos(),
-                                center.y + radii.y * a.sin(),
-                            ));
-                        }
-                        draw_mask_polygon(painter, &pts, &mat, &to_scr, st, false);
+                    draw_mask_polygon(painter, &pts, &mat, &to_scr, st, false);
+                }
+                MaskShape::Path { points, closed } => {
+                    let segs = mask_path_segments(points, *closed);
+                    for &(a, b) in &segs {
+                        let ta = mask_xform(a, &mat, &to_scr);
+                        let tb = mask_xform(b, &mat, &to_scr);
+                        painter.line_segment([ta, tb], st);
                     }
-                    MaskShape::Path { points, closed } => {
-                        let segs = mask_path_segments(points, *closed);
-                        for &(a, b) in &segs {
-                            let ta = mask_xform(a, &mat, &to_scr);
-                            let tb = mask_xform(b, &mat, &to_scr);
-                            painter.line_segment([ta, tb], st);
-                        }
-                        for pt in points {
-                            let p = mask_xform(pt.position, &mat, &to_scr);
-                            painter.circle_filled(p, 3.0, c);
-                        }
+                    for pt in points {
+                        let p = mask_xform(pt.position, &mat, &to_scr);
+                        painter.circle_filled(p, 3.0, c);
                     }
                 }
             }
         }
     }
+}
 
 fn mask_path_segments(points: &[BezierPoint], closed: bool) -> Vec<(glam::Vec2, glam::Vec2)> {
     let mut out = Vec::new();
     let n = points.len();
     for i in 0..n {
-        let ni = if i + 1 < n { i + 1 } else if closed { 0 } else { break };
-        let a = points[i]; let b = points[ni];
+        let ni = if i + 1 < n {
+            i + 1
+        } else if closed {
+            0
+        } else {
+            break;
+        };
+        let a = points[i];
+        let b = points[ni];
         let s = 8usize;
         let mut prev = a.position;
         for k in 1..=s {
@@ -4052,7 +4510,9 @@ fn draw_mask_polygon(
     stroke: egui::Stroke,
     closed: bool,
 ) {
-    if pts.len() < 2 { return; }
+    if pts.len() < 2 {
+        return;
+    }
     let cp: Vec<Pos2> = pts.iter().map(|&p| mask_xform(p, mat, to_scr)).collect();
     let n = if closed { cp.len() } else { cp.len() - 1 };
     for i in 0..n {

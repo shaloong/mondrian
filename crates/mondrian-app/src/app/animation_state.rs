@@ -316,6 +316,34 @@ impl AppState {
         Ok(true)
     }
 
+    /// Directly set clip position (bypasses PropertyMutation, which has a SetStaticValue bug).
+    pub fn set_clip_position_direct(
+        &mut self,
+        selection: SelectedClipRef,
+        pos: glam::Vec2,
+    ) -> mondrian_core::Result<bool> {
+        let (sequence_id, before, after) = {
+            let seq = self.sequence.as_mut().ok_or_else(|| {
+                mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "set_clip_position".to_string(),
+                    reason: "当前无项目".to_string(),
+                }
+            })?;
+            let before = seq.clone();
+            let clip = find_clip_mut_by_selection(seq, selection).ok_or_else(|| {
+                mondrian_core::MondrianError::ClipNotFound {
+                    clip_id: selection.clip_id.to_string(),
+                }
+            })?;
+            clip.transform.set_position(pos);
+            (seq.id, before, seq.clone())
+        };
+        self.record_sequence_snapshot_command("move clip", before, after);
+        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
+        let _ = self.save_project_file();
+        Ok(true)
+    }
+
     pub fn mutate_clip_property(
         &mut self,
         selection: SelectedClipRef,

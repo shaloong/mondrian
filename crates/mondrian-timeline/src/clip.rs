@@ -69,7 +69,7 @@ impl Transform2D {
         Self { properties }
     }
 
-    /// 求值为 3x3 仿射变换矩阵（用于 GPU 渲染）
+    /// 求值为 3x3 仿射变换矩阵（用于渲染）
     pub fn evaluate_matrix(&self, time: TimeCode) -> glam::Mat3 {
         let pos = self.evaluate_vec2(Self::POSITION_PATH, time);
         let scale = self.evaluate_vec2(Self::SCALE_PATH, time);
@@ -110,6 +110,27 @@ impl Transform2D {
         }
 
         self.properties.apply_mutation(mutation)
+    }
+
+    /// Directly set position (bypasses animation system for canvas drag).
+    pub fn set_position(&mut self, v: glam::Vec2) {
+        let _ = self.properties.set_static_value(
+            Self::POSITION_PATH, PropertyValue::Vec2(v),
+        );
+    }
+
+    /// Directly set scale (bypasses animation system for canvas drag).
+    pub fn set_scale(&mut self, v: glam::Vec2) {
+        let _ = self.properties.set_static_value(
+            Self::SCALE_PATH, PropertyValue::Vec2(v),
+        );
+    }
+
+    /// Directly set anchor point.
+    pub fn set_anchor_point(&mut self, v: glam::Vec2) {
+        let _ = self.properties.set_static_value(
+            Self::ANCHOR_POINT_PATH, PropertyValue::Vec2(v),
+        );
     }
 
     fn evaluate_vec2(&self, path: &str, time: TimeCode) -> Vec2 {
@@ -806,4 +827,5 @@ mod tests {
         assert!((first_exposure - 1.25).abs() < 1.0e-4);
         assert!(second_exposure.abs() < 1.0e-4);
     }
+
 }

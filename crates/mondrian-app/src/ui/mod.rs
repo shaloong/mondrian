@@ -8,5 +8,6 @@ pub mod library_panel;
 pub mod startup;
 pub mod theme;
 pub mod timeline_panel;
+pub mod viewer;
 pub mod viewer_panel;
 pub mod widgets;

@@ -305,9 +305,18 @@ pub struct SequenceSettings {
     pub color_space: ColorSpace,
     #[serde(default)]
     pub auto_tone_map_media: bool,
+    /// Action-safe margin as fraction of frame (0.10 = 10% total, 5% per side).
+    #[serde(default = "default_action_safe_margin")]
+    pub action_safe_margin: f32,
+    /// Title-safe margin as fraction of frame (0.20 = 20% total, 10% per side).
+    #[serde(default = "default_title_safe_margin")]
+    pub title_safe_margin: f32,
     #[serde(default)]
     pub color_management: SequenceColorManagement,
 }
+
+fn default_action_safe_margin() -> f32 { 0.10 }
+fn default_title_safe_margin() -> f32 { 0.20 }
 
 impl Default for SequenceSettings {
     fn default() -> Self {
@@ -326,6 +335,8 @@ impl Default for SequenceSettings {
             preview: SequencePreviewSettings::default(),
             color_space: ColorSpace::Rec709,
             auto_tone_map_media: true,
+            action_safe_margin: default_action_safe_margin(),
+            title_safe_margin: default_title_safe_margin(),
             color_management: SequenceColorManagement::default(),
         }
     }

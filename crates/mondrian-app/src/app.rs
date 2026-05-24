@@ -574,6 +574,8 @@ pub struct AppState {
 
     // 正在拖拽的素材（从素材库拖向时间线）
     pub dragging_asset: Option<DraggingAsset>,
+    /// Clip selected on the viewer canvas (synced to timeline/effect controls).
+    pub canvas_selected_clip: Option<(mondrian_core::types::TrackId, bool, mondrian_core::types::ClipId)>,
 
     // 渲染导出队列
     pub render_queue: Arc<RenderQueue>,
@@ -661,6 +663,7 @@ impl AppState {
             playback_buffering: false,
             asset_library: None,
             dragging_asset: None,
+            canvas_selected_clip: None,
             render_queue: RenderQueue::new(),
             status_hint: None,
             animation_selection: AnimationSelectionState::default(),
@@ -1232,6 +1235,11 @@ impl eframe::App for MondrianApp {
                     true,
                 );
             });
+        // Sync canvas selection to timeline. Only sync when the canvas has
+        // an active selection; let the timeline manage its own deselection.
+        if let Some(ref sel) = self.state.canvas_selected_clip {
+            self.timeline_panel.apply_canvas_selection(Some(*sel));
+        }
         if ui_diag_enabled() {
             log_ui_stage_slow("viewer_panel", viewer_started_at.elapsed());
         }

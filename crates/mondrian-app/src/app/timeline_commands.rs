@@ -1760,6 +1760,17 @@ impl AppState {
             });
         }
 
+        // Resolve media dimensions for auto-fit before borrowing seq.
+        let media_dim = if dragging.kind == AssetKind::Video {
+            self.asset_library
+                .as_ref()
+                .and_then(|lib| lib.get_asset(dragging.asset_id).ok().flatten())
+                .and_then(|asset| asset.media_info.primary_video().cloned())
+                .map(|v| (v.width, v.height))
+        } else {
+            None
+        };
+
         let (sequence_id, clip_id, start_frame, before, after) = {
             let seq = self.sequence.as_mut().ok_or_else(|| {
                 mondrian_core::MondrianError::WorkflowStepFailed {
@@ -1795,6 +1806,17 @@ impl AppState {
                 )
             };
             clip.label = Some(dragging.name.clone());
+            // Auto-fit: set scale so media fits sequence frame.
+            if let Some((mw, mh)) = media_dim {
+                if mw > 0 && mh > 0 {
+                    let seq_w = seq.settings.resolution.width.max(1) as f32;
+                    let seq_h = seq.settings.resolution.height.max(1) as f32;
+                    let fit_scale = (seq_w / mw as f32).min(seq_h / mh as f32);
+                    clip.transform.set_scale(
+                        glam::Vec2::new(fit_scale, fit_scale),
+                    );
+                }
+            }
             let clip_id = clip.id;
 
             let should_create_linked_audio =

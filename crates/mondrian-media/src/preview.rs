@@ -14,10 +14,6 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
 
-/// 预览分辨率硬上限（1080p 项目保持全分辨率）
-const PREVIEW_MAX_WIDTH: u32 = 1920;
-const PREVIEW_MAX_HEIGHT: u32 = 1080;
-
 /// 从关键帧向前解码的最大帧数安全限制
 /// 提高到 1800（足以覆盖常见 2 分钟超长 GOP 文件，例如广播流）
 const DECODE_BUDGET: usize = 1800;
@@ -157,8 +153,8 @@ impl PreviewDecodeSession {
         let (target_width, target_height) = fit_target_size(
             decoder.width(),
             decoder.height(),
-            max_width.map(|v| v.min(PREVIEW_MAX_WIDTH)),
-            max_height.map(|v| v.min(PREVIEW_MAX_HEIGHT)),
+            max_width,
+            max_height,
         );
 
         let scaler = ffmpeg::software::scaling::Context::get(

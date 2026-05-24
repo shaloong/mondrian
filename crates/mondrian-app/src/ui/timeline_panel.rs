@@ -223,6 +223,17 @@ impl TimelinePanel {
         })
     }
 
+    /// Select a clip from the viewer canvas, syncing to timeline and effect controls.
+    pub fn apply_canvas_selection(
+        &mut self,
+        selection: Option<(mondrian_core::types::TrackId, bool, mondrian_core::types::ClipId)>,
+    ) {
+        self.selected_clips.clear();
+        if let Some((track_id, is_video, clip_id)) = selection {
+            self.selected_clips.insert(ClipSelection { track_id, is_video_track: is_video, clip_id });
+        }
+    }
+
     pub fn show(&mut self, ui: &mut Ui, state: &mut AppState) {
         // 初始化默认缩放
         if self.pixels_per_frame == 0.0 {

@@ -103,10 +103,16 @@ fn sequence_preview_target_size_preserves_sequence_aspect_ratio() {
 }
 
 #[test]
-fn fit_aspect_keeps_canvas_centered_with_sequence_ratio() {
+fn canvas_transform_fit_keeps_canvas_centered_with_sequence_ratio() {
     let outer = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(900.0, 700.0));
-    let fitted = fit_aspect(outer, Resolution::FHD.aspect_ratio());
+    let ct = crate::ui::viewer::canvas::CanvasTransform::fit(
+        (1920, 1080),
+        outer,
+    );
+    let fitted = ct.content_rect();
 
+    assert!(fitted.width() <= outer.width());
+    assert!(fitted.height() <= outer.height());
     assert!((fitted.center().x - outer.center().x).abs() < 0.001);
     assert!((fitted.center().y - outer.center().y).abs() < 0.001);
     assert!((fitted.width() / fitted.height() - Resolution::FHD.aspect_ratio()).abs() < 0.01);
