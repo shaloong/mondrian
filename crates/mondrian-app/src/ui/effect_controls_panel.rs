@@ -2715,11 +2715,28 @@ impl EffectControlsPanel {
             PropertyValue::Vec2(value) => {
                 let mut edited = *value;
                 let speed = metadata.step.unwrap_or(0.05);
-                ui.horizontal(|ui| {
-                    let x_changed =
-                        ui.add(DragValue::new(&mut edited.x).speed(speed).prefix("X ")).changed();
-                    let y_changed =
-                        ui.add(DragValue::new(&mut edited.y).speed(speed).prefix("Y ")).changed();
+                let is_scale = path == mondrian_timeline::clip::Transform2D::SCALE_PATH;
+                if is_scale {
+                    // Display scale as percentage (100.0% = 1.0)
+                    let mut sx = edited.x * 100.0;
+                    let mut sy = edited.y * 100.0;
+                    let step = 0.01;
+                    ui.horizontal(|ui| {
+                        let xc = ui.add(DragValue::new(&mut sx).speed(step).suffix("%")).changed();
+                        let yc = ui.add(DragValue::new(&mut sy).speed(step).suffix("%")).changed();
+                        let mut channel_values = Vec::new();
+                        if xc { channel_values.push((0, (sx / 100.0) as f64)); }
+                        if yc { channel_values.push((1, (sy / 100.0) as f64)); }
+                        if !channel_values.is_empty() {
+                            self.commit_channel_values(app, selection, path, &channel_values, interpolation, is_animatable);
+                        }
+                    });
+                } else {
+                    ui.horizontal(|ui| {
+                        let x_changed =
+                            ui.add(DragValue::new(&mut edited.x).speed(speed).prefix("X ")).changed();
+                        let y_changed =
+                            ui.add(DragValue::new(&mut edited.y).speed(speed).prefix("Y ")).changed();
                     let mut channel_values = Vec::new();
                     if x_changed {
                         channel_values.push((0, edited.x as f64));
@@ -2738,6 +2755,7 @@ impl EffectControlsPanel {
                         );
                     }
                 });
+                } // end else (non-scale Vec2)
             }
             PropertyValue::Vec3(value) => {
                 let mut edited = *value;
