@@ -1806,14 +1806,20 @@ impl AppState {
                 )
             };
             clip.label = Some(dragging.name.clone());
-            // Auto-fit: set scale so media fits sequence frame.
+            // Auto-fit: set anchor to media center, position to seq center, scale to fit.
             if let Some((mw, mh)) = media_dim {
                 if mw > 0 && mh > 0 {
                     let seq_w = seq.settings.resolution.width.max(1) as f32;
                     let seq_h = seq.settings.resolution.height.max(1) as f32;
                     let fit_scale = (seq_w / mw as f32).min(seq_h / mh as f32);
+                    clip.transform.set_anchor_point(
+                        glam::Vec2::new(mw as f32 * 0.5, mh as f32 * 0.5),
+                    );
                     clip.transform.set_scale(
                         glam::Vec2::new(fit_scale, fit_scale),
+                    );
+                    clip.transform.set_position(
+                        glam::Vec2::new(seq_w * 0.5, seq_h * 0.5),
                     );
                 }
             }

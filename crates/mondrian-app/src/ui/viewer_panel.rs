@@ -390,7 +390,8 @@ pub struct ViewerPanel {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum DragMode { Move, Scale }
+#[allow(dead_code)]
+enum DragMode { Move, Scale, Anchor }
 
 struct CanvasDragState {
     track_id: mondrian_core::types::TrackId,
@@ -398,6 +399,9 @@ struct CanvasDragState {
     clip_id: mondrian_core::types::ClipId,
     mode: DragMode,
     start_pos: glam::Vec2,
+    start_scale: glam::Vec2,
+    start_anchor_val: glam::Vec2,
+    start_anchor: Pos2,
     start_mouse: Pos2,
 }
 
@@ -673,7 +677,41 @@ impl ViewerPanel {
                                         new_pos,
                                     );
                                 }
-                                DragMode::Scale => { /* TODO: scale via direct setter */ }
+                                DragMode::Scale => {
+                                    // Signed radial from anchor (not content center).
+                                    let ref_pt = drag.start_anchor;
+                                    let corner_dir = (drag.start_mouse - ref_pt).normalized();
+                                    let start_proj = (drag.start_mouse - ref_pt).dot(corner_dir);
+                                    let now_proj = (now - ref_pt).dot(corner_dir);
+                                    let ratio = (now_proj / start_proj.max(0.01)).clamp(0.01, 100.0);
+                                    let new_scale = drag.start_scale * ratio;
+                                    let _ = state.set_clip_scale_direct(
+                                        SelectedClipRef {
+                                            track_id: drag.track_id,
+                                            is_video_track: drag.is_video,
+                                            clip_id: drag.clip_id,
+                                        },
+                                        new_scale,
+                                    );
+                                }
+                                DragMode::Anchor => {
+                                    let zoom = self.canvas_transform.zoom();
+                                    let screen_delta = now - drag.start_mouse;
+                                    let seq_delta = glam::Vec2::new(
+                                        screen_delta.x / zoom.max(0.001),
+                                        screen_delta.y / zoom.max(0.001),
+                                    );
+                                    let inv_scale = 1.0 / drag.start_scale.x.max(0.001);
+                                    let new_anchor = drag.start_anchor_val + seq_delta * inv_scale;
+                                    let _ = state.set_clip_anchor_direct(
+                                        SelectedClipRef {
+                                            track_id: drag.track_id,
+                                            is_video_track: drag.is_video,
+                                            clip_id: drag.clip_id,
+                                        },
+                                        new_anchor,
+                                    );
+                                }
                             }
                         }
                     } else {
@@ -701,14 +739,11 @@ impl ViewerPanel {
                                                 .get(ac.track_index)
                                                 .map(|t| t.id)
                                                 .unwrap_or_default();
-                                            let mat = ac.clip.transform.evaluate_matrix(current);
-                                            let pos_v = glam::Vec2::new(mat.col(2).x, mat.col(2).y);
-                                            let scale = glam::Vec2::new(
-                                                mat.col(0).truncate().length(),
-                                                mat.col(1).truncate().length(),
-                                            );
-                                            let center_ss = bb.map(|r| r.center()).unwrap_or(pos);
-                                            hit = Some((track_id, ac.clip.id, pos_v, scale, center_ss, true));
+                                            let pos_v = ac.clip.transform.get_position(current);
+                                            let scale = ac.clip.transform.get_scale(current);
+                                            let center_ss = bb.as_ref().map(|r| r.center()).unwrap_or(pos);
+                                            let anchor_val = ac.clip.transform.get_anchor_point(current);
+                                            hit = Some((track_id, ac.clip.id, pos_v, scale, center_ss, true, anchor_val));
                                         }
                                     }
                                 }
@@ -724,31 +759,35 @@ impl ViewerPanel {
                                                 .get(ac.track_index)
                                                 .map(|t| t.id)
                                                 .unwrap_or_default();
-                                            let mat = ac.clip.transform.evaluate_matrix(current);
-                                            let pos_v = glam::Vec2::new(mat.col(2).x, mat.col(2).y);
-                                            let scale = glam::Vec2::new(
-                                                mat.col(0).truncate().length(),
-                                                mat.col(1).truncate().length(),
-                                            );
+                                            let pos_v = ac.clip.transform.get_position(current);
+                                            let scale = ac.clip.transform.get_scale(current);
                                             let bb2 = clip_screen_bounds_with_media(
                                                 &ac.clip, ac.transform_matrix,
                                                 &self.canvas_transform, state,
                                             );
                                             let center_ss = bb2.as_ref().map(|r| r.center()).unwrap_or(pos);
                                             let near_corner = is_near_corner(bb2, pos, 14.0);
-                                            hit = Some((track_id, ac.clip.id, pos_v, scale, center_ss, near_corner));
+                                            let anchor_val = ac.clip.transform.get_anchor_point(current);
+                                            hit = Some((track_id, ac.clip.id, pos_v, scale, center_ss, near_corner, anchor_val));
                                             break;
                                         }
                                     }
                                 }
-                                if let Some((track_id, cid, pos_v, _scale, _center_ss, near_corner)) = hit {
+                                if let Some((track_id, cid, pos_v, scale, _center_ss, near_corner, anchor_val)) = hit {
                                     let sel = (track_id, true, cid);
                                     self.canvas_selected_clip = Some(sel);
                                     state.canvas_selected_clip = Some(sel);
+                                    let anchor_screen = self.canvas_transform.seq_to_screen(pos_v.x, pos_v.y);
+                                    let near_anchor = pos.distance(anchor_screen) < 10.0;
                                     self.canvas_drag = Some(CanvasDragState {
                                         track_id, is_video: true, clip_id: cid,
-                                        mode: if near_corner { DragMode::Scale } else { DragMode::Move },
+                                        mode: if near_anchor { DragMode::Anchor }
+                                              else if near_corner { DragMode::Scale }
+                                              else { DragMode::Move },
                                         start_pos: pos_v,
+                                        start_scale: scale,
+                                        start_anchor_val: anchor_val,
+                                        start_anchor: anchor_screen,
                                         start_mouse: pos,
                                     });
                                 } else {
@@ -4320,6 +4359,10 @@ fn draw_transform_handles(
     for &c in &corners {
         painter.circle_filled(c, handle_radius, handle_color);
     }
+    // Draw anchor point (position = anchor's location in sequence space).
+    let anchor_pos = ac.clip.transform.get_position(current);
+    let ap = ct.seq_to_screen(anchor_pos.x, anchor_pos.y);
+    painter.circle_filled(ap, 5.0, egui::Color32::from_rgb(255, 200, 0));
 }
 
 /// 绘制棋盘格背景（表示空帧/透明）

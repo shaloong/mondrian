@@ -69,19 +69,27 @@ impl Transform2D {
         Self { properties }
     }
 
-    /// 求值为 3x3 仿射变换矩阵（用于渲染）
+    /// 求值为 3x3 仿射变换矩阵
+    ///
+    /// T(position) · R(rotation) · S(scale) · T(-anchor)
+    /// 锚点定义缩放旋转中心，位置定义锚点在父空间中的坐标。
     pub fn evaluate_matrix(&self, time: TimeCode) -> glam::Mat3 {
         let pos = self.evaluate_vec2(Self::POSITION_PATH, time);
         let scale = self.evaluate_vec2(Self::SCALE_PATH, time);
         let rot = self.evaluate_f32(Self::ROTATION_PATH, time).to_radians();
+        let anchor = self.evaluate_vec2(Self::ANCHOR_POINT_PATH, time);
 
         let cos_r = rot.cos();
         let sin_r = rot.sin();
 
+        // pos + R * S * (v - anchor) for vertex v
+        let tx = pos.x + scale.x * (cos_r * (-anchor.x) - sin_r * (-anchor.y));
+        let ty = pos.y + scale.y * (sin_r * (-anchor.x) + cos_r * (-anchor.y));
+
         glam::Mat3::from_cols(
             glam::Vec3::new(scale.x * cos_r, scale.x * sin_r, 0.0),
             glam::Vec3::new(-scale.y * sin_r, scale.y * cos_r, 0.0),
-            glam::Vec3::new(pos.x, pos.y, 1.0),
+            glam::Vec3::new(tx, ty, 1.0),
         )
     }
 
@@ -112,25 +120,40 @@ impl Transform2D {
         self.properties.apply_mutation(mutation)
     }
 
-    /// Directly set position (bypasses animation system for canvas drag).
+    /// Directly set position.
     pub fn set_position(&mut self, v: glam::Vec2) {
         let _ = self.properties.set_static_value(
             Self::POSITION_PATH, PropertyValue::Vec2(v),
         );
     }
 
-    /// Directly set scale (bypasses animation system for canvas drag).
+    /// Read current position value.
+    pub fn get_position(&self, time: TimeCode) -> glam::Vec2 {
+        self.evaluate_vec2(Self::POSITION_PATH, time)
+    }
+
+    /// Directly set scale.
     pub fn set_scale(&mut self, v: glam::Vec2) {
         let _ = self.properties.set_static_value(
             Self::SCALE_PATH, PropertyValue::Vec2(v),
         );
     }
 
-    /// Directly set anchor point.
+    /// Read current scale value.
+    pub fn get_scale(&self, time: TimeCode) -> glam::Vec2 {
+        self.evaluate_vec2(Self::SCALE_PATH, time)
+    }
+
+    /// Set anchor point.
     pub fn set_anchor_point(&mut self, v: glam::Vec2) {
         let _ = self.properties.set_static_value(
             Self::ANCHOR_POINT_PATH, PropertyValue::Vec2(v),
         );
+    }
+
+    /// Read current anchor value.
+    pub fn get_anchor_point(&self, time: TimeCode) -> glam::Vec2 {
+        self.evaluate_vec2(Self::ANCHOR_POINT_PATH, time)
     }
 
     fn evaluate_vec2(&self, path: &str, time: TimeCode) -> Vec2 {
@@ -828,4 +851,43 @@ mod tests {
         assert!(second_exposure.abs() < 1.0e-4);
     }
 
+    // ── Anchor matrix tests ───────────────────────────────────────
+
+    #[test]
+    fn anchor_zero_is_backward_compatible() {
+        let mut t = Transform2D::identity();
+        t.set_position(glam::Vec2::new(100.0, 200.0));
+        let m = t.evaluate_matrix(tc(0));
+        assert!((m.col(2).x - 100.0).abs() < 0.01, "tx={}", m.col(2).x);
+        assert!((m.col(2).y - 200.0).abs() < 0.01, "ty={}", m.col(2).y);
+    }
+
+    #[test]
+    fn anchor_center_pos_center_with_autofit_cancels() {
+        let mut t = Transform2D::identity();
+        t.set_position(glam::Vec2::new(960.0, 540.0));
+        t.set_scale(glam::Vec2::new(0.5, 0.5));
+        t.properties.set_static_value(
+            Transform2D::ANCHOR_POINT_PATH,
+            PropertyValue::Vec2(glam::Vec2::new(1920.0, 1080.0)),
+        ).unwrap();
+        let m = t.evaluate_matrix(tc(0));
+        assert!((m.col(2).x - 0.0).abs() < 0.01, "tx={}", m.col(2).x);
+        assert!((m.col(2).y - 0.0).abs() < 0.01, "ty={}", m.col(2).y);
+        assert!((m.col(0).x - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn position_change_with_nonzero_anchor() {
+        let mut t = Transform2D::identity();
+        t.set_scale(glam::Vec2::new(0.5, 0.5));
+        t.properties.set_static_value(
+            Transform2D::ANCHOR_POINT_PATH,
+            PropertyValue::Vec2(glam::Vec2::new(1920.0, 1080.0)),
+        ).unwrap();
+        t.set_position(glam::Vec2::new(1060.0, 640.0));
+        let m = t.evaluate_matrix(tc(0));
+        assert!((m.col(2).x - 100.0).abs() < 0.01, "tx={}", m.col(2).x);
+        assert!((m.col(2).y - 100.0).abs() < 0.01, "ty={}", m.col(2).y);
+    }
 }
