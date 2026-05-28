@@ -315,8 +315,12 @@ pub struct SequenceSettings {
     pub color_management: SequenceColorManagement,
 }
 
-fn default_action_safe_margin() -> f32 { 0.10 }
-fn default_title_safe_margin() -> f32 { 0.20 }
+fn default_action_safe_margin() -> f32 {
+    0.10
+}
+fn default_title_safe_margin() -> f32 {
+    0.20
+}
 
 impl Default for SequenceSettings {
     fn default() -> Self {

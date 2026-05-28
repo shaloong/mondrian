@@ -991,12 +991,19 @@ mod tests {
         // Result: output alpha should be modulated by mask (all opaque → no change from mask)
         let graph = EffectRenderGraph {
             nodes: vec![
-                EffectGraphNode { id: EffectGraphNodeId(0), kind: EffectGraphNodeKind::Source },
+                EffectGraphNode {
+                    id: EffectGraphNodeId(0),
+                    kind: EffectGraphNodeKind::Source,
+                },
                 EffectGraphNode {
                     id: EffectGraphNodeId(1),
                     kind: EffectGraphNodeKind::MaskSource {
                         shape: crate::mask::MaskShape::Rectangle {
-                            x: 0.0, y: 0.0, width: 1.0, height: 1.0, corner_radius: 0.0,
+                            x: 0.0,
+                            y: 0.0,
+                            width: 1.0,
+                            height: 1.0,
+                            corner_radius: 0.0,
                         },
                         feather: 0.0,
                         expansion: 0.0,
@@ -1020,8 +1027,11 @@ mod tests {
         let output = apply_effect_render_graph(&input, 1, 1, &graph, &schedule, 0);
         // RGB unchanged, alpha halved (200 * 0.5 = 100)
         assert_eq!(&output[0..3], &input[0..3]);
-        assert!((output[3] as i32 - 100).abs() <= 1,
-            "expected alpha ~100, got {}", output[3]);
+        assert!(
+            (output[3] as i32 - 100).abs() <= 1,
+            "expected alpha ~100, got {}",
+            output[3]
+        );
     }
 
     #[test]
@@ -1029,12 +1039,19 @@ mod tests {
         // Rectangle covering left half of canvas at 50% opacity.
         let graph = EffectRenderGraph {
             nodes: vec![
-                EffectGraphNode { id: EffectGraphNodeId(0), kind: EffectGraphNodeKind::Source },
+                EffectGraphNode {
+                    id: EffectGraphNodeId(0),
+                    kind: EffectGraphNodeKind::Source,
+                },
                 EffectGraphNode {
                     id: EffectGraphNodeId(1),
                     kind: EffectGraphNodeKind::MaskSource {
                         shape: crate::mask::MaskShape::Rectangle {
-                            x: 0.0, y: 0.0, width: 0.5, height: 1.0, corner_radius: 0.0,
+                            x: 0.0,
+                            y: 0.0,
+                            width: 0.5,
+                            height: 1.0,
+                            corner_radius: 0.0,
                         },
                         feather: 0.0,
                         expansion: 0.0,

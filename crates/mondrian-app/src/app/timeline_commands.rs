@@ -518,9 +518,7 @@ impl AppState {
         let start_frame = timeline_frame
             .or(selection_start)
             .unwrap_or_else(|| self.current_frame().max(0));
-        let default_duration_secs = self
-            .default_adjustment_layer_drag_duration()
-            .as_secs_f64();
+        let default_duration_secs = self.default_adjustment_layer_drag_duration().as_secs_f64();
 
         let (sequence_id, clip_id) = {
             let seq = self.sequence.as_mut().ok_or_else(|| {
@@ -543,9 +541,7 @@ impl AppState {
             clip.label = Some(asset_name.clone());
             let clip_id = clip.id;
             let track = seq.video_track_mut(track_id).ok_or_else(|| {
-                mondrian_core::MondrianError::TrackNotFound {
-                    track_id: track_id.to_string(),
-                }
+                mondrian_core::MondrianError::TrackNotFound { track_id: track_id.to_string() }
             })?;
             track.add_clip(clip)?;
             resolve_track_conflicts(track, clip_id, overlap_mode);
@@ -1754,7 +1750,10 @@ impl AppState {
         let dragging =
             self.dragging_asset.clone().ok_or(mondrian_core::MondrianError::Cancelled)?;
 
-        if !matches!(dragging.kind, AssetKind::Video | AssetKind::AdjustmentLayer | AssetKind::SolidColor) {
+        if !matches!(
+            dragging.kind,
+            AssetKind::Video | AssetKind::AdjustmentLayer | AssetKind::SolidColor
+        ) {
             return Err(mondrian_core::MondrianError::UnsupportedFormat {
                 format: "仅支持将视频素材或调整图层拖到视频轨".to_string(),
             });
@@ -1812,15 +1811,10 @@ impl AppState {
                     let seq_w = seq.settings.resolution.width.max(1) as f32;
                     let seq_h = seq.settings.resolution.height.max(1) as f32;
                     let fit_scale = (seq_w / mw as f32).min(seq_h / mh as f32);
-                    clip.transform.set_anchor_point(
-                        glam::Vec2::new(mw as f32 * 0.5, mh as f32 * 0.5),
-                    );
-                    clip.transform.set_scale(
-                        glam::Vec2::new(fit_scale, fit_scale),
-                    );
-                    clip.transform.set_position(
-                        glam::Vec2::new(seq_w * 0.5, seq_h * 0.5),
-                    );
+                    clip.transform
+                        .set_anchor_point(glam::Vec2::new(mw as f32 * 0.5, mh as f32 * 0.5));
+                    clip.transform.set_scale(glam::Vec2::new(fit_scale, fit_scale));
+                    clip.transform.set_position(glam::Vec2::new(seq_w * 0.5, seq_h * 0.5));
                 }
             }
             let clip_id = clip.id;
@@ -2231,7 +2225,11 @@ impl AppState {
 
     // ── Mask manipulation ──────────────────────────────────────────────
 
-    pub fn add_mask_to_clip(&mut self, selection: SelectedClipRef, name: &str) -> mondrian_core::Result<MaskId> {
+    pub fn add_mask_to_clip(
+        &mut self,
+        selection: SelectedClipRef,
+        name: &str,
+    ) -> mondrian_core::Result<MaskId> {
         let seq = self.sequence.as_mut().ok_or_else(|| {
             mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "add_mask".to_string(),
@@ -2240,9 +2238,7 @@ impl AppState {
         })?;
         let before = seq.clone();
         let clip = find_clip_mut_by_selection(seq, selection).ok_or_else(|| {
-            mondrian_core::MondrianError::ClipNotFound {
-                clip_id: selection.clip_id.to_string(),
-            }
+            mondrian_core::MondrianError::ClipNotFound { clip_id: selection.clip_id.to_string() }
         })?;
         let component = MaskComponent::new(name.to_string(), MaskKeyframe::default());
         let id = component.id;
@@ -2256,7 +2252,9 @@ impl AppState {
     }
 
     pub fn remove_mask_from_clip(
-        &mut self, selection: SelectedClipRef, mask_id: MaskId,
+        &mut self,
+        selection: SelectedClipRef,
+        mask_id: MaskId,
     ) -> mondrian_core::Result<()> {
         let seq = self.sequence.as_mut().ok_or_else(|| {
             mondrian_core::MondrianError::WorkflowStepFailed {
@@ -2266,9 +2264,7 @@ impl AppState {
         })?;
         let before = seq.clone();
         let clip = find_clip_mut_by_selection(seq, selection).ok_or_else(|| {
-            mondrian_core::MondrianError::ClipNotFound {
-                clip_id: selection.clip_id.to_string(),
-            }
+            mondrian_core::MondrianError::ClipNotFound { clip_id: selection.clip_id.to_string() }
         })?;
         let removed = {
             let len_before = clip.masks.len();
@@ -2286,7 +2282,10 @@ impl AppState {
     }
 
     pub fn set_mask_enabled(
-        &mut self, selection: SelectedClipRef, mask_id: MaskId, enabled: bool,
+        &mut self,
+        selection: SelectedClipRef,
+        mask_id: MaskId,
+        enabled: bool,
     ) -> mondrian_core::Result<()> {
         let seq = self.sequence.as_mut().ok_or_else(|| {
             mondrian_core::MondrianError::WorkflowStepFailed {
@@ -2296,9 +2295,7 @@ impl AppState {
         })?;
         let before = seq.clone();
         let clip = find_clip_mut_by_selection(seq, selection).ok_or_else(|| {
-            mondrian_core::MondrianError::ClipNotFound {
-                clip_id: selection.clip_id.to_string(),
-            }
+            mondrian_core::MondrianError::ClipNotFound { clip_id: selection.clip_id.to_string() }
         })?;
         if let Some(mask) = clip.masks.iter_mut().find(|m| m.id == mask_id) {
             mask.enabled = enabled;
@@ -2309,5 +2306,40 @@ impl AppState {
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         let _ = self.save_project_file();
         Ok(())
+    }
+
+    /// Update or insert a mask keyframe at the given time.
+    pub fn set_mask_keyframe(
+        &mut self,
+        selection: SelectedClipRef,
+        mask_id: MaskId,
+        keyframe: MaskKeyframe,
+        time: TimeTicks,
+    ) -> mondrian_core::Result<bool> {
+        let seq = self.sequence.as_mut().ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "set_mask_keyframe".to_string(),
+                reason: "当前无序列".to_string(),
+            }
+        })?;
+        let before = seq.clone();
+        let clip = find_clip_mut_by_selection(seq, selection).ok_or_else(|| {
+            mondrian_core::MondrianError::ClipNotFound { clip_id: selection.clip_id.to_string() }
+        })?;
+        if let Some(mask) = clip.masks.iter_mut().find(|m| m.id == mask_id) {
+            // Replace existing keyframe at same time, or insert sorted.
+            if let Some(pos) = mask.keyframes.iter().position(|(t, _)| *t == time) {
+                mask.keyframes[pos] = (time, keyframe);
+            } else {
+                mask.keyframes.push((time, keyframe));
+                mask.keyframes.sort_by_key(|(t, _)| *t);
+            }
+        }
+        let after = seq.clone();
+        let sequence_id = seq.id;
+        self.record_sequence_snapshot_command("修改蒙版", before, after);
+        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
+        let _ = self.save_project_file();
+        Ok(true)
     }
 }

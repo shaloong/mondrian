@@ -44,7 +44,11 @@ pub fn rasterize_mask_shape(
             // Apply feather: transition zone around the edge.
             let feather_px = (feather.max(0.0) * 0.5) * inv_w.max(inv_h).max(1e-6);
             let a = if feather_px <= 1e-8 {
-                if expanded <= 0.0 { 1.0 } else { 0.0 }
+                if expanded <= 0.0 {
+                    1.0
+                } else {
+                    0.0
+                }
             } else {
                 1.0 - smoothstep(-feather_px, feather_px, expanded)
             };
@@ -67,9 +71,7 @@ fn shape_sdf(shape: &MaskShape, px: f32, py: f32) -> f32 {
         MaskShape::Ellipse { center, radii } => {
             ellipse_sdf(px, py, center.x, center.y, radii.x, radii.y)
         }
-        MaskShape::Path { points, closed } => {
-            path_sdf(px, py, points, *closed)
-        }
+        MaskShape::Path { points, closed } => path_sdf(px, py, points, *closed),
     }
 }
 
@@ -126,7 +128,11 @@ fn path_sdf(px: f32, py: f32, points: &[BezierPoint], closed: bool) -> f32 {
     // Determine inside/outside via even-odd winding (only if closed).
     if closed {
         let inside = winding_number(target, &segments) % 2 != 0;
-        if inside { -min_dist } else { min_dist }
+        if inside {
+            -min_dist
+        } else {
+            min_dist
+        }
     } else {
         min_dist
     }
@@ -137,7 +143,13 @@ fn subdivide_path(points: &[BezierPoint], closed: bool) -> Vec<(Vec2, Vec2)> {
     let mut segments = Vec::new();
     let n = points.len();
     for i in 0..n {
-        let next = if i + 1 < n { i + 1 } else if closed { 0 } else { break };
+        let next = if i + 1 < n {
+            i + 1
+        } else if closed {
+            0
+        } else {
+            break;
+        };
         subdivide_bezier(points[i], points[next], &mut segments);
     }
     segments
@@ -217,7 +229,11 @@ mod tests {
     fn empty_rectangle_produces_full_alpha_inside() {
         // A rectangle covering the entire [0, 1] area.
         let shape = MaskShape::Rectangle {
-            x: 0.0, y: 0.0, width: 1.0, height: 1.0, corner_radius: 0.0,
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+            corner_radius: 0.0,
         };
         let alpha = rasterize_mask_shape(&shape, 64, 64, 0.0, 0.0, 1.0);
         // All pixels should be fully opaque (inside the shape).
@@ -227,7 +243,11 @@ mod tests {
     #[test]
     fn small_rectangle_has_transparent_border() {
         let shape = MaskShape::Rectangle {
-            x: 0.25, y: 0.25, width: 0.5, height: 0.5, corner_radius: 0.0,
+            x: 0.25,
+            y: 0.25,
+            width: 0.5,
+            height: 0.5,
+            corner_radius: 0.0,
         };
         let alpha = rasterize_mask_shape(&shape, 64, 64, 0.0, 0.0, 1.0);
         // Center should be opaque.
@@ -241,7 +261,11 @@ mod tests {
     #[test]
     fn feather_softens_edge() {
         let shape = MaskShape::Rectangle {
-            x: 0.25, y: 0.25, width: 0.5, height: 0.5, corner_radius: 0.0,
+            x: 0.25,
+            y: 0.25,
+            width: 0.5,
+            height: 0.5,
+            corner_radius: 0.0,
         };
         let hard = rasterize_mask_shape(&shape, 64, 64, 0.0, 0.0, 1.0);
         let soft = rasterize_mask_shape(&shape, 64, 64, 10.0, 0.0, 1.0);
@@ -251,26 +275,40 @@ mod tests {
         // Feather should smooth the transition — fewer purely binary pixels.
         let hard_mid = hard.iter().filter(|&&a| a > 30 && a < 220).count();
         let soft_mid = soft.iter().filter(|&&a| a > 30 && a < 220).count();
-        assert!(soft_mid > hard_mid, "feather should create more transitional pixels");
+        assert!(
+            soft_mid > hard_mid,
+            "feather should create more transitional pixels"
+        );
     }
 
     #[test]
     fn expansion_expands_shape() {
         let shape = MaskShape::Rectangle {
-            x: 0.25, y: 0.25, width: 0.5, height: 0.5, corner_radius: 0.0,
+            x: 0.25,
+            y: 0.25,
+            width: 0.5,
+            height: 0.5,
+            corner_radius: 0.0,
         };
         let normal = rasterize_mask_shape(&shape, 64, 64, 0.0, 0.0, 1.0);
         // Positive expansion = larger mask.
         let expanded = rasterize_mask_shape(&shape, 64, 64, 0.0, 10.0, 1.0);
         let normal_count = normal.iter().filter(|&&a| a > 128).count();
         let expanded_count = expanded.iter().filter(|&&a| a > 128).count();
-        assert!(expanded_count > normal_count, "expansion should increase visible area");
+        assert!(
+            expanded_count > normal_count,
+            "expansion should increase visible area"
+        );
     }
 
     #[test]
     fn opacity_scales_alpha() {
         let shape = MaskShape::Rectangle {
-            x: 0.0, y: 0.0, width: 1.0, height: 1.0, corner_radius: 0.0,
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+            corner_radius: 0.0,
         };
         let full = rasterize_mask_shape(&shape, 32, 32, 0.0, 0.0, 1.0);
         let half = rasterize_mask_shape(&shape, 32, 32, 0.0, 0.0, 0.5);
@@ -299,7 +337,11 @@ mod tests {
     #[test]
     fn zero_opacity_returns_all_zeros() {
         let shape = MaskShape::Rectangle {
-            x: 0.0, y: 0.0, width: 1.0, height: 1.0, corner_radius: 0.0,
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+            corner_radius: 0.0,
         };
         let alpha = rasterize_mask_shape(&shape, 32, 32, 0.0, 0.0, 0.0);
         assert!(alpha.iter().all(|&a| a == 0));
@@ -308,7 +350,11 @@ mod tests {
     #[test]
     fn degenerate_zero_size_handled() {
         let shape = MaskShape::Rectangle {
-            x: 0.5, y: 0.5, width: 0.0, height: 0.0, corner_radius: 0.0,
+            x: 0.5,
+            y: 0.5,
+            width: 0.0,
+            height: 0.0,
+            corner_radius: 0.0,
         };
         // Should not panic.
         let _alpha = rasterize_mask_shape(&shape, 1, 1, 0.0, 0.0, 1.0);

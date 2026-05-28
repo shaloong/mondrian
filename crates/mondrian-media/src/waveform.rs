@@ -31,7 +31,11 @@ pub struct WaveformCache {
 
 impl WaveformCache {
     pub fn new() -> Self {
-        Self { entries: HashMap::new(), order: Vec::new(), max_entries: 64 }
+        Self {
+            entries: HashMap::new(),
+            order: Vec::new(),
+            max_entries: 64,
+        }
     }
 
     pub fn get_or_compute(
@@ -113,11 +117,7 @@ mod tests {
 
     #[test]
     fn empty_buffer_returns_zero_peaks() {
-        let buffer = AudioBuffer {
-            samples: vec![],
-            sample_rate: 48000,
-            channels: 2,
-        };
+        let buffer = AudioBuffer { samples: vec![], sample_rate: 48000, channels: 2 };
         let data = compute_waveform(&buffer, 100);
         assert_eq!(data.peaks.len(), 100);
         assert!(data.peaks.iter().all(|&p| p == 0.0));
@@ -148,7 +148,10 @@ mod tests {
         let data = compute_waveform(&buffer, 100);
         assert_eq!(data.peaks.len(), 100);
         let max_peak = data.peaks.iter().cloned().fold(0.0f32, f32::max);
-        assert!(max_peak > 0.5, "sine tone should produce peaks > 0.5, got {max_peak}");
+        assert!(
+            max_peak > 0.5,
+            "sine tone should produce peaks > 0.5, got {max_peak}"
+        );
     }
 
     #[test]

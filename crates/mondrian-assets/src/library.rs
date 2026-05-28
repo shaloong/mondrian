@@ -368,11 +368,7 @@ impl AssetLibrary {
 
     // ── Folder / Bin CRUD ──────────────────────────────────────────────
 
-    pub fn create_folder(
-        &self,
-        name: &str,
-        parent_id: Option<&str>,
-    ) -> Result<String> {
+    pub fn create_folder(&self, name: &str, parent_id: Option<&str>) -> Result<String> {
         let id = Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
         let db = self.db.lock();
@@ -388,7 +384,9 @@ impl AssetLibrary {
     pub fn rename_folder(&self, folder_id: &str, new_name: &str) -> Result<()> {
         let trimmed = new_name.trim();
         if trimmed.is_empty() {
-            return Err(MondrianError::AssetDbError { reason: "文件夹名不能为空".to_string() });
+            return Err(MondrianError::AssetDbError {
+                reason: "文件夹名不能为空".to_string()
+            });
         }
         let db = self.db.lock();
         db.execute(
@@ -408,8 +406,11 @@ impl AssetLibrary {
         )
         .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
         // Child folders cascade via ON DELETE CASCADE.
-        db.execute("DELETE FROM folders WHERE id = ?1", rusqlite::params![folder_id])
-            .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
+        db.execute(
+            "DELETE FROM folders WHERE id = ?1",
+            rusqlite::params![folder_id],
+        )
+        .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
         Ok(())
     }
 
@@ -438,11 +439,7 @@ impl AssetLibrary {
         Ok(records)
     }
 
-    pub fn move_asset_to_folder(
-        &self,
-        asset_id: AssetId,
-        folder_id: Option<&str>,
-    ) -> Result<()> {
+    pub fn move_asset_to_folder(&self, asset_id: AssetId, folder_id: Option<&str>) -> Result<()> {
         let db = self.db.lock();
         db.execute(
             "UPDATE assets SET folder_id = ?1 WHERE id = ?2",
@@ -454,14 +451,20 @@ impl AssetLibrary {
 
     /// Find which timeline clips reference this asset (position reverse lookup).
     /// Returns a list of (asset_id, asset_name) for the UI to select and navigate to.
-    pub fn get_asset_location(&self, asset_id: AssetId) -> Result<Option<(Option<String>, Option<String>)>> {
+    pub fn get_asset_location(
+        &self,
+        asset_id: AssetId,
+    ) -> Result<Option<(Option<String>, Option<String>)>> {
         let db = self.db.lock();
         let mut stmt = db
             .prepare("SELECT folder_id, name FROM assets WHERE id = ?1")
             .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
         let result = stmt
             .query_row(rusqlite::params![asset_id.0.to_string()], |row| {
-                Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?))
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
             })
             .optional()
             .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
@@ -508,10 +511,9 @@ impl AssetLibrary {
             Err(_) => return "纯色层 1".to_string(),
         };
 
-        let rows = match stmt.query_map(
-            rusqlite::params![AssetKind::SolidColor.as_str()],
-            |row| row.get::<_, String>(0),
-        ) {
+        let rows = match stmt.query_map(rusqlite::params![AssetKind::SolidColor.as_str()], |row| {
+            row.get::<_, String>(0)
+        }) {
             Ok(rows) => rows,
             Err(_) => return "纯色层 1".to_string(),
         };

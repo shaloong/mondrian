@@ -122,9 +122,7 @@ impl Transform2D {
 
     /// Directly set position.
     pub fn set_position(&mut self, v: glam::Vec2) {
-        let _ = self.properties.set_static_value(
-            Self::POSITION_PATH, PropertyValue::Vec2(v),
-        );
+        let _ = self.properties.set_static_value(Self::POSITION_PATH, PropertyValue::Vec2(v));
     }
 
     /// Read current position value.
@@ -134,9 +132,7 @@ impl Transform2D {
 
     /// Directly set scale.
     pub fn set_scale(&mut self, v: glam::Vec2) {
-        let _ = self.properties.set_static_value(
-            Self::SCALE_PATH, PropertyValue::Vec2(v),
-        );
+        let _ = self.properties.set_static_value(Self::SCALE_PATH, PropertyValue::Vec2(v));
     }
 
     /// Read current scale value.
@@ -146,9 +142,9 @@ impl Transform2D {
 
     /// Set anchor point.
     pub fn set_anchor_point(&mut self, v: glam::Vec2) {
-        let _ = self.properties.set_static_value(
-            Self::ANCHOR_POINT_PATH, PropertyValue::Vec2(v),
-        );
+        let _ = self
+            .properties
+            .set_static_value(Self::ANCHOR_POINT_PATH, PropertyValue::Vec2(v));
     }
 
     /// Read current anchor value.
@@ -867,10 +863,12 @@ mod tests {
         let mut t = Transform2D::identity();
         t.set_position(glam::Vec2::new(960.0, 540.0));
         t.set_scale(glam::Vec2::new(0.5, 0.5));
-        t.properties.set_static_value(
-            Transform2D::ANCHOR_POINT_PATH,
-            PropertyValue::Vec2(glam::Vec2::new(1920.0, 1080.0)),
-        ).unwrap();
+        t.properties
+            .set_static_value(
+                Transform2D::ANCHOR_POINT_PATH,
+                PropertyValue::Vec2(glam::Vec2::new(1920.0, 1080.0)),
+            )
+            .unwrap();
         let m = t.evaluate_matrix(tc(0));
         assert!((m.col(2).x - 0.0).abs() < 0.01, "tx={}", m.col(2).x);
         assert!((m.col(2).y - 0.0).abs() < 0.01, "ty={}", m.col(2).y);
@@ -881,10 +879,12 @@ mod tests {
     fn position_change_with_nonzero_anchor() {
         let mut t = Transform2D::identity();
         t.set_scale(glam::Vec2::new(0.5, 0.5));
-        t.properties.set_static_value(
-            Transform2D::ANCHOR_POINT_PATH,
-            PropertyValue::Vec2(glam::Vec2::new(1920.0, 1080.0)),
-        ).unwrap();
+        t.properties
+            .set_static_value(
+                Transform2D::ANCHOR_POINT_PATH,
+                PropertyValue::Vec2(glam::Vec2::new(1920.0, 1080.0)),
+            )
+            .unwrap();
         t.set_position(glam::Vec2::new(1060.0, 640.0));
         let m = t.evaluate_matrix(tc(0));
         assert!((m.col(2).x - 100.0).abs() < 0.01, "tx={}", m.col(2).x);

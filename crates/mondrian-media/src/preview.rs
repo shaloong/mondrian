@@ -150,12 +150,8 @@ impl PreviewDecodeSession {
             reason: e.to_string(),
         })?;
 
-        let (target_width, target_height) = fit_target_size(
-            decoder.width(),
-            decoder.height(),
-            max_width,
-            max_height,
-        );
+        let (target_width, target_height) =
+            fit_target_size(decoder.width(), decoder.height(), max_width, max_height);
 
         let scaler = ffmpeg::software::scaling::Context::get(
             decoder.format(),

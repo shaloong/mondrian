@@ -15,8 +15,8 @@ use mondrian_core::{
     },
     events::{AppEvent, EventBus},
     types::{
-        AssetId, ClipId, Color, ColorEngine, ColorSpace, EffectId, KeyframeId,
-        OcioConfigSource, Rational, Resolution, SequenceId, TimeCode, TrackId,
+        AssetId, ClipId, Color, ColorEngine, ColorSpace, EffectId, KeyframeId, OcioConfigSource,
+        Rational, Resolution, SequenceId, TimeCode, TrackId,
     },
     ProjectColorManagement, ProjectSettings,
 };
@@ -575,7 +575,11 @@ pub struct AppState {
     // 正在拖拽的素材（从素材库拖向时间线）
     pub dragging_asset: Option<DraggingAsset>,
     /// Clip selected on the viewer canvas (synced to timeline/effect controls).
-    pub canvas_selected_clip: Option<(mondrian_core::types::TrackId, bool, mondrian_core::types::ClipId)>,
+    pub canvas_selected_clip: Option<(
+        mondrian_core::types::TrackId,
+        bool,
+        mondrian_core::types::ClipId,
+    )>,
 
     // 渲染导出队列
     pub render_queue: Arc<RenderQueue>,

@@ -226,11 +226,19 @@ impl TimelinePanel {
     /// Select a clip from the viewer canvas, syncing to timeline and effect controls.
     pub fn apply_canvas_selection(
         &mut self,
-        selection: Option<(mondrian_core::types::TrackId, bool, mondrian_core::types::ClipId)>,
+        selection: Option<(
+            mondrian_core::types::TrackId,
+            bool,
+            mondrian_core::types::ClipId,
+        )>,
     ) {
         self.selected_clips.clear();
         if let Some((track_id, is_video, clip_id)) = selection {
-            self.selected_clips.insert(ClipSelection { track_id, is_video_track: is_video, clip_id });
+            self.selected_clips.insert(ClipSelection {
+                track_id,
+                is_video_track: is_video,
+                clip_id,
+            });
         }
     }
 
@@ -970,10 +978,15 @@ impl TimelinePanel {
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                let preview = egui::Color32::from_rgb(r.clamp(0, 255) as u8, g.clamp(0, 255) as u8, b.clamp(0, 255) as u8);
+                let preview = egui::Color32::from_rgb(
+                    r.clamp(0, 255) as u8,
+                    g.clamp(0, 255) as u8,
+                    b.clamp(0, 255) as u8,
+                );
                 ui.horizontal(|ui| {
                     ui.label("预览:");
-                    let (rect, _) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::hover());
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::hover());
                     ui.painter().rect_filled(rect, egui::CornerRadius::same(4), preview);
                 });
                 ui.add_space(8.0);
@@ -1060,11 +1073,7 @@ impl TimelinePanel {
             return;
         }
 
-        let waveform = self.waveform_cache.get_or_compute(
-            clip.asset_id,
-            &buffer,
-            pixel_width,
-        );
+        let waveform = self.waveform_cache.get_or_compute(clip.asset_id, &buffer, pixel_width);
 
         let bottom_y = clip_rect.bottom() - 1.0;
         let max_height = clip_rect.height() * 0.85;
@@ -1080,7 +1089,10 @@ impl TimelinePanel {
             }
             let h = peak.clamp(0.0, 1.0) * max_height;
             painter.line_segment(
-                [egui::Pos2::new(x, bottom_y - h), egui::Pos2::new(x, bottom_y)],
+                [
+                    egui::Pos2::new(x, bottom_y - h),
+                    egui::Pos2::new(x, bottom_y),
+                ],
                 egui::Stroke::new(1.0, wave_color),
             );
         }

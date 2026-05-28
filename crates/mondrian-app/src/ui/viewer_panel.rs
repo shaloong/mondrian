@@ -4,6 +4,7 @@ use crate::{
 };
 use egui::{Pos2, Rect, Sense, Ui, Vec2};
 
+use crate::ui::timeline_panel::SelectedClipRef;
 use mondrian_core::{
     apply_display_profile_rgba8_in_place,
     automation::timecode_to_ticks,
@@ -14,11 +15,10 @@ use mondrian_core::{
     },
     ColorPipeline, DisplayColorProfile,
 };
-use mondrian_effects::mask::{BezierPoint, MaskShape};
+use mondrian_effects::mask::{BezierPoint, MaskKeyframe, MaskShape};
 use mondrian_effects::CompiledEffectGraph;
 use mondrian_media::cache::FrameCacheConfig;
 use mondrian_media::{DecoderPool, FrameCache, RgbaFrame};
-use crate::ui::timeline_panel::SelectedClipRef;
 use mondrian_renderer::{
     build_timeline_render_plan, collect_timeline_color_diagnostics,
     composite_timeline_elements_float_linear, is_identity_transform, quantize_transform_signature,
@@ -384,14 +384,34 @@ pub struct ViewerPanel {
     canvas_bg_hex: u32,
     canvas_transform: crate::ui::viewer::canvas::CanvasTransform,
     /// Clip currently selected via canvas click (track_id, is_video, clip_id).
-    canvas_selected_clip: Option<(mondrian_core::types::TrackId, bool, mondrian_core::types::ClipId)>,
+    canvas_selected_clip: Option<(
+        mondrian_core::types::TrackId,
+        bool,
+        mondrian_core::types::ClipId,
+    )>,
     /// Drag state for canvas move/resize.
     canvas_drag: Option<CanvasDragState>,
+    /// Active mask creation tool (None = normal interaction mode).
+    mask_tool: Option<MaskTool>,
+    /// Mask creation drag state.
+    mask_draw: Option<MaskDrawState>,
+    /// Mask editing state (resize/move existing mask).
+    mask_edit: Option<MaskEditState>,
+    /// Currently selected mask for editing (mask_id, clip_id, track_id).
+    selected_mask: Option<(
+        mondrian_effects::mask::MaskId,
+        mondrian_core::types::ClipId,
+        mondrian_core::types::TrackId,
+    )>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[allow(dead_code)]
-enum DragMode { Move, Scale, Anchor }
+enum DragMode {
+    Move,
+    Scale,
+    Anchor,
+}
 
 struct CanvasDragState {
     track_id: mondrian_core::types::TrackId,
@@ -403,6 +423,90 @@ struct CanvasDragState {
     start_anchor_val: glam::Vec2,
     start_anchor: Pos2,
     start_mouse: Pos2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum MaskTool {
+    Rect,
+    Ellipse,
+}
+
+#[derive(Debug, Clone)]
+struct MaskDrawState {
+    track_id: mondrian_core::types::TrackId,
+    clip_id: mondrian_core::types::ClipId,
+    start_seq: glam::Vec2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum MaskEditMode {
+    Move,
+    ResizeCorner(usize),
+}
+
+#[derive(Debug, Clone)]
+struct MaskEditState {
+    mask_id: mondrian_effects::mask::MaskId,
+    clip_id: mondrian_core::types::ClipId,
+    #[allow(dead_code)]
+    track_id: mondrian_core::types::TrackId,
+    mode: MaskEditMode,
+    start_shape: mondrian_effects::mask::MaskShape,
+    start_mouse: Pos2,
+}
+
+/// Unified hit-test result for canvas interaction priority resolution.
+enum HitResult {
+    /// Hit a mask corner handle (highest priority).
+    MaskCorner {
+        track_id: mondrian_core::types::TrackId,
+        clip_id: mondrian_core::types::ClipId,
+        mask_id: mondrian_effects::mask::MaskId,
+        corner: usize,
+        shape: mondrian_effects::mask::MaskShape,
+        pos: Pos2,
+    },
+    /// Hit a mask outline or interior (lower priority than clip handles).
+    MaskMove {
+        track_id: mondrian_core::types::TrackId,
+        clip_id: mondrian_core::types::ClipId,
+        mask_id: mondrian_effects::mask::MaskId,
+        shape: mondrian_effects::mask::MaskShape,
+        pos: Pos2,
+    },
+    /// Hit a clip resize corner.
+    ClipCorner {
+        track_id: mondrian_core::types::TrackId,
+        is_video: bool,
+        clip_id: mondrian_core::types::ClipId,
+        pos_v: glam::Vec2,
+        scale: glam::Vec2,
+        anchor_val: glam::Vec2,
+        anchor_screen: Pos2,
+        pos: Pos2,
+    },
+    /// Hit the clip anchor point.
+    ClipAnchor {
+        track_id: mondrian_core::types::TrackId,
+        is_video: bool,
+        clip_id: mondrian_core::types::ClipId,
+        pos_v: glam::Vec2,
+        scale: glam::Vec2,
+        anchor_val: glam::Vec2,
+        anchor_screen: Pos2,
+        pos: Pos2,
+    },
+    /// Hit clip interior (lowest priority).
+    ClipMove {
+        track_id: mondrian_core::types::TrackId,
+        is_video: bool,
+        clip_id: mondrian_core::types::ClipId,
+        pos_v: glam::Vec2,
+        scale: glam::Vec2,
+        anchor_val: glam::Vec2,
+        anchor_screen: Pos2,
+        pos: Pos2,
+    },
 }
 
 impl Default for ViewerPanel {
@@ -494,6 +598,10 @@ impl Default for ViewerPanel {
             canvas_bg_hex: default_canvas_bg(),
             canvas_selected_clip: None,
             canvas_drag: None,
+            mask_tool: None,
+            mask_draw: None,
+            mask_edit: None,
+            selected_mask: None,
             canvas_transform: crate::ui::viewer::canvas::CanvasTransform::fit(
                 (1920, 1080),
                 egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(960.0, 540.0)),
@@ -601,13 +709,41 @@ impl ViewerPanel {
             if ui.input(|i| i.key_pressed(egui::Key::End)) {
                 state.seek(state.last_content_frame().max(0));
             }
+            // Mask tool shortcuts
+            if ui.input(|i| i.key_pressed(egui::Key::R) && !i.modifiers.command) {
+                self.mask_tool = Some(MaskTool::Rect);
+                self.mask_edit = None;
+                self.selected_mask = None;
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::E) && !i.modifiers.command) {
+                self.mask_tool = Some(MaskTool::Ellipse);
+                self.mask_edit = None;
+                self.selected_mask = None;
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::V) && !i.modifiers.command) {
+                self.mask_tool = None;
+                self.mask_draw = None;
+                self.mask_edit = None;
+                self.selected_mask = None;
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.mask_tool = None;
+                self.mask_draw = None;
+                self.mask_edit = None;
+                self.selected_mask = None;
+            }
         }
 
         ui.vertical(|ui| {
+            let toolbar_h = 28.0;
             let controls_height = tokens::viewer_transport_height();
             let transport_gap = 4.0;
             let canvas_slot_height =
-                (ui.available_height() - controls_height - transport_gap).max(120.0);
+                (ui.available_height() - toolbar_h - controls_height - transport_gap).max(120.0);
+
+            // ── Mask tool toolbar ──
+            draw_mask_toolbar(ui, self);
+
             let (canvas_slot_rect, _) = ui.allocate_exact_size(
                 Vec2::new(ui.available_width(), canvas_slot_height),
                 Sense::hover(),
@@ -656,7 +792,117 @@ impl ViewerPanel {
                 let ptr = ctx.input(|inp| inp.pointer.interact_pos());
                 let primary_down = ctx.input(|inp| inp.pointer.button_down(egui::PointerButton::Primary));
 
-                if let Some(ref mut drag) = self.canvas_drag {
+                // ── Mask creation mode ──
+                if self.mask_tool.is_some() {
+                    if let Some(ref mut md) = self.mask_draw {
+                        if primary_down {
+                            // Update mask preview while dragging (visual only — drawn below).
+                        } else {
+                            // Release: create the mask.
+                            if let Some(seq_pos) = ptr.and_then(|p| self.canvas_transform.screen_to_seq(p)) {
+                                let (x1, y1) = (md.start_seq.x.min(seq_pos.0), md.start_seq.y.min(seq_pos.1));
+                                let (x2, y2) = (md.start_seq.x.max(seq_pos.0), md.start_seq.y.max(seq_pos.1));
+                                let normalized = seq_rect_to_clip_normalized(
+                                    state, md.clip_id, glam::Vec2::new(x1, y1), glam::Vec2::new(x2, y2),
+                                );
+                                let mask = MaskKeyframe {
+                                    shape: match self.mask_tool.unwrap() {
+                                        MaskTool::Rect => MaskShape::Rectangle {
+                                            x: normalized.0.x, y: normalized.0.y,
+                                            width: normalized.1.x - normalized.0.x,
+                                            height: normalized.1.y - normalized.0.y,
+                                            corner_radius: 0.0,
+                                        },
+                                        MaskTool::Ellipse => MaskShape::Ellipse {
+                                            center: (normalized.0 + normalized.1) * 0.5,
+                                            radii: (normalized.1 - normalized.0) * 0.5,
+                                        },
+                                    },
+                                    ..Default::default()
+                                };
+                                let sel = SelectedClipRef {
+                                    track_id: md.track_id,
+                                    is_video_track: true,
+                                    clip_id: md.clip_id,
+                                };
+                                if let Ok(mask_id) = state.add_mask_to_clip(sel, "蒙版") {
+                                    let current_frame = state.current_frame();
+                                    let seq = state.sequence.as_ref();
+                                    if let Some(seq) = seq {
+                                        let current = TimeCode::new(current_frame.max(0), seq.time_base());
+                                        let ticks = timecode_to_ticks(current);
+                                        let _ = state.set_mask_keyframe(sel, mask_id, mask, ticks);
+                                    }
+                                }
+                            }
+                            self.mask_draw = None;
+                            self.mask_tool = None;
+                        }
+                    } else if let Some(pos) = ptr {
+                        if ctx.input(|inp| inp.pointer.button_pressed(egui::PointerButton::Primary)) {
+                            if let Some(seq_pos) = self.canvas_transform.screen_to_seq(pos) {
+                                // Find clip under cursor to attach mask to.
+                                let mut target: Option<(mondrian_core::types::TrackId, mondrian_core::types::ClipId)> = None;
+                                if let Some(seq) = state.sequence.as_ref() {
+                                    let current = TimeCode::new(state.current_frame().max(0), seq.time_base());
+                                    let active = seq.active_clips_at(current);
+                                    for ac in active.iter().rev() {
+                                        let bb = clip_screen_bounds_with_media(
+                                            &ac.clip, ac.transform_matrix,
+                                            &self.canvas_transform, state,
+                                        );
+                                        if bb.is_some_and(|r| r.contains(pos)) {
+                                            let track_id = seq.video_tracks
+                                                .get(ac.track_index)
+                                                .map(|t| t.id)
+                                                .unwrap_or_default();
+                                            target = Some((track_id, ac.clip.id));
+                                            break;
+                                        }
+                                    }
+                                }
+                                if let Some((tid, cid)) = target {
+                                    self.canvas_selected_clip = Some((tid, true, cid));
+                                    state.canvas_selected_clip = Some((tid, true, cid));
+                                    self.mask_draw = Some(MaskDrawState {
+                                        track_id: tid,
+                                        clip_id: cid,
+                                        start_seq: glam::Vec2::new(seq_pos.0, seq_pos.1),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                } else if let Some(ref mut edit) = self.mask_edit {
+                    if primary_down {
+                        if let Some(now) = ctx.input(|inp| inp.pointer.interact_pos()) {
+                            let screen_delta = now - edit.start_mouse;
+                            let zoom = self.canvas_transform.zoom();
+                            let seq_delta = glam::Vec2::new(
+                                screen_delta.x / zoom.max(0.001),
+                                screen_delta.y / zoom.max(0.001),
+                            );
+                            // Convert seq delta to normalized delta via inverse clip transform.
+                            let norm_delta = seq_delta_to_norm(
+                                state, edit.clip_id, seq_delta,
+                            );
+                            let current_frame = state.current_frame();
+                            let mut new_shape = edit.start_shape.clone();
+                            match edit.mode {
+                                MaskEditMode::Move => {
+                                    translate_shape(&mut new_shape, norm_delta);
+                                }
+                                MaskEditMode::ResizeCorner(corner) => {
+                                    resize_shape_corner(&mut new_shape, corner, norm_delta);
+                                }
+                            }
+                            // Update mask in real-time (no undo per frame).
+                            update_mask_shape_direct(state, edit.clip_id, edit.mask_id, new_shape, current_frame);
+                        }
+                    } else {
+                        self.mask_edit = None;
+                    }
+                } else if let Some(ref mut drag) = self.canvas_drag {
                     if primary_down {
                         if let Some(now) = ctx.input(|inp| inp.pointer.interact_pos()) {
                             match drag.mode {
@@ -726,74 +972,251 @@ impl ViewerPanel {
                                     seq.time_base(),
                                 );
                                 let active = seq.active_clips_at(current);
-                                // Check if click is near corner of already-selected clip.
-                                let mut hit = None;
-                                if let Some((_tid, _iv, sel_cid)) = self.canvas_selected_clip {
-                                    if let Some(ac) = active.iter().find(|a| a.clip.id == sel_cid) {
-                                        let bb = clip_screen_bounds_with_media(
-                                            &ac.clip, ac.transform_matrix,
-                                            &self.canvas_transform, state,
-                                        );
-                                        if is_near_corner(bb, pos, 14.0) {
-                                            let track_id = seq.video_tracks
-                                                .get(ac.track_index)
-                                                .map(|t| t.id)
-                                                .unwrap_or_default();
-                                            let pos_v = ac.clip.transform.get_position(current);
-                                            let scale = ac.clip.transform.get_scale(current);
-                                            let center_ss = bb.as_ref().map(|r| r.center()).unwrap_or(pos);
-                                            let anchor_val = ac.clip.transform.get_anchor_point(current);
-                                            hit = Some((track_id, ac.clip.id, pos_v, scale, center_ss, true, anchor_val));
+
+                                if self.mask_tool.is_none() {
+                                    // ──────────────────────────────────────
+                                    //  Priority-based hit resolution:
+                                    //  1. Mask corners          (explicit handles, 10px)
+                                    //  2. Clip corners & anchor (explicit handles, 14px / 10px)
+                                    //  3. Mask outline/interior (less precise, 8px + interior)
+                                    //  4. Clip interior         (lowest)
+                                    //  Within each level, topmost clip/mask wins.
+                                    // ──────────────────────────────────────
+
+                                    let ticks = timecode_to_ticks(current);
+
+                                    // Level 1: Mask corner hits (highest priority).
+                                    let mut hit: Option<HitResult> = None;
+                                    'l1: for ac in active.iter().rev() {
+                                        if ac.clip.masks.is_empty() { continue; }
+                                        let (mw, mh) = state.asset_library.as_ref()
+                                            .and_then(|lib| lib.get_asset(ac.clip.asset_id).ok().flatten())
+                                            .and_then(|a| a.media_info.primary_video().cloned())
+                                            .map(|v| (v.width as f32, v.height as f32))
+                                            .unwrap_or((1.0, 1.0));
+                                        for mask in ac.clip.masks.iter().rev() {
+                                            if !mask.enabled { continue; }
+                                            let kf = mask.evaluate_at(ticks);
+                                            let (corner_hit, _) = mask_hit_test(
+                                                &kf.shape, mw, mh, &ac.transform_matrix,
+                                                &self.canvas_transform, pos,
+                                            );
+                                            if let Some(corner_idx) = corner_hit {
+                                                let track_id = seq.video_tracks
+                                                    .get(ac.track_index)
+                                                    .map(|t| t.id)
+                                                    .unwrap_or_default();
+                                                hit = Some(HitResult::MaskCorner {
+                                                    track_id, clip_id: ac.clip.id, mask_id: mask.id,
+                                                    corner: corner_idx, shape: kf.shape.clone(),
+                                                    pos,
+                                                });
+                                                break 'l1;
+                                            }
                                         }
                                     }
-                                }
-                                // Otherwise find clip under cursor.
-                                if hit.is_none() {
-                                    for ac in active.iter().rev() {
-                                        let bb_rect = clip_screen_bounds_with_media(
-                                            &ac.clip, ac.transform_matrix,
-                                            &self.canvas_transform, state,
-                                        );
-                                        if bb_rect.is_some_and(|r| r.contains(pos)) {
-                                            let track_id = seq.video_tracks
-                                                .get(ac.track_index)
-                                                .map(|t| t.id)
-                                                .unwrap_or_default();
-                                            let pos_v = ac.clip.transform.get_position(current);
-                                            let scale = ac.clip.transform.get_scale(current);
-                                            let bb2 = clip_screen_bounds_with_media(
+
+                                    // Level 2: Clip corners & anchor (only if no mask corner hit).
+                                    if hit.is_none() {
+                                        // Already-selected clip corners get priority.
+                                        if let Some((_tid, _iv, sel_cid)) = self.canvas_selected_clip {
+                                            if let Some(ac) = active.iter().find(|a| a.clip.id == sel_cid) {
+                                                let bb = clip_screen_bounds_with_media(
+                                                    &ac.clip, ac.transform_matrix,
+                                                    &self.canvas_transform, state,
+                                                );
+                                                let track_id = seq.video_tracks
+                                                    .get(ac.track_index)
+                                                    .map(|t| t.id)
+                                                    .unwrap_or_default();
+                                                let pos_v = ac.clip.transform.get_position(current);
+                                                let anchor_val = ac.clip.transform.get_anchor_point(current);
+                                                let anchor_screen = self.canvas_transform.seq_to_screen(pos_v.x, pos_v.y);
+                                                if is_near_corner(bb, pos, 14.0) {
+                                                    let scale = ac.clip.transform.get_scale(current);
+                                                    hit = Some(HitResult::ClipCorner {
+                                                        track_id, is_video: true, clip_id: ac.clip.id,
+                                                        pos_v, scale, anchor_val, anchor_screen, pos,
+                                                    });
+                                                } else if pos.distance(anchor_screen) < 10.0 {
+                                                    let scale = ac.clip.transform.get_scale(current);
+                                                    hit = Some(HitResult::ClipAnchor {
+                                                        track_id, is_video: true, clip_id: ac.clip.id,
+                                                        pos_v, scale, anchor_val, anchor_screen, pos,
+                                                    });
+                                                }
+                                            }
+                                        }
+                                        // Any clip corners/anchors.
+                                        if hit.is_none() {
+                                            for ac in active.iter().rev() {
+                                                let bb = clip_screen_bounds_with_media(
+                                                    &ac.clip, ac.transform_matrix,
+                                                    &self.canvas_transform, state,
+                                                );
+                                                let track_id = seq.video_tracks
+                                                    .get(ac.track_index)
+                                                    .map(|t| t.id)
+                                                    .unwrap_or_default();
+                                                let pos_v = ac.clip.transform.get_position(current);
+                                                let anchor_val = ac.clip.transform.get_anchor_point(current);
+                                                let anchor_screen = self.canvas_transform.seq_to_screen(pos_v.x, pos_v.y);
+                                                if is_near_corner(bb, pos, 14.0) {
+                                                    let scale = ac.clip.transform.get_scale(current);
+                                                    hit = Some(HitResult::ClipCorner {
+                                                        track_id, is_video: true, clip_id: ac.clip.id,
+                                                        pos_v, scale, anchor_val, anchor_screen, pos,
+                                                    });
+                                                    break;
+                                                } else if pos.distance(anchor_screen) < 10.0 {
+                                                    let scale = ac.clip.transform.get_scale(current);
+                                                    hit = Some(HitResult::ClipAnchor {
+                                                        track_id, is_video: true, clip_id: ac.clip.id,
+                                                        pos_v, scale, anchor_val, anchor_screen, pos,
+                                                    });
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Level 3: Mask outline/interior (only if no precise hit).
+                                    if hit.is_none() {
+                                        'l3: for ac in active.iter().rev() {
+                                            if ac.clip.masks.is_empty() { continue; }
+                                            let (mw, mh) = state.asset_library.as_ref()
+                                                .and_then(|lib| lib.get_asset(ac.clip.asset_id).ok().flatten())
+                                                .and_then(|a| a.media_info.primary_video().cloned())
+                                                .map(|v| (v.width as f32, v.height as f32))
+                                                .unwrap_or((1.0, 1.0));
+                                            for mask in ac.clip.masks.iter().rev() {
+                                                if !mask.enabled { continue; }
+                                                let kf = mask.evaluate_at(ticks);
+                                                let (corner_hit, area_hit) = mask_hit_test(
+                                                    &kf.shape, mw, mh, &ac.transform_matrix,
+                                                    &self.canvas_transform, pos,
+                                                );
+                                                if corner_hit.is_some() || area_hit {
+                                                    let track_id = seq.video_tracks
+                                                        .get(ac.track_index)
+                                                        .map(|t| t.id)
+                                                        .unwrap_or_default();
+                                                    hit = Some(HitResult::MaskMove {
+                                                        track_id, clip_id: ac.clip.id, mask_id: mask.id,
+                                                        shape: kf.shape.clone(), pos,
+                                                    });
+                                                    break 'l3;
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Level 4: Clip interior (lowest).
+                                    if hit.is_none() {
+                                        for ac in active.iter().rev() {
+                                            let bb = clip_screen_bounds_with_media(
                                                 &ac.clip, ac.transform_matrix,
                                                 &self.canvas_transform, state,
                                             );
-                                            let center_ss = bb2.as_ref().map(|r| r.center()).unwrap_or(pos);
-                                            let near_corner = is_near_corner(bb2, pos, 14.0);
-                                            let anchor_val = ac.clip.transform.get_anchor_point(current);
-                                            hit = Some((track_id, ac.clip.id, pos_v, scale, center_ss, near_corner, anchor_val));
-                                            break;
+                                            if bb.is_some_and(|r| r.contains(pos)) {
+                                                let track_id = seq.video_tracks
+                                                    .get(ac.track_index)
+                                                    .map(|t| t.id)
+                                                    .unwrap_or_default();
+                                                let pos_v = ac.clip.transform.get_position(current);
+                                                let scale = ac.clip.transform.get_scale(current);
+                                                let anchor_val = ac.clip.transform.get_anchor_point(current);
+                                                let anchor_screen = self.canvas_transform.seq_to_screen(pos_v.x, pos_v.y);
+                                                hit = Some(HitResult::ClipMove {
+                                                    track_id, is_video: true, clip_id: ac.clip.id,
+                                                    pos_v, scale, anchor_val, anchor_screen, pos,
+                                                });
+                                                break;
+                                            }
                                         }
                                     }
-                                }
-                                if let Some((track_id, cid, pos_v, scale, _center_ss, near_corner, anchor_val)) = hit {
-                                    let sel = (track_id, true, cid);
-                                    self.canvas_selected_clip = Some(sel);
-                                    state.canvas_selected_clip = Some(sel);
-                                    let anchor_screen = self.canvas_transform.seq_to_screen(pos_v.x, pos_v.y);
-                                    let near_anchor = pos.distance(anchor_screen) < 10.0;
-                                    self.canvas_drag = Some(CanvasDragState {
-                                        track_id, is_video: true, clip_id: cid,
-                                        mode: if near_anchor { DragMode::Anchor }
-                                              else if near_corner { DragMode::Scale }
-                                              else { DragMode::Move },
-                                        start_pos: pos_v,
-                                        start_scale: scale,
-                                        start_anchor_val: anchor_val,
-                                        start_anchor: anchor_screen,
-                                        start_mouse: pos,
-                                    });
-                                } else {
-                                    self.canvas_selected_clip = None;
-                                    state.canvas_selected_clip = None;
-                                }
+
+                                    // Apply the hit.
+                                    match hit {
+                                        Some(HitResult::MaskCorner { track_id, clip_id, mask_id, corner, shape, pos }) => {
+                                            let sel = (track_id, true, clip_id);
+                                            self.canvas_selected_clip = Some(sel);
+                                            state.canvas_selected_clip = Some(sel);
+                                            self.selected_mask = Some((mask_id, clip_id, track_id));
+                                            self.mask_edit = Some(MaskEditState {
+                                                mask_id, clip_id, track_id,
+                                                mode: MaskEditMode::ResizeCorner(corner),
+                                                start_shape: shape,
+                                                start_mouse: pos,
+                                            });
+                                        }
+                                        Some(HitResult::MaskMove { track_id, clip_id, mask_id, shape, pos }) => {
+                                            let sel = (track_id, true, clip_id);
+                                            self.canvas_selected_clip = Some(sel);
+                                            state.canvas_selected_clip = Some(sel);
+                                            self.selected_mask = Some((mask_id, clip_id, track_id));
+                                            self.mask_edit = Some(MaskEditState {
+                                                mask_id, clip_id, track_id,
+                                                mode: MaskEditMode::Move,
+                                                start_shape: shape,
+                                                start_mouse: pos,
+                                            });
+                                        }
+                                        Some(HitResult::ClipCorner { track_id, is_video, clip_id, pos_v, scale, anchor_val, anchor_screen, pos }) => {
+                                            let sel = (track_id, is_video, clip_id);
+                                            self.canvas_selected_clip = Some(sel);
+                                            state.canvas_selected_clip = Some(sel);
+                                            self.mask_edit = None;
+                                            self.selected_mask = None;
+                                            self.canvas_drag = Some(CanvasDragState {
+                                                track_id, is_video, clip_id,
+                                                mode: DragMode::Scale,
+                                                start_pos: pos_v,
+                                                start_scale: scale,
+                                                start_anchor_val: anchor_val,
+                                                start_anchor: anchor_screen,
+                                                start_mouse: pos,
+                                            });
+                                        }
+                                        Some(HitResult::ClipAnchor { track_id, is_video, clip_id, pos_v, scale, anchor_val, anchor_screen, pos }) => {
+                                            let sel = (track_id, is_video, clip_id);
+                                            self.canvas_selected_clip = Some(sel);
+                                            state.canvas_selected_clip = Some(sel);
+                                            self.mask_edit = None;
+                                            self.selected_mask = None;
+                                            self.canvas_drag = Some(CanvasDragState {
+                                                track_id, is_video, clip_id,
+                                                mode: DragMode::Anchor,
+                                                start_pos: pos_v,
+                                                start_scale: scale,
+                                                start_anchor_val: anchor_val,
+                                                start_anchor: anchor_screen,
+                                                start_mouse: pos,
+                                            });
+                                        }
+                                        Some(HitResult::ClipMove { track_id, is_video, clip_id, pos_v, scale, anchor_val, anchor_screen, pos }) => {
+                                            let sel = (track_id, is_video, clip_id);
+                                            self.canvas_selected_clip = Some(sel);
+                                            state.canvas_selected_clip = Some(sel);
+                                            self.mask_edit = None;
+                                            self.selected_mask = None;
+                                            self.canvas_drag = Some(CanvasDragState {
+                                                track_id, is_video, clip_id,
+                                                mode: DragMode::Move,
+                                                start_pos: pos_v,
+                                                start_scale: scale,
+                                                start_anchor_val: anchor_val,
+                                                start_anchor: anchor_screen,
+                                                start_mouse: pos,
+                                            });
+                                        }
+                                        None => {
+                                            self.canvas_selected_clip = None;
+                                            state.canvas_selected_clip = None;
+                                            self.selected_mask = None;
+                                        }
+                                    }
+                                } // end if mask_tool.is_none()
                             }
                         }
                     }
@@ -951,7 +1374,44 @@ impl ViewerPanel {
                                     palette::status_error(),
                                 );
                             }
-                            draw_mask_overlays(&painter, content_rect, state, current_frame);
+                            draw_mask_overlays(&painter, &self.canvas_transform, state, current_frame, self.selected_mask);
+
+                            // Mask creation preview during drag.
+                            if let (Some(tool), Some(ref md)) = (self.mask_tool, &self.mask_draw) {
+                                if let Some(pos) = ui.ctx().input(|inp| inp.pointer.interact_pos()) {
+                                    if let Some(cur_seq) = self.canvas_transform.screen_to_seq(pos) {
+                                        let (x1, y1) = (md.start_seq.x.min(cur_seq.0), md.start_seq.y.min(cur_seq.1));
+                                        let (x2, y2) = (md.start_seq.x.max(cur_seq.0), md.start_seq.y.max(cur_seq.1));
+                                        let preview_color = egui::Color32::from_rgb(0, 200, 255);
+                                        let stroke = egui::Stroke::new(2.0, preview_color);
+                                        match tool {
+                                            MaskTool::Rect => {
+                                                let corners = [
+                                                    glam::Vec2::new(x1, y1),
+                                                    glam::Vec2::new(x2, y1),
+                                                    glam::Vec2::new(x2, y2),
+                                                    glam::Vec2::new(x1, y2),
+                                                ];
+                                                draw_mask_preview_polygon(&painter, &corners, &self.canvas_transform, stroke, true);
+                                            }
+                                            MaskTool::Ellipse => {
+                                                let center = glam::Vec2::new((x1 + x2) * 0.5, (y1 + y2) * 0.5);
+                                                let radii = glam::Vec2::new((x2 - x1) * 0.5, (y2 - y1) * 0.5);
+                                                let n = 64usize;
+                                                let mut pts = Vec::with_capacity(n + 1);
+                                                for s in 0..=n {
+                                                    let a = s as f32 * std::f32::consts::TAU / n as f32;
+                                                    pts.push(glam::Vec2::new(
+                                                        center.x + radii.x * a.cos(),
+                                                        center.y + radii.y * a.sin(),
+                                                    ));
+                                                }
+                                                draw_mask_preview_polygon(&painter, &pts, &self.canvas_transform, stroke, false);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
 
                             // Transform handles for canvas-selected clip.
                             if let Some((_tid, _is_vid, clip_id)) = self.canvas_selected_clip {
@@ -964,16 +1424,6 @@ impl ViewerPanel {
                             if let Some(seq) = state.sequence.as_ref() {
                                 draw_safe_margins(&painter, &self.canvas_transform, seq);
                             }
-
-                            // Zoom indicator at bottom-right of slot.
-                            let zoom_label = self.canvas_transform.zoom_mode.display_label();
-                            painter.text(
-                                canvas_rect.right_bottom() + Vec2::new(-8.0, -6.0),
-                                egui::Align2::RIGHT_BOTTOM,
-                                zoom_label,
-                                typography::body_small(),
-                                palette::text_muted(),
-                            );
 
                         }
                     } else {
@@ -4219,13 +4669,24 @@ fn draw_safe_margins(
 
 /// Uniformly scale an affine matrix [a, b, tx, c, d, ty] by factor.
 fn scale_affine(t: [f32; 6], factor: f32) -> [f32; 6] {
-    [t[0] * factor, t[1] * factor, t[2] * factor,
-     t[3] * factor, t[4] * factor, t[5] * factor]
+    [
+        t[0] * factor,
+        t[1] * factor,
+        t[2] * factor,
+        t[3] * factor,
+        t[4] * factor,
+        t[5] * factor,
+    ]
 }
 
 fn is_near_corner(rect: Option<Rect>, point: Pos2, radius: f32) -> bool {
     rect.is_some_and(|r| {
-        let corners = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom()];
+        let corners = [
+            r.left_top(),
+            r.right_top(),
+            r.right_bottom(),
+            r.left_bottom(),
+        ];
         corners.iter().any(|&c| c.distance(point) <= radius)
     })
 }
@@ -4262,8 +4723,14 @@ fn clip_screen_bounds_with_media(
         max_x = max_x.max(p.x);
         max_y = max_y.max(p.y);
     }
-    if min_x >= max_x || min_y >= max_y { None }
-    else { Some(Rect::from_min_max(Pos2::new(min_x, min_y), Pos2::new(max_x, max_y))) }
+    if min_x >= max_x || min_y >= max_y {
+        None
+    } else {
+        Some(Rect::from_min_max(
+            Pos2::new(min_x, min_y),
+            Pos2::new(max_x, max_y),
+        ))
+    }
 }
 
 #[allow(dead_code)]
@@ -4306,11 +4773,17 @@ fn draw_transform_handles(
     ct: &crate::ui::viewer::canvas::CanvasTransform,
     clip_id: mondrian_core::types::ClipId,
 ) {
-    let Some(seq) = state.sequence.as_ref() else { return };
-    let Some(library) = state.asset_library.as_ref() else { return };
+    let Some(seq) = state.sequence.as_ref() else {
+        return;
+    };
+    let Some(library) = state.asset_library.as_ref() else {
+        return;
+    };
     let current = TimeCode::new(state.current_frame().max(0), seq.time_base());
     let active = seq.active_clips_at(current);
-    let Some(ac) = active.iter().find(|a| a.clip.id == clip_id) else { return };
+    let Some(ac) = active.iter().find(|a| a.clip.id == clip_id) else {
+        return;
+    };
 
     // Get media dimensions for the bounding box.
     let (mw, mh) = library
@@ -4339,7 +4812,9 @@ fn draw_transform_handles(
         max_x = max_x.max(p.x);
         max_y = max_y.max(p.y);
     }
-    if min_x >= max_x || min_y >= max_y { return; }
+    if min_x >= max_x || min_y >= max_y {
+        return;
+    }
     let rect = Rect::from_min_max(Pos2::new(min_x, min_y), Pos2::new(max_x, max_y));
 
     let handle_color = egui::Color32::from_rgb(0, 180, 255);
@@ -4428,31 +4903,26 @@ fn draw_empty_canvas_meta(
 
 fn draw_mask_overlays(
     painter: &egui::Painter,
-    canvas_rect: Rect,
+    ct: &crate::ui::viewer::canvas::CanvasTransform,
     state: &AppState,
     timeline_frame: i64,
+    selected_mask: Option<(
+        mondrian_effects::mask::MaskId,
+        mondrian_core::types::ClipId,
+        mondrian_core::types::TrackId,
+    )>,
 ) {
     let Some(seq) = state.sequence.as_ref() else {
+        return;
+    };
+    let Some(lib) = state.asset_library.as_ref() else {
         return;
     };
     let active = seq.active_clips_at(TimeCode::new(timeline_frame.max(0), seq.time_base()));
     if active.is_empty() {
         return;
     }
-    let seq_res = seq.settings.resolution;
-    if seq_res.width == 0 || seq_res.height == 0 {
-        return;
-    }
-    let sx = canvas_rect.width() / seq_res.width as f32;
-    let sy = canvas_rect.height() / seq_res.height as f32;
-    let ox = canvas_rect.left();
-    let oy = canvas_rect.top();
-    let to_scr = |nx: f32, ny: f32| {
-        Pos2::new(
-            ox + nx * seq_res.width as f32 * sx,
-            oy + ny * seq_res.height as f32 * sy,
-        )
-    };
+    let to_scr = |x: f32, y: f32| ct.seq_to_screen(x, y);
     let ticks = timecode_to_ticks(TimeCode::new(timeline_frame.max(0), seq.time_base()));
     let colors = [
         egui::Color32::from_rgb(0, 180, 240),
@@ -4465,34 +4935,77 @@ fn draw_mask_overlays(
             continue;
         }
         let mat = ac.transform_matrix;
+        // Get media dimensions for normalized → pixel conversion.
+        let (mw, mh) = lib
+            .get_asset(ac.clip.asset_id)
+            .ok()
+            .flatten()
+            .and_then(|a| a.media_info.primary_video().cloned())
+            .map(|v| (v.width as f32, v.height as f32))
+            .unwrap_or((1.0, 1.0));
         for (i, mask) in ac.clip.masks.iter().enumerate() {
             if !mask.enabled {
                 continue;
             }
+            let is_selected =
+                selected_mask.is_some_and(|(mid, cid, _)| mid == mask.id && cid == ac.clip.id);
             let p = mask.evaluate_at(ticks);
             let c = colors[i % colors.len()];
-            let st = egui::Stroke::new(2.0, c);
+            let st = if is_selected {
+                egui::Stroke::new(3.0, c)
+            } else {
+                egui::Stroke::new(2.0, c)
+            };
             match &p.shape {
                 MaskShape::Rectangle { x, y, width, height, .. } => {
                     let crn = [
-                        glam::Vec2::new(*x, *y),
-                        glam::Vec2::new(x + width, *y),
-                        glam::Vec2::new(x + width, y + height),
-                        glam::Vec2::new(*x, y + height),
+                        glam::Vec2::new(x * mw, y * mh),
+                        glam::Vec2::new((x + width) * mw, y * mh),
+                        glam::Vec2::new((x + width) * mw, (y + height) * mh),
+                        glam::Vec2::new(x * mw, (y + height) * mh),
                     ];
                     draw_mask_polygon(painter, &crn, &mat, &to_scr, st, true);
+                    // Draw corner handles for selected mask.
+                    if is_selected {
+                        for &corner in &crn {
+                            let sc = mask_xform(corner, &mat, &to_scr);
+                            painter.rect_filled(
+                                egui::Rect::from_center_size(sc, egui::vec2(8.0, 8.0)),
+                                2.0,
+                                egui::Color32::WHITE,
+                            );
+                        }
+                    }
                 }
                 MaskShape::Ellipse { center, radii } => {
                     let n = 64usize;
                     let mut pts = Vec::with_capacity(n + 1);
+                    let cx = center.x * mw;
+                    let cy = center.y * mh;
+                    let rx = radii.x * mw;
+                    let ry = radii.y * mh;
                     for s in 0..=n {
                         let a = s as f32 * std::f32::consts::TAU / n as f32;
-                        pts.push(glam::Vec2::new(
-                            center.x + radii.x * a.cos(),
-                            center.y + radii.y * a.sin(),
-                        ));
+                        pts.push(glam::Vec2::new(cx + rx * a.cos(), cy + ry * a.sin()));
                     }
                     draw_mask_polygon(painter, &pts, &mat, &to_scr, st, false);
+                    // Draw bounding-box handles for selected ellipse.
+                    if is_selected {
+                        let bbox_corners = [
+                            glam::Vec2::new(cx - rx, cy - ry),
+                            glam::Vec2::new(cx + rx, cy - ry),
+                            glam::Vec2::new(cx + rx, cy + ry),
+                            glam::Vec2::new(cx - rx, cy + ry),
+                        ];
+                        for &bc in &bbox_corners {
+                            let sc = mask_xform(bc, &mat, &to_scr);
+                            painter.rect_filled(
+                                egui::Rect::from_center_size(sc, egui::vec2(8.0, 8.0)),
+                                2.0,
+                                egui::Color32::WHITE,
+                            );
+                        }
+                    }
                 }
                 MaskShape::Path { points, closed } => {
                     let segs = mask_path_segments(points, *closed);
@@ -4557,6 +5070,417 @@ fn draw_mask_polygon(
         return;
     }
     let cp: Vec<Pos2> = pts.iter().map(|&p| mask_xform(p, mat, to_scr)).collect();
+    let n = if closed { cp.len() } else { cp.len() - 1 };
+    for i in 0..n {
+        painter.line_segment([cp[i], cp[(i + 1) % cp.len()]], stroke);
+    }
+}
+
+/// Mask tool toolbar — a thin row of tool buttons above the canvas.
+fn draw_mask_toolbar(ui: &mut egui::Ui, panel: &mut ViewerPanel) {
+    let available = ui.available_rect_before_wrap();
+    let rect = ui.allocate_space(egui::vec2(available.width(), 28.0)).1;
+    let inner = rect.shrink2(egui::vec2(4.0, 2.0));
+
+    let btn_w = 30.0;
+    let btn_h = 22.0;
+
+    let mut x = inner.left();
+    ui.push_id("mask_tools", |ui| {
+        // Selection tool (V)
+        let sel_active = panel.mask_tool.is_none();
+        let sel_rect = egui::Rect::from_min_size(
+            egui::pos2(x, inner.center().y - btn_h * 0.5),
+            egui::vec2(btn_w, btn_h),
+        );
+        let sel_resp = ui.interact(sel_rect, egui::Id::new("sel"), egui::Sense::click());
+        paint_tool_button(ui.painter(), sel_rect, "V", sel_active, sel_resp.hovered());
+        let sel_clicked = sel_resp.clone().on_hover_text("选择工具 (V)").clicked();
+        if sel_clicked {
+            panel.mask_tool = None;
+            panel.mask_draw = None;
+            panel.mask_edit = None;
+            panel.selected_mask = None;
+        }
+        x += btn_w + 2.0;
+
+        // Rectangle mask (R)
+        let rect_active = panel.mask_tool == Some(MaskTool::Rect);
+        let rect_btn_rect = egui::Rect::from_min_size(
+            egui::pos2(x, inner.center().y - btn_h * 0.5),
+            egui::vec2(btn_w, btn_h),
+        );
+        let rect_resp = ui.interact(rect_btn_rect, egui::Id::new("rect"), egui::Sense::click());
+        paint_tool_button(ui.painter(), rect_btn_rect, "□", rect_active, rect_resp.hovered());
+        let rect_clicked = rect_resp.clone().on_hover_text("矩形蒙版 (R)").clicked();
+        if rect_clicked {
+            panel.mask_tool = if rect_active {
+                None
+            } else {
+                Some(MaskTool::Rect)
+            };
+            panel.mask_draw = None;
+            panel.mask_edit = None;
+            panel.selected_mask = None;
+        }
+        x += btn_w + 2.0;
+
+        // Ellipse mask (E)
+        let ell_active = panel.mask_tool == Some(MaskTool::Ellipse);
+        let ell_rect = egui::Rect::from_min_size(
+            egui::pos2(x, inner.center().y - btn_h * 0.5),
+            egui::vec2(btn_w, btn_h),
+        );
+        let ell_resp = ui.interact(ell_rect, egui::Id::new("ellipse"), egui::Sense::click());
+        paint_tool_button(ui.painter(), ell_rect, "○", ell_active, ell_resp.hovered());
+        let ell_clicked = ell_resp.clone().on_hover_text("椭圆蒙版 (E)").clicked();
+        if ell_clicked {
+            panel.mask_tool = if ell_active {
+                None
+            } else {
+                Some(MaskTool::Ellipse)
+            };
+            panel.mask_draw = None;
+            panel.mask_edit = None;
+            panel.selected_mask = None;
+        }
+    });
+}
+
+fn paint_tool_button(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    label: &str,
+    active: bool,
+    hovered: bool,
+) {
+    let fill = if active {
+        palette::bg_surface_active()
+    } else if hovered {
+        palette::bg_surface_hover()
+    } else {
+        egui::Color32::TRANSPARENT
+    };
+    painter.rect_filled(rect, tokens::button_rounding(), fill);
+    if active {
+        painter.rect_stroke(
+            rect.shrink(0.5),
+            tokens::button_rounding(),
+            egui::Stroke::new(1.0, palette::interaction_highlight()),
+            egui::StrokeKind::Inside,
+        );
+    }
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        label,
+        typography::body_small(),
+        if active {
+            palette::text_primary()
+        } else {
+            palette::text_muted()
+        },
+    );
+}
+
+/// Convert a screen-space delta to normalized [0,1] mask coordinate delta.
+fn seq_delta_to_norm(
+    state: &AppState,
+    clip_id: mondrian_core::types::ClipId,
+    delta: glam::Vec2,
+) -> glam::Vec2 {
+    let Some(seq) = state.sequence.as_ref() else {
+        return delta;
+    };
+    let current = TimeCode::new(state.current_frame().max(0), seq.time_base());
+    let active = seq.active_clips_at(current);
+    let Some(ac) = active.iter().find(|a| a.clip.id == clip_id) else {
+        return delta;
+    };
+    let (mw, mh) = state
+        .asset_library
+        .as_ref()
+        .and_then(|lib| lib.get_asset(ac.clip.asset_id).ok().flatten())
+        .and_then(|a| a.media_info.primary_video().cloned())
+        .map(|v| (v.width as f32, v.height as f32))
+        .unwrap_or((1.0, 1.0));
+    // Extract rotation-free scale from the inverse transform.
+    let inv = ac.transform_matrix.inverse();
+    let local = inv.transform_vector2(delta);
+    glam::Vec2::new(local.x / mw, local.y / mh)
+}
+
+/// Translate a mask shape by a normalized delta.
+fn translate_shape(shape: &mut MaskShape, delta: glam::Vec2) {
+    match shape {
+        MaskShape::Rectangle { x, y, .. } => {
+            *x += delta.x;
+            *y += delta.y;
+        }
+        MaskShape::Ellipse { center, .. } => {
+            *center += delta;
+        }
+        MaskShape::Path { points, .. } => {
+            for pt in points {
+                pt.position += delta;
+                pt.control_in += delta;
+                pt.control_out += delta;
+            }
+        }
+    }
+}
+
+/// Resize a mask shape by dragging a corner. `corner` is 0=TL, 1=TR, 2=BR, 3=BL.
+fn resize_shape_corner(shape: &mut MaskShape, corner: usize, delta: glam::Vec2) {
+    let bbox = shape_bbox(shape);
+    let (mut x1, mut y1, mut x2, mut y2) = (bbox.0.x, bbox.0.y, bbox.1.x, bbox.1.y);
+    match corner {
+        0 => {
+            x1 += delta.x;
+            y1 += delta.y;
+        }
+        1 => {
+            x2 += delta.x;
+            y1 += delta.y;
+        }
+        2 => {
+            x2 += delta.x;
+            y2 += delta.y;
+        }
+        3 => {
+            x1 += delta.x;
+            y2 += delta.y;
+        }
+        _ => return,
+    }
+    // Maintain minimum size.
+    if x2 - x1 < 0.01 {
+        x2 = x1 + 0.01;
+    }
+    if y2 - y1 < 0.01 {
+        y2 = y1 + 0.01;
+    }
+    bbox_to_shape(shape, glam::Vec2::new(x1, y1), glam::Vec2::new(x2, y2));
+}
+
+fn shape_bbox(shape: &MaskShape) -> (glam::Vec2, glam::Vec2) {
+    match shape {
+        MaskShape::Rectangle { x, y, width, height, .. } => (
+            glam::Vec2::new(*x, *y),
+            glam::Vec2::new(*x + *width, *y + *height),
+        ),
+        MaskShape::Ellipse { center, radii } => (*center - *radii, *center + *radii),
+        MaskShape::Path { points, .. } => {
+            let mut min = glam::Vec2::splat(f32::MAX);
+            let mut max = glam::Vec2::splat(f32::MIN);
+            for pt in points {
+                min = min.min(pt.position);
+                max = max.max(pt.position);
+            }
+            (min, max)
+        }
+    }
+}
+
+fn bbox_to_shape(shape: &mut MaskShape, min: glam::Vec2, max: glam::Vec2) {
+    match shape {
+        MaskShape::Rectangle { x, y, width, height, .. } => {
+            *x = min.x;
+            *y = min.y;
+            *width = max.x - min.x;
+            *height = max.y - min.y;
+        }
+        MaskShape::Ellipse { center, radii } => {
+            *center = (min + max) * 0.5;
+            *radii = (max - min) * 0.5;
+        }
+        MaskShape::Path { .. } => {
+            // Path resize is more complex; skip for now.
+        }
+    }
+}
+
+/// Directly update mask shape without going through the full undo command.
+/// Used for real-time drag updates. The undo snapshot is captured once on release.
+fn update_mask_shape_direct(
+    state: &mut AppState,
+    clip_id: mondrian_core::types::ClipId,
+    mask_id: mondrian_effects::mask::MaskId,
+    new_shape: MaskShape,
+    current_frame: i64,
+) {
+    let Some(seq) = state.sequence.as_mut() else {
+        return;
+    };
+    let current = TimeCode::new(current_frame.max(0), seq.time_base());
+    let ticks = timecode_to_ticks(current);
+    for track in &mut seq.video_tracks {
+        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
+            if let Some(mask) = clip.masks.iter_mut().find(|m| m.id == mask_id) {
+                if let Some(pos) = mask.keyframes.iter().position(|(t, _)| *t == ticks) {
+                    mask.keyframes[pos].1.shape = new_shape;
+                } else {
+                    let kf = MaskKeyframe { shape: new_shape, ..Default::default() };
+                    mask.keyframes.push((ticks, kf));
+                    mask.keyframes.sort_by_key(|(t, _)| *t);
+                }
+            }
+            break;
+        }
+    }
+}
+
+/// Hit-test a mask shape at screen position. Returns (corner_hit, outline_hit).
+/// corner_hit is Some(index) if near a bounding-box corner (0=TL,1=TR,2=BR,3=BL).
+/// outline_hit is true if near the shape outline but not a corner.
+fn mask_hit_test(
+    shape: &MaskShape,
+    mw: f32,
+    mh: f32,
+    mat: &glam::Mat3,
+    ct: &crate::ui::viewer::canvas::CanvasTransform,
+    screen_pos: Pos2,
+) -> (Option<usize>, bool) {
+    let to_scr = |x: f32, y: f32| -> Pos2 {
+        let t = *mat * glam::Vec3::new(x, y, 1.0);
+        ct.seq_to_screen(t.x, t.y)
+    };
+    let bbox = shape_bbox(shape);
+    let corners = [
+        to_scr(bbox.0.x * mw, bbox.0.y * mh),
+        to_scr(bbox.1.x * mw, bbox.0.y * mh),
+        to_scr(bbox.1.x * mw, bbox.1.y * mh),
+        to_scr(bbox.0.x * mw, bbox.1.y * mh),
+    ];
+    const CORNER_RADIUS: f32 = 10.0;
+    for (i, &c) in corners.iter().enumerate() {
+        if c.distance(screen_pos) <= CORNER_RADIUS {
+            return (Some(i), true);
+        }
+    }
+    // Check proximity to outline by sampling points.
+    let outline_pts = shape_outline_points(shape, mw, mh);
+    const OUTLINE_RADIUS: f32 = 8.0;
+    for pt in &outline_pts {
+        let sp = to_scr(pt.x, pt.y);
+        if sp.distance(screen_pos) <= OUTLINE_RADIUS {
+            return (None, true);
+        }
+    }
+    // Check if inside the shape.
+    if is_point_in_mask(shape, mw, mh, mat, ct, screen_pos) {
+        return (None, true);
+    }
+    (None, false)
+}
+
+/// Get outline sample points for a mask shape.
+fn shape_outline_points(shape: &MaskShape, mw: f32, mh: f32) -> Vec<glam::Vec2> {
+    match shape {
+        MaskShape::Rectangle { x, y, width, height, .. } => {
+            let (x1, y1) = (x * mw, y * mh);
+            let (x2, y2) = ((x + width) * mw, (y + height) * mh);
+            let mut pts = Vec::new();
+            let n = 24;
+            for i in 0..n {
+                let t = i as f32 / n as f32;
+                pts.push(glam::Vec2::new(x1 + (x2 - x1) * t, y1));
+                pts.push(glam::Vec2::new(x2, y1 + (y2 - y1) * t));
+                pts.push(glam::Vec2::new(x1 + (x2 - x1) * t, y2));
+                pts.push(glam::Vec2::new(x1, y1 + (y2 - y1) * t));
+            }
+            pts
+        }
+        MaskShape::Ellipse { center, radii } => {
+            let (cx, cy) = (center.x * mw, center.y * mh);
+            let (rx, ry) = (radii.x * mw, radii.y * mh);
+            let n = 64;
+            (0..=n)
+                .map(|i| {
+                    let a = i as f32 * std::f32::consts::TAU / n as f32;
+                    glam::Vec2::new(cx + rx * a.cos(), cy + ry * a.sin())
+                })
+                .collect()
+        }
+        MaskShape::Path { points, .. } => points
+            .iter()
+            .map(|p| glam::Vec2::new(p.position.x * mw, p.position.y * mh))
+            .collect(),
+    }
+}
+
+/// Check if a screen point is inside a mask shape.
+fn is_point_in_mask(
+    shape: &MaskShape,
+    mw: f32,
+    mh: f32,
+    mat: &glam::Mat3,
+    ct: &crate::ui::viewer::canvas::CanvasTransform,
+    screen_pos: Pos2,
+) -> bool {
+    // Convert screen → seq → local media coords → normalized.
+    let Some((sx, sy)) = ct.screen_to_seq(screen_pos) else {
+        return false;
+    };
+    let inv = mat.inverse();
+    let local = inv.transform_point2(glam::Vec2::new(sx, sy));
+    let nx = local.x / mw;
+    let ny = local.y / mh;
+    match shape {
+        MaskShape::Rectangle { x, y, width, height, .. } => {
+            nx >= *x && nx <= *x + *width && ny >= *y && ny <= *y + *height
+        }
+        MaskShape::Ellipse { center, radii } => {
+            let dx = (nx - center.x) / radii.x.max(0.001);
+            let dy = (ny - center.y) / radii.y.max(0.001);
+            dx * dx + dy * dy <= 1.0
+        }
+        MaskShape::Path { .. } => false,
+    }
+}
+
+/// Convert a rectangle in sequence space to clip-local normalized [0,1] coordinates.
+fn seq_rect_to_clip_normalized(
+    state: &AppState,
+    clip_id: mondrian_core::types::ClipId,
+    min_seq: glam::Vec2,
+    max_seq: glam::Vec2,
+) -> (glam::Vec2, glam::Vec2) {
+    let Some(seq) = state.sequence.as_ref() else {
+        return (min_seq, max_seq);
+    };
+    let current = TimeCode::new(state.current_frame().max(0), seq.time_base());
+    let active = seq.active_clips_at(current);
+    let Some(ac) = active.iter().find(|a| a.clip.id == clip_id) else {
+        return (min_seq, max_seq);
+    };
+    let (mw, mh) = state
+        .asset_library
+        .as_ref()
+        .and_then(|lib| lib.get_asset(ac.clip.asset_id).ok().flatten())
+        .and_then(|a| a.media_info.primary_video().cloned())
+        .map(|v| (v.width as f32, v.height as f32))
+        .unwrap_or((1.0, 1.0));
+    let inv = ac.transform_matrix.inverse();
+    let local_min = inv.transform_point2(min_seq);
+    let local_max = inv.transform_point2(max_seq);
+    let norm_min = glam::Vec2::new(local_min.x / mw, local_min.y / mh);
+    let norm_max = glam::Vec2::new(local_max.x / mw, local_max.y / mh);
+    (norm_min, norm_max)
+}
+
+/// Draw a mask shape preview directly in sequence space (no clip transform).
+fn draw_mask_preview_polygon(
+    painter: &egui::Painter,
+    pts: &[glam::Vec2],
+    ct: &crate::ui::viewer::canvas::CanvasTransform,
+    stroke: egui::Stroke,
+    closed: bool,
+) {
+    if pts.len() < 2 {
+        return;
+    }
+    let cp: Vec<Pos2> = pts.iter().map(|&p| ct.seq_to_screen(p.x, p.y)).collect();
     let n = if closed { cp.len() } else { cp.len() - 1 };
     for i in 0..n {
         painter.line_segment([cp[i], cp[(i + 1) % cp.len()]], stroke);

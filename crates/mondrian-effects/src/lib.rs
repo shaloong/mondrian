@@ -35,6 +35,8 @@ pub use graph::{
     EffectGraphValue, EffectRenderGraph,
 };
 pub use lut::{Lut3D, LutCache, LutLibrary, LutLibraryEntry};
+pub use mask::{BezierPoint, MaskComponent, MaskId, MaskKeyframe, MaskOp, MaskShape};
+pub use mask_raster::rasterize_mask_shape;
 pub use plugin_contract::{
     effect_plugin_is_library_visible, effect_plugin_is_runtime_available,
     effect_plugin_runtime_status, plugin_contract, record_plugin_runtime_failure,
@@ -43,6 +45,4 @@ pub use plugin_contract::{
     CURRENT_EFFECT_PLUGIN_API_VERSION,
 };
 pub use plugin_sdk::{EffectGraphDsl, EffectPluginDefinitionBuilder};
-pub use mask::{BezierPoint, MaskComponent, MaskId, MaskKeyframe, MaskOp, MaskShape};
-pub use mask_raster::rasterize_mask_shape;
 pub use transition::Transition;

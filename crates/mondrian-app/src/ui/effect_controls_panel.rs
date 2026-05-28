@@ -2725,36 +2725,49 @@ impl EffectControlsPanel {
                         let xc = ui.add(DragValue::new(&mut sx).speed(step).suffix("%")).changed();
                         let yc = ui.add(DragValue::new(&mut sy).speed(step).suffix("%")).changed();
                         let mut channel_values = Vec::new();
-                        if xc { channel_values.push((0, (sx / 100.0) as f64)); }
-                        if yc { channel_values.push((1, (sy / 100.0) as f64)); }
+                        if xc {
+                            channel_values.push((0, (sx / 100.0) as f64));
+                        }
+                        if yc {
+                            channel_values.push((1, (sy / 100.0) as f64));
+                        }
                         if !channel_values.is_empty() {
-                            self.commit_channel_values(app, selection, path, &channel_values, interpolation, is_animatable);
+                            self.commit_channel_values(
+                                app,
+                                selection,
+                                path,
+                                &channel_values,
+                                interpolation,
+                                is_animatable,
+                            );
                         }
                     });
                 } else {
                     ui.horizontal(|ui| {
-                        let x_changed =
-                            ui.add(DragValue::new(&mut edited.x).speed(speed).prefix("X ")).changed();
-                        let y_changed =
-                            ui.add(DragValue::new(&mut edited.y).speed(speed).prefix("Y ")).changed();
-                    let mut channel_values = Vec::new();
-                    if x_changed {
-                        channel_values.push((0, edited.x as f64));
-                    }
-                    if y_changed {
-                        channel_values.push((1, edited.y as f64));
-                    }
-                    if !channel_values.is_empty() {
-                        self.commit_channel_values(
-                            app,
-                            selection,
-                            path,
-                            &channel_values,
-                            interpolation,
-                            is_animatable,
-                        );
-                    }
-                });
+                        let x_changed = ui
+                            .add(DragValue::new(&mut edited.x).speed(speed).prefix("X "))
+                            .changed();
+                        let y_changed = ui
+                            .add(DragValue::new(&mut edited.y).speed(speed).prefix("Y "))
+                            .changed();
+                        let mut channel_values = Vec::new();
+                        if x_changed {
+                            channel_values.push((0, edited.x as f64));
+                        }
+                        if y_changed {
+                            channel_values.push((1, edited.y as f64));
+                        }
+                        if !channel_values.is_empty() {
+                            self.commit_channel_values(
+                                app,
+                                selection,
+                                path,
+                                &channel_values,
+                                interpolation,
+                                is_animatable,
+                            );
+                        }
+                    });
                 } // end else (non-scale Vec2)
             }
             PropertyValue::Vec3(value) => {

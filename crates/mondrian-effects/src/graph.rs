@@ -890,19 +890,21 @@ mod tests {
     #[test]
     fn mask_source_node_has_no_dependencies() {
         let graph = EffectRenderGraph {
-            nodes: vec![
-                EffectGraphNode {
-                    id: EffectGraphNodeId(0),
-                    kind: EffectGraphNodeKind::MaskSource {
-                        shape: crate::mask::MaskShape::Rectangle {
-                            x: 0.0, y: 0.0, width: 1.0, height: 1.0, corner_radius: 0.0,
-                        },
-                        feather: 0.0,
-                        expansion: 0.0,
-                        opacity: 1.0,
+            nodes: vec![EffectGraphNode {
+                id: EffectGraphNodeId(0),
+                kind: EffectGraphNodeKind::MaskSource {
+                    shape: crate::mask::MaskShape::Rectangle {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 1.0,
+                        height: 1.0,
+                        corner_radius: 0.0,
                     },
+                    feather: 0.0,
+                    expansion: 0.0,
+                    opacity: 1.0,
                 },
-            ],
+            }],
             output: Some(EffectGraphNodeId(0)),
         };
 

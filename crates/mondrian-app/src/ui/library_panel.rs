@@ -52,8 +52,7 @@ const CARD_PADDING_BOTTOM: f32 = 10.0;
 const CARD_INFO_GAP_Y: f32 = 6.0;
 
 /// 左侧素材库面板
-#[derive(Clone)]
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct LibraryPanel {
     search_query: String,
     editing_asset: Option<AssetId>,
@@ -153,12 +152,12 @@ impl LibraryPanel {
             );
 
             let list_h = ui.available_height().max(tokens::list_min_height());
-            egui::ScrollArea::vertical()
-                .id_salt("library_scroll")
-                .max_height(list_h)
-                .show(ui, |ui| {
+            egui::ScrollArea::vertical().id_salt("library_scroll").max_height(list_h).show(
+                ui,
+                |ui| {
                     self.show_assets(ui, state);
-                });
+                },
+            );
 
             blank_resp.context_menu(|ui| {
                 ui.menu_button("新建", |ui| {
@@ -605,7 +604,6 @@ impl LibraryPanel {
             self.selected_asset = Some(asset.id);
         }
 
-
         // Double-click on name area only — matches Pr/Ae/DaVinci behavior
         // where thumbnail double-click has different meaning (open in viewer)
         let double_clicked = ui
@@ -646,9 +644,7 @@ impl LibraryPanel {
                             false,
                         );
                     } else {
-                        state.set_status_hint(
-                            format!("已开启代理模式：{}", asset_name), false
-                        );
+                        state.set_status_hint(format!("已开启代理模式：{}", asset_name), false);
                     }
                     ui.close();
                 }
@@ -881,8 +877,10 @@ impl LibraryPanel {
 }
 
 fn asset_is_offline(asset: &AssetRecord) -> bool {
-    !matches!(asset.kind, AssetKind::AdjustmentLayer | AssetKind::SolidColor)
-        && !asset.path.exists()
+    !matches!(
+        asset.kind,
+        AssetKind::AdjustmentLayer | AssetKind::SolidColor
+    ) && !asset.path.exists()
 }
 
 fn asset_card_presentation(

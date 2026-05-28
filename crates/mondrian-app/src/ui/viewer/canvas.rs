@@ -90,10 +90,7 @@ impl CanvasTransform {
     pub fn seq_to_screen(&self, x: f32, y: f32) -> Pos2 {
         let zoom = self.zoom();
         let content = self.content_rect();
-        Pos2::new(
-            content.left() + x * zoom,
-            content.top() + y * zoom,
-        )
+        Pos2::new(content.left() + x * zoom, content.top() + y * zoom)
     }
 
     /// Convert screen coordinates to sequence pixel coordinates.
@@ -134,10 +131,8 @@ impl CanvasTransform {
         let canvas_cx = self.canvas_rect.center().x;
         let canvas_cy = self.canvas_rect.center().y;
         if let Some((sx, sy)) = seq_under_center {
-            self.pan.x = (center.x - canvas_cx) / new_zoom
-                + self.seq_size.0 as f32 / 2.0 - sx;
-            self.pan.y = (center.y - canvas_cy) / new_zoom
-                + self.seq_size.1 as f32 / 2.0 - sy;
+            self.pan.x = (center.x - canvas_cx) / new_zoom + self.seq_size.0 as f32 / 2.0 - sx;
+            self.pan.y = (center.y - canvas_cy) / new_zoom + self.seq_size.1 as f32 / 2.0 - sy;
         }
         self.clamp_pan();
     }
@@ -255,10 +250,18 @@ mod tests {
         ct.set_zoom_mode(CanvasZoomMode::Fixed(0.5));
         let fixed_rect = ct.content_rect();
 
-        assert!((fit_rect.left() - fixed_rect.left()).abs() < 1.0,
-            "fit left={}, fixed left={}", fit_rect.left(), fixed_rect.left());
-        assert!((fit_rect.top() - fixed_rect.top()).abs() < 1.0,
-            "fit top={}, fixed top={}", fit_rect.top(), fixed_rect.top());
+        assert!(
+            (fit_rect.left() - fixed_rect.left()).abs() < 1.0,
+            "fit left={}, fixed left={}",
+            fit_rect.left(),
+            fixed_rect.left()
+        );
+        assert!(
+            (fit_rect.top() - fixed_rect.top()).abs() < 1.0,
+            "fit top={}, fixed top={}",
+            fit_rect.top(),
+            fixed_rect.top()
+        );
         assert!((fit_rect.width() - fixed_rect.width()).abs() < 1.0);
         assert!((fit_rect.height() - fixed_rect.height()).abs() < 1.0);
     }
@@ -270,10 +273,16 @@ mod tests {
         ct.set_zoom_mode(CanvasZoomMode::Fixed(0.1));
         let r = ct.content_rect();
         let slot_c = slot.center();
-        assert!((r.center().x - slot_c.x).abs() < 1.0,
-            "10% content not horizontally centered: center.x={}", r.center().x);
-        assert!((r.center().y - slot_c.y).abs() < 1.0,
-            "10% content not vertically centered: center.y={}", r.center().y);
+        assert!(
+            (r.center().x - slot_c.x).abs() < 1.0,
+            "10% content not horizontally centered: center.x={}",
+            r.center().x
+        );
+        assert!(
+            (r.center().y - slot_c.y).abs() < 1.0,
+            "10% content not vertically centered: center.y={}",
+            r.center().y
+        );
     }
 
     #[test]

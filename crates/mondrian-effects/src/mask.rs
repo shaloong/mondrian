@@ -40,7 +40,11 @@ pub struct BezierPoint {
 
 impl BezierPoint {
     pub fn new(pos: Vec2) -> Self {
-        Self { position: pos, control_in: Vec2::ZERO, control_out: Vec2::ZERO }
+        Self {
+            position: pos,
+            control_in: Vec2::ZERO,
+            control_out: Vec2::ZERO,
+        }
     }
 }
 
@@ -67,7 +71,11 @@ pub enum MaskShape {
 impl Default for MaskShape {
     fn default() -> Self {
         Self::Rectangle {
-            x: 0.1, y: 0.1, width: 0.8, height: 0.8, corner_radius: 0.0,
+            x: 0.1,
+            y: 0.1,
+            width: 0.8,
+            height: 0.8,
+            corner_radius: 0.0,
         }
     }
 }
@@ -186,27 +194,43 @@ impl MaskComponent {
 /// Path morphing is not supported — snaps to the second shape at t >= 0.5.
 fn interpolate_shape(a: &MaskShape, b: &MaskShape, t: f32) -> MaskShape {
     match (a, b) {
-        (MaskShape::Rectangle { x: ax, y: ay, width: aw, height: ah, corner_radius: ar },
-         MaskShape::Rectangle { x: bx, y: by, width: bw, height: bh, corner_radius: br }) =>
-        {
+        (
             MaskShape::Rectangle {
-                x: ax + (bx - ax) * t,
-                y: ay + (by - ay) * t,
-                width: aw + (bw - aw) * t,
-                height: ah + (bh - ah) * t,
-                corner_radius: ar + (br - ar) * t,
-            }
-        }
-        (MaskShape::Ellipse { center: ac, radii: ar },
-         MaskShape::Ellipse { center: bc, radii: br }) =>
-        {
-            MaskShape::Ellipse {
-                center: *ac + (*bc - *ac) * t,
-                radii: *ar + (*br - *ar) * t,
-            }
-        }
+                x: ax,
+                y: ay,
+                width: aw,
+                height: ah,
+                corner_radius: ar,
+            },
+            MaskShape::Rectangle {
+                x: bx,
+                y: by,
+                width: bw,
+                height: bh,
+                corner_radius: br,
+            },
+        ) => MaskShape::Rectangle {
+            x: ax + (bx - ax) * t,
+            y: ay + (by - ay) * t,
+            width: aw + (bw - aw) * t,
+            height: ah + (bh - ah) * t,
+            corner_radius: ar + (br - ar) * t,
+        },
+        (
+            MaskShape::Ellipse { center: ac, radii: ar },
+            MaskShape::Ellipse { center: bc, radii: br },
+        ) => MaskShape::Ellipse {
+            center: *ac + (*bc - *ac) * t,
+            radii: *ar + (*br - *ar) * t,
+        },
         // Cross-type or Path: snap to destination shape at midpoint.
-        _ => if t < 0.5 { a.clone() } else { b.clone() },
+        _ => {
+            if t < 0.5 {
+                a.clone()
+            } else {
+                b.clone()
+            }
+        }
     }
 }
 
@@ -239,11 +263,23 @@ mod tests {
     #[test]
     fn mask_component_interpolates_rectangle_shape() {
         let a = MaskKeyframe {
-            shape: MaskShape::Rectangle { x: 0.0, y: 0.0, width: 100.0, height: 100.0, corner_radius: 0.0 },
+            shape: MaskShape::Rectangle {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+                corner_radius: 0.0,
+            },
             ..Default::default()
         };
         let b = MaskKeyframe {
-            shape: MaskShape::Rectangle { x: 50.0, y: 50.0, width: 200.0, height: 200.0, corner_radius: 10.0 },
+            shape: MaskShape::Rectangle {
+                x: 50.0,
+                y: 50.0,
+                width: 200.0,
+                height: 200.0,
+                corner_radius: 10.0,
+            },
             ..Default::default()
         };
         let mut mc = MaskComponent::new("M1".into(), a);
