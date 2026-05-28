@@ -972,6 +972,9 @@ pub enum UiIcon {
     Anchor,
     ArrowRight,
     ArrowDown,
+    Rectangle,
+    Circle,
+    Pen,
 }
 
 pub fn icon(ui: &mut egui::Ui, kind: UiIcon, color: egui::Color32) -> egui::Response {
@@ -1196,6 +1199,9 @@ fn icon_svg_bytes(kind: UiIcon) -> &'static [u8] {
         UiIcon::Anchor => include_bytes!("../../assets/icons/anchor.svg"),
         UiIcon::ArrowRight => include_bytes!("../../assets/icons/arrow_right.svg"),
         UiIcon::ArrowDown => include_bytes!("../../assets/icons/arrow_down.svg"),
+        UiIcon::Rectangle => include_bytes!("../../assets/icons/rectangle.svg"),
+        UiIcon::Circle => include_bytes!("../../assets/icons/circle.svg"),
+        UiIcon::Pen => include_bytes!("../../assets/icons/pen.svg"),
     }
 }
 

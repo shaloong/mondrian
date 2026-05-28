@@ -580,6 +580,12 @@ pub struct AppState {
         bool,
         mondrian_core::types::ClipId,
     )>,
+    /// Mask selected on the viewer canvas (synced to effect controls).
+    pub canvas_selected_mask: Option<(
+        mondrian_effects::mask::MaskId,
+        mondrian_core::types::ClipId,
+        mondrian_core::types::TrackId,
+    )>,
 
     // 渲染导出队列
     pub render_queue: Arc<RenderQueue>,
@@ -668,6 +674,7 @@ impl AppState {
             asset_library: None,
             dragging_asset: None,
             canvas_selected_clip: None,
+            canvas_selected_mask: None,
             render_queue: RenderQueue::new(),
             status_hint: None,
             animation_selection: AnimationSelectionState::default(),
