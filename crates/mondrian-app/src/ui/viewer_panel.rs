@@ -5642,21 +5642,19 @@ fn update_mask_shape_direct(
     for track in &mut seq.video_tracks {
         if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
             if let Some(mask) = clip.masks.iter_mut().find(|m| m.id == mask_id) {
-                if let Some(pos) = mask.keyframes.iter().position(|(t, _)| *t == ticks) {
-                    mask.keyframes[pos].1.shape = new_shape;
+                if mask.shape_animation_enabled {
+                    // Animated: write a keyframe at the current time.
+                    if let Some(pos) = mask.shape_keyframes.iter().position(|(t, _)| *t == ticks) {
+                        mask.shape_keyframes[pos].1 = new_shape;
+                    } else {
+                        mask.shape_keyframes.push((ticks, new_shape));
+                        mask.shape_keyframes.sort_by_key(|(t, _)| *t);
+                    }
                 } else {
-                    // Inherit existing properties (feather, opacity, etc.) via interpolation.
-                    let base = mask.evaluate_at(ticks);
-                    let kf = MaskKeyframe {
-                        shape: new_shape,
-                        feather: base.feather,
-                        opacity: base.opacity,
-                        expansion: base.expansion,
-                        invert: base.invert,
-                        mask_op: base.mask_op,
-                    };
-                    mask.keyframes.push((ticks, kf));
-                    mask.keyframes.sort_by_key(|(t, _)| *t);
+                    // Static: update the single stored shape directly.
+                    if let Some(first) = mask.shape_keyframes.first_mut() {
+                        first.1 = new_shape;
+                    }
                 }
             }
             break;

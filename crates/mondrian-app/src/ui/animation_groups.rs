@@ -6,6 +6,7 @@ pub enum AnimationGroupKind {
     Opacity,
     TimeRemap,
     Effect,
+    Mask,
     Other,
 }
 
@@ -17,6 +18,7 @@ pub struct AnimationGroupMeta {
     pub order: usize,
     pub shows_fx_badge: bool,
     pub allows_effect_controls: bool,
+    pub allows_mask_controls: bool,
 }
 
 pub fn property_group_meta(path: &str, property: &AnimatedProperty) -> AnimationGroupMeta {
@@ -28,6 +30,7 @@ pub fn property_group_meta(path: &str, property: &AnimatedProperty) -> Animation
             order: 0,
             shows_fx_badge: false,
             allows_effect_controls: false,
+            allows_mask_controls: false,
         };
     }
     if path == mondrian_timeline::clip::Transform2D::OPACITY_PATH {
@@ -38,6 +41,7 @@ pub fn property_group_meta(path: &str, property: &AnimatedProperty) -> Animation
             order: 1,
             shows_fx_badge: false,
             allows_effect_controls: false,
+            allows_mask_controls: false,
         };
     }
     if path == mondrian_timeline::clip::Clip::BLEND_MODE_PATH {
@@ -48,6 +52,7 @@ pub fn property_group_meta(path: &str, property: &AnimatedProperty) -> Animation
             order: 1,
             shows_fx_badge: false,
             allows_effect_controls: false,
+            allows_mask_controls: false,
         };
     }
     if path == mondrian_timeline::clip::SpeedMap::MULTIPLIER_PATH {
@@ -58,6 +63,31 @@ pub fn property_group_meta(path: &str, property: &AnimatedProperty) -> Animation
             order: 2,
             shows_fx_badge: false,
             allows_effect_controls: false,
+            allows_mask_controls: false,
+        };
+    }
+    if path.starts_with("mask.") {
+        // Path format: "mask.<uuid>.<prop>"
+        let title = property
+            .descriptor
+            .ui_metadata
+            .group_name
+            .clone()
+            .unwrap_or_else(|| "蒙版".to_string());
+        let slug = sanitize_group_id(&title);
+        let uuid_tail = path
+            .split('.')
+            .nth(1)
+            .map(|s| if s.len() > 8 { &s[..8] } else { s })
+            .unwrap_or("0");
+        return AnimationGroupMeta {
+            id: format!("mask.{slug}.{uuid_tail}"),
+            title,
+            kind: AnimationGroupKind::Mask,
+            order: 20,
+            shows_fx_badge: false,
+            allows_effect_controls: false,
+            allows_mask_controls: true,
         };
     }
     if path.starts_with("effect.") {
@@ -81,6 +111,7 @@ pub fn property_group_meta(path: &str, property: &AnimatedProperty) -> Animation
             order: 10,
             shows_fx_badge: true,
             allows_effect_controls: true,
+            allows_mask_controls: false,
         };
     }
     let title = property
@@ -97,6 +128,7 @@ pub fn property_group_meta(path: &str, property: &AnimatedProperty) -> Animation
         order: 30,
         shows_fx_badge: false,
         allows_effect_controls: false,
+        allows_mask_controls: false,
     }
 }
 

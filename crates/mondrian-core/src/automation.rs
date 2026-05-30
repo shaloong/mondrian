@@ -1590,6 +1590,44 @@ impl PropertyMutation {
             | Self::RemoveProperty { path } => path,
         }
     }
+
+    /// Transform the path of this mutation using the given function.
+    /// Useful when delegating mutations between nested PropertyBags with different path prefixes.
+    pub fn map_path(self, f: impl FnOnce(String) -> String) -> Self {
+        use PropertyMutation::*;
+        match self {
+            DefineProperty(mut desc) => {
+                desc.path = f(desc.path);
+                DefineProperty(desc)
+            }
+            SetStaticValue { path, value } => SetStaticValue { path: f(path), value },
+            SetKeyframe { path, keyframe } => SetKeyframe { path: f(path), keyframe },
+            RemoveKeyframe { path, time } => RemoveKeyframe { path: f(path), time },
+            MoveKeyframe { path, from_time, to_time } => MoveKeyframe { path: f(path), from_time, to_time },
+            UpdateKeyframeInterpolation { path, time, interpolation } => {
+                UpdateKeyframeInterpolation { path: f(path), time, interpolation }
+            }
+            UpdateChannelKeyframeHandles { path, time, channel_index, interp_in, interp_out } => {
+                UpdateChannelKeyframeHandles { path: f(path), time, channel_index, interp_in, interp_out }
+            }
+            UpdateChannelKeyframeValue { path, time, channel_index, value } => {
+                UpdateChannelKeyframeValue { path: f(path), time, channel_index, value }
+            }
+            UpdateKeyframeTemporalFlags { path, time, temporal_flags } => {
+                UpdateKeyframeTemporalFlags { path: f(path), time, temporal_flags }
+            }
+            EnableAnimation { path, time } => EnableAnimation { path: f(path), time },
+            DisableAnimation { path, time } => DisableAnimation { path: f(path), time },
+            ClearAnimation { path, time } => ClearAnimation { path: f(path), time },
+            WriteValue { path, time, value, interpolation } => {
+                WriteValue { path: f(path), time, value, interpolation }
+            }
+            WriteChannels { path, time, channel_values, interpolation } => {
+                WriteChannels { path: f(path), time, channel_values, interpolation }
+            }
+            RemoveProperty { path } => RemoveProperty { path: f(path) },
+        }
+    }
 }
 
 pub trait PropertyHost {

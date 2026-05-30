@@ -31,7 +31,6 @@ use mondrian_timeline::{
 pub struct EffectControlsPanel {
     text_edit_buffers: HashMap<(ClipId, String), String>,
     inspector_group_collapsed: HashMap<(ClipId, String), bool>,
-    mask_group_collapsed: std::collections::HashSet<mondrian_effects::mask::MaskId>,
     view: EffectControlsView,
     graph_mode: GraphEditorMode,
     graph_channel_selection: HashMap<(ClipId, String), usize>,
@@ -384,14 +383,6 @@ impl EffectControlsPanel {
             }
         }
 
-        // ── Mask section (Inspector view only) ──
-        if self.view == EffectControlsView::Inspector && !clip.masks.is_empty() {
-            ui.add_space(tokens::panel_gap() * 0.6);
-            ui.separator();
-            ui.add_space(tokens::panel_gap() * 0.35);
-            self.draw_mask_section(ui, app, selection, current_time);
-        }
-
         self.draw_pending_clear_animation_dialog(ui.ctx(), app);
     }
 
@@ -473,15 +464,25 @@ impl EffectControlsPanel {
         let mut collapsed = *self.inspector_group_collapsed.get(&collapse_key).unwrap_or(&false);
 
         let effect_id = group_effect_id(group);
-        let enabled_state = effect_id
-            .and_then(|id| app.clip_snapshot(selection).and_then(|clip| clip.effect_enabled(id)));
+        let mask_id = group_mask_id(group);
+
+        let enabled_state = if let Some(mid) = mask_id {
+            app.clip_snapshot(selection)
+                .and_then(|clip| clip.masks.iter().find(|m| m.id == mid).map(|m| m.enabled))
+        } else {
+            effect_id.and_then(|id| app.clip_snapshot(selection).and_then(|clip| clip.effect_enabled(id)))
+        };
+
+        let show_controls = effect_id.is_some() || mask_id.is_some();
+        let can_delete = effect_id.is_some() || mask_id.is_some();
+
         let header_response = draw_group_header_row(
             ui,
             &group.meta,
             collapsed,
             enabled_state,
-            effect_id.is_some(),
-            effect_id.is_some(),
+            show_controls,
+            can_delete,
         );
         let action_clicked =
             header_response.toggle_effect.as_ref().is_some_and(egui::Response::clicked)
@@ -489,17 +490,25 @@ impl EffectControlsPanel {
         if header_response.row.clicked() && !action_clicked {
             collapsed = !collapsed;
         }
-        if let (Some(effect_id), Some(toggle)) = (effect_id, header_response.toggle_effect.as_ref())
-        {
+
+        if let Some(toggle) = header_response.toggle_effect.as_ref() {
             if toggle.clicked() {
                 let next_enabled = !enabled_state.unwrap_or(true);
-                let _ = app.set_clip_effect_enabled(selection, effect_id, next_enabled);
+                if let Some(eid) = effect_id {
+                    let _ = app.set_clip_effect_enabled(selection, eid, next_enabled);
+                } else if let Some(mid) = mask_id {
+                    let _ = app.set_mask_enabled(selection, mid, next_enabled);
+                }
             }
         }
-        if let (Some(effect_id), Some(delete)) = (effect_id, header_response.delete_effect.as_ref())
-        {
+
+        if let Some(delete) = header_response.delete_effect.as_ref() {
             if delete.clicked() {
-                let _ = app.remove_effect_from_clip(selection, effect_id);
+                if let Some(eid) = effect_id {
+                    let _ = app.remove_effect_from_clip(selection, eid);
+                } else if let Some(mid) = mask_id {
+                    let _ = app.remove_mask_from_clip(selection, mid);
+                }
                 self.inspector_group_collapsed.remove(&collapse_key);
                 return;
             }
@@ -516,6 +525,35 @@ impl EffectControlsPanel {
                         self.draw_property_row(ui, app, selection, path, property, current_time);
                     }
                 });
+
+            // For mask groups: draw a special Mask Path row (shape stored in shape_keyframes, not PropertyBag).
+            if let Some(mid) = mask_id {
+                if let Some(clip) = app.clip_snapshot(selection) {
+                    if let Some(mask) = clip.masks.iter().find(|m| m.id == mid) {
+                        let ticks = mondrian_core::automation::timecode_to_ticks(current_time);
+                        let has_animation = mask.shape_animation_enabled;
+
+                        ui.add_space(2.0);
+                        ui.horizontal(|ui| {
+                            let timer_resp = theme::icon_ghost_toggle_button(
+                                ui,
+                                tokens::timeline_toolbar_button_size(),
+                                theme::UiIcon::Timer,
+                                has_animation,
+                            ).on_hover_text(if has_animation { "已开启动画" } else { "点击开启形状关键帧动画" });
+                            if timer_resp.clicked() {
+                                let _ = app.set_mask_shape_animation_enabled(selection, mid, !has_animation, ticks);
+                            }
+
+                            ui.label(
+                                egui::RichText::new("Mask Path")
+                                    .font(typography::body_small())
+                                    .color(palette::text_muted()),
+                            );
+                        });
+                    }
+                }
+            }
         }
         self.inspector_group_collapsed.insert(collapse_key, collapsed);
     }
@@ -2836,7 +2874,20 @@ impl EffectControlsPanel {
                 });
             }
             PropertyValue::Text(value) => {
-                if path == Clip::BLEND_MODE_PATH {
+                if path.ends_with(".mask_op") {
+                    self.draw_mask_op_editor(
+                        ui,
+                        app,
+                        selection,
+                        path,
+                        value,
+                        interpolation,
+                        is_animatable,
+                    );
+                    return;
+                }
+
+                                if path == Clip::BLEND_MODE_PATH {
                     self.draw_blend_mode_editor(
                         ui,
                         app,
@@ -2918,6 +2969,38 @@ impl EffectControlsPanel {
             .show_ui(ui, |ui| {
                 for option in blend_mode_options() {
                     ui.selectable_value(&mut selected, option.value.to_string(), option.label);
+                }
+            });
+
+        if selected != current_value {
+            self.commit_value(
+                app,
+                selection,
+                path,
+                PropertyValue::Text(selected),
+                interpolation,
+                is_animatable,
+            );
+        }
+    }
+
+
+    fn draw_mask_op_editor(
+        &mut self,
+        ui: &mut Ui,
+        app: &mut AppState,
+        selection: SelectedClipRef,
+        path: &str,
+        current_value: &str,
+        interpolation: InterpolationType,
+        is_animatable: bool,
+    ) {
+        let mut selected = current_value.to_string();
+        ComboBox::from_id_salt((selection.clip_id, path))
+            .selected_text(mask_op_display_label(selected.as_str()))
+            .show_ui(ui, |ui| {
+                for (value, label) in mask_op_options() {
+                    ui.selectable_value(&mut selected, value.to_string(), *label);
                 }
             });
 
@@ -3280,6 +3363,22 @@ fn group_effect_id(group: &InspectorGroup<'_>) -> Option<EffectId> {
         .properties
         .first()
         .and_then(|(path, _)| parse_effect_id_from_property_path(path))
+}
+
+fn group_mask_id(group: &InspectorGroup<'_>) -> Option<mondrian_effects::mask::MaskId> {
+    group
+        .properties
+        .first()
+        .and_then(|(path, _)| parse_mask_id_from_property_path(path))
+}
+
+fn parse_mask_id_from_property_path(path: &str) -> Option<mondrian_effects::mask::MaskId> {
+    let mut segments = path.split('.');
+    if segments.next()? != "mask" {
+        return None;
+    }
+    let id_raw = segments.next()?;
+    uuid::Uuid::parse_str(id_raw).ok().map(mondrian_effects::mask::MaskId)
 }
 
 fn parse_effect_id_from_property_path(path: &str) -> Option<EffectId> {
@@ -4955,6 +5054,25 @@ fn blend_mode_display_label(value: &str) -> String {
     }
 }
 
+fn mask_op_options() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("Add", "相加"),
+        ("Subtract", "相减"),
+        ("Intersect", "交集"),
+        ("Difference", "差值"),
+    ]
+}
+
+fn mask_op_display_label(value: &str) -> String {
+    match value {
+        "Add" => "相加".to_string(),
+        "Subtract" => "相减".to_string(),
+        "Intersect" => "交集".to_string(),
+        "Difference" => "差值".to_string(),
+        _ => value.to_string(),
+    }
+}
+
 #[allow(dead_code)]
 fn color_space_options() -> [ColorSpace; 9] {
     [
@@ -5022,279 +5140,6 @@ fn frame_rate_label(value: Rational) -> String {
         format!("{fps:.1} fps")
     } else {
         format!("{fps:.3} fps")
-    }
-}
-
-// ── Mask properties section ──────────────────────────────────────────────
-
-impl EffectControlsPanel {
-    fn draw_mask_section(
-        &mut self,
-        ui: &mut Ui,
-        app: &mut AppState,
-        selection: SelectedClipRef,
-        current_time: mondrian_core::types::TimeCode,
-    ) {
-        // Re-read clip from live sequence to pick up mutations from previous frames.
-        let clip = match app.clip_snapshot(selection) {
-            Some(c) => c,
-            None => return,
-        };
-        if clip.masks.is_empty() {
-            return;
-        }
-        let ticks = mondrian_core::automation::timecode_to_ticks(current_time);
-
-        // Section header
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new("蒙版")
-                    .font(typography::body())
-                    .color(palette::text_primary()),
-            );
-            ui.label(
-                egui::RichText::new(format!("({})", clip.masks.len()))
-                    .font(typography::body_small())
-                    .color(palette::text_muted()),
-            );
-        });
-        ui.add_space(4.0);
-
-        let masks = clip.masks.to_vec();
-        for mask in &masks {
-            let is_selected = app
-                .canvas_selected_mask
-                .is_some_and(|(mid, cid, _)| mid == mask.id && cid == clip.id);
-            let kf = mask.evaluate_at(ticks);
-            let collapsed = self.mask_group_collapsed.contains(&mask.id);
-
-            // Group frame
-            let _bg = if is_selected {
-                palette::bg_surface_active()
-            } else {
-                egui::Color32::TRANSPARENT
-            };
-
-            ui.push_id(mask.id.0, |ui| {
-                // ── Header row (clickable to expand/collapse) ──
-                let header_h = tokens::inspector_group_header_height();
-                let (header_rect, header_resp) =
-                    ui.allocate_exact_size(egui::vec2(ui.available_width(), header_h), egui::Sense::click());
-                if header_resp.clicked() {
-                    if collapsed {
-                        self.mask_group_collapsed.remove(&mask.id);
-                    } else {
-                        self.mask_group_collapsed.insert(mask.id);
-                    }
-                }
-                if ui.is_rect_visible(header_rect) {
-                    let fill = if header_resp.hovered() || is_selected {
-                        palette::bg_surface_active()
-                    } else {
-                        egui::Color32::TRANSPARENT
-                    };
-                    ui.painter().rect_filled(header_rect, tokens::section_rounding(), fill);
-                    let cy = header_rect.center().y;
-
-                    // Collapse caret (exact same as inspector group)
-                    let caret_rect = egui::Rect::from_center_size(
-                        egui::pos2(header_rect.left() + tokens::icon_size() * 0.5 + 4.0, cy),
-                        egui::vec2(tokens::icon_size(), tokens::icon_size()),
-                    );
-                    theme::draw_icon(
-                        ui.painter(),
-                        caret_rect,
-                        if collapsed { theme::UiIcon::ArrowRight } else { theme::UiIcon::ArrowDown },
-                        palette::text_muted(),
-                    );
-
-                    // Enabled toggle
-                    let eye_x = caret_rect.right() + 4.0;
-                    let eye_rect = egui::Rect::from_center_size(
-                        egui::pos2(eye_x + tokens::icon_size() * 0.5, cy),
-                        egui::vec2(tokens::icon_size(), tokens::icon_size()),
-                    );
-                    let eye_icon = if mask.enabled { theme::UiIcon::Eye } else { theme::UiIcon::EyeOff };
-                    let eye_resp = ui.interact(eye_rect, ui.id().with("eye"), egui::Sense::click());
-                    theme::draw_icon(ui.painter(), eye_rect, eye_icon, if mask.enabled { palette::text_muted() } else { palette::text_muted().gamma_multiply(0.5) });
-                    if eye_resp.clicked() {
-                        let _ = app.set_mask_enabled(selection, mask.id, !mask.enabled);
-                    }
-
-                    // Name (galley-based for proper vertical alignment)
-                    let name_x = eye_rect.right() + 4.0;
-                    let name_galley = ui.painter().layout_no_wrap(
-                        mask.name.clone(),
-                        typography::body_small(),
-                        palette::text_primary(),
-                    );
-                    let name_rect = egui::Rect::from_min_size(
-                        egui::pos2(name_x, cy - name_galley.size().y * 0.5),
-                        name_galley.size(),
-                    );
-                    ui.painter().galley(name_rect.min, name_galley, palette::text_primary());
-
-                    // Right side: delete button
-                    let del_rect = egui::Rect::from_center_size(
-                        egui::pos2(header_rect.right() - tokens::icon_size() * 0.5 - 4.0, cy),
-                        egui::vec2(tokens::icon_size(), tokens::icon_size()),
-                    );
-                    let del_resp = ui.interact(del_rect, ui.id().with("del"), egui::Sense::click());
-                    theme::draw_icon(ui.painter(), del_rect, theme::UiIcon::Trash, if del_resp.hovered() { palette::status_error() } else { palette::text_muted() });
-                    if del_resp.clicked() {
-                        let _ = app.remove_mask_from_clip(selection, mask.id);
-                        self.mask_group_collapsed.remove(&mask.id);
-                    }
-
-                    // Mode dropdown (between name and delete)
-                    let mode_text = match kf.mask_op {
-                        mondrian_effects::mask::MaskOp::Add => "相加",
-                        mondrian_effects::mask::MaskOp::Subtract => "相减",
-                        mondrian_effects::mask::MaskOp::Intersect => "交集",
-                        mondrian_effects::mask::MaskOp::Difference => "差值",
-                    };
-                    let combo_rect = egui::Rect::from_min_size(
-                        egui::pos2(del_rect.left() - 72.0, cy - 10.0),
-                        egui::vec2(66.0, 20.0),
-                    );
-                    ui.scope_builder(
-                        egui::UiBuilder::new().max_rect(combo_rect),
-                        |ui| {
-                            ui.set_min_width(60.0);
-                            egui::ComboBox::from_id_salt(ui.make_persistent_id(mask.id))
-                                .selected_text(mode_text)
-                                .width(58.0)
-                                .show_ui(ui, |ui| {
-                                    let modes = [
-                                        (mondrian_effects::mask::MaskOp::Add, "相加 (Add)"),
-                                        (mondrian_effects::mask::MaskOp::Subtract, "相减 (Sub)"),
-                                        (mondrian_effects::mask::MaskOp::Intersect, "交集 (Int)"),
-                                        (mondrian_effects::mask::MaskOp::Difference, "差值 (Diff)"),
-                                    ];
-                                    for &(op, label) in &modes {
-                                        if ui.selectable_label(kf.mask_op == op, label).clicked() {
-                                            let mut new_kf = kf.clone();
-                                            new_kf.mask_op = op;
-                                            let _ = app.set_mask_keyframe(selection, mask.id, new_kf, ticks);
-                                        }
-                                    }
-                                });
-                        },
-                    );
-                }
-
-                // ── Expanded properties ──
-                if !collapsed {
-                    ui.add_space(2.0);
-                    // Manual inset without indent line
-                    let indent = tokens::inspector_group_indent() + tokens::icon_size() + 4.0;
-                    ui.horizontal(|ui| {
-                        ui.add_space(indent);
-                        ui.vertical(|ui| {
-                            // Feather
-                            ui.horizontal(|ui| {
-                                let has_kf = mask.keyframes.len() > 1;
-                                let timer_resp = theme::icon_ghost_toggle_button(
-                                    ui,
-                                    tokens::timeline_toolbar_button_size(),
-                                    theme::UiIcon::Timer,
-                                    has_kf,
-                                ).on_hover_text(if has_kf { "已开启动画" } else { "点击在当前时间创建关键帧" });
-                                if timer_resp.clicked() && !has_kf {
-                                    let _ = app.set_mask_keyframe(selection, mask.id, kf.clone(), ticks);
-                                }
-                                ui.label(
-                                    egui::RichText::new("羽化")
-                                        .font(typography::body_small())
-                                        .color(palette::text_muted()),
-                                );
-                                let mut feather = kf.feather;
-                                let resp = ui.add(
-                                    egui::Slider::new(&mut feather, 0.0..=200.0)
-                                        .text("px")
-                                        .step_by(0.5),
-                                );
-                                if resp.changed() {
-                                    let mut new_kf = kf.clone();
-                                    new_kf.feather = feather;
-                                    let _ = app.set_mask_keyframe(selection, mask.id, new_kf, ticks);
-                                }
-                            });
-
-                            // Opacity
-                            ui.horizontal(|ui| {
-                                let has_kf = mask.keyframes.len() > 1;
-                                let timer_resp = theme::icon_ghost_toggle_button(
-                                    ui,
-                                    tokens::timeline_toolbar_button_size(),
-                                    theme::UiIcon::Timer,
-                                    has_kf,
-                                ).on_hover_text(if has_kf { "已开启动画" } else { "点击在当前时间创建关键帧" });
-                                if timer_resp.clicked() && !has_kf {
-                                    let _ = app.set_mask_keyframe(selection, mask.id, kf.clone(), ticks);
-                                }
-                                ui.label(
-                                    egui::RichText::new("不透明度")
-                                        .font(typography::body_small())
-                                        .color(palette::text_muted()),
-                                );
-                                let mut opacity = kf.opacity;
-                                let resp = ui.add(
-                                    egui::Slider::new(&mut opacity, 0.0..=1.0).text("").step_by(0.01),
-                                );
-                                if resp.changed() {
-                                    let mut new_kf = kf.clone();
-                                    new_kf.opacity = opacity;
-                                    let _ = app.set_mask_keyframe(selection, mask.id, new_kf, ticks);
-                                }
-                            });
-
-                            // Expansion
-                            ui.horizontal(|ui| {
-                                let has_kf = mask.keyframes.len() > 1;
-                                let timer_resp = theme::icon_ghost_toggle_button(
-                                    ui,
-                                    tokens::timeline_toolbar_button_size(),
-                                    theme::UiIcon::Timer,
-                                    has_kf,
-                                ).on_hover_text(if has_kf { "已开启动画" } else { "点击在当前时间创建关键帧" });
-                                if timer_resp.clicked() && !has_kf {
-                                    let _ = app.set_mask_keyframe(selection, mask.id, kf.clone(), ticks);
-                                }
-                                ui.label(
-                                    egui::RichText::new("扩展")
-                                        .font(typography::body_small())
-                                        .color(palette::text_muted()),
-                                );
-                                let mut expansion = kf.expansion;
-                                let resp = ui.add(
-                                    egui::Slider::new(&mut expansion, -100.0..=100.0)
-                                        .text("px")
-                                        .step_by(0.5),
-                                );
-                                if resp.changed() {
-                                    let mut new_kf = kf.clone();
-                                    new_kf.expansion = expansion;
-                                    let _ = app.set_mask_keyframe(selection, mask.id, new_kf, ticks);
-                                }
-                            });
-
-                            // Invert
-                            ui.horizontal(|ui| {
-                                let mut invert = kf.invert;
-                                if ui.checkbox(&mut invert, "反转").changed() {
-                                    let mut new_kf = kf.clone();
-                                    new_kf.invert = invert;
-                                    let _ = app.set_mask_keyframe(selection, mask.id, new_kf, ticks);
-                                }
-                            });
-                        });
-                    });
-                }
-            });
-
-            ui.add_space(2.0);
-        }
     }
 }
 

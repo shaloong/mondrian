@@ -81,7 +81,7 @@ impl Default for MaskShape {
 }
 
 /// 蒙版布尔运算模式
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum MaskOp {
     #[default]
     Add,
@@ -110,16 +110,24 @@ impl MaskOp {
     }
 }
 
-/// 蒙版关键帧：单个时间点上的蒙版状态
+/// 蒙版关键帧：仅存储形状。泛型属性（羽化/不透明度等）迁移到 MaskComponent.properties。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MaskKeyframe {
     pub shape: MaskShape,
+    // Legacy scalar fields — kept for backward compat, no longer the primary source.
+    #[serde(default)]
     pub feather: f32,
+    #[serde(default = "default_one")]
     pub opacity: f32,
+    #[serde(default)]
     pub expansion: f32,
+    #[serde(default)]
     pub invert: bool,
+    #[serde(default)]
     pub mask_op: MaskOp,
 }
+
+fn default_one() -> f32 { 1.0 }
 
 impl Default for MaskKeyframe {
     fn default() -> Self {
@@ -134,58 +142,159 @@ impl Default for MaskKeyframe {
     }
 }
 
-/// 单个蒙版组件：包含关键帧动画
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+// Property paths for mask scalar properties (used in PropertyBag).
+pub const MASK_PROP_FEATHER: &str = "feather";
+pub const MASK_PROP_OPACITY: &str = "opacity";
+pub const MASK_PROP_EXPANSION: &str = "expansion";
+pub const MASK_PROP_INVERT: &str = "invert";
+pub const MASK_PROP_MASK_OP: &str = "mask_op";
+pub const MASK_PROP_SHAPE: &str = "shape";
+
+/// 单个蒙版组件
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MaskComponent {
     pub id: MaskId,
     pub name: String,
+    /// Shape keyframes. When `shape_animation_enabled` is false, only the first
+    /// entry is used (static shape). When enabled, shapes are interpolated by time.
+    pub shape_keyframes: Vec<(TimeTicks, MaskShape)>,
+    /// Legacy combined keyframes — preserved for deserialization of old project files.
+    #[serde(default)]
     pub keyframes: Vec<(TimeTicks, MaskKeyframe)>,
+    /// Scalar animatable properties (feather, opacity, expansion, invert, mask_op).
+    #[serde(skip)]
+    pub properties: mondrian_core::automation::PropertyBag,
     pub enabled: bool,
-    /// 编辑锁 — 禁止画布交互，但仍参与渲染
     pub locked: bool,
+    pub shape_animation_enabled: bool,
+}
+
+// Manual PartialEq since PropertyBag (BTreeMap<_, AnimatedProperty>) may not derive it cleanly.
+impl PartialEq for MaskComponent {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.name == other.name
+            && self.shape_keyframes == other.shape_keyframes
+            && self.keyframes == other.keyframes
+            && self.enabled == other.enabled
+            && self.locked == other.locked
+    }
 }
 
 impl MaskComponent {
     pub fn new(name: String, initial: MaskKeyframe) -> Self {
+        let id = MaskId::new();
+        let mut properties = mondrian_core::automation::PropertyBag::default();
+        use mondrian_core::automation::{AnimatablePropertyUiMetadata, PropertyDescriptor, PropertyValue};
+
+        let define_prop = |bag: &mut mondrian_core::automation::PropertyBag, path: &str, display: &str, value: PropertyValue| {
+            let mut desc = PropertyDescriptor::new(path, display, value);
+            desc.ui_metadata = AnimatablePropertyUiMetadata {
+                group_name: Some(name.clone()),
+                ..Default::default()
+            };
+            bag.define(desc);
+        };
+
+        define_prop(&mut properties, MASK_PROP_FEATHER, "羽化", PropertyValue::Float(initial.feather));
+        define_prop(&mut properties, MASK_PROP_OPACITY, "不透明度", PropertyValue::Float(initial.opacity));
+        define_prop(&mut properties, MASK_PROP_EXPANSION, "扩展", PropertyValue::Float(initial.expansion));
+        define_prop(&mut properties, MASK_PROP_INVERT, "反转", PropertyValue::Bool(initial.invert));
+        define_prop(&mut properties, MASK_PROP_MASK_OP, "模式", PropertyValue::Text(initial.mask_op.as_str().to_string()));
+
         Self {
-            id: MaskId::new(),
+            id,
             name,
-            keyframes: vec![(0, initial)],
+            shape_keyframes: vec![(0, initial.shape)],
+            keyframes: Vec::new(),
+            properties,
             enabled: true,
             locked: false,
+            shape_animation_enabled: false,
         }
     }
 
-    /// Evaluate the mask at a given time by interpolating between keyframes.
-    pub fn evaluate_at(&self, time: TimeTicks) -> MaskKeyframe {
-        if self.keyframes.is_empty() {
-            return MaskKeyframe::default();
-        }
-        if self.keyframes.len() == 1 || time <= self.keyframes[0].0 {
-            return self.keyframes[0].1.clone();
-        }
-        if time >= self.keyframes.last().unwrap().0 {
-            return self.keyframes.last().unwrap().1.clone();
-        }
+    pub fn shape_keyframes(&self) -> &[(TimeTicks, MaskShape)] {
+        &self.shape_keyframes
+    }
 
-        // Find the surrounding keyframe pair and interpolate.
-        for pair in self.keyframes.windows(2) {
-            let (t0, ref kf0) = pair[0];
-            let (t1, ref kf1) = pair[1];
-            if time >= t0 && time <= t1 {
-                let range = (t1 - t0).max(1);
-                let t = (time - t0) as f32 / range as f32;
-                return MaskKeyframe {
-                    shape: interpolate_shape(&kf0.shape, &kf1.shape, t),
-                    feather: kf0.feather + (kf1.feather - kf0.feather) * t,
-                    opacity: kf0.opacity + (kf1.opacity - kf0.opacity) * t,
-                    expansion: kf0.expansion + (kf1.expansion - kf0.expansion) * t,
-                    invert: if t < 0.5 { kf0.invert } else { kf1.invert },
-                    mask_op: if t < 0.5 { kf0.mask_op } else { kf1.mask_op },
-                };
+    pub fn shape_keyframes_mut(&mut self) -> &mut Vec<(TimeTicks, MaskShape)> {
+        &mut self.shape_keyframes
+    }
+
+    /// Evaluate the mask properties at a given time.
+    /// Scalar values come from PropertyBag (supporting independent keyframes).
+    /// Shape comes from shape_keyframes.
+    pub fn evaluate_at(&self, time: TimeTicks) -> MaskKeyframe {
+        let shape = if self.shape_keyframes.is_empty() {
+            MaskShape::default()
+        } else if !self.shape_animation_enabled {
+            // Static shape — always return the single stored shape.
+            self.shape_keyframes[0].1.clone()
+        } else if self.shape_keyframes.len() == 1 || time <= self.shape_keyframes[0].0 {
+            self.shape_keyframes[0].1.clone()
+        } else if time >= self.shape_keyframes.last().unwrap().0 {
+            self.shape_keyframes.last().unwrap().1.clone()
+        } else {
+            let mut result = self.shape_keyframes[0].1.clone();
+            for pair in self.shape_keyframes.windows(2) {
+                let (t0, ref s0) = pair[0];
+                let (t1, ref s1) = pair[1];
+                if time >= t0 && time <= t1 {
+                    let range = (t1 - t0).max(1);
+                    let t = (time - t0) as f32 / range as f32;
+                    result = interpolate_shape(s0, s1, t);
+                    break;
+                }
             }
+            result
+        };
+
+        let feather = self.properties.evaluate(MASK_PROP_FEATHER, time).and_then(|v| v.as_f32()).unwrap_or(0.0);
+        let opacity = self.properties.evaluate(MASK_PROP_OPACITY, time).and_then(|v| v.as_f32()).unwrap_or(1.0);
+        let expansion = self.properties.evaluate(MASK_PROP_EXPANSION, time).and_then(|v| v.as_f32()).unwrap_or(0.0);
+        let invert = self.properties.evaluate(MASK_PROP_INVERT, time)
+            .and_then(|v| if let mondrian_core::automation::PropertyValue::Bool(b) = v { Some(b) } else { None })
+            .unwrap_or(false);
+        let mask_op_str = self.properties.evaluate(MASK_PROP_MASK_OP, time)
+            .and_then(|v| if let mondrian_core::automation::PropertyValue::Text(s) = v { Some(s.clone()) } else { None })
+            .unwrap_or_else(|| "Add".to_string());
+
+        MaskKeyframe {
+            shape,
+            feather,
+            opacity,
+            expansion,
+            invert,
+            mask_op: MaskOp::parse(&mask_op_str),
         }
-        self.keyframes.last().unwrap().1.clone()
+    }
+
+    /// Migrate legacy keyframes to shape_keyframes + PropertyBag (for old project files).
+    pub fn ensure_migrated(&mut self) {
+        if !self.keyframes.is_empty() && self.shape_keyframes.is_empty() {
+            for (t, kf) in &self.keyframes {
+                self.shape_keyframes.push((*t, kf.shape.clone()));
+                // Write scalar values into PropertyBag at this time.
+                let _ = self.properties.write_value(MASK_PROP_FEATHER, *t, mondrian_core::automation::PropertyValue::Float(kf.feather), mondrian_core::automation::InterpolationType::Linear);
+                let _ = self.properties.write_value(MASK_PROP_OPACITY, *t, mondrian_core::automation::PropertyValue::Float(kf.opacity), mondrian_core::automation::InterpolationType::Linear);
+                let _ = self.properties.write_value(MASK_PROP_EXPANSION, *t, mondrian_core::automation::PropertyValue::Float(kf.expansion), mondrian_core::automation::InterpolationType::Linear);
+                let _ = self.properties.write_value(MASK_PROP_INVERT, *t, mondrian_core::automation::PropertyValue::Bool(kf.invert), mondrian_core::automation::InterpolationType::Hold);
+                let _ = self.properties.write_value(MASK_PROP_MASK_OP, *t, mondrian_core::automation::PropertyValue::Text(kf.mask_op.as_str().to_string()), mondrian_core::automation::InterpolationType::Hold);
+            }
+            // Clear migrated legacy data.
+            self.keyframes.clear();
+        }
+    }
+}
+
+/// Human-readable label for the mask shape type.
+pub fn shape_label(shape: &MaskShape) -> String {
+    match shape {
+        MaskShape::Rectangle { .. } => "矩形".to_string(),
+        MaskShape::Ellipse { .. } => "椭圆".to_string(),
+        MaskShape::Path { points, .. } if points.len() > 2 => format!("路径({}点)", points.len()),
+        MaskShape::Path { .. } => "路径".to_string(),
     }
 }
 
@@ -237,6 +346,7 @@ fn interpolate_shape(a: &MaskShape, b: &MaskShape, t: f32) -> MaskShape {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mondrian_core::automation::{InterpolationType, PropertyValue};
 
     #[test]
     fn mask_component_evaluates_single_keyframe() {
@@ -251,9 +361,13 @@ mod tests {
     #[test]
     fn mask_component_interpolates_between_two_keyframes() {
         let kf0 = MaskKeyframe { feather: 0.0, opacity: 1.0, ..Default::default() };
-        let kf1 = MaskKeyframe { feather: 10.0, opacity: 0.0, ..Default::default() };
         let mut mc = MaskComponent::new("M1".into(), kf0);
-        mc.keyframes.push((100, kf1));
+        mc.properties.enable_animation(MASK_PROP_FEATHER, 0).unwrap();
+        mc.properties.write_value(MASK_PROP_FEATHER, 0, PropertyValue::Float(0.0), InterpolationType::Linear).unwrap();
+        mc.properties.write_value(MASK_PROP_FEATHER, 100, PropertyValue::Float(10.0), InterpolationType::Linear).unwrap();
+        mc.properties.enable_animation(MASK_PROP_OPACITY, 0).unwrap();
+        mc.properties.write_value(MASK_PROP_OPACITY, 0, PropertyValue::Float(1.0), InterpolationType::Linear).unwrap();
+        mc.properties.write_value(MASK_PROP_OPACITY, 100, PropertyValue::Float(0.0), InterpolationType::Linear).unwrap();
 
         let mid = mc.evaluate_at(50);
         assert!((mid.feather - 5.0).abs() < 1e-5);
@@ -262,28 +376,16 @@ mod tests {
 
     #[test]
     fn mask_component_interpolates_rectangle_shape() {
-        let a = MaskKeyframe {
-            shape: MaskShape::Rectangle {
-                x: 0.0,
-                y: 0.0,
-                width: 100.0,
-                height: 100.0,
-                corner_radius: 0.0,
-            },
-            ..Default::default()
+        let shape_a = MaskShape::Rectangle {
+            x: 0.0, y: 0.0, width: 100.0, height: 100.0, corner_radius: 0.0,
         };
-        let b = MaskKeyframe {
-            shape: MaskShape::Rectangle {
-                x: 50.0,
-                y: 50.0,
-                width: 200.0,
-                height: 200.0,
-                corner_radius: 10.0,
-            },
-            ..Default::default()
+        let shape_b = MaskShape::Rectangle {
+            x: 50.0, y: 50.0, width: 200.0, height: 200.0, corner_radius: 10.0,
         };
+        let a = MaskKeyframe { shape: shape_a, ..Default::default() };
         let mut mc = MaskComponent::new("M1".into(), a);
-        mc.keyframes.push((100, b));
+        mc.shape_keyframes.push((100, shape_b));
+        mc.shape_animation_enabled = true;
 
         let mid = mc.evaluate_at(50);
         if let MaskShape::Rectangle { x, y, width, height, corner_radius } = mid.shape {

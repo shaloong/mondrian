@@ -518,6 +518,7 @@ impl Clip {
                     input: input_id,
                     mask: src_id,
                     invert: params.invert,
+                    mask_op: params.mask_op,
                 },
             });
             current_output = Some(mask_id);
@@ -603,6 +604,16 @@ impl PropertyHost for Clip {
                 properties.upsert(property.clone());
             }
         }
+        // Aggregate mask properties with "mask.<uuid>." prefix.
+        for mask in &self.masks {
+            let mut mask_component = mask.clone();
+            mask_component.ensure_migrated();
+            for (short_path, property) in mask_component.properties.iter() {
+                let mut prop = property.clone();
+                prop.descriptor.path = format!("mask.{}.{}", mask.id.0, short_path);
+                properties.upsert(prop);
+            }
+        }
         let blend_mode_text = blend_mode_to_text(self.blend_mode);
         let mut blend_mode_descriptor = PropertyDescriptor::new(
             Self::BLEND_MODE_PATH,
@@ -656,6 +667,52 @@ impl PropertyHost for Clip {
             && path == SpeedMap::MULTIPLIER_PATH
         {
             self.speed.apply_property_mutation(mutation)
+        } else if path.starts_with("mask.") {
+            // Path format: "mask.<uuid>.<short_prop>"
+            let parts: Vec<&str> = path.splitn(3, '.').collect();
+            if parts.len() == 3 {
+                let mask_uuid_prefix = parts[1];
+                let short_prop = parts[2];
+                let prefix = format!("mask.{}.", mask_uuid_prefix);
+                if let Some(mask) = self
+                    .masks
+                    .iter_mut()
+                    .find(|m| m.id.0.to_string().starts_with(mask_uuid_prefix))
+                {
+                    // Shape is stored in shape_keyframes, not PropertyBag.
+                    if short_prop == mondrian_effects::mask::MASK_PROP_SHAPE {
+                        match &mutation {
+                            PropertyMutation::ClearAnimation { time: _, .. } => {
+                                // Keep only the first shape keyframe.
+                                if let Some(first) = mask.shape_keyframes.first().cloned() {
+                                    mask.shape_keyframes.clear();
+                                    mask.shape_keyframes.push(first);
+                                }
+                                return Ok(());
+                            }
+                            _ => {
+                                // Other shape mutations (enable, disable) are handled
+                                // directly via set_mask_keyframe in the UI.
+                                return Ok(());
+                            }
+                        }
+                    }
+                    let short_mutation = mutation.map_path(|full| {
+                        full.strip_prefix(&prefix).unwrap_or(&full).to_string()
+                    });
+                    mask.properties.apply_mutation(short_mutation)
+                } else {
+                    Err(MondrianError::WorkflowStepFailed {
+                        step_id: "clip_apply_property_mutation".to_string(),
+                        reason: format!("蒙版未找到: {mask_uuid_prefix}"),
+                    })
+                }
+            } else {
+                Err(MondrianError::WorkflowStepFailed {
+                    step_id: "clip_apply_property_mutation".to_string(),
+                    reason: format!("无效的蒙版属性路径: {path}"),
+                })
+            }
         } else if path.starts_with("effect.") {
             if let Some(effect) = self.effects.iter_mut().find(|effect| {
                 effect.property_bag().ok().is_some_and(|bag| bag.property(path).is_some())

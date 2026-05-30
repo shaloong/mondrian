@@ -2308,7 +2308,57 @@ impl AppState {
         Ok(())
     }
 
+    /// Toggle shape animation for a mask. When enabled, a second shape keyframe is
+    /// added at the current time (copying the current static shape). When disabled,
+    /// all keyframes except the one at `time` (or the first) are removed.
+    pub fn set_mask_shape_animation_enabled(
+        &mut self,
+        selection: SelectedClipRef,
+        mask_id: MaskId,
+        enabled: bool,
+        time: TimeTicks,
+    ) -> mondrian_core::Result<bool> {
+        let seq = self.sequence.as_mut().ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "set_mask_shape_animation".to_string(),
+                reason: "当前无序列".to_string(),
+            }
+        })?;
+        let before = seq.clone();
+        let clip = find_clip_mut_by_selection(seq, selection).ok_or_else(|| {
+            mondrian_core::MondrianError::ClipNotFound { clip_id: selection.clip_id.to_string() }
+        })?;
+        if let Some(mask) = clip.masks.iter_mut().find(|m| m.id == mask_id) {
+            if enabled && !mask.shape_animation_enabled {
+                // Snapshot current shape as a second keyframe at current time.
+                let current_shape = mask.evaluate_at(time).shape;
+                mask.shape_keyframes.push((time, current_shape));
+                mask.shape_keyframes.sort_by_key(|(t, _)| *t);
+                mask.shape_animation_enabled = true;
+            } else if !enabled && mask.shape_animation_enabled {
+                // Keep only the shape at `time` (or the first shape) as the static shape.
+                let kept = mask
+                    .shape_keyframes
+                    .iter()
+                    .find(|(t, _)| *t == time)
+                    .or_else(|| mask.shape_keyframes.first())
+                    .map(|(_, s)| s.clone())
+                    .unwrap_or(MaskShape::default());
+                mask.shape_keyframes.clear();
+                mask.shape_keyframes.push((0, kept));
+                mask.shape_animation_enabled = false;
+            }
+        }
+        let after = seq.clone();
+        let sequence_id = seq.id;
+        self.record_sequence_snapshot_command("切换蒙版形状动画", before, after);
+        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
+        let _ = self.save_project_file();
+        Ok(true)
+    }
+
     /// Update or insert a mask keyframe at the given time.
+    /// Shape is stored in `shape_keyframes`; scalar properties go to `PropertyBag`.
     pub fn set_mask_keyframe(
         &mut self,
         selection: SelectedClipRef,
@@ -2327,13 +2377,42 @@ impl AppState {
             mondrian_core::MondrianError::ClipNotFound { clip_id: selection.clip_id.to_string() }
         })?;
         if let Some(mask) = clip.masks.iter_mut().find(|m| m.id == mask_id) {
-            // Replace existing keyframe at same time, or insert sorted.
-            if let Some(pos) = mask.keyframes.iter().position(|(t, _)| *t == time) {
-                mask.keyframes[pos] = (time, keyframe);
+            mask.ensure_migrated();
+            // Shape: write to shape_keyframes.
+            if let Some(pos) = mask.shape_keyframes.iter().position(|(t, _)| *t == time) {
+                mask.shape_keyframes[pos] = (time, keyframe.shape);
             } else {
-                mask.keyframes.push((time, keyframe));
-                mask.keyframes.sort_by_key(|(t, _)| *t);
+                mask.shape_keyframes.push((time, keyframe.shape));
+                mask.shape_keyframes.sort_by_key(|(t, _)| *t);
             }
+            // Scalar properties: write to PropertyBag.
+            use mondrian_core::automation::PropertyValue;
+            use mondrian_effects::mask::{MASK_PROP_EXPANSION, MASK_PROP_FEATHER, MASK_PROP_INVERT, MASK_PROP_MASK_OP, MASK_PROP_OPACITY};
+            let _ = mask.properties.write_value(
+                MASK_PROP_FEATHER, time,
+                PropertyValue::Float(keyframe.feather),
+                InterpolationType::Linear,
+            );
+            let _ = mask.properties.write_value(
+                MASK_PROP_OPACITY, time,
+                PropertyValue::Float(keyframe.opacity),
+                InterpolationType::Linear,
+            );
+            let _ = mask.properties.write_value(
+                MASK_PROP_EXPANSION, time,
+                PropertyValue::Float(keyframe.expansion),
+                InterpolationType::Linear,
+            );
+            let _ = mask.properties.write_value(
+                MASK_PROP_INVERT, time,
+                PropertyValue::Bool(keyframe.invert),
+                InterpolationType::Hold,
+            );
+            let _ = mask.properties.write_value(
+                MASK_PROP_MASK_OP, time,
+                PropertyValue::Text(keyframe.mask_op.as_str().to_string()),
+                InterpolationType::Hold,
+            );
         }
         let after = seq.clone();
         let sequence_id = seq.id;

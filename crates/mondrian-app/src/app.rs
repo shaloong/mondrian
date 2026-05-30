@@ -20,7 +20,7 @@ use mondrian_core::{
     },
     ProjectColorManagement, ProjectSettings,
 };
-use mondrian_effects::{EffectType, MaskComponent, MaskId, MaskKeyframe};
+use mondrian_effects::{EffectType, MaskComponent, MaskId, MaskKeyframe, MaskShape};
 use mondrian_export::queue::{JobStatus, RenderQueue};
 use mondrian_media::audio::{
     AudioBuffer, AudioClock, AudioMixer, AudioSourceCache, AudioSyncController, AudioTrackConfig,

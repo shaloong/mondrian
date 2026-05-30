@@ -28,6 +28,7 @@ pub enum EffectGraphNodeKind {
         input: EffectGraphNodeId,
         mask: EffectGraphNodeId,
         invert: bool,
+        mask_op: crate::mask::MaskOp,
     },
     /// Synthetic source node that rasterizes a mask shape into an alpha buffer.
     MaskSource {
@@ -106,11 +107,12 @@ impl EffectRenderGraph {
                     blend_mode.hash(&mut hasher);
                     opacity.to_bits().hash(&mut hasher);
                 }
-                EffectGraphNodeKind::Mask { input, mask, invert } => {
+                EffectGraphNodeKind::Mask { input, mask, invert, mask_op } => {
                     3u8.hash(&mut hasher);
                     input.hash(&mut hasher);
                     mask.hash(&mut hasher);
                     invert.hash(&mut hasher);
+                    mask_op.hash(&mut hasher);
                 }
                 EffectGraphNodeKind::MaskSource { ref shape, feather, expansion, opacity } => {
                     6u8.hash(&mut hasher);
@@ -221,11 +223,12 @@ impl EffectGraphBuilderState {
         input: EffectGraphNodeId,
         mask: EffectGraphNodeId,
         invert: bool,
+        mask_op: crate::mask::MaskOp,
     ) -> EffectGraphNodeId {
         let id = self.alloc_id();
         self.graph.nodes.push(EffectGraphNode {
             id,
-            kind: EffectGraphNodeKind::Mask { input, mask, invert },
+            kind: EffectGraphNodeKind::Mask { input, mask, invert, mask_op },
         });
         id
     }
@@ -250,13 +253,13 @@ impl EffectGraphBuilderState {
         output
     }
 
-    pub fn mask_current_with<F>(&mut self, invert: bool, build_mask: F) -> EffectGraphValue
+    pub fn mask_current_with<F>(&mut self, invert: bool, mask_op: crate::mask::MaskOp, build_mask: F) -> EffectGraphValue
     where
         F: FnOnce(&mut Self, EffectGraphValue) -> EffectGraphValue,
     {
         let input = self.current_output;
         let mask = build_mask(self, input);
-        let output = self.add_mask(input, mask, invert);
+        let output = self.add_mask(input, mask, invert, mask_op);
         self.current_output = output;
         output
     }
@@ -572,7 +575,7 @@ pub fn compile_effect_node_profiles(
                     output_cache_enabled,
                 }
             }
-            EffectGraphNodeKind::Mask { input, mask, invert } => {
+            EffectGraphNodeKind::Mask { input, mask, invert, mask_op } => {
                 let input_profile = profiles.get(input)?;
                 let mask_profile = profiles.get(mask)?;
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -580,6 +583,7 @@ pub fn compile_effect_node_profiles(
                 input_profile.subtree_signature.hash(&mut hasher);
                 mask_profile.subtree_signature.hash(&mut hasher);
                 invert.hash(&mut hasher);
+                mask_op.hash(&mut hasher);
                 let cache_policy = if input_profile.cache_policy
                     == EffectCachePolicy::FrameDependent
                     || mask_profile.cache_policy == EffectCachePolicy::FrameDependent
@@ -944,6 +948,7 @@ mod tests {
                         input: EffectGraphNodeId(0),
                         mask: EffectGraphNodeId(1),
                         invert: false,
+                        mask_op: crate::mask::MaskOp::Add,
                     },
                 },
             ],

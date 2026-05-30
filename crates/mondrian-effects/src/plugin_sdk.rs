@@ -82,20 +82,21 @@ impl<'a> EffectGraphDsl<'a> {
         &mut self,
         input: EffectGraphValue,
         invert: bool,
+        mask_op: crate::mask::MaskOp,
         build_mask: F,
     ) -> EffectGraphValue
     where
         F: for<'b> FnOnce(&mut EffectGraphDsl<'b>, EffectGraphValue) -> EffectGraphValue,
     {
         let mask = self.branch(input, build_mask);
-        self.builder.add_mask(input, mask, invert)
+        self.builder.add_mask(input, mask, invert, mask_op)
     }
 
-    pub fn mask_current<F>(&mut self, invert: bool, build_mask: F) -> EffectGraphValue
+    pub fn mask_current<F>(&mut self, invert: bool, mask_op: crate::mask::MaskOp, build_mask: F) -> EffectGraphValue
     where
         F: for<'b> FnOnce(&mut EffectGraphDsl<'b>, EffectGraphValue) -> EffectGraphValue,
     {
-        self.builder.mask_current_with(invert, |builder, source| {
+        self.builder.mask_current_with(invert, mask_op, |builder, source| {
             let mut dsl = EffectGraphDsl::new(builder);
             build_mask(&mut dsl, source)
         })

@@ -432,7 +432,7 @@ fn execute_effect_graph(
                 }
                 outputs.insert(node.id, rgba);
             }
-            EffectGraphNodeKind::Mask { input: input_id, mask, invert } => {
+            EffectGraphNodeKind::Mask { input: input_id, mask, invert, mask_op } => {
                 if let (Some(compiled), Some(input_signature)) = (compiled, source_input_signature)
                 {
                     if let Some(cached) = get_cached_node_output(
@@ -466,7 +466,7 @@ fn execute_effect_graph(
                     };
                     let mut mask_frame = take_execution_buffer(&mut buffer_pool, required_len);
                     mask_frame.copy_from_slice(&source);
-                    apply_alpha_mask_in_place(&mut source, &mask_frame, *invert);
+                    apply_alpha_mask_in_place(&mut source, &mask_frame, *invert, *mask_op);
                     release_execution_buffer(&mut buffer_pool, mask_frame);
                     if let (Some(compiled), Some(input_signature)) =
                         (compiled, source_input_signature)
@@ -502,7 +502,7 @@ fn execute_effect_graph(
                 ) else {
                     return input.to_vec();
                 };
-                apply_alpha_mask_in_place(&mut source, &mask_frame, *invert);
+                apply_alpha_mask_in_place(&mut source, &mask_frame, *invert, *mask_op);
                 release_execution_buffer(&mut buffer_pool, mask_frame);
                 if let (Some(compiled), Some(input_signature)) = (compiled, source_input_signature)
                 {
@@ -805,13 +805,20 @@ fn blend_graph_inputs_in_place(
     }
 }
 
-fn apply_alpha_mask_in_place(input: &mut [u8], mask: &[u8], invert: bool) {
+fn apply_alpha_mask_in_place(input: &mut [u8], mask: &[u8], invert: bool, mask_op: crate::mask::MaskOp) {
+    use crate::mask::MaskOp;
     for (out_px, mask_px) in input.chunks_exact_mut(4).zip(mask.chunks_exact(4)) {
-        let matte = if invert {
-            1.0 - mask_px[3] as f32 / 255.0
-        } else {
-            mask_px[3] as f32 / 255.0
+        let mut matte = mask_px[3] as f32 / 255.0;
+        if invert {
+            matte = 1.0 - matte;
+        }
+        let src_alpha = out_px[3] as f32 / 255.0;
+        let result = match mask_op {
+            MaskOp::Add => src_alpha * matte,
+            MaskOp::Subtract => src_alpha * (1.0 - matte),
+            MaskOp::Intersect => src_alpha.min(matte),
+            MaskOp::Difference => (src_alpha - matte).abs(),
         };
-        out_px[3] = unit_to_u8((out_px[3] as f32 / 255.0) * matte);
+        out_px[3] = unit_to_u8(result);
     }
 }
