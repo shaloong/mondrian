@@ -1,5 +1,15 @@
 # Mondrian 系统架构总览
 
+> **ARCHITECTURE V2 MIGRATION IN PROGRESS** (2026-05-30)
+> This document describes the current (V1) architecture. The target V2 architecture
+> is defined in:
+>
+> - [Architecture V2 Blueprint](architecture-v2-blueprint.md) — target state
+> - [Architecture V2 Gap Analysis](architecture-v2-gap-analysis.md) — what's missing
+> - [Architecture V2 Migration Plan](architecture-v2-migration-plan.md) — phased execution
+>
+> Branch: `feat/architecture-v2-dag-gpu`
+
 ## 1. 设计哲学
 
 ```text
