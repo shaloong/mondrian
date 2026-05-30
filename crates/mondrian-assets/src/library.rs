@@ -604,3 +604,208 @@ fn detect_asset_kind(info: &MediaInfo, path: &Path) -> Result<AssetKind> {
     }
     Err(MondrianError::UnsupportedFormat { format: info.container.clone() })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open_test_library() -> Arc<AssetLibrary> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        AssetLibrary::open(dir.into_path()).expect("open library")
+    }
+
+    #[test]
+    fn open_and_list_empty() {
+        let lib = open_test_library();
+        let assets = lib.list_assets().expect("list_assets");
+        assert!(assets.is_empty());
+    }
+
+    #[test]
+    fn create_adjustment_layer() {
+        let lib = open_test_library();
+        let id = lib
+            .create_adjustment_layer_asset(Some("Test Adjustment"))
+            .expect("create adjustment");
+        let record = lib.get_asset(id).expect("get").expect("exists");
+        assert_eq!(record.kind, AssetKind::AdjustmentLayer);
+        assert_eq!(record.name, "Test Adjustment");
+        assert!(record
+            .path
+            .to_string_lossy()
+            .starts_with("mondrian://adjustment-layer/"));
+    }
+
+    #[test]
+    fn create_adjustment_layer_auto_name() {
+        let lib = open_test_library();
+        let id = lib.create_adjustment_layer_asset(None).expect("create");
+        let record = lib.get_asset(id).expect("get").expect("exists");
+        assert!(record.name.contains("调整图层"));
+        assert_eq!(record.kind, AssetKind::AdjustmentLayer);
+    }
+
+    #[test]
+    fn create_multiple_adjustment_layers_increment_names() {
+        let lib = open_test_library();
+        let id1 = lib.create_adjustment_layer_asset(None).expect("create 1");
+        let id2 = lib.create_adjustment_layer_asset(None).expect("create 2");
+        let r1 = lib.get_asset(id1).expect("get1").expect("exists1");
+        let r2 = lib.get_asset(id2).expect("get2").expect("exists2");
+        assert_ne!(r1.name, r2.name);
+    }
+
+    #[test]
+    fn create_solid_color() {
+        let lib = open_test_library();
+        let id = lib.create_solid_color_asset(Some("Red Background")).expect("create");
+        let record = lib.get_asset(id).expect("get").expect("exists");
+        assert_eq!(record.kind, AssetKind::SolidColor);
+        assert_eq!(record.name, "Red Background");
+        assert!(record
+            .path
+            .to_string_lossy()
+            .starts_with("mondrian://solid-color/"));
+    }
+
+    #[test]
+    fn create_solid_color_auto_name() {
+        let lib = open_test_library();
+        let id = lib.create_solid_color_asset(None).expect("create");
+        let record = lib.get_asset(id).expect("get").expect("exists");
+        assert!(record.name.contains("纯色层"));
+        assert_eq!(record.kind, AssetKind::SolidColor);
+    }
+
+    #[test]
+    fn list_assets_returns_all() {
+        let lib = open_test_library();
+        lib.create_adjustment_layer_asset(Some("Adj1")).expect("create 1");
+        lib.create_solid_color_asset(Some("Solid1")).expect("create 2");
+        let assets = lib.list_assets().expect("list");
+        assert_eq!(assets.len(), 2);
+    }
+
+    #[test]
+    fn get_nonexistent_asset() {
+        let lib = open_test_library();
+        let result = lib.get_asset(AssetId::new()).expect("get");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn rename_asset() {
+        let lib = open_test_library();
+        let id = lib
+            .create_adjustment_layer_asset(Some("Original"))
+            .expect("create");
+        lib.rename_asset(id, "Renamed").expect("rename");
+        let record = lib.get_asset(id).expect("get").expect("exists");
+        assert_eq!(record.name, "Renamed");
+    }
+
+    #[test]
+    fn rename_asset_empty_name_fails() {
+        let lib = open_test_library();
+        let id = lib.create_adjustment_layer_asset(Some("X")).expect("create");
+        let err = lib.rename_asset(id, "   ").unwrap_err();
+        assert!(err.to_string().contains("不能为空"));
+    }
+
+    #[test]
+    fn rename_nonexistent_asset_fails() {
+        let lib = open_test_library();
+        let err = lib.rename_asset(AssetId::new(), "X").unwrap_err();
+        assert!(matches!(err, MondrianError::AssetNotFound { .. }));
+    }
+
+    #[test]
+    fn delete_asset() {
+        let lib = open_test_library();
+        let id = lib.create_solid_color_asset(Some("Delete Me")).expect("create");
+        lib.delete_asset(id).expect("delete");
+        assert!(lib.get_asset(id).expect("get").is_none());
+    }
+
+    #[test]
+    fn delete_nonexistent_asset_fails() {
+        let lib = open_test_library();
+        let err = lib.delete_asset(AssetId::new()).unwrap_err();
+        assert!(matches!(err, MondrianError::AssetNotFound { .. }));
+    }
+
+    #[test]
+    fn clear_assets_removes_all() {
+        let lib = open_test_library();
+        lib.create_adjustment_layer_asset(None).expect("create 1");
+        lib.create_solid_color_asset(None).expect("create 2");
+        lib.clear_assets().expect("clear");
+        assert!(lib.list_assets().expect("list").is_empty());
+    }
+
+    #[test]
+    fn create_and_list_folder() {
+        let lib = open_test_library();
+        let folder_id = lib.create_folder("My Folder", None).expect("create folder");
+        assert!(!folder_id.is_empty());
+        let folders = lib.list_folders().expect("list folders");
+        assert_eq!(folders.len(), 1);
+        assert_eq!(folders[0].name, "My Folder");
+    }
+
+    #[test]
+    fn create_nested_folder() {
+        let lib = open_test_library();
+        let parent = lib.create_folder("Parent", None).expect("create parent");
+        let child = lib
+            .create_folder("Child", Some(&parent))
+            .expect("create child");
+        let folders = lib.list_folders().expect("list");
+        assert_eq!(folders.len(), 2);
+        assert_eq!(folders.iter().find(|f| f.id == child).unwrap().parent_id.as_deref(), Some(parent.as_str()));
+    }
+
+    #[test]
+    fn rename_folder() {
+        let lib = open_test_library();
+        let id = lib.create_folder("Old", None).expect("create");
+        lib.rename_folder(&id, "New").expect("rename");
+        let folders = lib.list_folders().expect("list");
+        assert_eq!(folders[0].name, "New");
+    }
+
+    #[test]
+    fn delete_folder_unlinks_assets() {
+        let lib = open_test_library();
+        let folder_id = lib.create_folder("Bin", None).expect("create folder");
+        let id = lib.create_adjustment_layer_asset(Some("In Bin")).expect("create asset");
+        // Move asset to folder by renaming with folder context — we just verify
+        // that deleting the folder does not panic or cascade-delete assets.
+        lib.delete_folder(&folder_id).expect("delete folder");
+        // Asset should still exist (unlinked, not deleted)
+        assert!(lib.get_asset(id).expect("get").is_some());
+    }
+
+    #[test]
+    fn asset_kind_serde_roundtrip() {
+        for kind in [
+            AssetKind::Video,
+            AssetKind::Audio,
+            AssetKind::AdjustmentLayer,
+            AssetKind::SolidColor,
+        ] {
+            let json = serde_json::to_string(&kind).expect("serialize");
+            let back: AssetKind = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(kind, back);
+        }
+    }
+
+    #[test]
+    fn list_assets_in_nonexistent_folder_returns_empty() {
+        let lib = open_test_library();
+        let result = lib
+            .list_assets_in_folder(Some("nonexistent"))
+            .expect("list");
+        assert!(result.is_empty());
+    }
+}

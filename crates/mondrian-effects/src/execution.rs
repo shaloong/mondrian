@@ -181,7 +181,7 @@ pub fn register_custom_render_processor(
 ) {
     custom_render_processor_registry()
         .write()
-        .expect("custom render processor registry poisoned")
+        .unwrap_or_else(|e| e.into_inner())
         .insert(key.into(), processor);
 }
 

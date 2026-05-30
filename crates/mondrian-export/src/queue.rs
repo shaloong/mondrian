@@ -1257,7 +1257,7 @@ impl RenderQueue {
         let cancel_flags = Arc::clone(&self.cancel_flags);
         let executor = Arc::clone(&self.executor);
 
-        std::thread::Builder::new()
+        let result = std::thread::Builder::new()
             .name("mondrian-export-worker".to_string())
             .spawn(move || {
                 while let Some((job, cancel_flag)) =
@@ -1287,8 +1287,10 @@ impl RenderQueue {
 
                     cancel_flags.lock().remove(&job.id);
                 }
-            })
-            .expect("failed to spawn export worker thread");
+            });
+        if let Err(e) = result {
+            tracing::error!("Failed to spawn export worker thread: {}", e);
+        }
     }
 
     pub fn enqueue(&self, job: RenderJob) -> JobId {
@@ -1362,7 +1364,10 @@ fn take_next_pending_job(
         }
 
         if let Some(index) = queue.iter().position(|job| matches!(job.status, JobStatus::Pending)) {
-            let job = queue.get_mut(index).expect("pending job index should always be valid");
+            let Some(job) = queue.get_mut(index) else {
+                tracing::error!("Pending job index {index} disappeared from queue");
+                continue;
+            };
             job.status = JobStatus::Rendering { frame: 0, total_frames: 1000 };
             job.progress = 0.0;
             job.started_at = Some(Utc::now());

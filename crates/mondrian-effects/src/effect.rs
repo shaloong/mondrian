@@ -470,7 +470,7 @@ pub fn register_effect_definition(definition: EffectDefinition) {
     let key = definition.key.clone();
     effect_registry()
         .write()
-        .expect("effect registry poisoned")
+        .unwrap_or_else(|e| e.into_inner())
         .insert(key, Arc::new(definition));
 }
 
@@ -478,13 +478,13 @@ pub fn effect_definition(effect_type: &EffectType) -> Option<Arc<EffectDefinitio
     let key = effect_type.key();
     effect_registry()
         .read()
-        .expect("effect registry poisoned")
+        .unwrap_or_else(|e| e.into_inner())
         .get(key.as_str())
         .cloned()
 }
 
 pub fn effect_library_types() -> Vec<EffectType> {
-    let registry = effect_registry().read().expect("effect registry poisoned");
+    let registry = effect_registry().read().unwrap_or_else(|e| e.into_inner());
     let mut effects = registry
         .values()
         .filter(|definition| definition.supports_visual_evaluation())
@@ -504,7 +504,7 @@ pub struct EffectCategoryNode {
 
 /// Build a hierarchical category tree from all registered effects.
 pub fn effect_category_tree() -> Vec<EffectCategoryNode> {
-    let registry = effect_registry().read().expect("effect registry poisoned");
+    let registry = effect_registry().read().unwrap_or_else(|e| e.into_inner());
     let mut roots: Vec<EffectCategoryNode> = Vec::new();
 
     for definition in registry.values() {

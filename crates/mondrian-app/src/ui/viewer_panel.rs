@@ -1018,8 +1018,9 @@ impl ViewerPanel {
                                 let normalized = seq_rect_to_clip_normalized(
                                     state, md.clip_id, glam::Vec2::new(x1, y1), glam::Vec2::new(x2, y2),
                                 );
+                                let Some(tool) = self.mask_tool else { return; };
                                 let mask = MaskKeyframe {
-                                    shape: match self.mask_tool.unwrap() {
+                                    shape: match tool {
                                         MaskTool::Rect => MaskShape::Rectangle {
                                             x: normalized.0.x, y: normalized.0.y,
                                             width: normalized.1.x - normalized.0.x,

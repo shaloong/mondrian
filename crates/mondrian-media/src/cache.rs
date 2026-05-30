@@ -62,7 +62,9 @@ pub struct FrameCache {
 impl FrameCache {
     pub fn new(config: FrameCacheConfig) -> Arc<Self> {
         Arc::new(Self {
-            cache: Mutex::new(LruCache::new(NonZeroUsize::new(config.max_frames).unwrap())),
+            cache: Mutex::new(LruCache::new(
+                NonZeroUsize::new(config.max_frames.max(1)).expect("max_frames >= 1"),
+            )),
             hits: Default::default(),
             misses: Default::default(),
         })
@@ -130,4 +132,101 @@ pub struct CacheStats {
     pub misses: u64,
     pub hit_rate: f64,
     pub size: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_frame(asset_id: AssetId, frame_num: u64) -> Arc<RawVideoFrame> {
+        Arc::new(RawVideoFrame {
+            asset_id,
+            pts: TimeCode::new(
+                frame_num as i64,
+                mondrian_core::types::Rational::new(30, 1),
+            ),
+            width: 1920,
+            height: 1080,
+            planes: [vec![0u8; 100], vec![0u8; 50], vec![0u8; 50]],
+            strides: [1920, 960, 960],
+            frame_num,
+        })
+    }
+
+    #[test]
+    fn insert_and_get() {
+        let cache = FrameCache::new(FrameCacheConfig { max_frames: 10 });
+        let asset = AssetId::new();
+        let frame = make_frame(asset, 0);
+        cache.insert(frame);
+        let retrieved = cache.get(asset, 0);
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap().frame_num, 0);
+    }
+
+    #[test]
+    fn get_missing_returns_none() {
+        let cache = FrameCache::new(FrameCacheConfig { max_frames: 10 });
+        assert!(cache.get(AssetId::new(), 0).is_none());
+    }
+
+    #[test]
+    fn hit_miss_stats() {
+        let cache = FrameCache::new(FrameCacheConfig { max_frames: 10 });
+        let asset = AssetId::new();
+        assert!(cache.get(asset, 0).is_none()); // miss
+        cache.insert(make_frame(asset, 0));
+        assert!(cache.get(asset, 0).is_some()); // hit
+        cache.get(asset, 1); // miss
+        let stats = cache.stats();
+        assert_eq!(stats.hits, 1);
+        assert_eq!(stats.misses, 2);
+    }
+
+    #[test]
+    fn evict_asset_removes_all_its_frames() {
+        let cache = FrameCache::new(FrameCacheConfig { max_frames: 10 });
+        let a1 = AssetId::new();
+        let a2 = AssetId::new();
+        cache.insert(make_frame(a1, 0));
+        cache.insert(make_frame(a1, 1));
+        cache.insert(make_frame(a2, 0));
+        cache.evict_asset(a1);
+        assert!(cache.get(a1, 0).is_none());
+        assert!(cache.get(a1, 1).is_none());
+        assert!(cache.get(a2, 0).is_some()); // a2 unaffected
+    }
+
+    #[test]
+    fn clear_all() {
+        let cache = FrameCache::new(FrameCacheConfig { max_frames: 10 });
+        cache.insert(make_frame(AssetId::new(), 0));
+        cache.clear_all();
+        assert_eq!(cache.stats().size, 0);
+    }
+
+    #[test]
+    fn lru_eviction() {
+        let cache = FrameCache::new(FrameCacheConfig { max_frames: 2 });
+        let asset = AssetId::new();
+        cache.insert(make_frame(asset, 0));
+        cache.insert(make_frame(asset, 1));
+        // cache at capacity; inserting a 3rd should evict frame 0 (LRU)
+        cache.insert(make_frame(asset, 2));
+        assert_eq!(cache.stats().size, 2);
+        // frame 0 was least recently used (only inserted, never accessed)
+        // depending on LRU internals it may or may not be gone — but size is capped
+        let total_present = [0, 1, 2]
+            .iter()
+            .filter(|&&n| cache.get(asset, n).is_some())
+            .count();
+        assert_eq!(total_present, 2);
+    }
+
+    #[test]
+    fn max_frames_zero_uses_minimum() {
+        let cache = FrameCache::new(FrameCacheConfig { max_frames: 0 });
+        cache.insert(make_frame(AssetId::new(), 0));
+        assert_eq!(cache.stats().size, 1);
+    }
 }

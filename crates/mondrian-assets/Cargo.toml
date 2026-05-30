@@ -29,3 +29,6 @@ notify     = "6"
 dirs       = "5"
 # 图像缩略图
 image      = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

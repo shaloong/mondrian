@@ -337,7 +337,7 @@ impl EffectControlsPanel {
                             let (slot_y, insert_idx) = slots
                                 .iter()
                                 .min_by(|a, b| {
-                                    (ptr.y - a.0).abs().partial_cmp(&(ptr.y - b.0).abs()).unwrap()
+                                    (ptr.y - a.0).abs().partial_cmp(&(ptr.y - b.0).abs()).unwrap_or(std::cmp::Ordering::Equal)
                                 })
                                 .copied()
                                 .unwrap_or((end_y, total_fx));
