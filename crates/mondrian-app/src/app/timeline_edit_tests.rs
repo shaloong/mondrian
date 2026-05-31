@@ -1,5 +1,5 @@
 use super::*;
-use mondrian_effects::EffectRenderOp;
+use mondrian_effects::{EffectGraphNodeKind, EffectRenderOp};
 use mondrian_timeline::clip::{AlphaInterpretation, MediaInterpretation};
 
 fn create_state_with_sequence() -> AppState {
@@ -267,11 +267,15 @@ fn video_clip_is_disabled(state: &AppState, clip_id: ClipId) -> bool {
 }
 
 fn exposure_from_clip(clip: &Clip, time: TimeCode) -> f32 {
-    mondrian_effects::build_effect_render_plan(&clip.effects, time)
-        .ops
+    let graph = mondrian_effects::build_effect_render_graph(&clip.effects, time);
+    graph
+        .nodes
         .iter()
-        .find_map(|op| match op {
-            EffectRenderOp::ColorAdjust { exposure, .. } => Some(*exposure),
+        .find_map(|node| match &node.kind {
+            mondrian_effects::EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::ColorAdjust { exposure, .. },
+                ..
+            } => Some(*exposure),
             _ => None,
         })
         .unwrap_or(0.0)

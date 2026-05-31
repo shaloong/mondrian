@@ -701,17 +701,23 @@ mod tests {
         automation::{timecode_to_ticks, Keyframe, PropertyMutation, PropertyValue},
         types::Rational,
     };
-    use mondrian_effects::{build_effect_render_plan, EffectRenderOp, EffectRenderPlan};
+    use mondrian_effects::{EffectGraphNodeKind, EffectRenderOp};
 
     fn tc(frame: i64) -> TimeCode {
         TimeCode::new(frame, Rational::new(1, 25))
     }
 
-    fn exposure_from_plan(plan: &EffectRenderPlan) -> f32 {
-        plan.ops
+    fn exposure_from_graph(effects: &[EffectNode], time: TimeCode) -> f32 {
+        // Build graph and extract ColorAdjust exposure from UnaryEffect nodes.
+        let graph = mondrian_effects::build_effect_render_graph(effects, time);
+        graph
+            .nodes
             .iter()
-            .find_map(|op| match op {
-                EffectRenderOp::ColorAdjust { exposure, .. } => Some(*exposure),
+            .find_map(|node| match &node.kind {
+                mondrian_effects::EffectGraphNodeKind::UnaryEffect {
+                    op: EffectRenderOp::ColorAdjust { exposure, .. },
+                    ..
+                } => Some(*exposure),
                 _ => None,
             })
             .unwrap_or(0.0)
@@ -839,10 +845,8 @@ mod tests {
             })
             .expect("set first exposure");
 
-        let first_exposure =
-            exposure_from_plan(&build_effect_render_plan(&first.effects, tc(10)));
-        let second_exposure =
-            exposure_from_plan(&build_effect_render_plan(&second.effects, tc(50)));
+        let first_exposure = exposure_from_graph(&first.effects, tc(10));
+        let second_exposure = exposure_from_graph(&second.effects, tc(50));
 
         assert!((first_exposure - 1.25).abs() < 1.0e-4);
         assert!(second_exposure.abs() < 1.0e-4);

@@ -1,7 +1,7 @@
 # Architecture V2 — Gap Analysis
 
-**Date:** 2026-05-30
-**Assessment:** Code health **Good**, architecture conformity **48%** vs. [V2 Blueprint](architecture-v2-blueprint.md).
+**Date:** 2026-05-31 (updated after Phase 0-3)
+**Assessment:** Code health **Good**, architecture conformity **70%** vs. [V2 Blueprint](architecture-v2-blueprint.md).
 
 ---
 
@@ -131,11 +131,13 @@ Scheduler uses Kahn's algorithm with cycle detection ([graph.rs:417-456](crates/
 
 The work here is **deletion of the legacy path**, not construction of a new one.
 
-### P-ARCH3: CPU-centric rendering
+### P-ARCH3: CPU-centric rendering → PARTIALLY RESOLVED (Phase 3)
 
-All effect processing is CPU scalar. GPU used only for Porter-Duff "Over" compositing of pre-processed RGBA layers — and even that is optional (permanently disabled after 4 failures).
+**Phase 3 added GPU compute shaders for ColorAdjust and GaussianBlur.** The `GpuBackend` provides compute-shader acceleration with transparent CPU fallback. A `GpuEffectExecutor` trait integrates GPU into the effect graph execution without API changes. LUT3D compute shader exists but is not yet activated (needs 3D texture upload support).
 
-FFmpeg role: decode only (`DecoderPool`) and encode only (`ExportExecutor`). Core compositing is pure Rust CPU. This is better than FFmpeg filter graphs, but still CPU-bound.
+GPU compositing (Porter-Duff "Over") still exists as a separate accelerator with per-frame retry (no more permanent disable).
+
+FFmpeg role: decode only (`DecoderPool`) and encode only (`ExportExecutor`). Core compositing is pure Rust CPU with GPU acceleration for supported effects.
 
 ### P-ARCH4: Global mutable state
 
