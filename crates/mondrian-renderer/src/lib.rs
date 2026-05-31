@@ -8,11 +8,13 @@
 //! - `RenderPipeline`：YUV→RGB + 层混合 Shader 管线
 //! - `ShaderRegistry`：可扩展效果 Shader 注册
 
+pub mod batched_pipeline;
 pub mod compositor;
 pub mod context;
 pub mod gpu_backend;
 pub mod pipeline;
 pub mod shaders;
+pub mod texture_pool;
 pub mod timeline_composite;
 pub mod timeline_render_plan;
 

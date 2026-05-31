@@ -1,15 +1,23 @@
 //! 帧合成器（Frame Compositor）
 //!
 //! 将时间线中所有 ActiveClip 的解码帧合成为最终输出帧。
+//!
+//! Phase 4: Uses batched pipeline with single GPU submission and texture pooling.
 
+use crate::batched_pipeline::BatchedCompositor;
 use crate::context::GpuContext;
-use crate::pipeline::{CpuRgbaLayer, RenderPipeline};
+use crate::pipeline::CpuRgbaLayer;
+use crate::texture_pool::TexturePool;
 use mondrian_core::types::*;
 use std::sync::Arc;
 
 pub struct CompositorConfig {
     pub output_resolution: Resolution,
     pub output_format: wgpu::TextureFormat,
+    /// Maximum pooled textures per size class.
+    pub texture_pool_per_key: usize,
+    /// Maximum total pooled textures.
+    pub texture_pool_max_total: usize,
 }
 
 impl Default for CompositorConfig {
@@ -17,27 +25,38 @@ impl Default for CompositorConfig {
         Self {
             output_resolution: Resolution::FHD,
             output_format: wgpu::TextureFormat::Rgba8Unorm,
+            texture_pool_per_key: 8,
+            texture_pool_max_total: 64,
         }
     }
 }
 
 pub struct FrameCompositor {
-    gpu: Arc<GpuContext>,
-    pipeline: RenderPipeline,
-    config: CompositorConfig,
-    /// 输出帧纹理（复用，避免每帧重新分配）
-    #[allow(dead_code)]
-    output_texture: Option<wgpu::Texture>,
+    batched: BatchedCompositor,
+    texture_pool: Arc<TexturePool>,
+    _config: CompositorConfig,
 }
 
 impl FrameCompositor {
     pub fn new(gpu: Arc<GpuContext>, config: CompositorConfig) -> Self {
-        let pipeline =
-            RenderPipeline::new(gpu.clone()).expect("failed to initialize render pipeline");
-        Self { gpu, pipeline, config, output_texture: None }
+        let texture_pool = Arc::new(TexturePool::new(
+            config.texture_pool_per_key,
+            config.texture_pool_max_total,
+        ));
+        let batched = BatchedCompositor::new(gpu, Arc::clone(&texture_pool))
+            .expect("failed to initialize batched compositor");
+
+        Self {
+            batched,
+            texture_pool,
+            _config: config,
+        }
     }
 
     /// 合成一帧（输入：已解码 RGBA 图层，输出：RGBA 像素）
+    ///
+    /// All layers are composited in a single GPU submission. Texture
+    /// resources are pooled for reuse across frames.
     pub fn composite_frame(
         &mut self,
         width: u32,
@@ -45,12 +64,11 @@ impl FrameCompositor {
         layers: &[CpuRgbaLayer],
     ) -> mondrian_core::Result<Vec<u8>> {
         tracing::trace!(
-            "Compositing frame at resolution {:?}",
-            self.config.output_resolution
+            width, height, num_layers = layers.len(),
+            pooled_textures = self.texture_pool.len(),
+            "Batched frame composite"
         );
-
-        self.ensure_output_texture();
-        self.pipeline.composite_layers_to_rgba(width, height, layers)
+        self.batched.composite_layers_to_rgba(width, height, layers)
     }
 
     pub fn composite_rgba_layers(
@@ -62,26 +80,8 @@ impl FrameCompositor {
         self.composite_frame(width, height, layers)
     }
 
-    #[allow(dead_code)]
-    fn ensure_output_texture(&mut self) {
-        if self.output_texture.is_none() {
-            let res = self.config.output_resolution;
-            self.output_texture = Some(self.gpu.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("compositor_output"),
-                size: wgpu::Extent3d {
-                    width: res.width,
-                    height: res.height,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: self.config.output_format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                    | wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_SRC,
-                view_formats: &[],
-            }));
-        }
+    /// Return number of pooled textures (for dev metrics).
+    pub fn pooled_texture_count(&self) -> usize {
+        self.texture_pool.len()
     }
 }
