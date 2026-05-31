@@ -20,7 +20,9 @@ pub mod timeline_render_plan;
 
 pub use compositor::{CompositorConfig, FrameCompositor};
 pub use context::GpuContext;
-pub use gpu_backend::{GpuBackend, GpuEffectKind, GpuExecResult, GpuFallbackReason};
+pub use gpu_backend::{
+    gpu_enabled, set_gpu_enabled, GpuBackend, GpuEffectKind, GpuExecResult, GpuFallbackReason,
+};
 pub use pipeline::{CpuRgbaLayer, RenderPipeline};
 pub use timeline_composite::{
     composite_timeline_elements, composite_timeline_elements_float_linear,

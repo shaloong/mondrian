@@ -1118,6 +1118,35 @@ fn draw_developer_preferences(app: &mut MondrianApp, ui: &mut egui::Ui) {
             }
         });
     });
+
+    draw_preferences_section(ui, "GPU 加速", |ui| {
+        let mut gpu_on = mondrian_renderer::gpu_enabled();
+        if preference_toggle_row(
+            ui,
+            &mut gpu_on,
+            "启用 GPU 特效加速",
+            Some("ColorAdjust 和 GaussianBlur 将使用 GPU 计算。关闭后回退到 CPU。"),
+        )
+        .clicked()
+        {
+            mondrian_renderer::set_gpu_enabled(gpu_on);
+            app.state.set_status_hint(
+                if gpu_on {
+                    "GPU 加速已启用"
+                } else {
+                    "GPU 加速已禁用，使用 CPU 渲染"
+                },
+                false,
+            );
+        }
+        if !app.gpu_available {
+            ui.add_space(4.0);
+            ui.colored_label(
+                egui::Color32::from_rgb(200, 160, 60),
+                "⚠ 未检测到兼容 GPU，GPU 加速不可用",
+            );
+        }
+    });
 }
 
 fn draw_preferences_header(ui: &mut egui::Ui, title: &str, info: Option<&str>) {
