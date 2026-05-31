@@ -4114,33 +4114,25 @@ fn global_gpu_compositor() -> Option<&'static Mutex<FrameCompositor>> {
         .as_ref()
 }
 
+/// GPU compositor is available if the global singleton was successfully initialized.
 fn gpu_compositor_enabled() -> bool {
-    !gpu_compositor_disabled_flag().load(Ordering::Relaxed)
+    global_gpu_compositor().is_some()
 }
 
+/// Record GPU compositor result — logs persistent failures for debugging.
 fn record_gpu_compositor_result(success: bool) {
-    const MAX_FAILURES: u64 = 4;
+    static CONSECUTIVE_FAILURES: OnceLock<AtomicU64> = OnceLock::new();
+    let counter = CONSECUTIVE_FAILURES.get_or_init(|| AtomicU64::new(0));
 
     if success {
-        gpu_compositor_failures().store(0, Ordering::Relaxed);
-        gpu_compositor_disabled_flag().store(false, Ordering::Relaxed);
-        return;
+        counter.store(0, Ordering::Relaxed);
+    } else {
+        let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
+        // Log every 60 failures (~1 second at 60fps) instead of permanently disabling.
+        if n % 60 == 0 {
+            tracing::warn!("GPU compositor failed {n} times consecutively, retrying...");
+        }
     }
-
-    let failures = gpu_compositor_failures().fetch_add(1, Ordering::Relaxed) + 1;
-    if failures >= MAX_FAILURES {
-        gpu_compositor_disabled_flag().store(true, Ordering::Relaxed);
-    }
-}
-
-fn gpu_compositor_failures() -> &'static AtomicU64 {
-    static FAILURES: OnceLock<AtomicU64> = OnceLock::new();
-    FAILURES.get_or_init(|| AtomicU64::new(0))
-}
-
-fn gpu_compositor_disabled_flag() -> &'static AtomicBool {
-    static DISABLED: OnceLock<AtomicBool> = OnceLock::new();
-    DISABLED.get_or_init(|| AtomicBool::new(false))
 }
 
 fn global_media_path_cache(cache_root: PathBuf) -> Arc<mondrian_media::MultiLevelCache> {

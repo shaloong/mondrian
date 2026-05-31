@@ -803,6 +803,8 @@ pub struct MondrianApp {
     last_cache_maintenance_at: Option<std::time::Instant>,
     cache_maintenance_in_flight: bool,
     cache_maintenance_rx: Option<mpsc::Receiver<anyhow::Result<MediaCacheCleanupStats>>>,
+    /// Whether GPU compute acceleration is available (set at startup).
+    gpu_available: bool,
 }
 
 impl MondrianApp {
@@ -871,7 +873,11 @@ impl MondrianApp {
             last_cache_maintenance_at: None,
             cache_maintenance_in_flight: false,
             cache_maintenance_rx: None,
+            gpu_available: false,
         };
+
+        // Initialize GPU acceleration backend asynchronously.
+        app.try_init_gpu();
 
         app.load_app_preferences();
         crate::ui::theme::apply_theme(&cc.egui_ctx, app.theme);
@@ -1405,6 +1411,35 @@ fn audio_render_max_in_flight_buffering() -> usize {
 // ─────────────────────────────────────────────
 
 impl MondrianApp {
+    /// Try to initialize GPU acceleration for effect processing.
+    /// On failure, GPU is silently unavailable — effects fall back to CPU.
+    fn try_init_gpu(&mut self) {
+        let handle = tokio::runtime::Handle::current();
+        match handle.block_on(mondrian_renderer::GpuBackend::new()) {
+            Some(backend) => {
+                mondrian_effects::set_global_gpu_executor(Some(backend));
+                self.gpu_available = true;
+                tracing::info!("GPU 加速已启用");
+                let _ = self.state.event_bus.publish(
+                    mondrian_core::AppEvent::GpuStatusChanged {
+                        available: true,
+                        reason: "GPU 加速已启用".into(),
+                    },
+                );
+            }
+            None => {
+                self.gpu_available = false;
+                tracing::info!("GPU 不可用，使用 CPU 渲染");
+                let _ = self.state.event_bus.publish(
+                    mondrian_core::AppEvent::GpuStatusChanged {
+                        available: false,
+                        reason: "未检测到兼容 GPU，使用 CPU 渲染".into(),
+                    },
+                );
+            }
+        }
+    }
+
     fn load_app_preferences(&mut self) {
         preferences::load_app_preferences(self);
     }

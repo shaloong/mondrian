@@ -26,7 +26,8 @@ pub use execution::{
     apply_compiled_effect_graph, apply_compiled_effect_graph_pass,
     apply_compiled_effect_graph_with_gpu, apply_effect_render_graph,
     apply_effect_render_graph_pass, apply_effect_render_plan, apply_effect_render_plan_pass,
-    register_custom_render_processor, CustomEffectRenderProcessor, EffectGpuExecutor,
+    register_custom_render_processor, set_global_gpu_executor, CustomEffectRenderProcessor,
+    EffectGpuExecutor,
 };
 pub use graph::{
     compile_effect_render_graph, compile_scheduled_effect_graph,
