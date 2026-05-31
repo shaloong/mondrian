@@ -127,6 +127,13 @@ pub enum AppEvent {
     },
     UndoPerformed,
     RedoPerformed,
+
+    // ── GPU 状态 ────────────────────────────────────────────────────────────────
+    /// GPU 可用性变化通知。`available=false` 时 `reason` 给出回退到 CPU 的原因。
+    GpuStatusChanged {
+        available: bool,
+        reason: String,
+    },
 }
 
 // ─── 事件总线 ─────────────────────────────────────────────────────────────────

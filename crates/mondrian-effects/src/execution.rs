@@ -4,7 +4,7 @@ use crate::adjustment::{
 use crate::{
     get_or_compile_scheduled_effect_graph, graph::effect_graph_node_use_counts,
     CompiledEffectGraph, EffectExecutionSchedule, EffectGraphNodeId, EffectGraphNodeKind,
-    EffectRenderGraph, EffectRenderPlan,
+    EffectRenderGraph, EffectRenderPlan, EffectRenderOp,
 };
 use mondrian_core::{types::BlendMode, Result};
 use std::{
@@ -15,6 +15,21 @@ use std::{
 
 pub type CustomEffectRenderProcessor =
     Arc<dyn Fn(&mut Vec<u8>, u32, u32, &serde_json::Value, i64) -> Result<()> + Send + Sync>;
+
+/// Optional GPU acceleration hook for effect render ops.
+///
+/// Implementations (e.g., `GpuBackend` in `mondrian-renderer`) can intercept
+/// supported render ops and execute them on the GPU. Return `None` to fall
+/// back to the CPU path.
+pub trait EffectGpuExecutor: Send + Sync {
+    fn try_execute_op(
+        &self,
+        op: &EffectRenderOp,
+        input: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Option<Vec<u8>>;
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct EffectOutputCacheKey {
@@ -251,8 +266,9 @@ pub fn apply_effect_render_graph(
         graph,
         schedule,
         &node_use_counts,
-        None,
+        None, // compiled: Option<&CompiledEffectGraph>
         frame_seed,
+        None, // gpu: Option<&dyn EffectGpuExecutor>
     )
 }
 
@@ -265,6 +281,7 @@ fn execute_effect_graph(
     node_use_counts: &HashMap<EffectGraphNodeId, usize>,
     compiled: Option<&CompiledEffectGraph>,
     frame_seed: i64,
+    gpu: Option<&dyn EffectGpuExecutor>,
 ) -> Vec<u8> {
     let required_len = width as usize * height as usize * 4;
     let source_input_signature = compiled.map(|_| frame_buffer_signature(input));
@@ -312,7 +329,26 @@ fn execute_effect_graph(
                 ) else {
                     return input.to_vec();
                 };
-                apply_render_op(&mut source, width, height, op, frame_seed);
+
+                // Try GPU acceleration for supported ops.
+                let gpu_applied = if let Some(gpu_exec) = gpu {
+                    if let Some(gpu_result) = gpu_exec.try_execute_op(op, &source, width, height) {
+                        // GPU succeeded — replace source with GPU output.
+                        let mut out_buf = take_execution_buffer(&mut buffer_pool, required_len);
+                        out_buf.copy_from_slice(&gpu_result);
+                        release_execution_buffer(&mut buffer_pool, source);
+                        source = out_buf;
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                if !gpu_applied {
+                    apply_render_op(&mut source, width, height, op, frame_seed);
+                }
                 if let (Some(compiled), Some(input_signature)) = (compiled, source_input_signature)
                 {
                     put_cached_node_output(
@@ -534,6 +570,19 @@ pub fn apply_compiled_effect_graph(
     compiled: &CompiledEffectGraph,
     frame_seed: i64,
 ) -> Vec<u8> {
+    apply_compiled_effect_graph_with_gpu(input, width, height, compiled, frame_seed, None)
+}
+
+/// Like `apply_compiled_effect_graph`, but with an optional GPU executor for
+/// accelerating supported render ops.
+pub fn apply_compiled_effect_graph_with_gpu(
+    input: &[u8],
+    width: u32,
+    height: u32,
+    compiled: &CompiledEffectGraph,
+    frame_seed: i64,
+    gpu: Option<&dyn EffectGpuExecutor>,
+) -> Vec<u8> {
     if let Some(cached) = get_cached_effect_output(input, width, height, compiled, frame_seed) {
         return cached;
     }
@@ -547,6 +596,7 @@ pub fn apply_compiled_effect_graph(
         &compiled.node_use_counts,
         Some(compiled),
         frame_seed,
+        gpu,
     );
 
     put_cached_effect_output(input, width, height, compiled, frame_seed, &output);

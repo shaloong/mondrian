@@ -10,6 +10,7 @@
 
 pub mod compositor;
 pub mod context;
+pub mod gpu_backend;
 pub mod pipeline;
 pub mod shaders;
 pub mod timeline_composite;
@@ -17,6 +18,7 @@ pub mod timeline_render_plan;
 
 pub use compositor::{CompositorConfig, FrameCompositor};
 pub use context::GpuContext;
+pub use gpu_backend::{GpuBackend, GpuEffectKind, GpuExecResult, GpuFallbackReason};
 pub use pipeline::{CpuRgbaLayer, RenderPipeline};
 pub use timeline_composite::{
     composite_timeline_elements, composite_timeline_elements_float_linear,
