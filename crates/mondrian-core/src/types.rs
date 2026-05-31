@@ -456,3 +456,26 @@ mod tests {
         assert_eq!(back2, smart);
     }
 }
+
+// ── Asset source ──────────────────────────────────────────────────────
+
+/// Describes where an asset's content originates from.
+///
+/// Replaces the ad-hoc `mondrian://` URI scheme previously used to
+/// distinguish file-based media from generated content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AssetSource {
+    /// A file on the local filesystem.
+    File(PathBuf),
+    /// A synthetically generated asset (solid color, adjustment layer, etc.).
+    Generated(GeneratedAssetKind),
+    /// Remote URL — placeholder for future cloud asset support.
+    Remote(String),
+}
+
+/// Kind of synthetically generated asset content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GeneratedAssetKind {
+    SolidColor,
+    AdjustmentLayer,
+}

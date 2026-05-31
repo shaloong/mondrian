@@ -1,7 +1,10 @@
 //! 素材库主入口
 
 use crate::schema::{INIT_SQL, MIGRATE_FOLDERS_SQL};
-use mondrian_core::{types::AssetId, MondrianError, Result};
+use mondrian_core::{
+    types::{AssetId, AssetSource, GeneratedAssetKind},
+    MondrianError, Result,
+};
 use mondrian_media::MediaInfo;
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension};
@@ -45,6 +48,9 @@ pub struct AssetRecord {
     pub name: String,
     pub kind: AssetKind,
     pub path: PathBuf,
+    /// Structured asset source. `None` in legacy project files — use `path`.
+    #[serde(default)]
+    pub source: Option<AssetSource>,
     #[serde(default)]
     pub folder_id: Option<String>,
     pub media_info: MediaInfo,
@@ -555,6 +561,7 @@ fn parse_asset_row(row: &rusqlite::Row) -> rusqlite::Result<AssetRecord> {
         name,
         kind: AssetKind::from_str(&kind_raw),
         path: PathBuf::from(path_raw),
+        source: None, // legacy DB records; set for new assets only
         folder_id,
         media_info,
         created_at,
