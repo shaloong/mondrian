@@ -13,11 +13,11 @@ fi
 
 # ── Dependency violation checks ──────────────────────────────────────────
 
-# P-ARCH1: Timeline must not depend on Effects
-TIMELINE_DEPS_EFFECTS=$(grep -c "mondrian-effects" crates/mondrian-timeline/Cargo.toml 2>/dev/null || echo 0)
+# P-ARCH1: Timeline must not depend on Effects (check [dependencies] only, not [dev-dependencies])
+TIMELINE_DEPS_EFFECTS=$(awk '/^\[dependencies\]/{found=1} /^\[/{if($0!="[dependencies]") found=0} found && /mondrian-effects/{print}' crates/mondrian-timeline/Cargo.toml 2>/dev/null | wc -l | tr -d ' ')
 
 # P-ARCH2: Renderer must not depend on Timeline
-RENDERER_DEPS_TIMELINE=$(grep -c "mondrian-timeline" crates/mondrian-renderer/Cargo.toml 2>/dev/null || echo 0)
+RENDERER_DEPS_TIMELINE=$(awk '/^\[dependencies\]/{found=1} /^\[/{if($0!="[dependencies]") found=0} found && /mondrian-timeline/{print}' crates/mondrian-renderer/Cargo.toml 2>/dev/null | wc -l | tr -d ' ')
 
 # ── Global mutable state count ────────────────────────────────────────────
 

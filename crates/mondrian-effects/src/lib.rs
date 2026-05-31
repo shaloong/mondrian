@@ -16,11 +16,12 @@ pub mod transition;
 
 pub use adjustment::{blend_rgba_pixel, blend_rgba_pixel_seeded};
 pub use effect::{
-    build_effect_render_graph, build_effect_render_plan, effect_category_tree, effect_definition,
-    effect_library_types, evaluate_effect_stack, register_effect_definition, EffectCacheKeyBuilder,
-    EffectCachePolicy, EffectCapabilities, EffectCategoryNode, EffectDefinition, EffectEvalContext,
-    EffectGraphBuilder, EffectNode, EffectRenderOp, EffectRenderParamsBuilder, EffectRenderPlan,
-    EffectStackEvaluation, EffectType,
+    build_effect_render_graph, build_effect_render_plan, compile_clip_effect_graph,
+    effect_category_tree, effect_definition, effect_display_name, effect_library_types,
+    evaluate_effect_stack, register_effect_definition, EffectCacheKeyBuilder, EffectCachePolicy,
+    EffectCapabilities, EffectCategoryNode, EffectDefinition, EffectEvalContext,
+    EffectGraphBuilder, EffectNode, EffectNodeExt, EffectRenderOp, EffectRenderParamsBuilder,
+    EffectRenderPlan, EffectStackEvaluation, EffectType,
 };
 pub use execution::{
     apply_compiled_effect_graph, apply_compiled_effect_graph_pass, apply_effect_render_graph,

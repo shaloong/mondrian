@@ -46,6 +46,7 @@ define_id!(EffectId, "效果节点 ID");
 define_id!(AnimationTrackId, "动画轨道 ID");
 define_id!(KeyframeId, "关键帧 ID");
 define_id!(JobId, "渲染任务 ID");
+define_id!(MaskId, "蒙版 ID");
 
 // ─── 时间码（帧精确，有理数）──────────────────────────────────────────────────
 

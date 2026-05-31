@@ -6,16 +6,12 @@ use mondrian_core::{
         timecode_to_ticks, AnimatedProperty, PropertyBag, PropertyDescriptor, PropertyHost,
         PropertyMutation, PropertyValue,
     },
+    effect_data::{EffectNode, EffectType},
+    mask_data::MaskComponent,
     types::*,
     MondrianError, Result,
 };
-use mondrian_effects::{
-    build_effect_render_graph, build_effect_render_plan, get_or_compile_scheduled_render_graph,
-    CompiledEffectGraph, EffectGraphNode, EffectGraphNodeId, EffectGraphNodeKind, EffectNode,
-    EffectRenderPlan, EffectType,
-};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
 /// 裁剪边缘
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -364,7 +360,7 @@ pub struct Clip {
     pub effects: Vec<EffectNode>,
     /// 蒙版列表（按顺序叠加渲染）
     #[serde(default)]
-    pub masks: Vec<mondrian_effects::mask::MaskComponent>,
+    pub masks: Vec<MaskComponent>,
     /// 关联的音频/视频 Clip（保持同步）
     pub linked_clip: Option<ClipId>,
     /// 是否禁用
@@ -472,60 +468,6 @@ impl Clip {
         let local = timeline_time - self.position;
         let source_local = self.speed.map_time(local);
         self.source_in + source_local
-    }
-
-    pub fn evaluate_effect_render_plan(&self, time: TimeCode) -> EffectRenderPlan {
-        build_effect_render_plan(&self.effects, time)
-    }
-
-    pub fn evaluate_compiled_effect_graph(
-        &self,
-        time: TimeCode,
-    ) -> Option<Arc<CompiledEffectGraph>> {
-        let mut graph = build_effect_render_graph(&self.effects, time);
-
-        // Inject mask nodes after effects for each enabled mask.
-        let mut current_output = graph.output;
-        let mut next_id = graph.nodes.len() as u32;
-        let ticks = timecode_to_ticks(time);
-
-        for mask in &self.masks {
-            if !mask.enabled {
-                continue;
-            }
-            let params = mask.evaluate_at(ticks);
-
-            // MaskSource — rasterizes the shape into an alpha buffer.
-            let src_id = EffectGraphNodeId(next_id);
-            next_id += 1;
-            graph.nodes.push(EffectGraphNode {
-                id: src_id,
-                kind: EffectGraphNodeKind::MaskSource {
-                    shape: params.shape,
-                    feather: params.feather,
-                    expansion: params.expansion,
-                    opacity: params.opacity,
-                },
-            });
-
-            // Mask — applies the alpha buffer to the current output.
-            let mask_id = EffectGraphNodeId(next_id);
-            next_id += 1;
-            let input_id = current_output.unwrap_or(EffectGraphNodeId(0));
-            graph.nodes.push(EffectGraphNode {
-                id: mask_id,
-                kind: EffectGraphNodeKind::Mask {
-                    input: input_id,
-                    mask: src_id,
-                    invert: params.invert,
-                    mask_op: params.mask_op,
-                },
-            });
-            current_output = Some(mask_id);
-        }
-
-        graph.output = current_output;
-        get_or_compile_scheduled_render_graph(graph)
     }
 
     pub fn add_effect(&mut self, effect_type: EffectType) -> EffectId {
@@ -680,7 +622,7 @@ impl PropertyHost for Clip {
                     .find(|m| m.id.0.to_string().starts_with(mask_uuid_prefix))
                 {
                     // Shape is stored in shape_keyframes, not PropertyBag.
-                    if short_prop == mondrian_effects::mask::MASK_PROP_SHAPE {
+                    if short_prop == mondrian_core::mask_data::MASK_PROP_SHAPE {
                         match &mutation {
                             PropertyMutation::ClearAnimation { time: _, .. } => {
                                 // Keep only the first shape keyframe.
@@ -759,7 +701,7 @@ mod tests {
         automation::{timecode_to_ticks, Keyframe, PropertyMutation, PropertyValue},
         types::Rational,
     };
-    use mondrian_effects::EffectRenderOp;
+    use mondrian_effects::{build_effect_render_plan, EffectRenderOp, EffectRenderPlan};
 
     fn tc(frame: i64) -> TimeCode {
         TimeCode::new(frame, Rational::new(1, 25))
@@ -897,8 +839,10 @@ mod tests {
             })
             .expect("set first exposure");
 
-        let first_exposure = exposure_from_plan(&first.evaluate_effect_render_plan(tc(10)));
-        let second_exposure = exposure_from_plan(&second.evaluate_effect_render_plan(tc(50)));
+        let first_exposure =
+            exposure_from_plan(&build_effect_render_plan(&first.effects, tc(10)));
+        let second_exposure =
+            exposure_from_plan(&build_effect_render_plan(&second.effects, tc(50)));
 
         assert!((first_exposure - 1.25).abs() < 1.0e-4);
         assert!(second_exposure.abs() < 1.0e-4);

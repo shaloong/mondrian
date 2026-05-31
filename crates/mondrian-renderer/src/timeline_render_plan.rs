@@ -117,7 +117,7 @@ pub fn build_timeline_render_plan(
             let Some(sequence_id) = active_clip.clip.nested_sequence_id else {
                 continue;
             };
-            let Some(effect_graph) = active_clip.clip.evaluate_compiled_effect_graph(current)
+            let Some(effect_graph) = mondrian_effects::compile_clip_effect_graph(&active_clip.clip.effects, &active_clip.clip.masks, current)
             else {
                 continue;
             };
@@ -138,7 +138,7 @@ pub fn build_timeline_render_plan(
         }
 
         if active_clip.clip.is_adjustment_layer() {
-            let Some(effect_graph) = active_clip.clip.evaluate_compiled_effect_graph(current)
+            let Some(effect_graph) = mondrian_effects::compile_clip_effect_graph(&active_clip.clip.effects, &active_clip.clip.masks, current)
             else {
                 continue;
             };
@@ -154,7 +154,7 @@ pub fn build_timeline_render_plan(
         }
 
         if active_clip.clip.is_solid_color() {
-            let Some(effect_graph) = active_clip.clip.evaluate_compiled_effect_graph(current)
+            let Some(effect_graph) = mondrian_effects::compile_clip_effect_graph(&active_clip.clip.effects, &active_clip.clip.masks, current)
             else {
                 continue;
             };
@@ -172,7 +172,7 @@ pub fn build_timeline_render_plan(
             continue;
         }
 
-        let Some(effect_graph) = active_clip.clip.evaluate_compiled_effect_graph(current) else {
+        let Some(effect_graph) = mondrian_effects::compile_clip_effect_graph(&active_clip.clip.effects, &active_clip.clip.masks, current) else {
             continue;
         };
         let source_frame = active_clip.source_time.frame.max(0);

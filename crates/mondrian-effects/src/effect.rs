@@ -2,20 +2,22 @@
 
 use crate::adjustment::AdjustmentLayerParams;
 use crate::execution::{register_custom_render_processor, CustomEffectRenderProcessor};
-use crate::graph::{EffectGraphBuilderState, EffectRenderGraph};
+use crate::graph::{CompiledEffectGraph, EffectGraphBuilderState, EffectRenderGraph};
 use crate::lut::Lut3D;
+use crate::mask::MaskComponent;
 use crate::plugin_contract::{
     effect_plugin_is_library_visible, effect_plugin_is_runtime_available,
     record_plugin_runtime_failure, register_plugin_contract, EffectPluginContract,
 };
 use mondrian_core::{
     automation::{
-        timecode_to_ticks, AnimatablePropertyUiMetadata, PropertyBag, PropertyDescriptor,
-        PropertyHost, PropertyMutation, PropertyValue,
+        AnimatablePropertyUiMetadata, PropertyBag, PropertyDescriptor, PropertyValue,
     },
     types::{Color, EffectId, TimeCode},
-    Result,
 };
+// Re-export effect data types from mondrian-core.
+pub use mondrian_core::effect_data::{EffectNode, EffectType, namespaced_effect_path};
+
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -23,24 +25,6 @@ use std::{
     path::Path,
     sync::{Arc, OnceLock, RwLock},
 };
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum EffectType {
-    BasicCorrection,
-    WhiteBalance,
-    Lut3D,
-    ColorWheel,
-    Curves,
-    HueSaturationLightness,
-    GaussianBlur,
-    Sharpen,
-    Vignette,
-    ChromaticAberration,
-    Grain,
-    ChromaKey,
-    LumaKey,
-    Plugin(String),
-}
 
 #[derive(Debug, Clone, Copy)]
 pub struct EffectEvalContext {
@@ -490,7 +474,7 @@ pub fn effect_library_types() -> Vec<EffectType> {
         .filter(|definition| definition.supports_visual_evaluation())
         .map(|definition| EffectType::from_key(definition.key()))
         .collect::<Vec<_>>();
-    effects.sort_by_key(|effect_type| effect_type.display_name());
+    effects.sort_by(|a, b| a.display_name().cmp(b.display_name()));
     effects
 }
 
@@ -566,7 +550,7 @@ fn insert_effect_into_tree(
 fn sort_category_tree(nodes: &mut [EffectCategoryNode]) {
     nodes.sort_by(|a, b| a.name.cmp(&b.name));
     for node in nodes.iter_mut() {
-        node.effects.sort_by_key(|e| e.display_name());
+        node.effects.sort_by(|a, b| a.display_name().cmp(b.display_name()));
         sort_category_tree(&mut node.children);
     }
 }
@@ -598,20 +582,75 @@ pub fn build_effect_render_graph(effects: &[EffectNode], time: TimeCode) -> Effe
     builder.finish()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EffectNode {
-    #[serde(default)]
-    pub id: EffectId,
-    pub effect_type: EffectType,
-    #[serde(default)]
-    pub properties: PropertyBag,
-    #[serde(default)]
-    pub params: serde_json::Value,
-    pub is_enabled: bool,
+/// Build, mask-inject, and compile the effect graph for a clip.
+///
+/// This is the entry point used by the render plan builder. It replaces the
+/// former `Clip::evaluate_compiled_effect_graph()` method, which lived in
+/// `mondrian-timeline` and constituted an architecture violation (P-ARCH1).
+pub fn compile_clip_effect_graph(
+    effects: &[EffectNode],
+    masks: &[MaskComponent],
+    time: TimeCode,
+) -> Option<Arc<CompiledEffectGraph>> {
+    use crate::graph::{EffectGraphNode, EffectGraphNodeId, EffectGraphNodeKind};
+    use crate::graph::get_or_compile_scheduled_render_graph;
+    use mondrian_core::automation::timecode_to_ticks;
+    let mut graph = build_effect_render_graph(effects, time);
+
+    // Inject mask nodes after effects for each enabled mask.
+    let mut current_output = graph.output;
+    let mut next_id = graph.nodes.len() as u32;
+    let ticks = timecode_to_ticks(time);
+
+    for mask in masks {
+        if !mask.enabled {
+            continue;
+        }
+        let params = mask.evaluate_at(ticks);
+
+        // MaskSource — rasterizes the shape into an alpha buffer.
+        let src_id = EffectGraphNodeId(next_id);
+        next_id += 1;
+        graph.nodes.push(EffectGraphNode {
+            id: src_id,
+            kind: EffectGraphNodeKind::MaskSource {
+                shape: params.shape,
+                feather: params.feather,
+                expansion: params.expansion,
+                opacity: params.opacity,
+            },
+        });
+
+        // Mask — applies the alpha buffer to the current output.
+        let mask_id = EffectGraphNodeId(next_id);
+        next_id += 1;
+        let input_id = current_output.unwrap_or(EffectGraphNodeId(0));
+        graph.nodes.push(EffectGraphNode {
+            id: mask_id,
+            kind: EffectGraphNodeKind::Mask {
+                input: input_id,
+                mask: src_id,
+                invert: params.invert,
+                mask_op: params.mask_op,
+            },
+        });
+        current_output = Some(mask_id);
+    }
+
+    graph.output = current_output;
+    get_or_compile_scheduled_render_graph(graph)
 }
 
-impl EffectNode {
-    pub fn new(effect_type: EffectType) -> Self {
+/// Extension trait for EffectNode methods that require the effect registry.
+pub trait EffectNodeExt {
+    fn with_defaults(effect_type: EffectType) -> Self;
+    fn evaluate_into(&self, context: EffectEvalContext, output: &mut EffectStackEvaluation);
+    fn evaluate_render_into(&self, context: EffectEvalContext, plan: &mut EffectRenderPlan);
+    fn evaluate_graph_into(&self, context: EffectEvalContext, builder: &mut EffectGraphBuilderState);
+}
+
+impl EffectNodeExt for EffectNode {
+    fn with_defaults(effect_type: EffectType) -> Self {
         let default_properties = effect_definition(&effect_type)
             .map(|definition| definition.default_properties.clone())
             .unwrap_or_default();
@@ -624,59 +663,7 @@ impl EffectNode {
         }
     }
 
-    pub fn evaluate_property(&self, path: &str, time: TimeCode) -> Option<PropertyValue> {
-        self.properties.evaluate(path, timecode_to_ticks(time))
-    }
-
-    pub fn define_property(&mut self, descriptor: PropertyDescriptor) {
-        self.properties.define(descriptor);
-    }
-
-    pub fn instantiate_for_clip(&mut self, group_name: String) {
-        let mut namespaced = PropertyBag::default();
-        for (_, property) in self.properties.iter() {
-            let mut property = property.clone();
-            property.descriptor.path = namespaced_effect_path(self.id, &property.descriptor.path);
-            property.descriptor.ui_metadata.group_name = Some(group_name.clone());
-            namespaced.upsert(property);
-        }
-        self.properties = namespaced;
-    }
-
-    pub fn evaluate_f32_by_suffix(&self, suffix: &str, time: TimeCode, fallback: f32) -> f32 {
-        self.properties
-            .iter()
-            .find(|(path, _)| path.ends_with(suffix))
-            .and_then(|(path, _)| self.evaluate_property(path, time))
-            .and_then(|value| value.as_f32())
-            .unwrap_or(fallback)
-    }
-
-    pub fn evaluate_text_by_suffix(&self, suffix: &str, time: TimeCode) -> Option<String> {
-        self.properties
-            .iter()
-            .find(|(path, _)| path.ends_with(suffix))
-            .and_then(|(path, _)| self.evaluate_property(path, time))
-            .and_then(|value| match value {
-                PropertyValue::Text(text) if !text.trim().is_empty() => Some(text),
-                _ => None,
-            })
-    }
-
-    pub fn set_static_value_by_suffix(&mut self, suffix: &str, value: PropertyValue) -> Result<()> {
-        let path = self
-            .properties
-            .iter()
-            .find(|(path, _)| path.ends_with(suffix))
-            .map(|(path, _)| path.to_string())
-            .ok_or_else(|| mondrian_core::MondrianError::WorkflowStepFailed {
-                step_id: "effect_set_static_value".to_string(),
-                reason: format!("效果属性不存在: {suffix}"),
-            })?;
-        self.properties.set_static_value(&path, value)
-    }
-
-    pub fn evaluate_into(&self, context: EffectEvalContext, output: &mut EffectStackEvaluation) {
+    fn evaluate_into(&self, context: EffectEvalContext, output: &mut EffectStackEvaluation) {
         if let Some(definition) = effect_definition(&self.effect_type) {
             if !effect_plugin_is_runtime_available(definition.key(), definition.plugin_contract()) {
                 return;
@@ -698,7 +685,7 @@ impl EffectNode {
         }
     }
 
-    pub fn evaluate_render_into(&self, context: EffectEvalContext, plan: &mut EffectRenderPlan) {
+    fn evaluate_render_into(&self, context: EffectEvalContext, plan: &mut EffectRenderPlan) {
         if let Some(definition) = effect_definition(&self.effect_type) {
             if !effect_plugin_is_runtime_available(definition.key(), definition.plugin_contract()) {
                 return;
@@ -721,7 +708,7 @@ impl EffectNode {
         }
     }
 
-    pub fn evaluate_graph_into(
+    fn evaluate_graph_into(
         &self,
         context: EffectEvalContext,
         builder: &mut EffectGraphBuilderState,
@@ -769,15 +756,7 @@ impl EffectNode {
     }
 }
 
-impl PropertyHost for EffectNode {
-    fn property_bag(&self) -> Result<PropertyBag> {
-        Ok(self.properties.clone())
-    }
-
-    fn apply_property_mutation(&mut self, mutation: PropertyMutation) -> Result<()> {
-        self.properties.apply_mutation(mutation)
-    }
-}
+// PropertyHost impl for EffectNode moved to mondrian_core::effect_data
 
 fn default_properties_for(effect_type: EffectType) -> PropertyBag {
     let mut properties = PropertyBag::default();
@@ -1491,89 +1470,17 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
     }
 }
 
-fn namespaced_effect_path(effect_id: EffectId, path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("effect.") {
-        format!("effect.{}.{}", effect_id, rest)
-    } else {
-        format!("effect.{}.{}", effect_id, path)
-    }
-}
+// EffectType methods (key, from_key, display_name, etc.) are now in mondrian_core::effect_data
 
-impl EffectType {
-    pub fn property_namespace(&self) -> String {
-        match self {
-            EffectType::BasicCorrection => "basic_correction".to_string(),
-            EffectType::WhiteBalance => "white_balance".to_string(),
-            EffectType::Lut3D => "lut_3d".to_string(),
-            EffectType::ColorWheel => "color_wheel".to_string(),
-            EffectType::Curves => "curves".to_string(),
-            EffectType::HueSaturationLightness => "hue_saturation_lightness".to_string(),
-            EffectType::GaussianBlur => "gaussian_blur".to_string(),
-            EffectType::Sharpen => "sharpen".to_string(),
-            EffectType::Vignette => "vignette".to_string(),
-            EffectType::ChromaticAberration => "chromatic_aberration".to_string(),
-            EffectType::Grain => "grain".to_string(),
-            EffectType::ChromaKey => "chroma_key".to_string(),
-            EffectType::LumaKey => "luma_key".to_string(),
-            EffectType::Plugin(key) => key.clone(),
-        }
+/// Registry-aware display name — prefers the registered definition's display_name over the static fallback.
+pub fn effect_display_name(effect_type: &EffectType) -> String {
+    if let Some(definition) = effect_definition(effect_type) {
+        return definition.display_name().to_string();
     }
-
-    pub fn property_path(&self, parameter: &str) -> String {
-        format!("effect.{}.{}", self.property_namespace(), parameter)
+    if let EffectType::Plugin(key) = effect_type {
+        return key.clone();
     }
-
-    pub fn property_suffix(&self, parameter: &str) -> String {
-        format!("{}.{}", self.property_namespace(), parameter)
-    }
-
-    pub fn key(&self) -> String {
-        match self {
-            EffectType::BasicCorrection => "builtin.basic_correction".to_string(),
-            EffectType::WhiteBalance => "builtin.white_balance".to_string(),
-            EffectType::Lut3D => "builtin.lut_3d".to_string(),
-            EffectType::ColorWheel => "builtin.color_wheel".to_string(),
-            EffectType::Curves => "builtin.curves".to_string(),
-            EffectType::HueSaturationLightness => "builtin.hue_saturation_lightness".to_string(),
-            EffectType::GaussianBlur => "builtin.gaussian_blur".to_string(),
-            EffectType::Sharpen => "builtin.sharpen".to_string(),
-            EffectType::Vignette => "builtin.vignette".to_string(),
-            EffectType::ChromaticAberration => "builtin.chromatic_aberration".to_string(),
-            EffectType::Grain => "builtin.grain".to_string(),
-            EffectType::ChromaKey => "builtin.chroma_key".to_string(),
-            EffectType::LumaKey => "builtin.luma_key".to_string(),
-            EffectType::Plugin(key) => key.clone(),
-        }
-    }
-
-    pub fn from_key(key: &str) -> Self {
-        match key {
-            "builtin.basic_correction" => EffectType::BasicCorrection,
-            "builtin.white_balance" => EffectType::WhiteBalance,
-            "builtin.lut_3d" => EffectType::Lut3D,
-            "builtin.color_wheel" => EffectType::ColorWheel,
-            "builtin.curves" => EffectType::Curves,
-            "builtin.hue_saturation_lightness" => EffectType::HueSaturationLightness,
-            "builtin.gaussian_blur" => EffectType::GaussianBlur,
-            "builtin.sharpen" => EffectType::Sharpen,
-            "builtin.vignette" => EffectType::Vignette,
-            "builtin.chromatic_aberration" => EffectType::ChromaticAberration,
-            "builtin.grain" => EffectType::Grain,
-            "builtin.chroma_key" => EffectType::ChromaKey,
-            "builtin.luma_key" => EffectType::LumaKey,
-            other => EffectType::Plugin(other.to_string()),
-        }
-    }
-
-    pub fn display_name(&self) -> String {
-        if let Some(definition) = effect_definition(self) {
-            return definition.display_name().to_string();
-        }
-        match self {
-            EffectType::Plugin(key) => key.clone(),
-            _ => builtin_display_name(self).to_string(),
-        }
-    }
+    effect_type.display_name().to_string()
 }
 
 #[cfg(test)]

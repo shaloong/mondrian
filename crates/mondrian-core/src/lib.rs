@@ -5,9 +5,11 @@
 
 pub mod automation;
 pub mod color;
+pub mod effect_data;
 pub mod error;
 pub mod events;
 pub mod icc;
+pub mod mask_data;
 pub mod ocio;
 pub mod project;
 pub mod types;

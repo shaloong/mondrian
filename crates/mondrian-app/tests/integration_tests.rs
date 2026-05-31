@@ -53,9 +53,11 @@ fn clip_with_effect_graph_compiles() {
     let active = seq.active_clips_at(TimeCode::new(50, time_base));
     assert_eq!(active.len(), 1);
 
-    let graph = active[0]
-        .clip
-        .evaluate_compiled_effect_graph(TimeCode::new(50, time_base));
+    let graph = mondrian_effects::compile_clip_effect_graph(
+        &active[0].clip.effects,
+        &active[0].clip.masks,
+        TimeCode::new(50, time_base),
+    );
     assert!(
         graph.is_some(),
         "Effect graph should compile for a clip with GaussianBlur"

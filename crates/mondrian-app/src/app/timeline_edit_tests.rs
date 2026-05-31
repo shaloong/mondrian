@@ -267,7 +267,7 @@ fn video_clip_is_disabled(state: &AppState, clip_id: ClipId) -> bool {
 }
 
 fn exposure_from_clip(clip: &Clip, time: TimeCode) -> f32 {
-    clip.evaluate_effect_render_plan(time)
+    mondrian_effects::build_effect_render_plan(&clip.effects, time)
         .ops
         .iter()
         .find_map(|op| match op {
