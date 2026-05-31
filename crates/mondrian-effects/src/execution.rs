@@ -563,6 +563,14 @@ fn execute_effect_graph(
         .unwrap_or_else(|| input.to_vec())
 }
 
+/// Thread-safe global GPU executor, set once at app startup.
+static GPU_EXECUTOR: OnceLock<Option<Arc<dyn EffectGpuExecutor>>> = OnceLock::new();
+
+/// Register a global GPU executor. Call once at app startup.
+pub fn set_global_gpu_executor(executor: Option<Arc<dyn EffectGpuExecutor>>) {
+    let _ = GPU_EXECUTOR.set(executor);
+}
+
 pub fn apply_compiled_effect_graph(
     input: &[u8],
     width: u32,
@@ -570,7 +578,11 @@ pub fn apply_compiled_effect_graph(
     compiled: &CompiledEffectGraph,
     frame_seed: i64,
 ) -> Vec<u8> {
-    apply_compiled_effect_graph_with_gpu(input, width, height, compiled, frame_seed, None)
+    let gpu = GPU_EXECUTOR
+        .get()
+        .and_then(|opt| opt.as_ref())
+        .map(|arc| arc.as_ref() as &dyn EffectGpuExecutor);
+    apply_compiled_effect_graph_with_gpu(input, width, height, compiled, frame_seed, gpu)
 }
 
 /// Like `apply_compiled_effect_graph`, but with an optional GPU executor for
