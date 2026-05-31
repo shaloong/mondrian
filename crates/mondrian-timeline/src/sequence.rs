@@ -16,43 +16,8 @@ pub enum EditingMode {
     SocialVertical1080p,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
-pub enum PixelAspectRatio {
-    #[default]
-    Square,
-    D1DvNtsc,
-    D1DvNtscWidescreen,
-    D1DvPal,
-    D1DvPalWidescreen,
-    Anamorphic2x,
-    HdAnamorphic1080,
-    DvcproHd,
-    Unknown,
-}
-
-impl PixelAspectRatio {
-    pub fn ratio(self) -> Option<f32> {
-        match self {
-            Self::Square => Some(1.0),
-            Self::D1DvNtsc => Some(0.9091),
-            Self::D1DvNtscWidescreen => Some(1.2121),
-            Self::D1DvPal => Some(1.0940),
-            Self::D1DvPalWidescreen => Some(1.4587),
-            Self::Anamorphic2x => Some(2.0),
-            Self::HdAnamorphic1080 => Some(1.333),
-            Self::DvcproHd => Some(1.5),
-            Self::Unknown => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum FieldOrder {
-    #[default]
-    Progressive,
-    UpperFirst,
-    LowerFirst,
-}
+// Re-exported from mondrian_core::timeline_data.
+pub use mondrian_core::timeline_data::{FieldOrder, PixelAspectRatio};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum VideoDisplayFormat {
@@ -173,16 +138,8 @@ impl MissingColorMetadataPolicy {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-pub enum NestedColorProcessing {
-    /// Render the child sequence in its own working space, then convert to the parent space.
-    #[default]
-    PreserveChildWorkingSpace,
-    /// Interpret nested media directly in the parent working space.
-    ForceParentWorkingSpace,
-    /// Bake the child sequence output transform before compositing into the parent.
-    BakeChildOutputTransform,
-}
+// Re-exported from mondrian_core::timeline_data.
+pub use mondrian_core::timeline_data::NestedColorProcessing;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum VideoRange {
@@ -830,6 +787,54 @@ impl Sequence {
     pub fn normalize_track_names(&mut self) {
         renumber_tracks(&mut self.video_tracks, "V");
         renumber_tracks(&mut self.audio_tracks, "A");
+    }
+}
+
+impl mondrian_core::timeline_data::RenderPlanSource for Sequence {
+    fn flat_active_clips_at(
+        &self,
+        time: TimeCode,
+    ) -> Vec<mondrian_core::timeline_data::FlatActiveClip> {
+        use mondrian_core::timeline_data::FlatActiveClip;
+        self.active_clips_at(time)
+            .into_iter()
+            .map(|ac| {
+                let matrix = ac.transform_matrix;
+                FlatActiveClip {
+                    asset_id: ac.clip.asset_id,
+                    clip_id: ac.clip.id,
+                    kind: ac.clip.kind,
+                    nested_sequence_id: ac.clip.nested_sequence_id,
+                    is_disabled: ac.clip.is_disabled,
+                    effects: ac.clip.effects.clone(),
+                    masks: ac.clip.masks.clone(),
+                    solid_color: ac.clip.solid_color,
+                    interpretation: ac.clip.interpretation.clone(),
+                    source_time: ac.source_time,
+                    transform_matrix: [
+                        matrix.x_axis.x, matrix.x_axis.y, matrix.z_axis.x,
+                        matrix.y_axis.x, matrix.y_axis.y, matrix.z_axis.y,
+                    ],
+                    opacity: ac.opacity,
+                    blend_mode: ac.blend_mode,
+                    track_index: ac.track_index,
+                }
+            })
+            .collect()
+    }
+
+    fn source_time_base(&self) -> mondrian_core::types::Rational {
+        Sequence::time_base(self)
+    }
+
+    fn nested_color_processing(
+        &self,
+    ) -> mondrian_core::timeline_data::NestedColorProcessing {
+        self.settings.color_management.nested_processing
+    }
+
+    fn auto_tone_map_media(&self) -> bool {
+        self.settings.auto_tone_map_media
     }
 }
 

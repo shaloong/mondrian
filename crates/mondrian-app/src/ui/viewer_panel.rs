@@ -1926,6 +1926,7 @@ impl ViewerPanel {
         let diagnostics = collect_timeline_color_diagnostics(
             seq,
             current_frame,
+            seq.settings.color_space,
             seq.settings.color_management.output_color_space,
         );
         if diagnostics.is_empty() {

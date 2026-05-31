@@ -12,6 +12,7 @@ pub mod icc;
 pub mod mask_data;
 pub mod ocio;
 pub mod project;
+pub mod timeline_data;
 pub mod types;
 
 pub use automation::*;

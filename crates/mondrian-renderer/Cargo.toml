@@ -9,8 +9,6 @@ license.workspace    = true
 mondrian-core     = { workspace = true }
 mondrian-effects  = { workspace = true }
 mondrian-media    = { workspace = true }
-mondrian-timeline = { workspace = true }
-
 wgpu       = { workspace = true }
 bytemuck   = { workspace = true }
 glam       = { workspace = true }
@@ -23,3 +21,6 @@ anyhow     = { workspace = true }
 serde      = { workspace = true }
 lru        = "0.16"
 parking_lot = { workspace = true }
+
+[dev-dependencies]
+mondrian-timeline = { workspace = true }

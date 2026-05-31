@@ -1,7 +1,11 @@
-use mondrian_core::types::{AssetId, BlendMode, Color, ColorSpace, Rational, SequenceId, TimeCode};
+use mondrian_core::{
+    timeline_data::{
+        AlphaInterpretation, ClipKind, FieldOrder, FlatActiveClip, NestedColorProcessing,
+        PixelAspectRatio, RenderPlanSource,
+    },
+    types::{AssetId, BlendMode, Color, ColorSpace, Rational, SequenceId, TimeCode},
+};
 use mondrian_effects::CompiledEffectGraph;
-use mondrian_timeline::clip::AlphaInterpretation;
-use mondrian_timeline::sequence::{FieldOrder, NestedColorProcessing, PixelAspectRatio, Sequence};
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -19,6 +23,8 @@ pub struct TimelineMediaPlan {
     pub transform: [f32; 6],
     pub effect_graph: Arc<CompiledEffectGraph>,
     pub frame_seed: i64,
+    /// Whether to auto tone-map media to working color space.
+    pub auto_tone_map: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -75,19 +81,20 @@ pub struct TimelineColorDiagnostic {
 }
 
 pub fn collect_timeline_color_diagnostics(
-    sequence: &Sequence,
+    source: &dyn RenderPlanSource,
     timeline_frame: i64,
+    working_color_space: ColorSpace,
     output_color_space: ColorSpace,
 ) -> Vec<TimelineColorDiagnostic> {
-    build_timeline_render_plan(sequence, timeline_frame)
+    build_timeline_render_plan(source, timeline_frame)
         .into_iter()
         .filter_map(|element| match element {
             TimelineRenderPlanElement::Media(media) => Some(TimelineColorDiagnostic {
                 asset_id: media.asset_id,
                 input_color_space_override: media.color_space_override,
-                working_color_space: sequence.settings.color_space,
+                working_color_space,
                 output_color_space,
-                tone_map: sequence.settings.auto_tone_map_media,
+                tone_map: media.auto_tone_map,
                 pixel_aspect_ratio_override: media.pixel_aspect_ratio_override,
                 field_order_override: media.field_order_override,
                 alpha_interpretation: media.alpha_interpretation,
@@ -100,110 +107,96 @@ pub fn collect_timeline_color_diagnostics(
 }
 
 pub fn build_timeline_render_plan(
-    sequence: &Sequence,
+    source: &dyn RenderPlanSource,
     timeline_frame: i64,
 ) -> Vec<TimelineRenderPlanElement> {
-    let current = TimeCode::new(timeline_frame, sequence.time_base());
-    let active = sequence.active_clips_at(current);
+    let time_base = source.source_time_base();
+    let current = TimeCode::new(timeline_frame, time_base);
+    let active = source.flat_active_clips_at(current);
     let mut elements = Vec::with_capacity(active.len());
 
-    for active_clip in active {
-        let opacity = active_clip.opacity.clamp(0.0, 1.0);
+    for ac in active {
+        let opacity = ac.opacity.clamp(0.0, 1.0);
         if opacity <= 0.0 {
             continue;
         }
 
-        if active_clip.clip.is_nested_sequence() {
-            let Some(sequence_id) = active_clip.clip.nested_sequence_id else {
-                continue;
-            };
-            let Some(effect_graph) = mondrian_effects::compile_clip_effect_graph(&active_clip.clip.effects, &active_clip.clip.masks, current)
-            else {
-                continue;
-            };
-            elements.push(TimelineRenderPlanElement::NestedSequence(
-                TimelineNestedSequencePlan {
-                    sequence_id,
-                    source_frame: active_clip.source_time.frame.max(0),
-                    source_secs: active_clip.source_time.to_secs().max(0.0),
-                    nested_processing: sequence.settings.color_management.nested_processing,
-                    opacity,
-                    blend_mode: active_clip.blend_mode,
-                    transform: mat3_to_affine(active_clip.transform_matrix.to_cols_array()),
-                    effect_graph,
-                    frame_seed: timeline_frame.max(0),
-                },
-            ));
-            continue;
-        }
+        let effect_graph =
+            mondrian_effects::compile_clip_effect_graph(&ac.effects, &ac.masks, current);
 
-        if active_clip.clip.is_adjustment_layer() {
-            let Some(effect_graph) = mondrian_effects::compile_clip_effect_graph(&active_clip.clip.effects, &active_clip.clip.masks, current)
-            else {
-                continue;
-            };
-            elements.push(TimelineRenderPlanElement::Adjustment(
-                TimelineAdjustmentPlan {
-                    effect_graph,
+        match ac.kind {
+            ClipKind::NestedSequence => {
+                let Some(sequence_id) = ac.nested_sequence_id else { continue };
+                let Some(eg) = effect_graph else { continue };
+                elements.push(TimelineRenderPlanElement::NestedSequence(
+                    TimelineNestedSequencePlan {
+                        sequence_id,
+                        source_frame: ac.source_time.frame.max(0),
+                        source_secs: ac.source_time.to_secs().max(0.0),
+                        nested_processing: source.nested_color_processing(),
+                        opacity,
+                        blend_mode: ac.blend_mode,
+                        transform: ac.transform_matrix,
+                        effect_graph: eg,
+                        frame_seed: timeline_frame.max(0),
+                    },
+                ));
+            }
+            ClipKind::AdjustmentLayer => {
+                let Some(eg) = effect_graph else { continue };
+                elements.push(TimelineRenderPlanElement::Adjustment(
+                    TimelineAdjustmentPlan {
+                        effect_graph: eg,
+                        opacity,
+                        blend_mode: ac.blend_mode,
+                        frame_seed: timeline_frame.max(0),
+                    },
+                ));
+            }
+            ClipKind::SolidColor => {
+                let Some(eg) = effect_graph else { continue };
+                let color = ac.solid_color.unwrap_or(Color::BLACK);
+                elements.push(TimelineRenderPlanElement::SolidColor(
+                    TimelineSolidColorPlan {
+                        color,
+                        opacity,
+                        blend_mode: ac.blend_mode,
+                        transform: ac.transform_matrix,
+                        effect_graph: eg,
+                        frame_seed: timeline_frame.max(0),
+                    },
+                ));
+            }
+            ClipKind::Media => {
+                let Some(eg) = effect_graph else { continue };
+                let source_frame = ac.source_time.frame.max(0);
+                let source_time_base = ac
+                    .interpretation
+                    .frame_rate_override
+                    .map(|fps| Rational::new(fps.den, fps.num))
+                    .unwrap_or(ac.source_time.time_base);
+                let transform = apply_pixel_aspect_to_affine(
+                    ac.transform_matrix,
+                    ac.interpretation.pixel_aspect_ratio_override,
+                );
+                elements.push(TimelineRenderPlanElement::Media(TimelineMediaPlan {
+                    asset_id: ac.asset_id,
+                    color_space_override: ac.interpretation.color_space_override,
+                    pixel_aspect_ratio_override: ac.interpretation.pixel_aspect_ratio_override,
+                    field_order_override: ac.interpretation.field_order_override,
+                    alpha_interpretation: ac.interpretation.alpha,
+                    source_frame,
+                    source_secs: TimeCode::new(source_frame, source_time_base).to_secs().max(0.0),
+                    source_time_base,
                     opacity,
-                    blend_mode: active_clip.blend_mode,
+                    blend_mode: ac.blend_mode,
+                    transform,
+                    effect_graph: eg,
                     frame_seed: timeline_frame.max(0),
-                },
-            ));
-            continue;
+                    auto_tone_map: source.auto_tone_map_media(),
+                }));
+            }
         }
-
-        if active_clip.clip.is_solid_color() {
-            let Some(effect_graph) = mondrian_effects::compile_clip_effect_graph(&active_clip.clip.effects, &active_clip.clip.masks, current)
-            else {
-                continue;
-            };
-            let color = active_clip.clip.solid_color.unwrap_or(Color::BLACK);
-            elements.push(TimelineRenderPlanElement::SolidColor(
-                TimelineSolidColorPlan {
-                    color,
-                    opacity,
-                    blend_mode: active_clip.blend_mode,
-                    transform: mat3_to_affine(active_clip.transform_matrix.to_cols_array()),
-                    effect_graph,
-                    frame_seed: timeline_frame.max(0),
-                },
-            ));
-            continue;
-        }
-
-        let Some(effect_graph) = mondrian_effects::compile_clip_effect_graph(&active_clip.clip.effects, &active_clip.clip.masks, current) else {
-            continue;
-        };
-        let source_frame = active_clip.source_time.frame.max(0);
-        let source_time_base = active_clip
-            .clip
-            .interpretation
-            .frame_rate_override
-            .map(|fps| Rational::new(fps.den, fps.num))
-            .unwrap_or(active_clip.source_time.time_base);
-        let transform = apply_pixel_aspect_to_affine(
-            mat3_to_affine(active_clip.transform_matrix.to_cols_array()),
-            active_clip.clip.interpretation.pixel_aspect_ratio_override,
-        );
-        elements.push(TimelineRenderPlanElement::Media(TimelineMediaPlan {
-            asset_id: active_clip.clip.asset_id,
-            color_space_override: active_clip.clip.interpretation.color_space_override,
-            pixel_aspect_ratio_override: active_clip
-                .clip
-                .interpretation
-                .pixel_aspect_ratio_override,
-            field_order_override: active_clip.clip.interpretation.field_order_override,
-            alpha_interpretation: active_clip.clip.interpretation.alpha,
-            source_frame,
-            source_secs: TimeCode::new(source_frame, source_time_base).to_secs().max(0.0),
-            source_time_base,
-            opacity,
-            blend_mode: active_clip.blend_mode,
-            transform,
-            effect_graph,
-            frame_seed: timeline_frame.max(0),
-        }));
     }
 
     elements
@@ -233,6 +226,7 @@ mod tests {
     use super::*;
     use mondrian_core::types::{AssetId, Resolution};
     use mondrian_timeline::clip::Clip;
+    use mondrian_timeline::sequence::Sequence;
 
     #[test]
     fn render_plan_uses_track_blend_mode_for_media_and_adjustment() {
@@ -310,10 +304,7 @@ mod tests {
             Some(PixelAspectRatio::Anamorphic2x)
         );
         assert_eq!(media.field_order_override, Some(FieldOrder::UpperFirst));
-        assert_eq!(
-            media.alpha_interpretation,
-            AlphaInterpretation::Premultiplied
-        );
+        assert_eq!(media.alpha_interpretation, AlphaInterpretation::Premultiplied);
         assert!((media.transform[0] - 2.0).abs() < 1.0e-6);
     }
 
@@ -351,6 +342,7 @@ mod tests {
         let diagnostics = collect_timeline_color_diagnostics(
             &seq,
             4,
+            seq.settings.color_space,
             seq.settings.color_management.output_color_space,
         );
         assert_eq!(diagnostics.len(), 1);
@@ -366,10 +358,7 @@ mod tests {
             diagnostic.pixel_aspect_ratio_override,
             Some(PixelAspectRatio::DvcproHd)
         );
-        assert_eq!(
-            diagnostic.field_order_override,
-            Some(FieldOrder::LowerFirst)
-        );
+        assert_eq!(diagnostic.field_order_override, Some(FieldOrder::LowerFirst));
         assert_eq!(diagnostic.alpha_interpretation, AlphaInterpretation::Ignore);
     }
 

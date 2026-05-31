@@ -8,6 +8,7 @@ use mondrian_core::{
     },
     effect_data::{EffectNode, EffectType},
     mask_data::MaskComponent,
+    timeline_data::{FlatActiveClip, RenderPlanSource},
     types::*,
     MondrianError, Result,
 };
@@ -297,37 +298,8 @@ impl Default for SpeedMap {
     }
 }
 
-/// 时间线片段语义
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum ClipKind {
-    #[default]
-    Media,
-    AdjustmentLayer,
-    NestedSequence,
-    SolidColor,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum AlphaInterpretation {
-    #[default]
-    Straight,
-    Premultiplied,
-    Ignore,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-pub struct MediaInterpretation {
-    #[serde(default)]
-    pub color_space_override: Option<ColorSpace>,
-    #[serde(default)]
-    pub frame_rate_override: Option<Rational>,
-    #[serde(default)]
-    pub pixel_aspect_ratio_override: Option<crate::sequence::PixelAspectRatio>,
-    #[serde(default)]
-    pub field_order_override: Option<crate::sequence::FieldOrder>,
-    #[serde(default)]
-    pub alpha: AlphaInterpretation,
-}
+/// 时间线片段语义 — re-exported from mondrian_core::timeline_data.
+pub use mondrian_core::timeline_data::{AlphaInterpretation, ClipKind, MediaInterpretation};
 
 /// 时间线上的一个剪辑片段
 #[derive(Debug, Clone, Serialize, Deserialize)]
