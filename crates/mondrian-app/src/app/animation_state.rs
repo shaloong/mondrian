@@ -513,7 +513,8 @@ impl AppState {
                     clip_id: selection.clip_id.to_string(),
                 }
             })?;
-            clip.insert_effect_at(index, effect_type.clone());
+            let effect = EffectNode::with_defaults(effect_type.clone());
+            clip.insert_effect_node_at(index, effect);
             (seq.id, before, seq.clone())
         };
 

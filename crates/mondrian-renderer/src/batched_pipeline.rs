@@ -196,7 +196,9 @@ impl BatchedCompositor {
             &wgpu::CommandEncoderDescriptor { label: Some("batch_composite_encoder") },
         );
 
-        // Clear accum_a to opaque white (alpha=1.0)
+        // Clear accum_a to transparent black (alpha=0). The first composited
+        // layer will overlay onto this, producing correct results for the
+        // Porter-Duff "Over" blend used by composite.wgsl.
         {
             let view = accum_a.create_view(&wgpu::TextureViewDescriptor::default());
             let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -205,9 +207,7 @@ impl BatchedCompositor {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0, g: 0.0, b: 0.0, a: 1.0,
-                        }),
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
                     },
                 })],

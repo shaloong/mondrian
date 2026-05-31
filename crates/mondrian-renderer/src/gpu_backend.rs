@@ -3,6 +3,10 @@
 //! Provides compute-shader acceleration for supported effects with
 //! automatic CPU fallback. Each effect retains its CPU implementation —
 //! the GPU path is a transparent optimization, never a hard requirement.
+//!
+//! Shader modules, bind group layouts, and pipeline layouts are cached
+//! after first creation. Per-dispatch resources (input/output textures,
+//! uniform buffers, bind groups) are created each call.
 
 use crate::context::GpuContext;
 use crate::shaders;
@@ -45,14 +49,81 @@ impl GpuFallbackReason {
     }
 }
 
+// ── Cached pipeline resources ────────────────────────────────────────
+
+/// Pre-compiled shader + bind group layouts for a specific effect.
+/// Created once on first use, shared across all dispatches.
+struct CachedPipeline {
+    shader: wgpu::ShaderModule,
+    bgl_0: wgpu::BindGroupLayout,
+    bgl_1: wgpu::BindGroupLayout,
+    pipeline_layout: wgpu::PipelineLayout,
+}
+
+impl CachedPipeline {
+    fn new(device: &wgpu::Device, shader_src: &str, label: &str) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(label),
+            source: wgpu::ShaderSource::Wgsl(shader_src.into()),
+        });
+
+        let bgl_0 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("effect_bgl_0"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let bgl_1 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("effect_bgl_1"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("effect_pipeline_layout"),
+            bind_group_layouts: &[&bgl_0, &bgl_1],
+            push_constant_ranges: &[],
+        });
+
+        Self { shader, bgl_0, bgl_1, pipeline_layout }
+    }
+}
+
 // ── GpuBackend ────────────────────────────────────────────────────────
 
 pub struct GpuBackend {
     gpu: Arc<GpuContext>,
     available: bool,
-    /// Cached shader modules (compiled once, reused).
-    color_adjust_shader: Mutex<Option<wgpu::ShaderModule>>,
-    blur_shader: Mutex<Option<wgpu::ShaderModule>>,
+    color_adjust: Mutex<Option<Arc<CachedPipeline>>>,
+    blur: Mutex<Option<Arc<CachedPipeline>>>,
 }
 
 impl GpuBackend {
@@ -62,8 +133,8 @@ impl GpuBackend {
         Some(Arc::new(Self {
             gpu,
             available: true,
-            color_adjust_shader: Mutex::new(None),
-            blur_shader: Mutex::new(None),
+            color_adjust: Mutex::new(None),
+            blur: Mutex::new(None),
         }))
     }
 
@@ -88,13 +159,8 @@ impl GpuBackend {
         if exposure.abs() < 1e-4 && (contrast - 1.0).abs() < 1e-4 && (saturation - 1.0).abs() < 1e-4 {
             return GpuExecResult::Success { data: input.to_vec() };
         }
-        self.dispatch(
-            input, width, height,
-            &self.color_adjust_shader,
-            shaders::COLOR_ADJUST_COMPUTE,
-            "color_adjust",
-            &[exposure, contrast, saturation, 0.0],
-        )
+        let pipeline = self.get_or_create_pipeline(&self.color_adjust, shaders::COLOR_ADJUST_COMPUTE, "color_adjust");
+        self.dispatch(input, width, height, pipeline.as_ref(), &[exposure, contrast, saturation, 0.0])
     }
 
     pub fn execute_blur(
@@ -110,38 +176,36 @@ impl GpuBackend {
         if radius < 1e-4 {
             return GpuExecResult::Success { data: input.to_vec() };
         }
-        // Horizontal pass
-        let horiz = self.dispatch(
-            input, width, height,
-            &self.blur_shader,
-            shaders::BLUR_GAUSSIAN_COMPUTE,
-            "blur",
-            &[radius, 1.0, 0.0, 0.0],
-        );
+        let pipeline = self.get_or_create_pipeline(&self.blur, shaders::BLUR_GAUSSIAN_COMPUTE, "blur_gaussian");
+        let horiz = self.dispatch(input, width, height, pipeline.as_ref(), &[radius, 1.0, 0.0, 0.0]);
         let horiz_data = match horiz {
             GpuExecResult::Success { data } => data,
             other => return other,
         };
-        // Vertical pass
-        self.dispatch(
-            &horiz_data, width, height,
-            &self.blur_shader,
-            shaders::BLUR_GAUSSIAN_COMPUTE,
-            "blur",
-            &[radius, 0.0, 1.0, 0.0],
-        )
+        self.dispatch(&horiz_data, width, height, pipeline.as_ref(), &[radius, 0.0, 1.0, 0.0])
     }
 
     // ── Internal ──────────────────────────────────────────────────
+
+    fn get_or_create_pipeline(
+        &self,
+        cache: &Mutex<Option<Arc<CachedPipeline>>>,
+        src: &str,
+        label: &str,
+    ) -> Arc<CachedPipeline> {
+        let mut guard = cache.lock();
+        if guard.is_none() {
+            *guard = Some(Arc::new(CachedPipeline::new(&self.gpu.device, src, label)));
+        }
+        Arc::clone(guard.as_ref().unwrap())
+    }
 
     fn dispatch(
         &self,
         input: &[u8],
         width: u32,
         height: u32,
-        _shader_cache: &Mutex<Option<wgpu::ShaderModule>>,
-        shader_src: &str,
-        shader_label: &str,
+        pipeline: &CachedPipeline,
         uniforms: &[f32; 4],
     ) -> GpuExecResult {
         let device = &self.gpu.device;
@@ -202,75 +266,23 @@ impl GpuBackend {
             mapped_at_creation: false,
         });
 
-        // Shader module
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some(shader_label),
-            source: wgpu::ShaderSource::Wgsl(shader_src.into()),
-        });
-
-        // Bind group layouts
-        let bgl_0 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("bgl_0"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::StorageTexture {
-                        access: wgpu::StorageTextureAccess::WriteOnly,
-                        format: wgpu::TextureFormat::Rgba8Unorm,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                    },
-                    count: None,
-                },
-            ],
-        });
-
-        let bgl_1 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("bgl_1"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
-
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("layout"),
-            bind_group_layouts: &[&bgl_0, &bgl_1],
-            push_constant_ranges: &[],
-        });
-
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some(shader_label),
-            layout: Some(&layout),
-            module: &shader,
+        // Compute pipeline
+        let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("effect_compute"),
+            layout: Some(&pipeline.pipeline_layout),
+            module: &pipeline.shader,
             entry_point: "main",
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             cache: None,
         });
 
-        // Bind groups
+        // Bind groups (per-dispatch: reference specific textures/buffers)
         let input_view = input_tex.create_view(&wgpu::TextureViewDescriptor::default());
         let output_view = output_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
         let bg0 = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg0"),
-            layout: &bgl_0,
+            label: Some("effect_bg0"),
+            layout: &pipeline.bgl_0,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&input_view) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&output_view) },
@@ -278,21 +290,21 @@ impl GpuBackend {
         });
 
         let bg1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg1"),
-            layout: &bgl_1,
+            label: Some("effect_bg1"),
+            layout: &pipeline.bgl_1,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: uniform_buf.as_entire_binding() },
             ],
         });
 
-        // Compute dispatch
+        // Single encoder: compute + copy
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("effect_pass"),
                 timestamp_writes: None,
             });
-            cpass.set_pipeline(&pipeline);
+            cpass.set_pipeline(&compute_pipeline);
             cpass.set_bind_group(0, &bg0, &[]);
             cpass.set_bind_group(1, &bg1, &[]);
             cpass.dispatch_workgroups((width + 7) / 8, (height + 7) / 8, 1);

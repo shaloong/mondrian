@@ -20,7 +20,7 @@ use mondrian_core::{
     },
     ProjectColorManagement, ProjectSettings,
 };
-use mondrian_effects::{EffectType, MaskComponent, MaskId, MaskKeyframe, MaskShape};
+use mondrian_effects::{EffectNode, EffectNodeExt, EffectType, MaskComponent, MaskId, MaskKeyframe, MaskShape};
 use mondrian_export::queue::{JobStatus, RenderQueue};
 use mondrian_media::audio::{
     AudioBuffer, AudioClock, AudioMixer, AudioSourceCache, AudioSyncController, AudioTrackConfig,
@@ -1430,7 +1430,14 @@ impl MondrianApp {
     /// Try to initialize GPU acceleration for effect processing.
     /// On failure, GPU is silently unavailable — effects fall back to CPU.
     fn try_init_gpu(&mut self) {
-        let handle = tokio::runtime::Handle::current();
+        let handle = match tokio::runtime::Handle::try_current() {
+            Ok(h) => h,
+            Err(_) => {
+                tracing::info!("GPU 初始化跳过：无 Tokio 运行时");
+                self.gpu_available = false;
+                return;
+            }
+        };
         match handle.block_on(mondrian_renderer::GpuBackend::new()) {
             Some(backend) => {
                 mondrian_effects::set_global_gpu_executor(Some(backend));

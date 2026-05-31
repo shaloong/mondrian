@@ -8,7 +8,6 @@ use mondrian_core::{
     },
     effect_data::{EffectNode, EffectType},
     mask_data::MaskComponent,
-    timeline_data::{FlatActiveClip, RenderPlanSource},
     types::*,
     MondrianError, Result,
 };
@@ -446,14 +445,25 @@ impl Clip {
         self.insert_effect_at(self.effects.len(), effect_type)
     }
 
-    pub fn insert_effect_at(&mut self, index: usize, effect_type: EffectType) -> EffectId {
-        let label = self.next_effect_group_label(&effect_type);
-        let mut effect = EffectNode::new(effect_type);
+    /// Add a pre-built effect node. The caller is responsible for populating
+    /// default properties (see `EffectNodeExt::with_defaults()` in `mondrian-effects`).
+    pub fn add_effect_node(&mut self, effect: EffectNode) -> EffectId {
+        self.insert_effect_node_at(self.effects.len(), effect)
+    }
+
+    /// Insert a pre-built effect node at the given index.
+    pub fn insert_effect_node_at(&mut self, index: usize, mut effect: EffectNode) -> EffectId {
+        let label = self.next_effect_group_label(&effect.effect_type);
         effect.instantiate_for_clip(label);
         let effect_id = effect.id;
         let idx = index.min(self.effects.len());
         self.effects.insert(idx, effect);
         effect_id
+    }
+
+    pub fn insert_effect_at(&mut self, index: usize, effect_type: EffectType) -> EffectId {
+        let effect = EffectNode::new(effect_type);
+        self.insert_effect_node_at(index, effect)
     }
 
     pub fn effect_enabled(&self, effect_id: EffectId) -> Option<bool> {
@@ -804,8 +814,12 @@ mod tests {
         let shared_asset_id = AssetId::new();
         let mut first = Clip::new_adjustment_layer(shared_asset_id, tc(0), tc(30));
         let mut second = Clip::new_adjustment_layer(shared_asset_id, tc(40), tc(30));
-        first.add_effect(EffectType::BasicCorrection);
-        second.add_effect(EffectType::BasicCorrection);
+        first.add_effect_node(
+            mondrian_effects::EffectNodeExt::with_defaults(EffectType::BasicCorrection),
+        );
+        second.add_effect_node(
+            mondrian_effects::EffectNodeExt::with_defaults(EffectType::BasicCorrection),
+        );
         let exposure_path = first
             .effect_property_path("basic_correction.exposure")
             .expect("adjustment exposure path");

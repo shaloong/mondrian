@@ -1,5 +1,5 @@
 use super::*;
-use mondrian_effects::{EffectGraphNodeKind, EffectRenderOp};
+use mondrian_effects::EffectRenderOp;
 use mondrian_timeline::clip::{AlphaInterpretation, MediaInterpretation};
 
 fn create_state_with_sequence() -> AppState {
@@ -784,7 +784,8 @@ fn splitting_adjustment_layer_keeps_instance_state_isolated() {
 
     let mut clip =
         Clip::new_adjustment_layer(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(40, tb));
-    clip.add_effect(EffectType::BasicCorrection);
+    let effect = mondrian_effects::EffectNodeExt::with_defaults(EffectType::BasicCorrection);
+    clip.add_effect_node(effect);
     let exposure_path = clip
         .effect_property_path("basic_correction.exposure")
         .expect("adjustment exposure path");

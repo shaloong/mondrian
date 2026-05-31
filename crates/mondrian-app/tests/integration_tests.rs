@@ -26,7 +26,7 @@ fn add_solid_color_clip_and_query_active() {
         TimeCode::new(100, time_base),
     );
 
-    seq.video_tracks[0].add_clip(clip);
+    let _ = seq.video_tracks[0].add_clip(clip);
 
     let active = seq.active_clips_at(TimeCode::new(50, time_base));
     assert_eq!(active.len(), 1);
@@ -48,7 +48,7 @@ fn clip_with_effect_graph_compiles() {
 
     clip.add_effect(EffectType::GaussianBlur);
 
-    seq.video_tracks[0].add_clip(clip);
+    let _ = seq.video_tracks[0].add_clip(clip);
 
     let active = seq.active_clips_at(TimeCode::new(50, time_base));
     assert_eq!(active.len(), 1);
@@ -77,7 +77,7 @@ fn build_render_plan_from_sequence() {
         TimeCode::new(60, time_base),
     );
 
-    seq.video_tracks[0].add_clip(clip);
+    let _ = seq.video_tracks[0].add_clip(clip);
 
     let plan = mondrian_renderer::timeline_render_plan::build_timeline_render_plan(&seq, 30);
 
@@ -101,7 +101,7 @@ fn sequence_respects_clip_disabled() {
     );
     clip.is_disabled = true;
 
-    seq.video_tracks[0].add_clip(clip);
+    let _ = seq.video_tracks[0].add_clip(clip);
 
     let active = seq.active_clips_at(TimeCode::new(50, time_base));
     assert!(
@@ -130,8 +130,8 @@ fn multiple_tracks_composite_order() {
         TimeCode::new(100, time_base),
     );
 
-    seq.video_tracks[0].add_clip(clip1);
-    seq.video_tracks[1].add_clip(clip2);
+    let _ = seq.video_tracks[0].add_clip(clip1);
+    let _ = seq.video_tracks[1].add_clip(clip2);
 
     let active = seq.active_clips_at(TimeCode::new(50, time_base));
     // Both tracks should contribute active clips
@@ -160,8 +160,8 @@ fn adjustment_layer_is_included_in_active_clips() {
         TimeCode::new(100, time_base),
     );
 
-    seq.video_tracks[0].add_clip(media_clip);
-    seq.video_tracks[1].add_clip(adj_clip);
+    let _ = seq.video_tracks[0].add_clip(media_clip);
+    let _ = seq.video_tracks[1].add_clip(adj_clip);
 
     let active = seq.active_clips_at(TimeCode::new(50, time_base));
     assert!(active.iter().any(|a| a.clip.is_adjustment_layer()));

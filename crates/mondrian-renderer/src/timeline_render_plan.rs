@@ -1,6 +1,6 @@
 use mondrian_core::{
     timeline_data::{
-        AlphaInterpretation, ClipKind, FieldOrder, FlatActiveClip, NestedColorProcessing,
+        AlphaInterpretation, ClipKind, FieldOrder, NestedColorProcessing,
         PixelAspectRatio, RenderPlanSource,
     },
     types::{AssetId, BlendMode, Color, ColorSpace, Rational, SequenceId, TimeCode},
