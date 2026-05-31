@@ -224,20 +224,13 @@ impl TimelinePanel {
     }
 
     /// Select a clip from the viewer canvas, syncing to timeline and effect controls.
-    pub fn apply_canvas_selection(
-        &mut self,
-        selection: Option<(
-            mondrian_core::types::TrackId,
-            bool,
-            mondrian_core::types::ClipId,
-        )>,
-    ) {
+    pub fn apply_canvas_selection(&mut self, selection: Option<SelectedClipRef>) {
         self.selected_clips.clear();
-        if let Some((track_id, is_video, clip_id)) = selection {
+        if let Some(sel) = selection {
             self.selected_clips.insert(ClipSelection {
-                track_id,
-                is_video_track: is_video,
-                clip_id,
+                track_id: sel.track_id,
+                is_video_track: sel.is_video_track,
+                clip_id: sel.clip_id,
             });
         }
     }

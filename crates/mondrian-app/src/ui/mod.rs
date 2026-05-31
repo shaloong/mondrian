@@ -5,6 +5,7 @@ pub mod effect_library_panel;
 pub mod export_panel;
 pub mod fonts;
 pub mod library_panel;
+pub mod node_graph_panel;
 pub mod startup;
 pub mod theme;
 pub mod timeline_panel;

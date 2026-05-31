@@ -10,8 +10,8 @@ use mondrian_core::{
     automation::timecode_to_ticks,
     convert_rgba8_in_place,
     types::{
-        AssetId, BlendMode, Color, ColorEngine, ColorSpace, Rational, Resolution, SequenceId,
-        TimeCode,
+        AssetId, BlendMode, ClipId, Color, ColorEngine, ColorSpace, Rational, Resolution,
+        SequenceId, TimeCode, TrackId,
     },
     ColorPipeline, DisplayColorProfile,
 };
@@ -625,6 +625,20 @@ impl Default for ViewerPanel {
 }
 
 impl ViewerPanel {
+    /// Write clip selection to local field + AppState.selection (single source of truth).
+    fn set_clip_selection(
+        &mut self,
+        state: &mut AppState,
+        sel: Option<(TrackId, bool, ClipId)>,
+    ) {
+        self.canvas_selected_clip = sel;
+        state.selection.selected_clips = sel
+            .map(|(track_id, is_video, clip_id)| {
+                vec![SelectedClipRef { track_id, is_video_track: is_video, clip_id }]
+            })
+            .unwrap_or_default();
+    }
+
     pub fn toggle_color_diagnostics(&mut self) {
         self.show_color_diagnostics = !self.show_color_diagnostics;
     }
@@ -647,7 +661,7 @@ impl ViewerPanel {
         let is_playing = state.is_playing();
         // Reset canvas selection at start of each frame. Interaction code
         // re-sets it when the user clicks a clip.
-        state.canvas_selected_clip = None;
+        state.selection.selected_clips.clear();
         let current_frame = state.current_frame();
         let playback_fps = state
             .sequence
@@ -930,8 +944,7 @@ impl ViewerPanel {
                                         }
                                     }
                                     if let Some((tid, cid)) = target {
-                                        self.canvas_selected_clip = Some((tid, true, cid));
-                                        state.canvas_selected_clip = Some((tid, true, cid));
+                                        self.set_clip_selection(state, Some((tid, true, cid)));
                                         self.mask_draw = Some(MaskDrawState {
                                             track_id: tid, clip_id: cid,
                                             start_seq: pt,
@@ -1078,8 +1091,7 @@ impl ViewerPanel {
                                     }
                                 }
                                 if let Some((tid, cid)) = target {
-                                    self.canvas_selected_clip = Some((tid, true, cid));
-                                    state.canvas_selected_clip = Some((tid, true, cid));
+                                    self.set_clip_selection(state, Some((tid, true, cid)));
                                     self.mask_draw = Some(MaskDrawState {
                                         track_id: tid,
                                         clip_id: cid,
@@ -1364,8 +1376,7 @@ impl ViewerPanel {
                                     match hit {
                                         Some(HitResult::MaskCorner { track_id, clip_id, mask_id, corner, shape, pos }) => {
                                             let sel = (track_id, true, clip_id);
-                                            self.canvas_selected_clip = Some(sel);
-                                            state.canvas_selected_clip = Some(sel);
+                                            self.set_clip_selection(state, Some(sel));
                                             self.selected_mask = Some((mask_id, clip_id, track_id));
                                             let edit_mode = if let MaskShape::Path { points, .. } = &shape {
                                                 path_point_edit_mode(state, &self.canvas_transform, clip_id, points, corner, pos)
@@ -1382,8 +1393,7 @@ impl ViewerPanel {
                                         }
                                         Some(HitResult::MaskMove { track_id, clip_id, mask_id, shape, pos }) => {
                                             let sel = (track_id, true, clip_id);
-                                            self.canvas_selected_clip = Some(sel);
-                                            state.canvas_selected_clip = Some(sel);
+                                            self.set_clip_selection(state, Some(sel));
                                             self.selected_mask = Some((mask_id, clip_id, track_id));
                                             self.mask_edit = Some(MaskEditState {
                                                 mask_id, clip_id, track_id,
@@ -1394,8 +1404,7 @@ impl ViewerPanel {
                                         }
                                         Some(HitResult::ClipCorner { track_id, is_video, clip_id, pos_v, scale, anchor_val, anchor_screen, pos }) => {
                                             let sel = (track_id, is_video, clip_id);
-                                            self.canvas_selected_clip = Some(sel);
-                                            state.canvas_selected_clip = Some(sel);
+                                            self.set_clip_selection(state, Some(sel));
                                             self.mask_edit = None;
                                             self.selected_mask = None;
                                             self.canvas_drag = Some(CanvasDragState {
@@ -1410,8 +1419,7 @@ impl ViewerPanel {
                                         }
                                         Some(HitResult::ClipAnchor { track_id, is_video, clip_id, pos_v, scale, anchor_val, anchor_screen, pos }) => {
                                             let sel = (track_id, is_video, clip_id);
-                                            self.canvas_selected_clip = Some(sel);
-                                            state.canvas_selected_clip = Some(sel);
+                                            self.set_clip_selection(state, Some(sel));
                                             self.mask_edit = None;
                                             self.selected_mask = None;
                                             self.canvas_drag = Some(CanvasDragState {
@@ -1426,8 +1434,7 @@ impl ViewerPanel {
                                         }
                                         Some(HitResult::ClipMove { track_id, is_video, clip_id, pos_v, scale, anchor_val, anchor_screen, pos }) => {
                                             let sel = (track_id, is_video, clip_id);
-                                            self.canvas_selected_clip = Some(sel);
-                                            state.canvas_selected_clip = Some(sel);
+                                            self.set_clip_selection(state, Some(sel));
                                             self.mask_edit = None;
                                             self.selected_mask = None;
                                             self.canvas_drag = Some(CanvasDragState {
@@ -1441,8 +1448,7 @@ impl ViewerPanel {
                                             });
                                         }
                                         None => {
-                                            self.canvas_selected_clip = None;
-                                            state.canvas_selected_clip = None;
+                                            self.set_clip_selection(state, None);
                                             self.selected_mask = None;
                                         }
                                     }
@@ -1815,7 +1821,7 @@ impl ViewerPanel {
         }
 
         // Sync mask selection to AppState for effect controls panel.
-        state.canvas_selected_mask = self.selected_mask;
+        state.selection.selected_mask = self.selected_mask;
 
         // Change cursor for pen tool.
         if self.mask_tool == Some(MaskTool::Pen) {

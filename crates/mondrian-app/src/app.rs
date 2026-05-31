@@ -102,6 +102,18 @@ pub struct AnimationKeyframeSelection {
     pub time: mondrian_core::automation::TimeTicks,
 }
 
+/// Unified clip + mask + effect selection — single source of truth.
+///
+/// All panels read from and write to this struct. No panel maintains its
+/// own copy of selection state.
+#[derive(Debug, Clone, Default)]
+pub struct SelectionState {
+    /// Selected clips (supports multi-select from timeline).
+    pub selected_clips: Vec<crate::ui::timeline_panel::SelectedClipRef>,
+    /// Currently selected mask (canvas → effect controls).
+    pub selected_mask: Option<(MaskId, ClipId, TrackId)>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct AnimationSelectionState {
     pub active_property: Option<AnimationPropertySelection>,
@@ -574,18 +586,8 @@ pub struct AppState {
 
     // 正在拖拽的素材（从素材库拖向时间线）
     pub dragging_asset: Option<DraggingAsset>,
-    /// Clip selected on the viewer canvas (synced to timeline/effect controls).
-    pub canvas_selected_clip: Option<(
-        mondrian_core::types::TrackId,
-        bool,
-        mondrian_core::types::ClipId,
-    )>,
-    /// Mask selected on the viewer canvas (synced to effect controls).
-    pub canvas_selected_mask: Option<(
-        mondrian_effects::mask::MaskId,
-        mondrian_core::types::ClipId,
-        mondrian_core::types::TrackId,
-    )>,
+    /// Unified selection state — single source of truth for all panels.
+    pub selection: SelectionState,
 
     // 渲染导出队列
     pub render_queue: Arc<RenderQueue>,
@@ -673,8 +675,7 @@ impl AppState {
             playback_buffering: false,
             asset_library: None,
             dragging_asset: None,
-            canvas_selected_clip: None,
-            canvas_selected_mask: None,
+            selection: SelectionState::default(),
             render_queue: RenderQueue::new(),
             status_hint: None,
             animation_selection: AnimationSelectionState::default(),
@@ -753,9 +754,11 @@ pub struct MondrianApp {
     viewer_panel: ViewerPanel,
     library_panel: LibraryPanel,
     export_panel: ExportPanel,
+    node_graph_panel: crate::ui::node_graph_panel::NodeGraphPanel,
 
     // 面板可见性
     show_effect_controls: bool,
+    show_node_graph: bool,
     show_effect_library: bool,
     show_library: bool,
     show_export: bool,
@@ -825,7 +828,9 @@ impl MondrianApp {
             viewer_panel: ViewerPanel::default(),
             library_panel: LibraryPanel::default(),
             export_panel: ExportPanel::default(),
+            node_graph_panel: crate::ui::node_graph_panel::NodeGraphPanel::default(),
             show_effect_controls: true,
+            show_node_graph: false,
             show_effect_library: true,
             show_library: true,
             show_export: false,
@@ -1252,13 +1257,24 @@ impl eframe::App for MondrianApp {
                     true,
                 );
             });
-        // Sync canvas selection to timeline. Only sync when the canvas has
-        // an active selection; let the timeline manage its own deselection.
-        if let Some(ref sel) = self.state.canvas_selected_clip {
+        // Sync canvas selection to timeline.
+        if let Some(sel) = self.state.selection.selected_clips.first() {
             self.timeline_panel.apply_canvas_selection(Some(*sel));
         }
         if ui_diag_enabled() {
             log_ui_stage_slow("viewer_panel", viewer_started_at.elapsed());
+        }
+
+        // ── 节点图面板 ──
+        if self.show_node_graph {
+            let mut open = self.show_node_graph;
+            egui::Window::new("节点图编辑器")
+                .open(&mut open)
+                .default_size([800.0, 600.0])
+                .show(ctx, |ui| {
+                    self.node_graph_panel.show(ui);
+                });
+            self.show_node_graph = open;
         }
 
         // ── 导出弹窗 ──
