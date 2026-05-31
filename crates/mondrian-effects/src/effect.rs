@@ -1,6 +1,5 @@
 //! 效果节点抽象
 
-use crate::adjustment::AdjustmentLayerParams;
 use crate::execution::{register_custom_render_processor, CustomEffectRenderProcessor};
 use crate::graph::{CompiledEffectGraph, EffectGraphBuilderState, EffectRenderGraph};
 use crate::lut::Lut3D;
@@ -31,17 +30,8 @@ pub struct EffectEvalContext {
     pub time: TimeCode,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct EffectStackEvaluation {
-    pub adjustment: AdjustmentLayerParams,
-}
-
-pub type EffectEvaluator =
-    Arc<dyn Fn(&EffectNode, EffectEvalContext, &mut EffectStackEvaluation) + Send + Sync>;
 pub type EffectGraphBuilder =
     Arc<dyn Fn(&EffectNode, EffectEvalContext, &mut EffectGraphBuilderState) + Send + Sync>;
-pub type EffectRenderBuilder =
-    Arc<dyn Fn(&EffectNode, EffectEvalContext, &mut EffectRenderPlan) + Send + Sync>;
 pub type EffectRenderParamsBuilder =
     Arc<dyn Fn(&EffectNode, EffectEvalContext) -> Option<serde_json::Value> + Send + Sync>;
 pub type EffectCacheKeyBuilder =
@@ -243,10 +233,8 @@ fn hash_json_value<H: std::hash::Hasher>(value: &serde_json::Value, state: &mut 
 pub struct EffectCapabilities {
     pub supports_render_graph: bool,
     pub supports_branching_render_graph: bool,
-    pub supports_render_plan_fallback: bool,
     pub supports_custom_render_processor: bool,
     pub supports_cache_key_contract: bool,
-    pub supports_legacy_parameter_evaluation: bool,
 }
 
 #[derive(Clone)]
@@ -255,9 +243,7 @@ pub struct EffectDefinition {
     display_name: String,
     category_path: Vec<String>,
     default_properties: PropertyBag,
-    evaluator: Option<EffectEvaluator>,
     graph_builder: Option<EffectGraphBuilder>,
-    render_builder: Option<EffectRenderBuilder>,
     capabilities: EffectCapabilities,
     plugin_contract: Option<EffectPluginContract>,
 }
@@ -273,9 +259,7 @@ impl EffectDefinition {
             display_name: display_name.into(),
             category_path: Vec::new(),
             default_properties,
-            evaluator: None,
             graph_builder: None,
-            render_builder: None,
             capabilities: EffectCapabilities::default(),
             plugin_contract: None,
         }
@@ -283,12 +267,6 @@ impl EffectDefinition {
 
     pub fn with_category(mut self, category_path: Vec<String>) -> Self {
         self.category_path = category_path;
-        self
-    }
-
-    pub fn with_evaluator(mut self, evaluator: EffectEvaluator) -> Self {
-        self.evaluator = Some(evaluator);
-        self.capabilities.supports_legacy_parameter_evaluation = true;
         self
     }
 
@@ -301,12 +279,6 @@ impl EffectDefinition {
         for (_, property) in properties.iter() {
             self.default_properties.upsert(property.clone());
         }
-        self
-    }
-
-    pub fn with_render_builder(mut self, render_builder: EffectRenderBuilder) -> Self {
-        self.render_builder = Some(render_builder);
-        self.capabilities.supports_render_plan_fallback = true;
         self
     }
 
@@ -361,22 +333,7 @@ impl EffectDefinition {
                 });
             }
         }));
-        let cache_key_builder_for_plan = cache_key_builder.clone();
-        self.render_builder = Some(Arc::new(move |effect, context, plan| {
-            if let Some(params) = params_builder(effect, context) {
-                let cache_key = cache_key_builder_for_plan
-                    .as_ref()
-                    .and_then(|builder| builder(effect, context));
-                plan.ops.push(EffectRenderOp::Custom {
-                    key: effect_key.clone(),
-                    params,
-                    cache_key,
-                    cache_policy,
-                });
-            }
-        }));
         self.capabilities.supports_render_graph = true;
-        self.capabilities.supports_render_plan_fallback = true;
         self.capabilities.supports_custom_render_processor = true;
         self.capabilities.supports_cache_key_contract = cache_key_builder.is_some();
         self
@@ -404,12 +361,8 @@ impl EffectDefinition {
     }
 
     pub fn supports_visual_evaluation(&self) -> bool {
-        (self.capabilities.supports_render_graph || self.capabilities.supports_render_plan_fallback)
+        self.capabilities.supports_render_graph
             && effect_plugin_is_library_visible(self.key(), self.plugin_contract())
-    }
-
-    pub fn supports_legacy_parameter_evaluation(&self) -> bool {
-        self.capabilities.supports_legacy_parameter_evaluation
     }
 
     pub fn plugin_contract(&self) -> Option<&EffectPluginContract> {
@@ -555,24 +508,6 @@ fn sort_category_tree(nodes: &mut [EffectCategoryNode]) {
     }
 }
 
-pub fn evaluate_effect_stack(effects: &[EffectNode], time: TimeCode) -> EffectStackEvaluation {
-    let mut evaluation = EffectStackEvaluation::default();
-    let context = EffectEvalContext { time };
-    for effect in effects.iter().filter(|effect| effect.is_enabled) {
-        effect.evaluate_into(context, &mut evaluation);
-    }
-    evaluation
-}
-
-pub fn build_effect_render_plan(effects: &[EffectNode], time: TimeCode) -> EffectRenderPlan {
-    let mut plan = EffectRenderPlan::default();
-    let context = EffectEvalContext { time };
-    for effect in effects.iter().filter(|effect| effect.is_enabled) {
-        effect.evaluate_render_into(context, &mut plan);
-    }
-    plan
-}
-
 pub fn build_effect_render_graph(effects: &[EffectNode], time: TimeCode) -> EffectRenderGraph {
     let mut builder = EffectGraphBuilderState::new();
     let context = EffectEvalContext { time };
@@ -644,8 +579,6 @@ pub fn compile_clip_effect_graph(
 /// Extension trait for EffectNode methods that require the effect registry.
 pub trait EffectNodeExt {
     fn with_defaults(effect_type: EffectType) -> Self;
-    fn evaluate_into(&self, context: EffectEvalContext, output: &mut EffectStackEvaluation);
-    fn evaluate_render_into(&self, context: EffectEvalContext, plan: &mut EffectRenderPlan);
     fn evaluate_graph_into(&self, context: EffectEvalContext, builder: &mut EffectGraphBuilderState);
 }
 
@@ -660,51 +593,6 @@ impl EffectNodeExt for EffectNode {
             effect_type,
             params: serde_json::json!({}),
             is_enabled: true,
-        }
-    }
-
-    fn evaluate_into(&self, context: EffectEvalContext, output: &mut EffectStackEvaluation) {
-        if let Some(definition) = effect_definition(&self.effect_type) {
-            if !effect_plugin_is_runtime_available(definition.key(), definition.plugin_contract()) {
-                return;
-            }
-            if let Some(evaluator) = definition.evaluator.as_ref() {
-                let mut staged = output.clone();
-                let result =
-                    catch_unwind(AssertUnwindSafe(|| evaluator(self, context, &mut staged)));
-                if result.is_ok() {
-                    *output = staged;
-                } else {
-                    record_plugin_runtime_failure(
-                        definition.key(),
-                        definition.plugin_contract(),
-                        "effect evaluator panicked",
-                    );
-                }
-            }
-        }
-    }
-
-    fn evaluate_render_into(&self, context: EffectEvalContext, plan: &mut EffectRenderPlan) {
-        if let Some(definition) = effect_definition(&self.effect_type) {
-            if !effect_plugin_is_runtime_available(definition.key(), definition.plugin_contract()) {
-                return;
-            }
-            if let Some(render_builder) = definition.render_builder.as_ref() {
-                let mut staged = EffectRenderPlan::default();
-                let result = catch_unwind(AssertUnwindSafe(|| {
-                    render_builder(self, context, &mut staged)
-                }));
-                if result.is_ok() {
-                    plan.ops.extend(staged.ops);
-                } else {
-                    record_plugin_runtime_failure(
-                        definition.key(),
-                        definition.plugin_contract(),
-                        "effect render builder panicked",
-                    );
-                }
-            }
         }
     }
 
@@ -732,25 +620,6 @@ impl EffectNodeExt for EffectNode {
                     );
                 }
                 return;
-            }
-            if let Some(render_builder) = definition.render_builder.as_ref() {
-                let mut plan = EffectRenderPlan::default();
-                let result = catch_unwind(AssertUnwindSafe(|| {
-                    render_builder(self, context, &mut plan)
-                }));
-                if result.is_ok() {
-                    let mut staged = builder.clone();
-                    for op in plan.ops {
-                        staged.append_unary(op);
-                    }
-                    *builder = staged;
-                } else {
-                    record_plugin_runtime_failure(
-                        definition.key(),
-                        definition.plugin_contract(),
-                        "effect render-plan fallback panicked",
-                    );
-                }
             }
         }
     }
@@ -1131,217 +1000,10 @@ fn builtin_effect_definition(effect_type: EffectType) -> EffectDefinition {
         default_properties_for(effect_type.clone()),
     )
     .with_category(category);
-    let definition = if let Some(evaluator) = builtin_evaluator_for(&effect_type) {
-        definition.with_evaluator(evaluator)
-    } else {
-        definition
-    };
-    let definition = if let Some(graph_builder) = builtin_graph_builder_for(&effect_type) {
+    if let Some(graph_builder) = builtin_graph_builder_for(&effect_type) {
         definition.with_graph_builder(graph_builder)
     } else {
         definition
-    };
-    if let Some(render_builder) = builtin_render_builder_for(&effect_type) {
-        definition.with_render_builder(render_builder)
-    } else {
-        definition
-    }
-}
-
-fn builtin_evaluator_for(effect_type: &EffectType) -> Option<EffectEvaluator> {
-    match effect_type {
-        EffectType::BasicCorrection => {
-            let exposure_path = effect_type.property_suffix("exposure");
-            let contrast_path = effect_type.property_suffix("contrast");
-            let saturation_path = effect_type.property_suffix("saturation");
-            Some(Arc::new(move |effect, context, output| {
-                output.adjustment.exposure = effect.evaluate_f32_by_suffix(
-                    &exposure_path,
-                    context.time,
-                    output.adjustment.exposure,
-                );
-                output.adjustment.contrast = effect.evaluate_f32_by_suffix(
-                    &contrast_path,
-                    context.time,
-                    output.adjustment.contrast,
-                );
-                output.adjustment.saturation = effect.evaluate_f32_by_suffix(
-                    &saturation_path,
-                    context.time,
-                    output.adjustment.saturation,
-                );
-            }))
-        }
-        EffectType::WhiteBalance => {
-            let temperature_path = effect_type.property_suffix("temperature");
-            let tint_path = effect_type.property_suffix("tint");
-            Some(Arc::new(move |effect, context, output| {
-                output.adjustment.temperature = effect.evaluate_f32_by_suffix(
-                    &temperature_path,
-                    context.time,
-                    output.adjustment.temperature,
-                );
-                output.adjustment.tint =
-                    effect.evaluate_f32_by_suffix(&tint_path, context.time, output.adjustment.tint);
-            }))
-        }
-        EffectType::GaussianBlur => {
-            let radius_path = effect_type.property_suffix("radius");
-            Some(Arc::new(move |effect, context, output| {
-                output.adjustment.blur_radius = effect.evaluate_f32_by_suffix(
-                    &radius_path,
-                    context.time,
-                    output.adjustment.blur_radius,
-                );
-            }))
-        }
-        EffectType::Sharpen => {
-            let amount_path = effect_type.property_suffix("amount");
-            Some(Arc::new(move |effect, context, output| {
-                output.adjustment.sharpen_amount = effect.evaluate_f32_by_suffix(
-                    &amount_path,
-                    context.time,
-                    output.adjustment.sharpen_amount,
-                );
-            }))
-        }
-        EffectType::Vignette => {
-            let intensity_path = effect_type.property_suffix("intensity");
-            let feather_path = effect_type.property_suffix("feather");
-            Some(Arc::new(move |effect, context, output| {
-                output.adjustment.vignette_intensity = effect.evaluate_f32_by_suffix(
-                    &intensity_path,
-                    context.time,
-                    output.adjustment.vignette_intensity,
-                );
-                output.adjustment.vignette_feather = effect.evaluate_f32_by_suffix(
-                    &feather_path,
-                    context.time,
-                    output.adjustment.vignette_feather,
-                );
-            }))
-        }
-        EffectType::ChromaticAberration => {
-            let amount_path = effect_type.property_suffix("amount");
-            Some(Arc::new(move |effect, context, output| {
-                output.adjustment.chromatic_aberration = effect.evaluate_f32_by_suffix(
-                    &amount_path,
-                    context.time,
-                    output.adjustment.chromatic_aberration,
-                );
-            }))
-        }
-        EffectType::Grain => {
-            let amount_path = effect_type.property_suffix("amount");
-            Some(Arc::new(move |effect, context, output| {
-                output.adjustment.grain_amount = effect.evaluate_f32_by_suffix(
-                    &amount_path,
-                    context.time,
-                    output.adjustment.grain_amount,
-                );
-            }))
-        }
-        _ => None,
-    }
-}
-
-fn builtin_render_builder_for(effect_type: &EffectType) -> Option<EffectRenderBuilder> {
-    match effect_type {
-        EffectType::BasicCorrection => {
-            let exposure_path = effect_type.property_suffix("exposure");
-            let contrast_path = effect_type.property_suffix("contrast");
-            let saturation_path = effect_type.property_suffix("saturation");
-            Some(Arc::new(move |effect, context, plan| {
-                let exposure = effect.evaluate_f32_by_suffix(&exposure_path, context.time, 0.0);
-                let contrast = effect.evaluate_f32_by_suffix(&contrast_path, context.time, 1.0);
-                let saturation = effect.evaluate_f32_by_suffix(&saturation_path, context.time, 1.0);
-                if exposure.abs() > 1.0e-4
-                    || (contrast - 1.0).abs() > 1.0e-4
-                    || (saturation - 1.0).abs() > 1.0e-4
-                {
-                    plan.ops.push(EffectRenderOp::ColorAdjust { exposure, contrast, saturation });
-                }
-            }))
-        }
-        EffectType::WhiteBalance => {
-            let temperature_path = effect_type.property_suffix("temperature");
-            let tint_path = effect_type.property_suffix("tint");
-            Some(Arc::new(move |effect, context, plan| {
-                let temperature =
-                    effect.evaluate_f32_by_suffix(&temperature_path, context.time, 0.0);
-                let tint = effect.evaluate_f32_by_suffix(&tint_path, context.time, 0.0);
-                if temperature.abs() > 1.0e-4 || tint.abs() > 1.0e-4 {
-                    plan.ops.push(EffectRenderOp::WhiteBalance { temperature, tint });
-                }
-            }))
-        }
-        EffectType::Lut3D => {
-            let path_suffix = effect_type.property_suffix("path");
-            let intensity_path = effect_type.property_suffix("intensity");
-            Some(Arc::new(move |effect, context, plan| {
-                let intensity = effect.evaluate_f32_by_suffix(&intensity_path, context.time, 1.0);
-                if intensity <= 1.0e-4 {
-                    return;
-                }
-                let Some(path) = effect.evaluate_text_by_suffix(&path_suffix, context.time) else {
-                    return;
-                };
-                match Lut3D::from_cube_file_cached(Path::new(path.trim())) {
-                    Ok(lut) => plan.ops.push(EffectRenderOp::Lut3D { lut, intensity }),
-                    Err(err) => {
-                        tracing::warn!(path = %path, "failed to load LUT effect file: {err}")
-                    }
-                }
-            }))
-        }
-        EffectType::GaussianBlur => {
-            let radius_path = effect_type.property_suffix("radius");
-            Some(Arc::new(move |effect, context, plan| {
-                let radius = effect.evaluate_f32_by_suffix(&radius_path, context.time, 0.0);
-                if radius.abs() > 1.0e-4 {
-                    plan.ops.push(EffectRenderOp::GaussianBlur { radius });
-                }
-            }))
-        }
-        EffectType::Sharpen => {
-            let amount_path = effect_type.property_suffix("amount");
-            Some(Arc::new(move |effect, context, plan| {
-                let amount = effect.evaluate_f32_by_suffix(&amount_path, context.time, 0.0);
-                if amount.abs() > 1.0e-4 {
-                    plan.ops.push(EffectRenderOp::Sharpen { amount });
-                }
-            }))
-        }
-        EffectType::Vignette => {
-            let intensity_path = effect_type.property_suffix("intensity");
-            let feather_path = effect_type.property_suffix("feather");
-            Some(Arc::new(move |effect, context, plan| {
-                let intensity = effect.evaluate_f32_by_suffix(&intensity_path, context.time, 0.0);
-                let feather = effect.evaluate_f32_by_suffix(&feather_path, context.time, 0.65);
-                if intensity.abs() > 1.0e-4 {
-                    plan.ops.push(EffectRenderOp::Vignette { intensity, feather });
-                }
-            }))
-        }
-        EffectType::ChromaticAberration => {
-            let amount_path = effect_type.property_suffix("amount");
-            Some(Arc::new(move |effect, context, plan| {
-                let amount = effect.evaluate_f32_by_suffix(&amount_path, context.time, 0.0);
-                if amount.abs() > 1.0e-4 {
-                    plan.ops.push(EffectRenderOp::ChromaticAberration { amount });
-                }
-            }))
-        }
-        EffectType::Grain => {
-            let amount_path = effect_type.property_suffix("amount");
-            Some(Arc::new(move |effect, context, plan| {
-                let amount = effect.evaluate_f32_by_suffix(&amount_path, context.time, 0.0);
-                if amount.abs() > 1.0e-4 {
-                    plan.ops.push(EffectRenderOp::Grain { amount });
-                }
-            }))
-        }
-        _ => None,
     }
 }
 
@@ -1732,7 +1394,6 @@ mod tests {
         let caps = definition.capabilities();
         assert!(caps.supports_render_graph);
         assert!(caps.supports_branching_render_graph);
-        assert!(!caps.supports_legacy_parameter_evaluation);
     }
 
     #[test]

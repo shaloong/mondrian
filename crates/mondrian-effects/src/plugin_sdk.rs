@@ -1,7 +1,7 @@
 use crate::{
     effect::{
         EffectCacheKeyBuilder, EffectCachePolicy, EffectDefinition, EffectEvalContext,
-        EffectEvaluator, EffectGraphBuilder, EffectNode, EffectRenderParamsBuilder,
+        EffectGraphBuilder, EffectNode, EffectRenderParamsBuilder,
     },
     graph::{EffectGraphBuilderState, EffectGraphValue},
     CustomEffectRenderProcessor, EffectPluginContract, EffectRenderOp,
@@ -121,11 +121,6 @@ impl EffectPluginDefinitionBuilder {
 
     pub fn properties(mut self, properties: PropertyBag) -> Self {
         self.definition = self.definition.with_properties(properties);
-        self
-    }
-
-    pub fn with_evaluator(mut self, evaluator: EffectEvaluator) -> Self {
-        self.definition = self.definition.with_evaluator(evaluator);
         self
     }
 
