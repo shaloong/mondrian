@@ -26,7 +26,14 @@ impl From<wgpu::TextureFormat> for TexturePoolFormat {
     fn from(f: wgpu::TextureFormat) -> Self {
         match f {
             wgpu::TextureFormat::Rgba8Unorm => Self::Rgba8Unorm,
-            _ => Self::Rgba8Unorm,
+            other => {
+                debug_assert!(
+                    false,
+                    "TexturePool: unsupported format {:?}, defaulting to Rgba8Unorm",
+                    other
+                );
+                Self::Rgba8Unorm
+            }
         }
     }
 }
@@ -84,8 +91,8 @@ impl TexturePool {
         {
             let mut pool = self.pool.lock();
             if let Some(textures) = pool.get_mut(&key) {
-                if let Some(idx) = textures.iter().position(|_| true) {
-                    let pooled = textures.swap_remove(idx);
+                if !textures.is_empty() {
+                    let pooled = textures.swap_remove(0);
                     tracing::trace!(?key, "texture pool hit");
                     return pooled.texture;
                 }

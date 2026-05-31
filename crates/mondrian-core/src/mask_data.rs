@@ -146,6 +146,7 @@ impl PartialEq for MaskComponent {
             && self.keyframes == other.keyframes
             && self.enabled == other.enabled
             && self.locked == other.locked
+            && self.shape_animation_enabled == other.shape_animation_enabled
     }
 }
 
@@ -271,7 +272,11 @@ pub fn shape_label(shape: &MaskShape) -> String {
 }
 
 /// Linear interpolation between two MaskShapes.
-/// Path morphing snaps to the second shape at t >= 0.5.
+///
+/// Rectangle→Rectangle and Ellipse→Ellipse interpolate smoothly.
+/// Cross-type morphs (e.g., Rectangle→Ellipse) snap: t < 0.5 returns
+/// shape A, t >= 0.5 returns shape B. Path morphing is not supported
+/// and also follows the snap behavior.
 pub fn interpolate_shape(a: &MaskShape, b: &MaskShape, t: f32) -> MaskShape {
     match (a, b) {
         (
@@ -326,6 +331,17 @@ mod tests {
         let mid = mc.evaluate_at(50);
         assert!((mid.feather - 5.0).abs() < 1e-5);
         assert!((mid.opacity - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn mask_component_partial_eq_includes_animation_toggle() {
+        let kf = MaskKeyframe::default();
+        let mut a = MaskComponent::new("A".into(), kf.clone());
+        let mut b = MaskComponent::new("A".into(), kf);
+        a.id = b.id; // make ids match for comparison
+        assert_eq!(a, b);
+        b.shape_animation_enabled = true;
+        assert_ne!(a, b, "shape_animation_enabled should affect equality");
     }
 
     #[test]

@@ -568,6 +568,10 @@ static GPU_EXECUTOR: OnceLock<Option<Arc<dyn EffectGpuExecutor>>> = OnceLock::ne
 
 /// Register a global GPU executor. Call once at app startup.
 pub fn set_global_gpu_executor(executor: Option<Arc<dyn EffectGpuExecutor>>) {
+    if GPU_EXECUTOR.get().is_some() {
+        tracing::warn!("set_global_gpu_executor called more than once — ignored");
+        return;
+    }
     let _ = GPU_EXECUTOR.set(executor);
 }
 

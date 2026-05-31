@@ -388,6 +388,9 @@ fn builtin_effect_types() -> [EffectType; 13] {
     ]
 }
 
+/// Global effect definition registry. Entries are never evicted — if plugins
+/// are installed and later removed, their definitions persist until restart.
+/// This is acceptable for a desktop NLE where plugin install/uninstall is rare.
 fn effect_registry() -> &'static RwLock<HashMap<String, Arc<EffectDefinition>>> {
     static REGISTRY: OnceLock<RwLock<HashMap<String, Arc<EffectDefinition>>>> = OnceLock::new();
     REGISTRY.get_or_init(|| {

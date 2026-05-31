@@ -176,6 +176,9 @@ impl EffectNode {
 
     /// Namespace all property paths with an effect instance prefix.
     /// Called when an effect is placed on a clip to avoid path collisions.
+    ///
+    /// Not idempotent: calling twice double-prefixes property paths.
+    /// Callers must ensure this is called exactly once per clip placement.
     pub fn instantiate_for_clip(&mut self, group_name: String) {
         let mut namespaced = PropertyBag::default();
         for (_, property) in self.properties.iter() {
