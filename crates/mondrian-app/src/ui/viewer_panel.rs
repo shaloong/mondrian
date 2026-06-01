@@ -22,7 +22,7 @@ use mondrian_media::{DecoderPool, FrameCache, RgbaFrame};
 use mondrian_renderer::{
     build_timeline_render_plan, collect_timeline_color_diagnostics,
     composite_timeline_elements_float_linear, is_identity_transform, quantize_transform_signature,
-    CompositorConfig, CpuRgbaLayer, FrameCompositor, GpuContext, TimelineAdjustmentLayer,
+    CpuRgbaLayer, TimelineAdjustmentLayer,
     TimelineCompositeElement, TimelineCompositeOptions, TimelineCompositeScratch,
     TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
 };
@@ -44,6 +44,8 @@ use std::{
     },
     time::{Duration, Instant},
 };
+
+use crate::ui::viewer::gpu_composite::try_gpu_composite_rgba_layers;
 
 #[derive(Clone)]
 struct LayerDecodeRequest {
@@ -4071,76 +4073,7 @@ fn apply_preview_output_color(data: &mut [u8], request: &DecodeRequest) {
     }
 }
 
-fn try_gpu_composite_rgba_layers(
-    width: u32,
-    height: u32,
-    rgba_layers_for_gpu: &[CpuRgbaLayer],
-) -> Option<Vec<u8>> {
-    if !gpu_compositor_enabled() {
-        return None;
-    }
-
-    let gpu_compositor = global_gpu_compositor()?;
-    let gpu_composite_started_at = Instant::now();
-    let gpu_result = {
-        let mut guard = match gpu_compositor.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        guard.composite_rgba_layers(width, height, rgba_layers_for_gpu)
-    };
-
-    match gpu_result {
-        Ok(gpu_rgba) => {
-            record_gpu_compositor_result(true);
-            record_preview_perf_composite_ns(
-                gpu_composite_started_at.elapsed().as_nanos() as u64,
-                true,
-            );
-            Some(gpu_rgba)
-        }
-        Err(err) => {
-            record_gpu_compositor_result(false);
-            tracing::warn!("GPU 合成失败，回退 CPU 路径: {}", err);
-            None
-        }
-    }
-}
-
-fn global_gpu_compositor() -> Option<&'static Mutex<FrameCompositor>> {
-    static GPU_COMPOSITOR: OnceLock<Option<Mutex<FrameCompositor>>> = OnceLock::new();
-    GPU_COMPOSITOR
-        .get_or_init(|| {
-            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().ok()?;
-            let gpu = rt.block_on(GpuContext::new()).ok()?;
-            Some(Mutex::new(FrameCompositor::new(
-                gpu,
-                CompositorConfig::default(),
-            )))
-        })
-        .as_ref()
-}
-
-/// GPU compositor is available if the global singleton was successfully initialized.
-fn gpu_compositor_enabled() -> bool {
-    global_gpu_compositor().is_some()
-}
-
-/// Record GPU compositor result — logs persistent failures for debugging.
-fn record_gpu_compositor_result(success: bool) {
-    static CONSECUTIVE_FAILURES: OnceLock<AtomicU64> = OnceLock::new();
-    let counter = CONSECUTIVE_FAILURES.get_or_init(|| AtomicU64::new(0));
-
-    if success {
-        counter.store(0, Ordering::Relaxed);
-    } else {
-        let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
-        // Log every 60 failures (~1 second at 60fps) instead of permanently disabling.
-        if n % 60 == 0 {
-            tracing::warn!("GPU compositor failed {n} times consecutively, retrying...");
-        }
-    }
-}
+// GPU compositor functions extracted to crate::ui::viewer::gpu_composite.
 
 fn global_media_path_cache(cache_root: PathBuf) -> Arc<mondrian_media::MultiLevelCache> {
     static MEDIA_PATH_CACHE: OnceLock<
