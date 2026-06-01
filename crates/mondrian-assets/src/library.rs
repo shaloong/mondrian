@@ -2,7 +2,7 @@
 
 use crate::schema::{INIT_SQL, MIGRATE_FOLDERS_SQL};
 use mondrian_core::{
-    types::{AssetId, AssetSource, GeneratedAssetKind},
+    types::{AssetId, AssetSource},
     MondrianError, Result,
 };
 use mondrian_media::MediaInfo;
