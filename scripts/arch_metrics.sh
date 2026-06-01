@@ -60,7 +60,10 @@ INTEGRATION_TEST_COUNT=$(find crates/ -path "*/tests/*.rs" -exec grep -c "#\[tes
 DEAD_SHADERS=""
 for shader in crates/mondrian-renderer/shaders/*.wgsl; do
     shader_name=$(basename "$shader" .wgsl)
-    ref_count=$(grep -r "$shader_name" crates/mondrian-renderer/src/ --include="*.rs" \
+    # Check both the file name and the UPPER_CASE constant name in shaders.rs
+    const_name=$(echo "$shader_name" | tr '[:lower:]' '[:upper:]')
+    # Search for the constant name in all Rust source (it should appear outside shaders.rs)
+    ref_count=$(grep -r "$const_name" crates/mondrian-renderer/src/ --include="*.rs" \
         | grep -v "shaders\.rs" | wc -l | tr -d ' ')
     if [ "$ref_count" -eq 0 ]; then
         DEAD_SHADERS="$DEAD_SHADERS $shader_name"
