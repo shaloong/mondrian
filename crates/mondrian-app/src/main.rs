@@ -36,7 +36,7 @@ fn main() -> anyhow::Result<()> {
             .with_resizable(false)
             .with_transparent(true)
             .with_icon(load_icon()),
-        renderer: eframe::Renderer::Glow,
+        renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
 
