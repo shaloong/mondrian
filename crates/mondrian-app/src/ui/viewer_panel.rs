@@ -22,9 +22,9 @@ use mondrian_media::{DecoderPool, FrameCache, RgbaFrame};
 use mondrian_renderer::{
     build_timeline_render_plan, collect_timeline_color_diagnostics,
     composite_timeline_elements_float_linear, is_identity_transform, quantize_transform_signature,
-    CpuRgbaLayer, TimelineAdjustmentLayer,
-    TimelineCompositeElement, TimelineCompositeOptions, TimelineCompositeScratch,
-    TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
+    CpuRgbaLayer, TimelineAdjustmentLayer, TimelineCompositeElement, TimelineCompositeOptions,
+    TimelineCompositeScratch, TimelineMediaLayer, TimelineRenderPlanElement,
+    TimelineSolidColorLayer,
 };
 use mondrian_timeline::sequence::{
     ColorContext, ColorWorkflow, MissingColorMetadataPolicy, NestedColorProcessing, Sequence,
@@ -406,10 +406,7 @@ pub struct ViewerPanel {
         mondrian_core::types::TrackId,
     )>,
     /// Cached context menu hit-test result (computed once, reused while menu is open).
-    context_menu_hit: Option<(
-        SelectedClipRef,
-        Option<mondrian_effects::mask::MaskId>,
-    )>,
+    context_menu_hit: Option<(SelectedClipRef, Option<mondrian_effects::mask::MaskId>)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -628,11 +625,7 @@ impl Default for ViewerPanel {
 
 impl ViewerPanel {
     /// Write clip selection to local field + AppState.selection (single source of truth).
-    fn set_clip_selection(
-        &mut self,
-        state: &mut AppState,
-        sel: Option<(TrackId, bool, ClipId)>,
-    ) {
+    fn set_clip_selection(&mut self, state: &mut AppState, sel: Option<(TrackId, bool, ClipId)>) {
         self.canvas_selected_clip = sel;
         state.selection.selected_clips = sel
             .map(|(track_id, is_video, clip_id)| {
@@ -5281,7 +5274,10 @@ fn draw_mask_overlays(
                         .map(|p| mondrian_effects::mask::BezierPoint {
                             position: glam::Vec2::new(p.position.x * mw, p.position.y * mh),
                             control_in: glam::Vec2::new(p.control_in.x * mw, p.control_in.y * mh),
-                            control_out: glam::Vec2::new(p.control_out.x * mw, p.control_out.y * mh),
+                            control_out: glam::Vec2::new(
+                                p.control_out.x * mw,
+                                p.control_out.y * mh,
+                            ),
                         })
                         .collect();
                     let segs = mask_path_segments(&px_pts, *closed);
@@ -5299,7 +5295,10 @@ fn draw_mask_overlays(
                             egui::Color32::WHITE,
                         );
                         // Draw control handle lines and endpoints.
-                        let handle_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(c.r(), c.g(), c.b(), 150));
+                        let handle_stroke = egui::Stroke::new(
+                            1.0,
+                            egui::Color32::from_rgba_premultiplied(c.r(), c.g(), c.b(), 150),
+                        );
                         if pt.control_in.length_squared() > 0.01 {
                             let cp = mask_xform(pt.position + pt.control_in, &mat, &to_scr);
                             painter.line_segment([sp, cp], handle_stroke);
@@ -5378,67 +5377,72 @@ fn draw_mask_toolbar(ui: &mut egui::Ui, panel: &mut ViewerPanel) {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 1.0;
 
-            // Selection tool
-            let sel_active = panel.mask_tool.is_none();
-            if theme::icon_ghost_toggle_button(ui, btn_size, theme::UiIcon::Cursor, sel_active)
-                .on_hover_text("选择工具 (V)")
-                .clicked()
-            {
-                panel.mask_tool = None;
-                panel.mask_draw = None;
-                panel.mask_edit = None;
-                panel.selected_mask = None;
-            }
+                // Selection tool
+                let sel_active = panel.mask_tool.is_none();
+                if theme::icon_ghost_toggle_button(ui, btn_size, theme::UiIcon::Cursor, sel_active)
+                    .on_hover_text("选择工具 (V)")
+                    .clicked()
+                {
+                    panel.mask_tool = None;
+                    panel.mask_draw = None;
+                    panel.mask_edit = None;
+                    panel.selected_mask = None;
+                }
 
-            // Rectangle mask
-            let rect_active = panel.mask_tool == Some(MaskTool::Rect);
-            if theme::icon_ghost_toggle_button(ui, btn_size, theme::UiIcon::Rectangle, rect_active)
+                // Rectangle mask
+                let rect_active = panel.mask_tool == Some(MaskTool::Rect);
+                if theme::icon_ghost_toggle_button(
+                    ui,
+                    btn_size,
+                    theme::UiIcon::Rectangle,
+                    rect_active,
+                )
                 .on_hover_text("矩形蒙版 (R)")
                 .clicked()
-            {
-                panel.mask_tool = if rect_active {
-                    None
-                } else {
-                    Some(MaskTool::Rect)
-                };
-                panel.mask_draw = None;
-                panel.mask_edit = None;
-                panel.selected_mask = None;
-            }
+                {
+                    panel.mask_tool = if rect_active {
+                        None
+                    } else {
+                        Some(MaskTool::Rect)
+                    };
+                    panel.mask_draw = None;
+                    panel.mask_edit = None;
+                    panel.selected_mask = None;
+                }
 
-            // Ellipse mask
-            let ell_active = panel.mask_tool == Some(MaskTool::Ellipse);
-            if theme::icon_ghost_toggle_button(ui, btn_size, theme::UiIcon::Circle, ell_active)
-                .on_hover_text("椭圆蒙版 (E)")
-                .clicked()
-            {
-                panel.mask_tool = if ell_active {
-                    None
-                } else {
-                    Some(MaskTool::Ellipse)
-                };
-                panel.mask_draw = None;
-                panel.mask_edit = None;
-                panel.selected_mask = None;
-            }
+                // Ellipse mask
+                let ell_active = panel.mask_tool == Some(MaskTool::Ellipse);
+                if theme::icon_ghost_toggle_button(ui, btn_size, theme::UiIcon::Circle, ell_active)
+                    .on_hover_text("椭圆蒙版 (E)")
+                    .clicked()
+                {
+                    panel.mask_tool = if ell_active {
+                        None
+                    } else {
+                        Some(MaskTool::Ellipse)
+                    };
+                    panel.mask_draw = None;
+                    panel.mask_edit = None;
+                    panel.selected_mask = None;
+                }
 
-            // Pen tool
-            let pen_active = panel.mask_tool == Some(MaskTool::Pen);
-            if theme::icon_ghost_toggle_button(ui, btn_size, theme::UiIcon::Pen, pen_active)
-                .on_hover_text("钢笔工具 (P)")
-                .clicked()
-            {
-                panel.mask_tool = if pen_active {
-                    None
-                } else {
-                    Some(MaskTool::Pen)
-                };
-                panel.mask_draw = None;
-                panel.mask_edit = None;
-                panel.selected_mask = None;
-            }
+                // Pen tool
+                let pen_active = panel.mask_tool == Some(MaskTool::Pen);
+                if theme::icon_ghost_toggle_button(ui, btn_size, theme::UiIcon::Pen, pen_active)
+                    .on_hover_text("钢笔工具 (P)")
+                    .clicked()
+                {
+                    panel.mask_tool = if pen_active {
+                        None
+                    } else {
+                        Some(MaskTool::Pen)
+                    };
+                    panel.mask_draw = None;
+                    panel.mask_edit = None;
+                    panel.selected_mask = None;
+                }
+            });
         });
-    });
 }
 
 /// Convert a screen-space delta to normalized [0,1] mask coordinate delta.
@@ -5618,13 +5622,19 @@ fn mask_hit_test(
             // Check handle endpoints first (smaller hit target).
             const HANDLE_RADIUS: f32 = 12.0;
             if pt.control_in.length_squared() > 0.01 {
-                let cp = to_scr((pt.position.x + pt.control_in.x) * mw, (pt.position.y + pt.control_in.y) * mh);
+                let cp = to_scr(
+                    (pt.position.x + pt.control_in.x) * mw,
+                    (pt.position.y + pt.control_in.y) * mh,
+                );
                 if cp.distance(screen_pos) <= HANDLE_RADIUS {
                     return (Some(i), true);
                 }
             }
             if pt.control_out.length_squared() > 0.01 {
-                let cp = to_scr((pt.position.x + pt.control_out.x) * mw, (pt.position.y + pt.control_out.y) * mh);
+                let cp = to_scr(
+                    (pt.position.x + pt.control_out.x) * mw,
+                    (pt.position.y + pt.control_out.y) * mh,
+                );
                 if cp.distance(screen_pos) <= HANDLE_RADIUS {
                     return (Some(i), true);
                 }
@@ -5845,9 +5855,9 @@ fn mask_next_name(state: &AppState, clip_id: mondrian_core::types::ClipId) -> St
     let seq = state.sequence.as_ref();
     let count = seq
         .and_then(|s| {
-            s.video_tracks.iter().find_map(|t| {
-                t.clips.iter().find(|c| c.id == clip_id).map(|c| c.masks.len())
-            })
+            s.video_tracks
+                .iter()
+                .find_map(|t| t.clips.iter().find(|c| c.id == clip_id).map(|c| c.masks.len()))
         })
         .unwrap_or(0);
     format!("蒙版 {}", count + 1)
@@ -5860,10 +5870,20 @@ fn draw_selection_labels(
     ct: &crate::ui::viewer::canvas::CanvasTransform,
     state: &AppState,
     timeline_frame: i64,
-    selected_clip: Option<(mondrian_core::types::TrackId, bool, mondrian_core::types::ClipId)>,
-    selected_mask: Option<(mondrian_effects::mask::MaskId, mondrian_core::types::ClipId, mondrian_core::types::TrackId)>,
+    selected_clip: Option<(
+        mondrian_core::types::TrackId,
+        bool,
+        mondrian_core::types::ClipId,
+    )>,
+    selected_mask: Option<(
+        mondrian_effects::mask::MaskId,
+        mondrian_core::types::ClipId,
+        mondrian_core::types::TrackId,
+    )>,
 ) {
-    let Some(seq) = state.sequence.as_ref() else { return };
+    let Some(seq) = state.sequence.as_ref() else {
+        return;
+    };
     let current = TimeCode::new(timeline_frame.max(0), seq.time_base());
     let active = seq.active_clips_at(current);
     let ticks = timecode_to_ticks(current);
@@ -5873,16 +5893,27 @@ fn draw_selection_labels(
             let bb = clip_screen_bounds_with_media(&ac.clip, ac.transform_matrix, ct, state);
             if let Some(bb) = bb {
                 let label = ac.clip.label.as_deref().filter(|l| !l.is_empty()).unwrap_or("片段");
-                draw_label_badge(painter, bb.left_top(), label, egui::Color32::from_rgb(0, 180, 255));
+                draw_label_badge(
+                    painter,
+                    bb.left_top(),
+                    label,
+                    egui::Color32::from_rgb(0, 180, 255),
+                );
 
                 // Mask labels
                 if let Some((_mid, _mcid, _tid)) = selected_mask {
                     for mask in &ac.clip.masks {
-                        if !mask.enabled { continue; }
-                        if !selected_mask.is_some_and(|(mid, _, _)| mid == mask.id) { continue; }
+                        if !mask.enabled {
+                            continue;
+                        }
+                        if !selected_mask.is_some_and(|(mid, _, _)| mid == mask.id) {
+                            continue;
+                        }
                         let kf = mask.evaluate_at(ticks);
                         let bbox = shape_bbox(&kf.shape);
-                        let (mw, mh) = state.asset_library.as_ref()
+                        let (mw, mh) = state
+                            .asset_library
+                            .as_ref()
                             .and_then(|lib| lib.get_asset(ac.clip.asset_id).ok().flatten())
                             .and_then(|a| a.media_info.primary_video().cloned())
                             .map(|v| (v.width as f32, v.height as f32))
@@ -5893,7 +5924,12 @@ fn draw_selection_labels(
                             (ac.transform_matrix * tl.extend(1.0)).x,
                             (ac.transform_matrix * tl.extend(1.0)).y,
                         );
-                        draw_label_badge(painter, sp, &mask.name, egui::Color32::from_rgb(200, 120, 0));
+                        draw_label_badge(
+                            painter,
+                            sp,
+                            &mask.name,
+                            egui::Color32::from_rgb(200, 120, 0),
+                        );
                     }
                 }
             }
@@ -5908,9 +5944,7 @@ fn draw_label_badge(painter: &egui::Painter, top_left: Pos2, text: &str, color: 
     let pad = egui::vec2(6.0, 3.0);
     let size = galley.size() + pad * 2.0;
     let rect = egui::Rect::from_min_size(top_left - egui::vec2(0.0, size.y + 4.0), size);
-    let bg = egui::Color32::from_rgba_premultiplied(
-        color.r(), color.g(), color.b(), 200,
-    );
+    let bg = egui::Color32::from_rgba_premultiplied(color.r(), color.g(), color.b(), 200);
     painter.rect_filled(rect, egui::CornerRadius::same(4), bg);
     painter.rect_stroke(
         rect,
@@ -5979,7 +6013,9 @@ fn path_point_edit_mode(
     let seq = state.sequence.as_ref()?;
     let current = TimeCode::new(state.current_frame().max(0), seq.time_base());
     let ac = seq.active_clips_at(current).into_iter().find(|a| a.clip.id == clip_id)?;
-    let (mw, mh) = state.asset_library.as_ref()
+    let (mw, mh) = state
+        .asset_library
+        .as_ref()
         .and_then(|lib| lib.get_asset(ac.clip.asset_id).ok().flatten())
         .and_then(|a| a.media_info.primary_video().cloned())
         .map(|v| (v.width as f32, v.height as f32))
@@ -5992,11 +6028,17 @@ fn path_point_edit_mode(
     const HANDLE_RADIUS: f32 = 10.0;
     // Check control_in handle.
     if pt.control_in.length_squared() > 0.01 || pt.control_out.length_squared() > 0.01 {
-        let cp_in = to_scr((pt.position.x + pt.control_in.x) * mw, (pt.position.y + pt.control_in.y) * mh);
+        let cp_in = to_scr(
+            (pt.position.x + pt.control_in.x) * mw,
+            (pt.position.y + pt.control_in.y) * mh,
+        );
         if cp_in.distance(screen_pos) <= HANDLE_RADIUS {
             return Some(MaskEditMode::MovePathHandle(idx, true));
         }
-        let cp_out = to_scr((pt.position.x + pt.control_out.x) * mw, (pt.position.y + pt.control_out.y) * mh);
+        let cp_out = to_scr(
+            (pt.position.x + pt.control_out.x) * mw,
+            (pt.position.y + pt.control_out.y) * mh,
+        );
         if cp_out.distance(screen_pos) <= HANDLE_RADIUS {
             return Some(MaskEditMode::MovePathHandle(idx, false));
         }

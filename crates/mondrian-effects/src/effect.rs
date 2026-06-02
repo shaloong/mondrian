@@ -9,13 +9,11 @@ use crate::plugin_contract::{
     record_plugin_runtime_failure, register_plugin_contract, EffectPluginContract,
 };
 use mondrian_core::{
-    automation::{
-        AnimatablePropertyUiMetadata, PropertyBag, PropertyDescriptor, PropertyValue,
-    },
+    automation::{AnimatablePropertyUiMetadata, PropertyBag, PropertyDescriptor, PropertyValue},
     types::{Color, EffectId, TimeCode},
 };
 // Re-export effect data types from mondrian-core.
-pub use mondrian_core::effect_data::{EffectNode, EffectType, namespaced_effect_path};
+pub use mondrian_core::effect_data::{namespaced_effect_path, EffectNode, EffectType};
 
 use serde::{Deserialize, Serialize};
 use std::{
@@ -530,8 +528,8 @@ pub fn compile_clip_effect_graph(
     masks: &[MaskComponent],
     time: TimeCode,
 ) -> Option<Arc<CompiledEffectGraph>> {
-    use crate::graph::{EffectGraphNode, EffectGraphNodeId, EffectGraphNodeKind};
     use crate::graph::get_or_compile_scheduled_render_graph;
+    use crate::graph::{EffectGraphNode, EffectGraphNodeId, EffectGraphNodeKind};
     use mondrian_core::automation::timecode_to_ticks;
     let mut graph = build_effect_render_graph(effects, time);
 
@@ -582,7 +580,11 @@ pub fn compile_clip_effect_graph(
 /// Extension trait for EffectNode methods that require the effect registry.
 pub trait EffectNodeExt {
     fn with_defaults(effect_type: EffectType) -> Self;
-    fn evaluate_graph_into(&self, context: EffectEvalContext, builder: &mut EffectGraphBuilderState);
+    fn evaluate_graph_into(
+        &self,
+        context: EffectEvalContext,
+        builder: &mut EffectGraphBuilderState,
+    );
 }
 
 impl EffectNodeExt for EffectNode {
@@ -622,7 +624,6 @@ impl EffectNodeExt for EffectNode {
                         "effect graph builder panicked",
                     );
                 }
-                return;
             }
         }
     }
@@ -1267,17 +1268,19 @@ mod tests {
             PropertyValue::Float(0.0),
         ));
         register_effect_definition(
-            EffectDefinition::new(plugin_type.key(), "AI 自动曝光", properties)
-                .with_graph_builder(Arc::new(move |effect, context, graph| {
-                    let exposure = effect.evaluate_f32_by_suffix(
-                        &exposure_suffix, context.time, 0.0,
-                    );
+            EffectDefinition::new(plugin_type.key(), "AI 自动曝光", properties).with_graph_builder(
+                Arc::new(move |effect, context, graph| {
+                    let exposure =
+                        effect.evaluate_f32_by_suffix(&exposure_suffix, context.time, 0.0);
                     if exposure.abs() > 1e-4 {
                         graph.append_unary(EffectRenderOp::ColorAdjust {
-                            exposure, contrast: 1.0, saturation: 1.0,
+                            exposure,
+                            contrast: 1.0,
+                            saturation: 1.0,
                         });
                     }
-                })),
+                }),
+            ),
         );
 
         let mut effect = EffectNode::new(plugin_type.clone());
@@ -1330,18 +1333,23 @@ mod tests {
 
         let effect = EffectNode::new(plugin_type);
         let graph = build_effect_render_graph(&[effect], tc(0));
-        let custom_node = graph.nodes.iter().find(|n| matches!(
-            &n.kind,
-            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Custom { .. }, .. }
-        ));
+        let custom_node = graph.nodes.iter().find(|n| {
+            matches!(
+                &n.kind,
+                EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Custom { .. }, .. }
+            )
+        });
         assert!(custom_node.is_some(), "expected custom render op node");
-        if let EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Custom { key, params, cache_key, cache_policy }, .. } = &custom_node.unwrap().kind {
+        if let EffectGraphNodeKind::UnaryEffect {
+            op: EffectRenderOp::Custom { key, params, cache_key, cache_policy },
+            ..
+        } = &custom_node.unwrap().kind
+        {
             assert_eq!(key, "plugin.render.glow");
             assert_eq!(*cache_key, None);
             assert_eq!(*cache_policy, EffectCachePolicy::Deterministic);
             assert!(
-                (params["amount"].as_f64().expect("amount should be numeric") - 0.4).abs()
-                    < 1.0e-6
+                (params["amount"].as_f64().expect("amount should be numeric") - 0.4).abs() < 1.0e-6
             );
         }
     }
@@ -1442,9 +1450,10 @@ mod tests {
         let effect = EffectNode::new(plugin_type.clone());
         let graph = build_effect_render_graph(&[effect], tc(0));
         let custom_node = graph.nodes.iter().find_map(|n| match &n.kind {
-            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Custom { cache_key, cache_policy, .. }, .. } => {
-                Some((cache_key.clone(), *cache_policy))
-            }
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::Custom { cache_key, cache_policy, .. },
+                ..
+            } => Some((cache_key.clone(), *cache_policy)),
             _ => None,
         });
         let (cache_key, cache_policy) = custom_node.expect("expected custom render op node");

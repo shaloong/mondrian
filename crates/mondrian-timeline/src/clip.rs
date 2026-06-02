@@ -598,10 +598,8 @@ impl PropertyHost for Clip {
                 let mask_uuid_prefix = parts[1];
                 let short_prop = parts[2];
                 let prefix = format!("mask.{}.", mask_uuid_prefix);
-                if let Some(mask) = self
-                    .masks
-                    .iter_mut()
-                    .find(|m| m.id.0.to_string().starts_with(mask_uuid_prefix))
+                if let Some(mask) =
+                    self.masks.iter_mut().find(|m| m.id.0.to_string().starts_with(mask_uuid_prefix))
                 {
                     // Shape is stored in shape_keyframes, not PropertyBag.
                     if short_prop == mondrian_core::mask_data::MASK_PROP_SHAPE {
@@ -621,9 +619,8 @@ impl PropertyHost for Clip {
                             }
                         }
                     }
-                    let short_mutation = mutation.map_path(|full| {
-                        full.strip_prefix(&prefix).unwrap_or(&full).to_string()
-                    });
+                    let short_mutation = mutation
+                        .map_path(|full| full.strip_prefix(&prefix).unwrap_or(&full).to_string());
                     mask.properties.apply_mutation(short_mutation)
                 } else {
                     Err(MondrianError::WorkflowStepFailed {
@@ -683,7 +680,7 @@ mod tests {
         automation::{timecode_to_ticks, Keyframe, PropertyMutation, PropertyValue},
         types::Rational,
     };
-    use mondrian_effects::{EffectGraphNodeKind, EffectRenderOp};
+    use mondrian_effects::EffectRenderOp;
 
     fn tc(frame: i64) -> TimeCode {
         TimeCode::new(frame, Rational::new(1, 25))
@@ -814,12 +811,12 @@ mod tests {
         let shared_asset_id = AssetId::new();
         let mut first = Clip::new_adjustment_layer(shared_asset_id, tc(0), tc(30));
         let mut second = Clip::new_adjustment_layer(shared_asset_id, tc(40), tc(30));
-        first.add_effect_node(
-            mondrian_effects::EffectNodeExt::with_defaults(EffectType::BasicCorrection),
-        );
-        second.add_effect_node(
-            mondrian_effects::EffectNodeExt::with_defaults(EffectType::BasicCorrection),
-        );
+        first.add_effect_node(mondrian_effects::EffectNodeExt::with_defaults(
+            EffectType::BasicCorrection,
+        ));
+        second.add_effect_node(mondrian_effects::EffectNodeExt::with_defaults(
+            EffectType::BasicCorrection,
+        ));
         let exposure_path = first
             .effect_property_path("basic_correction.exposure")
             .expect("adjustment exposure path");

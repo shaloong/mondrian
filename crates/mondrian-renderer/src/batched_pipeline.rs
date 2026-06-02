@@ -38,9 +38,7 @@ impl BatchedCompositor {
     pub fn new(gpu: Arc<GpuContext>, texture_pool: Arc<TexturePool>) -> Result<Self> {
         let shader = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("batched_composite_shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/composite.wgsl").into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/composite.wgsl").into()),
         });
 
         let texture_bgl = gpu.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -183,18 +181,24 @@ impl BatchedCompositor {
             | wgpu::TextureUsages::COPY_DST;
 
         let accum_a = self.texture_pool.acquire(
-            &self.gpu.device, width, height,
-            wgpu::TextureFormat::Rgba8Unorm, rt_usage,
+            &self.gpu.device,
+            width,
+            height,
+            wgpu::TextureFormat::Rgba8Unorm,
+            rt_usage,
         );
         let accum_b = self.texture_pool.acquire(
-            &self.gpu.device, width, height,
-            wgpu::TextureFormat::Rgba8Unorm, rt_usage,
+            &self.gpu.device,
+            width,
+            height,
+            wgpu::TextureFormat::Rgba8Unorm,
+            rt_usage,
         );
 
         // Single encoder for all layers + readback
-        let mut encoder = self.gpu.device.create_command_encoder(
-            &wgpu::CommandEncoderDescriptor { label: Some("batch_composite_encoder") },
-        );
+        let mut encoder = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("batch_composite_encoder"),
+        });
 
         // Clear accum_a to transparent black (alpha=0). The first composited
         // layer will overlay onto this, producing correct results for the
@@ -228,9 +232,7 @@ impl BatchedCompositor {
             let src = if src_is_a { &accum_a } else { &accum_b };
             let dst = if src_is_a { &accum_b } else { &accum_a };
 
-            self.record_composite_pass(
-                &mut encoder, src, dst, &layer_tex, layer.opacity,
-            );
+            self.record_composite_pass(&mut encoder, src, dst, &layer_tex, layer.opacity);
 
             // Return layer texture to pool
             self.texture_pool.release(layer_tex, width, height);
@@ -267,8 +269,11 @@ impl BatchedCompositor {
 
         let tex_usage = wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING;
         let texture = self.texture_pool.acquire(
-            &self.gpu.device, output_width, output_height,
-            wgpu::TextureFormat::Rgba8Unorm, tex_usage,
+            &self.gpu.device,
+            output_width,
+            output_height,
+            wgpu::TextureFormat::Rgba8Unorm,
+            tex_usage,
         );
 
         // Pad layer data to output dimensions
@@ -286,8 +291,10 @@ impl BatchedCompositor {
 
         self.gpu.queue.write_texture(
             wgpu::ImageCopyTexture {
-                texture: &texture, mip_level: 0,
-                origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All,
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
             },
             &staged,
             wgpu::ImageDataLayout {
@@ -295,7 +302,11 @@ impl BatchedCompositor {
                 bytes_per_row: Some(output_width * 4),
                 rows_per_image: Some(output_height),
             },
-            wgpu::Extent3d { width: output_width, height: output_height, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: output_width,
+                height: output_height,
+                depth_or_array_layers: 1,
+            },
         );
 
         Ok(texture)
@@ -317,9 +328,18 @@ impl BatchedCompositor {
             label: Some("batch_tex_bg"),
             layout: &self.texture_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&layer_view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&src_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&layer_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&src_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
             ],
         });
 
@@ -328,7 +348,9 @@ impl BatchedCompositor {
             blend_mode: 0,
             _padding: [0.0, 0.0],
         };
-        self.gpu.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+        self.gpu
+            .queue
+            .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
         let uniform_bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("batch_uniform_bg"),
@@ -383,8 +405,10 @@ impl BatchedCompositor {
 
         encoder.copy_texture_to_buffer(
             wgpu::ImageCopyTexture {
-                texture, mip_level: 0,
-                origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All,
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
             },
             wgpu::ImageCopyBuffer {
                 buffer: &readback,

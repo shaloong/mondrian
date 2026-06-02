@@ -92,7 +92,12 @@ impl<'a> EffectGraphDsl<'a> {
         self.builder.add_mask(input, mask, invert, mask_op)
     }
 
-    pub fn mask_current<F>(&mut self, invert: bool, mask_op: crate::mask::MaskOp, build_mask: F) -> EffectGraphValue
+    pub fn mask_current<F>(
+        &mut self,
+        invert: bool,
+        mask_op: crate::mask::MaskOp,
+        build_mask: F,
+    ) -> EffectGraphValue
     where
         F: for<'b> FnOnce(&mut EffectGraphDsl<'b>, EffectGraphValue) -> EffectGraphValue,
     {

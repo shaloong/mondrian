@@ -18,7 +18,11 @@ pub struct BezierPoint {
 
 impl BezierPoint {
     pub fn new(pos: Vec2) -> Self {
-        Self { position: pos, control_in: Vec2::ZERO, control_out: Vec2::ZERO }
+        Self {
+            position: pos,
+            control_in: Vec2::ZERO,
+            control_out: Vec2::ZERO,
+        }
     }
 }
 
@@ -44,7 +48,13 @@ pub enum MaskShape {
 
 impl Default for MaskShape {
     fn default() -> Self {
-        Self::Rectangle { x: 0.1, y: 0.1, width: 0.8, height: 0.8, corner_radius: 0.0 }
+        Self::Rectangle {
+            x: 0.1,
+            y: 0.1,
+            width: 0.8,
+            height: 0.8,
+            corner_radius: 0.0,
+        }
     }
 }
 
@@ -156,20 +166,46 @@ impl MaskComponent {
         let mut properties = PropertyBag::default();
         use crate::automation::{AnimatablePropertyUiMetadata, PropertyDescriptor};
 
-        let define_prop = |bag: &mut PropertyBag, path: &str, display: &str, value: PropertyValue| {
-            let mut desc = PropertyDescriptor::new(path, display, value);
-            desc.ui_metadata = AnimatablePropertyUiMetadata {
-                group_name: Some(name.clone()),
-                ..Default::default()
+        let define_prop =
+            |bag: &mut PropertyBag, path: &str, display: &str, value: PropertyValue| {
+                let mut desc = PropertyDescriptor::new(path, display, value);
+                desc.ui_metadata = AnimatablePropertyUiMetadata {
+                    group_name: Some(name.clone()),
+                    ..Default::default()
+                };
+                bag.define(desc);
             };
-            bag.define(desc);
-        };
 
-        define_prop(&mut properties, MASK_PROP_FEATHER, "羽化", PropertyValue::Float(initial.feather));
-        define_prop(&mut properties, MASK_PROP_OPACITY, "不透明度", PropertyValue::Float(initial.opacity));
-        define_prop(&mut properties, MASK_PROP_EXPANSION, "扩展", PropertyValue::Float(initial.expansion));
-        define_prop(&mut properties, MASK_PROP_INVERT, "反转", PropertyValue::Bool(initial.invert));
-        define_prop(&mut properties, MASK_PROP_MASK_OP, "模式", PropertyValue::Text(initial.mask_op.as_str().to_string()));
+        define_prop(
+            &mut properties,
+            MASK_PROP_FEATHER,
+            "羽化",
+            PropertyValue::Float(initial.feather),
+        );
+        define_prop(
+            &mut properties,
+            MASK_PROP_OPACITY,
+            "不透明度",
+            PropertyValue::Float(initial.opacity),
+        );
+        define_prop(
+            &mut properties,
+            MASK_PROP_EXPANSION,
+            "扩展",
+            PropertyValue::Float(initial.expansion),
+        );
+        define_prop(
+            &mut properties,
+            MASK_PROP_INVERT,
+            "反转",
+            PropertyValue::Bool(initial.invert),
+        );
+        define_prop(
+            &mut properties,
+            MASK_PROP_MASK_OP,
+            "模式",
+            PropertyValue::Text(initial.mask_op.as_str().to_string()),
+        );
 
         Self {
             id,
@@ -203,9 +239,10 @@ impl MaskComponent {
     pub fn evaluate_at(&self, time: TimeTicks) -> MaskKeyframe {
         let shape = if self.shape_keyframes.is_empty() {
             MaskShape::default()
-        } else if !self.shape_animation_enabled {
-            self.shape_keyframes[0].1.clone()
-        } else if self.shape_keyframes.len() == 1 || time <= self.shape_keyframes[0].0 {
+        } else if !self.shape_animation_enabled
+            || self.shape_keyframes.len() == 1
+            || time <= self.shape_keyframes[0].0
+        {
             self.shape_keyframes[0].1.clone()
         } else if time >= self.shape_keyframes.last().map(|(t, _)| *t).unwrap_or(0) {
             self.shape_keyframes.last().map(|(_, s)| s.clone()).unwrap_or_default()
@@ -224,14 +261,42 @@ impl MaskComponent {
             result
         };
 
-        let feather = self.properties.evaluate(MASK_PROP_FEATHER, time).and_then(|v| v.as_f32()).unwrap_or(0.0);
-        let opacity = self.properties.evaluate(MASK_PROP_OPACITY, time).and_then(|v| v.as_f32()).unwrap_or(1.0);
-        let expansion = self.properties.evaluate(MASK_PROP_EXPANSION, time).and_then(|v| v.as_f32()).unwrap_or(0.0);
-        let invert = self.properties.evaluate(MASK_PROP_INVERT, time)
-            .and_then(|v| if let PropertyValue::Bool(b) = v { Some(b) } else { None })
+        let feather = self
+            .properties
+            .evaluate(MASK_PROP_FEATHER, time)
+            .and_then(|v| v.as_f32())
+            .unwrap_or(0.0);
+        let opacity = self
+            .properties
+            .evaluate(MASK_PROP_OPACITY, time)
+            .and_then(|v| v.as_f32())
+            .unwrap_or(1.0);
+        let expansion = self
+            .properties
+            .evaluate(MASK_PROP_EXPANSION, time)
+            .and_then(|v| v.as_f32())
+            .unwrap_or(0.0);
+        let invert = self
+            .properties
+            .evaluate(MASK_PROP_INVERT, time)
+            .and_then(|v| {
+                if let PropertyValue::Bool(b) = v {
+                    Some(b)
+                } else {
+                    None
+                }
+            })
             .unwrap_or(false);
-        let mask_op_str = self.properties.evaluate(MASK_PROP_MASK_OP, time)
-            .and_then(|v| if let PropertyValue::Text(s) = v { Some(s.clone()) } else { None })
+        let mask_op_str = self
+            .properties
+            .evaluate(MASK_PROP_MASK_OP, time)
+            .and_then(|v| {
+                if let PropertyValue::Text(s) = v {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            })
             .unwrap_or_else(|| "Add".to_string());
 
         MaskKeyframe {
@@ -250,11 +315,36 @@ impl MaskComponent {
             use crate::automation::InterpolationType;
             for (t, kf) in &self.keyframes {
                 self.shape_keyframes.push((*t, kf.shape.clone()));
-                let _ = self.properties.write_value(MASK_PROP_FEATHER, *t, PropertyValue::Float(kf.feather), InterpolationType::Linear);
-                let _ = self.properties.write_value(MASK_PROP_OPACITY, *t, PropertyValue::Float(kf.opacity), InterpolationType::Linear);
-                let _ = self.properties.write_value(MASK_PROP_EXPANSION, *t, PropertyValue::Float(kf.expansion), InterpolationType::Linear);
-                let _ = self.properties.write_value(MASK_PROP_INVERT, *t, PropertyValue::Bool(kf.invert), InterpolationType::Hold);
-                let _ = self.properties.write_value(MASK_PROP_MASK_OP, *t, PropertyValue::Text(kf.mask_op.as_str().to_string()), InterpolationType::Hold);
+                let _ = self.properties.write_value(
+                    MASK_PROP_FEATHER,
+                    *t,
+                    PropertyValue::Float(kf.feather),
+                    InterpolationType::Linear,
+                );
+                let _ = self.properties.write_value(
+                    MASK_PROP_OPACITY,
+                    *t,
+                    PropertyValue::Float(kf.opacity),
+                    InterpolationType::Linear,
+                );
+                let _ = self.properties.write_value(
+                    MASK_PROP_EXPANSION,
+                    *t,
+                    PropertyValue::Float(kf.expansion),
+                    InterpolationType::Linear,
+                );
+                let _ = self.properties.write_value(
+                    MASK_PROP_INVERT,
+                    *t,
+                    PropertyValue::Bool(kf.invert),
+                    InterpolationType::Hold,
+                );
+                let _ = self.properties.write_value(
+                    MASK_PROP_MASK_OP,
+                    *t,
+                    PropertyValue::Text(kf.mask_op.as_str().to_string()),
+                    InterpolationType::Hold,
+                );
             }
             self.keyframes.clear();
         }
@@ -280,8 +370,20 @@ pub fn shape_label(shape: &MaskShape) -> String {
 pub fn interpolate_shape(a: &MaskShape, b: &MaskShape, t: f32) -> MaskShape {
     match (a, b) {
         (
-            MaskShape::Rectangle { x: ax, y: ay, width: aw, height: ah, corner_radius: ar },
-            MaskShape::Rectangle { x: bx, y: by, width: bw, height: bh, corner_radius: br },
+            MaskShape::Rectangle {
+                x: ax,
+                y: ay,
+                width: aw,
+                height: ah,
+                corner_radius: ar,
+            },
+            MaskShape::Rectangle {
+                x: bx,
+                y: by,
+                width: bw,
+                height: bh,
+                corner_radius: br,
+            },
         ) => MaskShape::Rectangle {
             x: ax + (bx - ax) * t,
             y: ay + (by - ay) * t,
@@ -297,7 +399,11 @@ pub fn interpolate_shape(a: &MaskShape, b: &MaskShape, t: f32) -> MaskShape {
             radii: *ar + (*br - *ar) * t,
         },
         _ => {
-            if t < 0.5 { a.clone() } else { b.clone() }
+            if t < 0.5 {
+                a.clone()
+            } else {
+                b.clone()
+            }
         }
     }
 }
@@ -322,11 +428,39 @@ mod tests {
         let kf0 = MaskKeyframe { feather: 0.0, opacity: 1.0, ..Default::default() };
         let mut mc = MaskComponent::new("M1".into(), kf0);
         mc.properties.enable_animation(MASK_PROP_FEATHER, 0).unwrap();
-        mc.properties.write_value(MASK_PROP_FEATHER, 0, PropertyValue::Float(0.0), InterpolationType::Linear).unwrap();
-        mc.properties.write_value(MASK_PROP_FEATHER, 100, PropertyValue::Float(10.0), InterpolationType::Linear).unwrap();
+        mc.properties
+            .write_value(
+                MASK_PROP_FEATHER,
+                0,
+                PropertyValue::Float(0.0),
+                InterpolationType::Linear,
+            )
+            .unwrap();
+        mc.properties
+            .write_value(
+                MASK_PROP_FEATHER,
+                100,
+                PropertyValue::Float(10.0),
+                InterpolationType::Linear,
+            )
+            .unwrap();
         mc.properties.enable_animation(MASK_PROP_OPACITY, 0).unwrap();
-        mc.properties.write_value(MASK_PROP_OPACITY, 0, PropertyValue::Float(1.0), InterpolationType::Linear).unwrap();
-        mc.properties.write_value(MASK_PROP_OPACITY, 100, PropertyValue::Float(0.0), InterpolationType::Linear).unwrap();
+        mc.properties
+            .write_value(
+                MASK_PROP_OPACITY,
+                0,
+                PropertyValue::Float(1.0),
+                InterpolationType::Linear,
+            )
+            .unwrap();
+        mc.properties
+            .write_value(
+                MASK_PROP_OPACITY,
+                100,
+                PropertyValue::Float(0.0),
+                InterpolationType::Linear,
+            )
+            .unwrap();
 
         let mid = mc.evaluate_at(50);
         assert!((mid.feather - 5.0).abs() < 1e-5);
@@ -347,10 +481,18 @@ mod tests {
     #[test]
     fn mask_component_interpolates_rectangle_shape() {
         let shape_a = MaskShape::Rectangle {
-            x: 0.0, y: 0.0, width: 100.0, height: 100.0, corner_radius: 0.0,
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+            corner_radius: 0.0,
         };
         let shape_b = MaskShape::Rectangle {
-            x: 50.0, y: 50.0, width: 200.0, height: 200.0, corner_radius: 10.0,
+            x: 50.0,
+            y: 50.0,
+            width: 200.0,
+            height: 200.0,
+            corner_radius: 10.0,
         };
         let a = MaskKeyframe { shape: shape_a, ..Default::default() };
         let mut mc = MaskComponent::new("M1".into(), a);

@@ -87,8 +87,12 @@ impl EffectType {
 
     pub fn category_path(&self) -> Vec<&str> {
         match self {
-            Self::BasicCorrection | Self::WhiteBalance | Self::Lut3D | Self::ColorWheel
-            | Self::Curves | Self::HueSaturationLightness => vec!["颜色", "调色"],
+            Self::BasicCorrection
+            | Self::WhiteBalance
+            | Self::Lut3D
+            | Self::ColorWheel
+            | Self::Curves
+            | Self::HueSaturationLightness => vec!["颜色", "调色"],
             Self::GaussianBlur | Self::Sharpen => vec!["颜色", "模糊与锐化"],
             Self::Vignette | Self::ChromaticAberration | Self::Grain => vec!["颜色", "风格化"],
             Self::ChromaKey | Self::LumaKey => vec!["抠像"],
@@ -183,8 +187,7 @@ impl EffectNode {
         let mut namespaced = PropertyBag::default();
         for (_, property) in self.properties.iter() {
             let mut property = property.clone();
-            property.descriptor.path =
-                namespaced_effect_path(self.id, &property.descriptor.path);
+            property.descriptor.path = namespaced_effect_path(self.id, &property.descriptor.path);
             property.descriptor.ui_metadata.group_name = Some(group_name.clone());
             namespaced.upsert(property);
         }

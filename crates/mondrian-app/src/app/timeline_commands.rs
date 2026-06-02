@@ -2387,29 +2387,37 @@ impl AppState {
             }
             // Scalar properties: write to PropertyBag.
             use mondrian_core::automation::PropertyValue;
-            use mondrian_effects::mask::{MASK_PROP_EXPANSION, MASK_PROP_FEATHER, MASK_PROP_INVERT, MASK_PROP_MASK_OP, MASK_PROP_OPACITY};
+            use mondrian_effects::mask::{
+                MASK_PROP_EXPANSION, MASK_PROP_FEATHER, MASK_PROP_INVERT, MASK_PROP_MASK_OP,
+                MASK_PROP_OPACITY,
+            };
             let _ = mask.properties.write_value(
-                MASK_PROP_FEATHER, time,
+                MASK_PROP_FEATHER,
+                time,
                 PropertyValue::Float(keyframe.feather),
                 InterpolationType::Linear,
             );
             let _ = mask.properties.write_value(
-                MASK_PROP_OPACITY, time,
+                MASK_PROP_OPACITY,
+                time,
                 PropertyValue::Float(keyframe.opacity),
                 InterpolationType::Linear,
             );
             let _ = mask.properties.write_value(
-                MASK_PROP_EXPANSION, time,
+                MASK_PROP_EXPANSION,
+                time,
                 PropertyValue::Float(keyframe.expansion),
                 InterpolationType::Linear,
             );
             let _ = mask.properties.write_value(
-                MASK_PROP_INVERT, time,
+                MASK_PROP_INVERT,
+                time,
                 PropertyValue::Bool(keyframe.invert),
                 InterpolationType::Hold,
             );
             let _ = mask.properties.write_value(
-                MASK_PROP_MASK_OP, time,
+                MASK_PROP_MASK_OP,
+                time,
                 PropertyValue::Text(keyframe.mask_op.as_str().to_string()),
                 InterpolationType::Hold,
             );

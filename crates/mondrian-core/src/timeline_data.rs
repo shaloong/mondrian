@@ -10,9 +10,7 @@
 
 use crate::effect_data::EffectNode;
 use crate::mask_data::MaskComponent;
-use crate::types::{
-    AssetId, BlendMode, ClipId, Color, ColorSpace, Rational, SequenceId, TimeCode,
-};
+use crate::types::{AssetId, BlendMode, ClipId, Color, ColorSpace, Rational, SequenceId, TimeCode};
 use serde::{Deserialize, Serialize};
 
 // ── Pure data enums (moved from mondrian-timeline) ────────────────────

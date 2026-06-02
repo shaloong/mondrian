@@ -6,8 +6,8 @@
 
 // Re-export mask types from mondrian-core.
 pub use mondrian_core::mask_data::{
-    interpolate_shape, BezierPoint, MaskComponent, MaskKeyframe, MaskOp, MaskShape, shape_label,
-    MASK_PROP_EXPANSION, MASK_PROP_FEATHER, MASK_PROP_INVERT, MASK_PROP_MASK_OP,
-    MASK_PROP_OPACITY, MASK_PROP_SHAPE,
+    interpolate_shape, shape_label, BezierPoint, MaskComponent, MaskKeyframe, MaskOp, MaskShape,
+    MASK_PROP_EXPANSION, MASK_PROP_FEATHER, MASK_PROP_INVERT, MASK_PROP_MASK_OP, MASK_PROP_OPACITY,
+    MASK_PROP_SHAPE,
 };
 pub use mondrian_core::types::MaskId;

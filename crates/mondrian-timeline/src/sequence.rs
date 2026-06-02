@@ -812,8 +812,12 @@ impl mondrian_core::timeline_data::RenderPlanSource for Sequence {
                     interpretation: ac.clip.interpretation.clone(),
                     source_time: ac.source_time,
                     transform_matrix: [
-                        matrix.x_axis.x, matrix.x_axis.y, matrix.z_axis.x,
-                        matrix.y_axis.x, matrix.y_axis.y, matrix.z_axis.y,
+                        matrix.x_axis.x,
+                        matrix.x_axis.y,
+                        matrix.z_axis.x,
+                        matrix.y_axis.x,
+                        matrix.y_axis.y,
+                        matrix.z_axis.y,
                     ],
                     opacity: ac.opacity,
                     blend_mode: ac.blend_mode,
@@ -827,9 +831,7 @@ impl mondrian_core::timeline_data::RenderPlanSource for Sequence {
         Sequence::time_base(self)
     }
 
-    fn nested_color_processing(
-        &self,
-    ) -> mondrian_core::timeline_data::NestedColorProcessing {
+    fn nested_color_processing(&self) -> mondrian_core::timeline_data::NestedColorProcessing {
         self.settings.color_management.nested_processing
     }
 

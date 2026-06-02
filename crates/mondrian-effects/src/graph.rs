@@ -253,7 +253,12 @@ impl EffectGraphBuilderState {
         output
     }
 
-    pub fn mask_current_with<F>(&mut self, invert: bool, mask_op: crate::mask::MaskOp, build_mask: F) -> EffectGraphValue
+    pub fn mask_current_with<F>(
+        &mut self,
+        invert: bool,
+        mask_op: crate::mask::MaskOp,
+        build_mask: F,
+    ) -> EffectGraphValue
     where
         F: FnOnce(&mut Self, EffectGraphValue) -> EffectGraphValue,
     {

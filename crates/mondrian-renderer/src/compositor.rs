@@ -46,11 +46,7 @@ impl FrameCompositor {
         let batched = BatchedCompositor::new(gpu, Arc::clone(&texture_pool))
             .expect("failed to initialize batched compositor");
 
-        Self {
-            batched,
-            texture_pool,
-            _config: config,
-        }
+        Self { batched, texture_pool, _config: config }
     }
 
     /// 合成一帧（输入：已解码 RGBA 图层，输出：RGBA 像素）
@@ -64,7 +60,9 @@ impl FrameCompositor {
         layers: &[CpuRgbaLayer],
     ) -> mondrian_core::Result<Vec<u8>> {
         tracing::trace!(
-            width, height, num_layers = layers.len(),
+            width,
+            height,
+            num_layers = layers.len(),
             pooled_textures = self.texture_pool.len(),
             "Batched frame composite"
         );

@@ -1257,9 +1257,8 @@ impl RenderQueue {
         let cancel_flags = Arc::clone(&self.cancel_flags);
         let executor = Arc::clone(&self.executor);
 
-        let result = std::thread::Builder::new()
-            .name("mondrian-export-worker".to_string())
-            .spawn(move || {
+        let result = std::thread::Builder::new().name("mondrian-export-worker".to_string()).spawn(
+            move || {
                 while let Some((job, cancel_flag)) =
                     take_next_pending_job(&jobs, &wake, &shutdown, &cancel_flags)
                 {
@@ -1287,7 +1286,8 @@ impl RenderQueue {
 
                     cancel_flags.lock().remove(&job.id);
                 }
-            });
+            },
+        );
         if let Err(e) = result {
             tracing::error!("Failed to spawn export worker thread: {}", e);
         }

@@ -4,7 +4,7 @@ use crate::adjustment::{
 use crate::{
     get_or_compile_scheduled_effect_graph, graph::effect_graph_node_use_counts,
     CompiledEffectGraph, EffectExecutionSchedule, EffectGraphNodeId, EffectGraphNodeKind,
-    EffectRenderGraph, EffectRenderPlan, EffectRenderOp,
+    EffectRenderGraph, EffectRenderOp, EffectRenderPlan,
 };
 use mondrian_core::{types::BlendMode, Result};
 use std::{
@@ -871,7 +871,12 @@ fn blend_graph_inputs_in_place(
     }
 }
 
-fn apply_alpha_mask_in_place(input: &mut [u8], mask: &[u8], invert: bool, mask_op: crate::mask::MaskOp) {
+fn apply_alpha_mask_in_place(
+    input: &mut [u8],
+    mask: &[u8],
+    invert: bool,
+    mask_op: crate::mask::MaskOp,
+) {
     use crate::mask::MaskOp;
     for (out_px, mask_px) in input.chunks_exact_mut(4).zip(mask.chunks_exact(4)) {
         let mut matte = mask_px[3] as f32 / 255.0;

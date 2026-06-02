@@ -177,10 +177,16 @@ steps:
             m
         };
         let mut ctx = WorkflowContext::new(inputs);
-        assert_eq!(ctx.inputs.get("key").and_then(|v| v.as_str()), Some("value"));
+        assert_eq!(
+            ctx.inputs.get("key").and_then(|v| v.as_str()),
+            Some("value")
+        );
         assert!(ctx.get_output("step1").is_none());
 
-        ctx.set_output("step1", serde_json::json!({"url": "https://example.com/img.png"}));
+        ctx.set_output(
+            "step1",
+            serde_json::json!({"url": "https://example.com/img.png"}),
+        );
         let out = ctx.get_output("step1").expect("exists");
         assert_eq!(out["url"].as_str(), Some("https://example.com/img.png"));
     }
@@ -203,7 +209,10 @@ steps:
       factor: 2
 "#;
         let wf = WorkflowDef::from_yaml(yaml).expect("parse");
-        assert_eq!(wf.steps[0].condition.as_deref(), Some("{{ inputs.mode == \"quality\" }}"));
+        assert_eq!(
+            wf.steps[0].condition.as_deref(),
+            Some("{{ inputs.mode == \"quality\" }}")
+        );
     }
 
     #[test]
@@ -221,8 +230,14 @@ steps: []
         let style = wf.inputs.get("style").expect("style input");
         assert_eq!(style.input_type, "enum");
         assert_eq!(
-            style.options.as_ref().map(|o| o.as_slice()),
-            Some(&["realistic".to_string(), "anime".to_string(), "3d".to_string()][..])
+            style.options.as_deref(),
+            Some(
+                &[
+                    "realistic".to_string(),
+                    "anime".to_string(),
+                    "3d".to_string()
+                ][..]
+            )
         );
     }
 

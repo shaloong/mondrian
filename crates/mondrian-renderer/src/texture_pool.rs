@@ -151,4 +151,9 @@ impl TexturePool {
     pub fn len(&self) -> usize {
         self.pool.lock().values().map(|v| v.len()).sum()
     }
+
+    /// Returns true if no textures are currently pooled.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }

@@ -618,7 +618,7 @@ mod tests {
 
     fn open_test_library() -> Arc<AssetLibrary> {
         let dir = tempfile::tempdir().expect("tempdir");
-        AssetLibrary::open(dir.into_path()).expect("open library")
+        AssetLibrary::open(dir.keep()).expect("open library")
     }
 
     #[test]
@@ -637,10 +637,7 @@ mod tests {
         let record = lib.get_asset(id).expect("get").expect("exists");
         assert_eq!(record.kind, AssetKind::AdjustmentLayer);
         assert_eq!(record.name, "Test Adjustment");
-        assert!(record
-            .path
-            .to_string_lossy()
-            .starts_with("mondrian://adjustment-layer/"));
+        assert!(record.path.to_string_lossy().starts_with("mondrian://adjustment-layer/"));
     }
 
     #[test]
@@ -669,10 +666,7 @@ mod tests {
         let record = lib.get_asset(id).expect("get").expect("exists");
         assert_eq!(record.kind, AssetKind::SolidColor);
         assert_eq!(record.name, "Red Background");
-        assert!(record
-            .path
-            .to_string_lossy()
-            .starts_with("mondrian://solid-color/"));
+        assert!(record.path.to_string_lossy().starts_with("mondrian://solid-color/"));
     }
 
     #[test]
@@ -703,9 +697,7 @@ mod tests {
     #[test]
     fn rename_asset() {
         let lib = open_test_library();
-        let id = lib
-            .create_adjustment_layer_asset(Some("Original"))
-            .expect("create");
+        let id = lib.create_adjustment_layer_asset(Some("Original")).expect("create");
         lib.rename_asset(id, "Renamed").expect("rename");
         let record = lib.get_asset(id).expect("get").expect("exists");
         assert_eq!(record.name, "Renamed");
@@ -764,12 +756,13 @@ mod tests {
     fn create_nested_folder() {
         let lib = open_test_library();
         let parent = lib.create_folder("Parent", None).expect("create parent");
-        let child = lib
-            .create_folder("Child", Some(&parent))
-            .expect("create child");
+        let child = lib.create_folder("Child", Some(&parent)).expect("create child");
         let folders = lib.list_folders().expect("list");
         assert_eq!(folders.len(), 2);
-        assert_eq!(folders.iter().find(|f| f.id == child).unwrap().parent_id.as_deref(), Some(parent.as_str()));
+        assert_eq!(
+            folders.iter().find(|f| f.id == child).unwrap().parent_id.as_deref(),
+            Some(parent.as_str())
+        );
     }
 
     #[test]
@@ -810,9 +803,7 @@ mod tests {
     #[test]
     fn list_assets_in_nonexistent_folder_returns_empty() {
         let lib = open_test_library();
-        let result = lib
-            .list_assets_in_folder(Some("nonexistent"))
-            .expect("list");
+        let result = lib.list_assets_in_folder(Some("nonexistent")).expect("list");
         assert!(result.is_empty());
     }
 }

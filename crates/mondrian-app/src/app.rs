@@ -20,7 +20,9 @@ use mondrian_core::{
     },
     ProjectColorManagement, ProjectSettings,
 };
-use mondrian_effects::{EffectNode, EffectNodeExt, EffectType, MaskComponent, MaskId, MaskKeyframe, MaskShape};
+use mondrian_effects::{
+    EffectNode, EffectNodeExt, EffectType, MaskComponent, MaskId, MaskKeyframe, MaskShape,
+};
 use mondrian_export::queue::{JobStatus, RenderQueue};
 use mondrian_media::audio::{
     AudioBuffer, AudioClock, AudioMixer, AudioSourceCache, AudioSyncController, AudioTrackConfig,
@@ -1443,22 +1445,18 @@ impl MondrianApp {
                 mondrian_effects::set_global_gpu_executor(Some(backend));
                 self.gpu_available = true;
                 tracing::info!("GPU 加速已启用");
-                let _ = self.state.event_bus.publish(
-                    mondrian_core::AppEvent::GpuStatusChanged {
-                        available: true,
-                        reason: "GPU 加速已启用".into(),
-                    },
-                );
+                self.state.event_bus.publish(mondrian_core::AppEvent::GpuStatusChanged {
+                    available: true,
+                    reason: "GPU 加速已启用".into(),
+                });
             }
             None => {
                 self.gpu_available = false;
                 tracing::info!("GPU 不可用，使用 CPU 渲染");
-                let _ = self.state.event_bus.publish(
-                    mondrian_core::AppEvent::GpuStatusChanged {
-                        available: false,
-                        reason: "未检测到兼容 GPU，使用 CPU 渲染".into(),
-                    },
-                );
+                self.state.event_bus.publish(mondrian_core::AppEvent::GpuStatusChanged {
+                    available: false,
+                    reason: "未检测到兼容 GPU，使用 CPU 渲染".into(),
+                });
             }
         }
     }

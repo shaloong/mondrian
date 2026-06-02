@@ -141,10 +141,7 @@ mod tests {
     fn make_frame(asset_id: AssetId, frame_num: u64) -> Arc<RawVideoFrame> {
         Arc::new(RawVideoFrame {
             asset_id,
-            pts: TimeCode::new(
-                frame_num as i64,
-                mondrian_core::types::Rational::new(30, 1),
-            ),
+            pts: TimeCode::new(frame_num as i64, mondrian_core::types::Rational::new(30, 1)),
             width: 1920,
             height: 1080,
             planes: [vec![0u8; 100], vec![0u8; 50], vec![0u8; 50]],
@@ -216,10 +213,7 @@ mod tests {
         assert_eq!(cache.stats().size, 2);
         // frame 0 was least recently used (only inserted, never accessed)
         // depending on LRU internals it may or may not be gone — but size is capped
-        let total_present = [0, 1, 2]
-            .iter()
-            .filter(|&&n| cache.get(asset, n).is_some())
-            .count();
+        let total_present = [0, 1, 2].iter().filter(|&&n| cache.get(asset, n).is_some()).count();
         assert_eq!(total_present, 2);
     }
 

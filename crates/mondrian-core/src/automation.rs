@@ -1603,12 +1603,20 @@ impl PropertyMutation {
             SetStaticValue { path, value } => SetStaticValue { path: f(path), value },
             SetKeyframe { path, keyframe } => SetKeyframe { path: f(path), keyframe },
             RemoveKeyframe { path, time } => RemoveKeyframe { path: f(path), time },
-            MoveKeyframe { path, from_time, to_time } => MoveKeyframe { path: f(path), from_time, to_time },
+            MoveKeyframe { path, from_time, to_time } => {
+                MoveKeyframe { path: f(path), from_time, to_time }
+            }
             UpdateKeyframeInterpolation { path, time, interpolation } => {
                 UpdateKeyframeInterpolation { path: f(path), time, interpolation }
             }
             UpdateChannelKeyframeHandles { path, time, channel_index, interp_in, interp_out } => {
-                UpdateChannelKeyframeHandles { path: f(path), time, channel_index, interp_in, interp_out }
+                UpdateChannelKeyframeHandles {
+                    path: f(path),
+                    time,
+                    channel_index,
+                    interp_in,
+                    interp_out,
+                }
             }
             UpdateChannelKeyframeValue { path, time, channel_index, value } => {
                 UpdateChannelKeyframeValue { path: f(path), time, channel_index, value }

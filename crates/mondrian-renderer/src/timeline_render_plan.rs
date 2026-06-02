@@ -1,7 +1,7 @@
 use mondrian_core::{
     timeline_data::{
-        AlphaInterpretation, ClipKind, FieldOrder, NestedColorProcessing,
-        PixelAspectRatio, RenderPlanSource,
+        AlphaInterpretation, ClipKind, FieldOrder, NestedColorProcessing, PixelAspectRatio,
+        RenderPlanSource,
     },
     types::{AssetId, BlendMode, Color, ColorSpace, Rational, SequenceId, TimeCode},
 };
@@ -126,7 +126,9 @@ pub fn build_timeline_render_plan(
 
         match ac.kind {
             ClipKind::NestedSequence => {
-                let Some(sequence_id) = ac.nested_sequence_id else { continue };
+                let Some(sequence_id) = ac.nested_sequence_id else {
+                    continue;
+                };
                 let Some(eg) = effect_graph else { continue };
                 elements.push(TimelineRenderPlanElement::NestedSequence(
                     TimelineNestedSequencePlan {
@@ -304,7 +306,10 @@ mod tests {
             Some(PixelAspectRatio::Anamorphic2x)
         );
         assert_eq!(media.field_order_override, Some(FieldOrder::UpperFirst));
-        assert_eq!(media.alpha_interpretation, AlphaInterpretation::Premultiplied);
+        assert_eq!(
+            media.alpha_interpretation,
+            AlphaInterpretation::Premultiplied
+        );
         assert!((media.transform[0] - 2.0).abs() < 1.0e-6);
     }
 
@@ -358,7 +363,10 @@ mod tests {
             diagnostic.pixel_aspect_ratio_override,
             Some(PixelAspectRatio::DvcproHd)
         );
-        assert_eq!(diagnostic.field_order_override, Some(FieldOrder::LowerFirst));
+        assert_eq!(
+            diagnostic.field_order_override,
+            Some(FieldOrder::LowerFirst)
+        );
         assert_eq!(diagnostic.alpha_interpretation, AlphaInterpretation::Ignore);
     }
 

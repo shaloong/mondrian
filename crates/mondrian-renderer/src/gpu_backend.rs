@@ -250,11 +250,22 @@ impl GpuBackend {
         if !self.available {
             return GpuExecResult::Fallback { reason: GpuFallbackReason::GpuUnavailable };
         }
-        if exposure.abs() < 1e-4 && (contrast - 1.0).abs() < 1e-4 && (saturation - 1.0).abs() < 1e-4 {
+        if exposure.abs() < 1e-4 && (contrast - 1.0).abs() < 1e-4 && (saturation - 1.0).abs() < 1e-4
+        {
             return GpuExecResult::Success { data: input.to_vec() };
         }
-        let pipeline = self.get_or_create_pipeline(&self.color_adjust, shaders::COLOR_ADJUST_COMPUTE, "color_adjust");
-        self.dispatch(input, width, height, pipeline.as_ref(), &[exposure, contrast, saturation, 0.0])
+        let pipeline = self.get_or_create_pipeline(
+            &self.color_adjust,
+            shaders::COLOR_ADJUST_COMPUTE,
+            "color_adjust",
+        );
+        self.dispatch(
+            input,
+            width,
+            height,
+            pipeline.as_ref(),
+            &[exposure, contrast, saturation, 0.0],
+        )
     }
 
     pub fn execute_blur(
@@ -270,13 +281,29 @@ impl GpuBackend {
         if radius < 1e-4 {
             return GpuExecResult::Success { data: input.to_vec() };
         }
-        let pipeline = self.get_or_create_pipeline(&self.blur, shaders::BLUR_GAUSSIAN_COMPUTE, "blur_gaussian");
-        let horiz = self.dispatch(input, width, height, pipeline.as_ref(), &[radius, 1.0, 0.0, 0.0]);
+        let pipeline = self.get_or_create_pipeline(
+            &self.blur,
+            shaders::BLUR_GAUSSIAN_COMPUTE,
+            "blur_gaussian",
+        );
+        let horiz = self.dispatch(
+            input,
+            width,
+            height,
+            pipeline.as_ref(),
+            &[radius, 1.0, 0.0, 0.0],
+        );
         let horiz_data = match horiz {
             GpuExecResult::Success { data } => data,
             other => return other,
         };
-        self.dispatch(&horiz_data, width, height, pipeline.as_ref(), &[radius, 0.0, 1.0, 0.0])
+        self.dispatch(
+            &horiz_data,
+            width,
+            height,
+            pipeline.as_ref(),
+            &[radius, 0.0, 1.0, 0.0],
+        )
     }
 
     /// GPU 3D LUT color grading.
@@ -297,7 +324,9 @@ impl GpuBackend {
             return GpuExecResult::Success { data: input.to_vec() };
         }
         let pipeline = self.get_or_create_lut_pipeline();
-        self.dispatch_lut(input, width, height, &pipeline, lut_rgba, lut_size, intensity)
+        self.dispatch_lut(
+            input, width, height, &pipeline, lut_rgba, lut_size, intensity,
+        )
     }
 
     // ── Internal ──────────────────────────────────────────────────
@@ -351,7 +380,8 @@ impl GpuBackend {
         let input_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("lut_in"),
             size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-            mip_level_count: 1, sample_count: 1,
+            mip_level_count: 1,
+            sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
             usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
@@ -359,18 +389,25 @@ impl GpuBackend {
         });
         queue.write_texture(
             wgpu::ImageCopyTexture {
-                texture: &input_tex, mip_level: 0,
-                origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All,
+                texture: &input_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
             },
             input,
-            wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(width * 4), rows_per_image: Some(height) },
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
             wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         );
 
         let output_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("lut_out"),
             size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-            mip_level_count: 1, sample_count: 1,
+            mip_level_count: 1,
+            sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
             usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
@@ -380,8 +417,13 @@ impl GpuBackend {
         // 3D LUT texture
         let lut_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("lut_3d_table"),
-            size: wgpu::Extent3d { width: lut_size, height: lut_size, depth_or_array_layers: lut_size },
-            mip_level_count: 1, sample_count: 1,
+            size: wgpu::Extent3d {
+                width: lut_size,
+                height: lut_size,
+                depth_or_array_layers: lut_size,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
             dimension: wgpu::TextureDimension::D3,
             format: wgpu::TextureFormat::Rgba32Float,
             usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
@@ -391,8 +433,10 @@ impl GpuBackend {
         let lut_bytes: &[u8] = bytemuck::cast_slice(lut_rgba);
         queue.write_texture(
             wgpu::ImageCopyTexture {
-                texture: &lut_tex, mip_level: 0,
-                origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All,
+                texture: &lut_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
             },
             lut_bytes,
             wgpu::ImageDataLayout {
@@ -400,7 +444,11 @@ impl GpuBackend {
                 bytes_per_row: Some(lut_size * 16), // 4 × f32 = 16 bytes per texel
                 rows_per_image: Some(lut_size),
             },
-            wgpu::Extent3d { width: lut_size, height: lut_size, depth_or_array_layers: lut_size },
+            wgpu::Extent3d {
+                width: lut_size,
+                height: lut_size,
+                depth_or_array_layers: lut_size,
+            },
         );
 
         // Uniform buffer
@@ -410,7 +458,11 @@ impl GpuBackend {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        queue.write_buffer(&uniform_buf, 0, bytemuck::cast_slice(&[intensity, lut_size as f32, 0.0f32, 0.0f32]));
+        queue.write_buffer(
+            &uniform_buf,
+            0,
+            bytemuck::cast_slice(&[intensity, lut_size as f32, 0.0f32, 0.0f32]),
+        );
 
         // Readback
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
@@ -439,18 +491,28 @@ impl GpuBackend {
             label: Some("lut_bg0"),
             layout: &pipeline.bgl_0,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&input_view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&output_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&lut_view) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&input_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&output_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&lut_view),
+                },
             ],
         });
 
         let bg1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("lut_bg1"),
             layout: &pipeline.bgl_1,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: uniform_buf.as_entire_binding() },
-            ],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buf.as_entire_binding(),
+            }],
         });
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
@@ -462,16 +524,22 @@ impl GpuBackend {
             cpass.set_pipeline(&compute_pipeline);
             cpass.set_bind_group(0, &bg0, &[]);
             cpass.set_bind_group(1, &bg1, &[]);
-            cpass.dispatch_workgroups((width + 7) / 8, (height + 7) / 8, 1);
+            cpass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
         }
         encoder.copy_texture_to_buffer(
             wgpu::ImageCopyTexture {
-                texture: &output_tex, mip_level: 0,
-                origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All,
+                texture: &output_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
             },
             wgpu::ImageCopyBuffer {
                 buffer: &readback,
-                layout: wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(width * 4), rows_per_image: Some(height) },
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(width * 4),
+                    rows_per_image: Some(height),
+                },
             },
             wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         );
@@ -479,7 +547,9 @@ impl GpuBackend {
 
         // Readback
         let (tx, rx) = std::sync::mpsc::channel();
-        readback.slice(..).map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
+        readback.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
         device.poll(wgpu::Maintain::Wait);
 
         match rx.recv().unwrap_or(Err(wgpu::BufferAsyncError)) {
@@ -518,7 +588,8 @@ impl GpuBackend {
         let input_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("gpu_in"),
             size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-            mip_level_count: 1, sample_count: 1,
+            mip_level_count: 1,
+            sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
             usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
@@ -526,11 +597,17 @@ impl GpuBackend {
         });
         queue.write_texture(
             wgpu::ImageCopyTexture {
-                texture: &input_tex, mip_level: 0,
-                origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All,
+                texture: &input_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
             },
             input,
-            wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(width * 4), rows_per_image: Some(height) },
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
             wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         );
 
@@ -538,7 +615,8 @@ impl GpuBackend {
         let output_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("gpu_out"),
             size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-            mip_level_count: 1, sample_count: 1,
+            mip_level_count: 1,
+            sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
             usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
@@ -580,17 +658,24 @@ impl GpuBackend {
             label: Some("effect_bg0"),
             layout: &pipeline.bgl_0,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&input_view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&output_view) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&input_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&output_view),
+                },
             ],
         });
 
         let bg1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("effect_bg1"),
             layout: &pipeline.bgl_1,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: uniform_buf.as_entire_binding() },
-            ],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buf.as_entire_binding(),
+            }],
         });
 
         // Single encoder: compute + copy
@@ -603,16 +688,22 @@ impl GpuBackend {
             cpass.set_pipeline(&compute_pipeline);
             cpass.set_bind_group(0, &bg0, &[]);
             cpass.set_bind_group(1, &bg1, &[]);
-            cpass.dispatch_workgroups((width + 7) / 8, (height + 7) / 8, 1);
+            cpass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
         }
         encoder.copy_texture_to_buffer(
             wgpu::ImageCopyTexture {
-                texture: &output_tex, mip_level: 0,
-                origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All,
+                texture: &output_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
             },
             wgpu::ImageCopyBuffer {
                 buffer: &readback,
-                layout: wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(width * 4), rows_per_image: Some(height) },
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(width * 4),
+                    rows_per_image: Some(height),
+                },
             },
             wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         );
@@ -621,7 +712,9 @@ impl GpuBackend {
 
         // Readback
         let (tx, rx) = std::sync::mpsc::channel();
-        readback.slice(..).map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
+        readback.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
         device.poll(wgpu::Maintain::Wait);
 
         match rx.recv().unwrap_or(Err(wgpu::BufferAsyncError)) {
@@ -651,7 +744,14 @@ impl EffectGpuExecutor for GpuBackend {
     ) -> Option<Vec<u8>> {
         match op {
             EffectRenderOp::ColorAdjust { exposure, contrast, saturation } => {
-                match self.execute_color_adjust(input, width, height, *exposure, *contrast, *saturation) {
+                match self.execute_color_adjust(
+                    input,
+                    width,
+                    height,
+                    *exposure,
+                    *contrast,
+                    *saturation,
+                ) {
                     GpuExecResult::Success { data } => Some(data),
                     GpuExecResult::Fallback { reason } => {
                         tracing::debug!("GPU ColorAdjust fallback: {}", reason.user_message());
@@ -670,11 +770,8 @@ impl EffectGpuExecutor for GpuBackend {
             }
             EffectRenderOp::Lut3D { lut, intensity } => {
                 // Convert Vec<[f32; 3]> to Vec<f32> (RGBA with alpha=1.0)
-                let lut_rgba: Vec<f32> = lut
-                    .data
-                    .iter()
-                    .flat_map(|rgb| [rgb[0], rgb[1], rgb[2], 1.0f32])
-                    .collect();
+                let lut_rgba: Vec<f32> =
+                    lut.data.iter().flat_map(|rgb| [rgb[0], rgb[1], rgb[2], 1.0f32]).collect();
                 match self.execute_lut3d(input, width, height, &lut_rgba, lut.size, *intensity) {
                     GpuExecResult::Success { data } => Some(data),
                     GpuExecResult::Fallback { reason } => {

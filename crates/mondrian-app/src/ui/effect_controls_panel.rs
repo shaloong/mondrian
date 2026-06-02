@@ -337,7 +337,10 @@ impl EffectControlsPanel {
                             let (slot_y, insert_idx) = slots
                                 .iter()
                                 .min_by(|a, b| {
-                                    (ptr.y - a.0).abs().partial_cmp(&(ptr.y - b.0).abs()).unwrap_or(std::cmp::Ordering::Equal)
+                                    (ptr.y - a.0)
+                                        .abs()
+                                        .partial_cmp(&(ptr.y - b.0).abs())
+                                        .unwrap_or(std::cmp::Ordering::Equal)
                                 })
                                 .copied()
                                 .unwrap_or((end_y, total_fx));
@@ -470,7 +473,9 @@ impl EffectControlsPanel {
             app.clip_snapshot(selection)
                 .and_then(|clip| clip.masks.iter().find(|m| m.id == mid).map(|m| m.enabled))
         } else {
-            effect_id.and_then(|id| app.clip_snapshot(selection).and_then(|clip| clip.effect_enabled(id)))
+            effect_id.and_then(|id| {
+                app.clip_snapshot(selection).and_then(|clip| clip.effect_enabled(id))
+            })
         };
 
         let show_controls = effect_id.is_some() || mask_id.is_some();
@@ -540,9 +545,19 @@ impl EffectControlsPanel {
                                 tokens::timeline_toolbar_button_size(),
                                 theme::UiIcon::Timer,
                                 has_animation,
-                            ).on_hover_text(if has_animation { "已开启动画" } else { "点击开启形状关键帧动画" });
+                            )
+                            .on_hover_text(if has_animation {
+                                "已开启动画"
+                            } else {
+                                "点击开启形状关键帧动画"
+                            });
                             if timer_resp.clicked() {
-                                let _ = app.set_mask_shape_animation_enabled(selection, mid, !has_animation, ticks);
+                                let _ = app.set_mask_shape_animation_enabled(
+                                    selection,
+                                    mid,
+                                    !has_animation,
+                                    ticks,
+                                );
                             }
 
                             ui.label(
@@ -2887,7 +2902,7 @@ impl EffectControlsPanel {
                     return;
                 }
 
-                                if path == Clip::BLEND_MODE_PATH {
+                if path == Clip::BLEND_MODE_PATH {
                     self.draw_blend_mode_editor(
                         ui,
                         app,
@@ -2983,7 +2998,6 @@ impl EffectControlsPanel {
             );
         }
     }
-
 
     fn draw_mask_op_editor(
         &mut self,

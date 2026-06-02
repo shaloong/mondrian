@@ -1029,6 +1029,7 @@ mod tests {
             name: "Test".to_string(),
             kind,
             path: PathBuf::from("test"),
+            source: None,
             folder_id: None,
             media_info,
             created_at: "now".to_string(),
