@@ -4,8 +4,8 @@
 [![Rust](https://img.shields.io/badge/rust-1.92%2B-orange)](https://rustup.rs)
 [![Build](https://github.com/shaloong/mondrian/actions/workflows/ci.yml/badge.svg)](https://github.com/shaloong/mondrian/actions)
 
-> [!WARNING]  
-> 当前处于早期开发阶段，后续可能随时发生破坏性重构，不建议在生产环境中使用。
+> [!NOTE]
+> Mondrian is in active development. The core editing, preview, and export pipeline is functional. Expect continued iteration on effects, audio, and plugin APIs.
 
 ## 🏗️ 系统架构概览
 
@@ -46,7 +46,7 @@
 | `mondrian-renderer` | wgpu GPU 渲染管线、实时帧合成         | wgpu, bytemuck, glam   |
 | `mondrian-assets`   | 素材库、角色/场景/模板、跨项目复用    | serde, sqlite          |
 | `mondrian-ai`       | AI Agent 编排、视频生成 API、自动剪辑 | reqwest, tokio         |
-| `mondrian-effects`  | LUT 调色、滤镜、转场、文字动画        | mondrian-renderer      |
+| `mondrian-effects`  | DAG 效果图、GPU compute 加速效果、LUT 调色、滤镜、转场 | mondrian-core          |
 | `mondrian-export`   | 导出编码、渲染队列、硬件加速          | ffmpeg-next            |
 | `mondrian-app`      | 主程序入口、UI 状态机、面板布局       | egui                   |
 
@@ -54,7 +54,7 @@
 
 ### 环境要求
 
-- Rust 1.75+
+- Rust 1.92+
 - FFmpeg 8.x（动态链接）
 - Vulkan / Metal / DirectX 12 驱动
 - Windows 11 / macOS 13+ / Ubuntu 22.04+
@@ -102,6 +102,12 @@ $env:MONDRIAN_PREVIEW_SIM_OUTPUT='target/perf/preview-8k60.jsonl'; cargo test -p
 
 # Benchmark
 cargo bench -p mondrian-renderer
+
+# GPU 渲染性能剖析（输出 JSON 报告）
+$env:MONDRIAN_RENDER_PROFILE=1; cargo run -p mondrian-app
+
+# 金标准图像回归测试
+cargo test -p mondrian-renderer golden
 ```
 
 性能烟雾测试支持通过环境变量调整阈值：

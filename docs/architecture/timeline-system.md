@@ -22,6 +22,47 @@ Timeline (项目序列)
 
 ## 2. 核心数据结构
 
+### ClipGraphNode trait（mondrian-core）
+
+所有可渲染的 clip 类型通过 `ClipGraphNode` trait 统一暴露渲染图构建能力，定义在 `mondrian-core` 中，由 timeline 和 renderer 共享：
+
+```rust
+/// 统一 clip 渲染图节点接口（定义在 mondrian-core）
+pub trait ClipGraphNode {
+    /// 构建该 clip 的渲染子图
+    fn build_render_subgraph(&self, ctx: &RenderCtx) -> RenderSubgraph;
+    /// 返回属性包（支持效果面板自动发现）
+    fn property_bag(&self) -> &PropertyBag;
+}
+```
+
+### FlatActiveClip + RenderPlanSource 解耦
+
+时间线查询不再直接返回复杂的 `ActiveClip` 结构，而是通过 `FlatActiveClip` + `RenderPlanSource` 两层解耦：
+
+- `FlatActiveClip`：时间线层的扁平化输出，仅含渲染所需的最小字段集合
+- `RenderPlanSource`：由 `ClipGraphNode::build_render_subgraph()` 生成，renderer 侧直接消费
+
+```rust
+/// 扁平化活跃 clip（时间线查询输出）
+pub struct FlatActiveClip {
+    pub id: ClipId,
+    pub track_id: TrackId,
+    pub source_range: TimeRange,
+    pub transform: Mat3,
+    pub opacity: f32,
+    pub blend_mode: BlendMode,
+}
+
+/// 渲染计划来源（由 ClipGraphNode 构建，renderer 直接消费）
+pub enum RenderPlanSource {
+    Media(MediaFrameRequest),
+    ColorMatte(Color),
+    NestedSequence(SequenceId),
+    Generator(GeneratorParams),
+}
+```
+
 ```rust
 /// 时间码（帧精确）
 /// 内部用有理数表示，避免浮点误差
@@ -261,7 +302,43 @@ pub struct SequenceRenderColorContext {
 - `BakeChildOutputTransform`：先按子序列自己的输出意图渲染，再烘焙到父序列空间
 
 这套解析是 preview 与 export 共享的唯一入口，避免 nested sequence 在不同管线里出现不同解释。
-- 不透明度：不透明度、混合模式
+
+### PropertyBag + AnimatedProperty 关键帧动画系统
+
+`PropertyBag` 是 clip 属性的统一容器，通过 `AnimatedProperty<T>` 封装可关键帧驱动的属性值：
+
+```rust
+/// 属性包（每个 clip 的属性集合，供效果面板自动发现）
+pub struct PropertyBag {
+    properties: HashMap<String, Box<dyn AnimatableProperty>>,
+}
+
+impl PropertyBag {
+    /// 注册一个可动画属性
+    pub fn register<T: Interpolatable + 'static>(&mut self, name: &str, prop: AnimatedProperty<T>);
+    /// 在指定时间求值所有属性
+    pub fn evaluate_all(&self, time: TimeCode) -> HashMap<String, PropertyValue>;
+}
+
+/// 可动画属性（封装 KeyframeTrack + 求值缓存）
+pub struct AnimatedProperty<T: Interpolatable> {
+    pub track: KeyframeTrack<T>,
+    pub default_value: T,
+    evaluate_cache: RefCell<Option<(TimeCode, T)>>,
+}
+
+impl<T: Interpolatable> AnimatedProperty<T> {
+    /// 在指定时间求值（带缓存）
+    pub fn evaluate(&self, time: TimeCode) -> T;
+    /// 写入关键帧
+    pub fn set_keyframe(&mut self, kf: Keyframe<T>);
+}
+```
+
+效果控制面板通过 `PropertyHost::property_bag()` 自动发现所有可编辑属性，无需为每个属性手工添加 UI 行。
+
+---
+
 
 编辑行为约定：
 

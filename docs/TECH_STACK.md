@@ -23,7 +23,7 @@
 ## 二、媒体解码：FFmpeg（通过 ffmpeg-next）
 
 ```toml
-ffmpeg-next = "7"
+ffmpeg-next = "8"
 ```
 
 **为什么不用其他方案？**
@@ -49,7 +49,7 @@ Linux   : VAAPI / NVDEC
 ## 三、GPU 渲染：wgpu
 
 ```toml
-wgpu = "0.20"
+wgpu = "29.0"
 ```
 
 **wgpu vs 直接使用 Vulkan/Metal/DX12**
@@ -70,6 +70,8 @@ Linux   → Vulkan
 WebGPU  → 浏览器版（未来）
 ```
 
+当前使用 wgpu 29.0，与 egui 0.34 共享同一 wgpu 设备（unified GPU），preview 与 export compositor 均通过同一 device/queue 提交工作。
+
 ---
 
 ## 四、UI 框架：两阶段策略
@@ -77,8 +79,8 @@ WebGPU  → 浏览器版（未来）
 ### Phase 1（原型 / v0.1~v0.2）：egui
 
 ````toml
-egui     = "0.29"
-eframe   = "0.29"
+egui     = "0.34"
+eframe   = "0.34"
 ```text
 
 - 纯 Rust，零依赖

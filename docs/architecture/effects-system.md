@@ -4,28 +4,43 @@
 
 插件开发请参阅完整的 [插件开发手册](../plugins/README.md)，包含从快速入门到 API 参考的完整指南。
 
-## 1. 效果节点图（Effect Graph）
+## 1. 效果节点图（Effect Graph）— DAG 架构
 
-每个 Clip 的效果以**有向无环图**（DAG）组织，支持串联和并联：
+每个 Clip 的效果以**有向无环图**（DAG）组织，支持串联和并联。旧版线性效果栈已被删除，全部走 DAG 执行路径。
+
+效果图使用拓扑排序确定执行顺序，支持多输入节点（`MultiInput` node kind），为未来的 N-port 效果（如混合/转场）预留接口。
 
 ```text
 输入帧 (RawTexture)
     │
-    ▼
-[ColorCorrection]   ← LUT / 颜色轮
-    │
-    ▼
-[GaussianBlur]      ← 仅对蒙版区域
-    │
-    ▼
-[Sharpen]
-    │
-    ▼
-[Vignette]
-    │
-    ▼
+    ├──────────────────┐
+    ▼                  ▼
+[ColorCorrection]   [LUT3D] ← GPU compute 加速
+    │                  │
+    └──────┬───────────┘
+           ▼
+      [GaussianBlur] ← GPU compute 加速（仅蒙版区域）
+           │
+           ▼
+      [ColorAdjust]  ← GPU compute 加速
+           │
+           ▼
 输出帧 (ProcessedTexture)
 ```
+
+### 1.1 GPU Compute 加速效果
+
+以下 3 个效果通过 GPU compute shader 直接加速执行，无需 CPU↔GPU 数据往返：
+
+| 效果         | Compute Shader       | 加速比 vs CPU  |
+| ------------ | -------------------- | -------------- |
+| LUT3D        | `lut3d.wgsl`         | ~20x           |
+| GaussianBlur | `blur_gaussian.wgsl` | ~15x           |
+| ColorAdjust  | `color_adjust.wgsl`  | ~10x           |
+
+### 1.2 MultiInput 节点
+
+`MultiInput` node kind 允许效果节点接收多个输入纹理，是未来 N-port 效果（转场、混合模式、差异蒙版等）的基础抽象。当前 DAG 拓扑排序已支持多输入节点的依赖解析。
 
 ---
 
@@ -51,7 +66,7 @@ impl Lut3D {
     /// 插值强度 (0.0 = 不应用, 1.0 = 完全应用)
     pub fn with_intensity(self, intensity: f32) -> LutEffect;
 }
-```text
+```
 
 **WGSL Shader 实现：**
 
@@ -146,7 +161,7 @@ pub struct ZoomOut;            // 拉远
 pub struct FilmBurn;           // 胶片燃烧
 pub struct GlitchTransition;   // Glitch 故障
 pub struct LensFlareTransition; // 镜头光晕擦除
-```text
+```
 
 ---
 
@@ -193,4 +208,4 @@ pub struct Mask {
     pub invert: bool,
     pub tracking: Option<TrackingData>, // 绑定追踪数据（v0.6）
 }
-```text
+```

@@ -13,12 +13,16 @@ RenderQueue（异步后台任务）
     │
     ├─ FrameRenderer（时间线逐帧渲染）
     │      ↓
-    │  wgpu → CPU readback → YUV帧
+    │  BatchedCompositor (wgpu 29.0, GPU compositing)
+    │      ↓
+    │  GPU → CPU readback → YUV帧 (或 GPU→GPU 零拷贝路径)
     │
     └─ HardwareEncoder（FFmpeg 硬件编码）
            ↓
        输出文件 (.mp4 / .mov / .gif)
 ```
+
+导出 compositor 与 eframe preview 共享同一 wgpu device/queue（unified GPU），避免跨设备拷贝开销。GPU compositing 路径在导出中同样可用，包括 pass fusion 和 compute shader 效果加速。
 
 ---
 
@@ -86,7 +90,7 @@ pub fn presets() -> Vec<ExportPreset> {
         },
     ]
 }
-```text
+```
 
 ---
 
@@ -174,7 +178,7 @@ impl EncoderBackend {
         Self::SoftwareX264
     }
 }
-```text
+```
 
 ---
 
