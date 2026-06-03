@@ -1401,7 +1401,6 @@ fn update_job_status(
     }
 }
 
-
 mod helpers;
 pub(crate) use helpers::*;
 

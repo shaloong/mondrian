@@ -303,7 +303,11 @@ pub(crate) fn parse_progress_time_us(line: &str) -> Option<u64> {
     None
 }
 
-pub(crate) fn probe_duration_ms(path: &Path, in_point: Option<&str>, out_point: Option<&str>) -> Option<u64> {
+pub(crate) fn probe_duration_ms(
+    path: &Path,
+    in_point: Option<&str>,
+    out_point: Option<&str>,
+) -> Option<u64> {
     let output = Command::new("ffprobe")
         .arg("-v")
         .arg("error")
@@ -374,4 +378,3 @@ pub(crate) fn parse_time_spec_millis(raw: &str) -> Option<u64> {
         _ => None,
     }
 }
-
