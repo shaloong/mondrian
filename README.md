@@ -1,6 +1,6 @@
 # Mondrian
 
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![License](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.92%2B-orange)](https://rustup.rs)
 [![Build](https://github.com/shaloong/mondrian/actions/workflows/ci.yml/badge.svg)](https://github.com/shaloong/mondrian/actions)
 
@@ -178,4 +178,4 @@ cargo test -p mondrian-renderer golden
 
 ## 📄 许可证
 
-本项目采用 **Apache-2.0** 协议。
+本项目采用 **GNU Affero General Public License v3.0 (AGPL-3.0)** 协议。
