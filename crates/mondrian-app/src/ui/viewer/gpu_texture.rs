@@ -145,6 +145,12 @@ impl CompositedFrame {
     pub fn size_pixels(&self) -> [u32; 2] {
         [self.width, self.height]
     }
+
+    /// Consume this frame and return the inner texture + dimensions.
+    /// Useful for recycling the texture to a pool.
+    pub fn into_parts(self) -> (wgpu::Texture, u32, u32) {
+        (self.texture, self.width, self.height)
+    }
 }
 
 impl egui_wgpu::CallbackTrait for CompositedFrame {

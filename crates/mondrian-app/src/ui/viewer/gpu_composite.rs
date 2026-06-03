@@ -413,6 +413,54 @@ pub fn create_rgba_texture(
     texture
 }
 
+// ── Texture recycling ─────────────────────────────────────────────────
+
+/// Return a wgpu texture to the global preview cache for reuse.
+/// The next `try_reuse_texture` call with matching dimensions will return it.
+pub fn recycle_texture(texture: wgpu::Texture, width: u32, height: u32) {
+    static CACHE: parking_lot::Mutex<Option<(u32, u32, wgpu::Texture)>> =
+        parking_lot::Mutex::new(None);
+    let mut cache = CACHE.lock();
+    // Only keep the most recent texture (most common case: constant resolution)
+    *cache = Some((width, height, texture));
+}
+
+/// Try to get a recycled texture with matching dimensions.
+/// Uploads `data` into it if found, returns `None` if no cached texture matches.
+pub fn try_reuse_texture(
+    _device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    width: u32,
+    height: u32,
+    data: &[u8],
+) -> Option<wgpu::Texture> {
+    static CACHE: parking_lot::Mutex<Option<(u32, u32, wgpu::Texture)>> =
+        parking_lot::Mutex::new(None);
+    let mut cache = CACHE.lock();
+    if let Some((w, h, tex)) = cache.take() {
+        if w == width && h == height {
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                data,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(width * 4),
+                    rows_per_image: Some(height),
+                },
+                wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            );
+            return Some(tex);
+        }
+        // Wrong size — drop the old texture.
+    }
+    None
+}
+
 fn record_gpu_compositor_result(success: bool) {
     static CONSECUTIVE_FAILURES: OnceLock<AtomicU64> = OnceLock::new();
     let counter = CONSECUTIVE_FAILURES.get_or_init(|| AtomicU64::new(0));

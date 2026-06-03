@@ -46,8 +46,8 @@ use std::{
 };
 
 use crate::ui::viewer::gpu_composite::{
-    apply_gpu_color_conversion, create_rgba_texture, gpu_device, gpu_queue,
-    try_gpu_composite_rgba_layers, try_gpu_composite_to_texture,
+    apply_gpu_color_conversion, create_rgba_texture, gpu_device, gpu_queue, recycle_texture,
+    try_gpu_composite_rgba_layers, try_gpu_composite_to_texture, try_reuse_texture,
 };
 use crate::ui::viewer::gpu_texture::CompositedFrame;
 
@@ -2413,6 +2413,12 @@ impl ViewerPanel {
         let can_apply = self.desired_signature.as_ref() == Some(&result.signature);
 
         if can_apply {
+            // Recycle previous frame's texture before creating a new one.
+            if let Some(old_frame) = self.gpu_composited_frame.take() {
+                let (tex, w, h) = old_frame.into_parts();
+                recycle_texture(tex, w, h);
+            }
+
             // GPU zero-copy frame from decode thread — skip CPU upload entirely.
             if let Some(gf) = result.gpu_frame {
                 self.gpu_composited_frame = Some(gf);
@@ -2425,13 +2431,23 @@ impl ViewerPanel {
                     Ok(frame) => {
                         let upload_started_at = Instant::now();
                         if let (Some(device), Some(queue)) = (gpu_device(), gpu_queue()) {
-                            let tex = create_rgba_texture(
+                            // Try to reuse a recycled texture before creating new.
+                            let tex = try_reuse_texture(
                                 &device,
                                 &queue,
                                 frame.width,
                                 frame.height,
                                 &frame.data,
-                            );
+                            )
+                            .unwrap_or_else(|| {
+                                create_rgba_texture(
+                                    &device,
+                                    &queue,
+                                    frame.width,
+                                    frame.height,
+                                    &frame.data,
+                                )
+                            });
                             self.gpu_composited_frame = Some(CompositedFrame::new(
                                 &device,
                                 tex,
