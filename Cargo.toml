@@ -51,7 +51,7 @@ tracing          = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # ---- GPU 渲染 ----
-wgpu             = "22.1"
+wgpu             = "29.0"
 bytemuck         = { version = "1",    features = ["derive"] }
 glam             = { version = "0.27", features = ["serde"] }
 

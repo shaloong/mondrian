@@ -900,7 +900,8 @@ impl MondrianApp {
 }
 
 impl eframe::App for MondrianApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         let update_started_at = std::time::Instant::now();
 
         self.advance_playback_clock();
@@ -911,7 +912,7 @@ impl eframe::App for MondrianApp {
         let is_playing = self.state.is_playing();
 
         let theme_started_at = std::time::Instant::now();
-        crate::ui::theme::apply_theme(ctx, self.theme);
+        crate::ui::theme::apply_theme(&ctx, self.theme);
         ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(
             self.theme.to_system_theme(),
         ));
@@ -920,12 +921,12 @@ impl eframe::App for MondrianApp {
         }
 
         let shortcuts_started_at = std::time::Instant::now();
-        self.process_global_shortcuts(ctx);
+        self.process_global_shortcuts(&ctx);
         if ui_diag_enabled() {
             log_ui_stage_slow("process_global_shortcuts", shortcuts_started_at.elapsed());
         }
 
-        self.handle_viewport_close_requested(ctx);
+        self.handle_viewport_close_requested(&ctx);
 
         let cache_maintenance_started_at = std::time::Instant::now();
         self.run_cache_maintenance_if_needed();
@@ -959,10 +960,10 @@ impl eframe::App for MondrianApp {
         }
 
         if self.show_new_project_dialog {
-            new_project::draw_new_project_window(self, ctx);
+            new_project::draw_new_project_window(self, &ctx);
         }
 
-        self.sync_startup_viewport_mode(ctx, !self.state.has_open_project());
+        self.sync_startup_viewport_mode(&ctx, !self.state.has_open_project());
 
         if self.show_project_bootstrap_dialog {
             let recovery_items: Vec<BootstrapRecoveryItem> = self
@@ -1003,7 +1004,7 @@ impl eframe::App for MondrianApp {
                 .collect::<Vec<_>>();
 
             if let Some(action) = crate::ui::startup::show_project_bootstrap_window(
-                ctx,
+                ui,
                 PROJECT_EXTENSION,
                 &recent_items,
                 &recovery_items,
@@ -1018,18 +1019,18 @@ impl eframe::App for MondrianApp {
                         }
                     },
                     BootstrapAction::NewProject => self.show_new_project_dialog = true,
-                    BootstrapAction::Quit => self.request_quit_app(ctx),
+                    BootstrapAction::Quit => self.request_quit_app(&ctx),
                     BootstrapAction::Recover(idx) => self.recover_project_from_candidate(idx),
                 }
             }
 
             if !self.state.has_open_project() {
                 if self.show_preferences_dialog {
-                    self.capture_shortcut_input(ctx);
-                    self.draw_preferences_window(ctx);
+                    self.capture_shortcut_input(&ctx);
+                    self.draw_preferences_window(&ctx);
                 }
 
-                self.draw_pending_close_action_dialog(ctx);
+                self.draw_pending_close_action_dialog(&ctx);
 
                 let persist_started_at = std::time::Instant::now();
                 self.persist_preferences_if_needed();
@@ -1046,11 +1047,11 @@ impl eframe::App for MondrianApp {
             }
         }
 
-        self.sync_startup_viewport_mode(ctx, false);
+        self.sync_startup_viewport_mode(&ctx, false);
 
         // ── 顶部菜单栏 ──
         let top_menu_started_at = std::time::Instant::now();
-        egui::TopBottomPanel::top("top_menu")
+        egui::Panel::top("top_menu")
             .frame(
                 egui::Frame::new()
                     .fill(crate::ui::theme::palette::bg_surface())
@@ -1060,7 +1061,7 @@ impl eframe::App for MondrianApp {
                     ))
                     .inner_margin(egui::Margin::symmetric(10, 6)),
             )
-            .show(ctx, |ui| {
+            .show_inside(ui, |ui| {
                 self.draw_menu_bar(ui);
             });
         if ui_diag_enabled() {
@@ -1069,8 +1070,8 @@ impl eframe::App for MondrianApp {
 
         // ── 底部状态栏 ──
         let status_bar_started_at = std::time::Instant::now();
-        egui::TopBottomPanel::bottom("status_bar")
-            .exact_height(28.0)
+        egui::Panel::bottom("status_bar")
+            .exact_size(28.0)
             .frame(
                 egui::Frame::new()
                     .fill(crate::ui::theme::palette::bg_surface())
@@ -1080,7 +1081,7 @@ impl eframe::App for MondrianApp {
                     ))
                     .inner_margin(egui::Margin::symmetric(10, 0)),
             )
-            .show(ctx, |ui| {
+            .show_inside(ui, |ui| {
                 self.draw_status_bar(ui);
             });
         if ui_diag_enabled() {
@@ -1089,8 +1090,8 @@ impl eframe::App for MondrianApp {
 
         // ── 底部：时间线（全宽） ──
         let timeline_started_at = std::time::Instant::now();
-        egui::TopBottomPanel::bottom("timeline_panel")
-            .exact_height(self.timeline_panel_height)
+        egui::Panel::bottom("timeline_panel")
+            .exact_size(self.timeline_panel_height)
             .resizable(false)
             .frame(
                 egui::Frame::new()
@@ -1101,7 +1102,7 @@ impl eframe::App for MondrianApp {
                     ))
                     .inner_margin(egui::Margin { left: 12, right: 12, top: 0, bottom: 8 }),
             )
-            .show(ctx, |ui| {
+            .show_inside(ui, |ui| {
                 let (_resize_rect, resize_response) = ui.allocate_exact_size(
                     egui::vec2(ui.available_width(), 8.0),
                     egui::Sense::click_and_drag(),
@@ -1136,10 +1137,10 @@ impl eframe::App for MondrianApp {
             let viewer_min = 540.0;
             let right_reserved = crate::ui::theme::tokens::inspector_panel_min_width() + 208.0; // effect_library min
             let library_max = (ctx.content_rect().width() - viewer_min - right_reserved).max(220.0);
-            egui::SidePanel::left("library_panel")
-                .default_width(296.0)
-                .min_width(220.0)
-                .max_width(library_max)
+            egui::Panel::left("library_panel")
+                .default_size(296.0)
+                .min_size(220.0)
+                .max_size(library_max)
                 .resizable(true)
                 .frame(
                     egui::Frame::new()
@@ -1147,7 +1148,7 @@ impl eframe::App for MondrianApp {
                         .stroke(egui::Stroke::NONE)
                         .inner_margin(egui::Margin::symmetric(12, 8)),
                 )
-                .show(ctx, |ui| {
+                .show_inside(ui, |ui| {
                     self.library_panel.show(ui, &mut self.state);
                 });
             if ui_diag_enabled() {
@@ -1157,7 +1158,7 @@ impl eframe::App for MondrianApp {
 
         let selected_clip_ref = self.timeline_panel.selected_clip_ref();
         if let Some(selection) = selected_clip_ref {
-            if !ctx.wants_keyboard_input()
+            if !ctx.egui_wants_keyboard_input()
                 && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::C))
             {
                 match self.state.copy_selected_animation_keyframes(selection) {
@@ -1169,7 +1170,7 @@ impl eframe::App for MondrianApp {
                 }
             }
 
-            if !ctx.wants_keyboard_input()
+            if !ctx.egui_wants_keyboard_input()
                 && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::V))
             {
                 let destination_time =
@@ -1190,10 +1191,10 @@ impl eframe::App for MondrianApp {
             let other_right = if self.show_effect_library { 208.0 } else { 0.0 };
             let ec_max = (ctx.content_rect().width() - viewer_min - left_reserved - other_right)
                 .max(crate::ui::theme::tokens::inspector_panel_min_width());
-            egui::SidePanel::right("effect_controls_panel")
-                .default_width(crate::ui::theme::tokens::inspector_panel_width())
-                .min_width(crate::ui::theme::tokens::inspector_panel_min_width())
-                .max_width(ec_max)
+            egui::Panel::right("effect_controls_panel")
+                .default_size(crate::ui::theme::tokens::inspector_panel_width())
+                .min_size(crate::ui::theme::tokens::inspector_panel_min_width())
+                .max_size(ec_max)
                 .resizable(true)
                 .frame(
                     egui::Frame::new()
@@ -1201,7 +1202,7 @@ impl eframe::App for MondrianApp {
                         .stroke(egui::Stroke::NONE)
                         .inner_margin(egui::Margin::symmetric(12, 8)),
                 )
-                .show(ctx, |ui| {
+                .show_inside(ui, |ui| {
                     self.effect_controls_panel.show(ui, &mut self.state, selected_clip_ref);
                 });
             if ui_diag_enabled() {
@@ -1222,10 +1223,10 @@ impl eframe::App for MondrianApp {
             };
             let el_max =
                 (ctx.content_rect().width() - viewer_min - left_reserved - other_right).max(208.0);
-            egui::SidePanel::right("effect_library_panel")
-                .default_width(252.0)
-                .min_width(208.0)
-                .max_width(el_max)
+            egui::Panel::right("effect_library_panel")
+                .default_size(252.0)
+                .min_size(208.0)
+                .max_size(el_max)
                 .resizable(true)
                 .frame(
                     egui::Frame::new()
@@ -1233,7 +1234,7 @@ impl eframe::App for MondrianApp {
                         .stroke(egui::Stroke::NONE)
                         .inner_margin(egui::Margin::symmetric(12, 8)),
                 )
-                .show(ctx, |ui| {
+                .show_inside(ui, |ui| {
                     self.effect_library_panel.show(ui, &mut self.state, selected_clip_ref);
                 });
             if ui_diag_enabled() {
@@ -1249,7 +1250,7 @@ impl eframe::App for MondrianApp {
                     .fill(crate::ui::theme::palette::bg_base())
                     .inner_margin(egui::Margin::symmetric(12, 8)),
             )
-            .show(ctx, |ui| {
+            .show_inside(ui, |ui| {
                 self.viewer_panel.show(
                     ui,
                     &mut self.state,
@@ -1273,7 +1274,7 @@ impl eframe::App for MondrianApp {
             egui::Window::new("节点图编辑器")
                 .open(&mut open)
                 .default_size([800.0, 600.0])
-                .show(ctx, |ui| {
+                .show(&ctx, |ui| {
                     self.node_graph_panel.show(ui);
                 });
             self.show_node_graph = open;
@@ -1287,7 +1288,7 @@ impl eframe::App for MondrianApp {
                 .open(&mut open)
                 .default_size([560.0, 680.0])
                 .frame(crate::ui::theme::dialog_frame())
-                .show(ctx, |ui| {
+                .show(&ctx, |ui| {
                     self.export_panel.show(ui, &mut self.state);
                 });
             self.show_export = open;
@@ -1302,18 +1303,18 @@ impl eframe::App for MondrianApp {
                 .open(&mut open)
                 .default_size([520.0, 520.0])
                 .frame(crate::ui::theme::dialog_frame())
-                .show(ctx, |ui| {
+                .show(&ctx, |ui| {
                     self.draw_sequence_settings_window(ui);
                 });
             self.show_sequence_settings = open;
         }
 
         if self.show_preferences_dialog {
-            self.capture_shortcut_input(ctx);
-            self.draw_preferences_window(ctx);
+            self.capture_shortcut_input(&ctx);
+            self.draw_preferences_window(&ctx);
         }
 
-        self.draw_pending_close_action_dialog(ctx);
+        self.draw_pending_close_action_dialog(&ctx);
 
         let persist_started_at = std::time::Instant::now();
         self.persist_preferences_if_needed();

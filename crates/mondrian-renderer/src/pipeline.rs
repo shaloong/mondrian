@@ -87,24 +87,29 @@ impl RenderPipeline {
 
         let pipeline_layout = gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("composite_pipeline_layout"),
-            bind_group_layouts: &[&texture_bind_group_layout, &uniform_bind_group_layout],
-            push_constant_ranges: &[],
+            immediate_size: 0,
+            bind_group_layouts: &[
+                Some(&texture_bind_group_layout),
+                Some(&uniform_bind_group_layout),
+            ],
         });
 
         let composite_pipeline =
             gpu.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                cache: None,
+                multiview_mask: None,
                 label: Some("composite_pipeline"),
                 layout: Some(&pipeline_layout),
-                cache: None,
+
                 vertex: wgpu::VertexState {
                     module: &shader,
-                    entry_point: "vs_main",
+                    entry_point: Some("vs_main"),
                     buffers: &[],
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
-                    entry_point: "fs_main",
+                    entry_point: Some("fs_main"),
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: wgpu::TextureFormat::Rgba8Unorm,
@@ -123,7 +128,6 @@ impl RenderPipeline {
                 },
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState::default(),
-                multiview: None,
             });
 
         let sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
@@ -133,7 +137,7 @@ impl RenderPipeline {
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
 
@@ -221,15 +225,20 @@ impl RenderPipeline {
                         load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: alpha }),
                         store: wgpu::StoreOp::Store,
                     },
+                    depth_slice: None,
                 })],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
         }
 
         self.gpu.queue.submit([encoder.finish()]);
-        self.gpu.device.poll(wgpu::Maintain::Wait);
+        let _ = self
+            .gpu
+            .device
+            .poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
         let _ = (width, height);
     }
@@ -275,14 +284,14 @@ impl RenderPipeline {
         }
 
         self.gpu.queue.write_texture(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
             &staged,
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(output_width * 4),
                 rows_per_image: Some(output_height),
@@ -359,10 +368,12 @@ impl RenderPipeline {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
                     },
+                    depth_slice: None,
                 })],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             pass.set_pipeline(&self.composite_pipeline);
             pass.set_bind_group(0, &texture_bind_group, &[]);
@@ -371,7 +382,10 @@ impl RenderPipeline {
         }
 
         self.gpu.queue.submit([encoder.finish()]);
-        self.gpu.device.poll(wgpu::Maintain::Wait);
+        let _ = self
+            .gpu
+            .device
+            .poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
     }
 
     fn readback_rgba(&self, texture: &wgpu::Texture, width: u32, height: u32) -> Result<Vec<u8>> {
@@ -393,15 +407,15 @@ impl RenderPipeline {
         });
 
         encoder.copy_texture_to_buffer(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            wgpu::ImageCopyBuffer {
+            wgpu::TexelCopyBufferInfo {
                 buffer: &readback,
-                layout: wgpu::ImageDataLayout {
+                layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(padded_bytes_per_row),
                     rows_per_image: Some(height),
@@ -417,7 +431,10 @@ impl RenderPipeline {
         slice.map_async(wgpu::MapMode::Read, move |res| {
             let _ = tx.send(res);
         });
-        self.gpu.device.poll(wgpu::Maintain::Wait);
+        let _ = self
+            .gpu
+            .device
+            .poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
         match rx.recv() {
             Ok(Ok(())) => {}

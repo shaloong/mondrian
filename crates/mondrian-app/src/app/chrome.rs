@@ -2,7 +2,7 @@ use super::*;
 
 impl MondrianApp {
     pub(super) fn draw_menu_bar(&mut self, ui: &mut egui::Ui) {
-        ui.ctx().style_mut(|style| {
+        ui.ctx().global_style_mut(|style| {
             style.spacing.menu_width = Self::MENU_POPUP_WIDTH;
         });
         egui::MenuBar::new().ui(ui, |ui| {

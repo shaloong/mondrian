@@ -123,8 +123,8 @@ impl CachedPipeline {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("effect_pipeline_layout"),
-            bind_group_layouts: &[&bgl_0, &bgl_1],
-            push_constant_ranges: &[],
+            immediate_size: 0,
+            bind_group_layouts: &[Some(&bgl_0), Some(&bgl_1)],
         });
 
         Self { shader, bgl_0, bgl_1, pipeline_layout }
@@ -203,8 +203,8 @@ impl CachedLutPipeline {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("lut_pipeline_layout"),
-            bind_group_layouts: &[&bgl_0, &bgl_1],
-            push_constant_ranges: &[],
+            immediate_size: 0,
+            bind_group_layouts: &[Some(&bgl_0), Some(&bgl_1)],
         });
 
         Self { shader, bgl_0, bgl_1, pipeline_layout }
@@ -388,14 +388,14 @@ impl GpuBackend {
             view_formats: &[],
         });
         queue.write_texture(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &input_tex,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
             input,
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(width * 4),
                 rows_per_image: Some(height),
@@ -432,14 +432,14 @@ impl GpuBackend {
         // Convert [f32; N*4] to bytes for upload
         let lut_bytes: &[u8] = bytemuck::cast_slice(lut_rgba);
         queue.write_texture(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &lut_tex,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
             lut_bytes,
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(lut_size * 16), // 4 × f32 = 16 bytes per texel
                 rows_per_image: Some(lut_size),
@@ -474,12 +474,12 @@ impl GpuBackend {
 
         // Compute pipeline
         let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            cache: None,
             label: Some("lut_compute"),
             layout: Some(&pipeline.pipeline_layout),
             module: &pipeline.shader,
-            entry_point: "main",
+            entry_point: Some("main"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
-            cache: None,
         });
 
         // Bind groups
@@ -527,15 +527,15 @@ impl GpuBackend {
             cpass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
         }
         encoder.copy_texture_to_buffer(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &output_tex,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            wgpu::ImageCopyBuffer {
+            wgpu::TexelCopyBufferInfo {
                 buffer: &readback,
-                layout: wgpu::ImageDataLayout {
+                layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(width * 4),
                     rows_per_image: Some(height),
@@ -543,14 +543,14 @@ impl GpuBackend {
             },
             wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         );
-        queue.submit(Some(encoder.finish()));
+        queue.submit([encoder.finish()]);
 
         // Readback
         let (tx, rx) = std::sync::mpsc::channel();
         readback.slice(..).map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        device.poll(wgpu::Maintain::Wait);
+        let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
         match rx.recv().unwrap_or(Err(wgpu::BufferAsyncError)) {
             Ok(()) => {
@@ -596,14 +596,14 @@ impl GpuBackend {
             view_formats: &[],
         });
         queue.write_texture(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &input_tex,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
             input,
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(width * 4),
                 rows_per_image: Some(height),
@@ -642,12 +642,12 @@ impl GpuBackend {
 
         // Compute pipeline
         let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            cache: None,
             label: Some("effect_compute"),
             layout: Some(&pipeline.pipeline_layout),
             module: &pipeline.shader,
-            entry_point: "main",
+            entry_point: Some("main"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
-            cache: None,
         });
 
         // Bind groups (per-dispatch: reference specific textures/buffers)
@@ -691,15 +691,15 @@ impl GpuBackend {
             cpass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
         }
         encoder.copy_texture_to_buffer(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &output_tex,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            wgpu::ImageCopyBuffer {
+            wgpu::TexelCopyBufferInfo {
                 buffer: &readback,
-                layout: wgpu::ImageDataLayout {
+                layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(width * 4),
                     rows_per_image: Some(height),
@@ -708,14 +708,14 @@ impl GpuBackend {
             wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         );
 
-        queue.submit(Some(encoder.finish()));
+        queue.submit([encoder.finish()]);
 
         // Readback
         let (tx, rx) = std::sync::mpsc::channel();
         readback.slice(..).map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        device.poll(wgpu::Maintain::Wait);
+        let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
         match rx.recv().unwrap_or(Err(wgpu::BufferAsyncError)) {
             Ok(()) => {

@@ -75,7 +75,7 @@ pub fn search_bar(ui: &mut egui::Ui, query: &mut String, hint: &str) -> egui::Re
                     [input_width, ui.spacing().interact_size.y],
                     egui::TextEdit::singleline(query)
                         .hint_text(hint)
-                        .frame(false)
+                        .frame(egui::Frame::NONE)
                         .margin(egui::Margin::ZERO)
                         .vertical_align(egui::Align::Center),
                 )

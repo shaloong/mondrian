@@ -324,7 +324,7 @@ impl TimelinePanel {
                                             self.timeline_track_content_height =
                                                 self.timeline_total_track_height(state);
 
-                                            if !ui.ctx().wants_keyboard_input() {
+                                            if !ui.ctx().egui_wants_keyboard_input() {
                                                 // Tool shortcuts
                                                 if ui.input(|i| {
                                                     i.key_pressed(egui::Key::V)

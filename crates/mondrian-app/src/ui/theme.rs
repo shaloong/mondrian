@@ -538,7 +538,7 @@ fn build_visuals(theme: egui::Theme, tokens: &ThemeTokens) -> egui::Visuals {
 }
 
 fn apply_style(ctx: &egui::Context, tokens: &ThemeTokens) {
-    let mut style = (*ctx.style()).clone();
+    let mut style = (*ctx.global_style()).clone();
     style.spacing.item_spacing = tokens.metrics.item_spacing;
     style.spacing.button_padding = tokens.metrics.button_padding;
     style.spacing.interact_size.y = tokens.metrics.interact_height;
@@ -548,7 +548,7 @@ fn apply_style(ctx: &egui::Context, tokens: &ThemeTokens) {
     style.interaction.show_tooltips_only_when_still = false;
     style.visuals.window_fill = tokens.palette.bg_surface;
     style.visuals.panel_fill = tokens.palette.bg_base;
-    ctx.set_style(style);
+    ctx.set_global_style(style);
 }
 
 pub fn panel_frame() -> egui::Frame {

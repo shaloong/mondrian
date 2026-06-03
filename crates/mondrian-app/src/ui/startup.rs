@@ -29,11 +29,12 @@ pub enum BootstrapAction {
 }
 
 pub fn show_project_bootstrap_window(
-    ctx: &egui::Context,
+    ui: &mut egui::Ui,
     _project_extension: &str,
     recent_items: &[BootstrapRecentProjectItem],
     recovery_items: &[BootstrapRecoveryItem],
 ) -> Option<BootstrapAction> {
+    let ctx = ui.ctx().clone();
     let mut action = None;
 
     let bg_surface = crate::ui::theme::palette::bg_surface();
@@ -66,7 +67,7 @@ pub fn show_project_bootstrap_window(
                 .stroke(egui::Stroke::NONE)
                 .inner_margin(egui::Margin::same(0)),
         )
-        .show(ctx, |ui| {
+        .show_inside(ui, |ui| {
             let root = ui.max_rect();
             let panel_rect =
                 root.shrink2(egui::vec2(startup_panel_margin_x, startup_panel_margin_y));

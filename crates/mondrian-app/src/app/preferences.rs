@@ -192,7 +192,7 @@ pub(super) fn run_cache_maintenance_if_needed(app: &mut MondrianApp) {
 }
 
 pub(super) fn process_global_shortcuts(app: &mut MondrianApp, ctx: &egui::Context) {
-    if app.show_preferences_dialog || ctx.wants_keyboard_input() {
+    if app.show_preferences_dialog || ctx.egui_wants_keyboard_input() {
         return;
     }
 
@@ -393,7 +393,7 @@ pub(super) fn draw_preferences_window(app: &mut MondrianApp, ctx: &egui::Context
         }
 
         match class {
-            egui::ViewportClass::Embedded => {
+            egui::ViewportClass::EmbeddedWindow => {
                 let mut open = app.show_preferences_dialog;
                 egui::Window::new("首选项")
                     .open(&mut open)
@@ -413,7 +413,7 @@ pub(super) fn draw_preferences_window(app: &mut MondrianApp, ctx: &egui::Context
                             .fill(crate::ui::theme::palette::bg_surface())
                             .inner_margin(egui::Margin::symmetric(18, 18)),
                     )
-                    .show(viewport_ctx, |ui| {
+                    .show_inside(viewport_ctx, |ui| {
                         draw_preferences_panel(app, ui);
                     });
             }

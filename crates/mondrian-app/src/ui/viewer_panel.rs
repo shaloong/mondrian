@@ -689,7 +689,7 @@ impl ViewerPanel {
         ui.set_min_width(540.0);
 
         // ── Keyboard shortcuts ──
-        if !ui.ctx().wants_keyboard_input() {
+        if !ui.ctx().egui_wants_keyboard_input() {
             let current_frame = state.current_frame();
             if ui.input(|i| i.key_pressed(egui::Key::Space)) {
                 if state.is_playing() {
@@ -887,7 +887,7 @@ impl ViewerPanel {
             if canvas_hovered {
                 // Ctrl+scroll wheel zoom from center.
                 if ctx.input(|inp| inp.modifiers.command) {
-                    let scroll = ctx.input(|inp| inp.raw_scroll_delta.y);
+                    let scroll = ctx.input(|inp| inp.smooth_scroll_delta().y);
                     if scroll.abs() > 0.1 {
                         let factor = 1.0 + scroll.abs().min(10.0) * 0.001 * scroll.signum();
                         let ctr = self.canvas_transform.canvas_rect.center();

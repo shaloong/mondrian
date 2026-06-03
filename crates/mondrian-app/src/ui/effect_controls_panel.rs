@@ -2254,7 +2254,7 @@ impl EffectControlsPanel {
         let primary_pressed = ui.input(|i| i.pointer.primary_pressed());
         let primary_down = ui.input(|i| i.pointer.primary_down());
         let primary_released = ui.input(|i| i.pointer.primary_released());
-        let pointer_over_floating_ui = ui.ctx().is_pointer_over_area();
+        let pointer_over_floating_ui = ui.ctx().is_pointer_over_egui();
 
         if primary_pressed {
             if let Some(pos) = pointer_pos {

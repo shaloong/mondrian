@@ -31,7 +31,7 @@ pub(super) fn draw_new_project_window(app: &mut MondrianApp, ctx: &egui::Context
         }
 
         match class {
-            egui::ViewportClass::Embedded => {
+            egui::ViewportClass::EmbeddedWindow => {
                 let mut open = app.show_new_project_dialog;
                 egui::Window::new("新建项目")
                     .open(&mut open)
@@ -51,7 +51,7 @@ pub(super) fn draw_new_project_window(app: &mut MondrianApp, ctx: &egui::Context
                             .fill(crate::ui::theme::palette::bg_surface())
                             .inner_margin(egui::Margin::symmetric(18, 16)),
                     )
-                    .show(viewport_ctx, |ui| {
+                    .show_inside(viewport_ctx, |ui| {
                         draw_new_project_panel(app, ui);
                     });
             }

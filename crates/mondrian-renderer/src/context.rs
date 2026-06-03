@@ -15,7 +15,10 @@ impl GpuContext {
     pub async fn new() -> Result<Arc<Self>> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
-            ..Default::default()
+            flags: wgpu::InstanceFlags::default(),
+            memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
+            backend_options: wgpu::BackendOptions::default(),
+            display: None,
         });
 
         let adapter = instance
@@ -25,14 +28,14 @@ impl GpuContext {
                 force_fallback_adapter: false,
             })
             .await
-            .ok_or_else(|| mondrian_core::MondrianError::GpuInitFailed {
-                reason: "找不到合适的 GPU 适配器".to_string(),
+            .map_err(|e| mondrian_core::MondrianError::GpuInitFailed {
+                reason: format!("找不到合适的 GPU 适配器: {e}"),
             })?;
 
         tracing::info!("GPU Adapter: {:?}", adapter.get_info());
 
         let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default(), None)
+            .request_device(&wgpu::DeviceDescriptor::default())
             .await
             .map_err(|e| mondrian_core::MondrianError::GpuInitFailed { reason: e.to_string() })?;
 

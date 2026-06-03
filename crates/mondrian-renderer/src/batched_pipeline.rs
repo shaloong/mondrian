@@ -89,23 +89,25 @@ impl BatchedCompositor {
 
         let layout = gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("batch_composite_layout"),
-            bind_group_layouts: &[&texture_bgl, &uniform_bgl],
-            push_constant_ranges: &[],
+            immediate_size: 0,
+            bind_group_layouts: &[Some(&texture_bgl), Some(&uniform_bgl)],
         });
 
         let pipeline = gpu.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            cache: None,
+            multiview_mask: None,
             label: Some("batch_composite_pipeline"),
             layout: Some(&layout),
-            cache: None,
+
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: "vs_main",
+                entry_point: Some("vs_main"),
                 buffers: &[],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: "fs_main",
+                entry_point: Some("fs_main"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: wgpu::TextureFormat::Rgba8Unorm,
@@ -124,7 +126,6 @@ impl BatchedCompositor {
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
         });
 
         let sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
@@ -134,7 +135,7 @@ impl BatchedCompositor {
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
 
@@ -214,10 +215,12 @@ impl BatchedCompositor {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
                     },
+                    depth_slice: None,
                 })],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
         }
 
@@ -245,7 +248,7 @@ impl BatchedCompositor {
         let readback_data = self.record_readback(&mut encoder, final_tex, width, height)?;
 
         // Single submission for the entire frame
-        self.gpu.queue.submit(Some(encoder.finish()));
+        self.gpu.queue.submit([encoder.finish()]);
 
         // Return render targets to pool
         self.texture_pool.release(accum_a, width, height);
@@ -290,14 +293,14 @@ impl BatchedCompositor {
         }
 
         self.gpu.queue.write_texture(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
             &staged,
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(output_width * 4),
                 rows_per_image: Some(output_height),
@@ -371,10 +374,12 @@ impl BatchedCompositor {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
                     },
+                    depth_slice: None,
                 })],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &tex_bg, &[]);
@@ -404,15 +409,15 @@ impl BatchedCompositor {
         });
 
         encoder.copy_texture_to_buffer(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            wgpu::ImageCopyBuffer {
+            wgpu::TexelCopyBufferInfo {
                 buffer: &readback,
-                layout: wgpu::ImageDataLayout {
+                layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(padded),
                     rows_per_image: Some(height),
@@ -435,7 +440,10 @@ impl BatchedCompositor {
         slice.map_async(wgpu::MapMode::Read, move |res| {
             let _ = tx.send(res);
         });
-        self.gpu.device.poll(wgpu::Maintain::Wait);
+        let _ = self
+            .gpu
+            .device
+            .poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
         rx.recv()
             .map_err(|_| MondrianError::TextureUploadFailed {
