@@ -5,6 +5,7 @@
 //!
 //! Extracted from `viewer_panel.rs` during the Phase 5 file split.
 
+use egui_wgpu::wgpu;
 use mondrian_renderer::{CompositorConfig, CpuRgbaLayer, FrameCompositor, GpuContext};
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -121,6 +122,32 @@ fn global_gpu_compositor() -> Option<&'static Mutex<FrameCompositor>> {
 
 fn gpu_compositor_enabled() -> bool {
     GPU_COMPOSITOR.get().is_some()
+}
+
+/// Try to composite RGBA layers to a wgpu texture (zero-copy, no readback).
+/// Returns the composited texture, or `None` if GPU is unavailable or fails.
+pub fn try_gpu_composite_to_texture(
+    width: u32,
+    height: u32,
+    rgba_layers_for_gpu: &[CpuRgbaLayer],
+) -> Option<wgpu::Texture> {
+    let gpu_compositor = global_gpu_compositor()?;
+    let gpu_result = {
+        let mut guard = gpu_compositor.lock();
+        guard.composite_rgba_layers_to_texture(width, height, rgba_layers_for_gpu)
+    };
+
+    match gpu_result {
+        Ok(texture) => {
+            record_gpu_compositor_result(true);
+            Some(texture)
+        }
+        Err(err) => {
+            record_gpu_compositor_result(false);
+            tracing::warn!("GPU compositor (texture) failed, falling back: {}", err);
+            None
+        }
+    }
 }
 
 fn record_gpu_compositor_result(success: bool) {

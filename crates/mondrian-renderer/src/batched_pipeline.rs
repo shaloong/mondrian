@@ -258,6 +258,146 @@ impl BatchedCompositor {
         self.wait_and_map_readback(readback_data, width, height)
     }
 
+    /// Composite layers into a wgpu texture (GPU-only, no readback).
+    /// The returned texture is NOT pooled — the caller owns it.
+    pub fn composite_layers_to_texture(
+        &mut self,
+        output_width: u32,
+        output_height: u32,
+        layers: &[CpuRgbaLayer],
+    ) -> Result<wgpu::Texture> {
+        let width = output_width.max(1);
+        let height = output_height.max(1);
+
+        // Create a dedicated output texture (not pooled).
+        let output_tex = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("batch_composite_output"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        if layers.is_empty() {
+            // Clear to transparent and return.
+            let mut encoder =
+                self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("batch_empty_clear"),
+                });
+            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("empty_clear"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &output_tex.create_view(&wgpu::TextureViewDescriptor::default()),
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.gpu.queue.submit([encoder.finish()]);
+            return Ok(output_tex);
+        }
+
+        self.frame_counter += 1;
+        self.texture_pool.advance_frame();
+
+        let rt_usage = wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::COPY_DST;
+
+        let accum_a = self.texture_pool.acquire(
+            &self.gpu.device,
+            width,
+            height,
+            wgpu::TextureFormat::Rgba8Unorm,
+            rt_usage,
+        );
+        let accum_b = self.texture_pool.acquire(
+            &self.gpu.device,
+            width,
+            height,
+            wgpu::TextureFormat::Rgba8Unorm,
+            rt_usage,
+        );
+
+        let mut encoder = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("batch_composite_encoder"),
+        });
+
+        // Clear accum_a
+        {
+            let view = accum_a.create_view(&wgpu::TextureViewDescriptor::default());
+            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("batch_clear"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+        }
+
+        let mut src_is_a = true;
+        for layer in layers {
+            if layer.width == 0 || layer.height == 0 {
+                continue;
+            }
+            let layer_tex = self.upload_layer_texture(layer, width, height)?;
+            let src = if src_is_a { &accum_a } else { &accum_b };
+            let dst = if src_is_a { &accum_b } else { &accum_a };
+            self.record_composite_pass(&mut encoder, src, dst, &layer_tex, layer.opacity);
+            self.texture_pool.release(layer_tex, width, height);
+            src_is_a = !src_is_a;
+        }
+
+        let final_tex = if src_is_a { &accum_a } else { &accum_b };
+
+        // Copy final result to output texture (GPU-only, no readback).
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: final_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: &output_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        );
+
+        self.gpu.queue.submit([encoder.finish()]);
+
+        // Return pool textures
+        self.texture_pool.release(accum_a, width, height);
+        self.texture_pool.release(accum_b, width, height);
+
+        Ok(output_tex)
+    }
+
     fn upload_layer_texture(
         &self,
         layer: &CpuRgbaLayer,

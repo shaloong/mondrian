@@ -78,6 +78,17 @@ impl FrameCompositor {
         self.composite_frame(width, height, layers)
     }
 
+    /// Composite layers into a wgpu texture (GPU-only, no CPU readback).
+    /// Returns a non-pooled texture owned by the caller.
+    pub fn composite_rgba_layers_to_texture(
+        &mut self,
+        width: u32,
+        height: u32,
+        layers: &[CpuRgbaLayer],
+    ) -> mondrian_core::Result<wgpu::Texture> {
+        self.batched.composite_layers_to_texture(width, height, layers)
+    }
+
     /// Return number of pooled textures (for dev metrics).
     pub fn pooled_texture_count(&self) -> usize {
         self.texture_pool.len()
