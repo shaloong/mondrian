@@ -44,8 +44,8 @@
 |-----|-------------|
 | ClipGraphNode trait | `FlatActiveClip` + `RenderPlanSource` already provide the needed abstraction. Full clip-graph-as-DAG is premature optimization. |
 | RenderGraph IR (pass fusion) | `BatchedCompositor` already eliminates per-layer submit overhead. Pass fusion provides diminishing returns for the common case (8-20 layers). Significant GPU engineering effort — deferred to dedicated sprint. |
-| Golden image tests | API complexity prevented clean implementation. Infrastructure exists (`image` crate) but needs dedicated investigation. |
-| Performance benchmarks | Criterion dependency available but benchmark harness requires Compositor API knowledge. Deferred. |
+| Golden image tests | ✅ Done (2026-06-03): 5 CPU compositor golden tests with PNG comparison |
+| Performance benchmarks | ✅ Done (2026-06-03): 5 criterion benchmarks at 1080p/4K resolutions |
 | Procedural/Remote assets | Placeholder enums exist. No procedural generator framework needed yet. |
 
 ---
@@ -89,7 +89,7 @@
 
 ## 4. Branch Summary
 
-```
+```text
 feat/architecture-v2-dag-gpu
 Commits: 20
 Files: 47 changed
@@ -136,4 +136,16 @@ Commits: 1
   - Added ClipGraphNode trait to mondrian-core/timeline_data
   - Added MultiInput node variant to EffectGraphNodeKind
   - Clip Graph conformity: 70% → 90%, Architecture V2: 94% → 95%
+
+test/golden-images (2026-06-03)
+Commits: 1
+  - 5 CPU compositor golden tests: transparent, opaque, half-opacity, two-layer blend
+  - PNG comparison with ±1 per channel tolerance
+  - MONDRIAN_UPDATE_GOLDEN=1 to regenerate
+
+perf/benchmarks (2026-06-03)
+Commits: 1
+  - 5 criterion benchmarks: 1080p (1/4/8 layers), 4K (1/8 layers)
+  - CPU compositor throughput measurement
+  - Run: cargo bench -p mondrian-renderer
 ```
