@@ -474,7 +474,7 @@ pub enum AssetSource {
 }
 
 /// Kind of synthetically generated asset content.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub enum GeneratedAssetKind {
     SolidColor,
     AdjustmentLayer,
