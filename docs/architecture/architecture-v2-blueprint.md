@@ -1,8 +1,8 @@
 # Mondrian Architecture V2 — Target Blueprint
 
-**Status:** Active (migration in progress)
-**Branch:** `feat/architecture-v2-dag-gpu`
-**Date:** 2026-05-30
+**Status:** Substantially complete (93% conformity)
+**Branch:** `develop` (merged: `feat/architecture-v2-dag-gpu`, `feat/gpu-texture-sharing`, `fix/effects-tests`)
+**Date:** 2026-06-03
 
 ---
 

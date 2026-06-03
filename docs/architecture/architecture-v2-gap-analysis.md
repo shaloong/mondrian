@@ -1,7 +1,7 @@
 # Architecture V2 — Gap Analysis (FINAL)
 
-**Date:** 2026-06-01 (post-migration)
-**Assessment:** Code health **Good**, architecture conformity **88%** vs. [V2 Blueprint](architecture-v2-blueprint.md).
+**Date:** 2026-06-03 (post GPU texture-sharing)
+**Assessment:** Code health **Excellent**, architecture conformity **93%** vs. [V2 Blueprint](architecture-v2-blueprint.md).
 
 ---
 
@@ -21,15 +21,19 @@
 - ✅ P0: All 8 safety issues fixed
 - ✅ P1-1, P1-2, P1-3: Coupling fixed
 - ✅ P3-1, P3-3, P3-4: Performance fixed
+- ✅ P3-2: GPU surface presentation — zero-copy callback rendering (2026-06-03)
 - ✅ P4: All test gaps closed (325 tests, 0 crates without tests)
 - ✅ ocio-rs upgraded to v0.1.1 (crates.io)
+- ✅ wgpu 22→29 + egui/eframe 0.33→0.34 (2026-06-03)
+- ✅ GPU device unification — compositor shares eframe device
+- ✅ GPU color conversion compute shader for Rec709/sRGB workflows
+- ✅ Preview texture recycling across frames
 
 ### Accepted as Acceptable
 
 - **P1-4 (OCIO global config):** The OCIO C++ library maintains process-wide global state. The `OCIO_CONFIG_PATH` tracker is a thin wrapper — the underlying C++ config cannot be scoped per-project. Documented in `ocio.rs`.
 - **P1-5 (Frame cache global):** Content-addressable caches (effect frame cache, preview frame cache) are global by design — sharing across the application is their purpose. Cleared on project close.
 - **P2-1..6 (File splitting):** The 6 files >1000 lines (viewer_panel 6081, effect_controls 5907, etc.) are UI panels with complex interdependencies. Splitting them is high-risk mechanical work with no behavioral benefit. Deferred to a dedicated cleanup branch.
-- **P3-2 (Surface presentation):** Requires egui-wgpu integration to avoid readback. The current readback path works correctly and the batched compositor (Phase 4) already eliminated per-layer readback. Deferred.
 
 ### Remaining Gaps (Non-Blocking)
 
@@ -51,7 +55,7 @@
 | **Clip Graph** | ✅ 70% | `FlatActiveClip` provides flattening; no evaluable-node trait yet |
 | **Effect DAG** | ✅ 95% | DAG-only; GPU compute for 3 effects; N-port deferred |
 | **Render Graph** | ✅ 70% | Batched compositor (1 submit/frame); full IR deferred |
-| **GPU Backend** | ✅ 90% | 3 compute shaders + LUT3D; surface presentation deferred |
+| **GPU Backend** | ✅ 95% | 4 compute shaders + LUT3D; zero-copy callback rendering; GPU color conversion |
 | **UI — Unified Graph** | ✅ 80% | SelectionState unified; NodeGraphPanel skeleton exists |
 
 ---
@@ -66,10 +70,13 @@
 | P-ARCH violations | 4 | **0** |
 | GPU submits/frame | N (per-layer) | **1** |
 | GPU effects | 0 | **3** (ColorAdjust, Blur, LUT3D) |
-| Dead WGSL shaders | 3 | 1 (yuv_to_rgb — deferred) |
+| GPU shaders (total) | 0 | **6** (composite, blur, color_adjust, lut3d, gpu_texture, color_convert) |
+| Dead WGSL shaders | 3 | 0 |
 | Non-test unwraps | 28 | 27 |
 | Build warnings | ~15 | **0** |
 | Cargo dependency violations | 2 | **0** |
+| wgpu version | 22.1 | **29.0** |
+| GPU→CPU readback/frame | 1 | **0** (zero-copy callback path) |
 
 ---
 
@@ -82,4 +89,21 @@ Files: 47 changed
 Lines: ~+4500 / -1520
 Arch conformity: 48% → 88%
 Duration: 2 days
+
+feat/gpu-texture-sharing (2026-06-03)
+Commits: 12
+Files: 42 changed
+Lines: ~+3023 / -1690
+Arch conformity: 88% → 93%
+Key additions:
+  - wgpu 22→29 + egui/eframe 0.33→0.34
+  - GPU device unification (compositor shares eframe device)
+  - CompositedFrame + CallbackTrait zero-copy rendering
+  - GPU color conversion compute shader
+  - Preview texture recycling across frames
+  - Surface format-aware pipeline creation
+
+fix/effects-tests (2026-06-03)
+Commits: 1
+  - Repaired 7 pre-existing test failures (PropertyBag initialization)
 ```
