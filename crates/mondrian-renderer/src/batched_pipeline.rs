@@ -158,6 +158,16 @@ impl BatchedCompositor {
         })
     }
 
+    /// Access the shared wgpu device.
+    pub fn device(&self) -> &wgpu::Device {
+        &self.gpu.device
+    }
+
+    /// Access the shared wgpu queue.
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.gpu.queue
+    }
+
     /// Composite layers into a single RGBA8 buffer using one GPU submission.
     pub fn composite_layers_to_rgba(
         &mut self,

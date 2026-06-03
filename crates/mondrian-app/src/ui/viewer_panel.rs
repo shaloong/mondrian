@@ -45,7 +45,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::ui::viewer::gpu_composite::try_gpu_composite_rgba_layers;
+use crate::ui::viewer::gpu_composite::{
+    create_rgba_texture, gpu_device, gpu_queue, try_gpu_composite_rgba_layers,
+};
+use crate::ui::viewer::gpu_texture::CompositedFrame;
 
 #[derive(Clone)]
 struct LayerDecodeRequest {
@@ -135,6 +138,8 @@ struct DecodeRequest {
 struct DecodeResult {
     signature: CompositeFrameSignature,
     decoded: Result<RgbaFrame, String>,
+    /// Optional zero-copy GPU composited frame.
+    gpu_frame: Option<CompositedFrame>,
     generation: u64,
 }
 
@@ -343,6 +348,8 @@ impl Hash for CompositeFrameSignature {
 /// 中央预览窗口面板
 pub struct ViewerPanel {
     preview_texture: Option<egui::TextureHandle>,
+    /// GPU composited frame for zero-copy callback rendering.
+    gpu_composited_frame: Option<CompositedFrame>,
     preview_signature: Option<CompositeFrameSignature>,
     desired_signature: Option<CompositeFrameSignature>,
     preview_error: Option<String>,
@@ -555,10 +562,14 @@ impl Default for ViewerPanel {
                     latest
                 };
 
-                let decoded = decode_composited_rgba(&request).map_err(|e| e.to_string());
+                let (decoded, gpu_frame) = match decode_composited_rgba(&request) {
+                    Ok((rgba, gf)) => (Ok(rgba), gf),
+                    Err(e) => (Err(e.to_string()), None),
+                };
                 let _ = tx.send(DecodeResult {
                     signature: request.signature,
                     decoded,
+                    gpu_frame,
                     generation: request.generation,
                 });
             });
@@ -567,6 +578,7 @@ impl Default for ViewerPanel {
         let (proxy_done_tx, proxy_done_rx) = mpsc::channel();
         Self {
             preview_texture: None,
+            gpu_composited_frame: None,
             preview_signature: None,
             desired_signature: None,
             preview_error: None,
@@ -1577,7 +1589,13 @@ impl ViewerPanel {
                                 );
                             }
 
-                            if let Some(texture) = &self.preview_texture {
+                            if let Some(gpu_frame) = &self.gpu_composited_frame {
+                                let callback = egui_wgpu::Callback::new_paint_callback(
+                                    content_rect,
+                                    gpu_frame.clone(),
+                                );
+                                painter.add(egui::Shape::Callback(callback));
+                            } else if let Some(texture) = &self.preview_texture {
                                 // Render only the visible portion of content_rect,
                                 // adjusting UV to clip correctly when zoomed in.
                                 let visible =
@@ -2369,7 +2387,7 @@ impl ViewerPanel {
     fn apply_decode_result(
         &mut self,
         ctx: &egui::Context,
-        result: DecodeResult,
+        mut result: DecodeResult,
         allow_stale: bool,
         is_playing: bool,
     ) {
@@ -2394,34 +2412,62 @@ impl ViewerPanel {
         let can_apply = self.desired_signature.as_ref() == Some(&result.signature);
 
         if can_apply {
+            // Try GPU zero-copy path first (from decode thread).
+            if let Some(gf) = result.gpu_frame.take() {
+                self.gpu_composited_frame = Some(gf);
+            }
+
             match result.decoded {
                 Ok(frame) => {
                     let upload_started_at = Instant::now();
-                    let image = egui::ColorImage::from_rgba_unmultiplied(
-                        [frame.width as usize, frame.height as usize],
-                        &frame.data,
-                    );
-                    if is_playing {
-                        if let Some(texture) = self.preview_texture.as_mut() {
-                            texture.set(image, egui::TextureOptions::LINEAR);
+
+                    // Try to upload via wgpu for callback rendering.
+                    // Falls back to egui texture manager if GPU unavailable.
+                    let mut gpu_uploaded = false;
+                    if let (Some(device), Some(queue)) = (gpu_device(), gpu_queue()) {
+                        let tex = create_rgba_texture(
+                            &device,
+                            &queue,
+                            frame.width,
+                            frame.height,
+                            &frame.data,
+                        );
+                        self.gpu_composited_frame = Some(CompositedFrame::new(
+                            &device,
+                            tex,
+                            frame.width,
+                            frame.height,
+                        ));
+                        gpu_uploaded = true;
+                    }
+
+                    if !gpu_uploaded {
+                        let image = egui::ColorImage::from_rgba_unmultiplied(
+                            [frame.width as usize, frame.height as usize],
+                            &frame.data,
+                        );
+                        if is_playing {
+                            if let Some(texture) = self.preview_texture.as_mut() {
+                                texture.set(image, egui::TextureOptions::LINEAR);
+                            } else {
+                                self.preview_texture = Some(ctx.load_texture(
+                                    "preview-live-stream",
+                                    image,
+                                    egui::TextureOptions::LINEAR,
+                                ));
+                            }
                         } else {
                             self.preview_texture = Some(ctx.load_texture(
-                                "preview-live-stream",
+                                format!(
+                                    "preview-composited-{}",
+                                    composite_signature_hash(&result.signature)
+                                ),
                                 image,
                                 egui::TextureOptions::LINEAR,
                             ));
-                        }
-                    } else {
-                        self.preview_texture = Some(ctx.load_texture(
-                            format!(
-                                "preview-composited-{}",
-                                composite_signature_hash(&result.signature)
-                            ),
-                            image,
-                            egui::TextureOptions::LINEAR,
-                        ));
-                        if let Some(texture) = self.preview_texture.clone() {
-                            self.cache_put(result.signature.clone(), texture);
+                            if let Some(texture) = self.preview_texture.clone() {
+                                self.cache_put(result.signature.clone(), texture);
+                            }
                         }
                     }
                     self.preview_signature = Some(result.signature);
@@ -3664,7 +3710,9 @@ fn render_element_signature(layer: &RenderElement) -> LayerSignature {
     }
 }
 
-fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> {
+fn decode_composited_rgba(
+    request: &DecodeRequest,
+) -> anyhow::Result<(RgbaFrame, Option<CompositedFrame>)> {
     let decode_started_at = Instant::now();
     if request.generation != request.latest_generation.load(Ordering::Relaxed) {
         return Err(anyhow::anyhow!("decode cancelled by newer generation"));
@@ -3682,11 +3730,14 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
     let mut last_error: Option<anyhow::Error> = None;
 
     if request.layers.is_empty() {
-        return Ok(RgbaFrame {
-            width,
-            height,
-            data: vec![0u8; width as usize * height as usize * 4],
-        });
+        return Ok((
+            RgbaFrame {
+                width,
+                height,
+                data: vec![0u8; width as usize * height as usize * 4],
+            },
+            None,
+        ));
     }
 
     let playback_mode = request.playback_mode;
@@ -3825,7 +3876,9 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
             };
             Some((
                 index,
-                decode_composited_rgba(&nested_request).map_err(|e| e.to_string()),
+                decode_composited_rgba(&nested_request)
+                    .map(|(rgba, _gpu)| rgba)
+                    .map_err(|e| e.to_string()),
             ))
         })
         .collect::<Vec<_>>();
@@ -3893,11 +3946,14 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
         if let Some(err) = last_error {
             tracing::debug!("预览合成回退到透明帧：{}", err);
         }
-        return Ok(RgbaFrame {
-            width,
-            height,
-            data: vec![0u8; width as usize * height as usize * 4],
-        });
+        return Ok((
+            RgbaFrame {
+                width,
+                height,
+                data: vec![0u8; width as usize * height as usize * 4],
+            },
+            None,
+        ));
     }
 
     let has_cpu_only_ops = request.layers.iter().any(|layer| match layer {
@@ -3920,7 +3976,7 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
             record_preview_perf_decode_total(decode_started_at.elapsed());
             let mut data = frame.data.clone();
             apply_preview_output_color(&mut data, request);
-            return Ok(RgbaFrame { width, height, data });
+            return Ok((RgbaFrame { width, height, data }, None));
         }
     }
 
@@ -3939,7 +3995,7 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
             record_preview_perf_decode_total(decode_started_at.elapsed());
             let mut data = gpu_rgba;
             apply_preview_output_color(&mut data, request);
-            return Ok(RgbaFrame { width, height, data });
+            return Ok((RgbaFrame { width, height, data }, None));
         }
     }
 
@@ -4020,7 +4076,7 @@ fn decode_composited_rgba(request: &DecodeRequest) -> anyhow::Result<RgbaFrame> 
     record_preview_perf_composite_ns(cpu_composite_started_at.elapsed().as_nanos() as u64, false);
     record_preview_perf_decode_total(decode_started_at.elapsed());
 
-    Ok(RgbaFrame { width, height, data: canvas })
+    Ok((RgbaFrame { width, height, data: canvas }, None))
 }
 
 fn apply_preview_output_color(data: &mut [u8], request: &DecodeRequest) {

@@ -119,6 +119,7 @@ fn global_pipeline(device: &wgpu::Device) -> &'static GpuTexturePipeline {
 ///
 /// Implements `egui_wgpu::CallbackTrait` — use with `egui::PaintCallback`
 /// to render the composited texture directly in egui's render pass.
+#[derive(Clone)]
 pub struct CompositedFrame {
     texture: wgpu::Texture,
     pipeline: &'static GpuTexturePipeline,
@@ -131,18 +132,13 @@ pub struct CompositedFrame {
 impl CompositedFrame {
     /// Wrap an already-composited wgpu texture for zero-copy display.
     /// The shared pipeline is lazily initialized on first call.
-    pub fn new(
-        device: &wgpu::Device,
-        texture: wgpu::Texture,
-        width: u32,
-        height: u32,
-    ) -> std::sync::Arc<Self> {
-        std::sync::Arc::new(Self {
+    pub fn new(device: &wgpu::Device, texture: wgpu::Texture, width: u32, height: u32) -> Self {
+        Self {
             texture,
             pipeline: global_pipeline(device),
             width,
             height,
-        })
+        }
     }
 
     /// Size of the composited frame in pixels.

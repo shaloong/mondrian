@@ -89,6 +89,16 @@ impl FrameCompositor {
         self.batched.composite_layers_to_texture(width, height, layers)
     }
 
+    /// Access the wgpu device for texture creation.
+    pub fn device(&self) -> &wgpu::Device {
+        self.batched.device()
+    }
+
+    /// Access the wgpu queue for texture uploads.
+    pub fn queue(&self) -> &wgpu::Queue {
+        self.batched.queue()
+    }
+
     /// Return number of pooled textures (for dev metrics).
     pub fn pooled_texture_count(&self) -> usize {
         self.texture_pool.len()
