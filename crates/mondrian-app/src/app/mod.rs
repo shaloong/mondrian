@@ -890,6 +890,7 @@ impl MondrianApp {
 
         // Initialize GPU using eframe's wgpu device (shared, no separate adapter).
         app.try_init_gpu_with_device(cc.wgpu_render_state.as_ref());
+        mondrian_renderer::profile::init_profiling();
 
         app.load_app_preferences();
         crate::ui::theme::apply_theme(&cc.egui_ctx, app.theme);

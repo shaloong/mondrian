@@ -13,6 +13,7 @@ pub mod compositor;
 pub mod context;
 pub mod gpu_backend;
 pub mod pipeline;
+pub mod profile;
 pub mod shaders;
 pub mod texture_pool;
 pub mod timeline_composite;
