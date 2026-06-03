@@ -1165,7 +1165,7 @@ mod tests {
 
     #[test]
     fn builtin_effect_properties_are_animatable() {
-        let mut effect = EffectNode::new(EffectType::GaussianBlur);
+        let mut effect = EffectNode::with_defaults(EffectType::GaussianBlur);
         let radius_path = EffectType::GaussianBlur.property_path("radius");
         effect
             .apply_property_mutation(PropertyMutation::SetKeyframe {
@@ -1232,7 +1232,7 @@ mod tests {
         )
         .expect("cube");
 
-        let mut effect = EffectNode::new(EffectType::Lut3D);
+        let mut effect = EffectNode::with_defaults(EffectType::Lut3D);
         effect
             .set_static_value_by_suffix(
                 &EffectType::Lut3D.property_suffix("path"),
@@ -1283,7 +1283,7 @@ mod tests {
             ),
         );
 
-        let mut effect = EffectNode::new(plugin_type.clone());
+        let mut effect = EffectNode::with_defaults(plugin_type.clone());
         effect
             .apply_property_mutation(PropertyMutation::SetStaticValue {
                 path: exposure_path.clone(),
@@ -1300,7 +1300,7 @@ mod tests {
         // Verify the effect produces a graph node
         let graph = build_effect_render_graph(&[effect], tc(0));
         assert!(!graph.nodes.is_empty());
-        assert_eq!(plugin_type.display_name(), "AI 自动曝光".to_string());
+        assert_eq!(effect_display_name(&plugin_type), "AI 自动曝光".to_string());
     }
 
     #[test]
@@ -1331,7 +1331,7 @@ mod tests {
                 ),
         );
 
-        let effect = EffectNode::new(plugin_type);
+        let effect = EffectNode::with_defaults(plugin_type);
         let graph = build_effect_render_graph(&[effect], tc(0));
         let custom_node = graph.nodes.iter().find(|n| {
             matches!(
@@ -1393,7 +1393,7 @@ mod tests {
                 })),
         );
 
-        let effect = EffectNode::new(plugin_type.clone());
+        let effect = EffectNode::with_defaults(plugin_type.clone());
         let graph = build_effect_render_graph(&[effect], tc(0));
         assert_eq!(graph.nodes.len(), 3);
         assert!(matches!(
@@ -1447,7 +1447,7 @@ mod tests {
                 ),
         );
 
-        let effect = EffectNode::new(plugin_type.clone());
+        let effect = EffectNode::with_defaults(plugin_type.clone());
         let graph = build_effect_render_graph(&[effect], tc(0));
         let custom_node = graph.nodes.iter().find_map(|n| match &n.kind {
             EffectGraphNodeKind::UnaryEffect {

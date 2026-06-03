@@ -189,7 +189,8 @@ impl EffectPluginDefinitionBuilder {
 mod tests {
     use super::*;
     use crate::{
-        build_effect_render_graph, effect_definition, register_effect_definition, EffectType,
+        build_effect_render_graph, effect_definition, register_effect_definition, EffectNodeExt,
+        EffectType,
     };
     use mondrian_core::{
         automation::{PropertyDescriptor, PropertyValue},
@@ -232,7 +233,7 @@ mod tests {
             .build();
         register_effect_definition(definition);
 
-        let effect = crate::EffectNode::new(plugin_type.clone());
+        let effect = crate::EffectNode::with_defaults(plugin_type.clone());
         let graph = build_effect_render_graph(&[effect], tc(0));
         assert_eq!(graph.nodes.len(), 3);
 
