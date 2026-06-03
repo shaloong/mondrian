@@ -23,7 +23,7 @@ egui      = "0.34"
 eframe    = { version = "0.34", features = ["wgpu"] }
 egui-wgpu = "0.34"
 egui_extras = { version = "0.34", features = ["all_loaders"] }
-rfd       = "0.14"
+rfd       = "0.15"
 image     = { workspace = true }
 usvg = "0.45"
 resvg = "0.45"
