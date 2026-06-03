@@ -1,6 +1,6 @@
 //! OCIO (OpenColorIO) integration for color management.
 //!
-//! When [`ColorEngine::Ocio`] is selected, color transforms are delegated to
+//! When [`crate::ColorEngine::Ocio`] is selected, color transforms are delegated to
 //! an OCIO v2.5.1 config instead of the built-in MondrianSmart math.
 //! The config source is determined by [`OcioConfigSource`]:
 //!
