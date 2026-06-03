@@ -47,6 +47,7 @@ use std::{
 
 use crate::ui::viewer::gpu_composite::{
     create_rgba_texture, gpu_device, gpu_queue, try_gpu_composite_rgba_layers,
+    try_gpu_composite_to_texture,
 };
 use crate::ui::viewer::gpu_texture::CompositedFrame;
 
@@ -2387,7 +2388,7 @@ impl ViewerPanel {
     fn apply_decode_result(
         &mut self,
         ctx: &egui::Context,
-        mut result: DecodeResult,
+        result: DecodeResult,
         allow_stale: bool,
         is_playing: bool,
     ) {
@@ -2412,75 +2413,73 @@ impl ViewerPanel {
         let can_apply = self.desired_signature.as_ref() == Some(&result.signature);
 
         if can_apply {
-            // Try GPU zero-copy path first (from decode thread).
-            if let Some(gf) = result.gpu_frame.take() {
+            // GPU zero-copy frame from decode thread — skip CPU upload entirely.
+            if let Some(gf) = result.gpu_frame {
                 self.gpu_composited_frame = Some(gf);
-            }
-
-            match result.decoded {
-                Ok(frame) => {
-                    let upload_started_at = Instant::now();
-
-                    // Try to upload via wgpu for callback rendering.
-                    // Falls back to egui texture manager if GPU unavailable.
-                    let mut gpu_uploaded = false;
-                    if let (Some(device), Some(queue)) = (gpu_device(), gpu_queue()) {
-                        let tex = create_rgba_texture(
-                            &device,
-                            &queue,
-                            frame.width,
-                            frame.height,
-                            &frame.data,
-                        );
-                        self.gpu_composited_frame = Some(CompositedFrame::new(
-                            &device,
-                            tex,
-                            frame.width,
-                            frame.height,
-                        ));
-                        gpu_uploaded = true;
-                    }
-
-                    if !gpu_uploaded {
-                        let image = egui::ColorImage::from_rgba_unmultiplied(
-                            [frame.width as usize, frame.height as usize],
-                            &frame.data,
-                        );
-                        if is_playing {
-                            if let Some(texture) = self.preview_texture.as_mut() {
-                                texture.set(image, egui::TextureOptions::LINEAR);
+                self.preview_signature = Some(result.signature);
+                self.preview_error = None;
+                self.last_committed_generation = Some(result.generation);
+                self.last_texture_commit_at = Some(Instant::now());
+            } else {
+                match result.decoded {
+                    Ok(frame) => {
+                        let upload_started_at = Instant::now();
+                        if let (Some(device), Some(queue)) = (gpu_device(), gpu_queue()) {
+                            let tex = create_rgba_texture(
+                                &device,
+                                &queue,
+                                frame.width,
+                                frame.height,
+                                &frame.data,
+                            );
+                            self.gpu_composited_frame = Some(CompositedFrame::new(
+                                &device,
+                                tex,
+                                frame.width,
+                                frame.height,
+                            ));
+                        } else {
+                            // No GPU — fall back to egui texture manager.
+                            let image = egui::ColorImage::from_rgba_unmultiplied(
+                                [frame.width as usize, frame.height as usize],
+                                &frame.data,
+                            );
+                            if is_playing {
+                                if let Some(texture) = self.preview_texture.as_mut() {
+                                    texture.set(image, egui::TextureOptions::LINEAR);
+                                } else {
+                                    self.preview_texture = Some(ctx.load_texture(
+                                        "preview-live-stream",
+                                        image,
+                                        egui::TextureOptions::LINEAR,
+                                    ));
+                                }
                             } else {
                                 self.preview_texture = Some(ctx.load_texture(
-                                    "preview-live-stream",
+                                    format!(
+                                        "preview-composited-{}",
+                                        composite_signature_hash(&result.signature)
+                                    ),
                                     image,
                                     egui::TextureOptions::LINEAR,
                                 ));
-                            }
-                        } else {
-                            self.preview_texture = Some(ctx.load_texture(
-                                format!(
-                                    "preview-composited-{}",
-                                    composite_signature_hash(&result.signature)
-                                ),
-                                image,
-                                egui::TextureOptions::LINEAR,
-                            ));
-                            if let Some(texture) = self.preview_texture.clone() {
-                                self.cache_put(result.signature.clone(), texture);
+                                if let Some(texture) = self.preview_texture.clone() {
+                                    self.cache_put(result.signature.clone(), texture);
+                                }
                             }
                         }
-                    }
-                    self.preview_signature = Some(result.signature);
-                    self.preview_error = None;
-                    self.last_committed_generation = Some(result.generation);
-                    self.last_texture_commit_at = Some(Instant::now());
-                    record_preview_perf_upload(upload_started_at.elapsed());
-                }
-                Err(err) => {
-                    if !allow_stale {
-                        self.preview_texture = None;
                         self.preview_signature = Some(result.signature);
-                        self.preview_error = Some(err);
+                        self.preview_error = None;
+                        self.last_committed_generation = Some(result.generation);
+                        self.last_texture_commit_at = Some(Instant::now());
+                        record_preview_perf_upload(upload_started_at.elapsed());
+                    }
+                    Err(err) => {
+                        if !allow_stale {
+                            self.preview_texture = None;
+                            self.preview_signature = Some(result.signature);
+                            self.preview_error = Some(err);
+                        }
                     }
                 }
             }
@@ -3981,7 +3980,7 @@ fn decode_composited_rgba(
     }
 
     if !has_cpu_only_ops {
-        let rgba_layers_for_gpu = decoded_media_frames
+        let rgba_layers_for_gpu: Vec<CpuRgbaLayer> = decoded_media_frames
             .iter()
             .flatten()
             .map(|(layer, frame)| CpuRgbaLayer {
@@ -3990,7 +3989,24 @@ fn decode_composited_rgba(
                 data: frame.data.clone(),
                 opacity: layer.opacity,
             })
-            .collect::<Vec<_>>();
+            .collect();
+
+        // Zero-copy GPU path: composite to texture, skip readback when color is no-op.
+        if preview_color_is_noop(request) {
+            if let Some(texture) = try_gpu_composite_to_texture(width, height, &rgba_layers_for_gpu)
+            {
+                record_preview_perf_decode_total(decode_started_at.elapsed());
+                if let Some(device) = gpu_device() {
+                    let gpu_frame = CompositedFrame::new(&device, texture, width, height);
+                    return Ok((
+                        RgbaFrame { width, height, data: Vec::new() },
+                        Some(gpu_frame),
+                    ));
+                }
+            }
+        }
+
+        // Standard GPU path with CPU readback for color conversion.
         if let Some(gpu_rgba) = try_gpu_composite_rgba_layers(width, height, &rgba_layers_for_gpu) {
             record_preview_perf_decode_total(decode_started_at.elapsed());
             let mut data = gpu_rgba;
@@ -4077,6 +4093,52 @@ fn decode_composited_rgba(
     record_preview_perf_decode_total(decode_started_at.elapsed());
 
     Ok((RgbaFrame { width, height, data: canvas }, None))
+}
+
+/// Check whether the full preview color pipeline (working→output + display)
+/// is a no-op. When true, the GPU texture path can skip CPU color conversion.
+fn preview_color_is_noop(request: &DecodeRequest) -> bool {
+    // Working → Output color space conversion
+    let pipeline = ColorPipeline::new(
+        request.working_color_space,
+        request.working_color_space,
+        request.output_color_space,
+        request.tone_map,
+    )
+    .with_engine(request.engine.clone());
+    if !pipeline.is_noop() {
+        return false;
+    }
+    // Display transform (OCIO display/view)
+    let ocio_defaults = mondrian_core::ocio_default_display_view();
+    let display = request
+        .ocio_display
+        .as_deref()
+        .or_else(|| ocio_defaults.as_ref().map(|(d, _)| d.as_str()));
+    let view = request
+        .ocio_view
+        .as_deref()
+        .or_else(|| ocio_defaults.as_ref().map(|(_, v)| v.as_str()));
+    if display.is_some() && view.is_some() {
+        return false;
+    }
+    // Display profile: identity matrix + gamma ≈ 1.0 → no-op
+    let dp = &request.display_profile;
+    let is_identity_3x3 = |m: &[[f32; 3]; 3]| {
+        m[0][0].abs() - 1.0 < 0.001
+            && m[0][1].abs() < 0.001
+            && m[0][2].abs() < 0.001
+            && m[1][0].abs() < 0.001
+            && m[1][1].abs() - 1.0 < 0.001
+            && m[1][2].abs() < 0.001
+            && m[2][0].abs() < 0.001
+            && m[2][1].abs() < 0.001
+            && m[2][2].abs() - 1.0 < 0.001
+    };
+    if !is_identity_3x3(&dp.linear_matrix) || (dp.gamma - 1.0).abs() > 0.01 {
+        return false;
+    }
+    true
 }
 
 fn apply_preview_output_color(data: &mut [u8], request: &DecodeRequest) {
