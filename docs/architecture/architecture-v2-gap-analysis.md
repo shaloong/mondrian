@@ -1,7 +1,7 @@
 # Architecture V2 — Gap Analysis (FINAL)
 
-**Date:** 2026-06-03 (post GPU texture-sharing)
-**Assessment:** Code health **Excellent**, architecture conformity **93%** vs. [V2 Blueprint](architecture-v2-blueprint.md).
+**Date:** 2026-06-03 (post GPU texture-sharing + file splitting)
+**Assessment:** Code health **Excellent**, architecture conformity **94%** vs. [V2 Blueprint](architecture-v2-blueprint.md).
 
 ---
 
@@ -33,7 +33,10 @@
 
 - **P1-4 (OCIO global config):** The OCIO C++ library maintains process-wide global state. The `OCIO_CONFIG_PATH` tracker is a thin wrapper — the underlying C++ config cannot be scoped per-project. Documented in `ocio.rs`.
 - **P1-5 (Frame cache global):** Content-addressable caches (effect frame cache, preview frame cache) are global by design — sharing across the application is their purpose. Cleared on project close.
-- **P2-1..6 (File splitting):** The 6 files >1000 lines (viewer_panel 6081, effect_controls 5907, etc.) are UI panels with complex interdependencies. Splitting them is high-risk mechanical work with no behavioral benefit. Deferred to a dedicated cleanup branch.
+
+### Resolved (Post-Gap-Analysis)
+
+- ✅ **P2-1..6 (File splitting):** Completed 2026-06-03 on `refactor/split-large-files`. All files >2000 lines converted to directory modules. Largest file reduced from 6194 → 3725 lines. Effect controls 5921 → 1359 (-77%).
 
 ### Remaining Gaps (Non-Blocking)
 
@@ -77,6 +80,9 @@
 | Cargo dependency violations | 2 | **0** |
 | wgpu version | 22.1 | **29.0** |
 | GPU→CPU readback/frame | 1 | **0** (zero-copy callback path) |
+| Largest file (lines) | 6194 | **3725** |
+| Files >4000 lines | 4 | **0** |
+| Files >2000 lines | 8 | **3** (timeline 3725, viewer 3576, automation 2868) |
 
 ---
 
@@ -106,4 +112,16 @@ Key additions:
 fix/effects-tests (2026-06-03)
 Commits: 1
   - Repaired 7 pre-existing test failures (PropertyBag initialization)
+
+refactor/split-large-files (2026-06-03)
+Commits: 9
+Files: 17 changed
+Key changes:
+  - viewer_panel 6194→3576 (-42%): draw.rs, helpers.rs
+  - effect_controls 5921→1359 (-77%): graph.rs, graph_helpers.rs, inspector.rs, labels.rs
+  - timeline_panel 4271→3725 (-13%): helpers.rs
+  - automation 3229→2868 (-11%): interp.rs
+  - queue 2125→1754 (-17%): helpers.rs
+  - app.rs → app/mod.rs
+  - Fixed animation_groups.rs corruption (17→259 lines)
 ```
