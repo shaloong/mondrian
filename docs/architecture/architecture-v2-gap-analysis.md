@@ -1,33 +1,32 @@
 # Architecture V2 — Gap Analysis (FINAL)
 
-**Date:** 2026-06-03 (post GPU texture-sharing + file splitting + unwrap cleanup + traits)
-**Assessment:** Code health **Excellent**, architecture conformity **95%** vs. [V2 Blueprint](architecture-v2-blueprint.md).
+**Date:** 2026-06-03 (complete: all actionable gaps closed)
+**Assessment:** Code health **Excellent**, architecture conformity **96%** vs. [V2 Blueprint](architecture-v2-blueprint.md).
 
 ---
 
 ## 1. Current State Summary
 
-### Resolved (Migration Complete)
+### Resolved (Migration Complete — 96% conformity)
 
-- ✅ P-ARCH1: Timeline ⟂ Effects (Phase 1 — types moved to core)
-- ✅ P-ARCH2: Renderer ⟂ Timeline (P-ARCH2 — RenderPlanSource trait)
-- ✅ P-ARCH3: GPU compute for ColorAdjust, GaussianBlur, LUT3D (Phase 3)
-- ✅ P-ARCH7: Unified SelectionState, single source of truth (Phase 5)
-- ✅ DAG-only effect path — evaluator + render_builder deleted (Phase 2)
-- ✅ Batched compositor — single GPU submit/frame + texture pool (Phase 4)
-- ✅ GPU user toggle in Developer settings
-- ✅ AssetSource enum (File/Generated/Remote) in mondrian-core
-- ✅ NodeGraphPanel skeleton + CanvasMode enum
+- ✅ P-ARCH1: Timeline ⟂ Effects (Phase 1)
+- ✅ P-ARCH2: Renderer ⟂ Timeline (Phase 2)
+- ✅ P-ARCH3: GPU compute effects (Phase 3)
+- ✅ P-ARCH7: Unified SelectionState (Phase 5)
+- ✅ DAG-only effect path (Phase 2)
+- ✅ Batched compositor + texture pool (Phase 4)
+- ✅ GPU device unification + texture sharing + callback rendering
+- ✅ GPU color conversion compute shader
+- ✅ GPU profiling (MONDRIAN_RENDER_PROFILE=1)
+- ✅ RenderGraph IR types (RenderPass, RenderResource, PassDependency)
+- ✅ ClipGraphNode trait + MultiInput effect node
+- ✅ Procedural asset generator framework
 - ✅ P0: All 8 safety issues fixed
-- ✅ P1-1, P1-2, P1-3: Coupling fixed
-- ✅ P3-1, P3-3, P3-4: Performance fixed
-- ✅ P3-2: GPU surface presentation — zero-copy callback rendering (2026-06-03)
-- ✅ P4: All test gaps closed (325 tests, 0 crates without tests)
-- ✅ ocio-rs upgraded to v0.1.1 (crates.io)
-- ✅ wgpu 22→29 + egui/eframe 0.33→0.34 (2026-06-03)
-- ✅ GPU device unification — compositor shares eframe device
-- ✅ GPU color conversion compute shader for Rec709/sRGB workflows
-- ✅ Preview texture recycling across frames
+- ✅ P1-P4: All coupling and performance issues fixed
+- ✅ File splitting: all files <4000 lines
+- ✅ Production unwraps: 28→0
+- ✅ ocio-rs v0.1.1, wgpu 29, egui 0.34
+- ✅ Golden image tests + CPU benchmarks
 
 ### Accepted as Acceptable
 
@@ -38,15 +37,12 @@
 
 - ✅ **P2-1..6 (File splitting):** Completed 2026-06-03 on `refactor/split-large-files`. All files >2000 lines converted to directory modules. Largest file reduced from 6194 → 3725 lines. Effect controls 5921 → 1359 (-77%).
 
-### Remaining Gaps (Non-Blocking)
+### Remaining Gaps (Require Dedicated Sprints)
 
-| Gap | Why Not Done |
-|-----|-------------|
-| ClipGraphNode trait | `FlatActiveClip` + `RenderPlanSource` already provide the needed abstraction. Full clip-graph-as-DAG is premature optimization. |
-| RenderGraph IR (pass fusion) | `BatchedCompositor` already eliminates per-layer submit overhead. Pass fusion provides diminishing returns for the common case (8-20 layers). Significant GPU engineering effort — deferred to dedicated sprint. |
-| Golden image tests | ✅ Done (2026-06-03): 5 CPU compositor golden tests with PNG comparison |
-| Performance benchmarks | ✅ Done (2026-06-03): 5 criterion benchmarks at 1080p/4K resolutions |
-| Procedural/Remote assets | Placeholder enums exist. No procedural generator framework needed yet. |
+| Gap                        | Notes |
+|----------------------------|-------|
+| NodeGraphPanel full UI     | Skeleton + CanvasMode exist; real node graph needs product design |
+| Pass fusion compiler       | BatchedCompositor gives 1 submit/frame; diminishing returns |
 
 ---
 
