@@ -350,7 +350,7 @@ impl GpuBackend {
         if guard.is_none() {
             *guard = Some(Arc::new(CachedPipeline::new(&self.gpu.device, src, label)));
         }
-        Arc::clone(guard.as_ref().unwrap())
+        Arc::clone(guard.as_ref().expect("just inserted"))
     }
 
     fn get_or_create_lut_pipeline(&self) -> Arc<CachedLutPipeline> {
@@ -362,7 +362,7 @@ impl GpuBackend {
                 "lut3d_compute",
             )));
         }
-        Arc::clone(guard.as_ref().unwrap())
+        Arc::clone(guard.as_ref().expect("just inserted"))
     }
 
     fn dispatch_lut(

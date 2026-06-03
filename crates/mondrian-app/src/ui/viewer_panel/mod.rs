@@ -1705,7 +1705,7 @@ impl ViewerPanel {
                                                 if !has_temp_pt && !display_pts.is_empty() {
                                                     if let Some(cur_seq) = self.canvas_transform.screen_to_seq(pos) {
                                                         let cur_pt = glam::Vec2::new(cur_seq.0, cur_seq.1);
-                                                        let last = display_pts.last().unwrap();
+                                                        let last = display_pts.last().expect("display points non-empty");
                                                         // Build a 2-point path with last committed + cursor.
                                                         let mut rb_pts = vec![*last, mondrian_effects::mask::BezierPoint::new(cur_pt)];
                                                         // If last has control_out, preview with it.

@@ -53,7 +53,7 @@ impl MultiLevelCache {
         let l2_proxy_index = load_proxy_index(&l2_proxy_index_path);
         Arc::new(Self {
             l1_path_cache: Mutex::new(LruCache::new(
-                NonZeroUsize::new(l1_capacity.max(1)).unwrap(),
+                NonZeroUsize::new(l1_capacity.max(1)).expect("max(1) ensures non-zero"),
             )),
             l2_proxy_index_path,
             l2_proxy_index: Mutex::new(l2_proxy_index),

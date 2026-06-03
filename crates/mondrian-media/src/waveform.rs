@@ -51,7 +51,7 @@ impl WaveformCache {
         if self.entries.contains_key(&key) {
             // SAFETY: key exists, get returns Some. The reference is valid
             // because we only evict before inserting, never during reads.
-            return self.entries.get(&key).unwrap();
+            return self.entries.get(&key).expect("just checked contains_key");
         }
 
         // Evict oldest entries before inserting to stay within budget.
@@ -67,7 +67,7 @@ impl WaveformCache {
         let data = compute_waveform(buffer, capped_width);
         self.entries.insert(key, data);
         self.order.push(key);
-        self.entries.get(&key).unwrap()
+        self.entries.get(&key).expect("just inserted")
     }
 
     pub fn clear(&mut self) {

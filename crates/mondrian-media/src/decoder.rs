@@ -179,7 +179,9 @@ impl DecoderPool {
             hw_accel: HwAccelBackend::detect(),
             prefetch_tasks: DashMap::new(),
             next_prefetch_task_id: AtomicU64::new(1),
-            rgba_cache: Mutex::new(LruCache::new(NonZeroUsize::new(256).unwrap())),
+            rgba_cache: Mutex::new(LruCache::new(
+                NonZeroUsize::new(256).expect("256 is non-zero"),
+            )),
             rgba_inflight: DashMap::new(),
             preview_decode_runtime: Arc::new(
                 tokio::runtime::Builder::new_multi_thread()
