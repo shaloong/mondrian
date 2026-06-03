@@ -3184,6 +3184,7 @@ dependencies = [
  "async-trait",
  "bytemuck",
  "glam",
+ "image",
  "lru",
  "mondrian-core",
  "mondrian-effects",
