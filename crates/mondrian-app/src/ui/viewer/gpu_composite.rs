@@ -1,7 +1,7 @@
 //! GPU compositor integration for the viewer panel.
 //!
-//! Manages the GPU compositor singleton, failure tracking, and the
-//! preview output texture lifecycle (egui-managed, GPU-uploaded).
+//! Manages the global GPU compositor singleton, failure tracking, and
+//! utility functions for texture creation and zero-copy compositing.
 //!
 //! Extracted from `viewer_panel.rs` during the Phase 5 file split.
 
@@ -11,65 +11,6 @@ use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
-
-// ── Preview output texture manager ───────────────────────────────────
-
-/// Manages the preview output texture lifecycle in egui's texture manager.
-/// On each frame, CPU-composited RGBA data is uploaded to a reusable
-/// egui texture, avoiding per-frame allocation.
-#[derive(Default)]
-pub struct PreviewOutput {
-    texture_id: Option<egui::TextureId>,
-    width: u32,
-    height: u32,
-}
-
-impl PreviewOutput {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn egui_texture_id(&self) -> Option<egui::TextureId> {
-        self.texture_id
-    }
-
-    pub fn size(&self) -> egui::Vec2 {
-        egui::vec2(self.width as f32, self.height as f32)
-    }
-
-    /// Upload composited RGBA data to the preview texture.
-    /// The texture is created on first call and updated in-place on subsequent frames.
-    pub fn update(&mut self, ctx: &egui::Context, width: u32, height: u32, data: &[u8]) {
-        let size = [width as usize, height as usize];
-        let image = egui::ColorImage::from_rgba_unmultiplied(size, data);
-        let image = std::sync::Arc::new(image);
-
-        if self.texture_id.is_none() {
-            let tex = ctx.tex_manager().write().alloc(
-                "mondrian-preview".into(),
-                egui::epaint::ImageData::Color(image.clone()),
-                egui::TextureOptions::LINEAR,
-            );
-            self.texture_id = Some(tex);
-        } else {
-            let delta = egui::epaint::ImageDelta {
-                image: egui::epaint::ImageData::Color(image),
-                pos: None,
-                options: egui::TextureOptions::LINEAR,
-            };
-            ctx.tex_manager().write().set(self.texture_id.unwrap(), delta);
-        }
-        self.width = width;
-        self.height = height;
-    }
-
-    /// Release the egui texture (e.g., on resolution change or panel close).
-    pub fn release(&mut self, ctx: &egui::Context) {
-        if let Some(id) = self.texture_id.take() {
-            ctx.tex_manager().write().free(id);
-        }
-    }
-}
 
 // ── GPU compositor ───────────────────────────────────────────────────
 
