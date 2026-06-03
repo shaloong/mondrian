@@ -1,14 +1,7 @@
 # Mondrian 系统架构总览
 
-> **ARCHITECTURE V2 MIGRATION IN PROGRESS** (2026-05-30)
-> This document describes the current (V1) architecture. The target V2 architecture
-> is defined in:
->
-> - [Architecture V2 Blueprint](architecture-v2-blueprint.md) — target state
-> - [Architecture V2 Gap Analysis](architecture-v2-gap-analysis.md) — what's missing
-> - [Architecture V2 Migration Plan](architecture-v2-migration-plan.md) — phased execution
->
-> Branch: `feat/architecture-v2-dag-gpu`
+> **Status:** Architecture V2 migration complete (2026-06-03). This document
+> reflects the current production architecture.
 
 ## 1. 设计哲学
 
@@ -24,54 +17,67 @@ AI 原生 =  Provider 抽象层  +  可视化 AI 计划  +  资产复用系统
 
 ```text
 ┌──────────────────────────────────────────────────────────────────┐
-│  Layer 4: Application Layer                                       │
+│  Layer 4: Application Layer                                      │
 │  ┌─────────────────────────────────────────────────────────────┐ │
 │  │  mondrian-app                                               │ │
 │  │  ├─ MainWindow  (Panels: Timeline / Viewer / Library / AI)  │ │
-│  │  ├─ AppState    (单向数据流，类 Redux)                       │ │
-│  │  └─ CommandBus  (所有用户操作 → 可撤销 Command)              │ │
+│  │  ├─ AppState    (单向数据流，类 Redux)                      │ │
+│  │  └─ CommandBus  (所有用户操作 → 可撤销 Command)             │ │
 │  └─────────────────────────────────────────────────────────────┘ │
 └──────────────────────────────────────────────────────────────────┘
          │ Command / Event
 ┌──────────────────────────────────────────────────────────────────┐
-│  Layer 3: Domain Logic Layer                                      │
-│  ┌────────────────┐  ┌─────────────────┐  ┌───────────────────┐ │
-│  │ mondrian-      │  │ mondrian-       │  │ mondrian-         │ │
-│  │ timeline       │  │ assets          │  │ ai                │ │
-│  │                │  │                 │  │                   │ │
-│  │ Timeline       │  │ AssetLibrary    │  │ AgentOrchestrator │ │
-│  │ Track          │  │ CharacterRepo   │  │ WorkflowEngine    │ │
-│  │ Clip           │  │ SceneRepo       │  │ Providers         │ │
-│  │ Keyframe       │  │ TemplateRepo    │  │                   │ │
-│  └────────────────┘  └─────────────────┘  └───────────────────┘ │
+│  Layer 3: Domain Logic Layer                                     │
+│  ┌────────────────┐  ┌─────────────────┐  ┌───────────────────┐  │
+│  │ mondrian-      │  │ mondrian-       │  │ mondrian-         │  │
+│  │ timeline       │  │ assets          │  │ ai                │  │
+│  │                │  │                 │  │                   │  │
+│  │ Timeline       │  │ AssetLibrary    │  │ AgentOrchestrator │  │
+│  │ Track          │  │ CharacterRepo   │  │ WorkflowEngine    │  │
+│  │ Clip           │  │ SceneRepo       │  │ Providers         │  │
+│  │ Keyframe       │  │ TemplateRepo    │  │                   │  │
+│  └────────────────┘  └─────────────────┘  └───────────────────┘  │
 └──────────────────────────────────────────────────────────────────┘
          │ FrameRequest / MediaQuery
 ┌──────────────────────────────────────────────────────────────────┐
-│  Layer 2: Engine Layer                                            │
-│  ┌──────────────────────┐   ┌────────────────────────────────┐  │
-│  │ mondrian-renderer    │   │ mondrian-media                 │  │
-│  │                      │   │                                │  │
-│  │ FrameCompositor      │◄──│ DecoderPool    ProxyCache      │  │
-│  │ RenderPipeline(wgpu) │   │ AudioMixer     MediaInfo       │  │
-│  │ LayerGraph           │   │                                │  │
-│  │ ShaderRegistry       │   └────────────────────────────────┘  │
-│  └──────────────────────┘                                       │
-│  ┌──────────────────────┐   ┌────────────────────────────────┐  │
-│  │ mondrian-effects     │   │ mondrian-export                │  │
-│  │                      │   │                                │  │
-│  │ LutProcessor         │   │ RenderQueue                    │  │
-│  │ FilterGraph          │   │ HardwareEncoder                │  │
-│  │ TransitionEngine     │   │ FormatPresets                  │  │
-│  └──────────────────────┘   └────────────────────────────────┘  │
+│  Layer 2: Engine Layer                                           │
+│  ┌──────────────────────┐   ┌────────────────────────────────┐   │
+│  │ mondrian-renderer    │   │ mondrian-media                 │   │
+│  │                      │   │                                │   │
+│  │ FrameCompositor      │◄──│ DecoderPool    ProxyCache      │   │
+│  │ BatchedCompositor    │   │ AudioMixer     MediaInfo       │   │
+│  │   + PassFusion (≤4)  │   │ FrameCache     Waveform        │   │
+│  │ GPU Compute (4 shdr) │   └────────────────────────────────┘   │
+│  │ GpuBackend           │                                        │
+│  │ ZeroCopy Callback    │   ┌────────────────────────────────┐   │
+│  │ GPU Color Convert    │   │ mondrian-export                │   │
+│  │ TexturePool          │   │                                │   │
+│  │ RenderGraph IR       │   │ RenderQueue                    │   │
+│  └──────────────────────┘   │ HardwareEncoder                │   │
+│  ┌──────────────────────┐   │ FormatPresets                  │   │
+│  │ mondrian-effects     │   └────────────────────────────────┘   │
+│  │                      │                                        │
+│  │ EffectRenderGraph    │                                        │
+│  │ CompiledEffectGraph  │                                        │
+│  │ DAG Execution        │                                        │
+│  │ GPU Accelerator      │                                        │
+│  │ PluginSDK            │                                        │
+│  └──────────────────────┘                                        │
 └──────────────────────────────────────────────────────────────────┘
          │ 公共类型 / 错误 / 事件
 ┌──────────────────────────────────────────────────────────────────┐
-│  Layer 1: Core Foundation                                         │
-│  mondrian-core                                                    │
-│  ├─ types    (TimeCode, FrameRate, Resolution, Rect, Color...)    │
-│  ├─ error    (MondrianError, Result<T>)                           │
-│  ├─ events   (EventBus: publish/subscribe)                        │
-│  └─ project  (Project, Sequence, Settings)                        │
+│  Layer 1: Core Foundation                                        │
+│  mondrian-core                                                   │
+│  ├─ types         (TimeCode, FrameRate, Resolution, Color...)   │
+│  ├─ automation    (PropertyBag, Keyframe, AnimatedProperty)
+│  ├─ effect_data   (EffectNode, EffectType)
+│  ├─ mask_data     (MaskId, MaskComponent, MaskKeyframe)
+│  ├─ color         (ColorEngine, ColorPipeline, ICC, OCIO)
+│  ├─ render_graph  (RenderGraph IR types)
+│  ├─ timeline_data (FlatActiveClip, RenderPlanSource, ClipKind)
+│  ├─ error         (MondrianError, Result<T>)                          │
+│  ├─ events        (EventBus: publish/subscribe)                       │
+│  └─ project       (Project, Sequence, Settings)                       │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -97,7 +103,9 @@ DecoderPool::get_frame(clip_id, local_time)
       │
       ▼
 FrameCompositor::composite(clips, effects, keyframes)
-  → wgpu 渲染指令
+  → GPU compositing (BatchedCompositor, up to 4 layers/pass)
+  → GPU color conversion (Rec709/sRGB)
+  → Zero-copy callback (CompositedFrame → egui wgpu pass)
       │
       ▼
 预览窗口显示
@@ -117,12 +125,12 @@ AgentOrchestrator::run_plan(ai_plan)
   ┌───┴──────────────────────────────┐
   │  Step 1: transcribe_audio        │
   │  → SpeechProvider::transcribe()  │
-  │  → 保存到 AssetLibrary            │
+  │  → 保存到 AssetLibrary           │
   └───┬──────────────────────────────┘
   ┌───┴──────────────────────────────┐
   │  Step 2: translate_subtitle      │
   │  → SubtitleProvider::translate() │
-  │  → 生成 SRT / 双行字幕轨          │
+  │  → 生成 SRT / 双行字幕轨         │
   └───┬──────────────────────────────┘
   ┌───┴──────────────────────────────┐
   │  Step 3: place_on_timeline       │
@@ -239,3 +247,53 @@ project.mondrian (ZIP 容器)
 ```
 
 项目保存阶段对 `library/index.db` 采用流式写入 ZIP（`std::io::copy`），避免一次性读取整库到内存，降低大项目保存时的内存峰值与阻塞时长。
+
+---
+
+## 7. GPU 渲染管线
+
+### 7.1 架构
+
+```text
+Compositor input (RGBA layers)
+      │
+      ▼
+BatchedCompositor::composite_layers
+  ├─ Upload layer textures to GPU
+  ├─ Group consecutive Normal-blend layers (up to 4 per pass)
+  ├─ Record fused composite passes + non-fusible single passes
+  ├─ Single queue.submit() per frame
+  └─ TexturePool reuses intermediate targets
+      │
+      ▼
+GPU Color Conversion (optional, compute shader)
+  ├─ Rec709/sRGB gamma decode → linear
+  ├─ Display matrix + gamma encode
+  └─ Skip when no-op (identity matrix, gamma ≈ 1.0)
+      │
+      ▼
+CompositedFrame (CallbackTrait)
+  ├─ Wraps composited wgpu texture
+  ├─ Rendered directly in egui wgpu render pass
+  └─ Zero CPU readback (GPU→GPU path)
+```
+
+### 7.2 GPU Shaders
+
+| Shader | Type | Purpose |
+|--------|------|---------|
+| composite.wgsl | Render | Single-layer Porter-Duff Over blend |
+| composite_fused.wgsl | Render | Multi-layer fused blend (up to 4 layers/pass) |
+| color_convert_compute.wgsl | Compute | Gamma decode + matrix + gamma encode |
+| gpu_texture.wgsl | Render | Full-screen quad texture display (callback) |
+| lut3d_compute.wgsl | Compute | 3D LUT color grading |
+| blur_gaussian_compute.wgsl | Compute | Gaussian blur |
+| color_adjust_compute.wgsl | Compute | Exposure, contrast, saturation |
+
+### 7.3 性能特性
+
+- GPU→CPU readback: **0** (zero-copy callback rendering)
+- GPU submits/frame: **1** (batched compositor)
+- Layers per pass: **1–4** (pass fusion)
+- Texture allocation: **pooled** (TexturePool with LRU eviction)
+- Color conversion: **GPU** (Rec709/sRGB), **CPU fallback** (OCIO/ICC/HDR)
