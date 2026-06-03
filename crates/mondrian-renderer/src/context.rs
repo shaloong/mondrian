@@ -11,7 +11,18 @@ pub struct GpuContext {
 }
 
 impl GpuContext {
-    /// 异步初始化 GPU 上下文（选择最优适配器）
+    /// Create a GpuContext from an existing wgpu device and queue.
+    /// Used when sharing the eframe-created device.
+    pub fn from_device_queue(
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
+        adapter: wgpu::Adapter,
+    ) -> Arc<Self> {
+        Arc::new(Self { device, queue, adapter })
+    }
+
+    /// Creates a new independent GPU context (standalone device).
+    /// Used when no external device is available (e.g., tests, export).
     pub async fn new() -> Result<Arc<Self>> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),

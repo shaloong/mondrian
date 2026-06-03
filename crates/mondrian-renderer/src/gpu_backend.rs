@@ -223,13 +223,22 @@ impl GpuBackend {
     pub async fn new() -> Option<Arc<Self>> {
         let gpu = GpuContext::new().await.ok()?;
         tracing::info!("GPU backend initialized: {:?}", gpu.adapter.get_info());
-        Some(Arc::new(Self {
+        Some(Self::from_context(gpu))
+    }
+
+    /// Create a GpuBackend using an existing GpuContext (e.g., shared with eframe).
+    pub fn from_context(gpu: Arc<GpuContext>) -> Arc<Self> {
+        tracing::info!(
+            "GPU backend initialized (shared device): {:?}",
+            gpu.adapter.get_info()
+        );
+        Arc::new(Self {
             gpu,
             available: true,
             color_adjust: Mutex::new(None),
             blur: Mutex::new(None),
             lut3d: Mutex::new(None),
-        }))
+        })
     }
 
     pub fn is_available(&self) -> bool {

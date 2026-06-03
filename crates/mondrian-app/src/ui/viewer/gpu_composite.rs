@@ -8,7 +8,7 @@
 use mondrian_renderer::{CompositorConfig, CpuRgbaLayer, FrameCompositor, GpuContext};
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 // ── Preview output texture manager ───────────────────────────────────
@@ -72,6 +72,18 @@ impl PreviewOutput {
 
 // ── GPU compositor ───────────────────────────────────────────────────
 
+/// Initialize the global GPU compositor with an external wgpu device
+/// (typically from eframe's `CreationContext::wgpu_render_state`).
+/// Must be called once at app startup, before any compositing.
+pub fn init_gpu_compositor(gpu: Arc<GpuContext>) {
+    let compositor = Mutex::new(FrameCompositor::new(gpu, CompositorConfig::default()));
+    if GPU_COMPOSITOR.set(compositor).is_err() {
+        tracing::warn!("init_gpu_compositor called more than once — ignored");
+    }
+}
+
+static GPU_COMPOSITOR: OnceLock<Mutex<FrameCompositor>> = OnceLock::new();
+
 /// Try to composite RGBA layers using the GPU.
 /// Returns `None` if GPU compositing is unavailable or fails.
 pub fn try_gpu_composite_rgba_layers(
@@ -104,21 +116,11 @@ pub fn try_gpu_composite_rgba_layers(
 }
 
 fn global_gpu_compositor() -> Option<&'static Mutex<FrameCompositor>> {
-    static GPU_COMPOSITOR: OnceLock<Option<Mutex<FrameCompositor>>> = OnceLock::new();
-    GPU_COMPOSITOR
-        .get_or_init(|| {
-            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().ok()?;
-            let gpu = rt.block_on(GpuContext::new()).ok()?;
-            Some(Mutex::new(FrameCompositor::new(
-                gpu,
-                CompositorConfig::default(),
-            )))
-        })
-        .as_ref()
+    GPU_COMPOSITOR.get()
 }
 
 fn gpu_compositor_enabled() -> bool {
-    global_gpu_compositor().is_some()
+    GPU_COMPOSITOR.get().is_some()
 }
 
 fn record_gpu_compositor_result(success: bool) {

@@ -883,8 +883,8 @@ impl MondrianApp {
             gpu_available: false,
         };
 
-        // Initialize GPU acceleration backend asynchronously.
-        app.try_init_gpu();
+        // Initialize GPU using eframe's wgpu device (shared, no separate adapter).
+        app.try_init_gpu_with_device(cc.wgpu_render_state.as_ref());
 
         app.load_app_preferences();
         crate::ui::theme::apply_theme(&cc.egui_ctx, app.theme);
@@ -1430,8 +1430,53 @@ fn audio_render_max_in_flight_buffering() -> usize {
 // ─────────────────────────────────────────────
 
 impl MondrianApp {
+    /// Try to initialize GPU using eframe's shared wgpu device.
+    /// Falls back to standalone device creation if eframe device is unavailable.
+    fn try_init_gpu_with_device(&mut self, render_state: Option<&egui_wgpu::RenderState>) {
+        let gpu = if let Some(rs) = render_state {
+            tracing::info!("Using eframe wgpu device for GPU compositor & compute");
+            mondrian_renderer::GpuContext::from_device_queue(
+                std::sync::Arc::new(rs.device.clone()),
+                std::sync::Arc::new(rs.queue.clone()),
+                rs.adapter.clone(),
+            )
+        } else {
+            tracing::info!("eframe wgpu device not available, creating standalone GPU context");
+            let handle = match tokio::runtime::Handle::try_current() {
+                Ok(h) => h,
+                Err(_) => {
+                    self.gpu_available = false;
+                    return;
+                }
+            };
+            match handle.block_on(mondrian_renderer::GpuContext::new()) {
+                Ok(gpu) => gpu,
+                Err(e) => {
+                    tracing::warn!("Failed to create standalone GPU context: {e}");
+                    self.gpu_available = false;
+                    return;
+                }
+            }
+        };
+
+        // Initialize the GPU compositor (layer composition).
+        crate::ui::viewer::gpu_composite::init_gpu_compositor(gpu.clone());
+
+        // Initialize GPU compute backend for effect processing.
+        let backend = mondrian_renderer::GpuBackend::from_context(gpu);
+        mondrian_effects::set_global_gpu_executor(Some(backend));
+        self.gpu_available = true;
+        tracing::info!("GPU 加速已启用");
+        self.state.event_bus.publish(mondrian_core::AppEvent::GpuStatusChanged {
+            available: true,
+            reason: "GPU 加速已启用".into(),
+        });
+    }
+
+    /// Legacy path kept for test compatibility.
     /// Try to initialize GPU acceleration for effect processing.
     /// On failure, GPU is silently unavailable — effects fall back to CPU.
+    #[allow(dead_code)]
     fn try_init_gpu(&mut self) {
         let handle = match tokio::runtime::Handle::try_current() {
             Ok(h) => h,
