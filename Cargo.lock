@@ -3183,6 +3183,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bytemuck",
+ "criterion",
  "glam",
  "image",
  "lru",
