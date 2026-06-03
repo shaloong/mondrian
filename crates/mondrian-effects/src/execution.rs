@@ -554,6 +554,43 @@ fn execute_effect_graph(
                 }
                 outputs.insert(node.id, source);
             }
+            EffectGraphNodeKind::MultiInput { ref inputs, blend_mode, opacity } => {
+                let first = take_graph_input(
+                    &mut outputs,
+                    &mut remaining_uses,
+                    &mut buffer_pool,
+                    inputs[0],
+                    required_len,
+                )
+                .unwrap_or_else(|| input.to_vec());
+                let mut result = first;
+                for overlay_id in &inputs[1..] {
+                    if let Some(overlay) = take_graph_input(
+                        &mut outputs,
+                        &mut remaining_uses,
+                        &mut buffer_pool,
+                        *overlay_id,
+                        required_len,
+                    ) {
+                        let mut out = take_execution_buffer(&mut buffer_pool, required_len);
+                        crate::adjustment::blend_adjustment_result(
+                            &result,
+                            &overlay,
+                            width,
+                            height,
+                            *opacity,
+                            Some(*blend_mode),
+                            &mut out,
+                        );
+                        release_execution_buffer(
+                            &mut buffer_pool,
+                            std::mem::replace(&mut result, out),
+                        );
+                        release_execution_buffer(&mut buffer_pool, overlay);
+                    }
+                }
+                outputs.insert(node.id, result);
+            }
         }
     }
 

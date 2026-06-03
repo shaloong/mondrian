@@ -37,6 +37,13 @@ pub enum EffectGraphNodeKind {
         expansion: f32,
         opacity: f32,
     },
+    /// N-input blend or compositing node (future: Audio Mix, Color Mixer, etc.).
+    /// Currently implementation-deferred — 2-input Blend covers 95% of use cases.
+    MultiInput {
+        inputs: Vec<EffectGraphNodeId>,
+        blend_mode: BlendMode,
+        opacity: f32,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +60,7 @@ impl EffectGraphNode {
             EffectGraphNodeKind::Blend { base, overlay, .. } => vec![base, overlay],
             EffectGraphNodeKind::Mask { input, mask, .. } => vec![input, mask],
             EffectGraphNodeKind::MaskSource { .. } => Vec::new(),
+            EffectGraphNodeKind::MultiInput { ref inputs, .. } => inputs.clone(),
         }
     }
 }
@@ -119,6 +127,12 @@ impl EffectRenderGraph {
                     shape_variant_hash(shape, &mut hasher);
                     feather.to_bits().hash(&mut hasher);
                     expansion.to_bits().hash(&mut hasher);
+                    opacity.to_bits().hash(&mut hasher);
+                }
+                EffectGraphNodeKind::MultiInput { ref inputs, blend_mode, opacity } => {
+                    7u8.hash(&mut hasher);
+                    inputs.hash(&mut hasher);
+                    blend_mode.hash(&mut hasher);
                     opacity.to_bits().hash(&mut hasher);
                 }
             }
@@ -621,6 +635,20 @@ pub fn compile_effect_node_profiles(
                     cache_policy: EffectCachePolicy::Deterministic,
                     estimated_cost: 4,
                     output_cache_enabled: false,
+                }
+            }
+            EffectGraphNodeKind::MultiInput { ref inputs, .. } => {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                7u8.hash(&mut hasher);
+                inputs.hash(&mut hasher);
+                let input_cost: u32 =
+                    inputs.iter().filter_map(|id| profiles.get(id)).map(|p| p.estimated_cost).sum();
+                let estimated_cost = input_cost + inputs.len() as u32;
+                CompiledEffectNodeProfile {
+                    subtree_signature: hasher.finish(),
+                    cache_policy: EffectCachePolicy::Deterministic,
+                    estimated_cost,
+                    output_cache_enabled: estimated_cost >= 8,
                 }
             }
         };

@@ -142,3 +142,31 @@ pub trait RenderPlanSource {
     /// Whether to auto tone-map media to the working color space.
     fn auto_tone_map_media(&self) -> bool;
 }
+
+// ── Clip graph node trait ────────────────────────────────────────────
+
+/// A node in the abstract clip graph — each clip is an evaluable unit.
+///
+/// In the full Architecture V2 vision, the timeline is a projection of a
+/// directed acyclic graph of clip nodes. This trait formalizes that each
+/// clip type (media, adjustment, solid color, nested sequence) can
+/// evaluate itself into render elements independently.
+///
+/// Currently `FlatActiveClip` + `RenderPlanSource` provide the concrete
+/// implementation. This trait exists to document the architectural intent
+/// and allow future DAG-based clip graph evaluation.
+pub trait ClipGraphNode {
+    /// Unique identifier for this node in the clip graph.
+    fn node_id(&self) -> ClipId;
+
+    /// Node kind for dispatch.
+    fn node_kind(&self) -> ClipKind;
+
+    /// Input node IDs — clips this node depends on.
+    /// Empty for leaf nodes (media, solid color). Non-empty for
+    /// composition nodes (nested sequences, future group clips).
+    fn input_ids(&self) -> &[ClipId];
+
+    /// Whether this node is enabled (visible in the graph).
+    fn is_enabled(&self) -> bool;
+}
