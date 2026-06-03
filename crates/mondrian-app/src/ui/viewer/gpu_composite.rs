@@ -6,11 +6,286 @@
 //! Extracted from `viewer_panel.rs` during the Phase 5 file split.
 
 use egui_wgpu::wgpu;
+use egui_wgpu::wgpu::util::DeviceExt as _;
 use mondrian_renderer::{CompositorConfig, CpuRgbaLayer, FrameCompositor, GpuContext};
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
+
+// ── GPU color conversion ──────────────────────────────────────────────
+
+/// Parameters for the GPU color conversion compute shader.
+#[derive(Clone, Copy)]
+pub struct GpuColorConversionParams {
+    /// Source transfer gamma (e.g. Rec709 = 2.4, sRGB ≈ 2.2, 0.0 = linear).
+    pub decode_gamma: f32,
+    /// Display profile 3x3 linear matrix (row-major).
+    pub display_matrix: [[f32; 3]; 3],
+    /// Display profile gamma.
+    pub display_gamma: f32,
+    /// Profile color space transfer gamma for re-encoding.
+    pub encode_gamma: f32,
+}
+
+impl Default for GpuColorConversionParams {
+    fn default() -> Self {
+        Self {
+            decode_gamma: 2.4, // Rec709
+            display_matrix: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            display_gamma: 0.0, // no-op (γ=0 means linear/no conversion)
+            encode_gamma: 2.4,  // Rec709
+        }
+    }
+}
+
+impl GpuColorConversionParams {
+    /// True if this conversion is effectively a no-op.
+    pub fn is_noop(&self) -> bool {
+        let dm = self.display_matrix;
+        let is_identity = (dm[0][0] - 1.0).abs() < 0.001
+            && dm[0][1].abs() < 0.001
+            && dm[0][2].abs() < 0.001
+            && dm[1][0].abs() < 0.001
+            && (dm[1][1] - 1.0).abs() < 0.001
+            && dm[1][2].abs() < 0.001
+            && dm[2][0].abs() < 0.001
+            && dm[2][1].abs() < 0.001
+            && (dm[2][2] - 1.0).abs() < 0.001;
+        is_identity
+            && (self.decode_gamma - self.encode_gamma).abs() < 0.01
+            && self.display_gamma <= 0.001
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct ColorConvertUniforms {
+    decode_gamma: f32,
+    _pad0: [f32; 3],
+    display_matrix_0: [f32; 4],
+    display_matrix_1: [f32; 4],
+    display_matrix_2: [f32; 4],
+    display_gamma: f32,
+    encode_gamma: f32,
+    _pad1: [f32; 2],
+}
+
+struct CachedColorConvert {
+    pipeline: wgpu::ComputePipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+}
+
+fn color_convert_pipeline(device: &wgpu::Device) -> &'static CachedColorConvert {
+    static PIPELINE: OnceLock<CachedColorConvert> = OnceLock::new();
+    PIPELINE.get_or_init(|| {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("color_convert_shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../../../../mondrian-renderer/shaders/color_convert_compute.wgsl")
+                    .into(),
+            ),
+        });
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("color_convert_bgl_0"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let uniform_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("color_convert_bgl_1"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("color_convert_pl"),
+            immediate_size: 0,
+            bind_group_layouts: &[Some(&bind_group_layout), Some(&uniform_bgl)],
+        });
+
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("color_convert_pipeline"),
+            layout: Some(&pipeline_layout),
+            cache: None,
+            module: &shader,
+            entry_point: Some("main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        });
+
+        CachedColorConvert { pipeline, bind_group_layout }
+    })
+}
+
+/// Apply GPU color conversion to a composited texture.
+/// Returns the converted texture (newly allocated), or the input texture
+/// unchanged if the conversion is a no-op.
+pub fn apply_gpu_color_conversion(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    input_texture: &wgpu::Texture,
+    width: u32,
+    height: u32,
+    params: GpuColorConversionParams,
+) -> wgpu::Texture {
+    if params.is_noop() {
+        // For no-op: clone the texture via copy (keep input valid).
+        let output = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("color_convert_output_noop"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("color_convert_noop_copy"),
+        });
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: input_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: &output,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        );
+        queue.submit([encoder.finish()]);
+        return output;
+    }
+
+    let cached = color_convert_pipeline(device);
+
+    // Output texture
+    let output = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("color_convert_output"),
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+
+    let input_view = input_texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let output_view = output.create_view(&wgpu::TextureViewDescriptor::default());
+
+    let bg0 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("color_convert_bg0"),
+        layout: &cached.bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&input_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(&output_view),
+            },
+        ],
+    });
+
+    // Build uniforms (vec3 padded to vec4 for alignment)
+    let uniforms = ColorConvertUniforms {
+        decode_gamma: params.decode_gamma,
+        _pad0: [0.0; 3],
+        display_matrix_0: [
+            params.display_matrix[0][0],
+            params.display_matrix[0][1],
+            params.display_matrix[0][2],
+            0.0,
+        ],
+        display_matrix_1: [
+            params.display_matrix[1][0],
+            params.display_matrix[1][1],
+            params.display_matrix[1][2],
+            0.0,
+        ],
+        display_matrix_2: [
+            params.display_matrix[2][0],
+            params.display_matrix[2][1],
+            params.display_matrix[2][2],
+            0.0,
+        ],
+        display_gamma: params.display_gamma,
+        encode_gamma: params.encode_gamma,
+        _pad1: [0.0; 2],
+    };
+
+    let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("color_convert_uniforms"),
+        contents: bytemuck::bytes_of(&uniforms),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+
+    let bg1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("color_convert_bg1"),
+        layout: &cached.pipeline.get_bind_group_layout(1),
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: uniform_buffer.as_entire_binding(),
+        }],
+    });
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("color_convert_encoder"),
+    });
+    {
+        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("color_convert_pass"),
+            timestamp_writes: None,
+        });
+        cpass.set_pipeline(&cached.pipeline);
+        cpass.set_bind_group(0, &bg0, &[]);
+        cpass.set_bind_group(1, &bg1, &[]);
+        let wg_x = width.div_ceil(8);
+        let wg_y = height.div_ceil(8);
+        cpass.dispatch_workgroups(wg_x, wg_y, 1);
+    }
+    queue.submit([encoder.finish()]);
+
+    output
+}
 
 // ── GPU compositor ───────────────────────────────────────────────────
 

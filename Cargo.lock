@@ -3042,6 +3042,7 @@ name = "mondrian-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytemuck",
  "eframe",
  "egui",
  "egui-wgpu",

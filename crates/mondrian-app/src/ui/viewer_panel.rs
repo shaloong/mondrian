@@ -46,8 +46,8 @@ use std::{
 };
 
 use crate::ui::viewer::gpu_composite::{
-    create_rgba_texture, gpu_device, gpu_queue, try_gpu_composite_rgba_layers,
-    try_gpu_composite_to_texture,
+    apply_gpu_color_conversion, create_rgba_texture, gpu_device, gpu_queue,
+    try_gpu_composite_rgba_layers, try_gpu_composite_to_texture,
 };
 use crate::ui::viewer::gpu_texture::CompositedFrame;
 
@@ -3991,13 +3991,15 @@ fn decode_composited_rgba(
             })
             .collect();
 
-        // Zero-copy GPU path: composite to texture, skip readback when color is no-op.
-        if preview_color_is_noop(request) {
-            if let Some(texture) = try_gpu_composite_to_texture(width, height, &rgba_layers_for_gpu)
-            {
-                record_preview_perf_decode_total(decode_started_at.elapsed());
-                if let Some(device) = gpu_device() {
-                    let gpu_frame = CompositedFrame::new(&device, texture, width, height);
+        // Zero-copy GPU path: composite to texture + GPU color conversion.
+        if let Some(texture) = try_gpu_composite_to_texture(width, height, &rgba_layers_for_gpu) {
+            record_preview_perf_decode_total(decode_started_at.elapsed());
+            if let (Some(device), Some(queue)) = (gpu_device(), gpu_queue()) {
+                if let Some(params) = gpu_color_params(request) {
+                    let converted = apply_gpu_color_conversion(
+                        &device, &queue, &texture, width, height, params,
+                    );
+                    let gpu_frame = CompositedFrame::new(&device, converted, width, height);
                     return Ok((
                         RgbaFrame { width, height, data: Vec::new() },
                         Some(gpu_frame),
@@ -4095,50 +4097,42 @@ fn decode_composited_rgba(
     Ok((RgbaFrame { width, height, data: canvas }, None))
 }
 
-/// Check whether the full preview color pipeline (working→output + display)
-/// is a no-op. When true, the GPU texture path can skip CPU color conversion.
-fn preview_color_is_noop(request: &DecodeRequest) -> bool {
-    // Working → Output color space conversion
-    let pipeline = ColorPipeline::new(
-        request.working_color_space,
-        request.working_color_space,
-        request.output_color_space,
-        request.tone_map,
-    )
-    .with_engine(request.engine.clone());
-    if !pipeline.is_noop() {
-        return false;
+/// Build GPU color conversion parameters from the request's display profile.
+/// Returns `None` when the conversion requires CPU-side processing
+/// (OCIde display/view, ICC profile, HDR, or non-standard transfer functions).
+fn gpu_color_params(
+    request: &DecodeRequest,
+) -> Option<crate::ui::viewer::gpu_composite::GpuColorConversionParams> {
+    use crate::ui::viewer::gpu_composite::GpuColorConversionParams;
+    // Only supported for OCIde-free, ICC-free workflows.
+    if request.ocio_display.is_some() || request.ocio_view.is_some() {
+        return None;
     }
-    // Display transform (OCIO display/view)
-    let ocio_defaults = mondrian_core::ocio_default_display_view();
-    let display = request
-        .ocio_display
-        .as_deref()
-        .or_else(|| ocio_defaults.as_ref().map(|(d, _)| d.as_str()));
-    let view = request
-        .ocio_view
-        .as_deref()
-        .or_else(|| ocio_defaults.as_ref().map(|(_, v)| v.as_str()));
-    if display.is_some() && view.is_some() {
-        return false;
+    if request.display_profile.icc_bytes.is_some() {
+        return None;
     }
-    // Display profile: identity matrix + gamma ≈ 1.0 → no-op
-    let dp = &request.display_profile;
-    let is_identity_3x3 = |m: &[[f32; 3]; 3]| {
-        m[0][0].abs() - 1.0 < 0.001
-            && m[0][1].abs() < 0.001
-            && m[0][2].abs() < 0.001
-            && m[1][0].abs() < 0.001
-            && m[1][1].abs() - 1.0 < 0.001
-            && m[1][2].abs() < 0.001
-            && m[2][0].abs() < 0.001
-            && m[2][1].abs() < 0.001
-            && m[2][2].abs() - 1.0 < 0.001
+    // HDR not supported on GPU path.
+    if request.working_color_space.is_hdr() || request.output_color_space.is_hdr() {
+        return None;
+    }
+
+    let decode_gamma = match request.working_color_space {
+        ColorSpace::Srgb => 2.2,
+        ColorSpace::Rec709 => 2.4,
+        _ => return None, // unsupported transfer
     };
-    if !is_identity_3x3(&dp.linear_matrix) || (dp.gamma - 1.0).abs() > 0.01 {
-        return false;
-    }
-    true
+    let encode_gamma = match request.display_profile.color_space {
+        ColorSpace::Srgb => 2.2,
+        ColorSpace::Rec709 => 2.4,
+        _ => return None,
+    };
+
+    Some(GpuColorConversionParams {
+        decode_gamma,
+        display_matrix: request.display_profile.linear_matrix,
+        display_gamma: request.display_profile.gamma,
+        encode_gamma,
+    })
 }
 
 fn apply_preview_output_color(data: &mut [u8], request: &DecodeRequest) {

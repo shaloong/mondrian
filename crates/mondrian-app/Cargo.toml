@@ -44,6 +44,7 @@ uuid = { workspace = true }
 parking_lot = { workspace = true }
 rayon = { workspace = true }
 glam  = { workspace = true }
+bytemuck = { workspace = true }
 zip = "0.6"
 
 [target.'cfg(windows)'.build-dependencies]
