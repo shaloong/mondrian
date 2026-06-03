@@ -8,3 +8,6 @@ pub const GAUSSIAN_BLUR: &str = include_str!("../shaders/blur_gaussian.wgsl");
 pub const LUT3D_COMPUTE: &str = include_str!("../shaders/lut3d_compute.wgsl");
 pub const BLUR_GAUSSIAN_COMPUTE: &str = include_str!("../shaders/blur_gaussian_compute.wgsl");
 pub const COLOR_ADJUST_COMPUTE: &str = include_str!("../shaders/color_adjust_compute.wgsl");
+
+// Fused multi-layer composite (Phase 4.3: pass fusion)
+pub const COMPOSITE_FUSED: &str = include_str!("../shaders/composite_fused.wgsl");

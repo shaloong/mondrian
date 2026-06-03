@@ -26,10 +26,15 @@ struct CompositeUniforms {
 pub struct BatchedCompositor {
     gpu: Arc<GpuContext>,
     pipeline: wgpu::RenderPipeline,
+    /// Fused multi-layer pipeline (up to 4 layers in one pass).
+    fused_pipeline: wgpu::RenderPipeline,
+    fused_bgl: wgpu::BindGroupLayout,
     texture_bgl: wgpu::BindGroupLayout,
     uniform_bgl: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     uniform_buffer: wgpu::Buffer,
+    /// Uniform buffer for fused pass layer count.
+    fused_uniform: wgpu::Buffer,
     texture_pool: Arc<TexturePool>,
     frame_counter: u64,
 }
@@ -139,6 +144,117 @@ impl BatchedCompositor {
             ..Default::default()
         });
 
+        // Fused multi-layer pipeline (up to 4 layers per pass)
+        let fused_shader = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("composite_fused_shader"),
+            source: wgpu::ShaderSource::Wgsl(crate::shaders::COMPOSITE_FUSED.into()),
+        });
+        let fused_bgl = gpu.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("fused_bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let fused_pl_layout = gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("fused_pl"),
+            immediate_size: 0,
+            bind_group_layouts: &[Some(&fused_bgl), Some(&uniform_bgl)],
+        });
+        let fused_pipeline = gpu.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("composite_fused_pipeline"),
+            layout: Some(&fused_pl_layout),
+            cache: None,
+            multiview_mask: None,
+            vertex: wgpu::VertexState {
+                module: &fused_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &fused_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+        });
+        let fused_uniform = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fused_uniform"),
+            size: 16, // u32 layer_count + 12 bytes padding
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let uniform_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("batch_uniform_buf"),
             size: std::mem::size_of::<CompositeUniforms>() as u64,
@@ -149,10 +265,13 @@ impl BatchedCompositor {
         Ok(Self {
             gpu,
             pipeline,
+            fused_pipeline,
+            fused_bgl,
             texture_bgl,
             uniform_bgl,
             sampler,
             uniform_buffer,
+            fused_uniform,
             texture_pool,
             frame_counter: 0,
         })
@@ -234,21 +353,56 @@ impl BatchedCompositor {
             });
         }
 
-        // Composite each layer into the ping-pong targets — all in the SAME encoder
+        // Composite layers with pass fusion: group up to 4 fusible (Normal, same-size)
+        // layers into a single render pass, reducing ping-pong overhead.
         let mut src_is_a = true;
+        let mut batch: Vec<wgpu::Texture> = Vec::new();
         for layer in layers {
             if layer.width == 0 || layer.height == 0 {
                 continue;
             }
-
+            // All layers in batched compositor use Normal blend — always fusible.
+            let fusible = true;
             let layer_tex = self.upload_layer_texture(layer, width, height)?;
+            if fusible && batch.len() < 4 {
+                batch.push(layer_tex);
+            } else {
+                // Flush pending batch
+                if !batch.is_empty() {
+                    let src = if src_is_a { &accum_a } else { &accum_b };
+                    let dst = if src_is_a { &accum_b } else { &accum_a };
+                    let refs: Vec<&wgpu::Texture> = batch.iter().collect();
+                    if refs.len() >= 2 {
+                        self.record_fused_composite_pass(&mut encoder, src, dst, &refs);
+                    } else {
+                        self.record_composite_pass(&mut encoder, src, dst, refs[0], 1.0);
+                    }
+                    for t in batch.drain(..) {
+                        self.texture_pool.release(t, width, height);
+                    }
+                    src_is_a = !src_is_a;
+                }
+                // Process current non-fusible layer
+                let src = if src_is_a { &accum_a } else { &accum_b };
+                let dst = if src_is_a { &accum_b } else { &accum_a };
+                self.record_composite_pass(&mut encoder, src, dst, &layer_tex, layer.opacity);
+                self.texture_pool.release(layer_tex, width, height);
+                src_is_a = !src_is_a;
+            }
+        }
+        // Flush remaining batch
+        if !batch.is_empty() {
             let src = if src_is_a { &accum_a } else { &accum_b };
             let dst = if src_is_a { &accum_b } else { &accum_a };
-
-            self.record_composite_pass(&mut encoder, src, dst, &layer_tex, layer.opacity);
-
-            // Return layer texture to pool
-            self.texture_pool.release(layer_tex, width, height);
+            let refs: Vec<&wgpu::Texture> = batch.iter().collect();
+            if refs.len() >= 2 {
+                self.record_fused_composite_pass(&mut encoder, src, dst, &refs);
+            } else {
+                self.record_composite_pass(&mut encoder, src, dst, refs[0], 1.0);
+            }
+            for t in batch {
+                self.texture_pool.release(t, width, height);
+            }
             src_is_a = !src_is_a;
         }
 
@@ -368,15 +522,50 @@ impl BatchedCompositor {
         }
 
         let mut src_is_a = true;
+        let mut batch: Vec<wgpu::Texture> = Vec::new();
         for layer in layers {
             if layer.width == 0 || layer.height == 0 {
                 continue;
             }
+            // All layers in batched compositor use Normal blend — always fusible.
+            let fusible = true;
             let layer_tex = self.upload_layer_texture(layer, width, height)?;
-            let src = if src_is_a { &accum_a } else { &accum_b };
-            let dst = if src_is_a { &accum_b } else { &accum_a };
-            self.record_composite_pass(&mut encoder, src, dst, &layer_tex, layer.opacity);
-            self.texture_pool.release(layer_tex, width, height);
+            if fusible && batch.len() < 4 {
+                batch.push(layer_tex);
+            } else {
+                if !batch.is_empty() {
+                    let s = if src_is_a { &accum_a } else { &accum_b };
+                    let d = if src_is_a { &accum_b } else { &accum_a };
+                    let refs: Vec<&wgpu::Texture> = batch.iter().collect();
+                    if refs.len() >= 2 {
+                        self.record_fused_composite_pass(&mut encoder, s, d, &refs);
+                    } else {
+                        self.record_composite_pass(&mut encoder, s, d, refs[0], 1.0);
+                    }
+                    for t in batch.drain(..) {
+                        self.texture_pool.release(t, width, height);
+                    }
+                    src_is_a = !src_is_a;
+                }
+                let s = if src_is_a { &accum_a } else { &accum_b };
+                let d = if src_is_a { &accum_b } else { &accum_a };
+                self.record_composite_pass(&mut encoder, s, d, &layer_tex, layer.opacity);
+                self.texture_pool.release(layer_tex, width, height);
+                src_is_a = !src_is_a;
+            }
+        }
+        if !batch.is_empty() {
+            let s = if src_is_a { &accum_a } else { &accum_b };
+            let d = if src_is_a { &accum_b } else { &accum_a };
+            let refs: Vec<&wgpu::Texture> = batch.iter().collect();
+            if refs.len() >= 2 {
+                self.record_fused_composite_pass(&mut encoder, s, d, &refs);
+            } else {
+                self.record_composite_pass(&mut encoder, s, d, refs[0], 1.0);
+            }
+            for t in batch {
+                self.texture_pool.release(t, width, height);
+            }
             src_is_a = !src_is_a;
         }
 
@@ -532,6 +721,99 @@ impl BatchedCompositor {
                 multiview_mask: None,
             });
             pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &tex_bg, &[]);
+            pass.set_bind_group(1, &uniform_bg, &[]);
+            pass.draw(0..4, 0..1);
+        }
+    }
+
+    /// Record a fused composite pass — blends up to 4 layer textures onto
+    /// a base texture in a single render pass. This eliminates intermediate
+    /// ping-pong passes for consecutive Normal-blend layers with identical
+    /// dimensions.
+    fn record_fused_composite_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        base_tex: &wgpu::Texture,
+        dst_tex: &wgpu::Texture,
+        layers: &[&wgpu::Texture],
+    ) {
+        assert!(!layers.is_empty() && layers.len() <= 4);
+        let base_view = base_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let dst_view = dst_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let views: Vec<_> = layers
+            .iter()
+            .map(|t| t.create_view(&wgpu::TextureViewDescriptor::default()))
+            .collect();
+
+        // Pad with dummy views for unused slots
+        let l0 = views
+            .first()
+            .map(wgpu::BindingResource::TextureView)
+            .unwrap_or_else(|| wgpu::BindingResource::TextureView(&base_view));
+        let l1 = views
+            .get(1)
+            .map(wgpu::BindingResource::TextureView)
+            .unwrap_or_else(|| wgpu::BindingResource::TextureView(&base_view));
+        let l2 = views
+            .get(2)
+            .map(wgpu::BindingResource::TextureView)
+            .unwrap_or_else(|| wgpu::BindingResource::TextureView(&base_view));
+        let l3 = views
+            .get(3)
+            .map(wgpu::BindingResource::TextureView)
+            .unwrap_or_else(|| wgpu::BindingResource::TextureView(&base_view));
+
+        let tex_bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("fused_tex_bg"),
+            layout: &self.fused_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&base_view),
+                },
+                wgpu::BindGroupEntry { binding: 1, resource: l0 },
+                wgpu::BindGroupEntry { binding: 2, resource: l1 },
+                wgpu::BindGroupEntry { binding: 3, resource: l2 },
+                wgpu::BindGroupEntry { binding: 4, resource: l3 },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+
+        let layer_count = [layers.len() as u32, 0u32, 0u32, 0u32];
+        self.gpu
+            .queue
+            .write_buffer(&self.fused_uniform, 0, bytemuck::bytes_of(&layer_count));
+        let uniform_bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("fused_uniform_bg"),
+            layout: &self.uniform_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: self.fused_uniform.as_entire_binding(),
+            }],
+        });
+
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("fused_composite_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &dst_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.fused_pipeline);
             pass.set_bind_group(0, &tex_bg, &[]);
             pass.set_bind_group(1, &uniform_bg, &[]);
             pass.draw(0..4, 0..1);
