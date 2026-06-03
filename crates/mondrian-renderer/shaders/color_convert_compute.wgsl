@@ -16,15 +16,14 @@ struct ColorParams {
 
 @group(1) @binding(0) var<uniform> params: ColorParams;
 
-fn apply_gamma(rgb: vec3<f32>, gamma: f32) -> vec3<f32> {
+fn decode_gamma(rgb: vec3<f32>, gamma: f32) -> vec3<f32> {
     if gamma <= 0.001 {
-        return rgb; // linear — no conversion
+        return rgb;
     }
-    let exp = 1.0 / gamma;
-    return pow(max(rgb, vec3<f32>(0.0)), vec3<f32>(exp));
+    return pow(max(rgb, vec3<f32>(0.0)), vec3<f32>(1.0 / gamma));
 }
 
-fn apply_inv_gamma(rgb: vec3<f32>, gamma: f32) -> vec3<f32> {
+fn encode_gamma(rgb: vec3<f32>, gamma: f32) -> vec3<f32> {
     if gamma <= 0.001 {
         return rgb;
     }
@@ -41,8 +40,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let coord = vec2<i32>(i32(global_id.x), i32(global_id.y));
     let color = textureLoad(input_tex, coord, 0);
 
-    // 1. Decode: source gamma → linear
-    var rgb = apply_gamma(color.rgb, params.decode_gamma);
+    // 1. Decode: source transfer → linear
+    var rgb = decode_gamma(color.rgb, params.decode_gamma);
 
     // 2. Display primaries matrix
     let m = mat3x3<f32>(
@@ -53,10 +52,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     rgb = m * rgb;
 
     // 3. Display gamma
-    rgb = apply_inv_gamma(max(rgb, vec3<f32>(0.0)), params.display_gamma);
+    rgb = encode_gamma(max(rgb, vec3<f32>(0.0)), params.display_gamma);
 
-    // 4. Encode: linear → profile color space gamma
-    let encoded = apply_inv_gamma(rgb, params.encode_gamma);
+    // 4. Encode: linear → profile color space transfer
+    let encoded = encode_gamma(rgb, params.encode_gamma);
 
     textureStore(output_tex, coord, vec4<f32>(encoded, color.a));
 }

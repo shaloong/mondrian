@@ -1513,6 +1513,10 @@ impl ViewerPanel {
                         if layers.is_empty() {
                             self.invalidate_pending_decode();
                             self.preview_texture = None;
+                            if let Some(old) = self.gpu_composited_frame.take() {
+                                let (tex, w, h) = old.into_parts();
+                                recycle_texture(tex, w, h);
+                            }
                             self.preview_signature = None;
                             self.desired_signature = None;
                             self.preview_error = None;
@@ -1776,6 +1780,10 @@ impl ViewerPanel {
                     } else {
                         self.invalidate_pending_decode();
                         self.preview_texture = None;
+                        if let Some(old) = self.gpu_composited_frame.take() {
+                            let (tex, w, h) = old.into_parts();
+                            recycle_texture(tex, w, h);
+                        }
                         self.preview_signature = None;
                         self.desired_signature = None;
                         self.preview_error = None;
@@ -4012,9 +4020,8 @@ fn decode_composited_rgba(
             record_preview_perf_decode_total(decode_started_at.elapsed());
             if let (Some(device), Some(queue)) = (gpu_device(), gpu_queue()) {
                 if let Some(params) = gpu_color_params(request) {
-                    let converted = apply_gpu_color_conversion(
-                        &device, &queue, &texture, width, height, params,
-                    );
+                    let converted =
+                        apply_gpu_color_conversion(&device, &queue, texture, width, height, params);
                     let gpu_frame = CompositedFrame::new(&device, converted, width, height);
                     return Ok((
                         RgbaFrame { width, height, data: Vec::new() },

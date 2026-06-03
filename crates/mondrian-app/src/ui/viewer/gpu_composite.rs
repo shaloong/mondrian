@@ -147,53 +147,22 @@ fn color_convert_pipeline(device: &wgpu::Device) -> &'static CachedColorConvert 
 }
 
 /// Apply GPU color conversion to a composited texture.
-/// Returns the converted texture (newly allocated), or the input texture
-/// unchanged if the conversion is a no-op.
+/// Takes ownership of the input — returns it unchanged if no-op.
 pub fn apply_gpu_color_conversion(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    input_texture: &wgpu::Texture,
+    input_texture: wgpu::Texture,
     width: u32,
     height: u32,
     params: GpuColorConversionParams,
 ) -> wgpu::Texture {
     if params.is_noop() {
-        // For no-op: clone the texture via copy (keep input valid).
-        let output = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("color_convert_output_noop"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("color_convert_noop_copy"),
-        });
-        encoder.copy_texture_to_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: input_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyTextureInfo {
-                texture: &output,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-        );
-        queue.submit([encoder.finish()]);
-        return output;
+        return input_texture;
     }
 
     let cached = color_convert_pipeline(device);
 
-    // Output texture
+    // Output texture (COPY_DST included for recycling compatibility).
     let output = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("color_convert_output"),
         size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
@@ -203,7 +172,8 @@ pub fn apply_gpu_color_conversion(
         format: wgpu::TextureFormat::Rgba8Unorm,
         usage: wgpu::TextureUsages::STORAGE_BINDING
             | wgpu::TextureUsages::TEXTURE_BINDING
-            | wgpu::TextureUsages::COPY_SRC,
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
 
