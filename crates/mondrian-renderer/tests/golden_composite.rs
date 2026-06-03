@@ -11,8 +11,7 @@ use std::sync::Arc;
 
 use mondrian_core::types::{BlendMode, ColorSpace};
 use mondrian_renderer::{
-    composite_timeline_elements_float_linear,
-    TimelineCompositeElement, TimelineCompositeOptions,
+    composite_timeline_elements_float_linear, TimelineCompositeElement, TimelineCompositeOptions,
     TimelineCompositeScratch, TimelineMediaLayer,
 };
 
@@ -29,7 +28,7 @@ fn golden_dir() -> PathBuf {
 }
 
 fn should_update() -> bool {
-    std::env::var("MONDRIAN_UPDATE_GOLDEN").map_or(false, |v| v == "1")
+    std::env::var("MONDRIAN_UPDATE_GOLDEN").is_ok_and(|v| v == "1")
 }
 
 fn solid_rgba(w: u32, h: u32, r: u8, g: u8, b: u8, a: u8) -> Vec<u8> {
@@ -41,16 +40,10 @@ fn solid_rgba(w: u32, h: u32, r: u8, g: u8, b: u8, a: u8) -> Vec<u8> {
 
 fn identity_graph() -> Arc<mondrian_effects::CompiledEffectGraph> {
     let g = mondrian_effects::EffectRenderGraph::identity();
-    mondrian_effects::get_or_compile_scheduled_render_graph(g)
-        .expect("compile identity graph")
+    mondrian_effects::get_or_compile_scheduled_render_graph(g).expect("compile identity graph")
 }
 
-fn composite_single_layer(
-    w: u32, h: u32,
-    rgba: &[u8],
-    opacity: f32,
-    blend: BlendMode,
-) -> Vec<u8> {
+fn composite_single_layer(w: u32, h: u32, rgba: &[u8], opacity: f32, blend: BlendMode) -> Vec<u8> {
     let elements = vec![TimelineCompositeElement::Media(TimelineMediaLayer {
         rgba,
         width: w,
@@ -63,14 +56,16 @@ fn composite_single_layer(
     })];
     let mut scratch = TimelineCompositeScratch::default();
     composite_timeline_elements_float_linear(
-        w, h, &elements,
+        w,
+        h,
+        &elements,
         TimelineCompositeOptions { empty_canvas_transparent: true },
         ColorSpace::Rec709,
         &mut scratch,
     )
 }
 
-fn assert_rgba8_equal(actual: &[u8], expected: &[u8], w: u32, h: u32, name: &str) {
+fn assert_rgba8_equal(actual: &[u8], expected: &[u8], w: u32, _h: u32, name: &str) {
     assert_eq!(actual.len(), expected.len(), "{name}: size mismatch");
     let mut failures = 0u32;
     for i in (0..actual.len()).step_by(4) {
@@ -82,7 +77,8 @@ fn assert_rgba8_equal(actual: &[u8], expected: &[u8], w: u32, h: u32, name: &str
         let eg = expected[i + 1] as i32;
         let eb = expected[i + 2] as i32;
         let ea = expected[i + 3] as i32;
-        if (ar - er).abs() > 1 || (ag - eg).abs() > 1 || (ab - eb).abs() > 1 || (aa - ea).abs() > 1 {
+        if (ar - er).abs() > 1 || (ag - eg).abs() > 1 || (ab - eb).abs() > 1 || (aa - ea).abs() > 1
+        {
             if failures < 5 {
                 let px = (i / 4) as u32 % w;
                 let py = (i / 4) as u32 / w;
@@ -91,7 +87,10 @@ fn assert_rgba8_equal(actual: &[u8], expected: &[u8], w: u32, h: u32, name: &str
             failures += 1;
         }
     }
-    assert_eq!(failures, 0, "{name}: {failures} pixels differ beyond ±1 tolerance");
+    assert_eq!(
+        failures, 0,
+        "{name}: {failures} pixels differ beyond ±1 tolerance"
+    );
 }
 
 fn check_golden(name: &str, w: u32, h: u32, actual: &[u8]) {
@@ -116,20 +115,25 @@ fn check_golden(name: &str, w: u32, h: u32, actual: &[u8]) {
 
 #[test]
 fn golden_transparent_canvas() {
-    let w = 64; let h = 64;
+    let w = 64;
+    let h = 64;
     let elements: Vec<TimelineCompositeElement> = vec![];
     let mut scratch = TimelineCompositeScratch::default();
     let result = composite_timeline_elements_float_linear(
-        w, h, &elements,
+        w,
+        h,
+        &elements,
         TimelineCompositeOptions { empty_canvas_transparent: true },
-        ColorSpace::Rec709, &mut scratch,
+        ColorSpace::Rec709,
+        &mut scratch,
     );
     check_golden("transparent_canvas_64x64.png", w, h, &result);
 }
 
 #[test]
 fn golden_opaque_white() {
-    let w = 64; let h = 64;
+    let w = 64;
+    let h = 64;
     let data = solid_rgba(w, h, 255, 255, 255, 255);
     let result = composite_single_layer(w, h, &data, 1.0, BlendMode::Normal);
     check_golden("opaque_white_64x64.png", w, h, &result);
@@ -137,7 +141,8 @@ fn golden_opaque_white() {
 
 #[test]
 fn golden_opaque_red() {
-    let w = 64; let h = 64;
+    let w = 64;
+    let h = 64;
     let data = solid_rgba(w, h, 255, 0, 0, 255);
     let result = composite_single_layer(w, h, &data, 1.0, BlendMode::Normal);
     check_golden("opaque_red_64x64.png", w, h, &result);
@@ -145,7 +150,8 @@ fn golden_opaque_red() {
 
 #[test]
 fn golden_half_opacity_red_over_black() {
-    let w = 64; let h = 64;
+    let w = 64;
+    let h = 64;
     let data = solid_rgba(w, h, 255, 0, 0, 128);
     let result = composite_single_layer(w, h, &data, 1.0, BlendMode::Normal);
     check_golden("half_red_64x64.png", w, h, &result);
@@ -153,26 +159,37 @@ fn golden_half_opacity_red_over_black() {
 
 #[test]
 fn golden_two_layers_normal() {
-    let w = 64; let h = 64;
+    let w = 64;
+    let h = 64;
     let bg = solid_rgba(w, h, 255, 0, 0, 255);
     let fg = solid_rgba(w, h, 0, 255, 0, 128);
     let elements = vec![
         TimelineCompositeElement::Media(TimelineMediaLayer {
-            rgba: &bg, width: w, height: h, opacity: 1.0,
+            rgba: &bg,
+            width: w,
+            height: h,
+            opacity: 1.0,
             blend_mode: BlendMode::Normal,
             transform: IDENTITY_TRANSFORM,
-            effect_graph: identity_graph(), frame_seed: 0,
+            effect_graph: identity_graph(),
+            frame_seed: 0,
         }),
         TimelineCompositeElement::Media(TimelineMediaLayer {
-            rgba: &fg, width: w, height: h, opacity: 1.0,
+            rgba: &fg,
+            width: w,
+            height: h,
+            opacity: 1.0,
             blend_mode: BlendMode::Normal,
             transform: IDENTITY_TRANSFORM,
-            effect_graph: identity_graph(), frame_seed: 0,
+            effect_graph: identity_graph(),
+            frame_seed: 0,
         }),
     ];
     let mut scratch = TimelineCompositeScratch::default();
     let result = composite_timeline_elements_float_linear(
-        w, h, &elements,
+        w,
+        h,
+        &elements,
         TimelineCompositeOptions { empty_canvas_transparent: true },
         ColorSpace::Rec709,
         &mut scratch,

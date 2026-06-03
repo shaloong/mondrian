@@ -6,8 +6,7 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use mondrian_core::types::{BlendMode, ColorSpace};
 use mondrian_renderer::{
-    composite_timeline_elements_float_linear,
-    TimelineCompositeElement, TimelineCompositeOptions,
+    composite_timeline_elements_float_linear, TimelineCompositeElement, TimelineCompositeOptions,
     TimelineCompositeScratch, TimelineMediaLayer,
 };
 use std::sync::Arc;
@@ -58,9 +57,12 @@ fn bench_layers(c: &mut Criterion, name: &str, w: u32, h: u32, n: usize) {
     c.bench_function(name, |b| {
         b.iter(|| {
             composite_timeline_elements_float_linear(
-                black_box(w), black_box(h), black_box(&elements),
+                black_box(w),
+                black_box(h),
+                black_box(&elements),
                 TimelineCompositeOptions { empty_canvas_transparent: true },
-                ColorSpace::Rec709, &mut scratch,
+                ColorSpace::Rec709,
+                &mut scratch,
             )
         })
     });
