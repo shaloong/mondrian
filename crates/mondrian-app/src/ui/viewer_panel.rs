@@ -4016,10 +4016,13 @@ fn decode_composited_rgba(
             .collect();
 
         // Zero-copy GPU path: composite to texture + GPU color conversion.
-        if let Some(texture) = try_gpu_composite_to_texture(width, height, &rgba_layers_for_gpu) {
-            record_preview_perf_decode_total(decode_started_at.elapsed());
-            if let (Some(device), Some(queue)) = (gpu_device(), gpu_queue()) {
-                if let Some(params) = gpu_color_params(request) {
+        // Check prerequisites before allocating GPU resources.
+        if let (Some(device), Some(queue)) = (gpu_device(), gpu_queue()) {
+            if let Some(params) = gpu_color_params(request) {
+                if let Some(texture) =
+                    try_gpu_composite_to_texture(width, height, &rgba_layers_for_gpu)
+                {
+                    record_preview_perf_decode_total(decode_started_at.elapsed());
                     let converted =
                         apply_gpu_color_conversion(&device, &queue, texture, width, height, params);
                     let gpu_frame = CompositedFrame::new(&device, converted, width, height);
