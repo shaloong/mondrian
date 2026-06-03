@@ -26,9 +26,21 @@ struct GpuTexturePipeline {
     bind_group_layout: wgpu::BindGroupLayout,
 }
 
+/// Set the surface target format (call once during app init).
+pub fn set_surface_format(format: wgpu::TextureFormat) {
+    static SURFACE_FORMAT: OnceLock<wgpu::TextureFormat> = OnceLock::new();
+    let _ = SURFACE_FORMAT.set(format);
+}
+
+fn surface_format() -> wgpu::TextureFormat {
+    static SURFACE_FORMAT: OnceLock<wgpu::TextureFormat> = OnceLock::new();
+    SURFACE_FORMAT.get().copied().unwrap_or(wgpu::TextureFormat::Rgba8Unorm)
+}
+
 fn global_pipeline(device: &wgpu::Device) -> &'static GpuTexturePipeline {
     static PIPELINE: OnceLock<GpuTexturePipeline> = OnceLock::new();
     PIPELINE.get_or_init(|| {
+        let target_format = surface_format();
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("gpu_texture_shader"),
             source: wgpu::ShaderSource::Wgsl(
@@ -80,7 +92,7 @@ fn global_pipeline(device: &wgpu::Device) -> &'static GpuTexturePipeline {
                 entry_point: Some("fs_main"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    format: target_format,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],

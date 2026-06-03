@@ -820,6 +820,11 @@ impl MondrianApp {
         crate::ui::fonts::configure_fonts(&cc.egui_ctx);
         egui_extras::install_image_loaders(&cc.egui_ctx);
 
+        // Record surface format for GPU callback pipeline creation.
+        if let Some(rs) = cc.wgpu_render_state.as_ref() {
+            crate::ui::viewer::gpu_texture::set_surface_format(rs.target_format);
+        }
+
         let state = AppState::new();
 
         let mut app = Self {
