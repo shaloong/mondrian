@@ -10,6 +10,11 @@ members = [
     "crates/mondrian-effects",
     "crates/mondrian-export",
     "crates/mondrian-app",
+    "crates/mondrian-editor-state",
+    "crates/mondrian-ui-core",
+    "crates/mondrian-ui-theme",
+    "crates/mondrian-platform",
+    "crates/mondrian-editor-ui",
 ]
 
 [workspace.package]
@@ -31,6 +36,13 @@ mondrian-assets   = { path = "crates/mondrian-assets" }
 mondrian-ai       = { path = "crates/mondrian-ai" }
 mondrian-effects  = { path = "crates/mondrian-effects" }
 mondrian-export   = { path = "crates/mondrian-export" }
+
+# ---- 新 UI 架构 ----
+mondrian-editor-state = { path = "crates/mondrian-editor-state" }
+mondrian-ui-core      = { path = "crates/mondrian-ui-core" }
+mondrian-ui-theme     = { path = "crates/mondrian-ui-theme" }
+mondrian-platform     = { path = "crates/mondrian-platform" }
+mondrian-editor-ui    = { path = "crates/mondrian-editor-ui" }
 
 # ---- 异步运行时 ----
 tokio            = { version = "1",    features = ["full"] }

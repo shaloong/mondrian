@@ -1,0 +1,18 @@
+[package]
+name        = "mondrian-editor-state"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mondrian-core     = { workspace = true }
+mondrian-timeline = { workspace = true }
+mondrian-assets   = { workspace = true }
+
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+uuid        = { workspace = true }
+thiserror   = { workspace = true }

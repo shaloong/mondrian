@@ -52,6 +52,7 @@ use crate::ui::{
 const PROJECT_EXTENSION: &str = "mdp";
 const DEFAULT_ADJUSTMENT_LAYER_DURATION_SECS: f64 = 5.0;
 
+mod action_handler;
 mod animation_state;
 mod audio_rendering;
 mod bootstrap;

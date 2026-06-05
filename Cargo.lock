@@ -3042,11 +3042,16 @@ dependencies = [
  "image",
  "mondrian-assets",
  "mondrian-core",
+ "mondrian-editor-state",
+ "mondrian-editor-ui",
  "mondrian-effects",
  "mondrian-export",
  "mondrian-media",
+ "mondrian-platform",
  "mondrian-renderer",
  "mondrian-timeline",
+ "mondrian-ui-core",
+ "mondrian-ui-theme",
  "parking_lot",
  "rayon",
  "resvg",
@@ -3105,6 +3110,34 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "mondrian-editor-state"
+version = "0.1.0"
+dependencies = [
+ "mondrian-assets",
+ "mondrian-core",
+ "mondrian-timeline",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "uuid",
+]
+
+[[package]]
+name = "mondrian-editor-ui"
+version = "0.1.0"
+dependencies = [
+ "mondrian-core",
+ "mondrian-editor-state",
+ "mondrian-platform",
+ "mondrian-ui-core",
+ "mondrian-ui-theme",
+ "parking_lot",
+ "serde",
+ "serde_json",
  "uuid",
 ]
 
@@ -3168,6 +3201,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mondrian-platform"
+version = "0.1.0"
+dependencies = [
+ "mondrian-core",
+]
+
+[[package]]
 name = "mondrian-renderer"
 version = "0.1.0"
 dependencies = [
@@ -3205,6 +3245,27 @@ dependencies = [
  "thiserror 1.0.69",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "mondrian-ui-core"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "mondrian-core",
+ "mondrian-editor-state",
+ "mondrian-platform",
+ "mondrian-ui-theme",
+ "uuid",
+]
+
+[[package]]
+name = "mondrian-ui-theme"
+version = "0.1.0"
+dependencies = [
+ "mondrian-core",
+ "parking_lot",
+ "serde",
 ]
 
 [[package]]
