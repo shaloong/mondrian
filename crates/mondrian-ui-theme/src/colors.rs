@@ -191,5 +191,45 @@ impl ColorTokens {
             overlay_fill: Color { r: 0.094, g: 0.094, b: 0.094, a: 0.9 },
             overlay_stroke: Color { r: 0.941, g: 0.627, b: 0.188, a: 0.6 },
         }
+    } // end fusion()
+} // end impl ColorTokens
+
+// ═══════════════════════════════════════════════════════════════════════════════════
+// 便捷方法
+// ═══════════════════════════════════════════════════════════════════════════════════
+
+impl ColorTokens {
+    /// 将语义颜色转为 wgpu 兼容的 f32 数组
+    pub fn to_wgpu(&self, color: &mondrian_core::Color) -> [f32; 4] {
+        [color.r, color.g, color.b, color.a]
+    }
+
+    /// 根据交互状态选择背景色
+    pub fn bg_for_state(&self, hovered: bool, active: bool) -> mondrian_core::Color {
+        if active {
+            self.bg_surface_active
+        } else if hovered {
+            self.bg_surface_hover
+        } else {
+            self.bg_surface
+        }
+    }
+
+    /// 根据焦点状态选择边框色
+    pub fn border_for_state(&self, focused: bool) -> mondrian_core::Color {
+        if focused {
+            self.interaction_highlight
+        } else {
+            self.border_subtle
+        }
+    }
+
+    /// 根据重要程度选择文字色
+    pub fn text_for_muted(&self, muted: bool) -> mondrian_core::Color {
+        if muted {
+            self.text_muted
+        } else {
+            self.text_primary
+        }
     }
 }

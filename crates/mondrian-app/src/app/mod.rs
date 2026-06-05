@@ -57,6 +57,7 @@ mod animation_state;
 mod audio_rendering;
 mod bootstrap;
 mod chrome;
+mod ui_demo;
 mod new_project;
 mod playback;
 mod preferences;

@@ -3051,8 +3051,12 @@ dependencies = [
  "mondrian-renderer",
  "mondrian-timeline",
  "mondrian-ui-core",
+ "mondrian-ui-events",
+ "mondrian-ui-layout",
+ "mondrian-ui-renderer",
  "mondrian-ui-theme",
  "parking_lot",
+ "pollster",
  "rayon",
  "resvg",
  "rfd",
@@ -3064,6 +3068,8 @@ dependencies = [
  "tracing-subscriber",
  "usvg",
  "uuid",
+ "wgpu",
+ "winit",
  "winres",
  "zip",
 ]
@@ -3257,6 +3263,39 @@ dependencies = [
  "mondrian-platform",
  "mondrian-ui-theme",
  "uuid",
+]
+
+[[package]]
+name = "mondrian-ui-events"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "mondrian-core",
+ "mondrian-editor-state",
+ "mondrian-platform",
+ "mondrian-ui-core",
+]
+
+[[package]]
+name = "mondrian-ui-layout"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "mondrian-core",
+ "mondrian-ui-core",
+]
+
+[[package]]
+name = "mondrian-ui-renderer"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "glam",
+ "mondrian-core",
+ "mondrian-ui-core",
+ "mondrian-ui-theme",
+ "parking_lot",
+ "wgpu",
 ]
 
 [[package]]
