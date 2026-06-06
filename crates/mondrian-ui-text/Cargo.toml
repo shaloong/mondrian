@@ -13,10 +13,6 @@ mondrian-ui-core    = { workspace = true }
 mondrian-ui-theme   = { workspace = true }
 mondrian-ui-renderer = { workspace = true }
 
-cosmic-text = "0.14"
+cosmic-text = "0.19"
 fontdb = { version = "0.23", default-features = false, features = ["fontconfig"] }
 wgpu        = { workspace = true }
-glam        = { workspace = true }
-parking_lot = { workspace = true }
-
-# cosmic-text uses fontdb 0.23 and swash internally; no extra dep needed
