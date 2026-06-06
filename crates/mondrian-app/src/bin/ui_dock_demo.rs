@@ -237,8 +237,49 @@ fn mouse_button(b: winit::event::MouseButton) -> mondrian_ui_core::types::MouseB
 }
 
 fn dummy_event_ctx() -> EventContext<'static> {
-    /// Returns a dummy context (font size from egui by default); Ok(()) otherwise);
-    /// This match is exhaustive.
-    let _ = Option::<()>::None;
-    unimplemented!()
+    static mut FOCUS: DummyFocus = DummyFocus;
+    static mut SHORTCUT: DummyShortcut = DummyShortcut;
+    static mut TOOLTIP: DummyTooltip = DummyTooltip;
+
+    unsafe {
+        EventContext {
+            focus: &mut *std::ptr::addr_of_mut!(FOCUS),
+            shortcut: &mut *std::ptr::addr_of_mut!(SHORTCUT),
+            tooltip: &mut *std::ptr::addr_of_mut!(TOOLTIP),
+            dispatch: &|_| {},
+            platform: &mondrian_platform::NoopPlatformService,
+        }
+    }
+}
+
+use mondrian_editor_state::state::PanelKind;
+use mondrian_editor_state::Action;
+use mondrian_ui_core::focus::FocusManager;
+use mondrian_ui_core::shortcut::{ShortcutBinding, ShortcutManager, ShortcutScope};
+use mondrian_ui_core::tooltip::{TooltipManager, TooltipState};
+
+struct DummyFocus;
+impl FocusManager for DummyFocus {
+    fn focused_widget(&self) -> Option<WidgetId> { None }
+    fn focused_panel(&self) -> Option<PanelKind> { None }
+    fn request_focus(&mut self, _: WidgetId, _: PanelKind) {}
+    fn release_focus(&mut self, _: WidgetId) {}
+    fn focus_next(&mut self) {}
+    fn focus_prev(&mut self) {}
+    fn clear_focus(&mut self) {}
+}
+struct DummyShortcut;
+impl ShortcutManager for DummyShortcut {
+    fn register(&mut self, _: ShortcutScope, _: ShortcutBinding, _: Action) {}
+    fn unregister(&mut self, _: ShortcutScope, _: &ShortcutBinding) {}
+    fn resolve(&self, _: KeyCode, _: Modifiers) -> Option<Action> { None }
+    fn clear_scope(&mut self, _: ShortcutScope) {}
+    fn clear_all(&mut self) {}
+}
+struct DummyTooltip;
+impl TooltipManager for DummyTooltip {
+    fn show(&mut self, _: String, _: Point) {}
+    fn hide(&mut self) {}
+    fn current(&self) -> Option<&TooltipState> { None }
+    fn update(&mut self, _: u64) {}
 }
