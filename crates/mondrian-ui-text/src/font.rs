@@ -10,19 +10,17 @@ pub struct FontManager {
 
 impl FontManager {
     pub fn new() -> Self {
-        let locale = std::env::var("LANG").unwrap_or_else(|_| "en-US".into());
-        let db = fontdb::Database::new();
-        let font_system = FontSystem::new_with_locale_and_db(locale, db);
+        let font_system = FontSystem::new();
         Self { font_system }
     }
 
-    pub fn default_attrs(&self, font_size: f32) -> Attrs<'_> {
+    pub fn default_attrs(&self) -> Attrs<'_> {
         Attrs::new()
             .family(Family::SansSerif)
             .weight(Weight::NORMAL)
     }
 
-    pub fn mono_attrs(&self, font_size: f32) -> Attrs<'_> {
+    pub fn mono_attrs(&self) -> Attrs<'_> {
         Attrs::new()
             .family(Family::Monospace)
             .weight(Weight::NORMAL)
@@ -32,5 +30,30 @@ impl FontManager {
 impl Default for FontManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn font_manager_creates_default_attrs() {
+        let mgr = FontManager::new();
+        let attrs = mgr.default_attrs();
+        // Verify we can read back the family
+        assert_eq!(attrs.family, Family::SansSerif);
+    }
+
+    #[test]
+    fn font_manager_creates_mono_attrs() {
+        let mgr = FontManager::new();
+        let attrs = mgr.mono_attrs();
+        assert_eq!(attrs.family, Family::Monospace);
+    }
+
+    #[test]
+    fn font_manager_default_constructs() {
+        let _mgr = FontManager::default();
     }
 }

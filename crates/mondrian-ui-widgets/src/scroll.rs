@@ -4,9 +4,8 @@
 
 use glam::Vec2;
 use mondrian_ui_core::types::*;
-use mondrian_ui_core::widget::{DrawCommandEncoder, EventContext, PaintContext};
+use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
-use mondrian_ui_theme::Theme;
 
 /// 可滚动的单子节点容器
 pub struct ScrollView {
@@ -65,10 +64,13 @@ impl Widget for ScrollView {
     fn layout(&mut self, bounds: Rect) {
         self.bounds = bounds;
         if let Some(child) = &mut self.child {
-            let child_bounds = Rect::new(0.0, 0.0, bounds.width - self.scrollbar_width, 0.0);
-            child.layout(child_bounds);
-            let measured = child.measure(LayoutConstraint::LOOSE);
+            let measured = child.measure(LayoutConstraint {
+                min: Size::ZERO,
+                max: Size::new(bounds.width - self.scrollbar_width, f32::MAX),
+            });
             self.content_size = measured;
+            let child_bounds = Rect::new(0.0, 0.0, measured.width, measured.height);
+            child.layout(child_bounds);
         }
     }
 
@@ -118,10 +120,11 @@ impl Widget for ScrollView {
         }
         ctx.encoder.pop_transform();
 
-        // 绘制滚动条
         if self.content_size.height > self.bounds.height {
             let thumb_h = (self.bounds.height / self.content_size.height) * self.bounds.height;
-            let thumb_y = (self.scroll_offset.y / self.content_size.height) * self.bounds.height;
+            let scroll_range = (self.content_size.height - self.bounds.height).max(1.0);
+            let track_height = (self.bounds.height - thumb_h).max(0.0);
+            let thumb_y = (self.scroll_offset.y / scroll_range) * track_height;
             let sb_rect = Rect::new(
                 self.bounds.x + self.bounds.width - self.scrollbar_width + 2.0,
                 self.bounds.y + thumb_y,
@@ -143,11 +146,84 @@ impl Widget for ScrollView {
     }
 
     fn children(&self) -> &[Box<dyn Widget>] {
-        // ScrollView children managed internally
         &[]
     }
 
     fn children_mut(&mut self) -> &mut [Box<dyn Widget>] {
         &mut []
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mondrian_ui_core::widgets::Spacer;
+
+    #[test]
+    fn scroll_view_new_has_zero_offset() {
+        let sv = ScrollView::new(None);
+        assert_eq!(sv.scroll_offset(), Vec2::ZERO);
+    }
+
+    #[test]
+    fn scroll_view_measure_with_child() {
+        let child = Spacer::new(200.0, 400.0);
+        let sv = ScrollView::new(Some(Box::new(child)));
+        let s = sv.measure(LayoutConstraint::loose(300.0, 300.0));
+        assert!(s.width > 0.0);
+        assert!(s.height > 0.0);
+    }
+
+    #[test]
+    fn scroll_view_layout_sets_content_size() {
+        let child = Spacer::new(200.0, 400.0);
+        let mut sv = ScrollView::new(Some(Box::new(child)));
+        sv.layout(Rect::new(0.0, 0.0, 300.0, 300.0));
+        // content_size should reflect child's measured size
+        assert!(sv.content_size.height > 0.0);
+        assert!(sv.content_size.width > 0.0);
+    }
+
+    #[test]
+    fn scroll_view_mouse_wheel_updates_offset() {
+        let child = Spacer::new(200.0, 800.0);
+        let mut sv = ScrollView::new(Some(Box::new(child)));
+        sv.layout(Rect::new(0.0, 0.0, 300.0, 300.0));
+
+        use crate::test_utils::{DummyFocus, DummyShortcut, DummyTooltip, make_event_ctx};
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
+
+        sv.event(
+            &UiEvent::MouseWheel {
+                delta: 10.0,
+                position: Point::ZERO,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert!(sv.scroll_offset().y > 0.0);
+    }
+
+    #[test]
+    fn scroll_view_scroll_to_bottom() {
+        let child = Spacer::new(200.0, 800.0);
+        let mut sv = ScrollView::new(Some(Box::new(child)));
+        sv.layout(Rect::new(0.0, 0.0, 300.0, 300.0));
+
+        assert!(!sv.is_at_bottom());
+        sv.scroll_to_bottom();
+        assert!(sv.is_at_bottom());
+    }
+
+    #[test]
+    fn scroll_view_is_at_bottom_when_content_fits() {
+        let child = Spacer::new(200.0, 100.0);
+        let mut sv = ScrollView::new(Some(Box::new(child)));
+        sv.layout(Rect::new(0.0, 0.0, 300.0, 300.0));
+        // Content fits in viewport → always at bottom
+        assert!(sv.is_at_bottom());
     }
 }

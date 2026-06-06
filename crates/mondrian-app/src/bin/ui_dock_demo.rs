@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 //! Dock Demo — 独立 wgpu 窗口测试 Dock 系统
 //!
 //! 运行: cargo run --bin ui_dock_demo
@@ -15,7 +16,7 @@ use mondrian_ui_core::widgets::ColoredBox;
 use mondrian_ui_core::{EventResult, TreeWalker, Widget};
 use mondrian_ui_renderer::command::DrawEncoder;
 use mondrian_ui_renderer::UiRenderer;
-use mondrian_ui_widgets::dock_splitter::{DockSplitter, SplitDirection};
+use mondrian_ui_widgets::dock_splitter::DockSplitter;
 use mondrian_ui_widgets::dock_tab_bar::{DockTabBar, TabInfo};
 use mondrian_ui_widgets::panel_slot::{PanelSlot, SlotKind};
 
@@ -29,6 +30,7 @@ fn slot_content(kind: SlotKind) -> Box<dyn Widget> {
         SlotKind::Effects => Color::from_hex(0x2A1A3E),
         SlotKind::Project => Color::from_hex(0x1E3A2A),
         SlotKind::Console => Color::from_hex(0x0D1117),
+        _ => Color::from_hex(0x1A1A1A),
     };
     // Return a ColoredBox stretched to fill its parent; the
     // PanelSlot's layout() will give it the right bounds.
@@ -46,7 +48,7 @@ struct VerticalTabbedSlot {
 impl VerticalTabbedSlot {
     fn new(kind: SlotKind) -> Self {
         let tab_bar = DockTabBar::new(vec![TabInfo {
-            label: kind.label().to_string(),
+            label: kind.display_name().to_string(),
             active: true,
         }]);
         let content = PanelSlot::new(kind, slot_content(kind));
@@ -198,6 +200,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bounds = Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
     TreeWalker::layout(&mut root, bounds);
 
+    let mut last_cursor = Point::new(0.0, 0.0);
+    let current_bounds = std::cell::Cell::new(bounds);
+
     event_loop.run(move |event, elwt| {
         use winit::event::ElementState;
         use winit::event_loop::ControlFlow;
@@ -218,7 +223,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut encoder = DrawEncoder::new();
                 let theme = mondrian_ui_theme::current_theme();
                 // full-window background
-                encoder.draw_rect(bounds, theme.colors.bg_base, 0.0);
+                let b = current_bounds.get();
+                encoder.draw_rect(b, theme.colors.bg_base, 0.0);
                 TreeWalker::paint(&root, &mut encoder, &theme);
                 let commands = encoder.finish();
 
@@ -227,7 +233,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     wgpu::CurrentSurfaceTexture::Success(output)
                     | wgpu::CurrentSurfaceTexture::Suboptimal(output) => {
                         let v = output.texture.create_view(&Default::default());
-                        ui_renderer.render(&device, &queue, &v, &commands, (size.width, size.height));
+                        let sz = window.inner_size();
+                        ui_renderer.render(&device, &queue, &v, &commands, (sz.width, sz.height));
                         output.present();
                     }
                     wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {}
@@ -243,6 +250,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     config.width = new_size.width;
                     config.height = new_size.height;
                     surface.configure(&device, &config);
+                    // Re-layout the entire dock tree for new window size
+                    let new_bounds = Rect::new(0.0, 0.0, new_size.width as f32, new_size.height as f32);
+                    current_bounds.set(new_bounds);
+                    TreeWalker::layout(&mut root, new_bounds);
                     window.request_redraw();
                 }
             }
@@ -250,33 +261,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Event::WindowEvent {
                 event: WindowEvent::CursorMoved { position, .. }, ..
             } => {
-                let pt = Point::new(position.x as f32, position.y as f32);
+                last_cursor = Point::new(position.x as f32, position.y as f32);
                 let _ = root.event(
-                    &UiEvent::MouseMove { position: pt, modifiers: Modifiers::none() },
+                    &UiEvent::MouseMove { position: last_cursor, modifiers: Modifiers::none() },
                     &mut dummy_event_ctx(),
                 );
+                window.request_redraw();
             }
 
             Event::WindowEvent {
                 event: WindowEvent::MouseInput { state, button, .. }, ..
             } => {
-                // Use last known cursor position for more accurate hit testing
-                // We store cursor position in a local variable via a hack:
-                // (In a real implementation this would come from the previous CursorMoved event)
-                let pt = Point::new(0.0, 0.0);
                 let event = match state {
                     ElementState::Pressed => UiEvent::MouseDown {
-                        position: pt,
+                        position: last_cursor,
                         button: mouse_button(button),
                         modifiers: Modifiers::none(),
                     },
                     ElementState::Released => UiEvent::MouseUp {
-                        position: pt,
+                        position: last_cursor,
                         button: mouse_button(button),
                         modifiers: Modifiers::none(),
                     },
                 };
                 let _ = root.event(&event, &mut dummy_event_ctx());
+                window.request_redraw();
             }
 
             Event::AboutToWait => { window.request_redraw(); }

@@ -60,8 +60,16 @@ impl GlyphAtlas {
         let px = (uv.x * self.atlas.width as f32) as u32;
         let py = (uv.y * self.atlas.height as f32) as u32;
 
-        let mut bitmap = vec![0u8; (width * height) as usize];
-        let _ = self.cache.get_image(font_system, cache_key);
+        let image = self.cache.get_image(font_system, cache_key);
+        let bitmap = match image {
+            Some(img) => match img.content {
+                cosmic_text::SwashContent::SubpixelMask => {
+                    img.data.iter().flat_map(|&s| vec![s, s, s, 255]).collect()
+                }
+                _ => img.data.clone(),
+            },
+            None => return None,
+        };
 
         self.glyph_map.insert(cache_key, uv);
         self.pending_uploads.push(GlyphUpload {

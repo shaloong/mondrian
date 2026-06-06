@@ -2,20 +2,9 @@
 //!
 //! 水平/垂直方向可拖拽调整比例的分割容器。
 
-use mondrian_core::Color;
 use mondrian_ui_core::types::*;
-use mondrian_ui_core::widget::{DrawCommandEncoder, EventContext, PaintContext};
+use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
-use mondrian_ui_theme::Theme;
-
-/// 分割方向
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SplitDirection {
-    /// 水平分割（左右排列）
-    Horizontal,
-    /// 垂直分割（上下排列）
-    Vertical,
-}
 
 /// DockSplitter —— 可拖拽调整比例的双子节点分割容器
 pub struct DockSplitter {
@@ -119,6 +108,9 @@ impl Widget for DockSplitter {
                             self.ratio = rel.clamp(0.1, 0.9);
                         }
                     }
+                    // Re-layout children with the updated ratio
+                    let bounds = self.bounds;
+                    self.layout(bounds);
                     return EventResult::Handled;
                 }
                 // 检查 hover
