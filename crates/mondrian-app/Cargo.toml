@@ -9,6 +9,10 @@ license.workspace    = true
 name = "mondrian"
 path = "src/main.rs"
 
+[[bin]]
+name = "ui_dock_demo"
+path = "src/bin/ui_dock_demo.rs"
+
 [dependencies]
 mondrian-core     = { workspace = true }
 mondrian-media    = { workspace = true }
@@ -27,6 +31,7 @@ mondrian-editor-ui    = { workspace = true }
 mondrian-ui-renderer  = { workspace = true }
 mondrian-ui-layout    = { workspace = true }
 mondrian-ui-events    = { workspace = true }
+mondrian-ui-widgets   = { workspace = true }
 
 # UI（Phase 1: egui）
 egui      = "0.34"

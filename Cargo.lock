@@ -3270,6 +3270,7 @@ dependencies = [
  "mondrian-ui-layout",
  "mondrian-ui-renderer",
  "mondrian-ui-theme",
+ "mondrian-ui-widgets",
  "parking_lot",
  "pollster",
  "rayon",
