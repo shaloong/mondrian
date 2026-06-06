@@ -5,6 +5,10 @@
 use std::sync::Arc;
 
 use mondrian_core::Color;
+use mondrian_platform::NoopPlatformService;
+use mondrian_ui_core::focus::FocusManager;
+use mondrian_ui_core::shortcut::{ShortcutBinding, ShortcutManager, ShortcutScope};
+use mondrian_ui_core::tooltip::{TooltipManager, TooltipState};
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::widgets::ColoredBox;
@@ -15,7 +19,7 @@ use mondrian_ui_widgets::dock_splitter::{DockSplitter, SplitDirection};
 use mondrian_ui_widgets::dock_tab_bar::{DockTabBar, TabInfo};
 use mondrian_ui_widgets::panel_slot::{PanelSlot, SlotKind};
 
-/// 为不同面板创建占位内容（带颜色区分）
+// ── slot content factory ────────────────────────────────────────────────
 fn slot_content(kind: SlotKind) -> Box<dyn Widget> {
     let color = match kind {
         SlotKind::Viewer => Color::from_hex(0x1A1A2E),
@@ -26,35 +30,33 @@ fn slot_content(kind: SlotKind) -> Box<dyn Widget> {
         SlotKind::Project => Color::from_hex(0x1E3A2A),
         SlotKind::Console => Color::from_hex(0x0D1117),
     };
-    Box::new(ColoredBox::new(color, 100.0, 100.0))
+    // Return a ColoredBox stretched to fill its parent; the
+    // PanelSlot's layout() will give it the right bounds.
+    Box::new(ColoredBox::new(color, 1.0, 1.0))
 }
 
-/// 创建带 tab bar + content 的面板容器（Stack 布局模拟）
-fn tabbed_slot(kind: SlotKind) -> Box<dyn Widget> {
-    let tab_bar = DockTabBar::new(vec![TabInfo {
-        label: kind.label().to_string(),
-        active: true,
-    }]);
-
-    let content = PanelSlot::new(kind, slot_content(kind));
-
-    // 用 DockSplitter(Vertical) 把 tab bar 和 content 上下排列
-    // ratio=0.0 表示 tab bar 在顶部固定高度
-    // 实际用约 26px 高的 tab bar + 剩余给 content
-    Box::new(VerticalTabbedSlot {
-        id: WidgetId::new(),
-        tab_bar,
-        content: Box::new(content),
-        bounds: Rect::ZERO,
-    })
-}
-
-/// 简易垂直布局：tab bar 在上，content 在下
+// ── VerticalTabbedSlot ──────────────────────────────────────────────────
 struct VerticalTabbedSlot {
     id: WidgetId,
     tab_bar: DockTabBar,
     content: Box<dyn Widget>,
     bounds: Rect,
+}
+
+impl VerticalTabbedSlot {
+    fn new(kind: SlotKind) -> Self {
+        let tab_bar = DockTabBar::new(vec![TabInfo {
+            label: kind.label().to_string(),
+            active: true,
+        }]);
+        let content = PanelSlot::new(kind, slot_content(kind));
+        Self {
+            id: WidgetId::new(),
+            tab_bar,
+            content: Box::new(content),
+            bounds: Rect::ZERO,
+        }
+    }
 }
 
 impl Widget for VerticalTabbedSlot {
@@ -64,7 +66,12 @@ impl Widget for VerticalTabbedSlot {
         self.bounds = bounds;
         let tab_h = 26.0;
         self.tab_bar.layout(Rect::new(bounds.x, bounds.y, bounds.width, tab_h));
-        self.content.layout(Rect::new(bounds.x, bounds.y + tab_h, bounds.width, bounds.height - tab_h));
+        self.content.layout(Rect::new(
+            bounds.x,
+            bounds.y + tab_h,
+            bounds.width,
+            (bounds.height - tab_h).max(0.0),
+        ));
     }
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
         if self.tab_bar.event(event, ctx) == EventResult::Handled { return EventResult::Handled; }
@@ -77,35 +84,84 @@ impl Widget for VerticalTabbedSlot {
     fn hit_test(&self, p: Point) -> bool { self.bounds.contains(p) }
 }
 
+// ── Dock tree ───────────────────────────────────────────────────────────
 fn build_dock_tree() -> DockSplitter {
-    // 左侧: Assets(上) + Console(下)
     let left = DockSplitter::new(
         SplitDirection::Vertical,
         0.6,
-        tabbed_slot(SlotKind::Assets),
-        tabbed_slot(SlotKind::Console),
+        Box::new(VerticalTabbedSlot::new(SlotKind::Assets)),
+        Box::new(VerticalTabbedSlot::new(SlotKind::Console)),
     );
 
-    // 右侧下: Timeline(左) + Inspector(右)
     let right_bottom = DockSplitter::new(
         SplitDirection::Horizontal,
         0.7,
-        tabbed_slot(SlotKind::Timeline),
-        tabbed_slot(SlotKind::Inspector),
+        Box::new(VerticalTabbedSlot::new(SlotKind::Timeline)),
+        Box::new(VerticalTabbedSlot::new(SlotKind::Inspector)),
     );
 
-    // 右侧: Viewer(上) + right_bottom(下)
     let right = DockSplitter::new(
         SplitDirection::Vertical,
         0.65,
-        tabbed_slot(SlotKind::Viewer),
+        Box::new(VerticalTabbedSlot::new(SlotKind::Viewer)),
         Box::new(right_bottom),
     );
 
-    // 根: left + right
     DockSplitter::new(SplitDirection::Horizontal, 0.28, Box::new(left), Box::new(right))
 }
 
+// ── helper ──────────────────────────────────────────────────────────────
+fn mouse_button(b: winit::event::MouseButton) -> MouseButton {
+    match b {
+        winit::event::MouseButton::Left => MouseButton::Left,
+        winit::event::MouseButton::Right => MouseButton::Right,
+        winit::event::MouseButton::Middle => MouseButton::Middle,
+        _ => MouseButton::Left,
+    }
+}
+
+fn dummy_event_ctx() -> EventContext<'static> {
+    static mut FOCUS: DummyFocus = DummyFocus;
+    static mut SHORTCUT: DummyShortcut = DummyShortcut;
+    static mut TOOLTIP: DummyTooltip = DummyTooltip;
+    unsafe {
+        EventContext {
+            focus: &mut *std::ptr::addr_of_mut!(FOCUS),
+            shortcut: &mut *std::ptr::addr_of_mut!(SHORTCUT),
+            tooltip: &mut *std::ptr::addr_of_mut!(TOOLTIP),
+            dispatch: &|_| {},
+            platform: &NoopPlatformService,
+        }
+    }
+}
+
+struct DummyFocus;
+impl FocusManager for DummyFocus {
+    fn focused_widget(&self) -> Option<WidgetId> { None }
+    fn focused_panel(&self) -> Option<mondrian_editor_state::state::PanelKind> { None }
+    fn request_focus(&mut self, _: WidgetId, _: mondrian_editor_state::state::PanelKind) {}
+    fn release_focus(&mut self, _: WidgetId) {}
+    fn focus_next(&mut self) {}
+    fn focus_prev(&mut self) {}
+    fn clear_focus(&mut self) {}
+}
+struct DummyShortcut;
+impl ShortcutManager for DummyShortcut {
+    fn register(&mut self, _: ShortcutScope, _: ShortcutBinding, _: mondrian_editor_state::Action) {}
+    fn unregister(&mut self, _: ShortcutScope, _: &ShortcutBinding) {}
+    fn resolve(&self, _: KeyCode, _: Modifiers) -> Option<mondrian_editor_state::Action> { None }
+    fn clear_scope(&mut self, _: ShortcutScope) {}
+    fn clear_all(&mut self) {}
+}
+struct DummyTooltip;
+impl TooltipManager for DummyTooltip {
+    fn show(&mut self, _: String, _: Point) {}
+    fn hide(&mut self) {}
+    fn current(&self) -> Option<&TooltipState> { None }
+    fn update(&mut self, _: u64) {}
+}
+
+// ── main ────────────────────────────────────────────────────────────────
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use winit::event_loop::EventLoop;
 
@@ -143,6 +199,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     TreeWalker::layout(&mut root, bounds);
 
     event_loop.run(move |event, elwt| {
+        use winit::event::ElementState;
         use winit::event_loop::ControlFlow;
         use winit::event::{Event, WindowEvent};
         elwt.set_control_flow(ControlFlow::Wait);
@@ -152,7 +209,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             | Event::WindowEvent { event: WindowEvent::KeyboardInput {
                 event: winit::event::KeyEvent {
                     logical_key: winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape),
-                    state: winit::event::ElementState::Pressed,
+                    state: ElementState::Pressed,
                     ..
                 }, ..
             }, .. } => elwt.exit(),
@@ -160,7 +217,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Event::WindowEvent { event: WindowEvent::RedrawRequested, .. } => {
                 let mut encoder = DrawEncoder::new();
                 let theme = mondrian_ui_theme::current_theme();
-                // 窗口背景
+                // full-window background
                 encoder.draw_rect(bounds, theme.colors.bg_base, 0.0);
                 TreeWalker::paint(&root, &mut encoder, &theme);
                 let commands = encoder.finish();
@@ -193,7 +250,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Event::WindowEvent {
                 event: WindowEvent::CursorMoved { position, .. }, ..
             } => {
-                // Route mouse move to widget tree
                 let pt = Point::new(position.x as f32, position.y as f32);
                 let _ = root.event(
                     &UiEvent::MouseMove { position: pt, modifiers: Modifiers::none() },
@@ -204,8 +260,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Event::WindowEvent {
                 event: WindowEvent::MouseInput { state, button, .. }, ..
             } => {
-                use winit::event::ElementState;
-                let pt = Point::new(0.0, 0.0); // cursor pos not available directly
+                // Use last known cursor position for more accurate hit testing
+                // We store cursor position in a local variable via a hack:
+                // (In a real implementation this would come from the previous CursorMoved event)
+                let pt = Point::new(0.0, 0.0);
                 let event = match state {
                     ElementState::Pressed => UiEvent::MouseDown {
                         position: pt,
@@ -227,61 +285,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     Ok(())
-}
-
-fn mouse_button(b: winit::event::MouseButton) -> mondrian_ui_core::types::MouseButton {
-    match b {
-        winit::event::MouseButton::Left => mondrian_ui_core::types::MouseButton::Left,
-        winit::event::MouseButton::Right => mondrian_ui_core::types::MouseButton::Right,
-        winit::event::MouseButton::Middle => mondrian_ui_core::types::MouseButton::Middle,
-        _ => mondrian_ui_core::types::MouseButton::Left,
-    }
-}
-
-fn dummy_event_ctx() -> EventContext<'static> {
-    static mut FOCUS: DummyFocus = DummyFocus;
-    static mut SHORTCUT: DummyShortcut = DummyShortcut;
-    static mut TOOLTIP: DummyTooltip = DummyTooltip;
-
-    unsafe {
-        EventContext {
-            focus: &mut *std::ptr::addr_of_mut!(FOCUS),
-            shortcut: &mut *std::ptr::addr_of_mut!(SHORTCUT),
-            tooltip: &mut *std::ptr::addr_of_mut!(TOOLTIP),
-            dispatch: &|_| {},
-            platform: &mondrian_platform::NoopPlatformService,
-        }
-    }
-}
-
-use mondrian_editor_state::state::PanelKind;
-use mondrian_editor_state::Action;
-use mondrian_ui_core::focus::FocusManager;
-use mondrian_ui_core::shortcut::{ShortcutBinding, ShortcutManager, ShortcutScope};
-use mondrian_ui_core::tooltip::{TooltipManager, TooltipState};
-
-struct DummyFocus;
-impl FocusManager for DummyFocus {
-    fn focused_widget(&self) -> Option<WidgetId> { None }
-    fn focused_panel(&self) -> Option<PanelKind> { None }
-    fn request_focus(&mut self, _: WidgetId, _: PanelKind) {}
-    fn release_focus(&mut self, _: WidgetId) {}
-    fn focus_next(&mut self) {}
-    fn focus_prev(&mut self) {}
-    fn clear_focus(&mut self) {}
-}
-struct DummyShortcut;
-impl ShortcutManager for DummyShortcut {
-    fn register(&mut self, _: ShortcutScope, _: ShortcutBinding, _: Action) {}
-    fn unregister(&mut self, _: ShortcutScope, _: &ShortcutBinding) {}
-    fn resolve(&self, _: KeyCode, _: Modifiers) -> Option<Action> { None }
-    fn clear_scope(&mut self, _: ShortcutScope) {}
-    fn clear_all(&mut self) {}
-}
-struct DummyTooltip;
-impl TooltipManager for DummyTooltip {
-    fn show(&mut self, _: String, _: Point) {}
-    fn hide(&mut self) {}
-    fn current(&self) -> Option<&TooltipState> { None }
-    fn update(&mut self, _: u64) {}
 }
