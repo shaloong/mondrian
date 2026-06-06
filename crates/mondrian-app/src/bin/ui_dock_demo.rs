@@ -160,6 +160,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Event::WindowEvent { event: WindowEvent::RedrawRequested, .. } => {
                 let mut encoder = DrawEncoder::new();
                 let theme = mondrian_ui_theme::current_theme();
+                // 窗口背景
+                encoder.draw_rect(bounds, theme.colors.bg_base, 0.0);
                 TreeWalker::paint(&root, &mut encoder, &theme);
                 let commands = encoder.finish();
 

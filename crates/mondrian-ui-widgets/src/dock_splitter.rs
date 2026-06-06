@@ -46,7 +46,7 @@ impl DockSplitter {
             handle_rect: Rect::ZERO,
             dragging: false,
             handle_hovered: false,
-            handle_size: 5.0,
+            handle_size: 1.0,
         }
     }
 

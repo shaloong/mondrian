@@ -45,8 +45,10 @@ impl TreeWalker {
     /// 按深度优先顺序收集绘制命令到 encoder。
     pub fn paint(root: &dyn Widget, encoder: &mut dyn DrawCommandEncoder, theme: &Theme) {
         let clip_rect = Rect::new(0.0, 0.0, f32::MAX, f32::MAX);
-        let mut ctx = PaintContext { encoder, theme, clip_rect };
-        root.paint(&mut ctx);
+        {
+            let mut ctx = PaintContext { encoder, theme, clip_rect };
+            root.paint(&mut ctx);
+        }
 
         for child in root.children() {
             Self::paint(child.as_ref(), encoder, theme);
