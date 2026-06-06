@@ -13,5 +13,6 @@ mondrian-editor-state = { workspace = true }
 mondrian-ui-theme     = { workspace = true }
 mondrian-platform     = { workspace = true }
 
+serde   = { workspace = true }
 uuid    = { workspace = true }
 glam    = { workspace = true }

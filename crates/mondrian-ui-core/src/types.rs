@@ -215,81 +215,18 @@ impl Modifiers {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum KeyCode {
     // 字母
-    A,
-    B,
-    C,
-    D,
-    E,
-    F,
-    G,
-    H,
-    I,
-    J,
-    K,
-    L,
-    M,
-    N,
-    O,
-    P,
-    Q,
-    R,
-    S,
-    T,
-    U,
-    V,
-    W,
-    X,
-    Y,
-    Z,
+    A, B, C, D, E, F, G, H, I, J, K, L, M,
+    N, O, P, Q, R, S, T, U, V, W, X, Y, Z,
     // 数字
-    Digit0,
-    Digit1,
-    Digit2,
-    Digit3,
-    Digit4,
-    Digit5,
-    Digit6,
-    Digit7,
-    Digit8,
-    Digit9,
+    Digit0, Digit1, Digit2, Digit3, Digit4, Digit5, Digit6, Digit7, Digit8, Digit9,
     // 功能键
-    F1,
-    F2,
-    F3,
-    F4,
-    F5,
-    F6,
-    F7,
-    F8,
-    F9,
-    F10,
-    F11,
-    F12,
+    F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12,
     // 导航
-    Escape,
-    Tab,
-    Enter,
-    Space,
-    Backspace,
-    Delete,
-    Insert,
-    Home,
-    End,
-    PageUp,
-    PageDown,
-    Left,
-    Right,
-    Up,
-    Down,
+    Escape, Tab, Enter, Space, Backspace, Delete, Insert,
+    Home, End, PageUp, PageDown,
+    Left, Right, Up, Down,
     // 修饰键
-    LeftShift,
-    RightShift,
-    LeftCtrl,
-    RightCtrl,
-    LeftAlt,
-    RightAlt,
-    LeftMeta,
-    RightMeta,
+    LeftShift, RightShift, LeftCtrl, RightCtrl, LeftAlt, RightAlt, LeftMeta, RightMeta,
 }
 
 /// 拖拽载荷 —— 跨 Widget 的拖拽数据
@@ -300,6 +237,13 @@ pub enum DragPayload {
     Effect(EffectId),
     Track(TrackId),
     File(Vec<std::path::PathBuf>),
+}
+
+/// 分割方向（用于 Dock 分割器和工作区布局）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum SplitDirection {
+    Horizontal,
+    Vertical,
 }
 
 /// 事件处理结果
@@ -356,4 +300,229 @@ pub enum UiEvent {
         payload: DragPayload,
         position: Point,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // WidgetId
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn widget_id_is_unique() {
+        let a = WidgetId::new();
+        let b = WidgetId::new();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn widget_id_display_is_uuid_string() {
+        let id = WidgetId::new();
+        let display = id.to_string();
+        assert_eq!(display.len(), 36); // standard UUID format
+        assert!(display.contains('-'));
+    }
+
+    #[test]
+    fn widget_id_default_is_not_zero() {
+        let id = WidgetId::default();
+        assert_ne!(id.0, Uuid::nil());
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Size
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn size_zero_is_zero() {
+        assert!(Size::ZERO.is_zero());
+    }
+
+    #[test]
+    fn size_non_zero_is_not_zero() {
+        assert!(!Size::new(10.0, 10.0).is_zero());
+    }
+
+    #[test]
+    fn size_zero_width_is_zero() {
+        assert!(Size::new(0.0, 10.0).is_zero());
+    }
+
+    #[test]
+    fn size_zero_height_is_zero() {
+        assert!(Size::new(10.0, 0.0).is_zero());
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Point
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn point_to_vec2() {
+        let p = Point::new(3.0, 4.0);
+        let v = p.to_vec2();
+        assert_eq!(v.x, 3.0);
+        assert_eq!(v.y, 4.0);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Rect
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn rect_contains_center() {
+        let r = Rect::new(0.0, 0.0, 100.0, 100.0);
+        assert!(r.contains(Point::new(50.0, 50.0)));
+    }
+
+    #[test]
+    fn rect_contains_corners() {
+        let r = Rect::new(0.0, 0.0, 100.0, 100.0);
+        assert!(r.contains(Point::new(0.0, 0.0)));
+        assert!(r.contains(Point::new(100.0, 100.0)));
+    }
+
+    #[test]
+    fn rect_does_not_contain_outside() {
+        let r = Rect::new(10.0, 10.0, 100.0, 100.0);
+        assert!(!r.contains(Point::new(5.0, 5.0)));
+        assert!(!r.contains(Point::new(200.0, 200.0)));
+    }
+
+    #[test]
+    fn rect_intersects_overlapping() {
+        let a = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let b = Rect::new(50.0, 50.0, 100.0, 100.0);
+        assert!(a.intersects(&b));
+        assert!(b.intersects(&a));
+    }
+
+    #[test]
+    fn rect_does_not_intersect_separated() {
+        let a = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let b = Rect::new(200.0, 200.0, 100.0, 100.0);
+        assert!(!a.intersects(&b));
+    }
+
+    #[test]
+    fn rect_intersects_edge_touching() {
+        // Touching edges: A's right edge at 100, B's left edge at 100
+        let a = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let b = Rect::new(100.0, 0.0, 100.0, 100.0);
+        // intersects check: a.x < b.x+b.w (0 < 200) && a.x+a.w > b.x (100 > 100 = false)
+        assert!(!a.intersects(&b), "Edge-touching rects should not intersect");
+    }
+
+    #[test]
+    fn rect_min_max() {
+        let r = Rect::new(10.0, 20.0, 30.0, 40.0);
+        assert_eq!(r.min(), Point::new(10.0, 20.0));
+        assert_eq!(r.max(), Point::new(40.0, 60.0));
+    }
+
+    #[test]
+    fn rect_center() {
+        let r = Rect::new(0.0, 0.0, 100.0, 50.0);
+        assert_eq!(r.center(), Point::new(50.0, 25.0));
+    }
+
+    #[test]
+    fn rect_inset() {
+        let r = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let inner = r.inset(10.0, 5.0);
+        assert_eq!(inner, Rect::new(10.0, 5.0, 80.0, 90.0));
+    }
+
+    #[test]
+    fn rect_inset_clamps_to_zero() {
+        let r = Rect::new(0.0, 0.0, 10.0, 10.0);
+        let inner = r.inset(100.0, 100.0);
+        assert_eq!(inner.width, 0.0);
+        assert_eq!(inner.height, 0.0);
+    }
+
+    #[test]
+    fn rect_from_min_max() {
+        let r = Rect::from_min_max(10.0, 20.0, 110.0, 120.0);
+        assert_eq!(r, Rect::new(10.0, 20.0, 100.0, 100.0));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // LayoutConstraint
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn constraint_tight_fixes_size() {
+        let c = LayoutConstraint::tight(50.0, 30.0);
+        let s = c.constrain(Size::new(100.0, 100.0));
+        assert_eq!(s, Size::new(50.0, 30.0));
+    }
+
+    #[test]
+    fn constraint_loose_allows_growth() {
+        let c = LayoutConstraint::loose(10.0, 10.0);
+        let s = c.constrain(Size::new(5.0, 200.0));
+        assert_eq!(s, Size::new(10.0, 200.0)); // clamped to min width
+    }
+
+    #[test]
+    fn constraint_loose_preserves_larger() {
+        let c = LayoutConstraint::loose(10.0, 10.0);
+        let s = c.constrain(Size::new(50.0, 30.0));
+        assert_eq!(s, Size::new(50.0, 30.0));
+    }
+
+    #[test]
+    fn constraint_loose_constrains_width_to_max() {
+        let s = LayoutConstraint::LOOSE.constrain(Size::new(f32::MAX, 0.0));
+        assert_eq!(s.width, f32::MAX);
+        assert_eq!(s.height, 0.0);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Modifiers
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn modifiers_none_is_clear() {
+        let m = Modifiers::none();
+        assert!(!m.ctrl);
+        assert!(!m.alt);
+        assert!(!m.shift);
+        assert!(!m.meta);
+    }
+
+    #[test]
+    fn modifiers_ctrl_sets_only_ctrl() {
+        let m = Modifiers::ctrl();
+        assert!(m.ctrl);
+        assert!(!m.alt);
+        assert!(!m.shift);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // UiEvent
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn event_mouse_down_has_position() {
+        let evt = UiEvent::MouseDown {
+            position: Point::new(10.0, 20.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        };
+        match evt {
+            UiEvent::MouseDown { position, .. } => {
+                assert_eq!(position, Point::new(10.0, 20.0));
+            }
+            _ => panic!("expected MouseDown"),
+        }
+    }
+
+    #[test]
+    fn event_handled_and_ignored_are_distinct() {
+        assert_ne!(EventResult::Handled, EventResult::Ignored);
+    }
 }

@@ -249,12 +249,7 @@ impl DockNode {
     }
 }
 
-/// 分割方向
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SplitDirection {
-    Horizontal,
-    Vertical,
-}
+pub use mondrian_ui_core::types::SplitDirection;
 
 /// Tab 标签内容
 #[derive(Debug, Clone, Serialize, Deserialize)]

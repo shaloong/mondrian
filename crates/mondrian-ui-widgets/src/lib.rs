@@ -10,8 +10,11 @@ pub mod panel_slot;
 pub mod scroll;
 pub mod slider;
 
+#[cfg(test)]
+mod test_utils;
+
 pub use button::Button;
-pub use dock_splitter::{DockSplitter, SplitDirection};
+pub use dock_splitter::DockSplitter;
 pub use dock_tab_bar::{DockTabBar, TabInfo};
 pub use label::Label;
 pub use panel_slot::{PanelSlot, SlotKind};

@@ -2,46 +2,23 @@
 //!
 //! 包装面板标识和面板内容 Widget 的容器。
 
+use mondrian_editor_state::state::PanelKind;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
-/// 面板类型标识（精简版，用于 Demo）
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SlotKind {
-    Viewer,
-    Timeline,
-    Assets,
-    Inspector,
-    Effects,
-    Project,
-    Console,
-}
-
-impl SlotKind {
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Viewer => "预览",
-            Self::Timeline => "时间线",
-            Self::Assets => "素材",
-            Self::Inspector => "检查器",
-            Self::Effects => "效果",
-            Self::Project => "项目",
-            Self::Console => "控制台",
-        }
-    }
-}
+pub use mondrian_editor_state::state::PanelKind as SlotKind;
 
 /// PanelSlot —— 包装面板内容 Widget
 pub struct PanelSlot {
     id: WidgetId,
-    kind: SlotKind,
+    kind: PanelKind,
     content: Option<Box<dyn Widget>>,
     bounds: Rect,
 }
 
 impl PanelSlot {
-    pub fn new(kind: SlotKind, content: Box<dyn Widget>) -> Self {
+    pub fn new(kind: PanelKind, content: Box<dyn Widget>) -> Self {
         Self {
             id: WidgetId::new(),
             kind,
@@ -50,13 +27,15 @@ impl PanelSlot {
         }
     }
 
-    pub fn kind(&self) -> SlotKind {
+    pub fn kind(&self) -> PanelKind {
         self.kind
     }
 }
 
 impl Widget for PanelSlot {
-    fn id(&self) -> WidgetId { self.id }
+    fn id(&self) -> WidgetId {
+        self.id
+    }
 
     fn measure(&self, constraint: LayoutConstraint) -> Size {
         if let Some(content) = &self.content {
@@ -91,6 +70,11 @@ impl Widget for PanelSlot {
         self.bounds.contains(point)
     }
 
-    fn children(&self) -> &[Box<dyn Widget>] { &[] }
-    fn children_mut(&mut self) -> &mut [Box<dyn Widget>] { &mut [] }
+    fn children(&self) -> &[Box<dyn Widget>] {
+        &[]
+    }
+
+    fn children_mut(&mut self) -> &mut [Box<dyn Widget>] {
+        &mut []
+    }
 }
