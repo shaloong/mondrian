@@ -9,10 +9,11 @@ use crate::{EventResult, UiEvent, Widget};
 /// 纯色矩形 Widget
 pub struct ColoredBox {
     id: WidgetId,
-    color: Color,
+    pub color: Color,
     hovered: bool,
     bounds: Rect,
     preferred: Size,
+    pub label: &'static str,
 }
 
 impl ColoredBox {
@@ -23,22 +24,18 @@ impl ColoredBox {
             hovered: false,
             bounds: Rect::ZERO,
             preferred: Size::new(width, height),
+            label: "",
         }
     }
 
-    pub fn color(&self) -> Color {
-        self.color
-    }
-
-    pub fn is_hovered(&self) -> bool {
-        self.hovered
+    pub fn with_label(mut self, label: &'static str) -> Self {
+        self.label = label;
+        self
     }
 }
 
 impl Widget for ColoredBox {
-    fn id(&self) -> WidgetId {
-        self.id
-    }
+    fn id(&self) -> WidgetId { self.id }
 
     fn measure(&self, _constraint: LayoutConstraint) -> Size {
         self.preferred

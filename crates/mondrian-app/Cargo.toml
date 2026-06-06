@@ -13,6 +13,18 @@ path = "src/main.rs"
 name = "ui_dock_demo"
 path = "src/bin/ui_dock_demo.rs"
 
+[[bin]]
+name = "ui_color_test"
+path = "src/bin/ui_color_test.rs"
+
+[[bin]]
+name = "ui_widget_test"
+path = "src/bin/ui_widget_test.rs"
+
+[[bin]]
+name = "ui_pipeline_test"
+path = "src/bin/ui_pipeline_test.rs"
+
 [dependencies]
 mondrian-core     = { workspace = true }
 mondrian-media    = { workspace = true }
