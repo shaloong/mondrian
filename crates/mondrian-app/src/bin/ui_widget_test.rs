@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 //! Minimal widget paint test — verifies the Widget tree produces correct draw commands.
 //! Run: cargo run --bin ui_widget_test
 //!
@@ -8,7 +9,7 @@ use std::sync::Arc;
 use mondrian_core::Color;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
-use mondrian_ui_core::widgets::{ColoredBox, Container};
+use mondrian_ui_core::widgets::ColoredBox;
 use mondrian_ui_core::{EventResult, TreeWalker, Widget};
 use mondrian_ui_renderer::command::DrawEncoder;
 use mondrian_ui_renderer::UiRenderer;

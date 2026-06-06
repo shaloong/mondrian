@@ -2,7 +2,7 @@
 //!
 //! 所有子 Widget 占据同一空间，以最大子 Widget 的尺寸为参考。
 
-use mondrian_ui_core::types::{LayoutConstraint, Rect};
+use mondrian_ui_core::types::Rect;
 use mondrian_ui_core::Widget;
 
 /// Stack（层叠）布局
@@ -31,7 +31,7 @@ impl StackLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mondrian_ui_core::types::{Point, Size, WidgetId};
+    use mondrian_ui_core::types::{LayoutConstraint, Size, WidgetId};
     use mondrian_ui_core::widget::{EventContext, PaintContext};
     use mondrian_ui_core::{EventResult, UiEvent};
 

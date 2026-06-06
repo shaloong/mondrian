@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 use std::sync::Arc;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

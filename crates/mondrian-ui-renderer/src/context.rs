@@ -2,7 +2,6 @@
 //!
 //! [`UiRenderer`] 持有 wgpu 渲染管线，接收 DrawCommand 列表并渲染到纹理。
 
-use std::sync::Arc;
 
 use bytemuck::Pod;
 use wgpu::util::DeviceExt;
@@ -25,6 +24,7 @@ struct Uniforms {
 /// 接收 DrawCommand 序列，批次化后通过 wgpu 渲染管线提交到纹理。
 pub struct UiRenderer {
     pipeline: UiPipeline,
+    #[allow(dead_code)]
     sampler: wgpu::Sampler,
 }
 

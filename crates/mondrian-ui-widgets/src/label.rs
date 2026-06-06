@@ -4,7 +4,7 @@
 
 use mondrian_core::Color;
 use mondrian_ui_core::types::*;
-use mondrian_ui_core::widget::{DrawCommandEncoder, EventContext, PaintContext};
+use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
 /// Label Widget —— 纯文本显示

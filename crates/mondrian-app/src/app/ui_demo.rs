@@ -11,6 +11,7 @@ use mondrian_ui_core::TreeWalker;
 use mondrian_ui_renderer::command::DrawEncoder;
 use mondrian_ui_renderer::UiRenderer;
 
+#[allow(dead_code)]
 fn build_demo_widget_tree() -> Container {
     let _green = ColoredBox::new(Color::from_hex(0x4CAF50), 200.0, 60.0);
     let _blue = ColoredBox::new(Color::from_hex(0x2196F3), 200.0, 60.0);
@@ -21,6 +22,7 @@ fn build_demo_widget_tree() -> Container {
         .with_background(Color::from_hex(0x121212))
 }
 
+#[allow(dead_code)]
 pub fn launch_ui_demo_window() {
     std::thread::spawn(|| {
         if let Err(e) = run_ui_demo_window() {
@@ -29,8 +31,9 @@ pub fn launch_ui_demo_window() {
     });
 }
 
+#[allow(dead_code, deprecated)]
 fn run_ui_demo_window() -> Result<(), Box<dyn std::error::Error>> {
-    use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+    use winit::event_loop::{ControlFlow, EventLoop};
 
     let event_loop = EventLoop::new()?;
     let window_attrs = winit::window::Window::default_attributes()

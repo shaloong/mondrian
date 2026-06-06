@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 //! Minimal color test — verifies the GPU pipeline renders correct colors.
 //! Run: cargo run --bin ui_color_test
 //!
@@ -8,9 +9,10 @@ use std::sync::Arc;
 use mondrian_ui_renderer::command::DrawEncoder;
 use mondrian_ui_renderer::UiRenderer;
 use mondrian_core::Color;
-use mondrian_ui_core::types::{Point, Rect};
+use mondrian_ui_core::types::Rect;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[allow(deprecated)]
     let el = winit::event_loop::EventLoop::new()?;
     let w = Arc::new(el.create_window(
         winit::window::Window::default_attributes()
