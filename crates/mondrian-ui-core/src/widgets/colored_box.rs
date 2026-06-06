@@ -62,7 +62,9 @@ impl Widget for ColoredBox {
         }
     }
 
-    fn paint(&self, _ctx: &mut PaintContext) {}
+    fn paint(&self, ctx: &mut PaintContext) {
+        ctx.encoder.draw_rect(self.bounds, self.color, 0.0);
+    }
 
     fn hit_test(&self, point: Point) -> bool {
         self.bounds.contains(point)

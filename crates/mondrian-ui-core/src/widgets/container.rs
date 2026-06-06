@@ -90,8 +90,7 @@ impl Widget for Container {
 
     fn paint(&self, ctx: &mut PaintContext) {
         if let Some(bg) = self.background {
-            // FIXME: need to use DrawEncoder from ctx once PathContext is extended
-            let _ = (bg, self.bounds);
+            ctx.encoder.draw_rect(self.bounds, bg, 0.0);
         }
         if let Some(child) = &self.child {
             child.paint(ctx);
