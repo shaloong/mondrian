@@ -7,10 +7,8 @@ use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 
 use mondrian_core::events::AppEvent;
-use mondrian_editor_ui::panel::{Panel, PanelContext, PanelKind};
-use mondrian_ui_core::types::LayoutConstraint;
+use mondrian_editor_ui::panel::{Panel, PanelKind};
 use mondrian_ui_core::Widget;
-use mondrian_ui_widgets::label::Label;
 use mondrian_ui_widgets::scroll::ScrollView;
 
 use crate::tracing_layer::LogEntry;
@@ -19,6 +17,7 @@ use std::collections::VecDeque;
 /// 控制台面板
 ///
 /// 持有日志缓冲区的共享引用，构建 Widget 树。
+#[allow(dead_code)]
 pub struct ConsolePanel {
     buffer: Arc<Mutex<VecDeque<LogEntry>>>,
     max_lines: usize,
@@ -48,16 +47,6 @@ impl Panel for ConsolePanel {
     }
 
     fn build_widget_tree(&mut self) -> Box<dyn Widget> {
-        // 构建 Widget 树：
-        // ScrollView
-        //   └─ Container (Column: 每行一个 Label)
-        //
-        // 注意：Stage C 阶段用简单的 Container + Label 列表
-        // 后续可用 FlexLayout Column 替代
-
-        // 创建一堆 Label widget 作为子节点
-        // 当前简化为返回一个 ScrollView + Color widget placeholder
-
         let placeholder = mondrian_ui_core::widgets::ColoredBox::new(
             mondrian_core::Color {
                 r: 0.1,
@@ -74,5 +63,40 @@ impl Panel for ConsolePanel {
 
     fn on_event(&mut self, _event: &AppEvent) {
         // Console 不需要响应外部事件
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tracing_layer::ConsoleLogLayer;
+
+    #[test]
+    fn console_panel_creates_with_buffer() {
+        let (_, buffer) = ConsoleLogLayer::new(100);
+        let panel = ConsolePanel::new(buffer, 100);
+        assert_eq!(panel.kind(), PanelKind::Console);
+        assert_eq!(panel.title(), "控制台");
+    }
+
+    #[test]
+    fn console_panel_builds_widget_tree() {
+        let (_, buffer) = ConsoleLogLayer::new(100);
+        let mut panel = ConsolePanel::new(buffer, 100);
+        let _widget = panel.build_widget_tree();
+    }
+
+    #[test]
+    fn console_panel_is_closable_by_default() {
+        let (_, buffer) = ConsoleLogLayer::new(100);
+        let panel = ConsolePanel::new(buffer, 100);
+        assert!(panel.is_closable());
+    }
+
+    #[test]
+    fn console_panel_is_draggable_by_default() {
+        let (_, buffer) = ConsoleLogLayer::new(100);
+        let panel = ConsolePanel::new(buffer, 100);
+        assert!(panel.is_draggable());
     }
 }

@@ -9,7 +9,6 @@
 //! 3. 交叉轴: 根据 align_items 决定每个子的位置/尺寸
 //! 4. 主轴排列: 根据 justify_content 决定起始偏移
 
-use glam::Vec2;
 use mondrian_ui_core::types::{LayoutConstraint, Rect, Size};
 use mondrian_ui_core::Widget;
 
@@ -178,7 +177,7 @@ impl FlexLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mondrian_ui_core::types::{LayoutConstraint, Point, Size, WidgetId};
+    use mondrian_ui_core::types::{LayoutConstraint, Size, WidgetId};
     use mondrian_ui_core::widget::{EventContext, PaintContext};
     use mondrian_ui_core::{EventResult, UiEvent};
 
@@ -237,5 +236,104 @@ mod tests {
 
         assert_eq!(rects.len(), 1);
         assert!(rects[0].x > 0.0, "should be centered horizontally");
+    }
+
+    #[test]
+    fn space_between_justify() {
+        let w1 = TestWidget { id: WidgetId::new(), preferred: Size::new(30.0, 20.0) };
+        let w2 = TestWidget { id: WidgetId::new(), preferred: Size::new(30.0, 20.0) };
+        let w3 = TestWidget { id: WidgetId::new(), preferred: Size::new(30.0, 20.0) };
+        let children: Vec<&dyn Widget> = vec![&w1, &w2, &w3];
+
+        let layout = FlexLayout {
+            justify_content: JustifyContent::SpaceBetween,
+            ..FlexLayout::column()
+        };
+        let parent = Rect::new(0.0, 0.0, 200.0, 200.0);
+        let rects = layout.compute(parent, &children);
+
+        assert_eq!(rects.len(), 3);
+        // First at top, last at bottom, middle in between
+        assert!((rects[0].y - 0.0).abs() < 0.01, "first should be at top");
+        assert!(rects[1].y > rects[0].y, "middle between first and last");
+        assert!(rects[2].y > rects[1].y, "last below middle");
+    }
+
+    #[test]
+    fn end_alignment() {
+        let w1 = TestWidget { id: WidgetId::new(), preferred: Size::new(50.0, 30.0) };
+        let children: Vec<&dyn Widget> = vec![&w1];
+
+        let layout = FlexLayout {
+            align_items: AlignItems::End,
+            ..FlexLayout::row()
+        };
+        let parent = Rect::new(0.0, 0.0, 200.0, 100.0);
+        let rects = layout.compute(parent, &children);
+
+        assert_eq!(rects.len(), 1);
+        // In a row layout with End alignment, the item should be at the bottom
+        assert!(rects[0].y > 0.0, "should be at bottom");
+    }
+
+    #[test]
+    fn flex_with_gap() {
+        let w1 = TestWidget { id: WidgetId::new(), preferred: Size::new(100.0, 20.0) };
+        let w2 = TestWidget { id: WidgetId::new(), preferred: Size::new(100.0, 20.0) };
+        let children: Vec<&dyn Widget> = vec![&w1, &w2];
+
+        let no_gap = FlexLayout::column();
+        let with_gap = FlexLayout { gap: 8.0, ..FlexLayout::column() };
+
+        let parent = Rect::new(0.0, 0.0, 200.0, 200.0);
+        let rects_no_gap = no_gap.compute(parent, &children);
+        let rects_with_gap = with_gap.compute(parent, &children);
+
+        // Second child should be further down with gap
+        assert!(rects_with_gap[1].y > rects_no_gap[1].y);
+    }
+
+    #[test]
+    fn flex_empty_children() {
+        let children: Vec<&dyn Widget> = vec![];
+        let layout = FlexLayout::column();
+        let parent = Rect::new(0.0, 0.0, 200.0, 200.0);
+        let rects = layout.compute(parent, &children);
+        assert!(rects.is_empty());
+    }
+
+    #[test]
+    fn flex_with_padding() {
+        let w1 = TestWidget { id: WidgetId::new(), preferred: Size::new(100.0, 30.0) };
+        let children: Vec<&dyn Widget> = vec![&w1];
+
+        let layout = FlexLayout {
+            padding: crate::constraint::RectInsets::all(10.0),
+            ..FlexLayout::column()
+        };
+        let parent = Rect::new(0.0, 0.0, 200.0, 200.0);
+        let rects = layout.compute(parent, &children);
+
+        assert_eq!(rects.len(), 1);
+        // Child should be inset by padding
+        assert!(rects[0].x >= 10.0);
+        assert!(rects[0].y >= 10.0);
+    }
+
+    #[test]
+    fn stretch_cross_axis() {
+        let w1 = TestWidget { id: WidgetId::new(), preferred: Size::new(50.0, 30.0) };
+        let children: Vec<&dyn Widget> = vec![&w1];
+
+        let layout = FlexLayout {
+            align_items: AlignItems::Stretch,
+            ..FlexLayout::row()
+        };
+        let parent = Rect::new(0.0, 0.0, 200.0, 100.0);
+        let rects = layout.compute(parent, &children);
+
+        assert_eq!(rects.len(), 1);
+        // Stretch should expand the cross-axis to fill parent (minus padding)
+        assert!(rects[0].height > 30.0, "should stretch to fill cross-axis");
     }
 }

@@ -75,6 +75,7 @@ pub trait PlatformService: Send + Sync {
 ///
 /// 所有方法返回默认值（剪贴板为空，对话框为 None）。
 /// 后续 Stage 替换为真实的 OS 实现。
+#[derive(Debug, Clone, Copy, Default)]
 pub struct NoopPlatformService;
 
 impl PlatformService for NoopPlatformService {
@@ -106,4 +107,159 @@ impl PlatformService for NoopPlatformService {
     fn reveal_in_file_manager(&self, _path: &Path) {}
 
     fn send_notification(&self, _title: &str, _body: &str) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // FileFilter
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn file_filter_new() {
+        let filter = FileFilter::new("Video Files", vec!["mp4", "mov", "avi"]);
+        assert_eq!(filter.name, "Video Files");
+        assert_eq!(filter.extensions, vec!["mp4", "mov", "avi"]);
+    }
+
+    #[test]
+    fn file_filter_from_string_types() {
+        let filter = FileFilter::new(
+            String::from("Images"),
+            vec![String::from("png"), String::from("jpg")],
+        );
+        assert_eq!(filter.extensions, vec!["png", "jpg"]);
+    }
+
+    #[test]
+    fn file_filter_empty_extensions() {
+        let filter = FileFilter::new("All Files", Vec::<&str>::new());
+        assert!(filter.extensions.is_empty());
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // NoopPlatformService
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn noop_clipboard_paste_returns_none() {
+        let svc = NoopPlatformService;
+        assert_eq!(svc.clipboard_paste(), None);
+    }
+
+    #[test]
+    fn noop_clipboard_copy_does_not_panic() {
+        let svc = NoopPlatformService;
+        svc.clipboard_copy("any text");
+    }
+
+    #[test]
+    fn noop_open_file_dialog_returns_none() {
+        let svc = NoopPlatformService;
+        assert_eq!(svc.open_file_dialog("Open", &[]), None);
+    }
+
+    #[test]
+    fn noop_save_file_dialog_returns_none() {
+        let svc = NoopPlatformService;
+        assert_eq!(svc.save_file_dialog("Save", "test.txt", &[]), None);
+    }
+
+    #[test]
+    fn noop_open_folder_dialog_returns_none() {
+        let svc = NoopPlatformService;
+        assert_eq!(svc.open_folder_dialog("Select Folder"), None);
+    }
+
+    #[test]
+    fn noop_system_methods_do_not_panic() {
+        let svc = NoopPlatformService;
+        svc.open_url("https://example.com");
+        svc.reveal_in_file_manager(Path::new("/tmp/test.txt"));
+        svc.send_notification("Title", "Body");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // trait object safety
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn platform_service_is_object_safe() {
+        let svc: &dyn PlatformService = &NoopPlatformService;
+        assert_eq!(svc.clipboard_paste(), None);
+    }
+
+    #[test]
+    fn platform_service_can_be_boxed() {
+        let _boxed: Box<dyn PlatformService> = Box::new(NoopPlatformService);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // mock for testing downstream consumers
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// A test mock that returns controlled values.
+    struct MockPlatformService {
+        clipboard_content: Option<String>,
+        file_dialog_result: Option<Vec<PathBuf>>,
+        save_dialog_result: Option<PathBuf>,
+        folder_dialog_result: Option<PathBuf>,
+    }
+
+    impl PlatformService for MockPlatformService {
+        fn clipboard_copy(&self, _text: &str) {}
+
+        fn clipboard_paste(&self) -> Option<String> {
+            self.clipboard_content.clone()
+        }
+
+        fn open_file_dialog(&self, _title: &str, _filters: &[FileFilter]) -> Option<Vec<PathBuf>> {
+            self.file_dialog_result.clone()
+        }
+
+        fn save_file_dialog(
+            &self,
+            _title: &str,
+            _default_name: &str,
+            _filters: &[FileFilter],
+        ) -> Option<PathBuf> {
+            self.save_dialog_result.clone()
+        }
+
+        fn open_folder_dialog(&self, _title: &str) -> Option<PathBuf> {
+            self.folder_dialog_result.clone()
+        }
+
+        fn open_url(&self, _url: &str) {}
+
+        fn reveal_in_file_manager(&self, _path: &Path) {}
+
+        fn send_notification(&self, _title: &str, _body: &str) {}
+    }
+
+    #[test]
+    fn mock_platform_service_returns_configured_values() {
+        let mock = MockPlatformService {
+            clipboard_content: Some("copied text".into()),
+            file_dialog_result: Some(vec![PathBuf::from("/test/file.mp4")]),
+            save_dialog_result: Some(PathBuf::from("/test/output.mp4")),
+            folder_dialog_result: Some(PathBuf::from("/test/folder")),
+        };
+
+        assert_eq!(mock.clipboard_paste(), Some("copied text".into()));
+        assert_eq!(
+            mock.open_file_dialog("", &[]),
+            Some(vec![PathBuf::from("/test/file.mp4")])
+        );
+        assert_eq!(
+            mock.save_file_dialog("", "", &[]),
+            Some(PathBuf::from("/test/output.mp4"))
+        );
+        assert_eq!(
+            mock.open_folder_dialog(""),
+            Some(PathBuf::from("/test/folder")),
+        );
+    }
 }

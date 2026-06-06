@@ -5,7 +5,6 @@
 
 use std::collections::HashMap;
 
-use glam::Vec2;
 use mondrian_ui_core::types::Rect;
 
 /// 图集中的一个条目
@@ -87,5 +86,83 @@ impl TextureAtlas {
 
     pub fn entry_count(&self) -> usize {
         self.entries.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn atlas_new_is_empty() {
+        let atlas = TextureAtlas::new(1024, 1024);
+        assert_eq!(atlas.size(), (1024, 1024));
+        assert_eq!(atlas.entry_count(), 0);
+    }
+
+    #[test]
+    fn atlas_allocate_returns_uv_coords() {
+        let mut atlas = TextureAtlas::new(1024, 1024);
+        let uv = atlas.allocate("test", 256, 256).unwrap();
+        // UV should be in [0, 1] range
+        assert!(uv.x >= 0.0 && uv.x <= 1.0);
+        assert!(uv.y >= 0.0 && uv.y <= 1.0);
+        assert!(uv.width > 0.0 && uv.width <= 1.0);
+        assert!(uv.height > 0.0 && uv.height <= 1.0);
+    }
+
+    #[test]
+    fn atlas_allocate_multiple_items() {
+        let mut atlas = TextureAtlas::new(1024, 1024);
+        for i in 0..4 {
+            let uv = atlas.allocate(&format!("item_{i}"), 256, 256);
+            assert!(uv.is_some());
+        }
+        assert_eq!(atlas.entry_count(), 4);
+    }
+
+    #[test]
+    fn atlas_allocate_same_key_returns_cached() {
+        let mut atlas = TextureAtlas::new(1024, 1024);
+        let uv1 = atlas.allocate("same", 128, 128).unwrap();
+        let uv2 = atlas.allocate("same", 256, 256).unwrap(); // different size, same key
+        assert_eq!(uv1, uv2);
+        assert_eq!(atlas.entry_count(), 1);
+    }
+
+    #[test]
+    fn atlas_get_returns_uv_for_existing() {
+        let mut atlas = TextureAtlas::new(1024, 1024);
+        atlas.allocate("glyph", 64, 64).unwrap();
+        let uv = atlas.get("glyph");
+        assert!(uv.is_some());
+    }
+
+    #[test]
+    fn atlas_get_returns_none_for_missing() {
+        let atlas = TextureAtlas::new(1024, 1024);
+        assert!(atlas.get("missing").is_none());
+    }
+
+    #[test]
+    fn atlas_row_wraps_when_full_width() {
+        let mut atlas = TextureAtlas::new(256, 512);
+        // First item takes 200px → next_x = 200
+        atlas.allocate("a", 200, 50).unwrap();
+        // Second item (100px) won't fit in remaining 56px → wraps to next row
+        let uv = atlas.allocate("b", 100, 50);
+        assert!(uv.is_some(), "Should wrap to next row");
+        assert_eq!(atlas.entry_count(), 2);
+    }
+
+    #[test]
+    fn atlas_returns_none_when_full() {
+        let mut atlas = TextureAtlas::new(64, 64);
+        // Fill the atlas with one item
+        let uv = atlas.allocate("big", 64, 64);
+        assert!(uv.is_some());
+        // Next item should fail
+        let uv2 = atlas.allocate("overflow", 1, 1);
+        assert!(uv2.is_none());
     }
 }

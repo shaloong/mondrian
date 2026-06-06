@@ -191,8 +191,8 @@ impl ColorTokens {
             overlay_fill: Color { r: 0.094, g: 0.094, b: 0.094, a: 0.9 },
             overlay_stroke: Color { r: 0.941, g: 0.627, b: 0.188, a: 0.6 },
         }
-    } // end fusion()
-} // end impl ColorTokens
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════════
 // 便捷方法
@@ -230,6 +230,89 @@ impl ColorTokens {
             self.text_muted
         } else {
             self.text_primary
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Color preset value checks
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn dark_text_primary_is_light() {
+        let c = ColorTokens::dark();
+        assert!(c.text_primary.r > 0.9);
+        assert!(c.text_primary.g > 0.9);
+        assert!(c.text_primary.b > 0.9);
+    }
+
+    #[test]
+    fn light_text_primary_is_dark() {
+        let c = ColorTokens::light();
+        let lum = 0.2126 * c.text_primary.r + 0.7152 * c.text_primary.g + 0.0722 * c.text_primary.b;
+        assert!(lum < 0.3);
+    }
+
+    #[test]
+    fn dark_and_light_have_sufficient_contrast() {
+        let dark = ColorTokens::dark();
+        let light = ColorTokens::light();
+        // Text on background should have good contrast
+        let dark_contrast = (dark.text_primary.r - dark.bg_base.r).abs()
+            + (dark.text_primary.g - dark.bg_base.g).abs()
+            + (dark.text_primary.b - dark.bg_base.b).abs();
+        let light_contrast = (light.text_primary.r - light.bg_base.r).abs()
+            + (light.text_primary.g - light.bg_base.g).abs()
+            + (light.text_primary.b - light.bg_base.b).abs();
+        assert!(dark_contrast > 1.5, "Dark theme should have high text/background contrast");
+        assert!(light_contrast > 1.5, "Light theme should have high text/background contrast");
+    }
+
+    #[test]
+    fn status_colors_are_distinguishable() {
+        for colors in [ColorTokens::dark(), ColorTokens::light()] {
+            assert_ne!(colors.status_warning, colors.status_success);
+            assert_ne!(colors.status_success, colors.status_error);
+            assert_ne!(colors.status_error, colors.status_warning);
+        }
+    }
+
+    #[test]
+    fn canvas_bg_is_black_in_all_presets() {
+        assert_eq!(ColorTokens::dark().canvas_bg, Color::BLACK);
+        assert_eq!(ColorTokens::light().canvas_bg, Color::from_hex(0x141414));
+        assert_eq!(ColorTokens::resolve().canvas_bg, Color::BLACK);
+        assert_eq!(ColorTokens::premiere().canvas_bg, Color::BLACK);
+        assert_eq!(ColorTokens::fusion().canvas_bg, Color::BLACK);
+    }
+
+    #[test]
+    fn bg_hierarchy_is_ascending() {
+        // bg_base < bg_surface < bg_surface_raised < bg_surface_hover < bg_surface_active
+        // in terms of luminance (for dark themes)
+        let dark = ColorTokens::dark();
+        let lum = |c: &Color| 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+        assert!(lum(&dark.bg_base) <= lum(&dark.bg_surface));
+        assert!(lum(&dark.bg_surface) <= lum(&dark.bg_surface_raised));
+        assert!(lum(&dark.bg_surface_raised) <= lum(&dark.bg_surface_hover));
+        assert!(lum(&dark.bg_surface_hover) <= lum(&dark.bg_surface_active));
+    }
+
+    #[test]
+    fn overlay_colors_have_some_transparency() {
+        for colors in [
+            ColorTokens::dark(),
+            ColorTokens::light(),
+            ColorTokens::resolve(),
+            ColorTokens::premiere(),
+            ColorTokens::fusion(),
+        ] {
+            assert!(colors.overlay_fill.a < 1.0, "overlay_fill should be translucent");
+            assert!(colors.overlay_stroke.a < 1.0, "overlay_stroke should be translucent");
         }
     }
 }

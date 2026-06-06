@@ -188,3 +188,179 @@ impl DrawCommandEncoder for DrawEncoder {
         self.pop_transform();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Helpers
+    // ═══════════════════════════════════════════════════════════════════════
+
+    fn rect() -> Rect {
+        Rect::new(0.0, 0.0, 100.0, 50.0)
+    }
+
+    fn color() -> Color {
+        Color::WHITE
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // DrawEncoder collection
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn encoder_new_is_empty() {
+        let enc = DrawEncoder::new();
+        assert!(enc.is_empty());
+        assert_eq!(enc.command_count(), 0);
+    }
+
+    #[test]
+    fn encoder_draw_rect_adds_command() {
+        let mut enc = DrawEncoder::new();
+        enc.draw_rect(rect(), color(), 4.0);
+        assert_eq!(enc.command_count(), 1);
+        assert!(!enc.is_empty());
+    }
+
+    #[test]
+    fn encoder_multiple_draws() {
+        let mut enc = DrawEncoder::new();
+        enc.draw_rect(rect(), color(), 0.0);
+        enc.draw_rect(rect(), Color::BLACK, 0.0);
+        enc.draw_rect(rect(), Color::TRANSPARENT, 8.0);
+        assert_eq!(enc.command_count(), 3);
+    }
+
+    #[test]
+    fn encoder_draw_line() {
+        let mut enc = DrawEncoder::new();
+        enc.draw_line(Point::new(0.0, 0.0), Point::new(100.0, 100.0), 2.0, color());
+        assert_eq!(enc.command_count(), 1);
+    }
+
+    #[test]
+    fn encoder_draw_text() {
+        let mut enc = DrawEncoder::new();
+        let style = TextStyle {
+            font_size: 14.0,
+            line_height: 20.0,
+            font_weight: mondrian_ui_theme::typography::FontWeight::Regular,
+            letter_spacing: 0.0,
+        };
+        enc.draw_text("hello", &style, Point::ZERO, color());
+        assert_eq!(enc.command_count(), 1);
+    }
+
+    #[test]
+    fn encoder_draw_image() {
+        let mut enc = DrawEncoder::new();
+        enc.draw_image(rect(), rect(), color());
+        assert_eq!(enc.command_count(), 1);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Clip push/pop
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn encoder_clip_push_pop_balanced() {
+        let mut enc = DrawEncoder::new();
+        enc.push_clip(rect());
+        enc.draw_rect(rect(), color(), 0.0);
+        enc.pop_clip();
+        let cmds = enc.finish();
+        assert_eq!(cmds.len(), 3); // PushClip, Rect, PopClip
+    }
+
+    #[test]
+    fn encoder_nested_clips() {
+        let mut enc = DrawEncoder::new();
+        enc.push_clip(rect());
+        enc.draw_rect(rect(), color(), 0.0);
+        enc.push_clip(rect());
+        enc.draw_rect(rect(), color(), 0.0);
+        enc.pop_clip();
+        enc.pop_clip();
+        let cmds = enc.finish();
+        assert_eq!(cmds.len(), 6);
+    }
+
+    #[test]
+    #[should_panic(expected = "unbalanced clip push/pop")]
+    fn encoder_finish_panics_on_unbalanced_clip() {
+        let mut enc = DrawEncoder::new();
+        enc.push_clip(rect());
+        // No matching pop
+        enc.finish();
+    }
+
+    #[test]
+    fn encoder_extra_pop_clip_is_silently_ignored() {
+        let mut enc = DrawEncoder::new();
+        enc.pop_clip(); // unbalanced pop — silently ignored
+        let cmds = enc.finish();
+        assert!(cmds.is_empty());
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Transform push/pop
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn encoder_transform_push_pop_balanced() {
+        let mut enc = DrawEncoder::new();
+        enc.push_translate(Vec2::new(10.0, 20.0));
+        enc.draw_rect(rect(), color(), 0.0);
+        enc.pop_transform();
+        let cmds = enc.finish();
+        assert_eq!(cmds.len(), 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "unbalanced transform push/pop")]
+    fn encoder_finish_panics_on_unbalanced_transform() {
+        let mut enc = DrawEncoder::new();
+        enc.push_translate(Vec2::new(1.0, 0.0));
+        enc.finish();
+    }
+
+    #[test]
+    fn encoder_default_is_empty() {
+        let enc = DrawEncoder::default();
+        assert!(enc.is_empty());
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // DrawCommandEncoder trait impl
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn draw_encoder_implements_trait() {
+        let mut enc = DrawEncoder::new();
+        // Use the trait methods
+        <DrawEncoder as DrawCommandEncoder>::draw_rect(&mut enc, rect(), color(), 4.0);
+        <DrawEncoder as DrawCommandEncoder>::push_clip(&mut enc, rect());
+        <DrawEncoder as DrawCommandEncoder>::pop_clip(&mut enc);
+        <DrawEncoder as DrawCommandEncoder>::draw_line(
+            &mut enc,
+            Point::ZERO,
+            Point::new(10.0, 10.0),
+            1.0,
+            color(),
+        );
+        <DrawEncoder as DrawCommandEncoder>::push_translate(&mut enc, Vec2::ZERO);
+        <DrawEncoder as DrawCommandEncoder>::pop_transform(&mut enc);
+        let cmds = enc.finish();
+        assert_eq!(cmds.len(), 6);
+    }
+
+    #[test]
+    fn draw_encoder_as_trait_object() {
+        let mut enc = DrawEncoder::new();
+        let dyn_enc: &mut dyn DrawCommandEncoder = &mut enc;
+        dyn_enc.draw_rect(rect(), color(), 0.0);
+        assert_eq!(enc.command_count(), 1);
+    }
+}

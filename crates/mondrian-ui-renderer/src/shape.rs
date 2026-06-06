@@ -169,3 +169,146 @@ pub fn generate_rounded_rect_vertices(
 
     verts
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // RectVertex
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn vertex_size_is_36_bytes() {
+        assert_eq!(std::mem::size_of::<RectVertex>(), 36);
+    }
+
+    #[test]
+    fn vertex_is_pod_zeroable() {
+        // Compile-time check that RectVertex implements Pod + Zeroable
+        fn assert_pod<T: Pod + Zeroable>() {}
+        assert_pod::<RectVertex>();
+    }
+
+    #[test]
+    fn vertex_layout_stride_matches_size() {
+        let layout = RectVertex::layout();
+        assert_eq!(layout.array_stride as usize, std::mem::size_of::<RectVertex>());
+    }
+
+    #[test]
+    fn vertex_layout_has_4_attributes() {
+        let layout = RectVertex::layout();
+        assert_eq!(layout.attributes.len(), 4);
+    }
+
+    #[test]
+    fn vertex_new_stores_all_fields() {
+        let v = RectVertex::new(1.0, 2.0, 0.5, 0.5, 0.1, 0.2, 0.3, 0.8, 10.0);
+        assert_eq!(v.position, [1.0, 2.0]);
+        assert_eq!(v.tex_coord, [0.5, 0.5]);
+        assert_eq!(v.color, [0.1, 0.2, 0.3, 0.8]);
+        assert_eq!(v.corner_radius, 10.0);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // generate_rect_vertices
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn rect_vertices_has_6_elements() {
+        let verts = generate_rect_vertices(Rect::new(0.0, 0.0, 100.0, 50.0), 1.0, 0.0, 0.0, 1.0, 0.0);
+        assert_eq!(verts.len(), 6);
+    }
+
+    #[test]
+    fn rect_vertices_in_bounds() {
+        let rect = Rect::new(10.0, 20.0, 100.0, 50.0);
+        let verts = generate_rect_vertices(rect, 1.0, 0.0, 0.0, 1.0, 0.0);
+        for v in &verts {
+            assert!(v.position[0] >= rect.x - 0.01);
+            assert!(v.position[0] <= rect.x + rect.width + 0.01);
+            assert!(v.position[1] >= rect.y - 0.01);
+            assert!(v.position[1] <= rect.y + rect.height + 0.01);
+        }
+    }
+
+    #[test]
+    fn rect_vertices_pass_color_correctly() {
+        let verts = generate_rect_vertices(Rect::ZERO, 0.0, 1.0, 0.0, 0.5, 0.0);
+        for v in &verts {
+            assert_eq!(v.color, [0.0, 1.0, 0.0, 0.5]);
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // generate_rounded_rect_vertices
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn rounded_rect_zero_radii_falls_back_to_plain() {
+        let verts = generate_rounded_rect_vertices(
+            Rect::new(0.0, 0.0, 100.0, 50.0),
+            1.0, 1.0, 1.0, 1.0,
+            [0.0; 4],
+        );
+        assert_eq!(verts.len(), 6);
+    }
+
+    #[test]
+    fn rounded_rect_with_radii_produces_more_vertices() {
+        let verts = generate_rounded_rect_vertices(
+            Rect::new(0.0, 0.0, 100.0, 50.0),
+            1.0, 1.0, 1.0, 1.0,
+            [8.0; 4],
+        );
+        // 4 corners * 8 segments * 3 verts + 6 center verts = 102
+        assert!(verts.len() > 6);
+        assert_eq!(verts.len(), 102);
+    }
+
+    #[test]
+    fn rounded_rect_vertices_are_divisible_by_3() {
+        let verts = generate_rounded_rect_vertices(
+            Rect::new(0.0, 0.0, 200.0, 100.0),
+            1.0, 1.0, 1.0, 1.0,
+            [16.0, 0.0, 16.0, 0.0],
+        );
+        assert_eq!(verts.len() % 3, 0, "Vertex count should be divisible by 3 (triangles)");
+    }
+
+    #[test]
+    fn rounded_rect_all_vertices_in_bounds() {
+        let rect = Rect::new(0.0, 0.0, 200.0, 100.0);
+        let verts = generate_rounded_rect_vertices(rect, 1.0, 1.0, 1.0, 1.0, [16.0; 4]);
+        for v in &verts {
+            assert!(v.position[0] >= rect.x - 0.1, "vertex x={} below min_x={}", v.position[0], rect.x);
+            assert!(v.position[0] <= rect.x + rect.width + 0.1, "vertex x={} above max_x={}", v.position[0], rect.x + rect.width);
+            assert!(v.position[1] >= rect.y - 0.1);
+            assert!(v.position[1] <= rect.y + rect.height + 0.1);
+        }
+    }
+
+    #[test]
+    fn rounded_rect_small_rect_falls_back() {
+        // A rect so small that the inner rectangle collapses
+        let verts = generate_rounded_rect_vertices(
+            Rect::new(0.0, 0.0, 8.0, 8.0),
+            1.0, 1.0, 1.0, 1.0,
+            [10.0; 4], // radius > rect size
+        );
+        assert_eq!(verts.len(), 6, "Small rect should fall back to plain rect");
+    }
+
+    #[test]
+    fn rounded_rect_different_corner_radii() {
+        // Each corner with a different radius
+        let verts = generate_rounded_rect_vertices(
+            Rect::new(0.0, 0.0, 100.0, 100.0),
+            1.0, 0.0, 0.0, 1.0,
+            [0.0, 8.0, 16.0, 4.0],
+        );
+        assert!(verts.len() > 6, "Should generate corner fans for non-zero radii");
+        assert_eq!(verts.len() % 3, 0);
+    }
+}

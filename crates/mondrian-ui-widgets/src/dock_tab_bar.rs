@@ -2,11 +2,9 @@
 //!
 //! 水平排列的标签按钮，点击切换 active tab。
 
-use mondrian_core::Color;
 use mondrian_ui_core::types::*;
-use mondrian_ui_core::widget::{DrawCommandEncoder, EventContext, PaintContext};
+use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
-use mondrian_ui_theme::Theme;
 
 /// 单个 Tab 的信息
 #[derive(Debug, Clone)]
@@ -18,14 +16,10 @@ pub struct TabInfo {
 /// DockTabBar —— 水平标签栏
 pub struct DockTabBar {
     id: WidgetId,
-    /// 标签列表
     tabs: Vec<TabInfo>,
     bounds: Rect,
-    /// 当前 hover 的 tab 索引
     hovered_tab: Option<usize>,
-    /// Tab 栏高度
     bar_height: f32,
-    /// 单个 tab 的最小宽度
     tab_min_width: f32,
 }
 
@@ -41,24 +35,20 @@ impl DockTabBar {
         }
     }
 
-    /// 更新标签列表，保持 active 状态
     pub fn set_tabs(&mut self, tabs: Vec<TabInfo>) {
         self.tabs = tabs;
     }
 
-    /// 获取当前 active 标签的索引
     pub fn active_index(&self) -> usize {
         self.tabs.iter().position(|t| t.active).unwrap_or(0)
     }
 
-    /// 切换 active tab 到指定索引
     pub fn set_active(&mut self, index: usize) {
         for (i, tab) in self.tabs.iter_mut().enumerate() {
             tab.active = i == index;
         }
     }
 
-    /// 计算每个 tab 的屏幕位置
     fn tab_rects(&self) -> Vec<Rect> {
         let n = self.tabs.len().max(1);
         let tab_w = (self.bounds.width / n as f32).max(self.tab_min_width);
@@ -78,7 +68,9 @@ impl DockTabBar {
 }
 
 impl Widget for DockTabBar {
-    fn id(&self) -> WidgetId { self.id }
+    fn id(&self) -> WidgetId {
+        self.id
+    }
 
     fn measure(&self, constraint: LayoutConstraint) -> Size {
         Size::new(constraint.max.width.min(600.0), self.bar_height)
@@ -90,7 +82,11 @@ impl Widget for DockTabBar {
 
     fn event(&mut self, event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
         match event {
-            UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
+            UiEvent::MouseDown {
+                position,
+                button: MouseButton::Left,
+                ..
+            } => {
                 let rects = self.tab_rects();
                 for (i, r) in rects.iter().enumerate() {
                     if r.contains(*position) {
@@ -116,8 +112,12 @@ impl Widget for DockTabBar {
         let tokens = &ctx.theme.colors;
         let spacing = &ctx.theme.spacing;
 
-        // 背景条
-        let bg = Rect::new(self.bounds.x, self.bounds.y, self.bounds.width, self.bar_height);
+        let bg = Rect::new(
+            self.bounds.x,
+            self.bounds.y,
+            self.bounds.width,
+            self.bar_height,
+        );
         ctx.encoder.draw_rect(bg, tokens.bg_surface, 0.0);
 
         let rects = self.tab_rects();
@@ -140,7 +140,6 @@ impl Widget for DockTabBar {
             let inset = r.inset(2.0, 2.0);
             ctx.encoder.draw_rect(inset, fill, spacing.radius_sm);
 
-            // Active indicator bar at bottom
             if is_active {
                 let indicator = Rect::new(
                     inset.x + 4.0,
@@ -148,11 +147,9 @@ impl Widget for DockTabBar {
                     inset.width - 8.0,
                     2.0,
                 );
-                ctx.encoder.draw_rect(indicator, tokens.interaction_highlight, 0.0);
+                ctx.encoder
+                    .draw_rect(indicator, tokens.interaction_highlight, 0.0);
             }
-
-            // Label text (we don't draw text in paint since TextRenderer isn't in ctx yet;
-            // this will be handled by the demo via a separate text pass)
         }
     }
 
@@ -160,6 +157,153 @@ impl Widget for DockTabBar {
         self.bounds.contains(point)
     }
 
-    fn children(&self) -> &[Box<dyn Widget>] { &[] }
-    fn children_mut(&mut self) -> &mut [Box<dyn Widget>] { &mut [] }
+    fn children(&self) -> &[Box<dyn Widget>] {
+        &[]
+    }
+
+    fn children_mut(&mut self) -> &mut [Box<dyn Widget>] {
+        &mut []
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+
+    fn make_tabs(active: usize) -> Vec<TabInfo> {
+        vec![
+            TabInfo { label: "A".into(), active: active == 0 },
+            TabInfo { label: "B".into(), active: active == 1 },
+            TabInfo { label: "C".into(), active: active == 2 },
+        ]
+    }
+
+    #[test]
+    fn tab_bar_new_active_index() {
+        let bar = DockTabBar::new(make_tabs(0));
+        assert_eq!(bar.active_index(), 0);
+    }
+
+    #[test]
+    fn tab_bar_set_active_changes_index() {
+        let mut bar = DockTabBar::new(make_tabs(0));
+        bar.set_active(2);
+        assert_eq!(bar.active_index(), 2);
+    }
+
+    #[test]
+    fn tab_bar_set_tabs_updates_list() {
+        let mut bar = DockTabBar::new(make_tabs(0));
+        bar.set_tabs(vec![TabInfo { label: "X".into(), active: true }]);
+        assert_eq!(bar.tabs.len(), 1);
+        assert_eq!(bar.active_index(), 0);
+    }
+
+    #[test]
+    fn tab_bar_no_active_returns_zero() {
+        let bar = DockTabBar::new(vec![
+            TabInfo { label: "X".into(), active: false },
+        ]);
+        assert_eq!(bar.active_index(), 0);
+    }
+
+    #[test]
+    fn tab_bar_tab_rects_count_matches_tabs() {
+        let mut bar = DockTabBar::new(make_tabs(0));
+        bar.layout(Rect::new(0.0, 0.0, 300.0, 30.0));
+        assert_eq!(bar.tab_rects().len(), 3);
+    }
+
+    #[test]
+    fn tab_bar_click_switches_active() {
+        let mut bar = DockTabBar::new(make_tabs(0));
+        bar.layout(Rect::new(0.0, 0.0, 300.0, 30.0));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
+
+        // Click at x=140 which should be in the second tab (each tab ~100px)
+        let r = bar.event(
+            &UiEvent::MouseDown {
+                position: Point::new(140.0, 15.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(r, EventResult::Handled);
+        assert_eq!(bar.active_index(), 1);
+    }
+
+    #[test]
+    fn tab_bar_click_outside_tabs_ignored() {
+        let mut bar = DockTabBar::new(make_tabs(0));
+        bar.layout(Rect::new(0.0, 0.0, 300.0, 30.0));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
+
+        let r = bar.event(
+            &UiEvent::MouseDown {
+                position: Point::new(400.0, 15.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(r, EventResult::Ignored);
+        assert_eq!(bar.active_index(), 0);
+    }
+
+    #[test]
+    fn tab_bar_hover_tracks_mouse() {
+        let mut bar = DockTabBar::new(make_tabs(0));
+        bar.layout(Rect::new(0.0, 0.0, 300.0, 30.0));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
+
+        assert_eq!(bar.hovered_tab, None);
+
+        bar.event(
+            &UiEvent::MouseMove {
+                position: Point::new(50.0, 15.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(bar.hovered_tab, Some(0));
+    }
+
+    #[test]
+    fn tab_bar_measure_returns_bar_height() {
+        let bar = DockTabBar::new(make_tabs(0));
+        let s = bar.measure(LayoutConstraint::LOOSE);
+        assert!(s.width > 0.0);
+        assert!(s.height > 0.0);
+    }
+
+    #[test]
+    fn tab_bar_hit_test_in_bounds() {
+        let mut bar = DockTabBar::new(make_tabs(0));
+        bar.layout(Rect::new(0.0, 0.0, 300.0, 30.0));
+        assert!(bar.hit_test(Point::new(150.0, 15.0)));
+        assert!(!bar.hit_test(Point::new(400.0, 15.0)));
+    }
+
+    #[test]
+    fn tab_bar_empty_tabs_does_not_panic() {
+        let mut bar = DockTabBar::new(vec![]);
+        bar.layout(Rect::new(0.0, 0.0, 300.0, 30.0));
+        assert_eq!(bar.active_index(), 0);
+        let rects = bar.tab_rects();
+        assert_eq!(rects.len(), 0); // empty tabs → empty rects
+    }
 }

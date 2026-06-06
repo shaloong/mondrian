@@ -59,3 +59,104 @@ impl Default for PanelRegistry {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    struct TestPanel {
+        kind: PanelKind,
+    }
+
+    impl Panel for TestPanel {
+        fn kind(&self) -> PanelKind {
+            self.kind
+        }
+
+        fn title(&self) -> std::borrow::Cow<'static, str> {
+            "Test".into()
+        }
+
+        fn build_widget_tree(&mut self) -> Box<dyn mondrian_ui_core::Widget> {
+            Box::new(mondrian_ui_core::widgets::Spacer::new(10.0, 10.0))
+        }
+    }
+
+    fn test_context() -> PanelContext {
+        use mondrian_core::events::EventBus;
+        PanelContext {
+            event_bus: EventBus::new(),
+        }
+    }
+
+    #[test]
+    fn registry_new_is_empty() {
+        let registry = PanelRegistry::new();
+        assert!(registry.registered_kinds().is_empty());
+    }
+
+    #[test]
+    fn registry_register_adds_factory() {
+        let mut registry = PanelRegistry::new();
+        registry.register(PanelKind::Timeline, Arc::new(|_ctx| {
+            Box::new(TestPanel { kind: PanelKind::Timeline })
+        }));
+        assert!(registry.is_registered(PanelKind::Timeline));
+        assert!(!registry.is_registered(PanelKind::Viewer));
+    }
+
+    #[test]
+    fn registry_create_returns_panel() {
+        let mut registry = PanelRegistry::new();
+        registry.register(PanelKind::Console, Arc::new(|_ctx| {
+            Box::new(TestPanel { kind: PanelKind::Console })
+        }));
+
+        let panel = registry.create(PanelKind::Console, test_context()).unwrap();
+        assert_eq!(panel.kind(), PanelKind::Console);
+    }
+
+    #[test]
+    fn registry_create_unknown_returns_none() {
+        let registry = PanelRegistry::new();
+        assert!(registry.create(PanelKind::Viewer, test_context()).is_none());
+    }
+
+    #[test]
+    fn registry_register_overwrites_existing() {
+        let mut registry = PanelRegistry::new();
+        registry.register(PanelKind::Timeline, Arc::new(|_ctx| {
+            Box::new(TestPanel { kind: PanelKind::Timeline })
+        }));
+        registry.register(PanelKind::Timeline, Arc::new(|_ctx| {
+            Box::new(TestPanel { kind: PanelKind::Viewer }) // wrong kind on purpose
+        }));
+
+        // Second registration overwrites
+        let panel = registry.create(PanelKind::Timeline, test_context()).unwrap();
+        assert_eq!(panel.kind(), PanelKind::Viewer); // from second factory
+    }
+
+    #[test]
+    fn registry_registered_kinds_returns_all() {
+        let mut registry = PanelRegistry::new();
+        registry.register(PanelKind::Viewer, Arc::new(|_ctx| {
+            Box::new(TestPanel { kind: PanelKind::Viewer })
+        }));
+        registry.register(PanelKind::Timeline, Arc::new(|_ctx| {
+            Box::new(TestPanel { kind: PanelKind::Timeline })
+        }));
+
+        let kinds = registry.registered_kinds();
+        assert_eq!(kinds.len(), 2);
+        assert!(kinds.contains(&PanelKind::Viewer));
+        assert!(kinds.contains(&PanelKind::Timeline));
+    }
+
+    #[test]
+    fn registry_default_is_empty() {
+        let registry = PanelRegistry::default();
+        assert!(registry.registered_kinds().is_empty());
+    }
+}
