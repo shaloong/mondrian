@@ -6,6 +6,7 @@
 use glam::Vec2;
 use mondrian_core::Color;
 use mondrian_ui_core::types::{Point, Rect};
+use mondrian_ui_core::widget::DrawCommandEncoder;
 use mondrian_ui_theme::typography::TextStyle;
 
 /// 2D 绘制命令
@@ -155,5 +156,35 @@ impl DrawEncoder {
             "DrawEncoder: unbalanced transform push/pop"
         );
         self.commands
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════
+// DrawCommandEncoder trait impl — bridges the circular dep between ui-core and ui-renderer
+// ═══════════════════════════════════════════════════════════════════════════════════
+
+impl DrawCommandEncoder for DrawEncoder {
+    fn push_clip(&mut self, bounds: Rect) {
+        self.push_clip(bounds);
+    }
+
+    fn pop_clip(&mut self) {
+        self.pop_clip();
+    }
+
+    fn draw_rect(&mut self, bounds: Rect, color: Color, corner_radius: f32) {
+        self.draw_rect(bounds, color, corner_radius);
+    }
+
+    fn draw_line(&mut self, start: Point, end: Point, width: f32, color: Color) {
+        self.draw_line(start, end, width, color);
+    }
+
+    fn push_translate(&mut self, offset: Vec2) {
+        self.push_translate(offset);
+    }
+
+    fn pop_transform(&mut self) {
+        self.pop_transform();
     }
 }

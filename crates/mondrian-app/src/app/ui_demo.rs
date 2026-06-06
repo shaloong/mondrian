@@ -85,7 +85,7 @@ fn run_ui_demo_window() -> Result<(), Box<dyn std::error::Error>> {
             } => {
                 let mut encoder = DrawEncoder::new();
                 let theme = mondrian_ui_theme::current_theme();
-                TreeWalker::paint(&root, &theme);
+                TreeWalker::paint(&root, &mut encoder, &theme);
                 let commands = encoder.finish();
 
                 let current = surface.get_current_texture();

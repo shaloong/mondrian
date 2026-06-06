@@ -40,7 +40,7 @@ impl Widget for Spacer {
         EventResult::Ignored
     }
 
-    fn paint(&self, _ctx: &PaintContext) {}
+    fn paint(&self, _ctx: &mut PaintContext) {}
 
     fn hit_test(&self, point: Point) -> bool {
         self.bounds.contains(point)

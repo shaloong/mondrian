@@ -3,7 +3,7 @@
 //! 提供递归遍历 Widget 树的工具函数：layout、paint、事件冒泡、焦点遍历。
 
 use crate::types::{LayoutConstraint, Rect, WidgetId};
-use crate::widget::PaintContext;
+use crate::widget::{DrawCommandEncoder, PaintContext};
 use crate::Widget;
 use mondrian_ui_theme::Theme;
 
@@ -42,14 +42,14 @@ impl TreeWalker {
 
     /// 递归执行 paint：前序遍历
     ///
-    /// 按深度优先顺序收集绘制命令。
-    pub fn paint(root: &dyn Widget, theme: &Theme) {
+    /// 按深度优先顺序收集绘制命令到 encoder。
+    pub fn paint(root: &dyn Widget, encoder: &mut dyn DrawCommandEncoder, theme: &Theme) {
         let clip_rect = Rect::new(0.0, 0.0, f32::MAX, f32::MAX);
-        let ctx = PaintContext { theme, clip_rect };
-        root.paint(&ctx);
+        let mut ctx = PaintContext { encoder, theme, clip_rect };
+        root.paint(&mut ctx);
 
         for child in root.children() {
-            Self::paint(child.as_ref(), theme);
+            Self::paint(child.as_ref(), encoder, theme);
         }
     }
 

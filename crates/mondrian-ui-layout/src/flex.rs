@@ -191,7 +191,7 @@ mod tests {
         fn measure(&self, _c: LayoutConstraint) -> Size { self.preferred }
         fn layout(&mut self, _b: Rect) {}
         fn event(&mut self, _e: &UiEvent, _ctx: &mut EventContext) -> EventResult { EventResult::Ignored }
-        fn paint(&self, _ctx: &PaintContext) {}
+        fn paint(&self, _ctx: &mut PaintContext) {}
     }
 
     #[test]

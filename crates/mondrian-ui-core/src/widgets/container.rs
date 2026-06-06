@@ -88,7 +88,7 @@ impl Widget for Container {
         }
     }
 
-    fn paint(&self, ctx: &PaintContext) {
+    fn paint(&self, ctx: &mut PaintContext) {
         if let Some(bg) = self.background {
             // FIXME: need to use DrawEncoder from ctx once PathContext is extended
             let _ = (bg, self.bounds);

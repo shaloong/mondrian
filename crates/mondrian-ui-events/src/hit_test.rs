@@ -56,7 +56,7 @@ mod tests {
         fn measure(&self, _c: LayoutConstraint) -> Size { Size::new(self.bounds.width, self.bounds.height) }
         fn layout(&mut self, _b: Rect) {}
         fn event(&mut self, _e: &UiEvent, _ctx: &mut EventContext) -> EventResult { EventResult::Ignored }
-        fn paint(&self, _ctx: &PaintContext) {}
+        fn paint(&self, _ctx: &mut PaintContext) {}
         fn hit_test(&self, point: Point) -> bool { self.bounds.contains(point) }
         fn children(&self) -> &[Box<dyn Widget>] { &self.children }
         fn children_mut(&mut self) -> &mut [Box<dyn Widget>] { &mut self.children }

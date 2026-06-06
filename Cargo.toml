@@ -18,6 +18,9 @@ members = [
     "crates/mondrian-ui-renderer",
     "crates/mondrian-ui-layout",
     "crates/mondrian-ui-events",
+    "crates/mondrian-ui-text",
+    "crates/mondrian-ui-widgets",
+    "crates/mondrian-panel-console",
 ]
 
 [workspace.package]
@@ -49,6 +52,9 @@ mondrian-editor-ui    = { path = "crates/mondrian-editor-ui" }
 mondrian-ui-renderer  = { path = "crates/mondrian-ui-renderer" }
 mondrian-ui-layout    = { path = "crates/mondrian-ui-layout" }
 mondrian-ui-events    = { path = "crates/mondrian-ui-events" }
+mondrian-ui-text      = { path = "crates/mondrian-ui-text" }
+mondrian-ui-widgets   = { path = "crates/mondrian-ui-widgets" }
+mondrian-panel-console = { path = "crates/mondrian-panel-console" }
 
 # ---- 异步运行时 ----
 tokio            = { version = "1",    features = ["full"] }

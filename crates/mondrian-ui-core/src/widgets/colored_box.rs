@@ -62,9 +62,7 @@ impl Widget for ColoredBox {
         }
     }
 
-    fn paint(&self, _ctx: &PaintContext) {
-        // Draw command generation happens in the renderer
-    }
+    fn paint(&self, _ctx: &mut PaintContext) {}
 
     fn hit_test(&self, point: Point) -> bool {
         self.bounds.contains(point)

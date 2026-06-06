@@ -15,6 +15,7 @@ use crate::focus::FocusManager;
 use crate::shortcut::ShortcutManager;
 use crate::tooltip::TooltipManager;
 use crate::types::*;
+use mondrian_core::Color;
 use mondrian_editor_state::Action;
 use mondrian_ui_theme::Theme;
 
@@ -50,15 +51,31 @@ pub struct EventContext<'a> {
 
 /// 绘制上下文（paint 方法使用）
 ///
-/// 注意：此结构在后续 Stage 实现 wgpu 渲染时会被扩展，
-/// 加入 `DrawEncoder` 等真正的绘制接口。
-/// Stage A 阶段仅为 trait 骨架，PaintContext 暂为占位。
+/// Widget::paint() 通过此上下文发出绘制命令。
+/// `encoder` 字段的实际类型在 `mondrian-ui-renderer` 中定义。
+/// 这里使用 trait object 打破循环依赖。
 pub struct PaintContext<'a> {
+    /// 绘制命令编码器 —— Widget::paint() 向它写入 DrawCommand
+    pub encoder: &'a mut dyn DrawCommandEncoder,
     /// 当前主题
     pub theme: &'a Theme,
     /// 当前裁剪区域
     pub clip_rect: Rect,
 }
+
+/// 绘制命令编码器 trait —— 打破 mondrian-ui-core ↔ mondrian-ui-renderer 循环依赖
+///
+/// `mondrian-ui-renderer::command::DrawEncoder` 实现此 trait。
+pub trait DrawCommandEncoder {
+    fn push_clip(&mut self, bounds: Rect);
+    fn pop_clip(&mut self);
+    fn draw_rect(&mut self, bounds: Rect, color: mondrian_core::Color, corner_radius: f32);
+    fn draw_line(&mut self, start: Point, end: Point, width: f32, color: mondrian_core::Color);
+    fn push_translate(&mut self, offset: glam::Vec2);
+    fn pop_transform(&mut self);
+}
+
+/// 所有 UI 控件的统一接口
 
 /// 所有 UI 控件的统一接口
 ///
@@ -82,8 +99,8 @@ pub trait Widget {
     /// 返回 `Handled` 则停止冒泡，`Ignored` 则继续向父级传递。
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult;
 
-    /// 发出绘制命令。纯读操作。
-    fn paint(&self, ctx: &PaintContext);
+    /// 发出绘制命令。纯读操作。encoder 通过 &mut 访问。
+    fn paint(&self, ctx: &mut PaintContext);
 
     /// 判断点是否命中此 Widget（用于 HitTest）
     fn hit_test(&self, _point: Point) -> bool {
