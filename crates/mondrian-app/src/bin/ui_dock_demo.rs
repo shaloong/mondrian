@@ -266,6 +266,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &UiEvent::MouseMove { position: last_cursor, modifiers: Modifiers::none() },
                     &mut dummy_event_ctx(),
                 );
+                // Distinguish horizontal vs vertical resize cursor based on splitter direction
+                let grab_zones = root.collect_grab_zones();
+                let direction = grab_zones
+                    .iter()
+                    .find(|(z, _)| z.contains(last_cursor))
+                    .map(|(_, d)| *d);
+                match direction {
+                    Some(SplitDirection::Horizontal) => {
+                        window.set_cursor_icon(winit::window::CursorIcon::ColResize);
+                    }
+                    Some(SplitDirection::Vertical) => {
+                        window.set_cursor_icon(winit::window::CursorIcon::RowResize);
+                    }
+                    None => {
+                        window.set_cursor_icon(winit::window::CursorIcon::Default);
+                    }
+                }
                 window.request_redraw();
             }
 

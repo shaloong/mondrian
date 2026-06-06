@@ -115,6 +115,11 @@ pub trait Widget {
     fn children_mut(&mut self) -> &mut [Box<dyn Widget>] {
         &mut []
     }
+
+    /// 向下转型支持。默认返回 None。具体 Widget 可重写以支持类型检测。
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        None
+    }
 }
 
 #[cfg(test)]
