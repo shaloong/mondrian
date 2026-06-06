@@ -193,10 +193,8 @@ impl Widget for DockSplitter {
             }
         }
 
-        // 绘制子节点
-        for child in &self.children {
-            child.paint(ctx);
-        }
+        // 子节点绘制由 TreeWalker 通过 children() 递归完成；
+        // DockSplitter::paint 只负责绘制分割线把手。
     }
 
     fn hit_test(&self, point: Point) -> bool {
