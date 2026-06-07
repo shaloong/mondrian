@@ -55,6 +55,7 @@ mondrian-ui-layout    = { path = "crates/mondrian-ui-layout" }
 mondrian-ui-events    = { path = "crates/mondrian-ui-events" }
 mondrian-ui-text      = { path = "crates/mondrian-ui-text" }
 mondrian-ui-widgets   = { path = "crates/mondrian-ui-widgets" }
+mondrian-ui-tooltip   = { path = "crates/mondrian-ui-tooltip" }
 mondrian-panel-console = { path = "crates/mondrian-panel-console" }
 
 # ---- 异步运行时 ----
