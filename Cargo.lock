@@ -3092,6 +3092,7 @@ dependencies = [
  "mondrian-ui-events",
  "mondrian-ui-layout",
  "mondrian-ui-renderer",
+ "mondrian-ui-text",
  "mondrian-ui-theme",
  "mondrian-ui-tooltip",
  "mondrian-ui-widgets",
