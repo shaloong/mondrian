@@ -22,9 +22,9 @@ pub struct GlyphUpload {
 pub struct GlyphAtlas {
     atlas: TextureAtlas,
     cache: SwashCache,
-    glyph_map: HashMap<CacheKey, Rect>,
+    /// Map from cache_key to (uv_rect, bitmap_width, bitmap_height)
+    glyph_map: HashMap<CacheKey, (Rect, u32, u32)>,
     pub pending_uploads: Vec<GlyphUpload>,
-    /// 图集中每个字形周围保留的内边距（像素），防止采样渗色
     pad: u32,
 }
 
@@ -39,16 +39,17 @@ impl GlyphAtlas {
         }
     }
 
-    /// 获取或光栅化字形。首次返回 None（本帧上传，下帧可见）。
+        /// 获取或光栅化字形。首次返回 None，下一次返回 (UV rect, bmp_w, bmp_h)。
+    /// bitmap 尺寸用于生成正确比例的显示矩形。
     pub fn get_or_rasterize(
         &mut self,
         font_system: &mut FontSystem,
         glyph: &LayoutGlyph,
-    ) -> Option<Rect> {
+    ) -> Option<(Rect, u32, u32)> {
         let physical = glyph.physical((0.0, 0.0), 1.0);
         let cache_key = physical.cache_key;
-        if let Some(uv) = self.glyph_map.get(&cache_key) {
-            return Some(*uv);
+        if let Some(&(uv, w, h)) = self.glyph_map.get(&cache_key) {
+            return Some((uv, w, h));
         }
 
         let image = self.cache.get_image(font_system, cache_key);
@@ -76,7 +77,7 @@ impl GlyphAtlas {
             bmp_h as f32 / self.atlas.height as f32,
         );
 
-        self.glyph_map.insert(cache_key, uv_rect);
+        self.glyph_map.insert(cache_key, (uv_rect, bmp_w, bmp_h));
         self.pending_uploads.push(GlyphUpload {
             x: px, y: py,
             width: bmp_w, height: bmp_h,
@@ -88,6 +89,38 @@ impl GlyphAtlas {
 
     pub fn size(&self) -> (u32, u32) { self.atlas.size() }
     pub fn has_pending(&self) -> bool { !self.pending_uploads.is_empty() }
+}
+
+/// Convert swash Image to R8 alpha bitmap.
+fn swash_to_alpha(image: &cosmic_text::SwashImage) -> (u32, u32, Vec<u8>) {
+    match image.content {
+        cosmic_text::SwashContent::Mask => {
+            let w = image.placement.width;
+            let h = image.placement.height;
+            let mut alpha = image.data.clone();
+            alpha.resize((w * h) as usize, 0);
+            (w, h, alpha)
+        }
+        cosmic_text::SwashContent::SubpixelMask => {
+            let w = image.placement.width;
+            let h = image.placement.height;
+            let pixel_count = (w * h) as usize;
+            let mut alpha = Vec::with_capacity(pixel_count);
+            for chunk in image.data.chunks(3) {
+                let gray = if chunk.len() >= 3 {
+                    (chunk[0] as u32 + chunk[1] as u32 + chunk[2] as u32) / 3
+                } else { 0 };
+                alpha.push(gray as u8);
+            }
+            alpha.resize(pixel_count, 0);
+            (w, h, alpha)
+        }
+        _ => {
+            let w = image.placement.width;
+            let h = image.placement.height;
+            (w, h, vec![0u8; (w * h) as usize])
+        }
+    }
 }
 
 #[cfg(test)]
@@ -131,6 +164,88 @@ mod tests {
     }
 
     #[test]
+    fn atlas_rasterize_produces_non_empty_bitmap() {
+        let mut atlas = GlyphAtlas::new(1024);
+        let mut mgr = FontManager::new();
+        let attrs = cosmic_text::Attrs::new();
+        let layout = crate::layout::TextLayout::new_single_line(
+            &mut mgr.font_system, "M", attrs, 24.0,
+        );
+        let glyphs = layout.glyphs();
+        assert!(!glyphs.is_empty());
+
+        let _ = atlas.get_or_rasterize(&mut mgr.font_system, &glyphs[0]);
+        assert!(!atlas.pending_uploads.is_empty());
+
+        let upload = &atlas.pending_uploads[0];
+        assert!(upload.width > 0 && upload.height > 0,
+            "Glyph size: {}x{}", upload.width, upload.height);
+
+        // Bitmap should have non-zero pixels (the glyph shape)
+        let non_zero = upload.data.iter().filter(|&&b| b > 0).count();
+        assert!(non_zero > 0,
+            "Glyph bitmap is all zeros! {}x{} = {} bytes",
+            upload.width, upload.height, upload.data.len());
+    }
+
+    #[test]
+    fn atlas_uv_within_bounds() {
+        let mut atlas = GlyphAtlas::new(1024);
+        let mut mgr = FontManager::new();
+        let attrs = cosmic_text::Attrs::new();
+        let layout = crate::layout::TextLayout::new_single_line(
+            &mut mgr.font_system, "W", attrs, 24.0,
+        );
+        let glyphs = layout.glyphs();
+        assert!(!glyphs.is_empty());
+
+        // First call rasterizes (returns None), second returns cached UV
+        let _ = atlas.get_or_rasterize(&mut mgr.font_system, &glyphs[0]);
+        let (uv, _w, _h) = atlas.get_or_rasterize(&mut mgr.font_system, &glyphs[0])
+            .expect("Second call should return cached UV");
+
+        assert!(uv.x >= 0.0 && uv.x <= 1.0, "UV x={} out of [0,1]", uv.x);
+        assert!(uv.y >= 0.0 && uv.y <= 1.0, "UV y={} out of [0,1]", uv.y);
+        assert!(uv.width > 0.0, "UV width={} should be > 0", uv.width);
+        assert!(uv.height > 0.0, "UV height={} should be > 0", uv.height);
+        assert!(uv.x + uv.width <= 1.01, "UV right edge out of bounds");
+        assert!(uv.y + uv.height <= 1.01, "UV bottom edge out of bounds");
+    }
+
+    #[test]
+    fn rasterized_dimensions_vs_layout_dimensions() {
+        let mut mgr = FontManager::new();
+        let attrs = cosmic_text::Attrs::new();
+        let text = "Hello";
+        let font_size = 24.0;
+        let layout = crate::layout::TextLayout::new_single_line(
+            &mut mgr.font_system, text, attrs, font_size,
+        );
+
+        for glyph in layout.glyphs() {
+            let physical = glyph.physical((0.0, 0.0), 1.0);
+            // Rasterize via SwashCache to get actual bitmap dimensions
+            let mut cache = SwashCache::new();
+            if let Some(image) = cache.get_image(&mut mgr.font_system, physical.cache_key) {
+                let bmp_w = image.placement.width;
+                let bmp_h = image.placement.height;
+
+                // Layout glyph dimensions vs rasterized dimensions
+                // They should be reasonably close
+                let ratio_w = if glyph.w > 0.0 { bmp_w as f32 / glyph.w } else { 1.0 };
+                let ratio_h = if glyph.font_size > 0.0 { bmp_h as f32 / glyph.font_size } else { 1.0 };
+
+                // Log diagnostics if there's a significant mismatch
+                if (ratio_w - 1.0).abs() > 0.5 || (ratio_h - 1.0).abs() > 0.5 {
+                    // This is just diagnostic; the test passes even with a mismatch
+                    eprintln!("Glyph dim mismatch: layout=({:.1},{:.1}) raster=({},{}) ratio=({:.2},{:.2})",
+                        glyph.w, glyph.font_size, bmp_w, bmp_h, ratio_w, ratio_h);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn atlas_second_call_returns_cached_uv() {
         let mut atlas = GlyphAtlas::new(1024);
         let mut mgr = FontManager::new();
@@ -141,54 +256,17 @@ mod tests {
         let glyphs = layout.glyphs();
         assert!(!glyphs.is_empty());
 
-        // First call: rasterizes, returns None (or Some if cached)
+        // First call: rasterizes, returns None
         let first = atlas.get_or_rasterize(&mut mgr.font_system, &glyphs[0]);
         // Second call: should return cached UV
         let second = atlas.get_or_rasterize(&mut mgr.font_system, &glyphs[0]);
 
-        if first.is_some() {
-            // Was already cached somehow
-            assert_eq!(first, second);
+        if first.is_none() {
+            // First rasterized, bitmap in pending_uploads, second should be cached
+            assert!(second.is_some(), "Second call should return cached UV+size");
         } else {
-            // First rasterized, second should be cached
-            assert!(second.is_some());
-        }
-    }
-}
-
-/// Convert swash Image to R8 alpha bitmap.
-/// Mask: 1 byte/pixel alpha → pass through.
-/// SubpixelMask: average 3 bytes/pixel → 1 byte grayscale.
-fn swash_to_alpha(image: &cosmic_text::SwashImage) -> (u32, u32, Vec<u8>) {
-    match image.content {
-        cosmic_text::SwashContent::Mask => {
-            // Mask data is exactly w*h bytes of alpha
-            let w = image.placement.width;
-            let h = image.placement.height;
-            let mut alpha = image.data.clone();
-            alpha.resize((w * h) as usize, 0);
-            (w, h, alpha)
-        }
-        cosmic_text::SwashContent::SubpixelMask => {
-            let w = image.placement.width;
-            let h = image.placement.height;
-            let pixel_count = (w * h) as usize;
-            let mut alpha = Vec::with_capacity(pixel_count);
-            for chunk in image.data.chunks(3) {
-                let gray = if chunk.len() >= 3 {
-                    (chunk[0] as u32 + chunk[1] as u32 + chunk[2] as u32) / 3
-                } else {
-                    0
-                };
-                alpha.push(gray as u8);
-            }
-            alpha.resize(pixel_count, 0);
-            (w, h, alpha)
-        }
-        _ => {
-            let w = image.placement.width;
-            let h = image.placement.height;
-            (w, h, vec![0u8; (w * h) as usize])
+            // Already cached somehow — should be the same
+            assert_eq!(first.map(|(r, _, _)| r), second.map(|(r, _, _)| r));
         }
     }
 }

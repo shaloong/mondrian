@@ -44,12 +44,11 @@ impl TextRenderer {
 
         let mut commands = Vec::new();
         for glyph in layout.glyphs() {
-            let uv = self.atlas.get_or_rasterize(font_system, &glyph);
-            if let Some(uv_rect) = uv {
+            if let Some((uv_rect, bmp_w, bmp_h)) = self.atlas.get_or_rasterize(font_system, &glyph) {
                 let x = position.x + glyph.x;
                 let y = position.y + glyph.y;
                 commands.push(DrawCommand::Image {
-                    bounds: Rect::new(x, y, glyph.w, glyph.font_size),
+                    bounds: Rect::new(x, y, bmp_w as f32, bmp_h as f32),
                     uv_rect,
                     tint: color,
                 });

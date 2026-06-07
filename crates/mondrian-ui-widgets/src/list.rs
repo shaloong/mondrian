@@ -135,7 +135,7 @@ impl Widget for List {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
+    
     use crate::test_utils::{DummyFocus, DummyShortcut, DummyTooltip, make_event_ctx};
 
     #[test]
