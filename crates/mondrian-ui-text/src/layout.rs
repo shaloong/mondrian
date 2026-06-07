@@ -19,7 +19,7 @@ impl TextLayout {
         let mut buffer = Buffer::new(font_system, Metrics::new(font_size, line_height));
         buffer.set_wrap(Wrap::None);
         buffer.set_text(text, &attrs, Shaping::Advanced, Some(Align::Left));
-        buffer.shape_until_scroll(font_system, false);
+        buffer.shape_until_scroll(font_system, true);
         Self { buffer }
     }
 
@@ -35,7 +35,7 @@ impl TextLayout {
         buffer.set_size(Some(max_width), None);
         buffer.set_wrap(Wrap::Word);
         buffer.set_text(text, &attrs, Shaping::Advanced, Some(Align::Left));
-        buffer.shape_until_scroll(font_system, false);
+        buffer.shape_until_scroll(font_system, true);
         Self { buffer }
     }
 

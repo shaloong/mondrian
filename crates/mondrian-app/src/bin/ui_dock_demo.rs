@@ -16,6 +16,7 @@ use mondrian_ui_core::widgets::ColoredBox;
 use mondrian_ui_core::{EventResult, TreeWalker, Widget};
 use mondrian_ui_renderer::command::DrawEncoder;
 use mondrian_ui_renderer::UiRenderer;
+use mondrian_ui_text::{resolve_text_commands, TextRenderer};
 use mondrian_ui_widgets::dock_splitter::DockSplitter;
 use mondrian_ui_widgets::dock_tab_bar::{DockTabBar, TabInfo};
 use mondrian_ui_widgets::panel_slot::{PanelSlot, SlotKind};
@@ -32,9 +33,41 @@ fn slot_content(kind: SlotKind) -> Box<dyn Widget> {
         SlotKind::Console => Color::from_hex(0x0D1117),
         _ => Color::from_hex(0x1A1A1A),
     };
-    // Return a ColoredBox stretched to fill its parent; the
-    // PanelSlot's layout() will give it the right bounds.
-    Box::new(ColoredBox::new(color, 1.0, 1.0))
+    if kind == SlotKind::Viewer {
+        Box::new(DiagWidget::new())
+    } else {
+        Box::new(ColoredBox::new(color, 1.0, 1.0))
+    }
+}
+
+// ── Diagnostic text widget ───────────────────────────────────────────────
+struct DiagWidget { id: WidgetId, bounds: Rect }
+impl DiagWidget {
+    fn new() -> Self { Self { id: WidgetId::new(), bounds: Rect::ZERO } }
+}
+impl Widget for DiagWidget {
+    fn id(&self) -> WidgetId { self.id }
+    fn measure(&self, _c: LayoutConstraint) -> Size { Size::new(800.0, 500.0) }
+    fn layout(&mut self, b: Rect) { self.bounds = b; }
+    fn event(&mut self, _e: &UiEvent, _c: &mut EventContext) -> EventResult { EventResult::Ignored }
+    fn paint(&self, ctx: &mut PaintContext) {
+        let bg = Color::from_hex(0x1A1A2E);
+        ctx.encoder.draw_rect(self.bounds, bg, 0.0);
+        let c = Color::from_hex(0xEBEBF0);
+        let fs = 48.0;
+        let lh = fs * 1.5;
+        let texts = [
+            "Hamburgefontsiv",
+            "The quick brown fox jumps over the lazy dog",
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz",
+            "AVATAR WAWAWA ToToTo TaTaTa 1234567890",
+            "File Edit View Help 新建项目 打开项目",
+        ];
+        for (i, t) in texts.iter().enumerate() {
+            ctx.encoder.draw_text(t, fs, Point::new(10.0, 10.0 + i as f32 * lh), c);
+        }
+    }
+    fn hit_test(&self, _p: Point) -> bool { false }
 }
 
 // ── VerticalTabbedSlot ──────────────────────────────────────────────────
@@ -195,6 +228,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     surface.configure(&device, &config);
 
     let ui_renderer = UiRenderer::new(&device, config.format);
+    let mut text_renderer = TextRenderer::new();
 
     let mut root = build_dock_tree();
     let bounds = Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
@@ -226,7 +260,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let b = current_bounds.get();
                 encoder.draw_rect(b, theme.colors.background, 0.0);
                 TreeWalker::paint(&root, &mut encoder, &theme);
-                let commands = encoder.finish();
+                let commands = resolve_text_commands(encoder.finish(), &mut text_renderer);
+                let pending: Vec<mondrian_ui_renderer::GlyphUpload> = text_renderer
+                    .take_pending_uploads().into_iter()
+                    .map(|u| mondrian_ui_renderer::GlyphUpload { x: u.x, y: u.y, width: u.width, height: u.height, data: u.data })
+                    .collect();
+                if !pending.is_empty() { ui_renderer.upload_glyphs(&queue, &pending); }
 
                 let current = surface.get_current_texture();
                 match current {

@@ -29,6 +29,10 @@ path = "src/bin/ui_pipeline_test.rs"
 name = "ui_app"
 path = "src/bin/ui_app.rs"
 
+[[bin]]
+name = "ui_text_diag"
+path = "src/bin/ui_text_diag.rs"
+
 [dependencies]
 mondrian-core     = { workspace = true }
 mondrian-media    = { workspace = true }
