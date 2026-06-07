@@ -49,6 +49,7 @@ mondrian-ui-layout    = { workspace = true }
 mondrian-ui-events    = { workspace = true }
 mondrian-ui-widgets   = { workspace = true }
 mondrian-ui-tooltip   = { workspace = true }
+mondrian-ui-text      = { workspace = true }
 mondrian-panel-console = { workspace = true }
 
 tracing-subscriber = { workspace = true }

@@ -4,9 +4,11 @@
 
 pub mod button;
 pub mod checkbox;
+pub mod context_menu;
 pub mod dock_splitter;
 pub mod dock_tab_bar;
 pub mod label;
+pub mod list;
 pub mod menu;
 pub mod panel_slot;
 pub mod scroll;
@@ -18,9 +20,11 @@ mod test_utils;
 
 pub use button::Button;
 pub use checkbox::Checkbox;
+pub use context_menu::ContextMenu;
 pub use dock_splitter::DockSplitter;
 pub use dock_tab_bar::{DockTabBar, TabInfo};
 pub use label::Label;
+pub use list::{List, ListItem};
 pub use menu::{Dropdown, MenuItem};
 pub use panel_slot::{PanelSlot, SlotKind};
 pub use scroll::ScrollView;

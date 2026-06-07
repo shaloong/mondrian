@@ -88,6 +88,29 @@ impl TextRenderer {
     }
 }
 
+/// 后处理：将 DrawCommand::Text 替换为字形 DrawCommand::Image
+///
+/// 在每个渲染帧调用 `TreeWalker::paint()` 之后、`UiRenderer::render()` 之前使用。
+/// 首次出现的字形本帧不显示（下帧光栅化完成后可见）。
+pub fn resolve_text_commands(
+    commands: Vec<DrawCommand>,
+    text_renderer: &mut TextRenderer,
+) -> Vec<DrawCommand> {
+    let mut resolved = Vec::with_capacity(commands.len());
+    for cmd in commands {
+        match cmd {
+            DrawCommand::Text { text, style, position, color } => {
+                let glyph_cmds = text_renderer.layout_and_render(
+                    &text, style.font_size, position, color, None,
+                );
+                resolved.extend(glyph_cmds);
+            }
+            _ => resolved.push(cmd),
+        }
+    }
+    resolved
+}
+
 impl Default for TextRenderer {
     fn default() -> Self {
         Self::new()

@@ -19,6 +19,7 @@ use mondrian_ui_core::widgets::ColoredBox;
 use mondrian_ui_core::{EventResult, TreeWalker, Widget};
 use mondrian_ui_renderer::command::DrawEncoder;
 use mondrian_ui_renderer::UiRenderer;
+use mondrian_ui_text::{resolve_text_commands, TextRenderer};
 use mondrian_ui_widgets::dock_splitter::DockSplitter;
 use mondrian_ui_widgets::dock_tab_bar::{DockTabBar, TabInfo};
 use mondrian_ui_widgets::panel_slot::{PanelSlot, SlotKind};
@@ -211,6 +212,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     surface.configure(&device, &config);
 
     let ui_renderer = UiRenderer::new(&device, config.format);
+    let mut text_renderer = TextRenderer::new();
 
     let mut root = build_dock_tree();
     let bounds = Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
@@ -243,7 +245,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let b = current_bounds.get();
                 encoder.draw_rect(b, theme.colors.background, 0.0);
                 TreeWalker::paint(&root, &mut encoder, &theme);
-                let commands = encoder.finish();
+                let commands = resolve_text_commands(encoder.finish(), &mut text_renderer);
 
                 let current = surface.get_current_texture();
                 match current {
