@@ -23,27 +23,21 @@ pub struct Theme {
 }
 
 /// 主题预设
+///
+/// Dark 和 Light 是内置主题。用户可通过 plugin 或直接构造 `Theme` 来扩展。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThemePreset {
     Dark,
     Light,
-    Resolve,
-    Premiere,
-    Fusion,
 }
 
 impl ThemePreset {
-    pub const ALL: [Self; 5] = [
-        Self::Dark, Self::Light, Self::Resolve, Self::Premiere, Self::Fusion,
-    ];
+    pub const ALL: [Self; 2] = [Self::Dark, Self::Light];
 
     pub fn display_name(self) -> &'static str {
         match self {
             Self::Dark => "深色",
             Self::Light => "浅色",
-            Self::Resolve => "Resolve",
-            Self::Premiere => "Premiere",
-            Self::Fusion => "Fusion",
         }
     }
 
@@ -51,9 +45,6 @@ impl ThemePreset {
         let (name, colors) = match self {
             Self::Dark => ("Dark", ColorTokens::dark()),
             Self::Light => ("Light", ColorTokens::light()),
-            Self::Resolve => ("Resolve", ColorTokens::resolve()),
-            Self::Premiere => ("Premiere", ColorTokens::premiere()),
-            Self::Fusion => ("Fusion", ColorTokens::fusion()),
         };
         Theme {
             name: name.into(),

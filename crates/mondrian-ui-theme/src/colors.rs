@@ -164,50 +164,6 @@ impl ColorTokens {
         }
     }
 
-    /// Resolve 风格 — 深灰 + 蓝
-    pub fn resolve() -> Self {
-        let base = Self::dark();
-        Self {
-            background: Color::from_hex(0x111114),
-            card: Color::from_hex(0x1A1A1E),
-            popover: Color::from_hex(0x222228),
-            primary: Color::from_hex(0x4D94FF),
-            ring: Color::from_hex(0x4D94FF),
-            timeline_playhead: Color::from_hex(0x4D94FF),
-            timeline_clip_video: Color::from_hex(0x1E3A5F),
-            ..base
-        }
-    }
-
-    /// Premiere 风格 — 深紫 + 品红
-    pub fn premiere() -> Self {
-        let base = Self::dark();
-        Self {
-            background: Color::from_hex(0x12121A),
-            card: Color::from_hex(0x1C1C26),
-            popover: Color::from_hex(0x24242E),
-            primary: Color::from_hex(0xA855F7),
-            ring: Color::from_hex(0xA855F7),
-            timeline_playhead: Color::from_hex(0xA855F7),
-            timeline_clip_video: Color::from_hex(0x3B1F6E),
-            ..base
-        }
-    }
-
-    /// Fusion 风格 — 橙金强调
-    pub fn fusion() -> Self {
-        let base = Self::dark();
-        Self {
-            background: Color::from_hex(0x111110),
-            card: Color::from_hex(0x1C1C18),
-            popover: Color::from_hex(0x242420),
-            primary: Color::from_hex(0xF59E0B),
-            ring: Color::from_hex(0xF59E0B),
-            timeline_playhead: Color::from_hex(0xF59E0B),
-            timeline_clip_video: Color::from_hex(0x5F3A1E),
-            ..base
-        }
-    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

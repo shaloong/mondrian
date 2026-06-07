@@ -326,16 +326,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ..
                 }, ..
             }, .. } => {
-                // Cycle theme on F5
+                // Toggle Dark/Light theme on F5
                 use mondrian_ui_theme::ThemePreset;
-                let theme = mondrian_ui_theme::current_theme();
-                let next = match theme.name.as_str() {
-                    "Dark" => ThemePreset::Light,
-                    "Light" => ThemePreset::Resolve,
-                    "Resolve" => ThemePreset::Premiere,
-                    "Premiere" => ThemePreset::Fusion,
-                    _ => ThemePreset::Dark,
-                };
+                let next = {
+                    let theme = mondrian_ui_theme::current_theme();
+                    match theme.name.as_str() {
+                        "Dark" => ThemePreset::Light,
+                        _ => ThemePreset::Dark,
+                    }
+                }; // RwLockReadGuard dropped before write lock
                 mondrian_ui_theme::set_theme_preset(next);
                 tracing::info!("Theme switched to {}", next.display_name());
                 window.request_redraw();
