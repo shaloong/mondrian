@@ -82,6 +82,18 @@ impl Widget for Button {
                 self.state = ButtonState::Normal;
                 EventResult::Handled
             }
+            UiEvent::MouseMove { position, .. } if self.state != ButtonState::Pressed => {
+                let was_hovered = self.state == ButtonState::Hovered;
+                let now_inside = self.bounds.contains(*position);
+                if now_inside && !was_hovered {
+                    self.state = ButtonState::Hovered;
+                    return EventResult::Handled;
+                } else if !now_inside && was_hovered {
+                    self.state = ButtonState::Normal;
+                    return EventResult::Handled;
+                }
+                EventResult::Ignored
+            }
             UiEvent::FocusGained => {
                 self.state = ButtonState::Hovered;
                 EventResult::Handled

@@ -140,6 +140,19 @@ impl Widget for DockTabBar {
             let inset = r.inset(2.0, 2.0);
             ctx.encoder.draw_rect(inset, fill, spacing.radius_sm);
 
+            if !tab.label.is_empty() {
+                // Rough char-count based center: ~7px per char at 13px font
+                let tw = tab.label.chars().count() as f32 * 7.0;
+                let tx = inset.x + (inset.width - tw).max(0.0) * 0.5;
+                let ty = inset.y + (inset.height - 14.0).max(0.0) * 0.5;
+                ctx.encoder.draw_text(
+                    &tab.label,
+                    13.0,
+                    Point::new(tx, ty),
+                    tokens.foreground,
+                );
+            }
+
             if is_active {
                 let indicator = Rect::new(
                     inset.x + 4.0,

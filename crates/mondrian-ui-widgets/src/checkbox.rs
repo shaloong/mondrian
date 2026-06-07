@@ -66,6 +66,14 @@ impl Widget for Checkbox {
                 }
                 EventResult::Handled
             }
+            UiEvent::MouseMove { position, .. } => {
+                let now_inside = self.bounds.contains(*position);
+                if now_inside != self.hovered {
+                    self.hovered = now_inside;
+                    return EventResult::Handled;
+                }
+                EventResult::Ignored
+            }
             UiEvent::FocusGained => {
                 self.hovered = true;
                 EventResult::Handled
