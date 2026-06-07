@@ -503,4 +503,39 @@ mod tests {
         // Same logical center at different resolutions → different NDC
         assert_ne!(b1080[0].vertices[0].position[1], b4k[0].vertices[0].position[1]);
     }
+
+    #[test]
+    fn image_vertices_have_correct_uvs() {
+        // Create an Image command with known UV
+        let uv = Rect::new(0.1, 0.2, 0.05, 0.06);
+        let cmds = [DrawCommand::Image {
+            bounds: Rect::new(100.0, 200.0, 50.0, 30.0),
+            uv_rect: uv,
+            tint: Color::WHITE,
+        }];
+        let batches = build_batches(&cmds, (1920, 1080));
+        assert_eq!(batches.len(), 1);
+
+        let verts = &batches[0].vertices;
+        assert_eq!(verts.len(), 6);
+
+        // First vertex should have the UV rect's top-left
+        assert!((verts[0].tex_coord[0] - uv.x).abs() < 0.001,
+            "tex_coord.u={} should be {}", verts[0].tex_coord[0], uv.x);
+        assert!((verts[0].tex_coord[1] - uv.y).abs() < 0.001,
+            "tex_coord.v={} should be {}", verts[0].tex_coord[1], uv.y);
+
+        // Last vertex should have the UV rect's bottom-right
+        let ur = uv.x + uv.width;
+        let vr = uv.y + uv.height;
+        assert!((verts[5].tex_coord[0] - ur).abs() < 0.001,
+            "last tex_coord.u={} should be {}", verts[5].tex_coord[0], ur);
+        assert!((verts[5].tex_coord[1] - vr).abs() < 0.001,
+            "last tex_coord.v={} should be {}", verts[5].tex_coord[1], vr);
+
+        // All vertices should have corner_radius = -1.0 (texture mode)
+        for v in verts {
+            assert_eq!(v.corner_radius, -1.0, "Image vertices must have corner_radius=-1");
+        }
+    }
 }

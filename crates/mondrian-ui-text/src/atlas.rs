@@ -246,6 +246,31 @@ mod tests {
     }
 
     #[test]
+    fn cache_key_stable_across_calls() {
+        // Verify that the same glyph produces the same cache_key on repeated calls
+        let mut mgr = FontManager::new();
+        let attrs = cosmic_text::Attrs::new();
+        let text = "A";
+        let layout1 = crate::layout::TextLayout::new_single_line(
+            &mut mgr.font_system, text, attrs.clone(), 24.0,
+        );
+        let layout2 = crate::layout::TextLayout::new_single_line(
+            &mut mgr.font_system, text, attrs, 24.0,
+        );
+
+        let glyphs1 = layout1.glyphs();
+        let glyphs2 = layout2.glyphs();
+        assert_eq!(glyphs1.len(), glyphs2.len());
+
+        for (g1, g2) in glyphs1.iter().zip(glyphs2.iter()) {
+            let ck1 = g1.physical((0.0, 0.0), 1.0).cache_key;
+            let ck2 = g2.physical((0.0, 0.0), 1.0).cache_key;
+            assert_eq!(ck1, ck2,
+                "Cache key changed between calls for the same glyph! Glyph ID may not be stable.");
+        }
+    }
+
+    #[test]
     fn atlas_second_call_returns_cached_uv() {
         let mut atlas = GlyphAtlas::new(1024);
         let mut mgr = FontManager::new();
