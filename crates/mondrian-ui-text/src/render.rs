@@ -45,11 +45,14 @@ impl TextRenderer {
         // Line metrics: line centred vertically within the widget
         let line_h = layout.buffer().metrics().line_height;
         // Baseline: extra space split evenly, then offset by font ascent (~0.75 font_size)
-        let baseline_y = position.y + (line_h - font_size).max(0.0) * 0.5 + font_size * 0.75;
+        // Snap Y to integer pixel for sharp horizontal strokes (X stays subpixel)
+        let baseline_y = (position.y + (line_h - font_size).max(0.0) * 0.5 + font_size * 0.75).round();
 
         let mut commands = Vec::new();
         for (_line_y, glyph) in layout.positioned_glyphs() {
-            if let Some((uv_rect, bmp_w, bmp_h, top, left)) = self.atlas.get_or_rasterize(font_system, glyph) {
+            // Subpixel offset from screen X position for proper glyph caching
+            let sub_x = ((position.x + glyph.x).fract() * 4.0).round() / 4.0;
+            if let Some((uv_rect, bmp_w, bmp_h, top, left)) = self.atlas.get_or_rasterize(font_system, glyph, sub_x) {
                 let bitmap_x = position.x + glyph.x + left as f32;
                 let bitmap_top = baseline_y - top as f32;
                 commands.push(DrawCommand::Image {

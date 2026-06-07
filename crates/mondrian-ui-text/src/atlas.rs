@@ -45,8 +45,9 @@ impl GlyphAtlas {
         &mut self,
         font_system: &mut FontSystem,
         glyph: &LayoutGlyph,
+        sub_x: f32,
     ) -> Option<(Rect, u32, u32, i32, i32)> {
-        let physical = glyph.physical((0.0, 0.0), 1.0);
+        let physical = glyph.physical((sub_x, 0.0), 1.0);
         let cache_key = physical.cache_key;
         if let Some(&(uv, w, h, top, left)) = self.glyph_map.get(&cache_key) {
             return Some((uv, w, h, top, left));
@@ -143,7 +144,7 @@ mod tests {
         );
 
         for glyph in layout.glyphs() {
-            let _uv = atlas.get_or_rasterize(&mut mgr.font_system, &glyph);
+            let _uv = atlas.get_or_rasterize(&mut mgr.font_system, &glyph, 0.0);
         }
 
         // Verify all pending uploads have correct data sizes
@@ -172,7 +173,7 @@ mod tests {
         let glyphs = layout.glyphs();
         assert!(!glyphs.is_empty());
 
-        let _ = atlas.get_or_rasterize(&mut mgr.font_system, &glyphs[0]);
+        let _ = atlas.get_or_rasterize(&mut mgr.font_system, &glyphs[0], 0.0);
         assert!(!atlas.pending_uploads.is_empty());
 
         let upload = &atlas.pending_uploads[0];
@@ -198,8 +199,8 @@ mod tests {
         assert!(!glyphs.is_empty());
 
         // First call rasterizes (returns None), second returns cached UV
-        let _ = atlas.get_or_rasterize(&mut mgr.font_system, &glyphs[0]);
-        let (uv, _w, _h, _top, _left) = atlas.get_or_rasterize(&mut mgr.font_system, &glyphs[0])
+        let _ = atlas.get_or_rasterize(&mut mgr.font_system, &glyphs[0], 0.0);
+        let (uv, _w, _h, _top, _left) = atlas.get_or_rasterize(&mut mgr.font_system, &glyphs[0], 0.0)
             .expect("Second call should return cached UV");
 
         assert!(uv.x >= 0.0 && uv.x <= 1.0, "UV x={} out of [0,1]", uv.x);
@@ -280,9 +281,9 @@ mod tests {
         assert!(!glyphs.is_empty());
 
         // First call: rasterizes, returns None
-        let first = atlas.get_or_rasterize(&mut mgr.font_system, &glyphs[0]);
+        let first = atlas.get_or_rasterize(&mut mgr.font_system, &glyphs[0], 0.0);
         // Second call: should return cached UV
-        let second = atlas.get_or_rasterize(&mut mgr.font_system, &glyphs[0]);
+        let second = atlas.get_or_rasterize(&mut mgr.font_system, &glyphs[0], 0.0);
 
         if first.is_none() {
             // First rasterized, bitmap in pending_uploads, second should be cached

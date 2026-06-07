@@ -54,17 +54,12 @@ impl Widget for DiagWidget {
         let bg = Color::from_hex(0x1A1A2E);
         ctx.encoder.draw_rect(self.bounds, bg, 0.0);
         let c = Color::from_hex(0xEBEBF0);
-        let fs = 48.0;
-        let lh = fs * 1.5;
-        let texts = [
-            "Hamburgefontsiv",
-            "The quick brown fox jumps over the lazy dog",
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz",
-            "AVATAR WAWAWA ToToTo TaTaTa 1234567890",
-            "File Edit View Help 新建项目 打开项目",
-        ];
-        for (i, t) in texts.iter().enumerate() {
-            ctx.encoder.draw_text(t, fs, Point::new(10.0, 10.0 + i as f32 * lh), c);
+        let text = "File Edit View Help ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        let sizes = [12.0, 13.0, 14.0, 15.0, 16.0, 20.0, 24.0, 36.0, 48.0];
+        let mut y = 10.0;
+        for &fs in &sizes {
+            ctx.encoder.draw_text(text, fs, Point::new(10.0, y), c);
+            y += fs * 1.5 + 4.0;
         }
     }
     fn hit_test(&self, _p: Point) -> bool { false }
