@@ -43,12 +43,14 @@ impl TextRenderer {
         };
 
         let mut commands = Vec::new();
-        for glyph in layout.glyphs() {
-            if let Some((uv_rect, bmp_w, bmp_h)) = self.atlas.get_or_rasterize(font_system, &glyph) {
+        // Use cosmic-text's own positioning: line_y gives line offset,
+        // glyph.y gives baseline-relative glyph position within the line.
+        for (line_y, glyph) in layout.positioned_glyphs() {
+            if let Some((uv_rect, _bmp_w, _bmp_h)) = self.atlas.get_or_rasterize(font_system, glyph) {
                 let x = position.x + glyph.x;
-                let y = position.y + glyph.y;
+                let y = position.y + line_y + glyph.y;
                 commands.push(DrawCommand::Image {
-                    bounds: Rect::new(x, y, bmp_w as f32, bmp_h as f32),
+                    bounds: Rect::new(x, y, glyph.w, glyph.font_size),
                     uv_rect,
                     tint: color,
                 });
