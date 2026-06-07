@@ -42,15 +42,27 @@ impl TextRenderer {
             TextLayout::new_single_line(font_system, text, attrs, font_size)
         };
 
+        // Baseline calculation: use line metrics from buffer
+        let metrics = layout.buffer().metrics();
+        let line_h = metrics.line_height;
+        let font_size = metrics.font_size;
+        let ascent = font_size * 0.8;      // ~80% of font size
+        let descent = font_size * 0.2;     // ~20%
+        let content_h = ascent + descent;
+        // baseline_y = line_top + (line_h - content_h)/2 + ascent
+        let baseline_y = position.y + (line_h - content_h).max(0.0) * 0.5 + ascent;
+
         let mut commands = Vec::new();
-        // Use cosmic-text's own positioning: line_y gives line offset,
-        // glyph.y gives baseline-relative glyph position within the line.
-        for (line_y, glyph) in layout.positioned_glyphs() {
-            if let Some((uv_rect, _bmp_w, _bmp_h)) = self.atlas.get_or_rasterize(font_system, glyph) {
+        for (_line_y, glyph) in layout.positioned_glyphs() {
+            if let Some((uv_rect, bmp_w, bmp_h, placement_top)) = self.atlas.get_or_rasterize(font_system, glyph) {
                 let x = position.x + glyph.x;
-                let y = position.y + line_y + glyph.y;
+                // placement_top = distance from bitmap top to glyph visual top (from swash).
+                // Glyph baseline within bitmap ≈ placement_top + (font_size * 0.7) ≈ placement_top + x_height.
+                // Position bitmap so that its internal baseline aligns with baseline_y.
+                let glyph_baseline_in_bitmap = placement_top as f32 + font_size * 0.7;
+                let bitmap_top = baseline_y - glyph_baseline_in_bitmap;
                 commands.push(DrawCommand::Image {
-                    bounds: Rect::new(x, y, glyph.w, glyph.font_size),
+                    bounds: Rect::new(x, bitmap_top, bmp_w as f32, bmp_h as f32),
                     uv_rect,
                     tint: color,
                 });
