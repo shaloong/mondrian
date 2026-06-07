@@ -28,9 +28,7 @@ impl FontManager {
 }
 
 impl Default for FontManager {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 #[cfg(test)]
@@ -41,7 +39,6 @@ mod tests {
     fn font_manager_creates_default_attrs() {
         let mgr = FontManager::new();
         let attrs = mgr.default_attrs();
-        // Verify we can read back the family
         assert_eq!(attrs.family, Family::SansSerif);
     }
 
