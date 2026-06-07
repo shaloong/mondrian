@@ -319,27 +319,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 window.request_redraw();
             }
 
-            Event::WindowEvent { event: WindowEvent::KeyboardInput {
-                event: winit::event::KeyEvent {
-                    logical_key: winit::keyboard::Key::Named(winit::keyboard::NamedKey::F5),
-                    state: ElementState::Pressed,
-                    ..
-                }, ..
-            }, .. } => {
-                // Toggle Dark/Light theme on F5
-                use mondrian_ui_theme::ThemePreset;
-                let next = {
-                    let theme = mondrian_ui_theme::current_theme();
-                    match theme.name.as_str() {
-                        "Dark" => ThemePreset::Light,
-                        _ => ThemePreset::Dark,
-                    }
-                }; // RwLockReadGuard dropped before write lock
-                mondrian_ui_theme::set_theme_preset(next);
-                tracing::info!("Theme switched to {}", next.display_name());
-                window.request_redraw();
-            }
-
             Event::AboutToWait => { window.request_redraw(); }
             _ => {}
         }
