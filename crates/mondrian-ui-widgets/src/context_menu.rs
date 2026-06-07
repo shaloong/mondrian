@@ -38,6 +38,10 @@ impl ContextMenu {
         }
     }
 
+    pub fn is_visible(&self) -> bool {
+        self.visible
+    }
+
     fn menu_rect(&self, idx: usize) -> Rect {
         Rect::new(
             self.anchor.x + 4.0,

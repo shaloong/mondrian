@@ -38,7 +38,7 @@
       "command": "run",
       "args": [
         "--bin",
-        "ui_dock_demo"
+        "ui_demo"
       ],
       "problemMatcher": [
         "$rustc"

@@ -10,8 +10,8 @@ name = "mondrian"
 path = "src/main.rs"
 
 [[bin]]
-name = "ui_dock_demo"
-path = "src/bin/ui_dock_demo.rs"
+name = "ui_demo"
+path = "src/bin/ui_demo.rs"
 
 [[bin]]
 name = "ui_color_test"
