@@ -118,10 +118,10 @@ impl Widget for Button {
 
         ctx.encoder.draw_rect(self.bounds, bg, spacing.radius_md);
         if !self.label.is_empty() {
-            let tw = self.label.chars().count() as f32 * 7.0;
-            let tx = self.bounds.x + (self.bounds.width - tw).max(0.0) * 0.5;
-            let ty = self.bounds.y + (self.bounds.height - 14.0).max(0.0) * 0.5;
-            ctx.encoder.draw_text(&self.label, 13.0, Point::new(tx, ty), tokens.foreground);
+            let font_size = 13.0;
+            let tx = mondrian_ui_core::types::center_text_x(self.bounds, &self.label, font_size);
+            let ty = self.bounds.y + (self.bounds.height - font_size * 1.3).max(0.0) * 0.5;
+            ctx.encoder.draw_text(&self.label, font_size, Point::new(tx, ty), tokens.foreground);
         }
     }
 
@@ -274,5 +274,53 @@ mod tests {
         }, &mut ctx);
 
         assert!(cell.into_inner().is_empty());
+    }
+
+    #[test]
+    fn button_mouse_move_in_sets_hovered() {
+        let mut b = Button::new("OK");
+        b.layout(Rect::new(0.0, 0.0, 100.0, 30.0));
+        let mut f = DummyFocus; let mut s = DummyShortcut; let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
+
+        let r = b.event(&UiEvent::MouseMove {
+            position: Point::new(50.0, 15.0),
+            modifiers: Modifiers::none(),
+        }, &mut ctx);
+        assert_eq!(r, EventResult::Handled);
+        assert_eq!(b.state(), ButtonState::Hovered);
+    }
+
+    #[test]
+    fn button_mouse_move_out_clears_hovered() {
+        let mut b = Button::new("OK");
+        b.layout(Rect::new(0.0, 0.0, 100.0, 30.0));
+        b.state = ButtonState::Hovered;
+        let mut f = DummyFocus; let mut s = DummyShortcut; let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
+
+        let r = b.event(&UiEvent::MouseMove {
+            position: Point::new(200.0, 15.0),
+            modifiers: Modifiers::none(),
+        }, &mut ctx);
+        assert_eq!(r, EventResult::Handled);
+        assert_eq!(b.state(), ButtonState::Normal);
+    }
+
+    #[test]
+    fn button_mouse_move_during_press_no_hover_change() {
+        let mut b = Button::new("OK");
+        b.layout(Rect::new(0.0, 0.0, 100.0, 30.0));
+        b.state = ButtonState::Pressed;
+        let mut f = DummyFocus; let mut s = DummyShortcut; let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
+
+        let r = b.event(&UiEvent::MouseMove {
+            position: Point::new(200.0, 15.0),
+            modifiers: Modifiers::none(),
+        }, &mut ctx);
+        // During press, MouseMove does NOT change state (guard: self.state != Pressed)
+        assert_eq!(r, EventResult::Ignored);
+        assert_eq!(b.state(), ButtonState::Pressed);
     }
 }

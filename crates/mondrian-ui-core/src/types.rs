@@ -83,6 +83,39 @@ pub struct Rect {
     pub height: f32,
 }
 
+/// Estimate rendered text width for a single-line string at a given font size.
+///
+/// CJK / wide characters (> U+2E80) are ~1.0 × font_size wide;
+/// Latin, digits, and punctuation are ~0.55 × font_size wide.
+/// This is an approximation — use `TextRenderer::measure_text` for exact values.
+pub fn estimate_text_width(text: &str, font_size: f32) -> f32 {
+    text.chars()
+        .map(|ch| {
+            if ch >= '\u{2E80}' {
+                font_size
+            } else {
+                font_size * 0.55
+            }
+        })
+        .sum()
+}
+
+/// Center `text` horizontally within `rect` at `font_size`, returning the x coordinate
+/// to pass to `draw_text`. Returns `rect.x` for empty text.
+pub fn center_text_x(rect: Rect, text: &str, font_size: f32) -> f32 {
+    if text.is_empty() {
+        return rect.x;
+    }
+    let tw = estimate_text_width(text, font_size);
+    rect.x + (rect.width - tw).max(0.0) * 0.5
+}
+
+/// Snap a Point to the nearest pixel grid to reduce subpixel jitter during resize.
+/// Use for text baseline positions where stable rendering matters.
+pub fn snap_point(p: Point) -> Point {
+    Point::new(p.x.round(), p.y.round())
+}
+
 impl Rect {
     pub const ZERO: Self = Self { x: 0.0, y: 0.0, width: 0.0, height: 0.0 };
 
@@ -524,5 +557,95 @@ mod tests {
     #[test]
     fn event_handled_and_ignored_are_distinct() {
         assert_ne!(EventResult::Handled, EventResult::Ignored);
+    }
+}
+
+#[cfg(test)]
+mod utility_tests {
+    use super::*;
+
+    // ── estimate_text_width ──────────────────────────────────────────────
+
+    #[test]
+    fn estimate_pure_ascii() {
+        let w = estimate_text_width("Hello", 10.0);
+        // 5 chars × 0.55 × 10.0 = 27.5
+        assert!((w - 27.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn estimate_pure_cjk() {
+        let w = estimate_text_width("你好世界", 14.0);
+        // 4 chars × 14.0 = 56.0
+        assert!((w - 56.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn estimate_mixed_cjk_ascii() {
+        let w = estimate_text_width("时间线", 13.0);
+        // 3 CJK chars × 13.0 = 39.0
+        assert!((w - 39.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn estimate_empty_string() {
+        assert_eq!(estimate_text_width("", 16.0), 0.0);
+    }
+
+    #[test]
+    fn estimate_boundary_char() {
+        // U+2E80 is CJK Radicals Supplement start — treated as wide
+        let latin_w = estimate_text_width("A", 10.0); // 0x41 < 0x2E80
+        assert!((latin_w - 5.5).abs() < 0.01);
+        let cjk_w = estimate_text_width("\u{2E80}", 10.0);
+        assert!((cjk_w - 10.0).abs() < 0.01);
+        // Common CJK character
+        let han_w = estimate_text_width("\u{4E00}", 10.0); // 一
+        assert!((han_w - 10.0).abs() < 0.01);
+    }
+
+    // ── center_text_x ───────────────────────────────────────────────────
+
+    #[test]
+    fn center_empty_returns_rect_x() {
+        let r = Rect::new(10.0, 0.0, 100.0, 20.0);
+        assert_eq!(center_text_x(r, "", 13.0), 10.0);
+    }
+
+    #[test]
+    fn center_ascii_in_rect() {
+        let r = Rect::new(0.0, 0.0, 100.0, 20.0);
+        // "Hi" at 10px → width = 2 × 5.5 = 11.0
+        // center_x = 0 + (100 - 11) / 2 = 44.5
+        let cx = center_text_x(r, "Hi", 10.0);
+        assert!((cx - 44.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn center_wider_than_rect_clamps_to_zero() {
+        let r = Rect::new(5.0, 0.0, 10.0, 20.0);
+        // Very long text → estimated width > rect width → (10 - tw).max(0) = 0 → cx = 5.0
+        let cx = center_text_x(r, "VeryLongText", 10.0);
+        assert!((cx - 5.0).abs() < 0.01);
+    }
+
+    // ── snap_point ──────────────────────────────────────────────────────
+
+    #[test]
+    fn snap_integers_unchanged() {
+        let p = snap_point(Point::new(10.0, 20.0));
+        assert_eq!(p, Point::new(10.0, 20.0));
+    }
+
+    #[test]
+    fn snap_halves_round_up() {
+        let p = snap_point(Point::new(10.5, 20.5));
+        assert_eq!(p, Point::new(11.0, 21.0));
+    }
+
+    #[test]
+    fn snap_small_fractions() {
+        let p = snap_point(Point::new(10.3, 20.7));
+        assert_eq!(p, Point::new(10.0, 21.0));
     }
 }

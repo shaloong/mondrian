@@ -228,4 +228,50 @@ mod tests {
         }, &mut ctx);
         assert_eq!(cell.into_inner(), vec![Action::TogglePlay]);
     }
+
+    #[test]
+    fn checkbox_mouse_move_in_sets_hovered() {
+        let mut cb = Checkbox::new("Opt", false);
+        cb.layout(Rect::new(0.0, 0.0, 100.0, 22.0));
+        let mut f = DummyFocus; let mut s = DummyShortcut; let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
+
+        let r = cb.event(&UiEvent::MouseMove {
+            position: Point::new(50.0, 11.0),
+            modifiers: Modifiers::none(),
+        }, &mut ctx);
+        assert_eq!(r, EventResult::Handled);
+        assert!(cb.hovered);
+    }
+
+    #[test]
+    fn checkbox_mouse_move_out_clears_hovered() {
+        let mut cb = Checkbox::new("Opt", false);
+        cb.layout(Rect::new(0.0, 0.0, 100.0, 22.0));
+        cb.hovered = true;
+        let mut f = DummyFocus; let mut s = DummyShortcut; let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
+
+        let r = cb.event(&UiEvent::MouseMove {
+            position: Point::new(200.0, 11.0),
+            modifiers: Modifiers::none(),
+        }, &mut ctx);
+        assert_eq!(r, EventResult::Handled);
+        assert!(!cb.hovered);
+    }
+
+    #[test]
+    fn checkbox_mouse_move_same_state_no_rehandle() {
+        let mut cb = Checkbox::new("Opt", false);
+        cb.layout(Rect::new(0.0, 0.0, 100.0, 22.0));
+        cb.hovered = true;
+        let mut f = DummyFocus; let mut s = DummyShortcut; let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
+
+        let r = cb.event(&UiEvent::MouseMove {
+            position: Point::new(50.0, 11.0),
+            modifiers: Modifiers::none(),
+        }, &mut ctx);
+        assert_eq!(r, EventResult::Ignored); // already hovered, no state change
+    }
 }

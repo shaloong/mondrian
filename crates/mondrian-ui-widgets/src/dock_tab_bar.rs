@@ -110,7 +110,6 @@ impl Widget for DockTabBar {
 
     fn paint(&self, ctx: &mut PaintContext) {
         let tokens = &ctx.theme.colors;
-        let spacing = &ctx.theme.spacing;
 
         let bg = Rect::new(
             self.bounds.x,
@@ -138,19 +137,15 @@ impl Widget for DockTabBar {
             };
 
             let inset = r.inset(2.0, 2.0);
-            ctx.encoder.draw_rect(inset, fill, spacing.radius_sm);
+            // No corner radius — tabs sit flush; rounding creates protrusions at edges
+            ctx.encoder.draw_rect(inset, fill, 0.0);
 
             if !tab.label.is_empty() {
-                // Rough char-count based center: ~7px per char at 13px font
-                let tw = tab.label.chars().count() as f32 * 7.0;
-                let tx = inset.x + (inset.width - tw).max(0.0) * 0.5;
-                let ty = inset.y + (inset.height - 14.0).max(0.0) * 0.5;
-                ctx.encoder.draw_text(
-                    &tab.label,
-                    13.0,
-                    Point::new(tx, ty),
-                    tokens.foreground,
-                );
+                let font_size = 13.0;
+                let tx = mondrian_ui_core::types::center_text_x(inset, &tab.label, font_size);
+                let ty = inset.y + (inset.height - font_size * 1.3).max(0.0) * 0.5;
+                let pos = mondrian_ui_core::types::snap_point(Point::new(tx, ty));
+                ctx.encoder.draw_text(&tab.label, font_size, pos, tokens.foreground);
             }
 
             if is_active {

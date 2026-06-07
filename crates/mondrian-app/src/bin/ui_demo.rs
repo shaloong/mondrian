@@ -16,7 +16,7 @@ use mondrian_platform::NoopPlatformService;
 use mondrian_ui_core::focus::FocusManager;
 use mondrian_ui_core::shortcut::{ShortcutBinding, ShortcutManager, ShortcutScope};
 use mondrian_ui_core::tooltip::{TooltipManager, TooltipState};
-use mondrian_ui_core::types::*;
+use mondrian_ui_core::types::{self as ui_types, *};
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::widgets::ColoredBox;
 use mondrian_ui_core::{EventResult, TreeWalker, Widget};
@@ -114,11 +114,11 @@ impl Widget for GalleryWidget {
         self.bounds = b;
         let x0 = b.x + 12.0;
         let col_w = b.width - 24.0;
-        let mut y = b.y + 8.0;
         let row_h = 30.0;
         let gap = 6.0;
 
-        y += 4.0; // spacing after title
+        // Reserve space for title (15px @ y+6) + feedback (12px @ y+24) ≈ 42px
+        let mut y = b.y + 48.0;
 
         let half_w = (col_w - 8.0) * 0.5;
         self.button_click.layout(Rect::new(x0, y, half_w, row_h));
@@ -231,21 +231,14 @@ impl Widget for GalleryWidget {
 
         ctx.encoder.draw_rect(self.bounds, tokens.card, ctx.theme.spacing.radius_md);
 
-        ctx.encoder.draw_text(
-            "UI 控件画廊 — 右键可打开菜单",
-            15.0,
-            Point::new(self.bounds.x + 12.0, self.bounds.y + 6.0),
-            tokens.foreground,
-        );
+        // Snap text positions to pixel grid to avoid subpixel jitter during resize
+        let p = ui_types::snap_point(Point::new(self.bounds.x + 12.0, self.bounds.y + 6.0));
+        ctx.encoder.draw_text("UI 控件画廊 — 右键可打开菜单", 15.0, p, tokens.foreground);
 
         if !self.last_action.is_empty() {
             let fb = format!("最后操作: {}", self.last_action);
-            ctx.encoder.draw_text(
-                &fb,
-                12.0,
-                Point::new(self.bounds.x + 12.0, self.bounds.y + 24.0),
-                tokens.primary,
-            );
+            let p = ui_types::snap_point(Point::new(self.bounds.x + 12.0, self.bounds.y + 24.0));
+            ctx.encoder.draw_text(&fb, 12.0, p, tokens.primary);
         }
 
         self.button_click.paint(ctx);
@@ -306,33 +299,35 @@ impl Widget for ViewerWidget {
 
         let text = "Mondrian 自研 UI 框架 — 文本渲染测试";
         let sizes = [11.0, 12.0, 13.0, 14.0, 16.0, 20.0, 24.0];
-        let mut y = self.bounds.y + 10.0;
+        let base_x = (self.bounds.x + 10.0).round();
+        let mut y = (self.bounds.y + 10.0).round();
         for &fs in &sizes {
-            ctx.encoder.draw_text(text, fs, Point::new(self.bounds.x + 10.0, y), c);
-            y += fs * 1.5 + 4.0;
+            ctx.encoder.draw_text(text, fs, Point::new(base_x, y), c);
+            y += (fs * 1.5 + 4.0).round();
         }
 
         y += 20.0;
         ctx.encoder.draw_text(
             "子像素定位测试 (l 字符):",
             13.0,
-            Point::new(self.bounds.x + 10.0, y),
+            Point::new(base_x, y),
             Color::from_hex(0x888899),
         );
         y += 20.0;
+        // Subpixel test: intentionally fractional x positions
         for &fs in &[13.0, 14.0, 16.0] {
             for i in 0..5 {
                 let px = self.bounds.x + 10.0 + i as f32 * 0.33;
                 ctx.encoder.draw_text("l", fs, Point::new(px, y), c);
             }
-            y += fs * 1.5 + 8.0;
+            y += (fs * 1.5 + 8.0).round();
         }
 
         y += 10.0;
         ctx.encoder.draw_text(
             "中文字符测试：你好世界！これは日本語です。",
             14.0,
-            Point::new(self.bounds.x + 10.0, y),
+            Point::new(base_x, y),
             Color::from_hex(0xAABBCC),
         );
     }
