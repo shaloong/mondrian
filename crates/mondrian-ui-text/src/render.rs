@@ -42,11 +42,26 @@ impl TextRenderer {
             TextLayout::new_single_line(font_system, text, attrs, font_size)
         };
 
-        // Line metrics: line centred vertically within the widget
+        // Line metrics from cosmic-text Buffer
         let line_h = layout.buffer().metrics().line_height;
-        // Baseline: extra space split evenly, then offset by font ascent (~0.75 font_size)
-        // Snap Y to integer pixel for sharp horizontal strokes (X stays subpixel)
-        let baseline_y = (position.y + (line_h - font_size).max(0.0) * 0.5 + font_size * 0.75).round();
+        // Compute real ascent by looking at the average placement.top from rasterized glyphs.
+        // We rasterize the first few glyphs to get actual font ascent, using it as the
+        // shared baseline offset for the entire line.
+        let mut ascent_samples = Vec::new();
+        for (_line_y, glyph) in layout.positioned_glyphs().iter().take(4) {
+            if let Some((_, _, _, top, _)) = self.atlas.get_or_rasterize(font_system, glyph, 0.0) {
+                ascent_samples.push(top as f32);
+            }
+        }
+        let measured_ascent = if ascent_samples.is_empty() {
+            font_size * 0.75 // fallback
+        } else {
+            ascent_samples.iter().sum::<f32>() / ascent_samples.len() as f32
+        };
+        // Baseline: extra space split evenly, then offset by measured ascent
+        // floor() for stable pixel alignment; comment out .floor() for float experiment
+        // Experiment: try .floor(), .round(), or remove for full float
+        let baseline_y = (position.y + (line_h - measured_ascent).max(0.0) * 0.5 + measured_ascent).round();
 
         let mut commands = Vec::new();
         for (_line_y, glyph) in layout.positioned_glyphs() {

@@ -54,12 +54,24 @@ impl Widget for DiagWidget {
         let bg = Color::from_hex(0x1A1A2E);
         ctx.encoder.draw_rect(self.bounds, bg, 0.0);
         let c = Color::from_hex(0xEBEBF0);
+        // Test 1: same text at various sizes
         let text = "File Edit View Help ABCDEFGHIJKLMNOPQRSTUVWXYZ";
         let sizes = [12.0, 13.0, 14.0, 15.0, 16.0, 20.0, 24.0, 36.0, 48.0];
         let mut y = 10.0;
         for &fs in &sizes {
             ctx.encoder.draw_text(text, fs, Point::new(10.0, y), c);
             y += fs * 1.5 + 4.0;
+        }
+
+        // Test 2: "l" at stepped X positions to expose subpixel binning
+        y += 20.0;
+        for &fs in &[13.0, 14.0, 16.0, 20.0] {
+            for i in 0..8 {
+                let px = 10.0 + i as f32 * 0.25;
+                ctx.encoder.draw_text("l", fs, Point::new(px, y), c);
+            }
+            ctx.encoder.draw_text(&format!("{}px", fs as i32), 10.0, Point::new(10.0, y + fs * 1.3), c);
+            y += fs * 1.5 + 20.0;
         }
     }
     fn hit_test(&self, _p: Point) -> bool { false }
