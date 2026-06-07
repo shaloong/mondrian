@@ -1,6 +1,6 @@
 //! UI 渲染器 —— 将 DrawCommand 提交到 GPU
 //!
-//! [`UiRenderer`] 持有 wgpu 渲染管线，接收 DrawCommand 列表并渲染到纹理。
+//! [`UiRenderer`] 持有 wgpu 渲染管线 + glyph 纹理图集，每帧接收绘制命令。
 
 use bytemuck::Pod;
 use wgpu::util::DeviceExt;
@@ -10,7 +10,6 @@ use crate::command::DrawCommand;
 use crate::pipeline::UiPipeline;
 use crate::shape::RectVertex;
 
-/// 统一缓冲区数据（CPU→GPU）
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, bytemuck::Zeroable)]
 struct Uniforms {
@@ -18,16 +17,20 @@ struct Uniforms {
     _pad: [f32; 2],
 }
 
+/// 字形上传数据
+pub struct GlyphUpload {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub data: Vec<u8>,
+}
+
 /// GPU 2D UI 渲染器
-///
-/// 持有渲染管线、glyph 纹理图集。
 pub struct UiRenderer {
     pipeline: UiPipeline,
-    glyph_sampler: wgpu::Sampler,
     glyph_texture: wgpu::Texture,
-    glyph_view: wgpu::TextureView,
     glyph_bind_group: wgpu::BindGroup,
-    atlas_size: u32,
 }
 
 impl UiRenderer {
@@ -52,8 +55,8 @@ impl UiRenderer {
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
 
@@ -66,13 +69,18 @@ impl UiRenderer {
             ],
         });
 
-        Self { pipeline, glyph_sampler, glyph_texture, glyph_view, glyph_bind_group, atlas_size }
+        Self { pipeline, glyph_texture, glyph_bind_group }
     }
 
-    /// Upload glyph bitmap data to the atlas texture
+    /// 上传字形 alpha bitmap 到 GPU 图集纹理
     pub fn upload_glyphs(&self, queue: &wgpu::Queue, uploads: &[GlyphUpload]) {
         for upload in uploads {
             if upload.width == 0 || upload.height == 0 { continue; }
+            let expected = (upload.width * upload.height) as usize;
+            let actual = upload.data.len();
+            if actual != expected {
+                continue;
+            }
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &self.glyph_texture,
@@ -91,7 +99,6 @@ impl UiRenderer {
         }
     }
 
-    /// 将绘制命令渲染到指定的纹理视图
     pub fn render(
         &self,
         device: &wgpu::Device,
@@ -161,13 +168,4 @@ impl UiRenderer {
 
         queue.submit(std::iter::once(encoder.finish()));
     }
-}
-
-/// 字形上传数据（由 mondrian-ui-text::atlas::GlyphUpload 提供）
-pub struct GlyphUpload {
-    pub x: u32,
-    pub y: u32,
-    pub width: u32,
-    pub height: u32,
-    pub data: Vec<u8>,
 }
