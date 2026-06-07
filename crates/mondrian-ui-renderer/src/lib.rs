@@ -17,5 +17,5 @@ pub mod shape;
 
 pub use atlas::TextureAtlas;
 pub use command::{DrawCommand, DrawEncoder};
-pub use context::UiRenderer;
+pub use context::{GlyphUpload, UiRenderer};
 pub use shape::{generate_rect_vertices, generate_rounded_rect_vertices, RectVertex};

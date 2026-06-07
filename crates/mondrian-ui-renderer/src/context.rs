@@ -2,7 +2,6 @@
 //!
 //! [`UiRenderer`] 持有 wgpu 渲染管线，接收 DrawCommand 列表并渲染到纹理。
 
-
 use bytemuck::Pod;
 use wgpu::util::DeviceExt;
 
@@ -21,22 +20,35 @@ struct Uniforms {
 
 /// GPU 2D UI 渲染器
 ///
-/// 接收 DrawCommand 序列，批次化后通过 wgpu 渲染管线提交到纹理。
+/// 持有渲染管线、glyph 纹理图集。
 pub struct UiRenderer {
     pipeline: UiPipeline,
-    #[allow(dead_code)]
-    sampler: wgpu::Sampler,
+    glyph_sampler: wgpu::Sampler,
+    glyph_texture: wgpu::Texture,
+    glyph_view: wgpu::TextureView,
+    glyph_bind_group: wgpu::BindGroup,
+    atlas_size: u32,
 }
 
 impl UiRenderer {
-    /// 创建新的 UI 渲染器
-    ///
-    /// `surface_format` 应与输出纹理的格式匹配。
-    /// 复用 `mondrian-renderer::GpuContext` 的 device。
     pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
         let pipeline = UiPipeline::new(device, surface_format);
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("ui_sampler"),
+
+        let atlas_size: u32 = 2048;
+        let glyph_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("glyph_atlas"),
+            size: wgpu::Extent3d { width: atlas_size, height: atlas_size, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let glyph_view = glyph_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let glyph_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("glyph_sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
@@ -45,15 +57,41 @@ impl UiRenderer {
             ..Default::default()
         });
 
-        Self { pipeline, sampler }
+        let glyph_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("glyph_bg"),
+            layout: &pipeline.texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::Sampler(&glyph_sampler) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&glyph_view) },
+            ],
+        });
+
+        Self { pipeline, glyph_sampler, glyph_texture, glyph_view, glyph_bind_group, atlas_size }
+    }
+
+    /// Upload glyph bitmap data to the atlas texture
+    pub fn upload_glyphs(&self, queue: &wgpu::Queue, uploads: &[GlyphUpload]) {
+        for upload in uploads {
+            if upload.width == 0 || upload.height == 0 { continue; }
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.glyph_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x: upload.x, y: upload.y, z: 0 },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &upload.data,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(upload.width),
+                    rows_per_image: Some(upload.height),
+                },
+                wgpu::Extent3d { width: upload.width, height: upload.height, depth_or_array_layers: 1 },
+            );
+        }
     }
 
     /// 将绘制命令渲染到指定的纹理视图
-    ///
-    /// `device` 和 `queue` 来自 `GpuContext`。
-    /// `view` 是渲染目标（通常是 surface texture 或离屏纹理）。
-    /// `commands` 是 DrawEncoder 产出的命令列表。
-    /// `screen_size` 是绘制区域的像素尺寸。
     pub fn render(
         &self,
         device: &wgpu::Device,
@@ -93,12 +131,7 @@ impl UiRenderer {
                     view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 0.0,
-                        }),
+                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }),
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,
@@ -111,19 +144,16 @@ impl UiRenderer {
 
             rpass.set_pipeline(&self.pipeline.render_pipeline);
             rpass.set_bind_group(0, &bind_group, &[]);
+            rpass.set_bind_group(1, &self.glyph_bind_group, &[]);
 
             for batch in &batches {
-                if batch.vertices.is_empty() {
-                    continue;
-                }
-
+                if batch.vertices.is_empty() { continue; }
                 let vertex_data: &[RectVertex] = &batch.vertices;
                 let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("ui_vb"),
                     contents: bytemuck::cast_slice(vertex_data),
                     usage: wgpu::BufferUsages::VERTEX,
                 });
-
                 rpass.set_vertex_buffer(0, vertex_buffer.slice(..));
                 rpass.draw(0..vertex_data.len() as u32, 0..1);
             }
@@ -131,4 +161,13 @@ impl UiRenderer {
 
         queue.submit(std::iter::once(encoder.finish()));
     }
+}
+
+/// 字形上传数据（由 mondrian-ui-text::atlas::GlyphUpload 提供）
+pub struct GlyphUpload {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub data: Vec<u8>,
 }

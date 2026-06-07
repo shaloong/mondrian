@@ -331,6 +331,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 encoder.draw_rect(b, theme.colors.background, 0.0);
                 TreeWalker::paint(&root, &mut encoder, &theme);
                 let commands = resolve_text_commands(encoder.finish(), &mut text_renderer);
+                // Upload any newly rasterized glyphs to GPU atlas
+                let pending: Vec<mondrian_ui_renderer::GlyphUpload> = text_renderer
+                    .take_pending_uploads()
+                    .into_iter()
+                    .map(|u| mondrian_ui_renderer::GlyphUpload {
+                        x: u.x, y: u.y, width: u.width, height: u.height, data: u.data,
+                    })
+                    .collect();
+                if !pending.is_empty() {
+                    ui_renderer.upload_glyphs(&queue, &pending);
+                }
 
                 let current = surface.get_current_texture();
                 match current {

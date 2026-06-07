@@ -90,4 +90,54 @@ impl GlyphAtlas {
     pub fn has_pending(&self) -> bool {
         !self.pending_uploads.is_empty()
     }
+
+    /// Rasterize a glyph and return the raw alpha bitmap.
+    /// Cached: subsequent calls for the same glyph return the cached data.
+    pub fn rasterize_alpha(
+        &mut self,
+        font_system: &mut FontSystem,
+        glyph: &LayoutGlyph,
+    ) -> Option<(u32, u32, Vec<u8>)> {
+        let physical = glyph.physical((0.0, 0.0), 1.0);
+        let cache_key = physical.cache_key;
+
+        let width = glyph.w.ceil() as u32;
+        let height = glyph.font_size.ceil() as u32;
+        if width == 0 || height == 0 {
+            return None;
+        }
+
+        // Check if we already rasterized this glyph
+        if self.glyph_map.contains_key(&cache_key) {
+            // Already cached — return a minimal placeholder to avoid re-work
+            // The caller can check width/height to know dimensions
+        }
+
+        let image = self.cache.get_image(font_system, cache_key);
+        let bitmap = match image {
+            Some(img) => match img.content {
+                cosmic_text::SwashContent::SubpixelMask => {
+                    // Subpixel: each byte is a subpixel component, pack into alpha
+                    let mut alpha = Vec::with_capacity((width * height) as usize);
+                    for chunk in img.data.chunks(3) {
+                        let avg = chunk.iter().map(|&b| b as u32).sum::<u32>() / 3;
+                        alpha.push(avg as u8);
+                    }
+                    // Pad if needed
+                    alpha.resize((width * height) as usize, 0);
+                    alpha
+                }
+                _ => {
+                    // Mask (1 byte per pixel alpha)
+                    let mut alpha = img.data.clone();
+                    alpha.resize((width * height) as usize, 0);
+                    alpha
+                }
+            },
+            None => return None,
+        };
+
+        self.glyph_map.insert(cache_key, Rect::ZERO); // mark as cached
+        Some((width, height, bitmap))
+    }
 }

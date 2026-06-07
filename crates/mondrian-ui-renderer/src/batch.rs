@@ -87,20 +87,28 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
             }
             DrawCommand::Image {
                 bounds,
-                uv_rect: _,
+                uv_rect,
                 tint,
             } => {
                 let rect = apply_transform(bounds, &transform_stack);
                 let screen_rect = pixel_to_ndc_rect(rect, sx, sy, tx, ty);
 
-                let vertices = generate_rect_vertices(
-                    screen_rect,
-                    tint.r,
-                    tint.g,
-                    tint.b,
-                    tint.a,
-                    0.0,
-                );
+                // Generate vertices with UV coords and corner_radius=-1 (texture mode)
+                let x0 = screen_rect.x; let y0 = screen_rect.y;
+                let x1 = screen_rect.x + screen_rect.width;
+                let y1 = screen_rect.y + screen_rect.height;
+                let u0 = uv_rect.x; let v0 = uv_rect.y;
+                let u1 = uv_rect.x + uv_rect.width;
+                let v1 = uv_rect.y + uv_rect.height;
+                let r = tint.r; let g = tint.g; let b = tint.b; let a = tint.a;
+                let vertices = vec![
+                    RectVertex::new(x0, y0, u0, v0, r, g, b, a, -1.0),
+                    RectVertex::new(x1, y0, u1, v0, r, g, b, a, -1.0),
+                    RectVertex::new(x0, y1, u0, v1, r, g, b, a, -1.0),
+                    RectVertex::new(x0, y1, u0, v1, r, g, b, a, -1.0),
+                    RectVertex::new(x1, y0, u1, v0, r, g, b, a, -1.0),
+                    RectVertex::new(x1, y1, u1, v1, r, g, b, a, -1.0),
+                ];
                 current_batch.vertices.extend(vertices);
             }
             DrawCommand::Line {
