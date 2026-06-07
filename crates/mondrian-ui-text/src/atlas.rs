@@ -23,7 +23,7 @@ pub struct GlyphAtlas {
     atlas: TextureAtlas,
     cache: SwashCache,
     /// Map from cache_key to (uv_rect, bmp_w, bmp_h, top, left)
-    glyph_map: HashMap<CacheKey, (Rect, u32, u32, i32, i32)>,
+    glyph_map: HashMap<CacheKey, (Rect, u32, u32, i32, i32, i32, i32)>,
     pub pending_uploads: Vec<GlyphUpload>,
     pad: u32,
 }
@@ -46,11 +46,14 @@ impl GlyphAtlas {
         font_system: &mut FontSystem,
         glyph: &LayoutGlyph,
         sub_x: f32,
-    ) -> Option<(Rect, u32, u32, i32, i32)> {
+    ) -> Option<(Rect, u32, u32, i32, i32, i32, i32)> {
         let physical = glyph.physical((sub_x, 0.0), 1.0);
         let cache_key = physical.cache_key;
-        if let Some(&(uv, w, h, top, left)) = self.glyph_map.get(&cache_key) {
-            return Some((uv, w, h, top, left));
+        // physical.x/y = hinting-adjusted pixel snap; use alongside cache_key
+        let phys_x = physical.x;
+        let phys_y = physical.y;
+        if let Some(&(uv, w, h, top, left, px, py)) = self.glyph_map.get(&cache_key) {
+            return Some((uv, w, h, top, left, px, py));
         }
 
         let image = self.cache.get_image(font_system, cache_key);
@@ -78,7 +81,7 @@ impl GlyphAtlas {
             bmp_h as f32 / self.atlas.height as f32,
         );
 
-        self.glyph_map.insert(cache_key, (uv_rect, bmp_w, bmp_h, top, left));
+        self.glyph_map.insert(cache_key, (uv_rect, bmp_w, bmp_h, top, left, phys_x, phys_y));
         self.pending_uploads.push(GlyphUpload {
             x: px, y: py,
             width: bmp_w, height: bmp_h,
@@ -200,7 +203,7 @@ mod tests {
 
         // First call rasterizes (returns None), second returns cached UV
         let _ = atlas.get_or_rasterize(&mut mgr.font_system, &glyphs[0], 0.0);
-        let (uv, _w, _h, _top, _left) = atlas.get_or_rasterize(&mut mgr.font_system, &glyphs[0], 0.0)
+        let (uv, _w, _h, _top, _left, _, _) = atlas.get_or_rasterize(&mut mgr.font_system, &glyphs[0], 0.0)
             .expect("Second call should return cached UV");
 
         assert!(uv.x >= 0.0 && uv.x <= 1.0, "UV x={} out of [0,1]", uv.x);
@@ -290,7 +293,7 @@ mod tests {
             assert!(second.is_some(), "Second call should return cached UV+size");
         } else {
             // Already cached somehow — should be the same
-            assert_eq!(first.map(|(r, _, _, _, _)| r), second.map(|(r, _, _, _, _)| r));
+            assert_eq!(first.map(|(r, _, _, _, _, _, _)| r), second.map(|(r, _, _, _, _, _, _)| r));
         }
     }
 }
