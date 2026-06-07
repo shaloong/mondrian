@@ -47,31 +47,30 @@ impl DiagWidget {
 }
 impl Widget for DiagWidget {
     fn id(&self) -> WidgetId { self.id }
-    fn measure(&self, _c: LayoutConstraint) -> Size { Size::new(800.0, 500.0) }
+    fn measure(&self, _c: LayoutConstraint) -> Size { Size::new(1200.0, 1200.0) }
     fn layout(&mut self, b: Rect) { self.bounds = b; }
     fn event(&mut self, _e: &UiEvent, _c: &mut EventContext) -> EventResult { EventResult::Ignored }
     fn paint(&self, ctx: &mut PaintContext) {
         let bg = Color::from_hex(0x1A1A2E);
         ctx.encoder.draw_rect(self.bounds, bg, 0.0);
         let c = Color::from_hex(0xEBEBF0);
-        // Test 1: same text at various sizes
-        let text = "File Edit View Help ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-        let sizes = [12.0, 13.0, 14.0, 15.0, 16.0, 20.0, 24.0, 36.0, 48.0];
+
+        // Minimal debug text: just a few sizes
+        let text = "File Edit View Help";
+        let sizes = [12.0, 13.0, 14.0, 15.0, 16.0];
         let mut y = 10.0;
         for &fs in &sizes {
             ctx.encoder.draw_text(text, fs, Point::new(10.0, y), c);
             y += fs * 1.5 + 4.0;
         }
-
-        // Test 2: "l" at stepped X positions to expose subpixel binning
+        // Also test 'l' at subpixel positions
         y += 20.0;
-        for &fs in &[13.0, 14.0, 16.0, 20.0] {
-            for i in 0..8 {
+        for &fs in &[13.0, 14.0] {
+            for i in 0..4 {
                 let px = 10.0 + i as f32 * 0.25;
                 ctx.encoder.draw_text("l", fs, Point::new(px, y), c);
             }
-            ctx.encoder.draw_text(&format!("{}px", fs as i32), 10.0, Point::new(10.0, y + fs * 1.3), c);
-            y += fs * 1.5 + 20.0;
+            y += fs * 1.5 + 10.0;
         }
     }
     fn hit_test(&self, _p: Point) -> bool { false }
