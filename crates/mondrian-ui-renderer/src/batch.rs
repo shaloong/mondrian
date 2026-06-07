@@ -101,13 +101,15 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                 let u1 = uv_rect.x + uv_rect.width;
                 let v1 = uv_rect.y + uv_rect.height;
                 let r = tint.r; let g = tint.g; let b = tint.b; let a = tint.a;
+                // NDC Y is flipped (y0=bottom, y1=top), so swap V coords:
+                // bottom vertices → v1 (bottom of glyph), top vertices → v0 (top of glyph)
                 let vertices = vec![
-                    RectVertex::new(x0, y0, u0, v0, r, g, b, a, -1.0),
-                    RectVertex::new(x1, y0, u1, v0, r, g, b, a, -1.0),
-                    RectVertex::new(x0, y1, u0, v1, r, g, b, a, -1.0),
-                    RectVertex::new(x0, y1, u0, v1, r, g, b, a, -1.0),
-                    RectVertex::new(x1, y0, u1, v0, r, g, b, a, -1.0),
-                    RectVertex::new(x1, y1, u1, v1, r, g, b, a, -1.0),
+                    RectVertex::new(x0, y0, u0, v1, r, g, b, a, -1.0),
+                    RectVertex::new(x1, y0, u1, v1, r, g, b, a, -1.0),
+                    RectVertex::new(x0, y1, u0, v0, r, g, b, a, -1.0),
+                    RectVertex::new(x0, y1, u0, v0, r, g, b, a, -1.0),
+                    RectVertex::new(x1, y0, u1, v1, r, g, b, a, -1.0),
+                    RectVertex::new(x1, y1, u1, v0, r, g, b, a, -1.0),
                 ];
                 current_batch.vertices.extend(vertices);
             }
@@ -519,19 +521,18 @@ mod tests {
         let verts = &batches[0].vertices;
         assert_eq!(verts.len(), 6);
 
-        // First vertex should have the UV rect's top-left
-        assert!((verts[0].tex_coord[0] - uv.x).abs() < 0.001,
-            "tex_coord.u={} should be {}", verts[0].tex_coord[0], uv.x);
-        assert!((verts[0].tex_coord[1] - uv.y).abs() < 0.001,
-            "tex_coord.v={} should be {}", verts[0].tex_coord[1], uv.y);
-
-        // Last vertex should have the UV rect's bottom-right
-        let ur = uv.x + uv.width;
-        let vr = uv.y + uv.height;
-        assert!((verts[5].tex_coord[0] - ur).abs() < 0.001,
-            "last tex_coord.u={} should be {}", verts[5].tex_coord[0], ur);
-        assert!((verts[5].tex_coord[1] - vr).abs() < 0.001,
-            "last tex_coord.v={} should be {}", verts[5].tex_coord[1], vr);
+        // After Y-flip correction: bottom vertices get v1 (bottom UV), top get v0
+        let v0 = uv.y;
+        let v1 = uv.y + uv.height;
+        // verts[0] is bottom-left: should have v=v1 (bottom of glyph)
+        assert!((verts[0].tex_coord[1] - v1).abs() < 0.001,
+            "bottom-left v={} should be v1={}", verts[0].tex_coord[1], v1);
+        // verts[2] is top-left: should have v=v0 (top of glyph)
+        assert!((verts[2].tex_coord[1] - v0).abs() < 0.001,
+            "top-left v={} should be v0={}", verts[2].tex_coord[1], v0);
+        // verts[5] is top-right: u=right, v=top
+        assert!((verts[5].tex_coord[0] - (uv.x + uv.width)).abs() < 0.001);
+        assert!((verts[5].tex_coord[1] - v0).abs() < 0.001);
 
         // All vertices should have corner_radius = -1.0 (texture mode)
         for v in verts {

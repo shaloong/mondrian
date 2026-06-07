@@ -16,6 +16,7 @@ struct VertexOutput {
 fn main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Texture mode: corner_radius < 0 means Image command (glyph)
     if in.corner_radius < 0.0 {
+        
         let sampled = textureSample(glyph_texture, glyph_sampler, in.tex_coord);
         return vec4<f32>(in.color.rgb, in.color.a * sampled.a);
     }
