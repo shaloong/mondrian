@@ -44,7 +44,7 @@ impl UiRenderer {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm,
+            format: wgpu::TextureFormat::Rgba8Unorm,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -72,15 +72,18 @@ impl UiRenderer {
         Self { pipeline, glyph_texture, glyph_bind_group }
     }
 
-    /// 上传字形 alpha bitmap 到 GPU 图集纹理
+    /// 上传字形 bitmap 到 GPU 图集纹理（alpha→Rgba8 格式转换）
     pub fn upload_glyphs(&self, queue: &wgpu::Queue, uploads: &[GlyphUpload]) {
         for upload in uploads {
             if upload.width == 0 || upload.height == 0 { continue; }
-            let expected = (upload.width * upload.height) as usize;
-            let actual = upload.data.len();
-            if actual != expected {
+            let pixel_count = (upload.width * upload.height) as usize;
+            if upload.data.len() != pixel_count {
                 continue;
             }
+            // Convert alpha-only to RGBA: each pixel becomes [255, 255, 255, alpha]
+            let rgba: Vec<u8> = upload.data.iter()
+                .flat_map(|&a| vec![255u8, 255, 255, a])
+                .collect();
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &self.glyph_texture,
@@ -88,10 +91,10 @@ impl UiRenderer {
                     origin: wgpu::Origin3d { x: upload.x, y: upload.y, z: 0 },
                     aspect: wgpu::TextureAspect::All,
                 },
-                &upload.data,
+                &rgba,
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(upload.width),
+                    bytes_per_row: Some(upload.width * 4),
                     rows_per_image: Some(upload.height),
                 },
                 wgpu::Extent3d { width: upload.width, height: upload.height, depth_or_array_layers: 1 },
