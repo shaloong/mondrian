@@ -180,6 +180,17 @@ impl DrawCommandEncoder for DrawEncoder {
         self.draw_line(start, end, width, color);
     }
 
+    fn draw_text(&mut self, text: &str, font_size: f32, position: Point, color: Color) {
+        use mondrian_ui_theme::typography::FontWeight;
+        let style = TextStyle {
+            font_size,
+            line_height: font_size * 1.3,
+            font_weight: FontWeight::Regular,
+            letter_spacing: 0.0,
+        };
+        self.draw_text(text, &style, position, color);
+    }
+
     fn push_translate(&mut self, offset: Vec2) {
         self.push_translate(offset);
     }

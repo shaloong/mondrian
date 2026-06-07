@@ -130,6 +130,9 @@ impl Widget for Dropdown {
         ctx.encoder.draw_rect(btn_rect, bg, spacing.radius_sm);
 
         // Dropdown arrow indicator
+        if !self.label.is_empty() {
+            ctx.encoder.draw_text(&self.label, 13.0, Point::new(btn_rect.x + 8.0, btn_rect.y + 5.0), tokens.foreground);
+        }
         let arrow_x = btn_rect.x + btn_rect.width - 16.0;
         let arrow_y = btn_rect.y + btn_rect.height * 0.5;
         ctx.encoder.draw_line(
@@ -165,14 +168,15 @@ impl Widget for Dropdown {
                 };
                 ctx.encoder.draw_rect(item_rect, fill, 0.0);
 
-                // Text color
-                let text_color = if item.enabled { tokens.foreground } else { tokens.muted_foreground };
-                // Draw a small indicator line for hover / disabled
+                // Item label
+                ctx.encoder.draw_text(&item.label, 13.0,
+                    Point::new(item_rect.x + 6.0, item_rect.y + 5.0),
+                    if item.enabled { tokens.foreground } else { tokens.muted_foreground });
                 if !item.enabled {
                     ctx.encoder.draw_line(
                         Point::new(item_rect.x + 4.0, item_rect.y + item_rect.height * 0.5),
                         Point::new(item_rect.x + item_rect.width - 4.0, item_rect.y + item_rect.height * 0.5),
-                        1.0, text_color,
+                        1.0, tokens.muted_foreground,
                     );
                 }
             }

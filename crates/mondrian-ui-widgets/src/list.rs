@@ -107,6 +107,7 @@ impl Widget for List {
         let visible = start_idx.min(self.items.len())..end_idx.min(self.items.len());
 
         for i in visible {
+            let item = &self.items[i];
             let y = self.bounds.y + i as f32 * self.row_height - self.scroll_offset;
             let row = Rect::new(self.bounds.x + 2.0, y, self.bounds.width - 4.0, self.row_height);
 
@@ -118,6 +119,9 @@ impl Widget for List {
                 tokens.card
             };
             ctx.encoder.draw_rect(row, fill, spacing.radius_sm);
+            if !item.label.is_empty() {
+                ctx.encoder.draw_text(&item.label, 13.0, Point::new(row.x + 8.0, row.y + 5.0), tokens.foreground);
+            }
         }
 
         ctx.encoder.pop_clip();

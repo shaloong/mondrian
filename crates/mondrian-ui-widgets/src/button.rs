@@ -105,6 +105,12 @@ impl Widget for Button {
         };
 
         ctx.encoder.draw_rect(self.bounds, bg, spacing.radius_md);
+        if !self.label.is_empty() {
+            let tw = self.label.chars().count() as f32 * 7.0;
+            let tx = self.bounds.x + (self.bounds.width - tw).max(0.0) * 0.5;
+            let ty = self.bounds.y + (self.bounds.height - 14.0).max(0.0) * 0.5;
+            ctx.encoder.draw_text(&self.label, 13.0, Point::new(tx, ty), tokens.foreground);
+        }
     }
 
     fn hit_test(&self, point: Point) -> bool {

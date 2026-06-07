@@ -127,6 +127,11 @@ impl Widget for Checkbox {
         }
 
         // Label text drawn by app-level TextRenderer
+        if !self.label.is_empty() {
+            let tx = self.bounds.x + 20.0;
+            let ty = self.bounds.y + (self.bounds.height - 12.0) * 0.5;
+            ctx.encoder.draw_text(&self.label, 13.0, Point::new(tx, ty), tokens.foreground);
+        }
     }
 
     fn hit_test(&self, point: Point) -> bool {

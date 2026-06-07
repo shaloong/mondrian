@@ -159,6 +159,11 @@ impl Widget for TextInput {
         }
 
         // Text drawn by app-level TextRenderer
+        if !self.text.is_empty() {
+            ctx.encoder.draw_text(&self.text, 13.0, Point::new(self.bounds.x + 8.0, self.bounds.y + 5.0), tokens.foreground);
+        } else if self.focused {
+            ctx.encoder.draw_text(&self.placeholder, 13.0, Point::new(self.bounds.x + 8.0, self.bounds.y + 5.0), tokens.muted_foreground);
+        }
     }
 
     fn hit_test(&self, point: Point) -> bool {

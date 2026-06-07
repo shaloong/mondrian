@@ -69,6 +69,7 @@ pub trait DrawCommandEncoder {
     fn pop_clip(&mut self);
     fn draw_rect(&mut self, bounds: Rect, color: mondrian_core::Color, corner_radius: f32);
     fn draw_line(&mut self, start: Point, end: Point, width: f32, color: mondrian_core::Color);
+    fn draw_text(&mut self, text: &str, font_size: f32, position: Point, color: mondrian_core::Color);
     fn push_translate(&mut self, offset: glam::Vec2);
     fn pop_transform(&mut self);
 }
@@ -155,6 +156,7 @@ mod tests {
             self.rects.push((bounds, color, corner_radius));
         }
         fn draw_line(&mut self, _start: Point, _end: Point, _width: f32, _color: Color) {}
+        fn draw_text(&mut self, _text: &str, _font_size: f32, _position: Point, _color: Color) {}
         fn push_translate(&mut self, _offset: Vec2) {}
         fn pop_transform(&mut self) {}
     }

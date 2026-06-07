@@ -169,6 +169,7 @@ mod tests {
             self.rect_count += 1;
         }
         fn draw_line(&mut self, _start: Point, _end: Point, _width: f32, _color: Color) {}
+        fn draw_text(&mut self, _text: &str, _font_size: f32, _position: Point, _color: Color) {}
         fn push_translate(&mut self, _offset: glam::Vec2) {}
         fn pop_transform(&mut self) {}
     }
