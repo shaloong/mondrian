@@ -42,32 +42,18 @@ impl TextRenderer {
             TextLayout::new_single_line(font_system, text, attrs, font_size)
         };
 
-        // Line metrics from cosmic-text Buffer
+        // Use cosmic-text Metrics for stable baseline (font metrics drive layout,
+        // not rasterized glyph tops which vary with hinting/shape/subpixel).
         let line_h = layout.buffer().metrics().line_height;
-        // Compute real ascent by looking at the average placement.top from rasterized glyphs.
-        // We rasterize the first few glyphs to get actual font ascent, using it as the
-        // shared baseline offset for the entire line.
-        let mut ascent_samples = Vec::new();
-        for (_line_y, glyph) in layout.positioned_glyphs().iter().take(4) {
-            if let Some((_, _, _, top, _)) = self.atlas.get_or_rasterize(font_system, glyph, 0.0) {
-                ascent_samples.push(top as f32);
-            }
-        }
-        let measured_ascent = if ascent_samples.is_empty() {
-            font_size * 0.75 // fallback
-        } else {
-            ascent_samples.iter().sum::<f32>() / ascent_samples.len() as f32
-        };
-        // Baseline: extra space split evenly, then offset by measured ascent
-        // floor() for stable pixel alignment; comment out .floor() for float experiment
-        // Experiment: try .floor(), .round(), or remove for full float
-        let baseline_y = (position.y + (line_h - measured_ascent).max(0.0) * 0.5 + measured_ascent).round();
+        let ascent = font_size * 0.75; // stable proportional estimate
+        // Full-float baseline: no premature rounding. Snap, if any, belongs at GPU vertex stage.
+        let baseline_y = position.y + (line_h - font_size).max(0.0) * 0.5 + ascent;
 
         let mut commands = Vec::new();
         for (_line_y, glyph) in layout.positioned_glyphs() {
-            // Subpixel offset from screen X position for proper glyph caching
-            let sub_x = ((position.x + glyph.x).fract() * 4.0).round() / 4.0;
-            if let Some((uv_rect, bmp_w, bmp_h, top, left)) = self.atlas.get_or_rasterize(font_system, glyph, sub_x) {
+            // Subpixel positioning: cache key uses 0.0 (atlas not polluted by subpixel variants);
+            // subpixel offset affects only final bitmap_x position via glyph.x.fract().
+            if let Some((uv_rect, bmp_w, bmp_h, top, left)) = self.atlas.get_or_rasterize(font_system, glyph, 0.0) {
                 let bitmap_x = position.x + glyph.x + left as f32;
                 let bitmap_top = baseline_y - top as f32;
                 commands.push(DrawCommand::Image {
