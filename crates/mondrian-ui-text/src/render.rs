@@ -42,12 +42,12 @@ impl TextRenderer {
             TextLayout::new_single_line(font_system, text, attrs, font_size)
         };
 
-        // Use cosmic-text Metrics for stable baseline (font metrics drive layout,
-        // not rasterized glyph tops which vary with hinting/shape/subpixel).
-        let line_h = layout.buffer().metrics().line_height;
-        let ascent = font_size * 0.75; // stable proportional estimate
-        // Full-float baseline: no premature rounding. Snap, if any, belongs at GPU vertex stage.
-        let baseline_y = position.y + (line_h - font_size).max(0.0) * 0.5 + ascent;
+        // Real font ascent: distance from line_top to baseline (cosmic-text measured)
+        let ascent = layout.buffer().layout_runs()
+            .next()
+            .map(|run| run.line_y - run.line_top)
+            .unwrap_or(font_size * 0.75);
+        let baseline_y = position.y + ascent;
 
         let mut commands = Vec::new();
         for (_line_y, glyph) in layout.positioned_glyphs() {
