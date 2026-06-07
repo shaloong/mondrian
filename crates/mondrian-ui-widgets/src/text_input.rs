@@ -136,9 +136,9 @@ impl Widget for TextInput {
         let spacing = &ctx.theme.spacing;
 
         let bg = if self.focused {
-            tokens.bg_surface_raised
+            tokens.popover
         } else {
-            tokens.bg_surface
+            tokens.card
         };
         let border = tokens.border_for_state(self.focused);
 
@@ -154,7 +154,7 @@ impl Widget for TextInput {
                 Point::new(cursor_x, cy),
                 Point::new(cursor_x, cy + ch),
                 1.0,
-                tokens.text_primary,
+                tokens.foreground,
             );
         }
 

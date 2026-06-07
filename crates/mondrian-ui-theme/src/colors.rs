@@ -1,318 +1,238 @@
-//! 语义化颜色 Token
+//! 语义化颜色 Token — shadcn/ui 风格
 //!
-//! 每个 Token 描述 UI 用途，而非具体色值。
-//! Dark/Light 变体提供完整的双色方案。
-//! Resolve/Premiere/Fusion 变体模仿对应编辑器的默认风格。
+//! 每个 Token 描述 UI 用途，不描述具体色值。
+//! 命名约定参考 shadcn/ui：每个有色表面都有对应的 foreground（文字色）。
+//! 视觉风格参考 Apple Human Interface：低对比度边框、微妙层次、柔和阴影。
 
 use mondrian_core::Color;
 
-/// 语义化颜色面板 —— 所有 UI 颜色从这里获取
+/// 语义化颜色面板
 #[derive(Debug, Clone)]
 pub struct ColorTokens {
-    // 背景层次
-    pub bg_base: Color,
-    pub bg_surface: Color,
-    pub bg_surface_raised: Color,
-    pub bg_surface_hover: Color,
-    pub bg_surface_active: Color,
+    // ── 表面层级 (Surface Hierarchy) ──────────────────────────────────────
+    /// 窗口/页面背景
+    pub background: Color,
+    /// 默认文字色
+    pub foreground: Color,
 
-    // 边框
-    pub border_subtle: Color,
-    pub border_emphasis: Color,
-    pub panel_divider_strong: Color,
+    /// 卡片/面板背景（第一级抬升）
+    pub card: Color,
+    /// 卡片文字色
+    pub card_foreground: Color,
 
-    // 文本
-    pub text_primary: Color,
-    pub text_muted: Color,
+    /// 弹出层背景（第二级抬升：dropdown, tooltip, popover）
+    pub popover: Color,
+    /// 弹出层文字色
+    pub popover_foreground: Color,
 
-    // 状态色
-    pub status_warning: Color,
-    pub status_success: Color,
-    pub status_error: Color,
+    // ── 品牌 / 交互 (Brand & Interactive) ─────────────────────────────────
+    /// 主色调（按钮、链接、选中态）
+    pub primary: Color,
+    /// 主色调上的文字
+    pub primary_foreground: Color,
 
-    // 交互
-    pub interaction_highlight: Color,
-    pub accent_secondary: Color,
-    pub accent_audio: Color,
+    /// 次要色调（次要按钮、标签）
+    pub secondary: Color,
+    /// 次要色调上的文字
+    pub secondary_foreground: Color,
 
-    // 时间线专属
+    // ── 辅助色 (Utility) ──────────────────────────────────────────────────
+    /// 弱化背景（禁用的按钮、占位符区域）
+    pub muted: Color,
+    /// 弱化文字（辅助说明、placeholder）
+    pub muted_foreground: Color,
+
+    /// 强调背景（hover 高亮、选中项背景）
+    pub accent: Color,
+    /// 强调文字
+    pub accent_foreground: Color,
+
+    /// 危险/删除操作色
+    pub destructive: Color,
+    /// 危险色上的文字
+    pub destructive_foreground: Color,
+
+    // ── 边框 & 输入 (Borders & Inputs) ────────────────────────────────────
+    /// 默认边框
+    pub border: Color,
+    /// 输入框边框
+    pub input: Color,
+    /// 聚焦环（focus ring）
+    pub ring: Color,
+
+    // ── 状态色 (Status) ───────────────────────────────────────────────────
+    pub success: Color,
+    pub warning: Color,
+    pub error: Color,
+
+    // ── 时间线专色 (Timeline) ─────────────────────────────────────────────
     pub timeline_clip_video: Color,
     pub timeline_clip_audio: Color,
     pub timeline_playhead: Color,
 
-    // 画布
-    pub canvas_bg: Color,
-    pub image_tint: Color,
+    // ── 画布 (Canvas) ─────────────────────────────────────────────────────
+    pub canvas: Color,
+    /// 画布上的叠加层（安全区域、参考线）
+    pub canvas_overlay: Color,
 
-    // 覆盖层
-    pub overlay_fill: Color,
-    pub overlay_stroke: Color,
+    // ── 滚动条 (Scrollbar) ────────────────────────────────────────────────
+    pub scrollbar_thumb: Color,
 }
 
 impl ColorTokens {
+    /// Dark 主题 — 深色背景 + 高对比度文字
     pub fn dark() -> Self {
         Self {
-            bg_base: Color::from_hex(0x121212),
-            bg_surface: Color::from_hex(0x1E1E1E),
-            bg_surface_raised: Color::from_hex(0x252527),
-            bg_surface_hover: Color::from_hex(0x2B2B30),
-            bg_surface_active: Color::from_hex(0x333338),
-            border_subtle: Color::from_hex(0x3A3A3C),
-            border_emphasis: Color::from_hex(0x4C4C52),
-            panel_divider_strong: Color::from_hex(0x2F2F33),
-            text_primary: Color::from_hex(0xF2F2F2),
-            text_muted: Color::from_hex(0x767680),
-            status_warning: Color::from_hex(0xF58220),
-            status_success: Color::from_hex(0x73D18F),
-            status_error: Color::from_hex(0xE36D6D),
-            interaction_highlight: Color::from_hex(0x006EFF),
-            accent_secondary: Color::from_hex(0x0A3565),
-            accent_audio: Color::from_hex(0x5AC8FA),
-            timeline_clip_video: Color::from_hex(0x0A3565),
+            background: Color::from_hex(0x0B0B0E),
+            foreground: Color::from_hex(0xEBEBF0),
+            card: Color::from_hex(0x16161A),
+            card_foreground: Color::from_hex(0xEBEBF0),
+            popover: Color::from_hex(0x1C1C22),
+            popover_foreground: Color::from_hex(0xEBEBF0),
+
+            primary: Color::from_hex(0x3B82F6),
+            primary_foreground: Color::WHITE,
+            secondary: Color::from_hex(0x27272D),
+            secondary_foreground: Color::from_hex(0xD4D4DB),
+
+            muted: Color::from_hex(0x1C1C22),
+            muted_foreground: Color::from_hex(0x717182),
+            accent: Color::from_hex(0x27272D),
+            accent_foreground: Color::from_hex(0xD4D4DB),
+
+            destructive: Color::from_hex(0x7F1D1D),
+            destructive_foreground: Color::from_hex(0xFCA5A5),
+
+            border: Color::from_hex(0x27272D),
+            input: Color::from_hex(0x27272D),
+            ring: Color::from_hex(0x3B82F6),
+
+            success: Color::from_hex(0x22C55E),
+            warning: Color::from_hex(0xF59E0B),
+            error: Color::from_hex(0xEF4444),
+
+            timeline_clip_video: Color::from_hex(0x1E3A5F),
             timeline_clip_audio: Color::from_hex(0x1D587B),
-            timeline_playhead: Color::from_hex(0x006EFF),
-            canvas_bg: Color::BLACK,
-            image_tint: Color::WHITE,
-            overlay_fill: Color { r: 0.071, g: 0.071, b: 0.071, a: 0.91 },
-            overlay_stroke: Color { r: 0.353, g: 0.784, b: 0.980, a: 0.627 },
+            timeline_playhead: Color::from_hex(0x3B82F6),
+
+            canvas: Color::BLACK,
+            canvas_overlay: Color { r: 1.0, g: 1.0, b: 1.0, a: 0.08 },
+
+            scrollbar_thumb: Color::from_hex(0x3F3F48),
         }
     }
 
+    /// Light 主题 — 浅色背景 + 柔和对比度
     pub fn light() -> Self {
         Self {
-            bg_base: Color::from_hex(0xFFFFFF),
-            bg_surface: Color::from_hex(0xFFFFFF),
-            bg_surface_raised: Color::from_hex(0xF7F9FC),
-            bg_surface_hover: Color::from_hex(0xECF1F7),
-            bg_surface_active: Color::from_hex(0xECF1F7),
-            border_subtle: Color::from_hex(0xD3DAE4),
-            border_emphasis: Color::from_hex(0xB4C0CE),
-            panel_divider_strong: Color::from_hex(0xC8D1DC),
-            text_primary: Color::from_hex(0x202733),
-            text_muted: Color::from_hex(0x677486),
-            status_warning: Color::from_hex(0xD4740A),
-            status_success: Color::from_hex(0x1D8948),
-            status_error: Color::from_hex(0xC13C3C),
-            interaction_highlight: Color::from_hex(0x0A63D8),
-            accent_secondary: Color::from_hex(0x1F5089),
-            accent_audio: Color::from_hex(0x1F95CB),
-            timeline_clip_video: Color::from_hex(0x3F6EB1),
-            timeline_clip_audio: Color::from_hex(0x4A92BC),
-            timeline_playhead: Color::from_hex(0x0A63D8),
-            canvas_bg: Color::from_hex(0x141414),
-            image_tint: Color::WHITE,
-            overlay_fill: Color { r: 0.094, g: 0.133, b: 0.188, a: 0.847 },
-            overlay_stroke: Color { r: 0.039, g: 0.388, b: 0.847, a: 0.533 },
+            background: Color::WHITE,
+            foreground: Color::from_hex(0x0B0B0E),
+            card: Color::from_hex(0xF4F4F5),
+            card_foreground: Color::from_hex(0x0B0B0E),
+            popover: Color::WHITE,
+            popover_foreground: Color::from_hex(0x0B0B0E),
+
+            primary: Color::from_hex(0x2563EB),
+            primary_foreground: Color::WHITE,
+            secondary: Color::from_hex(0xF4F4F5),
+            secondary_foreground: Color::from_hex(0x1A1A22),
+
+            muted: Color::from_hex(0xF4F4F5),
+            muted_foreground: Color::from_hex(0x717182),
+            accent: Color::from_hex(0xF4F4F5),
+            accent_foreground: Color::from_hex(0x1A1A22),
+
+            destructive: Color::from_hex(0xFEE2E2),
+            destructive_foreground: Color::from_hex(0x991B1B),
+
+            border: Color::from_hex(0xE4E4E7),
+            input: Color::from_hex(0xE4E4E7),
+            ring: Color::from_hex(0x2563EB),
+
+            success: Color::from_hex(0x16A34A),
+            warning: Color::from_hex(0xD97706),
+            error: Color::from_hex(0xDC2626),
+
+            timeline_clip_video: Color::from_hex(0xDBEAFE),
+            timeline_clip_audio: Color::from_hex(0xE0F2FE),
+            timeline_playhead: Color::from_hex(0x2563EB),
+
+            canvas: Color::from_hex(0x0B0B0E),
+            canvas_overlay: Color { r: 0.0, g: 0.0, b: 0.0, a: 0.06 },
+
+            scrollbar_thumb: Color::from_hex(0xD4D4D8),
         }
     }
 
-    /// Resolve 风格 —— 深灰背景 + 蓝色强调 + 高对比度
+    /// Resolve 风格 — 深灰 + 蓝
     pub fn resolve() -> Self {
+        let base = Self::dark();
         Self {
-            bg_base: Color::from_hex(0x1A1A1A),
-            bg_surface: Color::from_hex(0x232323),
-            bg_surface_raised: Color::from_hex(0x2A2A2A),
-            bg_surface_hover: Color::from_hex(0x333333),
-            bg_surface_active: Color::from_hex(0x3D3D3D),
-            border_subtle: Color::from_hex(0x383838),
-            border_emphasis: Color::from_hex(0x505050),
-            panel_divider_strong: Color::from_hex(0x333333),
-            text_primary: Color::from_hex(0xE6E6E6),
-            text_muted: Color::from_hex(0x7A7A7A),
-            status_warning: Color::from_hex(0xF5A623),
-            status_success: Color::from_hex(0x6DD98A),
-            status_error: Color::from_hex(0xE05555),
-            interaction_highlight: Color::from_hex(0x2979FF),
-            accent_secondary: Color::from_hex(0x0D47A1),
-            accent_audio: Color::from_hex(0x40C4FF),
-            timeline_clip_video: Color::from_hex(0x0D47A1),
-            timeline_clip_audio: Color::from_hex(0x1565C0),
-            timeline_playhead: Color::from_hex(0x2979FF),
-            canvas_bg: Color::BLACK,
-            image_tint: Color::WHITE,
-            overlay_fill: Color { r: 0.1, g: 0.1, b: 0.1, a: 0.9 },
-            overlay_stroke: Color { r: 0.16, g: 0.47, b: 1.0, a: 0.6 },
+            background: Color::from_hex(0x111114),
+            card: Color::from_hex(0x1A1A1E),
+            popover: Color::from_hex(0x222228),
+            primary: Color::from_hex(0x4D94FF),
+            ring: Color::from_hex(0x4D94FF),
+            timeline_playhead: Color::from_hex(0x4D94FF),
+            timeline_clip_video: Color::from_hex(0x1E3A5F),
+            ..base
         }
     }
 
-    /// Premiere 风格 —— 深灰紫背景 + 品红强调
+    /// Premiere 风格 — 深紫 + 品红
     pub fn premiere() -> Self {
+        let base = Self::dark();
         Self {
-            bg_base: Color::from_hex(0x1E1E28),
-            bg_surface: Color::from_hex(0x262631),
-            bg_surface_raised: Color::from_hex(0x2E2E3A),
-            bg_surface_hover: Color::from_hex(0x363645),
-            bg_surface_active: Color::from_hex(0x404052),
-            border_subtle: Color::from_hex(0x3A3A48),
-            border_emphasis: Color::from_hex(0x505060),
-            panel_divider_strong: Color::from_hex(0x343440),
-            text_primary: Color::from_hex(0xE8E8F0),
-            text_muted: Color::from_hex(0x808090),
-            status_warning: Color::from_hex(0xE8A840),
-            status_success: Color::from_hex(0x50C878),
-            status_error: Color::from_hex(0xD84860),
-            interaction_highlight: Color::from_hex(0x8B4C9E),
-            accent_secondary: Color::from_hex(0x6A3D7C),
-            accent_audio: Color::from_hex(0x50B8E0),
-            timeline_clip_video: Color::from_hex(0x6A3D7C),
-            timeline_clip_audio: Color::from_hex(0x3D6B7C),
-            timeline_playhead: Color::from_hex(0x8B4C9E),
-            canvas_bg: Color::BLACK,
-            image_tint: Color::WHITE,
-            overlay_fill: Color { r: 0.118, g: 0.118, b: 0.157, a: 0.9 },
-            overlay_stroke: Color { r: 0.545, g: 0.298, b: 0.620, a: 0.6 },
+            background: Color::from_hex(0x12121A),
+            card: Color::from_hex(0x1C1C26),
+            popover: Color::from_hex(0x24242E),
+            primary: Color::from_hex(0xA855F7),
+            ring: Color::from_hex(0xA855F7),
+            timeline_playhead: Color::from_hex(0xA855F7),
+            timeline_clip_video: Color::from_hex(0x3B1F6E),
+            ..base
         }
     }
 
-    /// Fusion 风格 —— 深灰背景 + 橙黄强调（类似 DaVinci Fusion）
+    /// Fusion 风格 — 橙金强调
     pub fn fusion() -> Self {
+        let base = Self::dark();
         Self {
-            bg_base: Color::from_hex(0x181818),
-            bg_surface: Color::from_hex(0x212121),
-            bg_surface_raised: Color::from_hex(0x292929),
-            bg_surface_hover: Color::from_hex(0x323232),
-            bg_surface_active: Color::from_hex(0x3C3C3C),
-            border_subtle: Color::from_hex(0x363636),
-            border_emphasis: Color::from_hex(0x4E4E4E),
-            panel_divider_strong: Color::from_hex(0x303030),
-            text_primary: Color::from_hex(0xE5E5E5),
-            text_muted: Color::from_hex(0x787878),
-            status_warning: Color::from_hex(0xF5A623),
-            status_success: Color::from_hex(0x6BBF6B),
-            status_error: Color::from_hex(0xDE5A5A),
-            interaction_highlight: Color::from_hex(0xF0A030),
-            accent_secondary: Color::from_hex(0xB87820),
-            accent_audio: Color::from_hex(0x40B8E0),
-            timeline_clip_video: Color::from_hex(0xB87820),
-            timeline_clip_audio: Color::from_hex(0x5A8A40),
-            timeline_playhead: Color::from_hex(0xF0A030),
-            canvas_bg: Color::BLACK,
-            image_tint: Color::WHITE,
-            overlay_fill: Color { r: 0.094, g: 0.094, b: 0.094, a: 0.9 },
-            overlay_stroke: Color { r: 0.941, g: 0.627, b: 0.188, a: 0.6 },
+            background: Color::from_hex(0x111110),
+            card: Color::from_hex(0x1C1C18),
+            popover: Color::from_hex(0x242420),
+            primary: Color::from_hex(0xF59E0B),
+            ring: Color::from_hex(0xF59E0B),
+            timeline_playhead: Color::from_hex(0xF59E0B),
+            timeline_clip_video: Color::from_hex(0x5F3A1E),
+            ..base
         }
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════════
-// 便捷方法
-// ═══════════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
+// Convenience
+// ═══════════════════════════════════════════════════════════════════════════
 
 impl ColorTokens {
-    /// 将语义颜色转为 wgpu 兼容的 f32 数组
-    pub fn to_wgpu(&self, color: &mondrian_core::Color) -> [f32; 4] {
+    pub fn to_wgpu(&self, color: &Color) -> [f32; 4] {
         [color.r, color.g, color.b, color.a]
     }
 
-    /// 根据交互状态选择背景色
-    pub fn bg_for_state(&self, hovered: bool, active: bool) -> mondrian_core::Color {
-        if active {
-            self.bg_surface_active
-        } else if hovered {
-            self.bg_surface_hover
-        } else {
-            self.bg_surface
-        }
+    /// Hover / Active / Normal 背景选择
+    pub fn surface_for_state(&self, hovered: bool, active: bool) -> Color {
+        if active { self.accent }
+        else if hovered { self.muted }
+        else { self.card }
     }
 
-    /// 根据焦点状态选择边框色
-    pub fn border_for_state(&self, focused: bool) -> mondrian_core::Color {
-        if focused {
-            self.interaction_highlight
-        } else {
-            self.border_subtle
-        }
+    /// 焦点边框选择
+    pub fn border_for_state(&self, focused: bool) -> Color {
+        if focused { self.ring } else { self.border }
     }
 
-    /// 根据重要程度选择文字色
-    pub fn text_for_muted(&self, muted: bool) -> mondrian_core::Color {
-        if muted {
-            self.text_muted
-        } else {
-            self.text_primary
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Color preset value checks
-    // ═══════════════════════════════════════════════════════════════════════
-
-    #[test]
-    fn dark_text_primary_is_light() {
-        let c = ColorTokens::dark();
-        assert!(c.text_primary.r > 0.9);
-        assert!(c.text_primary.g > 0.9);
-        assert!(c.text_primary.b > 0.9);
-    }
-
-    #[test]
-    fn light_text_primary_is_dark() {
-        let c = ColorTokens::light();
-        let lum = 0.2126 * c.text_primary.r + 0.7152 * c.text_primary.g + 0.0722 * c.text_primary.b;
-        assert!(lum < 0.3);
-    }
-
-    #[test]
-    fn dark_and_light_have_sufficient_contrast() {
-        let dark = ColorTokens::dark();
-        let light = ColorTokens::light();
-        // Text on background should have good contrast
-        let dark_contrast = (dark.text_primary.r - dark.bg_base.r).abs()
-            + (dark.text_primary.g - dark.bg_base.g).abs()
-            + (dark.text_primary.b - dark.bg_base.b).abs();
-        let light_contrast = (light.text_primary.r - light.bg_base.r).abs()
-            + (light.text_primary.g - light.bg_base.g).abs()
-            + (light.text_primary.b - light.bg_base.b).abs();
-        assert!(dark_contrast > 1.5, "Dark theme should have high text/background contrast");
-        assert!(light_contrast > 1.5, "Light theme should have high text/background contrast");
-    }
-
-    #[test]
-    fn status_colors_are_distinguishable() {
-        for colors in [ColorTokens::dark(), ColorTokens::light()] {
-            assert_ne!(colors.status_warning, colors.status_success);
-            assert_ne!(colors.status_success, colors.status_error);
-            assert_ne!(colors.status_error, colors.status_warning);
-        }
-    }
-
-    #[test]
-    fn canvas_bg_is_black_in_all_presets() {
-        assert_eq!(ColorTokens::dark().canvas_bg, Color::BLACK);
-        assert_eq!(ColorTokens::light().canvas_bg, Color::from_hex(0x141414));
-        assert_eq!(ColorTokens::resolve().canvas_bg, Color::BLACK);
-        assert_eq!(ColorTokens::premiere().canvas_bg, Color::BLACK);
-        assert_eq!(ColorTokens::fusion().canvas_bg, Color::BLACK);
-    }
-
-    #[test]
-    fn bg_hierarchy_is_ascending() {
-        // bg_base < bg_surface < bg_surface_raised < bg_surface_hover < bg_surface_active
-        // in terms of luminance (for dark themes)
-        let dark = ColorTokens::dark();
-        let lum = |c: &Color| 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
-        assert!(lum(&dark.bg_base) <= lum(&dark.bg_surface));
-        assert!(lum(&dark.bg_surface) <= lum(&dark.bg_surface_raised));
-        assert!(lum(&dark.bg_surface_raised) <= lum(&dark.bg_surface_hover));
-        assert!(lum(&dark.bg_surface_hover) <= lum(&dark.bg_surface_active));
-    }
-
-    #[test]
-    fn overlay_colors_have_some_transparency() {
-        for colors in [
-            ColorTokens::dark(),
-            ColorTokens::light(),
-            ColorTokens::resolve(),
-            ColorTokens::premiere(),
-            ColorTokens::fusion(),
-        ] {
-            assert!(colors.overlay_fill.a < 1.0, "overlay_fill should be translucent");
-            assert!(colors.overlay_stroke.a < 1.0, "overlay_stroke should be translucent");
-        }
+    /// 文字色：主要 / 弱化
+    pub fn text_for_muted(&self, muted: bool) -> Color {
+        if muted { self.muted_foreground } else { self.foreground }
     }
 }

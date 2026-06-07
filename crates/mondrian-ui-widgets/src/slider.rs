@@ -90,7 +90,7 @@ impl Widget for Slider {
             self.track_height,
         );
         ctx.encoder
-            .draw_rect(track_bg, tokens.bg_surface_hover, spacing.radius_sm);
+            .draw_rect(track_bg, tokens.accent, spacing.radius_sm);
 
         // Filled track
         let ratio = (self.value - self.min) / (self.max - self.min);
@@ -98,7 +98,7 @@ impl Widget for Slider {
         if fill_w > 0.0 {
             let track_fill = Rect::new(self.bounds.x, track_y, fill_w, self.track_height);
             ctx.encoder
-                .draw_rect(track_fill, tokens.interaction_highlight, spacing.radius_sm);
+                .draw_rect(track_fill, tokens.primary, spacing.radius_sm);
         }
 
         // Thumb
@@ -114,7 +114,7 @@ impl Widget for Slider {
             self.thumb_size,
         );
         ctx.encoder
-            .draw_rect(thumb_rect, tokens.interaction_highlight, spacing.radius_full);
+            .draw_rect(thumb_rect, tokens.primary, spacing.radius_full);
     }
 
     fn hit_test(&self, point: Point) -> bool {

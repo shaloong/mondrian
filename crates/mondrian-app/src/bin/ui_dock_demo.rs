@@ -224,7 +224,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let theme = mondrian_ui_theme::current_theme();
                 // full-window background
                 let b = current_bounds.get();
-                encoder.draw_rect(b, theme.colors.bg_base, 0.0);
+                encoder.draw_rect(b, theme.colors.background, 0.0);
                 TreeWalker::paint(&root, &mut encoder, &theme);
                 let commands = encoder.finish();
 

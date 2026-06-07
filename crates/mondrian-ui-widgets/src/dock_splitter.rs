@@ -188,11 +188,11 @@ impl Widget for DockSplitter {
 
         // Handle color: highlight when dragging or hovered
         let handle_color = if self.dragging {
-            tokens.interaction_highlight
+            tokens.primary
         } else if self.handle_hovered {
-            tokens.border_emphasis
+            tokens.ring
         } else {
-            tokens.border_subtle
+            tokens.border
         };
 
         // 绘制把手线条（视觉上保持细线，在热区中心）

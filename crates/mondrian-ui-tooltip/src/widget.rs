@@ -80,10 +80,10 @@ impl Widget for TooltipWidget {
         let y = self.state.position.y + offset;
 
         let bg = Rect::new(x, y, tw, th);
-        let border = tokens.border_emphasis;
+        let border = tokens.ring;
 
         // Background
-        ctx.encoder.draw_rect(bg, tokens.bg_surface_raised, spacing.radius_sm);
+        ctx.encoder.draw_rect(bg, tokens.popover, spacing.radius_sm);
         // Simple border by drawing a slightly larger rect behind
         let border_rect = bg.inset(-1.0, -1.0);
         ctx.encoder.draw_rect(border_rect, border, spacing.radius_sm);

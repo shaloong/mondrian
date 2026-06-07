@@ -92,16 +92,16 @@ impl Widget for Checkbox {
 
         // Checkbox background
         let fill = if self.checked {
-            tokens.interaction_highlight
+            tokens.primary
         } else if self.hovered {
-            tokens.bg_surface_hover
+            tokens.accent
         } else {
-            tokens.bg_surface
+            tokens.card
         };
         let border = if self.checked || self.hovered {
-            tokens.interaction_highlight
+            tokens.primary
         } else {
-            tokens.border_subtle
+            tokens.border
         };
 
         ctx.encoder.draw_rect(box_rect, fill, spacing.radius_sm);
@@ -116,13 +116,13 @@ impl Widget for Checkbox {
                 Point::new(box_rect.x + inset, cy),
                 Point::new(cx, box_rect.y + box_rect.height - inset),
                 1.5,
-                tokens.text_primary,
+                tokens.foreground,
             );
             ctx.encoder.draw_line(
                 Point::new(cx, box_rect.y + box_rect.height - inset),
                 Point::new(box_rect.x + box_rect.width - inset, box_rect.y + inset),
                 1.5,
-                tokens.text_primary,
+                tokens.foreground,
             );
         }
 

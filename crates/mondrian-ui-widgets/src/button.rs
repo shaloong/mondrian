@@ -99,9 +99,9 @@ impl Widget for Button {
         let spacing = &ctx.theme.spacing;
 
         let bg = match self.state {
-            ButtonState::Normal => tokens.bg_surface,
-            ButtonState::Hovered => tokens.bg_surface_hover,
-            ButtonState::Pressed => tokens.bg_surface_active,
+            ButtonState::Normal => tokens.card,
+            ButtonState::Hovered => tokens.accent,
+            ButtonState::Pressed => tokens.muted,
         };
 
         ctx.encoder.draw_rect(self.bounds, bg, spacing.radius_md);

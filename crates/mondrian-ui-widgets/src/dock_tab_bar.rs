@@ -118,7 +118,7 @@ impl Widget for DockTabBar {
             self.bounds.width,
             self.bar_height,
         );
-        ctx.encoder.draw_rect(bg, tokens.bg_surface, 0.0);
+        ctx.encoder.draw_rect(bg, tokens.card, 0.0);
 
         let rects = self.tab_rects();
         for (i, tab) in self.tabs.iter().enumerate() {
@@ -130,11 +130,11 @@ impl Widget for DockTabBar {
             let is_hovered = self.hovered_tab == Some(i);
 
             let fill = if is_active {
-                tokens.bg_surface_raised
+                tokens.popover
             } else if is_hovered {
-                tokens.bg_surface_hover
+                tokens.accent
             } else {
-                tokens.bg_surface
+                tokens.card
             };
 
             let inset = r.inset(2.0, 2.0);
@@ -148,7 +148,7 @@ impl Widget for DockTabBar {
                     2.0,
                 );
                 ctx.encoder
-                    .draw_rect(indicator, tokens.interaction_highlight, 0.0);
+                    .draw_rect(indicator, tokens.primary, 0.0);
             }
         }
     }

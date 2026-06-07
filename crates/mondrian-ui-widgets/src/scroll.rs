@@ -133,7 +133,7 @@ impl Widget for ScrollView {
             );
             ctx.encoder.draw_rect(
                 sb_rect,
-                ctx.theme.colors.text_muted,
+                ctx.theme.colors.muted_foreground,
                 tokens.radius_sm,
             );
         }
