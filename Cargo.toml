@@ -20,6 +20,7 @@ members = [
     "crates/mondrian-ui-events",
     "crates/mondrian-ui-text",
     "crates/mondrian-ui-widgets",
+    "crates/mondrian-ui-tooltip",
     "crates/mondrian-panel-console",
 ]
 

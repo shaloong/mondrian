@@ -1,17 +1,19 @@
 //! 控制台日志捕获
 //!
-//! 通过 tracing 事件回调写入环形缓冲区。
+//! 通过 tracing_subscriber::Layer 将 tracing 事件写入环形缓冲区。
 
 use std::collections::VecDeque;
+use std::fmt::Write as FmtWrite;
 use std::sync::{Arc, Mutex};
 
-use chrono::{DateTime, Local};
+use chrono::Local;
 use tracing::Level;
+use tracing_subscriber::Layer;
 
 /// 日志条目
 #[derive(Debug, Clone)]
 pub struct LogEntry {
-    pub timestamp: DateTime<Local>,
+    pub timestamp: String,
     pub level: Level,
     pub target: String,
     pub message: String,
@@ -20,7 +22,15 @@ pub struct LogEntry {
 /// 线程安全的日志缓冲区
 pub type LogBuffer = Arc<Mutex<VecDeque<LogEntry>>>;
 
-/// 日志捕获 —— 将 tracing 事件写入共享缓冲区
+/// 日志捕获 Layer —— 将 tracing 事件写入共享缓冲区
+///
+/// ## 用法
+///
+/// ```ignore
+/// let (layer, buffer) = ConsoleLogLayer::new(500);
+/// tracing_subscriber::registry().with(layer).init();
+/// let panel = ConsolePanel::new(buffer, 500);
+/// ```
 pub struct ConsoleLogLayer {
     buffer: LogBuffer,
     max_lines: usize,
@@ -37,18 +47,29 @@ impl ConsoleLogLayer {
             buffer,
         )
     }
+}
 
-    /// 处理一个 tracing 事件
-    pub fn on_event(
+impl<S> Layer<S> for ConsoleLogLayer
+where
+    S: tracing::Subscriber,
+{
+    fn on_event(
         &self,
-        metadata: &tracing::Metadata<'_>,
-        message: &str,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
+        let metadata = event.metadata();
+        let mut message = String::new();
+        {
+            let mut visitor = StringVisitor(&mut message);
+            event.record(&mut visitor);
+        }
+
         let entry = LogEntry {
-            timestamp: Local::now(),
+            timestamp: Local::now().format("%H:%M:%S").to_string(),
             level: *metadata.level(),
             target: metadata.target().to_string(),
-            message: message.to_string(),
+            message,
         };
 
         let mut buf = self.buffer.lock().unwrap();
@@ -59,25 +80,40 @@ impl ConsoleLogLayer {
     }
 }
 
+/// Helper to extract formatted message from a tracing Event
+struct StringVisitor<'a>(&'a mut String);
+
+impl tracing::field::Visit for StringVisitor<'_> {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            let _ = write!(self.0, "{value:?}");
+        }
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "message" {
+            self.0.push_str(value);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn log_layer_creates_buffer() {
-        let (layer, buffer) = ConsoleLogLayer::new(100);
+        let (_layer, buffer) = ConsoleLogLayer::new(100);
         assert!(buffer.lock().unwrap().is_empty());
-        drop(layer);
     }
 
     #[test]
     fn log_layer_buffer_is_shared() {
         let (_layer, buffer) = ConsoleLogLayer::new(50);
-        // Push directly to test shared buffer
         {
             let mut buf = buffer.lock().unwrap();
             buf.push_back(LogEntry {
-                timestamp: Local::now(),
+                timestamp: "12:00:00".into(),
                 level: Level::INFO,
                 target: "test".into(),
                 message: "hello".into(),
@@ -88,14 +124,7 @@ mod tests {
 
     #[test]
     fn log_layer_evicts_oldest_when_full() {
-        let (layer, buffer) = ConsoleLogLayer::new(3);
-        // Use tracing's actual event mechanism by creating events
-        // that get captured. Since ConsoleLogLayer isn't registered as
-        // a subscriber, test the on_event directly using a simpler approach.
-
-        // Access the internal buffer by dropping layer
-        drop(layer);
-        // Push 4 items via buffer directly to test eviction
+        let (_layer, buffer) = ConsoleLogLayer::new(3);
         {
             let mut buf = buffer.lock().unwrap();
             for i in 1..=4 {
@@ -103,7 +132,7 @@ mod tests {
                     buf.pop_front();
                 }
                 buf.push_back(LogEntry {
-                    timestamp: Local::now(),
+                    timestamp: "12:00:00".into(),
                     level: Level::INFO,
                     target: "test".into(),
                     message: format!("msg{i}"),

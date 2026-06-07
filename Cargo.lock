@@ -3254,10 +3254,12 @@ dependencies = [
  "mondrian-editor-ui",
  "mondrian-platform",
  "mondrian-ui-core",
+ "mondrian-ui-layout",
  "mondrian-ui-theme",
  "mondrian-ui-widgets",
  "parking_lot",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3373,6 +3375,15 @@ dependencies = [
  "mondrian-core",
  "parking_lot",
  "serde",
+]
+
+[[package]]
+name = "mondrian-ui-tooltip"
+version = "0.1.0"
+dependencies = [
+ "mondrian-core",
+ "mondrian-ui-core",
+ "mondrian-ui-theme",
 ]
 
 [[package]]
