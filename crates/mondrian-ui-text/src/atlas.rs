@@ -22,8 +22,8 @@ pub struct GlyphUpload {
 pub struct GlyphAtlas {
     atlas: TextureAtlas,
     cache: SwashCache,
-    /// Map from cache_key to (uv_rect, bitmap_width, bitmap_height, placement_top)
-    glyph_map: HashMap<CacheKey, (Rect, u32, u32, i32)>,
+    /// Map from cache_key to (uv_rect, bmp_w, bmp_h, top, left)
+    glyph_map: HashMap<CacheKey, (Rect, u32, u32, i32, i32)>,
     pub pending_uploads: Vec<GlyphUpload>,
     pad: u32,
 }
@@ -45,15 +45,15 @@ impl GlyphAtlas {
         &mut self,
         font_system: &mut FontSystem,
         glyph: &LayoutGlyph,
-    ) -> Option<(Rect, u32, u32, i32)> {
+    ) -> Option<(Rect, u32, u32, i32, i32)> {
         let physical = glyph.physical((0.0, 0.0), 1.0);
         let cache_key = physical.cache_key;
-        if let Some(&(uv, w, h, top)) = self.glyph_map.get(&cache_key) {
-            return Some((uv, w, h, top));
+        if let Some(&(uv, w, h, top, left)) = self.glyph_map.get(&cache_key) {
+            return Some((uv, w, h, top, left));
         }
 
         let image = self.cache.get_image(font_system, cache_key);
-        let (bmp_w, bmp_h, top, alpha) = match image {
+        let (bmp_w, bmp_h, top, left, alpha) = match image {
             Some(img) => swash_to_alpha(img),
             None => return None,
         };
@@ -77,7 +77,7 @@ impl GlyphAtlas {
             bmp_h as f32 / self.atlas.height as f32,
         );
 
-        self.glyph_map.insert(cache_key, (uv_rect, bmp_w, bmp_h, top));
+        self.glyph_map.insert(cache_key, (uv_rect, bmp_w, bmp_h, top, left));
         self.pending_uploads.push(GlyphUpload {
             x: px, y: py,
             width: bmp_w, height: bmp_h,
@@ -91,16 +91,17 @@ impl GlyphAtlas {
     pub fn has_pending(&self) -> bool { !self.pending_uploads.is_empty() }
 }
 
-/// Convert swash Image to R8 alpha bitmap. Returns (width, height, placement_top, data).
-fn swash_to_alpha(image: &cosmic_text::SwashImage) -> (u32, u32, i32, Vec<u8>) {
+/// Convert swash Image to R8 alpha bitmap. Returns (width, height, top, left, data).
+fn swash_to_alpha(image: &cosmic_text::SwashImage) -> (u32, u32, i32, i32, Vec<u8>) {
     let w = image.placement.width;
     let h = image.placement.height;
     let top = image.placement.top;
+    let left = image.placement.left;
     match image.content {
         cosmic_text::SwashContent::Mask => {
             let mut alpha = image.data.clone();
             alpha.resize((w * h) as usize, 0);
-            (w, h, top, alpha)
+            (w, h, top, left, alpha)
         }
         cosmic_text::SwashContent::SubpixelMask => {
             let pixel_count = (w * h) as usize;
@@ -112,10 +113,10 @@ fn swash_to_alpha(image: &cosmic_text::SwashImage) -> (u32, u32, i32, Vec<u8>) {
                 alpha.push(gray as u8);
             }
             alpha.resize(pixel_count, 0);
-            (w, h, top, alpha)
+            (w, h, top, left, alpha)
         }
         _ => {
-            (w, h, top, vec![0u8; (w * h) as usize])
+            (w, h, top, left, vec![0u8; (w * h) as usize])
         }
     }
 }
@@ -198,7 +199,7 @@ mod tests {
 
         // First call rasterizes (returns None), second returns cached UV
         let _ = atlas.get_or_rasterize(&mut mgr.font_system, &glyphs[0]);
-        let (uv, _w, _h, _top) = atlas.get_or_rasterize(&mut mgr.font_system, &glyphs[0])
+        let (uv, _w, _h, _top, _left) = atlas.get_or_rasterize(&mut mgr.font_system, &glyphs[0])
             .expect("Second call should return cached UV");
 
         assert!(uv.x >= 0.0 && uv.x <= 1.0, "UV x={} out of [0,1]", uv.x);
@@ -288,7 +289,7 @@ mod tests {
             assert!(second.is_some(), "Second call should return cached UV+size");
         } else {
             // Already cached somehow — should be the same
-            assert_eq!(first.map(|(r, _, _, _)| r), second.map(|(r, _, _, _)| r));
+            assert_eq!(first.map(|(r, _, _, _, _)| r), second.map(|(r, _, _, _, _)| r));
         }
     }
 }

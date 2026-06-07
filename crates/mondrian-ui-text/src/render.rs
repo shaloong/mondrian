@@ -49,13 +49,14 @@ impl TextRenderer {
 
         let mut commands = Vec::new();
         for (_line_y, glyph) in layout.positioned_glyphs() {
-            if let Some((uv_rect, bmp_w, bmp_h, top)) = self.atlas.get_or_rasterize(font_system, glyph) {
-                let x = position.x + glyph.x;
-                // placement.top = distance from bitmap top to baseline (swash convention).
-                // Position bitmap so its internal baseline aligns with the line's baseline.
+            if let Some((uv_rect, bmp_w, bmp_h, top, left)) = self.atlas.get_or_rasterize(font_system, glyph) {
+                // Cosmic-text: visual at (glyph.x, baseline).
+                // Swash: visual at (placement.left, placement.top) within bitmap.
+                // Offset bitmap so visual content aligns with cosmic-text position.
+                let bitmap_x = position.x + glyph.x - left as f32;
                 let bitmap_top = baseline_y - top as f32;
                 commands.push(DrawCommand::Image {
-                    bounds: Rect::new(x, bitmap_top, bmp_w as f32, bmp_h as f32),
+                    bounds: Rect::new(bitmap_x, bitmap_top, bmp_w as f32, bmp_h as f32),
                     uv_rect,
                     tint: color,
                 });
