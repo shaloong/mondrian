@@ -45,7 +45,7 @@ impl ShortcutManager for ShortcutManagerImpl {
     }
 
     fn resolve(&self, key: KeyCode, modifiers: Modifiers) -> Option<Action> {
-        for (_scope, list) in &self.bindings {
+        for list in self.bindings.values() {
             for (binding, action) in list {
                 if binding.key == key && binding.modifiers == modifiers {
                     return Some(action.clone());
