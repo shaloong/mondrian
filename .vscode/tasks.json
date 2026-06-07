@@ -4,28 +4,45 @@
     {
       "type": "cargo",
       "command": "build",
-      "args": ["-p", "mondrian-app"],
-      "problemMatcher": ["$rustc"],
+      "args": [
+        "-p",
+        "mondrian-app"
+      ],
+      "problemMatcher": [
+        "$rustc"
+      ],
       "label": "构建主程序"
     },
     {
       "type": "cargo",
       "command": "run",
-      "args": ["-p", "mondrian-app"],
-      "problemMatcher": ["$rustc"],
+      "args": [
+        "-p",
+        "mondrian-app"
+      ],
+      "problemMatcher": [
+        "$rustc"
+      ],
       "label": "运行主程序"
     },
     {
       "label": "运行主程序(诊断日志)",
       "type": "shell",
       "command": "$env:RUST_BACKTRACE='full'; $env:RUST_LOG='debug,mondrian_app=debug,mondrian_media=debug,mondrian_assets=debug,wgpu_core=warn,wgpu_hal=warn,naga=warn'; $env:MONDRIAN_PREVIEW_DIAG='true'; $env:MONDRIAN_PREVIEW_DIAG_SLOW_MS='16'; $env:MONDRIAN_MEDIA_PROBE_SLOW_MS='30'; $env:MONDRIAN_UI_DIAG='1'; $env:MONDRIAN_UI_DIAG_SLOW_MS='100'; $env:MONDRIAN_PREVIEW_PERF='1'; cargo run -p mondrian-app",
-      "problemMatcher": ["$rustc"]
+      "problemMatcher": [
+        "$rustc"
+      ]
     },
     {
       "type": "cargo",
       "command": "run",
-      "args": ["--bin", "ui_dock_demo"],
-      "problemMatcher": ["$rustc"],
+      "args": [
+        "--bin",
+        "ui_dock_demo"
+      ],
+      "problemMatcher": [
+        "$rustc"
+      ],
       "label": "测试UI框架"
     }
   ]
