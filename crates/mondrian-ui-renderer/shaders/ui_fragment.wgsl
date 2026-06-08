@@ -13,13 +13,12 @@ struct VertexOutput {
     @location(3) @interpolate(flat) corner_radius_px: f32,
     @location(4) local_px: vec2<f32>,
     @location(5) @interpolate(flat) render_mode: u32,
+    @location(6) @interpolate(flat) aa_floor: f32,
 };
 
 @group(1) @binding(0) var glyph_sampler: sampler;
 @group(1) @binding(1) var glyph_texture: texture_2d<f32>;
 
-// Signed-distance to a rounded box in pixel space.
-// p in [0, size], r = corner radius in pixels.
 fn sd_rounded_box_px(p: vec2<f32>, size: vec2<f32>, r: f32) -> f32 {
     let half = size * 0.5;
     let q = abs(p - half) - half + r;
@@ -37,7 +36,7 @@ fn main(in: VertexOutput) -> @location(0) vec4<f32> {
     if r <= 0.0 { return in.color; }
 
     let d = sd_rounded_box_px(in.local_px, in.rect_size, r);
-    let aa = max(fwidth(d), 1.0);
+    let aa = max(fwidth(d), in.aa_floor);
     let alpha = 1.0 - smoothstep(-aa * 0.5, aa * 0.5, d);
     if alpha <= 0.001 { discard; }
     return vec4<f32>(in.color.rgb, in.color.a * alpha);
