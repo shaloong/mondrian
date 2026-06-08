@@ -117,3 +117,11 @@ the same math.
 Widgets emit draw commands only. Checkbox checkmarks are vector line commands,
 not font glyphs, so they are stable across operating systems and font stacks.
 Tooltip widgets draw border, fill, and text commands in that order.
+
+`DrawEncoder` snaps axis-aligned UI geometry to whole pixels at command
+recording time: rectangle bounds, line endpoints, clip bounds, image bounds,
+and translate offsets. This keeps rounded-rect circles, slider thumbs,
+splitter handles, and scrollbar thumbs visually stable after window resizing.
+Text positions are left to the text renderer and caller-side layout policy, and
+image UVs remain unsnapped because they are texture coordinates rather than
+screen-space geometry.

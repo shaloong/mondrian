@@ -579,8 +579,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             Event::WindowEvent { event: WindowEvent::MouseWheel { delta, .. }, .. } => {
                 let dy = match delta {
-                    winit::event::MouseScrollDelta::LineDelta(_, y) => y * 20.0,
-                    winit::event::MouseScrollDelta::PixelDelta(pos) => pos.y as f32,
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => -y * 20.0,
+                    winit::event::MouseScrollDelta::PixelDelta(pos) => -(pos.y as f32),
                 };
                 let _ = root.event(
                     &UiEvent::MouseWheel {

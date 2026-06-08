@@ -9,20 +9,22 @@
 //!   Layout: DockSplitter, DockTabBar, PanelSlot, ScrollView
 
 use std::cell::Cell;
+use std::cell::RefCell;
 use std::sync::Arc;
 
 use mondrian_core::Color;
 use mondrian_editor_state::Action;
-use mondrian_ui_core::focus::FocusManager;
-use mondrian_ui_core::shortcut::{ShortcutBinding, ShortcutManager, ShortcutScope};
-use mondrian_ui_core::tooltip::{TooltipManager, TooltipState};
+use mondrian_ui_core::tooltip::TooltipState;
+use mondrian_ui_core::tree::WidgetTreeView;
 use mondrian_ui_core::types::{self as ui_types, *};
-use mondrian_ui_core::widget::{EventContext, EventRequests, PaintContext};
+use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::widgets::ColoredBox;
 use mondrian_ui_core::{EventResult, TreeWalker, Widget};
+use mondrian_ui_events::EventRouter;
 use mondrian_ui_renderer::command::DrawEncoder;
 use mondrian_ui_renderer::UiRenderer;
 use mondrian_ui_text::{resolve_text_commands, TextRenderer};
+use mondrian_ui_tooltip::TooltipWidget;
 use mondrian_ui_widgets::button::Button;
 use mondrian_ui_widgets::checkbox::Checkbox;
 use mondrian_ui_widgets::context_menu::ContextMenu;
@@ -45,6 +47,17 @@ fn demo_action(name: &str) -> Action {
 
 thread_local! {
     static TEXT_INPUT_BOUNDS: Cell<Option<Rect>> = const { Cell::new(None) };
+    static DEMO_LAST_ACTION: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+fn record_demo_action(action: Action) {
+    DEMO_LAST_ACTION.with(|last| {
+        *last.borrow_mut() = Some(format!("{action:?}"));
+    });
+}
+
+fn take_demo_action() -> Option<String> {
+    DEMO_LAST_ACTION.with(|last| last.borrow_mut().take())
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -63,8 +76,11 @@ struct GalleryWidget {
     dropdown: Dropdown,
     list: List,
     scroll_area: ScrollView,
+    tooltip_trigger: Rect,
+    tooltip: TooltipWidget,
     context_menu: Option<ContextMenu>,
     last_action: String,
+    last_slider_value: f32,
     /// Index of the child that captured the mouse (during drag/selection)
     captured: Option<usize>,
 }
@@ -100,9 +116,35 @@ impl GalleryWidget {
             dropdown: Dropdown::new("选择选项", dropdown_items),
             list: List::new(list_items),
             scroll_area: ScrollView::new(Some(Box::new(scroll_content))),
+            tooltip_trigger: Rect::ZERO,
+            tooltip: TooltipWidget::new(),
             context_menu: None,
             last_action: String::new(),
+            last_slider_value: 50.0,
             captured: None,
+        }
+    }
+
+    fn update_hover_tooltip(&mut self, position: Point) {
+        if self.tooltip_trigger.contains(position) {
+            self.tooltip.update_state(TooltipState {
+                text: "Tooltip 示例：用于检查悬停提示、边界夹紧和文字绘制。".into(),
+                position,
+                visible: true,
+            });
+        } else {
+            self.tooltip.clear();
+        }
+    }
+
+    fn sync_child_feedback(&mut self) {
+        if let Some(action) = take_demo_action() {
+            self.last_action = action;
+        }
+        let slider_value = self.slider.value();
+        if (slider_value - self.last_slider_value).abs() > 0.05 {
+            self.last_slider_value = slider_value;
+            self.last_action = format!("slider={slider_value:.1}");
         }
     }
 }
@@ -140,8 +182,16 @@ impl Widget for GalleryWidget {
         self.slider.layout(Rect::new(x0, y, col_w, row_h));
         y += row_h + gap;
 
-        self.dropdown.layout(Rect::new(x0, y, 160.0, row_h));
-        y += row_h + 12.0;
+        let dropdown_w = col_w.clamp(1.0, 160.0);
+        self.dropdown.layout(Rect::new(x0, y, dropdown_w, row_h));
+        if col_w >= 260.0 {
+            self.tooltip_trigger = Rect::new(x0 + 172.0, y, (col_w - 172.0).max(0.0), row_h);
+            y += row_h + 12.0;
+        } else {
+            y += row_h + gap;
+            self.tooltip_trigger = Rect::new(x0, y, col_w.max(1.0), row_h);
+            y += row_h + 12.0;
+        }
 
         let list_h = 5.0 * 28.0;
         self.list.layout(Rect::new(x0, y, col_w * 0.55, list_h));
@@ -159,6 +209,10 @@ impl Widget for GalleryWidget {
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if let UiEvent::MouseMove { position, .. } = event {
+            self.update_hover_tooltip(*position);
+        }
+
         // Context menu always gets first dibs
         if let Some(ref mut cm) = &mut self.context_menu {
             if cm.event(event, ctx) == EventResult::Handled {
@@ -210,6 +264,7 @@ impl Widget for GalleryWidget {
                 if handled == EventResult::Handled {
                     if idx == 5 {
                         self.last_action = format!("slider={:.1}", self.slider.value());
+                        self.last_slider_value = self.slider.value();
                     } else {
                         self.last_action = last_action.into_inner();
                     }
@@ -242,6 +297,7 @@ impl Widget for GalleryWidget {
                 }
                 if *idx == 5 {
                     self.last_action = format!("slider={:.1}", self.slider.value());
+                    self.last_slider_value = self.slider.value();
                 }
                 handled = EventResult::Handled;
                 break;
@@ -269,6 +325,11 @@ impl Widget for GalleryWidget {
         EventResult::Ignored
     }
 
+    fn after_child_event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+        self.sync_child_feedback();
+        EventResult::Ignored
+    }
+
     fn paint(&self, ctx: &mut PaintContext) {
         let tokens = &ctx.theme.colors;
 
@@ -281,11 +342,23 @@ impl Widget for GalleryWidget {
         self.text_input.paint(ctx);
         self.slider.paint(ctx);
         self.dropdown.paint(ctx);
+        ctx.encoder.draw_rect(
+            self.tooltip_trigger,
+            tokens.secondary,
+            ctx.theme.spacing.radius_sm,
+        );
+        ctx.encoder.draw_text(
+            "悬停 Tooltip",
+            12.0,
+            Point::new(self.tooltip_trigger.x + 8.0, self.tooltip_trigger.y + 7.0),
+            tokens.secondary_foreground,
+        );
         self.list.paint(ctx);
         self.scroll_area.paint(ctx);
         if let Some(ref cm) = &self.context_menu {
             cm.paint(ctx);
         }
+        self.tooltip.paint(ctx);
 
         let p = ui_types::snap_point(Point::new(self.bounds.x + 12.0, self.bounds.y + 6.0));
         ctx.encoder
@@ -687,60 +760,13 @@ fn winit_key_to_keycode(key: &winit::keyboard::Key) -> Option<KeyCode> {
     }
 }
 
-fn dummy_event_ctx() -> EventContext<'static> {
-    static mut FOCUS: DummyFocus = DummyFocus;
-    static mut SHORTCUT: DummyShortcut = DummyShortcut;
-    static mut TOOLTIP: DummyTooltip = DummyTooltip;
-    static mut REQUESTS: EventRequests =
-        EventRequests { pointer_capture: None, ime: None, repaint: false };
-    static PLATFORM: mondrian_platform::SystemPlatformService =
-        mondrian_platform::SystemPlatformService;
-    unsafe {
-        EventContext {
-            focus: &mut *std::ptr::addr_of_mut!(FOCUS),
-            shortcut: &mut *std::ptr::addr_of_mut!(SHORTCUT),
-            tooltip: &mut *std::ptr::addr_of_mut!(TOOLTIP),
-            dispatch: &|_| {},
-            platform: &PLATFORM,
-            requests: &mut *std::ptr::addr_of_mut!(REQUESTS),
-        }
-    }
-}
-
-struct DummyFocus;
-impl FocusManager for DummyFocus {
-    fn focused_widget(&self) -> Option<WidgetId> {
-        None
-    }
-    fn focused_panel(&self) -> Option<mondrian_editor_state::state::PanelKind> {
-        None
-    }
-    fn request_focus(&mut self, _: WidgetId, _: mondrian_editor_state::state::PanelKind) {}
-    fn release_focus(&mut self, _: WidgetId) {}
-    fn focus_next(&mut self) {}
-    fn focus_prev(&mut self) {}
-    fn clear_focus(&mut self) {}
-}
-
-struct DummyShortcut;
-impl ShortcutManager for DummyShortcut {
-    fn register(&mut self, _: ShortcutScope, _: ShortcutBinding, _: Action) {}
-    fn unregister(&mut self, _: ShortcutScope, _: &ShortcutBinding) {}
-    fn resolve(&self, _: KeyCode, _: Modifiers) -> Option<Action> {
-        None
-    }
-    fn clear_scope(&mut self, _: ShortcutScope) {}
-    fn clear_all(&mut self) {}
-}
-
-struct DummyTooltip;
-impl TooltipManager for DummyTooltip {
-    fn show(&mut self, _: String, _: Point) {}
-    fn hide(&mut self) {}
-    fn current(&self) -> Option<&TooltipState> {
-        None
-    }
-    fn update(&mut self, _: u64) {}
+fn route_demo_event(
+    router: &mut EventRouter,
+    root: &mut dyn Widget,
+    event: UiEvent,
+) -> EventResult {
+    let mut tree = WidgetTreeView::new(root);
+    router.route(event, &mut tree, &record_demo_action)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -785,6 +811,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut root = build_dock_tree();
     let bounds = Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
     TreeWalker::layout(&mut root, bounds);
+    let mut router = EventRouter::with_platform(
+        root.id(),
+        Box::new(mondrian_platform::SystemPlatformService),
+    );
 
     let mut last_cursor = Point::new(0.0, 0.0);
     let current_bounds = std::cell::Cell::new(bounds);
@@ -841,18 +871,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 if pressed {
                     if let Some(kc) = winit_key_to_keycode(&logical_key) {
-                        let _ = root.event(
-                            &UiEvent::KeyDown { key: kc, modifiers: modifiers_state },
-                            &mut dummy_event_ctx(),
+                        let _ = route_demo_event(
+                            &mut router,
+                            &mut root,
+                            UiEvent::KeyDown { key: kc, modifiers: modifiers_state },
                         );
                     }
                     // Only send TextInput for printable characters when Ctrl is NOT held
                     if !modifiers_state.ctrl {
                         if let Some(txt) = text {
                             if !txt.is_empty() && !txt.chars().any(|c| c.is_control()) {
-                                let _ = root.event(
-                                    &UiEvent::TextInput(txt.to_string()),
-                                    &mut dummy_event_ctx(),
+                                let _ = route_demo_event(
+                                    &mut router,
+                                    &mut root,
+                                    UiEvent::TextInput(txt.to_string()),
                                 );
                             }
                         }
@@ -866,14 +898,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 event: WindowEvent::Ime(winit::event::Ime::Commit(text)),
                 ..
             } => {
-                let _ = root.event(&UiEvent::ImeCommit(text), &mut dummy_event_ctx());
+                let _ = route_demo_event(&mut router, &mut root, UiEvent::ImeCommit(text));
                 window.request_redraw();
             }
             Event::WindowEvent {
                 event: WindowEvent::Ime(winit::event::Ime::Preedit(text, _cursor)),
                 ..
             } => {
-                let _ = root.event(&UiEvent::ImePreedit(text), &mut dummy_event_ctx());
+                let _ = route_demo_event(&mut router, &mut root, UiEvent::ImePreedit(text));
                 window.request_redraw();
             }
             Event::WindowEvent {
@@ -887,7 +919,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ..
             } => {
                 // IME disabled — clear any pending preedit
-                let _ = root.event(&UiEvent::ImePreedit(String::new()), &mut dummy_event_ctx());
+                let _ =
+                    route_demo_event(&mut router, &mut root, UiEvent::ImePreedit(String::new()));
                 window.request_redraw();
             }
 
@@ -948,12 +981,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 event: WindowEvent::CursorMoved { position, .. }, ..
             } => {
                 last_cursor = Point::new(position.x as f32, position.y as f32);
-                let _ = root.event(
-                    &UiEvent::MouseMove {
+                let _ = route_demo_event(
+                    &mut router,
+                    &mut root,
+                    UiEvent::MouseMove {
                         position: last_cursor,
                         modifiers: Modifiers::none(),
                     },
-                    &mut dummy_event_ctx(),
                 );
                 let grab_zones = root.collect_grab_zones();
                 let direction =
@@ -994,22 +1028,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         modifiers: Modifiers::none(),
                     },
                 };
-                let _ = root.event(&event, &mut dummy_event_ctx());
+                let _ = route_demo_event(&mut router, &mut root, event);
                 window.request_redraw();
             }
 
             Event::WindowEvent { event: WindowEvent::MouseWheel { delta, .. }, .. } => {
                 let scroll_delta = match delta {
-                    winit::event::MouseScrollDelta::LineDelta(_, y) => y * 20.0,
-                    winit::event::MouseScrollDelta::PixelDelta(pos) => pos.y as f32,
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => -y * 20.0,
+                    winit::event::MouseScrollDelta::PixelDelta(pos) => -(pos.y as f32),
                 };
-                let _ = root.event(
-                    &UiEvent::MouseWheel {
+                let _ = route_demo_event(
+                    &mut router,
+                    &mut root,
+                    UiEvent::MouseWheel {
                         delta: scroll_delta,
                         position: last_cursor,
                         modifiers: Modifiers::none(),
                     },
-                    &mut dummy_event_ctx(),
                 );
                 window.request_redraw();
             }
@@ -1027,7 +1062,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 // ── Shape Panel Widget ────────────────────────────────────────────────────────
 /// 形状面板：在 Console → 形状 标签页中绘制 3 个圆形（大/中/小），
 /// 中号圆形不绘制背景矩形。
-
 struct ShapePanelWidget {
     id: WidgetId,
     bounds: Rect,

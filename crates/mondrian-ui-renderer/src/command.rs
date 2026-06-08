@@ -9,6 +9,31 @@ use mondrian_ui_core::types::{Point, Rect};
 use mondrian_ui_core::widget::DrawCommandEncoder;
 use mondrian_ui_theme::typography::TextStyle;
 
+fn snap_scalar(value: f32) -> f32 {
+    if value.is_finite() {
+        value.round()
+    } else {
+        value
+    }
+}
+
+fn snap_point(point: Point) -> Point {
+    Point::new(snap_scalar(point.x), snap_scalar(point.y))
+}
+
+fn snap_rect(rect: Rect) -> Rect {
+    Rect::new(
+        snap_scalar(rect.x),
+        snap_scalar(rect.y),
+        snap_scalar(rect.width),
+        snap_scalar(rect.height),
+    )
+}
+
+fn snap_vec2(offset: Vec2) -> Vec2 {
+    Vec2::new(snap_scalar(offset.x), snap_scalar(offset.y))
+}
+
 /// 2D 绘制命令
 ///
 /// 每个命令描述一个 GPU 可执行的绘制操作。
@@ -80,7 +105,7 @@ impl DrawEncoder {
 
     pub fn push_clip(&mut self, bounds: Rect) {
         self.clip_depth += 1;
-        self.commands.push(DrawCommand::PushClip { bounds });
+        self.commands.push(DrawCommand::PushClip { bounds: snap_rect(bounds) });
     }
 
     pub fn pop_clip(&mut self) {
@@ -92,7 +117,7 @@ impl DrawEncoder {
 
     pub fn push_translate(&mut self, offset: Vec2) {
         self.transform_depth += 1;
-        self.commands.push(DrawCommand::PushTranslate { offset });
+        self.commands.push(DrawCommand::PushTranslate { offset: snap_vec2(offset) });
     }
 
     pub fn pop_transform(&mut self) {
@@ -103,7 +128,8 @@ impl DrawEncoder {
     }
 
     pub fn draw_rect(&mut self, bounds: Rect, color: Color, corner_radius: f32) {
-        self.commands.push(DrawCommand::Rect { bounds, color, corner_radius });
+        self.commands
+            .push(DrawCommand::Rect { bounds: snap_rect(bounds), color, corner_radius });
     }
 
     pub fn draw_text(&mut self, text: &str, style: &TextStyle, position: Point, color: Color) {
@@ -116,11 +142,17 @@ impl DrawEncoder {
     }
 
     pub fn draw_image(&mut self, bounds: Rect, uv_rect: Rect, tint: Color) {
-        self.commands.push(DrawCommand::Image { bounds, uv_rect, tint });
+        self.commands
+            .push(DrawCommand::Image { bounds: snap_rect(bounds), uv_rect, tint });
     }
 
     pub fn draw_line(&mut self, start: Point, end: Point, width: f32, color: Color) {
-        self.commands.push(DrawCommand::Line { start, end, width, color });
+        self.commands.push(DrawCommand::Line {
+            start: snap_point(start),
+            end: snap_point(end),
+            width,
+            color,
+        });
     }
 
     pub fn is_empty(&self) -> bool {
@@ -252,6 +284,50 @@ mod tests {
         let mut enc = DrawEncoder::new();
         enc.draw_image(rect(), rect(), color());
         assert_eq!(enc.command_count(), 1);
+    }
+
+    #[test]
+    fn encoder_snaps_axis_aligned_geometry_to_pixels() {
+        let mut enc = DrawEncoder::new();
+        enc.push_clip(Rect::new(0.4, 1.6, 100.3, 49.8));
+        enc.push_translate(Vec2::new(2.2, 3.8));
+        enc.draw_rect(Rect::new(9.5, 10.4, 20.6, 30.2), color(), 4.0);
+        enc.draw_line(Point::new(1.2, 2.8), Point::new(9.7, 10.1), 1.0, color());
+        enc.draw_image(
+            Rect::new(4.4, 5.5, 12.6, 16.1),
+            Rect::new(0.25, 0.25, 0.5, 0.5),
+            color(),
+        );
+        enc.pop_transform();
+        enc.pop_clip();
+
+        let cmds = enc.finish();
+        assert!(matches!(
+            cmds[0],
+            DrawCommand::PushClip { bounds }
+                if bounds == Rect::new(0.0, 2.0, 100.0, 50.0)
+        ));
+        assert!(matches!(
+            cmds[1],
+            DrawCommand::PushTranslate { offset }
+                if offset == Vec2::new(2.0, 4.0)
+        ));
+        assert!(matches!(
+            cmds[2],
+            DrawCommand::Rect { bounds, .. }
+                if bounds == Rect::new(10.0, 10.0, 21.0, 30.0)
+        ));
+        assert!(matches!(
+            cmds[3],
+            DrawCommand::Line { start, end, .. }
+                if start == Point::new(1.0, 3.0) && end == Point::new(10.0, 10.0)
+        ));
+        assert!(matches!(
+            cmds[4],
+            DrawCommand::Image { bounds, uv_rect, .. }
+                if bounds == Rect::new(4.0, 6.0, 13.0, 16.0)
+                    && uv_rect == Rect::new(0.25, 0.25, 0.5, 0.5)
+        ));
     }
 
     // ═══════════════════════════════════════════════════════════════════════
