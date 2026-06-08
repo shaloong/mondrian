@@ -98,6 +98,13 @@ menus. Tooltip requests preserve their delay timer when the same tooltip is
 reported repeatedly during hover, and tooltip painting clamps to the current
 clip rect.
 
+## Scroll Views
+
+Scroll containers translate pointer events from screen coordinates into child
+content coordinates using `screen - viewport_origin + scroll_offset`, matching
+the inverse of their paint transform. Wheel events are handled only inside the
+viewport and offsets are clamped after wheel input and layout.
+
 ## Rendering Notes
 
 Widgets emit draw commands only. Checkbox checkmarks are vector line commands,

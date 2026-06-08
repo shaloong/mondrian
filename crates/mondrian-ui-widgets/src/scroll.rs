@@ -42,6 +42,20 @@ impl ScrollView {
         let max_y = (self.content_size.height - self.bounds.height).max(0.0);
         self.scroll_offset.y >= max_y - 1.0
     }
+
+    fn max_scroll_y(&self) -> f32 {
+        (self.content_size.height - self.bounds.height).max(0.0)
+    }
+
+    fn clamp_scroll_offset(&mut self) {
+        self.scroll_offset.x = self.scroll_offset.x.max(0.0);
+        self.scroll_offset.y = self.scroll_offset.y.clamp(0.0, self.max_scroll_y());
+    }
+
+    fn translate_point_to_child(&self, point: &mut Point) {
+        point.x = point.x - self.bounds.x + self.scroll_offset.x;
+        point.y = point.y - self.bounds.y + self.scroll_offset.y;
+    }
 }
 
 impl Widget for ScrollView {
@@ -66,34 +80,34 @@ impl Widget for ScrollView {
         if let Some(child) = &mut self.child {
             let measured = child.measure(LayoutConstraint {
                 min: Size::ZERO,
-                max: Size::new(bounds.width - self.scrollbar_width, f32::MAX),
+                max: Size::new((bounds.width - self.scrollbar_width).max(0.0), f32::MAX),
             });
             self.content_size = measured;
             let child_bounds = Rect::new(0.0, 0.0, measured.width, measured.height);
             child.layout(child_bounds);
+            self.clamp_scroll_offset();
         }
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
         match event {
-            UiEvent::MouseWheel { delta, .. } => {
+            UiEvent::MouseWheel { delta, position, .. } => {
+                if !self.bounds.contains(*position) {
+                    return EventResult::Ignored;
+                }
                 self.scroll_offset.y += *delta;
-                self.scroll_offset.y = self.scroll_offset.y.clamp(
-                    0.0,
-                    (self.content_size.height - self.bounds.height).max(0.0),
-                );
+                self.clamp_scroll_offset();
                 EventResult::Handled
             }
             _ => {
+                let mut offset_event = event.clone();
+                if let UiEvent::MouseDown { ref mut position, .. }
+                | UiEvent::MouseUp { ref mut position, .. }
+                | UiEvent::MouseMove { ref mut position, .. } = &mut offset_event
+                {
+                    self.translate_point_to_child(position);
+                }
                 if let Some(ref mut child) = self.child {
-                    let mut offset_event = event.clone();
-                    if let UiEvent::MouseDown { ref mut position, .. }
-                    | UiEvent::MouseUp { ref mut position, .. }
-                    | UiEvent::MouseMove { ref mut position, .. } = &mut offset_event
-                    {
-                        position.x += self.scroll_offset.x;
-                        position.y -= self.scroll_offset.y;
-                    }
                     child.event(&offset_event, ctx)
                 } else {
                     EventResult::Ignored
@@ -155,7 +169,44 @@ impl Widget for ScrollView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
     use mondrian_ui_core::widgets::Spacer;
+
+    struct RecordingChild {
+        id: WidgetId,
+        preferred: Size,
+        last_mouse_down: Rc<RefCell<Option<Point>>>,
+    }
+
+    impl Widget for RecordingChild {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+
+        fn measure(&self, _constraint: LayoutConstraint) -> Size {
+            self.preferred
+        }
+
+        fn layout(&mut self, _bounds: Rect) {}
+
+        fn event(&mut self, event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+            if let UiEvent::MouseDown { position, .. } = event {
+                *self.last_mouse_down.borrow_mut() = Some(*position);
+                EventResult::Handled
+            } else {
+                EventResult::Ignored
+            }
+        }
+
+        fn paint(&self, _ctx: &mut PaintContext) {}
+
+        fn hit_test(&self, _point: Point) -> bool {
+            true
+        }
+    }
 
     #[test]
     fn scroll_view_new_has_zero_offset() {
@@ -188,21 +239,82 @@ mod tests {
         let mut sv = ScrollView::new(Some(Box::new(child)));
         sv.layout(Rect::new(0.0, 0.0, 300.0, 300.0));
 
-        use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
         let mut f = DummyFocus;
         let mut s = DummyShortcut;
         let mut t = DummyTooltip;
-        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
+        let dispatch = |_| {};
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch);
 
         sv.event(
             &UiEvent::MouseWheel {
                 delta: 10.0,
-                position: Point::ZERO,
+                position: Point::new(10.0, 10.0),
                 modifiers: Modifiers::none(),
             },
             &mut ctx,
         );
         assert!(sv.scroll_offset().y > 0.0);
+    }
+
+    #[test]
+    fn scroll_view_ignores_mouse_wheel_outside_bounds() {
+        let child = Spacer::new(200.0, 800.0);
+        let mut sv = ScrollView::new(Some(Box::new(child)));
+        sv.layout(Rect::new(20.0, 20.0, 300.0, 300.0));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let dispatch = |_| {};
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch);
+
+        let result = sv.event(
+            &UiEvent::MouseWheel {
+                delta: 50.0,
+                position: Point::new(0.0, 0.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(sv.scroll_offset().y, 0.0);
+    }
+
+    #[test]
+    fn scroll_view_translates_pointer_events_to_child_content_space() {
+        let last_mouse_down = Rc::new(RefCell::new(None));
+        let child = RecordingChild {
+            id: WidgetId::new(),
+            preferred: Size::new(200.0, 800.0),
+            last_mouse_down: Rc::clone(&last_mouse_down),
+        };
+        let mut sv = ScrollView::new(Some(Box::new(child)));
+        sv.layout(Rect::new(20.0, 30.0, 300.0, 300.0));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let dispatch = |_| {};
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch);
+        sv.event(
+            &UiEvent::MouseWheel {
+                delta: 40.0,
+                position: Point::new(40.0, 50.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        sv.event(
+            &UiEvent::MouseDown {
+                position: Point::new(50.0, 70.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(*last_mouse_down.borrow(), Some(Point::new(30.0, 80.0)));
     }
 
     #[test]
