@@ -15,11 +15,11 @@ use mondrian_ui_theme::typography::TextStyle;
 /// 命令序列由 DrawEncoder 收集，由 UiRenderer 批次化后提交。
 #[derive(Debug, Clone)]
 pub enum DrawCommand {
-    /// 填充矩形（可带圆角）
+    /// 填充矩形（可带圆角）。corner_radius in pixels; shader clamps automatically.
     Rect {
         bounds: Rect,
         color: Color,
-        corner_radius: f32,
+        corner_radius: f32, // px; 0 = sharp
     },
 
     /// 文字

@@ -5,7 +5,7 @@
 use mondrian_ui_core::types::{Point, Rect};
 
 use crate::command::DrawCommand;
-use crate::shape::{generate_rect_vertices, generate_rounded_rect_vertices, RectVertex};
+use crate::shape::{generate_rect_vertices, RectVertex, RenderMode};
 
 /// 一个绘制批次 —— 一组顶点 + 可选的裁剪矩形
 #[derive(Debug, Clone)]
@@ -55,36 +55,19 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                 color,
                 corner_radius,
             } => {
+                let pixel_w = bounds.width.max(1.0);
+                let pixel_h = bounds.height.max(1.0);
+
                 let rect = apply_transform(bounds, &transform_stack);
                 let screen_rect = pixel_to_ndc_rect(rect, sx, sy, tx, ty);
 
-                // Per-axis NDC radii so the arc stays circular on non-square screens.
-                // Using max(sx,|sy|) stretches the X radius: 1440×860 → 1.67× too wide.
-                let rx = *corner_radius * sx.abs();
-                let ry = *corner_radius * sy.abs();
-                let ndc_radii = [rx, ry, rx, ry];
-
-                let vertices = if rx > 0.0 || ry > 0.0 {
-                    generate_rounded_rect_vertices(
-                        screen_rect,
-                        color.r,
-                        color.g,
-                        color.b,
-                        color.a,
-                        ndc_radii,
-                        (rx, ry),
-                    )
-                } else {
-                    generate_rect_vertices(
-                        screen_rect,
-                        color.r,
-                        color.g,
-                        color.b,
-                        color.a,
-                        0.0,
-                    )
-                    .to_vec()
-                };
+                let vertices = generate_rect_vertices(
+                    screen_rect,
+                    color.r, color.g, color.b, color.a,
+                    pixel_w, pixel_h,
+                    *corner_radius,
+                    RenderMode::Shape,
+                );
                 current_batch.vertices.extend(vertices);
             }
             DrawCommand::Text { .. } => {
@@ -98,7 +81,7 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                 let rect = apply_transform(bounds, &transform_stack);
                 let screen_rect = pixel_to_ndc_rect(rect, sx, sy, tx, ty);
 
-                // Generate vertices with UV coords and corner_radius=-1 (texture mode)
+                // Generate vertices with UV coords and render_mode=Glyph
                 let x0 = screen_rect.x; let y0 = screen_rect.y;
                 let x1 = screen_rect.x + screen_rect.width;
                 let y1 = screen_rect.y + screen_rect.height;
@@ -108,13 +91,15 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                 let r = tint.r; let g = tint.g; let b = tint.b; let a = tint.a;
                 // NDC Y is flipped (y0=bottom, y1=top), so swap V coords:
                 // bottom vertices → v1 (bottom of glyph), top vertices → v0 (top of glyph)
+                let bw = bounds.width.max(1.0);
+                let bh = bounds.height.max(1.0);
                 let vertices = vec![
-                    RectVertex::new(x0, y0, u0, v1, r, g, b, a, -1.0),
-                    RectVertex::new(x1, y0, u1, v1, r, g, b, a, -1.0),
-                    RectVertex::new(x0, y1, u0, v0, r, g, b, a, -1.0),
-                    RectVertex::new(x0, y1, u0, v0, r, g, b, a, -1.0),
-                    RectVertex::new(x1, y0, u1, v1, r, g, b, a, -1.0),
-                    RectVertex::new(x1, y1, u1, v0, r, g, b, a, -1.0),
+                    RectVertex::new(x0, y0, u0, v1, r, g, b, a, bw, bh, 0.0, RenderMode::Glyph),
+                    RectVertex::new(x1, y0, u1, v1, r, g, b, a, bw, bh, 0.0, RenderMode::Glyph),
+                    RectVertex::new(x0, y1, u0, v0, r, g, b, a, bw, bh, 0.0, RenderMode::Glyph),
+                    RectVertex::new(x0, y1, u0, v0, r, g, b, a, bw, bh, 0.0, RenderMode::Glyph),
+                    RectVertex::new(x1, y0, u1, v1, r, g, b, a, bw, bh, 0.0, RenderMode::Glyph),
+                    RectVertex::new(x1, y1, u1, v0, r, g, b, a, bw, bh, 0.0, RenderMode::Glyph),
                 ];
                 current_batch.vertices.extend(vertices);
             }
@@ -151,12 +136,12 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                 let y3 = screen_end.y + screen_ny * screen_hw;
 
                 let verts = vec![
-                    RectVertex::new(x0, y0, 0.0, 0.0, color.r, color.g, color.b, color.a, 0.0),
-                    RectVertex::new(x2, y2, 0.0, 0.0, color.r, color.g, color.b, color.a, 0.0),
-                    RectVertex::new(x1, y1, 0.0, 0.0, color.r, color.g, color.b, color.a, 0.0),
-                    RectVertex::new(x1, y1, 0.0, 0.0, color.r, color.g, color.b, color.a, 0.0),
-                    RectVertex::new(x2, y2, 0.0, 0.0, color.r, color.g, color.b, color.a, 0.0),
-                    RectVertex::new(x3, y3, 0.0, 0.0, color.r, color.g, color.b, color.a, 0.0),
+                    RectVertex::new(x0, y0, 0.0, 0.0, color.r, color.g, color.b, color.a, 1.0, 1.0, 0.0, RenderMode::Shape),
+                    RectVertex::new(x2, y2, 0.0, 0.0, color.r, color.g, color.b, color.a, 1.0, 1.0, 0.0, RenderMode::Shape),
+                    RectVertex::new(x1, y1, 0.0, 0.0, color.r, color.g, color.b, color.a, 1.0, 1.0, 0.0, RenderMode::Shape),
+                    RectVertex::new(x1, y1, 0.0, 0.0, color.r, color.g, color.b, color.a, 1.0, 1.0, 0.0, RenderMode::Shape),
+                    RectVertex::new(x2, y2, 0.0, 0.0, color.r, color.g, color.b, color.a, 1.0, 1.0, 0.0, RenderMode::Shape),
+                    RectVertex::new(x3, y3, 0.0, 0.0, color.r, color.g, color.b, color.a, 1.0, 1.0, 0.0, RenderMode::Shape),
                 ];
                 current_batch.vertices.extend(verts);
             }
@@ -539,9 +524,9 @@ mod tests {
         assert!((verts[5].tex_coord[0] - (uv.x + uv.width)).abs() < 0.001);
         assert!((verts[5].tex_coord[1] - v0).abs() < 0.001);
 
-        // All vertices should have corner_radius = -1.0 (texture mode)
+        // All vertices should have render_mode = Glyph
         for v in verts {
-            assert_eq!(v.corner_radius, -1.0, "Image vertices must have corner_radius=-1");
+            assert_eq!(v.render_mode, RenderMode::Glyph as u32, "Image vertices must have render_mode=Glyph");
         }
     }
 }

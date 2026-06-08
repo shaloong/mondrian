@@ -1,38 +1,50 @@
 // UI 2D fragment shader
-// Rounded rects + texture sampling via corner_radius sentinel.
+// Shape mode: pixel-space rounded-rect SDF with analytic AA.
+// Glyph mode: texture sampling.
+
+const RENDER_MODE_SHAPE: u32 = 0u;
+const RENDER_MODE_GLYPH: u32 = 1u;
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) tex_coord: vec2<f32>,
     @location(1) color: vec4<f32>,
-    @location(2) corner_radius: f32,
-    @location(3) local_pos: vec2<f32>,
+    @location(2) rect_size: vec2<f32>,
+    @location(3) corner_radius_px: f32,
+    @location(4) local_pos: vec2<f32>,
+    @location(5) @interpolate(flat) render_mode: u32,
 };
 
 @group(1) @binding(0) var glyph_sampler: sampler;
 @group(1) @binding(1) var glyph_texture: texture_2d<f32>;
 
+// Signed-distance to a rounded box in pixel space.
+// p in [0, rect_size], r = corner radius in pixels, clamped to [0, min(w,h)/2].
+fn sd_rounded_box_px(p: vec2<f32>, size: vec2<f32>, r: f32) -> f32 {
+    let half = size * 0.5;
+    let q = abs(p - half) - half + r;
+    return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - r;
+}
+
 @fragment
 fn main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Texture mode: corner_radius < 0 means Image command (glyph)
-    if in.corner_radius < 0.0 {
-        
+    // ── Glyph mode ───────────────────────────────────────────────────
+    // Atlas is Rgba8Unorm: CPU upload stores coverage in the alpha channel
+    // as [255, 255, 255, a], so sampled.a is the glyph coverage.
+    if in.render_mode == RENDER_MODE_GLYPH {
         let sampled = textureSample(glyph_texture, glyph_sampler, in.tex_coord);
         return vec4<f32>(in.color.rgb, in.color.a * sampled.a);
     }
 
-    // Rounded rect mode: corner_radius > 0
-    let radius = in.corner_radius;
-    if radius > 0.0 {
-        let p = in.local_pos;
-        let corner = vec2<f32>(
-            select(p.x, 1.0 - p.x, p.x > 0.5),
-            select(p.y, 1.0 - p.y, p.y > 0.5),
-        );
-        let dist = length(corner);
-        if dist > 1.0 {
-            discard;
-        }
+    // ── Shape mode ───────────────────────────────────────────────────
+    let r = clamp(in.corner_radius_px, 0.0, min(in.rect_size.x, in.rect_size.y) * 0.5);
+    if r <= 0.0 {
+        return in.color;
     }
-    return in.color;
+
+    let p = in.local_pos * in.rect_size; // [0,1] → pixel coords
+    let d = sd_rounded_box_px(p, in.rect_size, r);
+    let aa = fwidth(d);
+    let alpha = 1.0 - smoothstep(0.0, aa, d);
+    return vec4<f32>(in.color.rgb, in.color.a * alpha);
 }
