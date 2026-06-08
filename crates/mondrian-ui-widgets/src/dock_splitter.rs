@@ -189,11 +189,11 @@ impl Widget for DockSplitter {
             _ => {}
         }
 
-        // 将事件转发给子节点（跳过热区的事件，防止误触子节点）
+        // Block movement events in the grab zone to prevent accidental child
+        // interactions during a drag. MouseDown is NOT blocked here — it is
+        // only caught by the before-match check when truly starting a drag.
         if self.grab_rect.contains(match event {
-            UiEvent::MouseDown { position, .. }
-            | UiEvent::MouseUp { position, .. }
-            | UiEvent::MouseMove { position, .. }
+            UiEvent::MouseMove { position, .. }
             | UiEvent::MouseWheel { position, .. }
             | UiEvent::DragEnter { position, .. }
             | UiEvent::DragOver { position, .. }

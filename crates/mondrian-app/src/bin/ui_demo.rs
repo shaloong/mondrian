@@ -66,6 +66,8 @@ struct GalleryWidget {
     scroll_area: ScrollView,
     context_menu: Option<ContextMenu>,
     last_action: String,
+    /// Index of the child that captured the mouse (during drag/selection)
+    captured: Option<usize>,
 }
 
 impl GalleryWidget {
@@ -101,6 +103,7 @@ impl GalleryWidget {
             scroll_area: ScrollView::new(Some(Box::new(scroll_content))),
             context_menu: None,
             last_action: String::new(),
+            captured: None,
         }
     }
 }
@@ -157,6 +160,7 @@ impl Widget for GalleryWidget {
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        // Context menu always gets first dibs
         if let Some(ref mut cm) = &mut self.context_menu {
             if cm.event(event, ctx) == EventResult::Handled {
                 if !cm.is_visible() {
@@ -177,37 +181,73 @@ impl Widget for GalleryWidget {
             platform: ctx.platform,
         };
 
-        if self.button_click.event(event, inner_ctx) == EventResult::Handled {
-            self.last_action = last_action.into_inner();
-            return EventResult::Handled;
+        // If a child captured the mouse (drag/selection in progress), route
+        // MouseMove and MouseUp to it first. MouseUp clears the capture.
+        // On MouseDown: if captured child ignores it, fall through to normal
+        // dispatch so other widgets can receive the click.
+        if let Some(idx) = self.captured {
+            let handled = match idx {
+                0 => self.button_click.event(event, inner_ctx),
+                1 => self.button_no_action.event(event, inner_ctx),
+                2 => self.checkbox_a.event(event, inner_ctx),
+                3 => self.checkbox_b.event(event, inner_ctx),
+                4 => self.text_input.event(event, inner_ctx),
+                5 => self.slider.event(event, inner_ctx),
+                6 => self.dropdown.event(event, inner_ctx),
+                7 => self.list.event(event, inner_ctx),
+                8 => self.scroll_area.event(event, inner_ctx),
+                _ => EventResult::Ignored,
+            };
+            if matches!(event, UiEvent::MouseUp { .. }) {
+                self.captured = None;
+            }
+            // MouseDown during capture: if captured child doesn't handle it,
+            // let the click go to the actual target.
+            if matches!(event, UiEvent::MouseDown { .. }) && handled == EventResult::Ignored {
+                self.captured = None;
+                // fall through to normal dispatch below
+            } else {
+                if handled == EventResult::Handled {
+                    if idx == 5 {
+                        self.last_action = format!("slider={:.1}", self.slider.value());
+                    } else {
+                        self.last_action = last_action.into_inner();
+                    }
+                    return EventResult::Handled;
+                }
+                return EventResult::Ignored;
+            }
         }
-        if self.button_no_action.event(event, inner_ctx) == EventResult::Handled {
-            return EventResult::Handled;
+
+        // Normal event dispatch. On MouseDown, record which child captures.
+        let mut handled = EventResult::Ignored;
+        let mut children: [(&mut dyn Widget, usize, bool); 9] = [
+            (&mut self.button_click, 0, true),
+            (&mut self.button_no_action, 1, false),
+            (&mut self.checkbox_a, 2, true),
+            (&mut self.checkbox_b, 3, true),
+            (&mut self.text_input, 4, false),
+            (&mut self.slider, 5, false),
+            (&mut self.dropdown, 6, true),
+            (&mut self.list, 7, true),
+            (&mut self.scroll_area, 8, false),
+        ];
+        for (child, idx, show_action) in &mut children {
+            if child.event(event, inner_ctx) == EventResult::Handled {
+                if matches!(event, UiEvent::MouseDown { .. }) {
+                    self.captured = Some(*idx);
+                }
+                if *show_action {
+                    self.last_action = last_action.into_inner();
+                }
+                if *idx == 5 {
+                    self.last_action = format!("slider={:.1}", self.slider.value());
+                }
+                handled = EventResult::Handled;
+                break;
+            }
         }
-        if self.checkbox_a.event(event, inner_ctx) == EventResult::Handled {
-            self.last_action = last_action.into_inner();
-            return EventResult::Handled;
-        }
-        if self.checkbox_b.event(event, inner_ctx) == EventResult::Handled {
-            self.last_action = last_action.into_inner();
-            return EventResult::Handled;
-        }
-        if self.text_input.event(event, inner_ctx) == EventResult::Handled {
-            return EventResult::Handled;
-        }
-        if self.slider.event(event, inner_ctx) == EventResult::Handled {
-            self.last_action = format!("slider={:.1}", self.slider.value());
-            return EventResult::Handled;
-        }
-        if self.dropdown.event(event, inner_ctx) == EventResult::Handled {
-            self.last_action = last_action.into_inner();
-            return EventResult::Handled;
-        }
-        if self.list.event(event, inner_ctx) == EventResult::Handled {
-            self.last_action = last_action.into_inner();
-            return EventResult::Handled;
-        }
-        if self.scroll_area.event(event, inner_ctx) == EventResult::Handled {
+        if handled == EventResult::Handled {
             return EventResult::Handled;
         }
 

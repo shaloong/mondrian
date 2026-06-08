@@ -150,7 +150,7 @@ impl Widget for TextInput {
                         .request_focus(self.id, mondrian_editor_state::state::PanelKind::Console);
                     let rel_x = position.x - (self.bounds.x + 8.0);
                     self.set_cursor_from_x(rel_x, 14.0);
-                    self.selection_start = Some(self.cursor);
+                    self.clear_selection();
                     self.mouse_down = true;
                 } else {
                     self.focused = false;
@@ -162,6 +162,9 @@ impl Widget for TextInput {
             }
             UiEvent::MouseMove { position, .. } => {
                 if self.mouse_down && self.bounds.contains(*position) {
+                    if self.selection_start.is_none() {
+                        self.selection_start = Some(self.cursor);
+                    }
                     let rel_x = position.x - (self.bounds.x + 8.0);
                     self.set_cursor_from_x(rel_x, 14.0);
                     EventResult::Handled
@@ -171,10 +174,7 @@ impl Widget for TextInput {
             }
             UiEvent::MouseUp { button: MouseButton::Left, .. } => {
                 self.mouse_down = false;
-                if self.bounds.contains(Point::ZERO) {
-                    // Just clear the drag state
-                }
-                EventResult::Ignored
+                EventResult::Handled
             }
             UiEvent::FocusGained => {
                 self.focused = true;
@@ -304,35 +304,16 @@ impl Widget for TextInput {
         } else {
             tokens.card
         };
-        ctx.encoder.draw_rect(self.bounds, bg, spacing.radius_sm);
-
-        // Border
         let border = tokens.border_for_state(self.focused);
-        let r = self.bounds;
-        ctx.encoder.draw_line(
-            Point::new(r.x, r.y),
-            Point::new(r.x + r.width, r.y),
-            1.0,
+
+        // Rounded border via larger rect behind fill
+        let border_inset = 1.0;
+        ctx.encoder.draw_rect(
+            self.bounds.inset(-border_inset, -border_inset),
             border,
+            spacing.radius_sm + border_inset,
         );
-        ctx.encoder.draw_line(
-            Point::new(r.x, r.y + r.height),
-            Point::new(r.x + r.width, r.y + r.height),
-            1.0,
-            border,
-        );
-        ctx.encoder.draw_line(
-            Point::new(r.x, r.y),
-            Point::new(r.x, r.y + r.height),
-            1.0,
-            border,
-        );
-        ctx.encoder.draw_line(
-            Point::new(r.x + r.width, r.y),
-            Point::new(r.x + r.width, r.y + r.height),
-            1.0,
-            border,
-        );
+        ctx.encoder.draw_rect(self.bounds, bg, spacing.radius_sm);
 
         let text_x = self.bounds.x + 8.0;
         let text_y = self.bounds.y + (self.bounds.height - font_size * 1.3).max(0.0) * 0.5;

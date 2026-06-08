@@ -107,7 +107,7 @@ impl Widget for Checkbox {
             box_size,
         );
 
-        // Checkbox background
+        // Fill color
         let fill = if self.checked {
             tokens.primary
         } else if self.hovered {
@@ -116,44 +116,22 @@ impl Widget for Checkbox {
             tokens.card
         };
 
-        ctx.encoder.draw_rect(box_rect, fill, spacing.radius_sm);
-
-        // Border lines around the checkbox box
+        // Border color
         let border_color = if self.checked || self.hovered {
             tokens.primary
         } else {
             tokens.border
         };
-        let bx = box_rect.x;
-        let by = box_rect.y;
-        let bw = box_rect.width;
-        let bh = box_rect.height;
-        ctx.encoder.draw_line(
-            Point::new(bx, by),
-            Point::new(bx + bw, by),
-            1.0,
-            border_color,
-        );
-        ctx.encoder.draw_line(
-            Point::new(bx, by + bh),
-            Point::new(bx + bw, by + bh),
-            1.0,
-            border_color,
-        );
-        ctx.encoder.draw_line(
-            Point::new(bx, by),
-            Point::new(bx, by + bh),
-            1.0,
-            border_color,
-        );
-        ctx.encoder.draw_line(
-            Point::new(bx + bw, by),
-            Point::new(bx + bw, by + bh),
-            1.0,
-            border_color,
-        );
 
-        // Check mark — egui-style V shape
+        // Rounded border: draw slightly larger rounded rect behind fill
+        let border_inset = 1.0;
+        let border_rect = box_rect.inset(-border_inset, -border_inset);
+        ctx.encoder
+            .draw_rect(border_rect, border_color, spacing.radius_sm + border_inset);
+        // Fill on top
+        ctx.encoder.draw_rect(box_rect, fill, spacing.radius_sm);
+
+        // Check mark — two line segments forming a V
         if self.checked {
             let side = box_rect.width.min(box_rect.height);
             let cx = box_rect.x + box_rect.width * 0.5;
@@ -161,8 +139,8 @@ impl Widget for Checkbox {
             let start = Point::new(cx - side * 0.20, cy + side * 0.04);
             let mid = Point::new(cx - side * 0.04, cy + side * 0.20);
             let end = Point::new(cx + side * 0.24, cy - side * 0.18);
-            ctx.encoder.draw_line(start, mid, 2.0, tokens.foreground);
-            ctx.encoder.draw_line(mid, end, 2.0, tokens.foreground);
+            ctx.encoder.draw_line(start, mid, 3.0, tokens.foreground);
+            ctx.encoder.draw_line(mid, end, 3.0, tokens.foreground);
         }
 
         // Label text
