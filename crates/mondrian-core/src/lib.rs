@@ -5,6 +5,7 @@
 
 pub mod automation;
 pub mod color;
+pub mod color_models;
 pub mod effect_data;
 pub mod error;
 pub mod events;
@@ -18,6 +19,7 @@ pub mod types;
 
 pub use automation::*;
 pub use color::*;
+pub use color_models::*;
 pub use error::{MondrianError, Result};
 pub use events::{AppEvent, EventBus};
 pub use ocio::*;

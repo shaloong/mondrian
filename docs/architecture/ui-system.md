@@ -105,6 +105,13 @@ content coordinates using `screen - viewport_origin + scroll_offset`, matching
 the inverse of their paint transform. Wheel events are handled only inside the
 viewport and offsets are clamped after wheel input and layout.
 
+## Color Input
+
+Color parsing and conversion live in `mondrian-core`, not in the widget layer.
+ColorPicker and inspector controls should use the shared HEX/RGBA/HSL/HSV/CMYK
+models so text inputs, swatches, and future effect parameters round-trip through
+the same math.
+
 ## Rendering Notes
 
 Widgets emit draw commands only. Checkbox checkmarks are vector line commands,

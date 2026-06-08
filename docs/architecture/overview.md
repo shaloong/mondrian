@@ -73,6 +73,7 @@ AI 原生 =  Provider 抽象层  +  可视化 AI 计划  +  资产复用系统
 │  ├─ effect_data   (EffectNode, EffectType)
 │  ├─ mask_data     (MaskId, MaskComponent, MaskKeyframe)
 │  ├─ color         (ColorEngine, ColorPipeline, ICC, OCIO)
+│  ├─ color_models  (HEX/RGBA/HSL/HSV/CMYK parsing and conversion)
 │  ├─ render_graph  (RenderGraph IR types)
 │  ├─ timeline_data (FlatActiveClip, RenderPlanSource, ClipKind)
 │  ├─ error         (MondrianError, Result<T>)                          │
