@@ -50,11 +50,7 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
             DrawCommand::PopTransform => {
                 transform_stack.pop();
             }
-            DrawCommand::Rect {
-                bounds,
-                color,
-                corner_radius,
-            } => {
+            DrawCommand::Rect { bounds, color, corner_radius } => {
                 let pixel_w = bounds.width.max(1.0);
                 let pixel_h = bounds.height.max(1.0);
 
@@ -63,8 +59,12 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
 
                 let vertices = generate_rect_vertices(
                     screen_rect,
-                    color.r, color.g, color.b, color.a,
-                    pixel_w, pixel_h,
+                    color.r,
+                    color.g,
+                    color.b,
+                    color.a,
+                    pixel_w,
+                    pixel_h,
                     *corner_radius,
                     RenderMode::Shape,
                 );
@@ -73,22 +73,23 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
             DrawCommand::Text { .. } => {
                 // Stage B: text placeholder — skip
             }
-            DrawCommand::Image {
-                bounds,
-                uv_rect,
-                tint,
-            } => {
+            DrawCommand::Image { bounds, uv_rect, tint } => {
                 let rect = apply_transform(bounds, &transform_stack);
                 let screen_rect = pixel_to_ndc_rect(rect, sx, sy, tx, ty);
 
                 // Generate vertices with UV coords and render_mode=Glyph
-                let x0 = screen_rect.x; let y0 = screen_rect.y;
+                let x0 = screen_rect.x;
+                let y0 = screen_rect.y;
                 let x1 = screen_rect.x + screen_rect.width;
                 let y1 = screen_rect.y + screen_rect.height;
-                let u0 = uv_rect.x; let v0 = uv_rect.y;
+                let u0 = uv_rect.x;
+                let v0 = uv_rect.y;
                 let u1 = uv_rect.x + uv_rect.width;
                 let v1 = uv_rect.y + uv_rect.height;
-                let r = tint.r; let g = tint.g; let b = tint.b; let a = tint.a;
+                let r = tint.r;
+                let g = tint.g;
+                let b = tint.b;
+                let a = tint.a;
                 // NDC Y is flipped (y0=bottom, y1=top), so swap V coords:
                 // bottom vertices → v1 (bottom of glyph), top vertices → v0 (top of glyph)
                 let bw = bounds.width.max(1.0);
@@ -103,12 +104,7 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                 ];
                 current_batch.vertices.extend(vertices);
             }
-            DrawCommand::Line {
-                start,
-                end,
-                width,
-                color,
-            } => {
+            DrawCommand::Line { start, end, width, color } => {
                 let dx = end.x - start.x;
                 let dy = end.y - start.y;
                 let len = (dx * dx + dy * dy).sqrt().max(0.001);
@@ -136,12 +132,90 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                 let y3 = screen_end.y + screen_ny * screen_hw;
 
                 let verts = vec![
-                    RectVertex::new(x0, y0, 0.0, 0.0, color.r, color.g, color.b, color.a, 1.0, 1.0, 0.0, RenderMode::Shape),
-                    RectVertex::new(x2, y2, 0.0, 0.0, color.r, color.g, color.b, color.a, 1.0, 1.0, 0.0, RenderMode::Shape),
-                    RectVertex::new(x1, y1, 0.0, 0.0, color.r, color.g, color.b, color.a, 1.0, 1.0, 0.0, RenderMode::Shape),
-                    RectVertex::new(x1, y1, 0.0, 0.0, color.r, color.g, color.b, color.a, 1.0, 1.0, 0.0, RenderMode::Shape),
-                    RectVertex::new(x2, y2, 0.0, 0.0, color.r, color.g, color.b, color.a, 1.0, 1.0, 0.0, RenderMode::Shape),
-                    RectVertex::new(x3, y3, 0.0, 0.0, color.r, color.g, color.b, color.a, 1.0, 1.0, 0.0, RenderMode::Shape),
+                    RectVertex::new(
+                        x0,
+                        y0,
+                        0.0,
+                        0.0,
+                        color.r,
+                        color.g,
+                        color.b,
+                        color.a,
+                        1.0,
+                        1.0,
+                        0.0,
+                        RenderMode::Shape,
+                    ),
+                    RectVertex::new(
+                        x2,
+                        y2,
+                        0.0,
+                        0.0,
+                        color.r,
+                        color.g,
+                        color.b,
+                        color.a,
+                        1.0,
+                        1.0,
+                        0.0,
+                        RenderMode::Shape,
+                    ),
+                    RectVertex::new(
+                        x1,
+                        y1,
+                        0.0,
+                        0.0,
+                        color.r,
+                        color.g,
+                        color.b,
+                        color.a,
+                        1.0,
+                        1.0,
+                        0.0,
+                        RenderMode::Shape,
+                    ),
+                    RectVertex::new(
+                        x1,
+                        y1,
+                        0.0,
+                        0.0,
+                        color.r,
+                        color.g,
+                        color.b,
+                        color.a,
+                        1.0,
+                        1.0,
+                        0.0,
+                        RenderMode::Shape,
+                    ),
+                    RectVertex::new(
+                        x2,
+                        y2,
+                        0.0,
+                        0.0,
+                        color.r,
+                        color.g,
+                        color.b,
+                        color.a,
+                        1.0,
+                        1.0,
+                        0.0,
+                        RenderMode::Shape,
+                    ),
+                    RectVertex::new(
+                        x3,
+                        y3,
+                        0.0,
+                        0.0,
+                        color.r,
+                        color.g,
+                        color.b,
+                        color.a,
+                        1.0,
+                        1.0,
+                        0.0,
+                        RenderMode::Shape,
+                    ),
                 ];
                 current_batch.vertices.extend(verts);
             }
@@ -264,9 +338,7 @@ mod tests {
     #[test]
     fn build_batches_clip_applied_on_finalization() {
         let cmds = [
-            DrawCommand::PushClip {
-                bounds: Rect::new(0.0, 0.0, 50.0, 50.0),
-            },
+            DrawCommand::PushClip { bounds: Rect::new(0.0, 0.0, 50.0, 50.0) },
             DrawCommand::Rect {
                 bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
                 color: Color::WHITE,
@@ -282,9 +354,7 @@ mod tests {
     #[test]
     fn build_batches_no_clip_after_pop() {
         let cmds = [
-            DrawCommand::PushClip {
-                bounds: Rect::new(0.0, 0.0, 50.0, 50.0),
-            },
+            DrawCommand::PushClip { bounds: Rect::new(0.0, 0.0, 50.0, 50.0) },
             DrawCommand::Rect {
                 bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
                 color: Color::WHITE,
@@ -309,9 +379,7 @@ mod tests {
     #[test]
     fn build_batches_transform_offsets_rect() {
         let cmds = [
-            DrawCommand::PushTranslate {
-                offset: glam::Vec2::new(50.0, 0.0),
-            },
+            DrawCommand::PushTranslate { offset: glam::Vec2::new(50.0, 0.0) },
             DrawCommand::Rect {
                 bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
                 color: Color::WHITE,
@@ -351,9 +419,7 @@ mod tests {
     fn build_batches_clip_preserved_across_batch_split() {
         // Push a clip, then generate enough rects to overflow a batch.
         // The clip should be attached to BOTH batches.
-        let mut cmds = vec![DrawCommand::PushClip {
-            bounds: Rect::new(0.0, 0.0, 500.0, 500.0),
-        }];
+        let mut cmds = vec![DrawCommand::PushClip { bounds: Rect::new(0.0, 0.0, 500.0, 500.0) }];
         for i in 0..2800i32 {
             cmds.push(DrawCommand::Rect {
                 bounds: Rect::new(i as f32, 0.0, 1.0, 1.0),
@@ -366,8 +432,10 @@ mod tests {
         // All batches (except possibly the last if PopClip happened) must
         // carry the clip rect since the PushClip was never popped.
         for batch in &batches {
-            assert!(batch.clip_rect.is_some(),
-                "Batch under active clip must have clip_rect set");
+            assert!(
+                batch.clip_rect.is_some(),
+                "Batch under active clip must have clip_rect set"
+            );
         }
     }
 
@@ -453,8 +521,10 @@ mod tests {
         let batches = build_batches(&cmds, (1920, 1080));
         let verts = &batches[0].vertices;
 
-        let mut min_x = f32::MAX; let mut max_x = f32::MIN;
-        let mut min_y = f32::MAX; let mut max_y = f32::MIN;
+        let mut min_x = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut min_y = f32::MAX;
+        let mut max_y = f32::MIN;
         for v in verts {
             min_x = min_x.min(v.position[0]);
             max_x = max_x.max(v.position[0]);
@@ -493,7 +563,10 @@ mod tests {
         let b1080 = build_batches(&cmds, (1920, 1080));
         let b4k = build_batches(&cmds, (3840, 2160));
         // Same logical center at different resolutions → different NDC
-        assert_ne!(b1080[0].vertices[0].position[1], b4k[0].vertices[0].position[1]);
+        assert_ne!(
+            b1080[0].vertices[0].position[1],
+            b4k[0].vertices[0].position[1]
+        );
     }
 
     #[test]
@@ -515,18 +588,118 @@ mod tests {
         let v0 = uv.y;
         let v1 = uv.y + uv.height;
         // verts[0] is bottom-left: should have v=v1 (bottom of glyph)
-        assert!((verts[0].tex_coord[1] - v1).abs() < 0.001,
-            "bottom-left v={} should be v1={}", verts[0].tex_coord[1], v1);
+        assert!(
+            (verts[0].tex_coord[1] - v1).abs() < 0.001,
+            "bottom-left v={} should be v1={}",
+            verts[0].tex_coord[1],
+            v1
+        );
         // verts[2] is top-left: should have v=v0 (top of glyph)
-        assert!((verts[2].tex_coord[1] - v0).abs() < 0.001,
-            "top-left v={} should be v0={}", verts[2].tex_coord[1], v0);
+        assert!(
+            (verts[2].tex_coord[1] - v0).abs() < 0.001,
+            "top-left v={} should be v0={}",
+            verts[2].tex_coord[1],
+            v0
+        );
         // verts[5] is top-right: u=right, v=top
         assert!((verts[5].tex_coord[0] - (uv.x + uv.width)).abs() < 0.001);
         assert!((verts[5].tex_coord[1] - v0).abs() < 0.001);
 
         // All vertices should have render_mode = Glyph
         for v in verts {
-            assert_eq!(v.render_mode, RenderMode::Glyph as u32, "Image vertices must have render_mode=Glyph");
+            assert_eq!(
+                v.render_mode,
+                RenderMode::Glyph as u32,
+                "Image vertices must have render_mode=Glyph"
+            );
+        }
+    }
+    // ═══════════════════════════════════════════════════════════════════════
+    // SDF / 圆形数据完整性：DrawCommand → RectVertex 管线
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn circle_command_passes_correct_rect_size() {
+        // 100x100 矩形 + corner_radius=50 → 圆形
+        let cmds = [DrawCommand::Rect {
+            bounds: Rect::new(100.0, 100.0, 100.0, 100.0),
+            color: Color::WHITE,
+            corner_radius: 50.0,
+        }];
+        let batches = build_batches(&cmds, (1920, 1080));
+        assert_eq!(batches.len(), 1);
+        let verts = &batches[0].vertices;
+        assert_eq!(verts.len(), 6);
+        for v in verts {
+            assert_eq!(
+                v.rect_size,
+                [100.0, 100.0],
+                "rect_size should be pixel dims of original rect"
+            );
+            assert!(
+                (v.corner_radius_px - 50.0).abs() < 0.001,
+                "corner_radius_px={} should be 50",
+                v.corner_radius_px
+            );
+            assert!(
+                v.tex_coord[0] >= 0.0 && v.tex_coord[0] <= 1.0,
+                "tex_coord.x={} should be in [0,1]",
+                v.tex_coord[0]
+            );
+            assert!(
+                v.tex_coord[1] >= 0.0 && v.tex_coord[1] <= 1.0,
+                "tex_coord.y={} should be in [0,1]",
+                v.tex_coord[1]
+            );
+        }
+    }
+
+    #[test]
+    fn circle_command_sdf_reconstruction_from_batch() {
+        let cmds = [DrawCommand::Rect {
+            bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+            color: Color::WHITE,
+            corner_radius: 50.0,
+        }];
+        let batches = build_batches(&cmds, (1920, 1080));
+        for v in &batches[0].vertices {
+            let p_local = [
+                v.tex_coord[0] * v.rect_size[0],
+                v.tex_coord[1] * v.rect_size[1],
+            ];
+            assert!(
+                p_local[0] >= 0.0 && p_local[0] <= 100.0,
+                "p_local.x={} out of bounds",
+                p_local[0]
+            );
+            assert!(
+                p_local[1] >= 0.0 && p_local[1] <= 100.0,
+                "p_local.y={} out of bounds",
+                p_local[1]
+            );
+        }
+    }
+
+    #[test]
+    fn circle_command_rect_size_matches_bounds_not_ndc() {
+        // rect_size 始终是像素尺寸，即使矩形进行了平移变换
+        let cmds = [
+            DrawCommand::PushTranslate { offset: glam::Vec2::new(100.0, 200.0) },
+            DrawCommand::Rect {
+                bounds: Rect::new(0.0, 0.0, 50.0, 80.0),
+                color: Color::WHITE,
+                corner_radius: 25.0,
+            },
+            DrawCommand::PopTransform,
+        ];
+        let batches = build_batches(&cmds, (1920, 1080));
+        for v in &batches[0].vertices {
+            assert_eq!(
+                v.rect_size,
+                [50.0, 80.0],
+                "rect_size must remain original pixel dims"
+            );
+            assert!((v.corner_radius_px - 25.0).abs() < 0.001);
         }
     }
 }
