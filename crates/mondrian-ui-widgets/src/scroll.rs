@@ -111,9 +111,10 @@ impl Widget for ScrollView {
     fn paint(&self, ctx: &mut PaintContext) {
         let tokens = &ctx.theme.spacing;
         ctx.encoder.push_clip(self.bounds);
+        // Translate child from (0,0) to scroll view's screen position, minus scroll offset.
         ctx.encoder.push_translate(Vec2::new(
-            -self.scroll_offset.x,
-            -self.scroll_offset.y,
+            self.bounds.x - self.scroll_offset.x,
+            self.bounds.y - self.scroll_offset.y,
         ));
         if let Some(ref child) = self.child {
             child.paint(ctx);

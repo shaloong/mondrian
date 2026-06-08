@@ -110,6 +110,7 @@ impl Widget for DockTabBar {
 
     fn paint(&self, ctx: &mut PaintContext) {
         let tokens = &ctx.theme.colors;
+        let spacing = &ctx.theme.spacing;
 
         let bg = Rect::new(
             self.bounds.x,
@@ -137,8 +138,7 @@ impl Widget for DockTabBar {
             };
 
             let inset = r.inset(2.0, 2.0);
-            // No corner radius — tabs sit flush; rounding creates protrusions at edges
-            ctx.encoder.draw_rect(inset, fill, 0.0);
+            ctx.encoder.draw_rect(inset, fill, spacing.radius_sm);
 
             if !tab.label.is_empty() {
                 let font_size = 13.0;

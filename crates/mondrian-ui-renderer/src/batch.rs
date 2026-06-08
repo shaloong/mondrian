@@ -58,16 +58,21 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                 let rect = apply_transform(bounds, &transform_stack);
                 let screen_rect = pixel_to_ndc_rect(rect, sx, sy, tx, ty);
 
-                let r = *corner_radius * sx.max(sy.abs()).abs();
+                // Per-axis NDC radii so the arc stays circular on non-square screens.
+                // Using max(sx,|sy|) stretches the X radius: 1440×860 → 1.67× too wide.
+                let rx = *corner_radius * sx.abs();
+                let ry = *corner_radius * sy.abs();
+                let ndc_radii = [rx, ry, rx, ry];
 
-                let vertices = if r > 0.0 {
+                let vertices = if rx > 0.0 || ry > 0.0 {
                     generate_rounded_rect_vertices(
                         screen_rect,
                         color.r,
                         color.g,
                         color.b,
                         color.a,
-                        [r; 4],
+                        ndc_radii,
+                        (rx, ry),
                     )
                 } else {
                     generate_rect_vertices(

@@ -61,6 +61,8 @@ struct GalleryWidget {
     scroll_area: ScrollView,
     context_menu: Option<ContextMenu>,
     last_action: String,
+    // Diagnostic: record sub-widget bounds during layout
+    diag_rects: [Rect; 9],
 }
 
 impl GalleryWidget {
@@ -80,8 +82,7 @@ impl GalleryWidget {
             ListItem::new("列表项 7"),
         ];
 
-        let scroll_content = ColoredBox::new(Color::from_hex(0x2A2A4A), 180.0, 500.0)
-            .with_label("可滚动区域\n\n滚轮测试\n\nLine 3\n\nLine 4\n\n底部");
+        let scroll_content = ColoredBox::new(Color::from_hex(0x2A2A4A), 180.0, 500.0);
 
         Self {
             id: WidgetId::new(),
@@ -97,6 +98,7 @@ impl GalleryWidget {
             scroll_area: ScrollView::new(Some(Box::new(scroll_content))),
             context_menu: None,
             last_action: String::new(),
+            diag_rects: [Rect::ZERO; 9],
         }
     }
 }
@@ -116,31 +118,47 @@ impl Widget for GalleryWidget {
         let col_w = b.width - 24.0;
         let row_h = 30.0;
         let gap = 6.0;
-
-        // Reserve space for title (15px @ y+6) + feedback (12px @ y+24) ≈ 42px
         let mut y = b.y + 48.0;
 
-        let half_w = (col_w - 8.0) * 0.5;
-        self.button_click.layout(Rect::new(x0, y, half_w, row_h));
-        self.button_no_action.layout(Rect::new(x0 + half_w + 8.0, y, half_w, row_h));
+        let half_w = (col_w - 8.0).max(1.0) * 0.5;
+        let r0 = Rect::new(x0, y, half_w, row_h);
+        let r1 = Rect::new(x0 + half_w + 8.0, y, half_w, row_h);
+        self.button_click.layout(r0);
+        self.button_no_action.layout(r1);
+        self.diag_rects[0] = r0;
+        self.diag_rects[1] = r1;
         y += row_h + gap;
 
-        self.checkbox_a.layout(Rect::new(x0, y, col_w * 0.5, row_h));
-        self.checkbox_b.layout(Rect::new(x0 + col_w * 0.5, y, col_w * 0.5, row_h));
+        let r2 = Rect::new(x0, y, col_w * 0.5, row_h);
+        let r3 = Rect::new(x0 + col_w * 0.5, y, col_w * 0.5, row_h);
+        self.checkbox_a.layout(r2);
+        self.checkbox_b.layout(r3);
+        self.diag_rects[2] = r2;
+        self.diag_rects[3] = r3;
         y += row_h + gap;
 
-        self.text_input.layout(Rect::new(x0, y, col_w, row_h));
+        let r4 = Rect::new(x0, y, col_w, row_h);
+        self.text_input.layout(r4);
+        self.diag_rects[4] = r4;
         y += row_h + gap;
 
-        self.slider.layout(Rect::new(x0, y, col_w, row_h));
+        let r5 = Rect::new(x0, y, col_w, row_h);
+        self.slider.layout(r5);
+        self.diag_rects[5] = r5;
         y += row_h + gap;
 
-        self.dropdown.layout(Rect::new(x0, y, 160.0, row_h));
+        let r6 = Rect::new(x0, y, 160.0, row_h);
+        self.dropdown.layout(r6);
+        self.diag_rects[6] = r6;
         y += row_h + 12.0;
 
         let list_h = 5.0 * 28.0;
-        self.list.layout(Rect::new(x0, y, col_w * 0.55, list_h));
-        self.scroll_area.layout(Rect::new(x0 + col_w * 0.55 + 8.0, y, col_w * 0.45 - 8.0, list_h));
+        let r7 = Rect::new(x0, y, col_w * 0.55, list_h);
+        let r8 = Rect::new(x0 + col_w * 0.55 + 8.0, y, col_w * 0.45 - 8.0, list_h);
+        self.list.layout(r7);
+        self.scroll_area.layout(r8);
+        self.diag_rects[7] = r7;
+        self.diag_rects[8] = r8;
 
         if let Some(ref mut cm) = &mut self.context_menu {
             let cm_size = cm.measure(LayoutConstraint::LOOSE);
@@ -231,16 +249,28 @@ impl Widget for GalleryWidget {
 
         ctx.encoder.draw_rect(self.bounds, tokens.card, ctx.theme.spacing.radius_md);
 
-        // Snap text positions to pixel grid to avoid subpixel jitter during resize
-        let p = ui_types::snap_point(Point::new(self.bounds.x + 12.0, self.bounds.y + 6.0));
-        ctx.encoder.draw_text("UI 控件画廊 — 右键可打开菜单", 15.0, p, tokens.foreground);
+        // ── Rounded-rect diagnostic ──────────────────────────────────────
+        let diag_r = Rect::new(self.bounds.x + 8.0, self.bounds.y + 8.0, 160.0, 80.0);
+        let fill = Color::from_hex(0xFFDD00);
+        let bg   = Color::from_hex(0xCC0000);
+        ctx.encoder.draw_rect(diag_r, bg, 0.0);
+        ctx.encoder.draw_rect(diag_r, fill, 20.0);
+        let plain_r = Rect::new(self.bounds.x + 180.0, self.bounds.y + 8.0, 160.0, 80.0);
+        ctx.encoder.draw_rect(plain_r, fill, 0.0);
 
-        if !self.last_action.is_empty() {
-            let fb = format!("最后操作: {}", self.last_action);
-            let p = ui_types::snap_point(Point::new(self.bounds.x + 12.0, self.bounds.y + 24.0));
-            ctx.encoder.draw_text(&fb, 12.0, p, tokens.primary);
+        // Bright diag rects FIRST, then sub-widgets paint on top.
+        // If sub-widgets are at correct bounds, their dark backgrounds
+        // (card color) cover the bright diag rects → visible as dark bars.
+        // If diag rects remain bright → sub-widgets didn't render there.
+        let diag_colors: [Color; 9] = [
+            Color::from_hex(0x00FF88), Color::from_hex(0x88FF00), Color::from_hex(0x00FFFF),
+            Color::from_hex(0xFF8800), Color::from_hex(0xFF0088), Color::from_hex(0x8800FF),
+            Color::from_hex(0x0088FF), Color::from_hex(0xFF0044), Color::from_hex(0x44FF00),
+        ];
+        for (i, &c) in diag_colors.iter().enumerate() {
+            ctx.encoder.draw_rect(self.diag_rects[i], c, 0.0);
         }
-
+        // Sub-widgets on top — their card-color backgrounds should cover diag rects
         self.button_click.paint(ctx);
         self.button_no_action.paint(ctx);
         self.checkbox_a.paint(ctx);
@@ -250,9 +280,17 @@ impl Widget for GalleryWidget {
         self.dropdown.paint(ctx);
         self.list.paint(ctx);
         self.scroll_area.paint(ctx);
-
         if let Some(ref cm) = &self.context_menu {
             cm.paint(ctx);
+        }
+
+        let p = ui_types::snap_point(Point::new(self.bounds.x + 12.0, self.bounds.y + 110.0));
+        ctx.encoder.draw_text("[Gallery]", 13.0, p, tokens.foreground);
+
+        if !self.last_action.is_empty() {
+            let fb = format!("最后操作: {}", self.last_action);
+            let p = ui_types::snap_point(Point::new(self.bounds.x + 12.0, self.bounds.y + 126.0));
+            ctx.encoder.draw_text(&fb, 12.0, p, tokens.primary);
         }
     }
 
@@ -434,18 +472,17 @@ impl Widget for VerticalTabbedSlot {
 fn slot_content(kind: SlotKind) -> Box<dyn Widget> {
     match kind {
         SlotKind::Viewer => Box::new(ViewerWidget::new()),
-        SlotKind::Assets => Box::new(GalleryWidget::new()),
+        // Top-left: red — easy diagnostic reference
+        SlotKind::Assets => Box::new(
+            ColoredBox::new(Color::from_hex(0xCC2222), 1.0, 1.0),
+        ),
+        // Bottom-left: interactive widget gallery
+        SlotKind::Console => Box::new(GalleryWidget::new()),
         SlotKind::Inspector => Box::new(
-            ColoredBox::new(Color::from_hex(0x1E2A3A), 1.0, 1.0).with_label("检查器面板"),
+            ColoredBox::new(Color::from_hex(0x1E2A3A), 1.0, 1.0),
         ),
         SlotKind::Timeline => Box::new(
-            ColoredBox::new(Color::from_hex(0x16213E), 1.0, 1.0).with_label("时间线面板"),
-        ),
-        SlotKind::Effects => Box::new(
-            ColoredBox::new(Color::from_hex(0x2A1A3E), 1.0, 1.0).with_label("效果面板"),
-        ),
-        SlotKind::Console => Box::new(
-            ColoredBox::new(Color::from_hex(0x0D1117), 1.0, 1.0).with_label("控制台面板"),
+            ColoredBox::new(Color::from_hex(0x16213E), 1.0, 1.0),
         ),
         _ => Box::new(ColoredBox::new(Color::from_hex(0x1A1A1A), 1.0, 1.0)),
     }
@@ -456,9 +493,10 @@ fn slot_content(kind: SlotKind) -> Box<dyn Widget> {
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn build_dock_tree() -> DockSplitter {
+    // Top-left: Assets=red (35%) / Bottom-left: Gallery=Console (65%)
     let left = DockSplitter::new(
         SplitDirection::Vertical,
-        0.55,
+        0.35,
         Box::new(VerticalTabbedSlot::new(SlotKind::Assets)),
         Box::new(VerticalTabbedSlot::new(SlotKind::Console)),
     );

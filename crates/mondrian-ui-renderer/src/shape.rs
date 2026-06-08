@@ -75,95 +75,111 @@ pub fn generate_rect_vertices(rect: Rect, r: f32, g: f32, b: f32, a: f32, radius
     ]
 }
 
-/// 生成圆角矩形（4 个角各有独立半径）
+fn push_rect(verts: &mut Vec<RectVertex>, rx: f32, ry: f32, rw: f32, rh: f32, r: f32, g: f32, b: f32, a: f32) {
+    let x0 = rx; let y0 = ry;
+    let x1 = rx + rw; let y1 = ry + rh;
+    verts.push(RectVertex::new(x0, y0, 0.0, 0.0, r, g, b, a, 0.0));
+    verts.push(RectVertex::new(x1, y0, 1.0, 0.0, r, g, b, a, 0.0));
+    verts.push(RectVertex::new(x0, y1, 0.0, 1.0, r, g, b, a, 0.0));
+    verts.push(RectVertex::new(x0, y1, 0.0, 1.0, r, g, b, a, 0.0));
+    verts.push(RectVertex::new(x1, y0, 1.0, 0.0, r, g, b, a, 0.0));
+    verts.push(RectVertex::new(x1, y1, 1.0, 1.0, r, g, b, a, 0.0));
+}
+
+/// 生成圆角矩形（所有角使用相同的半径）
+///
+/// `ndc_r` gives the per-axis NDC radii (rx, ry) so arc points stay circular
+/// on non-square screens.
+///
+/// Tessellation: center rect (inner area) + 4 edge strips (top/bottom/left/right)
+/// + 4 corner fans (arcs). The gaps between arcs and outer corners are uncovered
+/// → show whatever was drawn behind this rect → visible rounded corners.
 pub fn generate_rounded_rect_vertices(
     rect: Rect,
     r: f32,
     g: f32,
     b: f32,
     a: f32,
-    radii: [f32; 4],
+    _radii: [f32; 4],
+    ndc_r: (f32, f32),
 ) -> Vec<RectVertex> {
-    if radii.iter().all(|&r| r <= 0.0) {
+    let (rx_initial, ry_initial) = ndc_r;
+    if rx_initial <= 0.0 && ry_initial <= 0.0 {
         return generate_rect_vertices(rect, r, g, b, a, 0.0).to_vec();
     }
-
     let x0 = rect.x;
     let y0 = rect.y;
     let x1 = rect.x + rect.width;
     let y1 = rect.y + rect.height;
-    let segments = 8; // 每个角的三角形分段数
-    let mut verts = Vec::with_capacity((segments * 4 + 2) * 3);
+    let segments = 16;
+    // 9 rects (center + 4 edges + 4 corners as fans) × 6 + 4*segments*3
+    let mut verts = Vec::with_capacity(54 + (segments * 4 + 2) * 3);
 
-    // 使用简化的三角剖分：中心 + 外环顶点
-    let radii_clamped = [
-        radii[0].min(rect.width * 0.5).min(rect.height * 0.5).max(0.0), // top-left
-        radii[1].min(rect.width * 0.5).min(rect.height * 0.5).max(0.0), // top-right
-        radii[2].min(rect.width * 0.5).min(rect.height * 0.5).max(0.0), // bottom-right
-        radii[3].min(rect.width * 0.5).min(rect.height * 0.5).max(0.0), // bottom-left
-    ];
-
-    let corner_centers = [
-        Vec2::new(x0 + radii_clamped[0], y0 + radii_clamped[0]),
-        Vec2::new(x1 - radii_clamped[1], y0 + radii_clamped[1]),
-        Vec2::new(x1 - radii_clamped[2], y1 - radii_clamped[2]),
-        Vec2::new(x0 + radii_clamped[3], y1 - radii_clamped[3]),
-    ];
-
-    let corner_start_angles = [
-        std::f32::consts::PI,           // top-left: π → 3π/2
-        std::f32::consts::PI * 1.5,     // top-right: 3π/2 → 2π
-        0.0,                             // bottom-right: 0 → π/2
-        std::f32::consts::PI * 0.5,     // bottom-left: π/2 → π
-    ];
-
-    // 中心矩形（核心区域）的两个三角形
-    let inner_x0 = x0 + radii_clamped[0].max(radii_clamped[3]);
-    let inner_y0 = y0 + radii_clamped[0].max(radii_clamped[1]);
-    let inner_x1 = x1 - radii_clamped[1].max(radii_clamped[2]);
-    let inner_y1 = y1 - radii_clamped[2].max(radii_clamped[3]);
-
-    if inner_x1 > inner_x0 && inner_y1 > inner_y0 {
-        verts.push(RectVertex::new(inner_x0, inner_y0, 0.5, 0.5, r, g, b, a, 0.0));
-        verts.push(RectVertex::new(inner_x1, inner_y0, 0.5, 0.5, r, g, b, a, 0.0));
-        verts.push(RectVertex::new(inner_x0, inner_y1, 0.5, 0.5, r, g, b, a, 0.0));
-
-        verts.push(RectVertex::new(inner_x0, inner_y1, 0.5, 0.5, r, g, b, a, 0.0));
-        verts.push(RectVertex::new(inner_x1, inner_y0, 0.5, 0.5, r, g, b, a, 0.0));
-        verts.push(RectVertex::new(inner_x1, inner_y1, 0.5, 0.5, r, g, b, a, 0.0));
-    } else {
-        // 太小了，退化为普通矩形
-        return generate_rect_vertices(rect, r, g, b, a, radii[0]).to_vec();
+    let rx = rx_initial.min(rect.width * 0.5).max(0.0);
+    let ry = ry_initial.min(rect.height * 0.5).max(0.0);
+    if rx <= 0.0 && ry <= 0.0 {
+        return generate_rect_vertices(rect, r, g, b, a, 0.0).to_vec();
     }
 
-    // 每个角从核心矩形向外的扇形三角形带
+    // NDC y increases upward: y0 = smaller (screen bottom), y1 = larger (screen top)
+    let top_y = y1;
+    let bot_y = y0;
+    let inner_x0 = x0 + rx;
+    let inner_x1 = x1 - rx;
+    let inner_y0 = bot_y + ry;
+    let inner_y1 = top_y - ry;
+
+    // If inner area collapsed, fall back to plain rect
+    if inner_x1 <= inner_x0 || inner_y1 <= inner_y0 {
+        return generate_rect_vertices(rect, r, g, b, a, 0.0).to_vec();
+    }
+
+    // ── Center rectangle (inner area) ─────────────────────────────────
+    {
+        // always true since we returned above, but keep the block for clarity
+        push_rect(&mut verts, inner_x0, inner_y0, inner_x1 - inner_x0, inner_y1 - inner_y0, r, g, b, a);
+    }
+
+    // ── Edge strips ───────────────────────────────────────────────────
+    // (original if blocks removed — inner area is guaranteed valid now)
+    push_rect(&mut verts, inner_x0, inner_y1, inner_x1 - inner_x0, top_y - inner_y1, r, g, b, a);
+    push_rect(&mut verts, inner_x0, bot_y, inner_x1 - inner_x0, inner_y0 - bot_y, r, g, b, a);
+    push_rect(&mut verts, x0, inner_y0, inner_x0 - x0, inner_y1 - inner_y0, r, g, b, a);
+    push_rect(&mut verts, inner_x1, inner_y0, x1 - inner_x1, inner_y1 - inner_y0, r, g, b, a);
+
+    // ── Corner fans ─────────────────────────────────────────────────
+    let corner_centers = [
+        Vec2::new(x0 + rx, top_y - ry),   // TL
+        Vec2::new(x1 - rx, top_y - ry),   // TR
+        Vec2::new(x1 - rx, bot_y + ry),   // BR
+        Vec2::new(x0 + rx, bot_y + ry),   // BL
+    ];
+    let start_angles = [
+        std::f32::consts::FRAC_PI_2,       // TL: π/2 → π  (top→left)
+        0.0,                                // TR: 0 → π/2   (right→top)
+        std::f32::consts::PI * 1.5,        // BR: 3π/2→2π  (bottom→right)
+        std::f32::consts::PI,              // BL: π→3π/2   (left→bottom)
+    ];
     let inner_corners = [
-        Vec2::new(inner_x0, inner_y0),
-        Vec2::new(inner_x1, inner_y0),
-        Vec2::new(inner_x1, inner_y1),
-        Vec2::new(inner_x0, inner_y1),
+        Vec2::new(inner_x0, inner_y1), // TL
+        Vec2::new(inner_x1, inner_y1), // TR
+        Vec2::new(inner_x1, inner_y0), // BR
+        Vec2::new(inner_x0, inner_y0), // BL
     ];
 
-    for corner_idx in 0..4 {
-        let center = corner_centers[corner_idx];
-        let r_c = radii_clamped[corner_idx];
-        if r_c <= 0.0 {
-            continue;
-        }
-        let inner = inner_corners[corner_idx];
-        let start_angle = corner_start_angles[corner_idx];
-
+    for ci in 0..4 {
+        let center = corner_centers[ci];
+        let inner = inner_corners[ci];
+        let start = start_angles[ci];
         for i in 0..segments {
-            let a0 = start_angle + (i as f32) / (segments as f32) * std::f32::consts::FRAC_PI_2;
-            let a1 = start_angle + ((i + 1) as f32) / (segments as f32) * std::f32::consts::FRAC_PI_2;
-
-            let p0 = center + Vec2::new(a0.cos() * r_c, a0.sin() * r_c);
-            let p1 = center + Vec2::new(a1.cos() * r_c, a1.sin() * r_c);
-
-            // 三角形: inner → p0 → p1
-            verts.push(RectVertex::new(inner.x, inner.y, 0.5, 0.5, r, g, b, a, 0.0));
-            verts.push(RectVertex::new(p0.x, p0.y, 0.0, 0.0, r, g, b, a, r_c));
-            verts.push(RectVertex::new(p1.x, p1.y, 0.0, 0.0, r, g, b, a, r_c));
+            let a0 = start + (i as f32) / (segments as f32) * std::f32::consts::FRAC_PI_2;
+            let a1 = start + ((i + 1) as f32) / (segments as f32) * std::f32::consts::FRAC_PI_2;
+            let p0 = center + Vec2::new(a0.cos() * rx, a0.sin() * ry);
+            let p1 = center + Vec2::new(a1.cos() * rx, a1.sin() * ry);
+            // radius=0 = geometric tessellation, no SDF clipping
+            verts.push(RectVertex::new(inner.x, inner.y, 0.0, 0.0, r, g, b, a, 0.0));
+            verts.push(RectVertex::new(p0.x, p0.y, 0.0, 0.0, r, g, b, a, 0.0));
+            verts.push(RectVertex::new(p1.x, p1.y, 0.0, 0.0, r, g, b, a, 0.0));
         }
     }
 
@@ -185,7 +201,6 @@ mod tests {
 
     #[test]
     fn vertex_is_pod_zeroable() {
-        // Compile-time check that RectVertex implements Pod + Zeroable
         fn assert_pod<T: Pod + Zeroable>() {}
         assert_pod::<RectVertex>();
     }
@@ -251,20 +266,22 @@ mod tests {
             Rect::new(0.0, 0.0, 100.0, 50.0),
             1.0, 1.0, 1.0, 1.0,
             [0.0; 4],
+            (0.0, 0.0),
         );
         assert_eq!(verts.len(), 6);
     }
 
     #[test]
-    fn rounded_rect_with_radii_produces_more_vertices() {
+    fn rounded_rect_with_radii_produces_many_vertices() {
         let verts = generate_rounded_rect_vertices(
             Rect::new(0.0, 0.0, 100.0, 50.0),
             1.0, 1.0, 1.0, 1.0,
             [8.0; 4],
+            (8.0, 8.0),
         );
-        // 4 corners * 8 segments * 3 verts + 6 center verts = 102
+        // center(6) + 4 edges(6×4=24) + 4 corners × 16 segments × 3 = 30 + 192 = 222
         assert!(verts.len() > 6);
-        assert_eq!(verts.len(), 102);
+        assert_eq!(verts.len(), 222);
     }
 
     #[test]
@@ -273,14 +290,15 @@ mod tests {
             Rect::new(0.0, 0.0, 200.0, 100.0),
             1.0, 1.0, 1.0, 1.0,
             [16.0, 0.0, 16.0, 0.0],
+            (16.0, 16.0),
         );
-        assert_eq!(verts.len() % 3, 0, "Vertex count should be divisible by 3 (triangles)");
+        assert_eq!(verts.len() % 3, 0);
     }
 
     #[test]
     fn rounded_rect_all_vertices_in_bounds() {
         let rect = Rect::new(0.0, 0.0, 200.0, 100.0);
-        let verts = generate_rounded_rect_vertices(rect, 1.0, 1.0, 1.0, 1.0, [16.0; 4]);
+        let verts = generate_rounded_rect_vertices(rect, 1.0, 1.0, 1.0, 1.0, [16.0; 4], (16.0, 16.0));
         for v in &verts {
             assert!(v.position[0] >= rect.x - 0.1, "vertex x={} below min_x={}", v.position[0], rect.x);
             assert!(v.position[0] <= rect.x + rect.width + 0.1, "vertex x={} above max_x={}", v.position[0], rect.x + rect.width);
@@ -291,22 +309,22 @@ mod tests {
 
     #[test]
     fn rounded_rect_small_rect_falls_back() {
-        // A rect so small that the inner rectangle collapses
         let verts = generate_rounded_rect_vertices(
             Rect::new(0.0, 0.0, 8.0, 8.0),
             1.0, 1.0, 1.0, 1.0,
-            [10.0; 4], // radius > rect size
+            [10.0; 4],
+            (10.0, 10.0),
         );
         assert_eq!(verts.len(), 6, "Small rect should fall back to plain rect");
     }
 
     #[test]
     fn rounded_rect_different_corner_radii() {
-        // Each corner with a different radius
         let verts = generate_rounded_rect_vertices(
             Rect::new(0.0, 0.0, 100.0, 100.0),
             1.0, 0.0, 0.0, 1.0,
             [0.0, 8.0, 16.0, 4.0],
+            (16.0, 16.0),
         );
         assert!(verts.len() > 6, "Should generate corner fans for non-zero radii");
         assert_eq!(verts.len() % 3, 0);
