@@ -55,11 +55,8 @@ impl Widget for Container {
             },
         };
 
-        let child_size = self
-            .child
-            .as_ref()
-            .map(|c| c.measure(inner_constraint))
-            .unwrap_or(Size::ZERO);
+        let child_size =
+            self.child.as_ref().map(|c| c.measure(inner_constraint)).unwrap_or(Size::ZERO);
 
         Size {
             width: child_size.width + pad2,

@@ -85,9 +85,7 @@ mod tests {
 
     fn test_context() -> PanelContext {
         use mondrian_core::events::EventBus;
-        PanelContext {
-            event_bus: EventBus::new(),
-        }
+        PanelContext { event_bus: EventBus::new() }
     }
 
     #[test]
@@ -99,9 +97,10 @@ mod tests {
     #[test]
     fn registry_register_adds_factory() {
         let mut registry = PanelRegistry::new();
-        registry.register(PanelKind::Timeline, Arc::new(|_ctx| {
-            Box::new(TestPanel { kind: PanelKind::Timeline })
-        }));
+        registry.register(
+            PanelKind::Timeline,
+            Arc::new(|_ctx| Box::new(TestPanel { kind: PanelKind::Timeline })),
+        );
         assert!(registry.is_registered(PanelKind::Timeline));
         assert!(!registry.is_registered(PanelKind::Viewer));
     }
@@ -109,9 +108,10 @@ mod tests {
     #[test]
     fn registry_create_returns_panel() {
         let mut registry = PanelRegistry::new();
-        registry.register(PanelKind::Console, Arc::new(|_ctx| {
-            Box::new(TestPanel { kind: PanelKind::Console })
-        }));
+        registry.register(
+            PanelKind::Console,
+            Arc::new(|_ctx| Box::new(TestPanel { kind: PanelKind::Console })),
+        );
 
         let panel = registry.create(PanelKind::Console, test_context()).unwrap();
         assert_eq!(panel.kind(), PanelKind::Console);
@@ -126,12 +126,16 @@ mod tests {
     #[test]
     fn registry_register_overwrites_existing() {
         let mut registry = PanelRegistry::new();
-        registry.register(PanelKind::Timeline, Arc::new(|_ctx| {
-            Box::new(TestPanel { kind: PanelKind::Timeline })
-        }));
-        registry.register(PanelKind::Timeline, Arc::new(|_ctx| {
-            Box::new(TestPanel { kind: PanelKind::Viewer }) // wrong kind on purpose
-        }));
+        registry.register(
+            PanelKind::Timeline,
+            Arc::new(|_ctx| Box::new(TestPanel { kind: PanelKind::Timeline })),
+        );
+        registry.register(
+            PanelKind::Timeline,
+            Arc::new(|_ctx| {
+                Box::new(TestPanel { kind: PanelKind::Viewer }) // wrong kind on purpose
+            }),
+        );
 
         // Second registration overwrites
         let panel = registry.create(PanelKind::Timeline, test_context()).unwrap();
@@ -141,12 +145,14 @@ mod tests {
     #[test]
     fn registry_registered_kinds_returns_all() {
         let mut registry = PanelRegistry::new();
-        registry.register(PanelKind::Viewer, Arc::new(|_ctx| {
-            Box::new(TestPanel { kind: PanelKind::Viewer })
-        }));
-        registry.register(PanelKind::Timeline, Arc::new(|_ctx| {
-            Box::new(TestPanel { kind: PanelKind::Timeline })
-        }));
+        registry.register(
+            PanelKind::Viewer,
+            Arc::new(|_ctx| Box::new(TestPanel { kind: PanelKind::Viewer })),
+        );
+        registry.register(
+            PanelKind::Timeline,
+            Arc::new(|_ctx| Box::new(TestPanel { kind: PanelKind::Timeline })),
+        );
 
         let kinds = registry.registered_kinds();
         assert_eq!(kinds.len(), 2);

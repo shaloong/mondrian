@@ -81,7 +81,6 @@ pub fn set_theme_preset(preset: ThemePreset) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     #[test]
     fn each_preset_builds_with_correct_name() {
@@ -107,14 +106,18 @@ mod tests {
     #[test]
     fn dark_theme_is_dark() {
         let t = ThemePreset::Dark.build();
-        let lum = 0.2126 * t.colors.background.r + 0.7152 * t.colors.background.g + 0.0722 * t.colors.background.b;
+        let lum = 0.2126 * t.colors.background.r
+            + 0.7152 * t.colors.background.g
+            + 0.0722 * t.colors.background.b;
         assert!(lum < 0.2);
     }
 
     #[test]
     fn light_theme_is_light() {
         let t = ThemePreset::Light.build();
-        let lum = 0.2126 * t.colors.background.r + 0.7152 * t.colors.background.g + 0.0722 * t.colors.background.b;
+        let lum = 0.2126 * t.colors.background.r
+            + 0.7152 * t.colors.background.g
+            + 0.0722 * t.colors.background.b;
         assert!(lum > 0.7);
     }
 
@@ -152,6 +155,8 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         std::thread::spawn(move || {
             assert_eq!(theme.name, "Dark");
-        }).join().unwrap();
+        })
+        .join()
+        .unwrap();
     }
 }

@@ -35,7 +35,9 @@ impl ColoredBox {
 }
 
 impl Widget for ColoredBox {
-    fn id(&self) -> WidgetId { self.id }
+    fn id(&self) -> WidgetId {
+        self.id
+    }
 
     fn measure(&self, _constraint: LayoutConstraint) -> Size {
         self.preferred
@@ -62,7 +64,12 @@ impl Widget for ColoredBox {
     fn paint(&self, ctx: &mut PaintContext) {
         ctx.encoder.draw_rect(self.bounds, self.color, 0.0);
         if !self.label.is_empty() {
-            ctx.encoder.draw_text(self.label, 12.0, Point::new(self.bounds.x + 4.0, self.bounds.y + 4.0), Color::WHITE);
+            ctx.encoder.draw_text(
+                self.label,
+                12.0,
+                Point::new(self.bounds.x + 4.0, self.bounds.y + 4.0),
+                Color::WHITE,
+            );
         }
     }
 
@@ -78,8 +85,8 @@ mod tests {
     use crate::widget::DrawCommandEncoder;
     use crate::EventContext;
     use glam::Vec2;
-    use mondrian_editor_state::Action;
     use mondrian_editor_state::state::PanelKind;
+    use mondrian_editor_state::Action;
     use mondrian_platform::NoopPlatformService;
     use mondrian_ui_theme::Theme;
 
@@ -88,7 +95,9 @@ mod tests {
     }
 
     impl MockEncoder {
-        fn new() -> Self { Self { draw_count: 0 } }
+        fn new() -> Self {
+            Self { draw_count: 0 }
+        }
     }
 
     impl DrawCommandEncoder for MockEncoder {
@@ -106,8 +115,12 @@ mod tests {
     struct MockFocus;
 
     impl crate::focus::FocusManager for MockFocus {
-        fn focused_widget(&self) -> Option<WidgetId> { None }
-        fn focused_panel(&self) -> Option<PanelKind> { None }
+        fn focused_widget(&self) -> Option<WidgetId> {
+            None
+        }
+        fn focused_panel(&self) -> Option<PanelKind> {
+            None
+        }
         fn request_focus(&mut self, _widget: WidgetId, _panel: PanelKind) {}
         fn release_focus(&mut self, _widget: WidgetId) {}
         fn focus_next(&mut self) {}
@@ -120,7 +133,9 @@ mod tests {
     impl crate::shortcut::ShortcutManager for MockShortcut {
         fn register(&mut self, _s: crate::ShortcutScope, _b: crate::ShortcutBinding, _a: Action) {}
         fn unregister(&mut self, _s: crate::ShortcutScope, _b: &crate::ShortcutBinding) {}
-        fn resolve(&self, _k: crate::KeyCode, _m: Modifiers) -> Option<Action> { None }
+        fn resolve(&self, _k: crate::KeyCode, _m: Modifiers) -> Option<Action> {
+            None
+        }
         fn clear_scope(&mut self, _s: crate::ShortcutScope) {}
         fn clear_all(&mut self) {}
     }
@@ -130,7 +145,9 @@ mod tests {
     impl crate::tooltip::TooltipManager for MockTooltip {
         fn show(&mut self, _text: String, _position: Point) {}
         fn hide(&mut self) {}
-        fn current(&self) -> Option<&crate::TooltipState> { None }
+        fn current(&self) -> Option<&crate::TooltipState> {
+            None
+        }
         fn update(&mut self, _delta_ms: u64) {}
     }
 
@@ -148,7 +165,10 @@ mod tests {
     fn colored_box_measure_ignores_constraint() {
         let w = ColoredBox::new(Color::from_hex(0xFF0000), 100.0, 50.0);
         // Even when constraint is tight 30x30, measure returns preferred
-        assert_eq!(w.measure(LayoutConstraint::tight(30.0, 30.0)), Size::new(100.0, 50.0));
+        assert_eq!(
+            w.measure(LayoutConstraint::tight(30.0, 30.0)),
+            Size::new(100.0, 50.0)
+        );
     }
 
     #[test]
@@ -232,7 +252,11 @@ mod tests {
         };
 
         let result = w.event(
-            &UiEvent::MouseDown { position: Point::ZERO, button: crate::MouseButton::Left, modifiers: Modifiers::none() },
+            &UiEvent::MouseDown {
+                position: Point::ZERO,
+                button: crate::MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
             &mut ctx,
         );
         assert_eq!(result, EventResult::Ignored);

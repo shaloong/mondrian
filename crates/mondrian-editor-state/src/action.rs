@@ -175,10 +175,7 @@ mod tests {
     }
 
     fn test_timecode() -> TimeCode {
-        TimeCode {
-            frame: 42,
-            time_base: Rational::new(30000, 1001),
-        }
+        TimeCode { frame: 42, time_base: Rational::new(30000, 1001) }
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -232,7 +229,10 @@ mod tests {
 
     #[test]
     fn round_trip_delete_selection() {
-        assert_eq!(round_trip(&Action::DeleteSelection), Action::DeleteSelection);
+        assert_eq!(
+            round_trip(&Action::DeleteSelection),
+            Action::DeleteSelection
+        );
     }
 
     #[test]
@@ -245,19 +245,13 @@ mod tests {
 
     #[test]
     fn round_trip_nudge_clip() {
-        let a = Action::NudgeClip {
-            clip_id: test_clip_id(),
-            delta_frames: 5,
-        };
+        let a = Action::NudgeClip { clip_id: test_clip_id(), delta_frames: 5 };
         assert_eq!(round_trip(&a), a);
     }
 
     #[test]
     fn round_trip_nudge_clip_negative() {
-        let a = Action::NudgeClip {
-            clip_id: test_clip_id(),
-            delta_frames: -3,
-        };
+        let a = Action::NudgeClip { clip_id: test_clip_id(), delta_frames: -3 };
         assert_eq!(round_trip(&a), a);
     }
 
@@ -372,11 +366,7 @@ mod tests {
 
     #[test]
     fn round_trip_reorder_effects() {
-        let a = Action::ReorderEffects {
-            clip_id: test_clip_id(),
-            from: 2,
-            to: 5,
-        };
+        let a = Action::ReorderEffects { clip_id: test_clip_id(), from: 2, to: 5 };
         assert_eq!(round_trip(&a), a);
     }
 
@@ -410,7 +400,10 @@ mod tests {
 
     #[test]
     fn round_trip_toggle_fullscreen() {
-        assert_eq!(round_trip(&Action::ToggleFullscreen), Action::ToggleFullscreen);
+        assert_eq!(
+            round_trip(&Action::ToggleFullscreen),
+            Action::ToggleFullscreen
+        );
     }
 
     #[test]
@@ -486,10 +479,7 @@ mod tests {
 
     #[test]
     fn json_format_nudge_clip_is_object() {
-        let a = Action::NudgeClip {
-            clip_id: test_clip_id(),
-            delta_frames: 10,
-        };
+        let a = Action::NudgeClip { clip_id: test_clip_id(), delta_frames: 10 };
         let json = serde_json::to_string(&a).unwrap();
         // Should be a JSON object {"NudgeClip": {...}}, not a string
         assert!(json.starts_with('{'));

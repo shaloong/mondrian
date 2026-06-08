@@ -43,7 +43,9 @@ impl TextRenderer {
         };
 
         // Real font ascent: distance from line_top to baseline (cosmic-text measured)
-        let ascent = layout.buffer().layout_runs()
+        let ascent = layout
+            .buffer()
+            .layout_runs()
             .next()
             .map(|run| run.line_y - run.line_top)
             .unwrap_or(font_size * 0.75);
@@ -51,7 +53,9 @@ impl TextRenderer {
 
         let mut commands = Vec::new();
         for (_line_y, glyph) in layout.positioned_glyphs() {
-            if let Some((uv_rect, bmp_w, bmp_h, top, left)) = self.atlas.get_or_rasterize(font_system, glyph, 0.0) {
+            if let Some((uv_rect, bmp_w, bmp_h, top, left)) =
+                self.atlas.get_or_rasterize(font_system, glyph, 0.0)
+            {
                 let bitmap_x = position.x + glyph.x + left as f32;
                 let bitmap_top = baseline_y - top as f32;
                 commands.push(DrawCommand::Image {
@@ -68,9 +72,8 @@ impl TextRenderer {
         let attrs = cosmic_text::Attrs::new()
             .family(cosmic_text::Family::SansSerif)
             .weight(cosmic_text::Weight::NORMAL);
-        let layout = TextLayout::new_single_line(
-            &mut self.font_manager.font_system, text, attrs, font_size,
-        );
+        let layout =
+            TextLayout::new_single_line(&mut self.font_manager.font_system, text, attrs, font_size);
         layout.size()
     }
 
@@ -92,9 +95,8 @@ pub fn resolve_text_commands(
     for cmd in commands {
         match cmd {
             DrawCommand::Text { text, style, position, color } => {
-                let glyph_cmds = text_renderer.layout_and_render(
-                    &text, style.font_size, position, color, None,
-                );
+                let glyph_cmds =
+                    text_renderer.layout_and_render(&text, style.font_size, position, color, None);
                 resolved.extend(glyph_cmds);
             }
             _ => resolved.push(cmd),
@@ -104,7 +106,9 @@ pub fn resolve_text_commands(
 }
 
 impl Default for TextRenderer {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -115,31 +119,46 @@ mod tests {
 
     /// Extract [Rect] bounds from Image commands.
     fn image_bounds(cmds: &[DrawCommand]) -> Vec<Rect> {
-        cmds.iter().filter_map(|c| {
-            if let DrawCommand::Image { bounds, .. } = c { Some(*bounds) } else { None }
-        }).collect()
+        cmds.iter()
+            .filter_map(|c| {
+                if let DrawCommand::Image { bounds, .. } = c {
+                    Some(*bounds)
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     /// Get the UV rect from the first Image command.
     fn first_uv(cmds: &[DrawCommand]) -> Option<Rect> {
         cmds.iter().find_map(|c| {
-            if let DrawCommand::Image { uv_rect, .. } = c { Some(*uv_rect) } else { None }
+            if let DrawCommand::Image { uv_rect, .. } = c {
+                Some(*uv_rect)
+            } else {
+                None
+            }
         })
     }
 
     // ── Basic Tests ─────────────────────────────────────────────────────
 
     #[test]
-    fn text_renderer_creates() { let _r = TextRenderer::new(); }
+    fn text_renderer_creates() {
+        let _r = TextRenderer::new();
+    }
 
     #[test]
-    fn text_renderer_default_creates() { let _r = TextRenderer::default(); }
+    fn text_renderer_default_creates() {
+        let _r = TextRenderer::default();
+    }
 
     #[test]
     fn measure_text_returns_positive() {
         let mut r = TextRenderer::new();
         let (w, h) = r.measure_text("Hello", 16.0);
-        assert!(w > 0.0); assert!(h > 0.0);
+        assert!(w > 0.0);
+        assert!(h > 0.0);
     }
 
     #[test]
@@ -162,10 +181,21 @@ mod tests {
         let _ = r.layout_and_render("AB", 24.0, Point::ZERO, Color::WHITE, None);
         assert!(!r.atlas.pending_uploads.is_empty());
         let cmds = r.layout_and_render("AB", 24.0, Point::ZERO, Color::WHITE, None);
-        let uvs: Vec<Rect> = cmds.iter().filter_map(|c| {
-            if let DrawCommand::Image { uv_rect, .. } = c { Some(*uv_rect) } else { None }
-        }).collect();
-        assert!(uvs.len() >= 2, "Expected 2+ glyphs for 'AB', got {}", uvs.len());
+        let uvs: Vec<Rect> = cmds
+            .iter()
+            .filter_map(|c| {
+                if let DrawCommand::Image { uv_rect, .. } = c {
+                    Some(*uv_rect)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(
+            uvs.len() >= 2,
+            "Expected 2+ glyphs for 'AB', got {}",
+            uvs.len()
+        );
         if uvs.len() >= 2 {
             let (r1, r2) = (uvs[0], uvs[1]);
             let same = (r1.x - r2.x).abs() < 0.0001
@@ -184,19 +214,31 @@ mod tests {
         let uploads = r.take_pending_uploads();
         assert!(!uploads.is_empty());
         let cmds = r.layout_and_render("AB", 24.0, Point::ZERO, Color::WHITE, None);
-        let uvs: Vec<Rect> = cmds.iter().filter_map(|c| {
-            if let DrawCommand::Image { uv_rect, .. } = c { Some(*uv_rect) } else { None }
-        }).collect();
-        assert!(!uvs.is_empty(), "Second frame should produce Image commands");
+        let uvs: Vec<Rect> = cmds
+            .iter()
+            .filter_map(|c| {
+                if let DrawCommand::Image { uv_rect, .. } = c {
+                    Some(*uv_rect)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(
+            !uvs.is_empty(),
+            "Second frame should produce Image commands"
+        );
         for upload in &uploads {
             let expected_u = upload.x as f32 / 2048.0;
             let expected_v = upload.y as f32 / 2048.0;
-            let found = uvs.iter().any(|uv| {
-                (uv.x - expected_u).abs() < 0.001 && (uv.y - expected_v).abs() < 0.001
-            });
-            assert!(found,
+            let found = uvs
+                .iter()
+                .any(|uv| (uv.x - expected_u).abs() < 0.001 && (uv.y - expected_v).abs() < 0.001);
+            assert!(
+                found,
                 "Upload at ({},{}) has no matching UV rect among {:?}",
-                upload.x, upload.y, uvs);
+                upload.x, upload.y, uvs
+            );
         }
     }
 
@@ -206,9 +248,16 @@ mod tests {
         let _ = r.layout_and_render("ABC", 24.0, Point::ZERO, Color::WHITE, None);
         let _ = r.take_pending_uploads();
         let cmds = r.layout_and_render("ABC", 24.0, Point::ZERO, Color::WHITE, None);
-        let uvs: Vec<Rect> = cmds.iter().filter_map(|c| {
-            if let DrawCommand::Image { uv_rect, .. } = c { Some(*uv_rect) } else { None }
-        }).collect();
+        let uvs: Vec<Rect> = cmds
+            .iter()
+            .filter_map(|c| {
+                if let DrawCommand::Image { uv_rect, .. } = c {
+                    Some(*uv_rect)
+                } else {
+                    None
+                }
+            })
+            .collect();
         assert!(uvs.len() >= 3, "Expected 3 glyphs, got {}", uvs.len());
         assert_ne!(uvs[0], uvs[1], "A and B should have different UVs");
         assert_ne!(uvs[1], uvs[2], "B and C should have different UVs");
@@ -220,11 +269,18 @@ mod tests {
         let mut r = TextRenderer::new();
         let _ = r.layout_and_render("Test", 16.0, Point::ZERO, Color::WHITE, None);
         let uploads = r.take_pending_uploads();
-        assert!(!uploads.is_empty(), "Should have pending uploads after rasterization");
+        assert!(
+            !uploads.is_empty(),
+            "Should have pending uploads after rasterization"
+        );
         for u in &uploads {
             let non_zero = u.data.iter().filter(|&&b| b > 0).count();
-            assert!(non_zero > 0,
-                "Glyph {}x{} bitmap is all zeros!", u.width, u.height);
+            assert!(
+                non_zero > 0,
+                "Glyph {}x{} bitmap is all zeros!",
+                u.width,
+                u.height
+            );
         }
     }
 
@@ -263,14 +319,19 @@ mod tests {
         let mut r = TextRenderer::new();
         for &fs in &[14.0, 16.0, 24.0] {
             for &(text, px, py) in &[
-                ("i", 0.0, 0.0), ("e", 0.0, 0.0), ("l", 0.0, 0.0),
-                ("M", 100.0, 50.0), ("g", 100.0, 50.0),
+                ("i", 0.0, 0.0),
+                ("e", 0.0, 0.0),
+                ("l", 0.0, 0.0),
+                ("M", 100.0, 50.0),
+                ("g", 100.0, 50.0),
             ] {
                 let _ = r.layout_and_render(text, fs, Point::new(px, py), Color::WHITE, None);
                 let _ = r.take_pending_uploads();
                 let cmds = r.layout_and_render(text, fs, Point::new(px, py), Color::WHITE, None);
                 let bounds = image_bounds(&cmds);
-                if bounds.is_empty() { continue; }
+                if bounds.is_empty() {
+                    continue;
+                }
                 let b = bounds[0];
                 // x should be near the requested position
                 assert!(
@@ -282,7 +343,13 @@ mod tests {
                 assert!(
                     b.y >= py - fs * 2.0 && b.y <= py + fs * 2.0,
                     "'{}' at {}px pos=({},{:.0}): bitmap_y={:.1} out of range [{:.1}, {:.1}]",
-                    text, fs, px, py, b.y, py - fs * 2.0, py + fs * 2.0
+                    text,
+                    fs,
+                    px,
+                    py,
+                    b.y,
+                    py - fs * 2.0,
+                    py + fs * 2.0
                 );
             }
         }
@@ -300,13 +367,17 @@ mod tests {
             let _ = r.take_pending_uploads();
             let cmds = r.layout_and_render(text, fs, Point::ZERO, Color::WHITE, None);
             let bounds = image_bounds(&cmds);
-            if bounds.len() < 2 { continue; }
+            if bounds.len() < 2 {
+                continue;
+            }
             let centers: Vec<f32> = bounds.iter().map(|b| b.x + b.width / 2.0).collect();
             for w in centers.windows(2) {
                 assert!(
                     w[0] < w[1],
                     "At {}px, glyph centers not monotonically increasing: {:?}. Bounds: {:?}",
-                    fs, centers, bounds
+                    fs,
+                    centers,
+                    bounds
                 );
             }
         }
@@ -322,13 +393,17 @@ mod tests {
             let _ = r.take_pending_uploads();
             let cmds = r.layout_and_render(text, fs, Point::ZERO, Color::WHITE, None);
             let bounds = image_bounds(&cmds);
-            if bounds.len() < 2 { continue; }
+            if bounds.len() < 2 {
+                continue;
+            }
             for w in bounds.windows(2) {
                 let gap = w[1].x - (w[0].x + w[0].width);
                 assert!(
                     gap > -3.0,
                     "At {}px, consecutive glyphs overlap by {:.1}px. Bounds: {:?}",
-                    fs, -gap, bounds
+                    fs,
+                    -gap,
+                    bounds
                 );
             }
         }
@@ -341,11 +416,13 @@ mod tests {
         for &fs in &[16.0, 24.0, 36.0] {
             let _ = r.layout_and_render("AV", fs, Point::ZERO, Color::WHITE, None);
             let _ = r.take_pending_uploads();
-            let bounds_av = image_bounds(&r.layout_and_render("AV", fs, Point::ZERO, Color::WHITE, None));
+            let bounds_av =
+                image_bounds(&r.layout_and_render("AV", fs, Point::ZERO, Color::WHITE, None));
 
             let _ = r.layout_and_render("AB", fs, Point::ZERO, Color::WHITE, None);
             let _ = r.take_pending_uploads();
-            let bounds_ab = image_bounds(&r.layout_and_render("AB", fs, Point::ZERO, Color::WHITE, None));
+            let bounds_ab =
+                image_bounds(&r.layout_and_render("AB", fs, Point::ZERO, Color::WHITE, None));
 
             if bounds_av.len() >= 2 && bounds_ab.len() >= 2 {
                 let gap_av = bounds_av[1].x - (bounds_av[0].x + bounds_av[0].width);
@@ -368,8 +445,10 @@ mod tests {
         let _ = r.layout_and_render("A", 16.0, Point::new(0.0, 0.0), Color::WHITE, None);
         let _ = r.take_pending_uploads();
 
-        let bounds_int = image_bounds(&r.layout_and_render("A", 16.0, Point::new(0.0, 0.0), Color::WHITE, None));
-        let bounds_frac = image_bounds(&r.layout_and_render("A", 16.0, Point::new(0.5, 0.0), Color::WHITE, None));
+        let bounds_int =
+            image_bounds(&r.layout_and_render("A", 16.0, Point::new(0.0, 0.0), Color::WHITE, None));
+        let bounds_frac =
+            image_bounds(&r.layout_and_render("A", 16.0, Point::new(0.5, 0.0), Color::WHITE, None));
 
         if !bounds_int.is_empty() && !bounds_frac.is_empty() {
             let dx = bounds_frac[0].x - bounds_int[0].x;
@@ -388,9 +467,12 @@ mod tests {
         let _ = r.layout_and_render("A", 16.0, Point::ZERO, Color::WHITE, None);
         let _ = r.take_pending_uploads();
 
-        let uv1 = first_uv(&r.layout_and_render("A", 16.0, Point::new(0.0, 0.0), Color::WHITE, None));
-        let uv2 = first_uv(&r.layout_and_render("A", 16.0, Point::new(0.25, 0.0), Color::WHITE, None));
-        let uv3 = first_uv(&r.layout_and_render("A", 16.0, Point::new(0.75, 0.0), Color::WHITE, None));
+        let uv1 =
+            first_uv(&r.layout_and_render("A", 16.0, Point::new(0.0, 0.0), Color::WHITE, None));
+        let uv2 =
+            first_uv(&r.layout_and_render("A", 16.0, Point::new(0.25, 0.0), Color::WHITE, None));
+        let uv3 =
+            first_uv(&r.layout_and_render("A", 16.0, Point::new(0.75, 0.0), Color::WHITE, None));
 
         if let (Some(uv1), Some(uv2), Some(uv3)) = (uv1, uv2, uv3) {
             assert_eq!(uv1.x, uv2.x, "UV x changed with subpixel offset");
@@ -406,25 +488,56 @@ mod tests {
     #[test]
     fn problematic_chars_have_reasonable_bounds() {
         let mut r = TextRenderer::new();
-        for &fs in &[12.0, 13.0, 14.0, 15.0, 16.0, 18.0, 20.0, 24.0, 28.0, 32.0, 36.0] {
+        for &fs in &[
+            12.0, 13.0, 14.0, 15.0, 16.0, 18.0, 20.0, 24.0, 28.0, 32.0, 36.0,
+        ] {
             for &ch in &['i', 'e', 'l'] {
                 let text = ch.to_string();
-                let _ = r.layout_and_render(&text, fs, Point::new(100.0, 100.0), Color::WHITE, None);
+                let _ =
+                    r.layout_and_render(&text, fs, Point::new(100.0, 100.0), Color::WHITE, None);
                 let _ = r.take_pending_uploads();
-                let cmds = r.layout_and_render(&text, fs, Point::new(100.0, 100.0), Color::WHITE, None);
+                let cmds =
+                    r.layout_and_render(&text, fs, Point::new(100.0, 100.0), Color::WHITE, None);
                 let bounds = image_bounds(&cmds);
-                if bounds.is_empty() { continue; }
+                if bounds.is_empty() {
+                    continue;
+                }
                 let b = bounds[0];
-                assert!(b.x >= 90.0 && b.x <= 120.0,
-                    "'{}' at {}px: bitmap_x={:.1} far from expected ~100.0", ch, fs, b.x);
-                assert!(b.width >= 1.0,
-                    "'{}' at {}px: bitmap width {:.1} too small", ch, fs, b.width);
-                assert!(b.width <= fs * 3.0,
-                    "'{}' at {}px: bitmap width {:.1} suspiciously large", ch, fs, b.width);
-                assert!(b.height >= fs * 0.3,
-                    "'{}' at {}px: bitmap height {:.1} too small", ch, fs, b.height);
-                assert!(b.height <= fs * 2.5,
-                    "'{}' at {}px: bitmap height {:.1} suspiciously large", ch, fs, b.height);
+                assert!(
+                    b.x >= 90.0 && b.x <= 120.0,
+                    "'{}' at {}px: bitmap_x={:.1} far from expected ~100.0",
+                    ch,
+                    fs,
+                    b.x
+                );
+                assert!(
+                    b.width >= 1.0,
+                    "'{}' at {}px: bitmap width {:.1} too small",
+                    ch,
+                    fs,
+                    b.width
+                );
+                assert!(
+                    b.width <= fs * 3.0,
+                    "'{}' at {}px: bitmap width {:.1} suspiciously large",
+                    ch,
+                    fs,
+                    b.width
+                );
+                assert!(
+                    b.height >= fs * 0.3,
+                    "'{}' at {}px: bitmap height {:.1} too small",
+                    ch,
+                    fs,
+                    b.height
+                );
+                assert!(
+                    b.height <= fs * 2.5,
+                    "'{}' at {}px: bitmap height {:.1} suspiciously large",
+                    ch,
+                    fs,
+                    b.height
+                );
             }
         }
     }
@@ -451,7 +564,11 @@ mod tests {
                     assert!(
                         (c - avg).abs() <= fs * 0.2 + 1.5,
                         "At {}px, '{}' center={:.1} deviates from avg {:.1}. All centers: {:?}",
-                        fs, ch, c, avg, centers
+                        fs,
+                        ch,
+                        c,
+                        avg,
+                        centers
                     );
                 }
             }
@@ -471,12 +588,24 @@ mod tests {
             let cmds = r.layout_and_render(text, fs, Point::ZERO, Color::WHITE, None);
             for cmd in &cmds {
                 if let DrawCommand::Image { bounds, .. } = cmd {
-                    assert!(bounds.width > 0.0 && bounds.height > 0.0,
-                        "Empty glyph at {}px: {:?}", fs, bounds);
-                    assert!(bounds.width <= fs * 5.0,
-                        "Glyph too wide at {}px: {:?}", fs, bounds);
-                    assert!(bounds.height <= fs * 4.0,
-                        "Glyph too tall at {}px: {:?}", fs, bounds);
+                    assert!(
+                        bounds.width > 0.0 && bounds.height > 0.0,
+                        "Empty glyph at {}px: {:?}",
+                        fs,
+                        bounds
+                    );
+                    assert!(
+                        bounds.width <= fs * 5.0,
+                        "Glyph too wide at {}px: {:?}",
+                        fs,
+                        bounds
+                    );
+                    assert!(
+                        bounds.height <= fs * 4.0,
+                        "Glyph too tall at {}px: {:?}",
+                        fs,
+                        bounds
+                    );
                 }
             }
         }
@@ -489,7 +618,9 @@ mod tests {
     fn adjacent_sizes_produce_proportional_metrics() {
         let mut r = TextRenderer::new();
         let text = "Hello";
-        let sizes: &[f32] = &[10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 18.0, 20.0, 24.0, 28.0, 32.0, 36.0];
+        let sizes: &[f32] = &[
+            10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 18.0, 20.0, 24.0, 28.0, 32.0, 36.0,
+        ];
         let mut prev: Option<(f32, f32)> = None; // (size, width)
         for &fs in sizes {
             let (w, h) = r.measure_text(text, fs);
@@ -501,7 +632,12 @@ mod tests {
                 assert!(
                     (actual_ratio - expected_ratio).abs() <= 0.4,
                     "Width scaling {:.0}→{:.0}px: expected ratio ~{:.2}, got {:.2} ({:.1} → {:.1})",
-                    prev_size, fs, expected_ratio, actual_ratio, prev_w, w
+                    prev_size,
+                    fs,
+                    expected_ratio,
+                    actual_ratio,
+                    prev_w,
+                    w
                 );
             }
             prev = Some((fs, w));
@@ -514,28 +650,35 @@ mod tests {
     #[test]
     fn resolve_text_commands_produces_image_commands() {
         let mut r = TextRenderer::new();
-        let commands = vec![
-            DrawCommand::Text {
-                text: "Hi".to_string(),
-                style: mondrian_ui_theme::typography::TextStyle {
-                    font_size: 16.0,
-                    line_height: 1.3,
-                    font_weight: mondrian_ui_theme::typography::FontWeight::Regular,
-                    letter_spacing: 0.0,
-                },
-                position: Point::new(10.0, 20.0),
-                color: Color::WHITE,
+        let commands = vec![DrawCommand::Text {
+            text: "Hi".to_string(),
+            style: mondrian_ui_theme::typography::TextStyle {
+                font_size: 16.0,
+                line_height: 1.3,
+                font_weight: mondrian_ui_theme::typography::FontWeight::Regular,
+                letter_spacing: 0.0,
             },
-        ];
+            position: Point::new(10.0, 20.0),
+            color: Color::WHITE,
+        }];
         // First pass: rasterizes
         let _ = resolve_text_commands(commands.clone(), &mut r);
         let _ = r.take_pending_uploads();
         // Second pass: should return Image commands
         let resolved = resolve_text_commands(commands, &mut r);
-        let image_count = resolved.iter().filter(|c| matches!(c, DrawCommand::Image { .. })).count();
-        assert!(image_count > 0, "Expected Image commands, got none. Commands: {:?}", resolved);
+        let image_count =
+            resolved.iter().filter(|c| matches!(c, DrawCommand::Image { .. })).count();
+        assert!(
+            image_count > 0,
+            "Expected Image commands, got none. Commands: {:?}",
+            resolved
+        );
         // No Text commands should remain
-        let text_remaining = resolved.iter().filter(|c| matches!(c, DrawCommand::Text { .. })).count();
-        assert_eq!(text_remaining, 0, "Text commands should all be resolved to Image");
+        let text_remaining =
+            resolved.iter().filter(|c| matches!(c, DrawCommand::Text { .. })).count();
+        assert_eq!(
+            text_remaining, 0,
+            "Text commands should all be resolved to Image"
+        );
     }
 }

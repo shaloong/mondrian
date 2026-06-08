@@ -15,20 +15,18 @@ impl FontManager {
     }
 
     pub fn default_attrs(&self) -> Attrs<'_> {
-        Attrs::new()
-            .family(Family::SansSerif)
-            .weight(Weight::NORMAL)
+        Attrs::new().family(Family::SansSerif).weight(Weight::NORMAL)
     }
 
     pub fn mono_attrs(&self) -> Attrs<'_> {
-        Attrs::new()
-            .family(Family::Monospace)
-            .weight(Weight::NORMAL)
+        Attrs::new().family(Family::Monospace).weight(Weight::NORMAL)
     }
 }
 
 impl Default for FontManager {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]

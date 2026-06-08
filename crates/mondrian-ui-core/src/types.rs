@@ -248,18 +248,81 @@ impl Modifiers {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum KeyCode {
     // 字母
-    A, B, C, D, E, F, G, H, I, J, K, L, M,
-    N, O, P, Q, R, S, T, U, V, W, X, Y, Z,
+    A,
+    B,
+    C,
+    D,
+    E,
+    F,
+    G,
+    H,
+    I,
+    J,
+    K,
+    L,
+    M,
+    N,
+    O,
+    P,
+    Q,
+    R,
+    S,
+    T,
+    U,
+    V,
+    W,
+    X,
+    Y,
+    Z,
     // 数字
-    Digit0, Digit1, Digit2, Digit3, Digit4, Digit5, Digit6, Digit7, Digit8, Digit9,
+    Digit0,
+    Digit1,
+    Digit2,
+    Digit3,
+    Digit4,
+    Digit5,
+    Digit6,
+    Digit7,
+    Digit8,
+    Digit9,
     // 功能键
-    F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12,
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
+    F11,
+    F12,
     // 导航
-    Escape, Tab, Enter, Space, Backspace, Delete, Insert,
-    Home, End, PageUp, PageDown,
-    Left, Right, Up, Down,
+    Escape,
+    Tab,
+    Enter,
+    Space,
+    Backspace,
+    Delete,
+    Insert,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    Left,
+    Right,
+    Up,
+    Down,
     // 修饰键
-    LeftShift, RightShift, LeftCtrl, RightCtrl, LeftAlt, RightAlt, LeftMeta, RightMeta,
+    LeftShift,
+    RightShift,
+    LeftCtrl,
+    RightCtrl,
+    LeftAlt,
+    RightAlt,
+    LeftMeta,
+    RightMeta,
 }
 
 /// 拖拽载荷 —— 跨 Widget 的拖拽数据
@@ -445,7 +508,10 @@ mod tests {
         let a = Rect::new(0.0, 0.0, 100.0, 100.0);
         let b = Rect::new(100.0, 0.0, 100.0, 100.0);
         // intersects check: a.x < b.x+b.w (0 < 200) && a.x+a.w > b.x (100 > 100 = false)
-        assert!(!a.intersects(&b), "Edge-touching rects should not intersect");
+        assert!(
+            !a.intersects(&b),
+            "Edge-touching rects should not intersect"
+        );
     }
 
     #[test]

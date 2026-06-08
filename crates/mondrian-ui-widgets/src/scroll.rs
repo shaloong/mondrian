@@ -78,24 +78,18 @@ impl Widget for ScrollView {
         match event {
             UiEvent::MouseWheel { delta, .. } => {
                 self.scroll_offset.y += *delta;
-                self.scroll_offset.y = self
-                    .scroll_offset
-                    .y
-                    .clamp(0.0, (self.content_size.height - self.bounds.height).max(0.0));
+                self.scroll_offset.y = self.scroll_offset.y.clamp(
+                    0.0,
+                    (self.content_size.height - self.bounds.height).max(0.0),
+                );
                 EventResult::Handled
             }
             _ => {
                 if let Some(ref mut child) = self.child {
                     let mut offset_event = event.clone();
-                    if let UiEvent::MouseDown {
-                        ref mut position, ..
-                    }
-                    | UiEvent::MouseUp {
-                        ref mut position, ..
-                    }
-                    | UiEvent::MouseMove {
-                        ref mut position, ..
-                    } = &mut offset_event
+                    if let UiEvent::MouseDown { ref mut position, .. }
+                    | UiEvent::MouseUp { ref mut position, .. }
+                    | UiEvent::MouseMove { ref mut position, .. } = &mut offset_event
                     {
                         position.x += self.scroll_offset.x;
                         position.y -= self.scroll_offset.y;
@@ -132,11 +126,8 @@ impl Widget for ScrollView {
                 self.scrollbar_width - 4.0,
                 thumb_h.max(16.0),
             );
-            ctx.encoder.draw_rect(
-                sb_rect,
-                ctx.theme.colors.muted_foreground,
-                tokens.radius_sm,
-            );
+            ctx.encoder
+                .draw_rect(sb_rect, ctx.theme.colors.muted_foreground, tokens.radius_sm);
         }
 
         ctx.encoder.pop_clip();
@@ -191,7 +182,7 @@ mod tests {
         let mut sv = ScrollView::new(Some(Box::new(child)));
         sv.layout(Rect::new(0.0, 0.0, 300.0, 300.0));
 
-        use crate::test_utils::{DummyFocus, DummyShortcut, DummyTooltip, make_event_ctx};
+        use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
         let mut f = DummyFocus;
         let mut s = DummyShortcut;
         let mut t = DummyTooltip;

@@ -32,7 +32,9 @@ struct DummyTooltip;
 impl mondrian_ui_core::tooltip::TooltipManager for DummyTooltip {
     fn show(&mut self, _: String, _: Point) {}
     fn hide(&mut self) {}
-    fn current(&self) -> Option<&mondrian_ui_core::tooltip::TooltipState> { None }
+    fn current(&self) -> Option<&mondrian_ui_core::tooltip::TooltipState> {
+        None
+    }
     fn update(&mut self, _: u64) {}
 }
 
@@ -49,18 +51,32 @@ impl EventRouter {
         }
     }
 
-    pub fn hovered(&self) -> Option<WidgetId> { self.hovered }
-    pub fn focused(&self) -> Option<WidgetId> { self.focused }
-    pub fn captured(&self) -> Option<WidgetId> { self.captured }
+    pub fn hovered(&self) -> Option<WidgetId> {
+        self.hovered
+    }
+    pub fn focused(&self) -> Option<WidgetId> {
+        self.focused
+    }
+    pub fn captured(&self) -> Option<WidgetId> {
+        self.captured
+    }
 
     pub fn set_capture(&mut self, widget: Option<WidgetId>) {
         self.captured = widget;
     }
 
-    pub fn focus_manager(&self) -> &FocusManagerImpl { &self.focus_mgr }
-    pub fn focus_manager_mut(&mut self) -> &mut FocusManagerImpl { &mut self.focus_mgr }
-    pub fn shortcut_manager(&self) -> &ShortcutManagerImpl { &self.shortcut_mgr }
-    pub fn shortcut_manager_mut(&mut self) -> &mut ShortcutManagerImpl { &mut self.shortcut_mgr }
+    pub fn focus_manager(&self) -> &FocusManagerImpl {
+        &self.focus_mgr
+    }
+    pub fn focus_manager_mut(&mut self) -> &mut FocusManagerImpl {
+        &mut self.focus_mgr
+    }
+    pub fn shortcut_manager(&self) -> &ShortcutManagerImpl {
+        &self.shortcut_mgr
+    }
+    pub fn shortcut_manager_mut(&mut self) -> &mut ShortcutManagerImpl {
+        &mut self.shortcut_mgr
+    }
 
     /// 将事件路由到正确的 Widget
     pub fn route(
@@ -134,10 +150,7 @@ impl EventRouter {
     }
 
     #[allow(static_mut_refs)]
-    fn make_event_context<'a>(
-        &'a mut self,
-        dispatch: &'a dyn Fn(Action),
-    ) -> EventContext<'a> {
+    fn make_event_context<'a>(&'a mut self, dispatch: &'a dyn Fn(Action)) -> EventContext<'a> {
         static mut TT: DummyTooltip = DummyTooltip;
         EventContext {
             focus: &mut self.focus_mgr,

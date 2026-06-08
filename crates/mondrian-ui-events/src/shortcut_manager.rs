@@ -32,10 +32,7 @@ impl ShortcutManagerImpl {
 
 impl ShortcutManager for ShortcutManagerImpl {
     fn register(&mut self, scope: ShortcutScope, binding: ShortcutBinding, action: Action) {
-        self.bindings
-            .entry(scope)
-            .or_default()
-            .push((binding, action));
+        self.bindings.entry(scope).or_default().push((binding, action));
     }
 
     fn unregister(&mut self, scope: ShortcutScope, binding: &ShortcutBinding) {
@@ -106,8 +103,16 @@ mod tests {
     #[test]
     fn clear_all_removes_everything() {
         let mut mgr = ShortcutManagerImpl::new();
-        mgr.register(ShortcutScope::Global, ShortcutBinding::ctrl(KeyCode::S), Action::SaveProject);
-        mgr.register(ShortcutScope::Panel(PanelKind::Timeline), ShortcutBinding::key_only(KeyCode::Delete), Action::DeleteSelection);
+        mgr.register(
+            ShortcutScope::Global,
+            ShortcutBinding::ctrl(KeyCode::S),
+            Action::SaveProject,
+        );
+        mgr.register(
+            ShortcutScope::Panel(PanelKind::Timeline),
+            ShortcutBinding::key_only(KeyCode::Delete),
+            Action::DeleteSelection,
+        );
         mgr.clear_all();
         assert!(mgr.resolve(KeyCode::S, Modifiers::ctrl()).is_none());
         assert!(mgr.resolve(KeyCode::Delete, Modifiers::none()).is_none());

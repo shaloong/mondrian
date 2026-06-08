@@ -163,7 +163,6 @@ impl ColorTokens {
             scrollbar_thumb: Color::from_hex(0xD4D4D8),
         }
     }
-
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -177,18 +176,30 @@ impl ColorTokens {
 
     /// Hover / Active / Normal 背景选择
     pub fn surface_for_state(&self, hovered: bool, active: bool) -> Color {
-        if active { self.accent }
-        else if hovered { self.muted }
-        else { self.card }
+        if active {
+            self.accent
+        } else if hovered {
+            self.muted
+        } else {
+            self.card
+        }
     }
 
     /// 焦点边框选择
     pub fn border_for_state(&self, focused: bool) -> Color {
-        if focused { self.ring } else { self.border }
+        if focused {
+            self.ring
+        } else {
+            self.border
+        }
     }
 
     /// 文字色：主要 / 弱化
     pub fn text_for_muted(&self, muted: bool) -> Color {
-        if muted { self.muted_foreground } else { self.foreground }
+        if muted {
+            self.muted_foreground
+        } else {
+            self.foreground
+        }
     }
 }

@@ -137,7 +137,12 @@ impl Widget for GalleryWidget {
 
         let list_h = 5.0 * 28.0;
         self.list.layout(Rect::new(x0, y, col_w * 0.55, list_h));
-        self.scroll_area.layout(Rect::new(x0 + col_w * 0.55 + 8.0, y, col_w * 0.45 - 8.0, list_h));
+        self.scroll_area.layout(Rect::new(
+            x0 + col_w * 0.55 + 8.0,
+            y,
+            col_w * 0.45 - 8.0,
+            list_h,
+        ));
 
         if let Some(ref mut cm) = &mut self.context_menu {
             let cm_size = cm.measure(LayoutConstraint::LOOSE);
@@ -201,12 +206,7 @@ impl Widget for GalleryWidget {
         }
 
         // Right-click opens context menu
-        if let UiEvent::MouseDown {
-            position,
-            button: MouseButton::Right,
-            ..
-        } = event
-        {
+        if let UiEvent::MouseDown { position, button: MouseButton::Right, .. } = event {
             if self.bounds.contains(*position) {
                 let items = vec![
                     MenuItem::new("剪切", Action::Cut),
@@ -242,7 +242,8 @@ impl Widget for GalleryWidget {
         }
 
         let p = ui_types::snap_point(Point::new(self.bounds.x + 12.0, self.bounds.y + 6.0));
-        ctx.encoder.draw_text("UI 控件画廊 — 右键可打开菜单", 15.0, p, tokens.foreground);
+        ctx.encoder
+            .draw_text("UI 控件画廊 — 右键可打开菜单", 15.0, p, tokens.foreground);
 
         if !self.last_action.is_empty() {
             let fb = format!("最后操作: {}", self.last_action);
@@ -267,10 +268,7 @@ struct ViewerWidget {
 
 impl ViewerWidget {
     fn new() -> Self {
-        Self {
-            id: WidgetId::new(),
-            bounds: Rect::ZERO,
-        }
+        Self { id: WidgetId::new(), bounds: Rect::ZERO }
     }
 }
 
@@ -346,29 +344,14 @@ impl VerticalTabbedSlot {
     fn new(kind: SlotKind) -> Self {
         let tabs = if kind == SlotKind::Timeline {
             vec![
-                TabInfo {
-                    label: "时间线".to_string(),
-                    active: true,
-                },
-                TabInfo {
-                    label: "音频".to_string(),
-                    active: false,
-                },
-                TabInfo {
-                    label: "效果".to_string(),
-                    active: false,
-                },
+                TabInfo { label: "时间线".to_string(), active: true },
+                TabInfo { label: "音频".to_string(), active: false },
+                TabInfo { label: "效果".to_string(), active: false },
             ]
         } else if kind == SlotKind::Inspector {
             vec![
-                TabInfo {
-                    label: "检查器".to_string(),
-                    active: true,
-                },
-                TabInfo {
-                    label: "属性".to_string(),
-                    active: false,
-                },
+                TabInfo { label: "检查器".to_string(), active: true },
+                TabInfo { label: "属性".to_string(), active: false },
             ]
         } else {
             vec![TabInfo {
@@ -398,8 +381,7 @@ impl Widget for VerticalTabbedSlot {
     fn layout(&mut self, bounds: Rect) {
         self.bounds = bounds;
         let tab_h = 26.0;
-        self.tab_bar
-            .layout(Rect::new(bounds.x, bounds.y, bounds.width, tab_h));
+        self.tab_bar.layout(Rect::new(bounds.x, bounds.y, bounds.width, tab_h));
         self.content.layout(Rect::new(
             bounds.x,
             bounds.y + tab_h,
@@ -430,17 +412,11 @@ fn slot_content(kind: SlotKind) -> Box<dyn Widget> {
     match kind {
         SlotKind::Viewer => Box::new(ViewerWidget::new()),
         // Top-left: red — easy diagnostic reference
-        SlotKind::Assets => Box::new(
-            ColoredBox::new(Color::from_hex(0xCC2222), 1.0, 1.0),
-        ),
+        SlotKind::Assets => Box::new(ColoredBox::new(Color::from_hex(0xCC2222), 1.0, 1.0)),
         // Bottom-left: interactive widget gallery
         SlotKind::Console => Box::new(GalleryWidget::new()),
-        SlotKind::Inspector => Box::new(
-            ColoredBox::new(Color::from_hex(0x1E2A3A), 1.0, 1.0),
-        ),
-        SlotKind::Timeline => Box::new(
-            ColoredBox::new(Color::from_hex(0x16213E), 1.0, 1.0),
-        ),
+        SlotKind::Inspector => Box::new(ColoredBox::new(Color::from_hex(0x1E2A3A), 1.0, 1.0)),
+        SlotKind::Timeline => Box::new(ColoredBox::new(Color::from_hex(0x16213E), 1.0, 1.0)),
         _ => Box::new(ColoredBox::new(Color::from_hex(0x1A1A1A), 1.0, 1.0)),
     }
 }
@@ -472,7 +448,12 @@ fn build_dock_tree() -> DockSplitter {
         Box::new(right_bottom),
     );
 
-    DockSplitter::new(SplitDirection::Horizontal, 0.3, Box::new(left), Box::new(right))
+    DockSplitter::new(
+        SplitDirection::Horizontal,
+        0.3,
+        Box::new(left),
+        Box::new(right),
+    )
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -556,15 +537,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let instance = wgpu::Instance::new(instance_desc);
     let surface = instance.create_surface(window.clone())?;
 
-    let adapter =
-        match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            compatible_surface: Some(&surface),
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            ..Default::default()
-        })) {
-            Ok(a) => a,
-            Err(_) => return Err("No suitable GPU adapter".into()),
-        };
+    let adapter = match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        compatible_surface: Some(&surface),
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        ..Default::default()
+    })) {
+        Ok(a) => a,
+        Err(_) => return Err("No suitable GPU adapter".into()),
+    };
 
     let (device, queue) =
         pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))?;
@@ -593,10 +573,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         elwt.set_control_flow(ControlFlow::Wait);
 
         match event {
-            Event::WindowEvent {
-                event: WindowEvent::CloseRequested,
-                ..
-            }
+            Event::WindowEvent { event: WindowEvent::CloseRequested, .. }
             | Event::WindowEvent {
                 event:
                     WindowEvent::KeyboardInput {
@@ -612,10 +589,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ..
             } => elwt.exit(),
 
-            Event::WindowEvent {
-                event: WindowEvent::RedrawRequested,
-                ..
-            } => {
+            Event::WindowEvent { event: WindowEvent::RedrawRequested, .. } => {
                 let mut encoder = DrawEncoder::new();
                 let theme = mondrian_ui_theme::current_theme();
                 let b = current_bounds.get();
@@ -648,18 +622,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     wgpu::CurrentSurfaceTexture::Timeout
                     | wgpu::CurrentSurfaceTexture::Occluded => {}
-                    wgpu::CurrentSurfaceTexture::Outdated
-                    | wgpu::CurrentSurfaceTexture::Lost => {
+                    wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                         surface.configure(&device, &config);
                     }
                     _ => {}
                 }
             }
 
-            Event::WindowEvent {
-                event: WindowEvent::Resized(new_size),
-                ..
-            } => {
+            Event::WindowEvent { event: WindowEvent::Resized(new_size), .. } => {
                 if new_size.width > 0 && new_size.height > 0 {
                     config.width = new_size.width;
                     config.height = new_size.height;
@@ -673,8 +643,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             Event::WindowEvent {
-                event: WindowEvent::CursorMoved { position, .. },
-                ..
+                event: WindowEvent::CursorMoved { position, .. }, ..
             } => {
                 last_cursor = Point::new(position.x as f32, position.y as f32);
                 let _ = root.event(
@@ -685,10 +654,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &mut dummy_event_ctx(),
                 );
                 let grab_zones = root.collect_grab_zones();
-                let direction = grab_zones
-                    .iter()
-                    .find(|(z, _)| z.contains(last_cursor))
-                    .map(|(_, d)| *d);
+                let direction =
+                    grab_zones.iter().find(|(z, _)| z.contains(last_cursor)).map(|(_, d)| *d);
                 match direction {
                     Some(SplitDirection::Horizontal) => {
                         window.set_cursor_icon(winit::window::CursorIcon::ColResize);
@@ -704,10 +671,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             Event::WindowEvent {
-                event:
-                    WindowEvent::MouseInput {
-                        state, button, ..
-                    },
+                event: WindowEvent::MouseInput { state, button, .. },
                 ..
             } => {
                 let event = match state {
@@ -726,10 +690,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 window.request_redraw();
             }
 
-            Event::WindowEvent {
-                event: WindowEvent::MouseWheel { delta, .. },
-                ..
-            } => {
+            Event::WindowEvent { event: WindowEvent::MouseWheel { delta, .. }, .. } => {
                 let scroll_delta = match delta {
                     winit::event::MouseScrollDelta::LineDelta(_, y) => y * 20.0,
                     winit::event::MouseScrollDelta::PixelDelta(pos) => pos.y as f32,

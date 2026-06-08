@@ -39,7 +39,7 @@ impl GlyphAtlas {
         }
     }
 
-        /// 获取或光栅化字形。首次返回 None，下一次返回 (UV rect, bmp_w, bmp_h, top)。
+    /// 获取或光栅化字形。首次返回 None，下一次返回 (UV rect, bmp_w, bmp_h, top)。
     /// `top` 是 glyph bitmap 内部 placement.top（swash rasterized offset）。
     pub fn get_or_rasterize(
         &mut self,
@@ -96,16 +96,22 @@ impl GlyphAtlas {
 
         self.glyph_map.insert(cache_key, (uv_rect, bmp_w, bmp_h, top, left));
         self.pending_uploads.push(GlyphUpload {
-            x: px, y: py,
-            width: bmp_w, height: bmp_h,
+            x: px,
+            y: py,
+            width: bmp_w,
+            height: bmp_h,
             data: alpha,
         });
 
         None
     }
 
-    pub fn size(&self) -> (u32, u32) { self.atlas.size() }
-    pub fn has_pending(&self) -> bool { !self.pending_uploads.is_empty() }
+    pub fn size(&self) -> (u32, u32) {
+        self.atlas.size()
+    }
+    pub fn has_pending(&self) -> bool {
+        !self.pending_uploads.is_empty()
+    }
 }
 
 /// Convert swash Image to R8 alpha bitmap. Returns (width, height, top, left, data).
@@ -126,15 +132,15 @@ fn swash_to_alpha(image: &cosmic_text::SwashImage) -> (u32, u32, i32, i32, Vec<u
             for chunk in image.data.chunks(3) {
                 let gray = if chunk.len() >= 3 {
                     (chunk[0] as u32 + chunk[1] as u32 + chunk[2] as u32) / 3
-                } else { 0 };
+                } else {
+                    0
+                };
                 alpha.push(gray as u8);
             }
             alpha.resize(pixel_count, 0);
             (w, h, top, left, alpha)
         }
-        _ => {
-            (w, h, top, left, vec![0u8; (w * h) as usize])
-        }
+        _ => (w, h, top, left, vec![0u8; (w * h) as usize]),
     }
 }
 
@@ -155,9 +161,8 @@ mod tests {
         let mut atlas = GlyphAtlas::new(1024);
         let mut mgr = FontManager::new();
         let attrs = cosmic_text::Attrs::new();
-        let layout = crate::layout::TextLayout::new_single_line(
-            &mut mgr.font_system, "M", attrs, 24.0,
-        );
+        let layout =
+            crate::layout::TextLayout::new_single_line(&mut mgr.font_system, "M", attrs, 24.0);
 
         for glyph in layout.glyphs() {
             let _uv = atlas.get_or_rasterize(&mut mgr.font_system, &glyph, 0.0);
@@ -170,7 +175,8 @@ mod tests {
                     upload.data.len(),
                     (upload.width * upload.height) as usize,
                     "Upload {}x{} should have {} bytes, got {}",
-                    upload.width, upload.height,
+                    upload.width,
+                    upload.height,
                     upload.width * upload.height,
                     upload.data.len(),
                 );
@@ -183,9 +189,8 @@ mod tests {
         let mut atlas = GlyphAtlas::new(1024);
         let mut mgr = FontManager::new();
         let attrs = cosmic_text::Attrs::new();
-        let layout = crate::layout::TextLayout::new_single_line(
-            &mut mgr.font_system, "M", attrs, 24.0,
-        );
+        let layout =
+            crate::layout::TextLayout::new_single_line(&mut mgr.font_system, "M", attrs, 24.0);
         let glyphs = layout.glyphs();
         assert!(!glyphs.is_empty());
 
@@ -193,14 +198,22 @@ mod tests {
         assert!(!atlas.pending_uploads.is_empty());
 
         let upload = &atlas.pending_uploads[0];
-        assert!(upload.width > 0 && upload.height > 0,
-            "Glyph size: {}x{}", upload.width, upload.height);
+        assert!(
+            upload.width > 0 && upload.height > 0,
+            "Glyph size: {}x{}",
+            upload.width,
+            upload.height
+        );
 
         // Bitmap should have non-zero pixels (the glyph shape)
         let non_zero = upload.data.iter().filter(|&&b| b > 0).count();
-        assert!(non_zero > 0,
+        assert!(
+            non_zero > 0,
             "Glyph bitmap is all zeros! {}x{} = {} bytes",
-            upload.width, upload.height, upload.data.len());
+            upload.width,
+            upload.height,
+            upload.data.len()
+        );
     }
 
     #[test]
@@ -208,15 +221,15 @@ mod tests {
         let mut atlas = GlyphAtlas::new(1024);
         let mut mgr = FontManager::new();
         let attrs = cosmic_text::Attrs::new();
-        let layout = crate::layout::TextLayout::new_single_line(
-            &mut mgr.font_system, "W", attrs, 24.0,
-        );
+        let layout =
+            crate::layout::TextLayout::new_single_line(&mut mgr.font_system, "W", attrs, 24.0);
         let glyphs = layout.glyphs();
         assert!(!glyphs.is_empty());
 
         // First call rasterizes (returns None), second returns cached UV
         let _ = atlas.get_or_rasterize(&mut mgr.font_system, &glyphs[0], 0.0);
-        let (uv, _w, _h, _top, _left) = atlas.get_or_rasterize(&mut mgr.font_system, &glyphs[0], 0.0)
+        let (uv, _w, _h, _top, _left) = atlas
+            .get_or_rasterize(&mut mgr.font_system, &glyphs[0], 0.0)
             .expect("Second call should return cached UV");
 
         assert!(uv.x >= 0.0 && uv.x <= 1.0, "UV x={} out of [0,1]", uv.x);
@@ -234,7 +247,10 @@ mod tests {
         let text = "Hello";
         let font_size = 24.0;
         let layout = crate::layout::TextLayout::new_single_line(
-            &mut mgr.font_system, text, attrs, font_size,
+            &mut mgr.font_system,
+            text,
+            attrs,
+            font_size,
         );
 
         for glyph in layout.glyphs() {
@@ -247,8 +263,16 @@ mod tests {
 
                 // Layout glyph dimensions vs rasterized dimensions
                 // They should be reasonably close
-                let ratio_w = if glyph.w > 0.0 { bmp_w as f32 / glyph.w } else { 1.0 };
-                let ratio_h = if glyph.font_size > 0.0 { bmp_h as f32 / glyph.font_size } else { 1.0 };
+                let ratio_w = if glyph.w > 0.0 {
+                    bmp_w as f32 / glyph.w
+                } else {
+                    1.0
+                };
+                let ratio_h = if glyph.font_size > 0.0 {
+                    bmp_h as f32 / glyph.font_size
+                } else {
+                    1.0
+                };
 
                 // Non-fatal: layout glyph dimensions vs rasterized dimensions may differ
                 // due to hinting. Recorded for manual review if needed.
@@ -264,11 +288,13 @@ mod tests {
         let attrs = cosmic_text::Attrs::new();
         let text = "A";
         let layout1 = crate::layout::TextLayout::new_single_line(
-            &mut mgr.font_system, text, attrs.clone(), 24.0,
+            &mut mgr.font_system,
+            text,
+            attrs.clone(),
+            24.0,
         );
-        let layout2 = crate::layout::TextLayout::new_single_line(
-            &mut mgr.font_system, text, attrs, 24.0,
-        );
+        let layout2 =
+            crate::layout::TextLayout::new_single_line(&mut mgr.font_system, text, attrs, 24.0);
 
         let glyphs1 = layout1.glyphs();
         let glyphs2 = layout2.glyphs();
@@ -277,8 +303,10 @@ mod tests {
         for (g1, g2) in glyphs1.iter().zip(glyphs2.iter()) {
             let ck1 = g1.physical((0.0, 0.0), 1.0).cache_key;
             let ck2 = g2.physical((0.0, 0.0), 1.0).cache_key;
-            assert_eq!(ck1, ck2,
-                "Cache key changed between calls for the same glyph! Glyph ID may not be stable.");
+            assert_eq!(
+                ck1, ck2,
+                "Cache key changed between calls for the same glyph! Glyph ID may not be stable."
+            );
         }
     }
 
@@ -287,9 +315,8 @@ mod tests {
         let mut atlas = GlyphAtlas::new(1024);
         let mut mgr = FontManager::new();
         let attrs = cosmic_text::Attrs::new();
-        let layout = crate::layout::TextLayout::new_single_line(
-            &mut mgr.font_system, "A", attrs, 24.0,
-        );
+        let layout =
+            crate::layout::TextLayout::new_single_line(&mut mgr.font_system, "A", attrs, 24.0);
         let glyphs = layout.glyphs();
         assert!(!glyphs.is_empty());
 
@@ -303,7 +330,10 @@ mod tests {
             assert!(second.is_some(), "Second call should return cached UV+size");
         } else {
             // Already cached somehow — should be the same
-            assert_eq!(first.map(|(r, _, _, _, _)| r), second.map(|(r, _, _, _, _)| r));
+            assert_eq!(
+                first.map(|(r, _, _, _, _)| r),
+                second.map(|(r, _, _, _, _)| r)
+            );
         }
     }
 
@@ -318,13 +348,24 @@ mod tests {
         let mut cache = SwashCache::new();
 
         for &(ch, size) in &[
-            ('A', 16.0), ('a', 16.0), ('i', 16.0), ('e', 16.0), ('l', 16.0),
-            ('A', 13.0), ('i', 13.0), ('l', 13.0),
-            ('A', 24.0), ('i', 24.0), ('l', 24.0),
+            ('A', 16.0),
+            ('a', 16.0),
+            ('i', 16.0),
+            ('e', 16.0),
+            ('l', 16.0),
+            ('A', 13.0),
+            ('i', 13.0),
+            ('l', 13.0),
+            ('A', 24.0),
+            ('i', 24.0),
+            ('l', 24.0),
         ] {
             let text = ch.to_string();
             let layout = crate::layout::TextLayout::new_single_line(
-                &mut mgr.font_system, &text, attrs.clone(), size,
+                &mut mgr.font_system,
+                &text,
+                attrs.clone(),
+                size,
             );
             for glyph in layout.glyphs() {
                 let ck = glyph.physical((0.0, 0.0), 1.0).cache_key;
@@ -342,7 +383,10 @@ mod tests {
                     assert!(
                         top <= max_top,
                         "Glyph '{}' at {}px: top={} exceeds max expected {}",
-                        ch, size, top, max_top
+                        ch,
+                        size,
+                        top,
+                        max_top
                     );
                 }
             }
@@ -357,12 +401,20 @@ mod tests {
         let mut cache = SwashCache::new();
 
         for &(ch, size) in &[
-            ('A', 16.0), ('i', 16.0), ('e', 16.0), ('l', 16.0),
-            ('M', 24.0), ('W', 24.0), ('j', 16.0),
+            ('A', 16.0),
+            ('i', 16.0),
+            ('e', 16.0),
+            ('l', 16.0),
+            ('M', 24.0),
+            ('W', 24.0),
+            ('j', 16.0),
         ] {
             let text = ch.to_string();
             let layout = crate::layout::TextLayout::new_single_line(
-                &mut mgr.font_system, &text, attrs.clone(), size,
+                &mut mgr.font_system,
+                &text,
+                attrs.clone(),
+                size,
             );
             for glyph in layout.glyphs() {
                 let ck = glyph.physical((0.0, 0.0), 1.0).cache_key;
@@ -374,13 +426,19 @@ mod tests {
                     assert!(
                         left >= min_left,
                         "Glyph '{}' at {}px: left={}, expected >= {}",
-                        ch, size, left, min_left
+                        ch,
+                        size,
+                        left,
+                        min_left
                     );
                     // left shouldn't exceed bitmap width (extreme case)
                     assert!(
                         left <= img.placement.width as i32 + (size as i32),
                         "Glyph '{}' at {}px: left={} seems extreme for width={}",
-                        ch, size, left, img.placement.width
+                        ch,
+                        size,
+                        left,
+                        img.placement.width
                     );
                 }
             }
@@ -394,14 +452,19 @@ mod tests {
         let mut mgr = FontManager::new();
         let attrs = cosmic_text::Attrs::new();
         let mut cache = SwashCache::new();
-        let sizes = [10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 18.0, 20.0, 24.0, 28.0, 32.0, 36.0, 48.0];
+        let sizes = [
+            10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 18.0, 20.0, 24.0, 28.0, 32.0, 36.0, 48.0,
+        ];
 
         for &ch in &['i', 'l', 'I'] {
             let mut prev_left: Option<i32> = None;
             for &size in &sizes {
                 let text = ch.to_string();
                 let layout = crate::layout::TextLayout::new_single_line(
-                    &mut mgr.font_system, &text, attrs.clone(), size,
+                    &mut mgr.font_system,
+                    &text,
+                    attrs.clone(),
+                    size,
                 );
                 for glyph in layout.glyphs() {
                     let ck = glyph.physical((0.0, 0.0), 1.0).cache_key;
@@ -448,7 +511,10 @@ mod tests {
             for group in [&tall_chars[..], &short_chars[..]] {
                 let text: String = group.iter().collect();
                 let layout = crate::layout::TextLayout::new_single_line(
-                    &mut mgr.font_system, &text, attrs.clone(), size,
+                    &mut mgr.font_system,
+                    &text,
+                    attrs.clone(),
+                    size,
                 );
                 let mut tops: Vec<i32> = Vec::new();
                 for glyph in layout.glyphs() {
@@ -465,7 +531,10 @@ mod tests {
                     assert!(
                         max_top - min_top <= 3,
                         "At {}px, chars {:?}: top values {:?} vary too much (max-min={})",
-                        size, group, tops, max_top - min_top
+                        size,
+                        group,
+                        tops,
+                        max_top - min_top
                     );
                 }
             }
@@ -480,9 +549,8 @@ mod tests {
         let mut atlas = GlyphAtlas::new(2048);
         let mut mgr = FontManager::new();
         let attrs = cosmic_text::Attrs::new();
-        let layout = crate::layout::TextLayout::new_single_line(
-            &mut mgr.font_system, "Hello", attrs, 24.0,
-        );
+        let layout =
+            crate::layout::TextLayout::new_single_line(&mut mgr.font_system, "Hello", attrs, 24.0);
 
         for glyph in layout.glyphs() {
             let _ = atlas.get_or_rasterize(&mut mgr.font_system, &glyph, 0.0);
@@ -492,11 +560,15 @@ mod tests {
                 let uv_h_px = uv.height * atlas.size().1 as f32;
                 assert!(
                     (uv_w_px - w as f32).abs() < 0.51,
-                    "UV width {}px != bitmap width {}px", uv_w_px, w
+                    "UV width {}px != bitmap width {}px",
+                    uv_w_px,
+                    w
                 );
                 assert!(
                     (uv_h_px - h as f32).abs() < 0.51,
-                    "UV height {}px != bitmap height {}px", uv_h_px, h
+                    "UV height {}px != bitmap height {}px",
+                    uv_h_px,
+                    h
                 );
             }
         }
@@ -510,9 +582,8 @@ mod tests {
         let attrs = cosmic_text::Attrs::new();
         // Use diverse characters to get multiple glyphs
         let chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-        let layout = crate::layout::TextLayout::new_single_line(
-            &mut mgr.font_system, chars, attrs, 24.0,
-        );
+        let layout =
+            crate::layout::TextLayout::new_single_line(&mut mgr.font_system, chars, attrs, 24.0);
 
         // First pass: rasterize
         for glyph in layout.glyphs() {
@@ -521,7 +592,9 @@ mod tests {
         // Second pass: get UVs
         let mut uv_rects: Vec<Rect> = Vec::new();
         for glyph in layout.glyphs() {
-            if let Some((uv, _, _, _, _)) = atlas.get_or_rasterize(&mut mgr.font_system, &glyph, 0.0) {
+            if let Some((uv, _, _, _, _)) =
+                atlas.get_or_rasterize(&mut mgr.font_system, &glyph, 0.0)
+            {
                 uv_rects.push(uv);
             }
         }
@@ -535,7 +608,11 @@ mod tests {
                 let overlap_y = a.y < b.y + b.height && a.y + a.height > b.y;
                 assert!(
                     !(overlap_x && overlap_y),
-                    "Glyph {} and {} overlap in atlas: {:?} vs {:?}", i, j, a, b
+                    "Glyph {} and {} overlap in atlas: {:?} vs {:?}",
+                    i,
+                    j,
+                    a,
+                    b
                 );
             }
         }
@@ -558,7 +635,10 @@ mod tests {
             for &ch in &test_chars {
                 let text = ch.to_string();
                 let layout = crate::layout::TextLayout::new_single_line(
-                    &mut mgr.font_system, &text, attrs.clone(), size_f,
+                    &mut mgr.font_system,
+                    &text,
+                    attrs.clone(),
+                    size_f,
                 );
                 let glyphs = layout.glyphs();
                 if glyphs.is_empty() {

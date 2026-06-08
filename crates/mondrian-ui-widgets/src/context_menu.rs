@@ -53,7 +53,9 @@ impl ContextMenu {
 }
 
 impl Widget for ContextMenu {
-    fn id(&self) -> WidgetId { self.id }
+    fn id(&self) -> WidgetId {
+        self.id
+    }
 
     fn measure(&self, _c: LayoutConstraint) -> Size {
         if self.visible {
@@ -87,7 +89,10 @@ impl Widget for ContextMenu {
                 EventResult::Handled
             }
             UiEvent::MouseMove { position, .. } => {
-                self.hovered = self.items.iter().enumerate()
+                self.hovered = self
+                    .items
+                    .iter()
+                    .enumerate()
                     .find(|(i, _)| self.menu_rect(*i).contains(*position))
                     .map(|(i, _)| i);
                 EventResult::Handled
@@ -101,7 +106,9 @@ impl Widget for ContextMenu {
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
-        if !self.visible { return; }
+        if !self.visible {
+            return;
+        }
 
         let tokens = &ctx.theme.colors;
         let spacing = &ctx.theme.spacing;
@@ -114,57 +121,81 @@ impl Widget for ContextMenu {
 
         for (i, item) in self.items.iter().enumerate() {
             let r = self.menu_rect(i);
-            let fill = if !item.enabled { tokens.popover }
-            else if self.hovered == Some(i) { tokens.accent }
-            else { tokens.popover };
+            let fill = if !item.enabled {
+                tokens.popover
+            } else if self.hovered == Some(i) {
+                tokens.accent
+            } else {
+                tokens.popover
+            };
             ctx.encoder.draw_rect(r, fill, 0.0);
         }
     }
 
-    fn hit_test(&self, _p: Point) -> bool { self.visible }
+    fn hit_test(&self, _p: Point) -> bool {
+        self.visible
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use std::cell::RefCell;
-    use crate::test_utils::{DummyFocus, DummyShortcut, DummyTooltip, make_event_ctx};
 
     #[test]
     fn context_menu_select_dispatches() {
-        let mut menu = ContextMenu::new(Point::new(100.0, 100.0), vec![
-            MenuItem::new("Cut", Action::Cut),
-            MenuItem::new("Copy", Action::Copy),
-        ]);
+        let mut menu = ContextMenu::new(
+            Point::new(100.0, 100.0),
+            vec![
+                MenuItem::new("Cut", Action::Cut),
+                MenuItem::new("Copy", Action::Copy),
+            ],
+        );
         menu.layout(Rect::ZERO);
 
-        let mut f = DummyFocus; let mut s = DummyShortcut; let mut t = DummyTooltip;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
         let cell = RefCell::new(Vec::new());
-        let dispatch_fn = |a: Action| { cell.borrow_mut().push(a); };
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
         let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch_fn);
 
-        menu.event(&UiEvent::MouseDown {
-            position: Point::new(174.0, 117.0), // first item
-            button: MouseButton::Left, modifiers: Modifiers::none(),
-        }, &mut ctx);
+        menu.event(
+            &UiEvent::MouseDown {
+                position: Point::new(174.0, 117.0), // first item
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
         assert!(!menu.visible);
         assert_eq!(cell.into_inner(), vec![Action::Cut]);
     }
 
     #[test]
     fn context_menu_click_outside_closes() {
-        let mut menu = ContextMenu::new(Point::new(100.0, 100.0), vec![
-            MenuItem::new("Copy", Action::Copy),
-        ]);
+        let mut menu = ContextMenu::new(
+            Point::new(100.0, 100.0),
+            vec![MenuItem::new("Copy", Action::Copy)],
+        );
         menu.layout(Rect::ZERO);
         assert!(menu.visible);
 
-        let mut f = DummyFocus; let mut s = DummyShortcut; let mut t = DummyTooltip;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
         let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
-        menu.event(&UiEvent::MouseDown {
-            position: Point::new(10.0, 10.0),
-            button: MouseButton::Left, modifiers: Modifiers::none(),
-        }, &mut ctx);
+        menu.event(
+            &UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
         assert!(!menu.visible);
     }
 }

@@ -30,7 +30,12 @@ pub struct DockSplitter {
 }
 
 impl DockSplitter {
-    pub fn new(direction: SplitDirection, ratio: f32, child_a: Box<dyn Widget>, child_b: Box<dyn Widget>) -> Self {
+    pub fn new(
+        direction: SplitDirection,
+        ratio: f32,
+        child_a: Box<dyn Widget>,
+        child_b: Box<dyn Widget>,
+    ) -> Self {
         Self {
             id: WidgetId::new(),
             direction,
@@ -59,10 +64,8 @@ impl DockSplitter {
     pub fn collect_grab_zones(&self) -> Vec<(Rect, SplitDirection)> {
         let mut zones = vec![(self.grab_rect, self.direction)];
         for child in &self.children {
-            if let Some(splitter) = child
-                .as_ref()
-                .as_any()
-                .and_then(|a| a.downcast_ref::<DockSplitter>())
+            if let Some(splitter) =
+                child.as_ref().as_any().and_then(|a| a.downcast_ref::<DockSplitter>())
             {
                 zones.extend(splitter.collect_grab_zones());
             }
@@ -75,14 +78,20 @@ impl DockSplitter {
         let cy = self.bounds.y + self.bounds.height * self.ratio;
         let hw = self.grab_zone * 0.5;
         match self.direction {
-            SplitDirection::Horizontal => Rect::new(cx - hw, self.bounds.y, self.grab_zone, self.bounds.height),
-            SplitDirection::Vertical => Rect::new(self.bounds.x, cy - hw, self.bounds.width, self.grab_zone),
+            SplitDirection::Horizontal => {
+                Rect::new(cx - hw, self.bounds.y, self.grab_zone, self.bounds.height)
+            }
+            SplitDirection::Vertical => {
+                Rect::new(self.bounds.x, cy - hw, self.bounds.width, self.grab_zone)
+            }
         }
     }
 }
 
 impl Widget for DockSplitter {
-    fn id(&self) -> WidgetId { self.id }
+    fn id(&self) -> WidgetId {
+        self.id
+    }
 
     fn measure(&self, constraint: LayoutConstraint) -> Size {
         constraint.constrain(Size::new(200.0, 100.0))
@@ -98,7 +107,12 @@ impl Widget for DockSplitter {
                 let b_x = bounds.x + a_w + self.handle_size;
                 (
                     Rect::new(bounds.x, bounds.y, a_w, bounds.height),
-                    Rect::new(b_x, bounds.y, bounds.width - a_w - self.handle_size, bounds.height),
+                    Rect::new(
+                        b_x,
+                        bounds.y,
+                        bounds.width - a_w - self.handle_size,
+                        bounds.height,
+                    ),
                 )
             }
             SplitDirection::Vertical => {
@@ -106,7 +120,12 @@ impl Widget for DockSplitter {
                 let b_y = bounds.y + a_h + self.handle_size;
                 (
                     Rect::new(bounds.x, bounds.y, bounds.width, a_h),
-                    Rect::new(bounds.x, b_y, bounds.width, bounds.height - a_h - self.handle_size),
+                    Rect::new(
+                        bounds.x,
+                        b_y,
+                        bounds.width,
+                        bounds.height - a_h - self.handle_size,
+                    ),
                 )
             }
         };
@@ -131,11 +150,13 @@ impl Widget for DockSplitter {
                 if self.dragging {
                     match self.direction {
                         SplitDirection::Horizontal => {
-                            let rel = (position.x - self.bounds.x - self.handle_size * 0.5) / (self.bounds.width - self.handle_size);
+                            let rel = (position.x - self.bounds.x - self.handle_size * 0.5)
+                                / (self.bounds.width - self.handle_size);
                             self.ratio = rel.clamp(0.1, 0.9);
                         }
                         SplitDirection::Vertical => {
-                            let rel = (position.y - self.bounds.y - self.handle_size * 0.5) / (self.bounds.height - self.handle_size);
+                            let rel = (position.y - self.bounds.y - self.handle_size * 0.5)
+                                / (self.bounds.height - self.handle_size);
                             self.ratio = rel.clamp(0.1, 0.9);
                         }
                     }

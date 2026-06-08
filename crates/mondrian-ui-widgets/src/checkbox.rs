@@ -44,7 +44,9 @@ impl Checkbox {
 }
 
 impl Widget for Checkbox {
-    fn id(&self) -> WidgetId { self.id }
+    fn id(&self) -> WidgetId {
+        self.id
+    }
 
     fn measure(&self, _constraint: LayoutConstraint) -> Size {
         let char_count = self.label.chars().count() as f32;
@@ -150,8 +152,8 @@ impl Widget for Checkbox {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use std::cell::RefCell;
-    use crate::test_utils::{DummyFocus, DummyShortcut, DummyTooltip, make_event_ctx};
 
     #[test]
     fn checkbox_new_unchecked() {
@@ -170,16 +172,23 @@ mod tests {
         let mut cb = Checkbox::new("Opt", false);
         cb.layout(Rect::new(0.0, 0.0, 100.0, 22.0));
 
-        let mut f = DummyFocus; let mut s = DummyShortcut; let mut t = DummyTooltip;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
         let cell = RefCell::new(Vec::new());
-        let dispatch_fn = |a: Action| { cell.borrow_mut().push(a); };
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
         let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch_fn);
 
-        cb.event(&UiEvent::MouseDown {
-            position: Point::new(50.0, 11.0),
-            button: MouseButton::Left,
-            modifiers: Modifiers::none(),
-        }, &mut ctx);
+        cb.event(
+            &UiEvent::MouseDown {
+                position: Point::new(50.0, 11.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
         assert!(cb.is_checked());
     }
 
@@ -188,19 +197,27 @@ mod tests {
         let mut cb = Checkbox::new("Opt", false);
         cb.layout(Rect::new(0.0, 0.0, 100.0, 22.0));
 
-        let mut f = DummyFocus; let mut s = DummyShortcut; let mut t = DummyTooltip;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
         let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
 
-        cb.event(&UiEvent::MouseDown {
-            position: Point::new(50.0, 11.0),
-            button: MouseButton::Left,
-            modifiers: Modifiers::none(),
-        }, &mut ctx);
-        cb.event(&UiEvent::MouseDown {
-            position: Point::new(50.0, 11.0),
-            button: MouseButton::Left,
-            modifiers: Modifiers::none(),
-        }, &mut ctx);
+        cb.event(
+            &UiEvent::MouseDown {
+                position: Point::new(50.0, 11.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        cb.event(
+            &UiEvent::MouseDown {
+                position: Point::new(50.0, 11.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
         assert!(!cb.is_checked());
     }
 
@@ -216,16 +233,23 @@ mod tests {
         let mut cb = Checkbox::new("Opt", false).on_toggle(Action::TogglePlay);
         cb.layout(Rect::new(0.0, 0.0, 100.0, 22.0));
 
-        let mut f = DummyFocus; let mut s = DummyShortcut; let mut t = DummyTooltip;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
         let cell = RefCell::new(Vec::new());
-        let dispatch_fn = |a: Action| { cell.borrow_mut().push(a); };
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
         let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch_fn);
 
-        cb.event(&UiEvent::MouseDown {
-            position: Point::new(50.0, 11.0),
-            button: MouseButton::Left,
-            modifiers: Modifiers::none(),
-        }, &mut ctx);
+        cb.event(
+            &UiEvent::MouseDown {
+                position: Point::new(50.0, 11.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
         assert_eq!(cell.into_inner(), vec![Action::TogglePlay]);
     }
 
@@ -233,13 +257,18 @@ mod tests {
     fn checkbox_mouse_move_in_sets_hovered() {
         let mut cb = Checkbox::new("Opt", false);
         cb.layout(Rect::new(0.0, 0.0, 100.0, 22.0));
-        let mut f = DummyFocus; let mut s = DummyShortcut; let mut t = DummyTooltip;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
         let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
 
-        let r = cb.event(&UiEvent::MouseMove {
-            position: Point::new(50.0, 11.0),
-            modifiers: Modifiers::none(),
-        }, &mut ctx);
+        let r = cb.event(
+            &UiEvent::MouseMove {
+                position: Point::new(50.0, 11.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
         assert_eq!(r, EventResult::Handled);
         assert!(cb.hovered);
     }
@@ -249,13 +278,18 @@ mod tests {
         let mut cb = Checkbox::new("Opt", false);
         cb.layout(Rect::new(0.0, 0.0, 100.0, 22.0));
         cb.hovered = true;
-        let mut f = DummyFocus; let mut s = DummyShortcut; let mut t = DummyTooltip;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
         let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
 
-        let r = cb.event(&UiEvent::MouseMove {
-            position: Point::new(200.0, 11.0),
-            modifiers: Modifiers::none(),
-        }, &mut ctx);
+        let r = cb.event(
+            &UiEvent::MouseMove {
+                position: Point::new(200.0, 11.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
         assert_eq!(r, EventResult::Handled);
         assert!(!cb.hovered);
     }
@@ -265,13 +299,18 @@ mod tests {
         let mut cb = Checkbox::new("Opt", false);
         cb.layout(Rect::new(0.0, 0.0, 100.0, 22.0));
         cb.hovered = true;
-        let mut f = DummyFocus; let mut s = DummyShortcut; let mut t = DummyTooltip;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
         let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
 
-        let r = cb.event(&UiEvent::MouseMove {
-            position: Point::new(50.0, 11.0),
-            modifiers: Modifiers::none(),
-        }, &mut ctx);
+        let r = cb.event(
+            &UiEvent::MouseMove {
+                position: Point::new(50.0, 11.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
         assert_eq!(r, EventResult::Ignored); // already hovered, no state change
     }
 }

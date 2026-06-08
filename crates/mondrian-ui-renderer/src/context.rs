@@ -40,7 +40,11 @@ impl UiRenderer {
         let atlas_size: u32 = 2048;
         let glyph_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("glyph_atlas"),
-            size: wgpu::Extent3d { width: atlas_size, height: atlas_size, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: atlas_size,
+                height: atlas_size,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -64,8 +68,14 @@ impl UiRenderer {
             label: Some("glyph_bg"),
             layout: &pipeline.texture_bind_group_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::Sampler(&glyph_sampler) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&glyph_view) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Sampler(&glyph_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&glyph_view),
+                },
             ],
         });
 
@@ -75,15 +85,16 @@ impl UiRenderer {
     /// 上传字形 bitmap 到 GPU 图集纹理（alpha→Rgba8 格式转换）
     pub fn upload_glyphs(&self, queue: &wgpu::Queue, uploads: &[GlyphUpload]) {
         for upload in uploads {
-            if upload.width == 0 || upload.height == 0 { continue; }
+            if upload.width == 0 || upload.height == 0 {
+                continue;
+            }
             let pixel_count = (upload.width * upload.height) as usize;
             if upload.data.len() != pixel_count {
                 continue;
             }
             // Convert alpha-only to RGBA: each pixel becomes [255, 255, 255, alpha]
-            let rgba: Vec<u8> = upload.data.iter()
-                .flat_map(|&a| vec![255u8, 255, 255, a])
-                .collect();
+            let rgba: Vec<u8> =
+                upload.data.iter().flat_map(|&a| vec![255u8, 255, 255, a]).collect();
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &self.glyph_texture,
@@ -97,7 +108,11 @@ impl UiRenderer {
                     bytes_per_row: Some(upload.width * 4),
                     rows_per_image: Some(upload.height),
                 },
-                wgpu::Extent3d { width: upload.width, height: upload.height, depth_or_array_layers: 1 },
+                wgpu::Extent3d {
+                    width: upload.width,
+                    height: upload.height,
+                    depth_or_array_layers: 1,
+                },
             );
         }
     }
@@ -131,8 +146,8 @@ impl UiRenderer {
             }],
         });
 
-        let mut encoder =
-            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("ui_encoder") });
+        let mut encoder = device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("ui_encoder") });
 
         {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -157,7 +172,9 @@ impl UiRenderer {
             rpass.set_bind_group(1, &self.glyph_bind_group, &[]);
 
             for batch in &batches {
-                if batch.vertices.is_empty() { continue; }
+                if batch.vertices.is_empty() {
+                    continue;
+                }
                 let vertex_data: &[RectVertex] = &batch.vertices;
                 let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("ui_vb"),

@@ -19,7 +19,7 @@ struct VertexOutput {
 @group(1) @binding(1) var glyph_texture: texture_2d<f32>;
 
 // Signed-distance to a rounded box in pixel space.
-// p in [0, rect_size], r = corner radius in pixels, clamped to [0, min(w,h)/2].
+// p in [0, size], r = corner radius in pixels.
 fn sd_rounded_box_px(p: vec2<f32>, size: vec2<f32>, r: f32) -> f32 {
     let half = size * 0.5;
     let q = abs(p - half) - half + r;
@@ -28,21 +28,15 @@ fn sd_rounded_box_px(p: vec2<f32>, size: vec2<f32>, r: f32) -> f32 {
 
 @fragment
 fn main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // ── Glyph mode ───────────────────────────────────────────────────
-    // Atlas is Rgba8Unorm: CPU upload stores coverage in the alpha channel
-    // as [255, 255, 255, a], so sampled.a is the glyph coverage.
     if in.render_mode == RENDER_MODE_GLYPH {
         let sampled = textureSample(glyph_texture, glyph_sampler, in.tex_coord);
         return vec4<f32>(in.color.rgb, in.color.a * sampled.a);
     }
 
-    // ── Shape mode ───────────────────────────────────────────────────
     let r = clamp(in.corner_radius_px, 0.0, min(in.rect_size.x, in.rect_size.y) * 0.5);
-    if r <= 0.0 {
-        return in.color;
-    }
+    if r <= 0.0 { return in.color; }
 
-    let p = in.local_pos * in.rect_size; // [0,1] → pixel coords
+    let p = in.local_pos * in.rect_size;
     let d = sd_rounded_box_px(p, in.rect_size, r);
     let aa = fwidth(d);
     let alpha = 1.0 - smoothstep(0.0, aa, d);

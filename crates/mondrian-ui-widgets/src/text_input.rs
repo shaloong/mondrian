@@ -52,7 +52,9 @@ impl TextInput {
 }
 
 impl Widget for TextInput {
-    fn id(&self) -> WidgetId { self.id }
+    fn id(&self) -> WidgetId {
+        self.id
+    }
 
     fn measure(&self, _constraint: LayoutConstraint) -> Size {
         Size::new(200.0, 28.0)
@@ -76,52 +78,54 @@ impl Widget for TextInput {
                 self.focused = false;
                 EventResult::Handled
             }
-            UiEvent::KeyDown { key, modifiers: _ } if self.focused => {
-                match key {
-                    KeyCode::Backspace => {
-                        if self.cursor > 0 {
-                            let idx = self.text.char_indices()
-                                .nth(self.cursor - 1)
-                                .map(|(i, _)| i)
-                                .unwrap_or(0);
-                            self.text.remove(idx);
-                            self.cursor -= 1;
-                        }
-                        EventResult::Handled
+            UiEvent::KeyDown { key, modifiers: _ } if self.focused => match key {
+                KeyCode::Backspace => {
+                    if self.cursor > 0 {
+                        let idx = self
+                            .text
+                            .char_indices()
+                            .nth(self.cursor - 1)
+                            .map(|(i, _)| i)
+                            .unwrap_or(0);
+                        self.text.remove(idx);
+                        self.cursor -= 1;
                     }
-                    KeyCode::Delete => {
-                        if self.cursor < self.text.chars().count() {
-                            let idx = self.text.char_indices()
-                                .nth(self.cursor)
-                                .map(|(i, _)| i)
-                                .unwrap_or(self.text.len());
-                            self.text.remove(idx);
-                        }
-                        EventResult::Handled
-                    }
-                    KeyCode::Left => {
-                        if self.cursor > 0 {
-                            self.cursor -= 1;
-                        }
-                        EventResult::Handled
-                    }
-                    KeyCode::Right => {
-                        if self.cursor < self.text.chars().count() {
-                            self.cursor += 1;
-                        }
-                        EventResult::Handled
-                    }
-                    KeyCode::Home => {
-                        self.cursor = 0;
-                        EventResult::Handled
-                    }
-                    KeyCode::End => {
-                        self.cursor = self.text.chars().count();
-                        EventResult::Handled
-                    }
-                    _ => EventResult::Ignored,
+                    EventResult::Handled
                 }
-            }
+                KeyCode::Delete => {
+                    if self.cursor < self.text.chars().count() {
+                        let idx = self
+                            .text
+                            .char_indices()
+                            .nth(self.cursor)
+                            .map(|(i, _)| i)
+                            .unwrap_or(self.text.len());
+                        self.text.remove(idx);
+                    }
+                    EventResult::Handled
+                }
+                KeyCode::Left => {
+                    if self.cursor > 0 {
+                        self.cursor -= 1;
+                    }
+                    EventResult::Handled
+                }
+                KeyCode::Right => {
+                    if self.cursor < self.text.chars().count() {
+                        self.cursor += 1;
+                    }
+                    EventResult::Handled
+                }
+                KeyCode::Home => {
+                    self.cursor = 0;
+                    EventResult::Handled
+                }
+                KeyCode::End => {
+                    self.cursor = self.text.chars().count();
+                    EventResult::Handled
+                }
+                _ => EventResult::Ignored,
+            },
             UiEvent::TextInput(ch) if self.focused => {
                 self.text.insert(self.cursor_char_idx(), ch.chars().next().unwrap_or(' '));
                 self.cursor += 1;
@@ -160,9 +164,19 @@ impl Widget for TextInput {
 
         // Text drawn by app-level TextRenderer
         if !self.text.is_empty() {
-            ctx.encoder.draw_text(&self.text, 13.0, Point::new(self.bounds.x + 8.0, self.bounds.y + 5.0), tokens.foreground);
+            ctx.encoder.draw_text(
+                &self.text,
+                13.0,
+                Point::new(self.bounds.x + 8.0, self.bounds.y + 5.0),
+                tokens.foreground,
+            );
         } else if self.focused {
-            ctx.encoder.draw_text(&self.placeholder, 13.0, Point::new(self.bounds.x + 8.0, self.bounds.y + 5.0), tokens.muted_foreground);
+            ctx.encoder.draw_text(
+                &self.placeholder,
+                13.0,
+                Point::new(self.bounds.x + 8.0, self.bounds.y + 5.0),
+                tokens.muted_foreground,
+            );
         }
     }
 
@@ -184,7 +198,7 @@ impl TextInput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{DummyFocus, DummyShortcut, DummyTooltip, make_event_ctx};
+    use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
 
     #[test]
     fn text_input_new_is_empty() {
@@ -206,14 +220,19 @@ mod tests {
         ti.layout(Rect::new(0.0, 0.0, 200.0, 28.0));
         assert!(!ti.focused);
 
-        let mut f = DummyFocus; let mut s = DummyShortcut; let mut t = DummyTooltip;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
         let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
 
-        ti.event(&UiEvent::MouseDown {
-            position: Point::new(100.0, 14.0),
-            button: MouseButton::Left,
-            modifiers: Modifiers::none(),
-        }, &mut ctx);
+        ti.event(
+            &UiEvent::MouseDown {
+                position: Point::new(100.0, 14.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
         assert!(ti.focused);
     }
 
@@ -222,7 +241,9 @@ mod tests {
         let mut ti = TextInput::new("ph");
         ti.focused = true;
 
-        let mut f = DummyFocus; let mut s = DummyShortcut; let mut t = DummyTooltip;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
         let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
 
         ti.event(&UiEvent::TextInput("a".into()), &mut ctx);
@@ -236,10 +257,18 @@ mod tests {
         let mut ti = TextInput::new("ph").with_text("abc");
         ti.focused = true;
 
-        let mut f = DummyFocus; let mut s = DummyShortcut; let mut t = DummyTooltip;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
         let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
 
-        ti.event(&UiEvent::KeyDown { key: KeyCode::Backspace, modifiers: Modifiers::none() }, &mut ctx);
+        ti.event(
+            &UiEvent::KeyDown {
+                key: KeyCode::Backspace,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
         assert_eq!(ti.text(), "ab");
         assert_eq!(ti.cursor, 2);
     }
@@ -249,12 +278,20 @@ mod tests {
         let mut ti = TextInput::new("ph").with_text("abc");
         ti.focused = true;
 
-        let mut f = DummyFocus; let mut s = DummyShortcut; let mut t = DummyTooltip;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
         let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
 
-        ti.event(&UiEvent::KeyDown { key: KeyCode::Left, modifiers: Modifiers::none() }, &mut ctx);
+        ti.event(
+            &UiEvent::KeyDown { key: KeyCode::Left, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
         assert_eq!(ti.cursor, 2);
-        ti.event(&UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() }, &mut ctx);
+        ti.event(
+            &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
         assert_eq!(ti.cursor, 3);
     }
 
@@ -264,12 +301,20 @@ mod tests {
         ti.focused = true;
         ti.cursor = 1; // middle
 
-        let mut f = DummyFocus; let mut s = DummyShortcut; let mut t = DummyTooltip;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
         let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
 
-        ti.event(&UiEvent::KeyDown { key: KeyCode::Home, modifiers: Modifiers::none() }, &mut ctx);
+        ti.event(
+            &UiEvent::KeyDown { key: KeyCode::Home, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
         assert_eq!(ti.cursor, 0);
-        ti.event(&UiEvent::KeyDown { key: KeyCode::End, modifiers: Modifiers::none() }, &mut ctx);
+        ti.event(
+            &UiEvent::KeyDown { key: KeyCode::End, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
         assert_eq!(ti.cursor, 3);
     }
 

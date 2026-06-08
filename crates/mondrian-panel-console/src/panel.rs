@@ -2,13 +2,13 @@
 //!
 //! 将 ConsoleLogLayer 捕获的日志渲染为可滚动的日志行列表。
 
-use std::borrow::Cow;
-use mondrian_core::Color;
 use mondrian_core::events::AppEvent;
+use mondrian_core::Color;
 use mondrian_editor_ui::panel::{Panel, PanelKind};
 use mondrian_ui_core::Widget;
 use mondrian_ui_widgets::label::Label;
 use mondrian_ui_widgets::scroll::ScrollView;
+use std::borrow::Cow;
 
 use crate::tracing_layer::{LogBuffer, LogEntry};
 
@@ -23,11 +23,7 @@ pub struct ConsolePanel {
 
 impl ConsolePanel {
     pub fn new(buffer: LogBuffer, max_lines: usize) -> Self {
-        Self {
-            buffer,
-            max_lines,
-            auto_scroll: true,
-        }
+        Self { buffer, max_lines, auto_scroll: true }
     }
 }
 
@@ -58,15 +54,14 @@ impl Panel for ConsolePanel {
                     tracing::Level::TRACE => Color::from_hex(0x555560),
                 };
                 let text = format!("{} {:>5} {}", entry.timestamp, entry.level, entry.message);
-                let label = Label::new(text)
-                    .with_color(color)
-                    .with_font_size(12.0);
+                let label = Label::new(text).with_color(color).with_font_size(12.0);
                 Box::new(label) as Box<dyn Widget>
             })
             .collect();
 
         if labels.is_empty() {
-            let placeholder = Label::new("控制台就绪 — 无日志").with_color(Color::from_hex(0x767680));
+            let placeholder =
+                Label::new("控制台就绪 — 无日志").with_color(Color::from_hex(0x767680));
             return Box::new(ScrollView::new(Some(Box::new(placeholder))));
         }
 
@@ -112,9 +107,14 @@ impl ColumnWidget {
 }
 
 impl Widget for ColumnWidget {
-    fn id(&self) -> mondrian_ui_core::types::WidgetId { self.id }
+    fn id(&self) -> mondrian_ui_core::types::WidgetId {
+        self.id
+    }
 
-    fn measure(&self, constraint: mondrian_ui_core::types::LayoutConstraint) -> mondrian_ui_core::types::Size {
+    fn measure(
+        &self,
+        constraint: mondrian_ui_core::types::LayoutConstraint,
+    ) -> mondrian_ui_core::types::Size {
         let mut total_h = 0.0f32;
         let mut max_w = 0.0f32;
         for child in &self.children {
@@ -133,16 +133,28 @@ impl Widget for ColumnWidget {
         self.child_heights.clear();
         let mut y = bounds.y;
         for child in &mut self.children {
-            let cs = child.measure(mondrian_ui_core::types::LayoutConstraint::loose(bounds.width, 0.0));
+            let cs = child.measure(mondrian_ui_core::types::LayoutConstraint::loose(
+                bounds.width,
+                0.0,
+            ));
             let child_h = cs.height;
             self.child_heights.push(child_h);
-            child.layout(mondrian_ui_core::types::Rect::new(bounds.x, y, bounds.width, child_h));
+            child.layout(mondrian_ui_core::types::Rect::new(
+                bounds.x,
+                y,
+                bounds.width,
+                child_h,
+            ));
             y += child_h + self.gap;
         }
         self.total_height = y - bounds.y;
     }
 
-    fn event(&mut self, event: &mondrian_ui_core::UiEvent, ctx: &mut mondrian_ui_core::widget::EventContext) -> mondrian_ui_core::EventResult {
+    fn event(
+        &mut self,
+        event: &mondrian_ui_core::UiEvent,
+        ctx: &mut mondrian_ui_core::widget::EventContext,
+    ) -> mondrian_ui_core::EventResult {
         for child in &mut self.children {
             if child.event(event, ctx) == mondrian_ui_core::EventResult::Handled {
                 return mondrian_ui_core::EventResult::Handled;
@@ -161,8 +173,12 @@ impl Widget for ColumnWidget {
         self.bounds.contains(point)
     }
 
-    fn children(&self) -> &[Box<dyn Widget>] { &self.children }
-    fn children_mut(&mut self) -> &mut [Box<dyn Widget>] { &mut self.children }
+    fn children(&self) -> &[Box<dyn Widget>] {
+        &self.children
+    }
+    fn children_mut(&mut self) -> &mut [Box<dyn Widget>] {
+        &mut self.children
+    }
 }
 
 #[cfg(test)]

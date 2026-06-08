@@ -10,8 +10,12 @@ use mondrian_ui_core::widget::EventContext;
 
 pub(crate) struct DummyFocus;
 impl FocusManager for DummyFocus {
-    fn focused_widget(&self) -> Option<WidgetId> { None }
-    fn focused_panel(&self) -> Option<mondrian_editor_state::state::PanelKind> { None }
+    fn focused_widget(&self) -> Option<WidgetId> {
+        None
+    }
+    fn focused_panel(&self) -> Option<mondrian_editor_state::state::PanelKind> {
+        None
+    }
     fn request_focus(&mut self, _: WidgetId, _: mondrian_editor_state::state::PanelKind) {}
     fn release_focus(&mut self, _: WidgetId) {}
     fn focus_next(&mut self) {}
@@ -23,7 +27,9 @@ pub(crate) struct DummyShortcut;
 impl ShortcutManager for DummyShortcut {
     fn register(&mut self, _: ShortcutScope, _: ShortcutBinding, _: Action) {}
     fn unregister(&mut self, _: ShortcutScope, _: &ShortcutBinding) {}
-    fn resolve(&self, _: KeyCode, _: Modifiers) -> Option<Action> { None }
+    fn resolve(&self, _: KeyCode, _: Modifiers) -> Option<Action> {
+        None
+    }
     fn clear_scope(&mut self, _: ShortcutScope) {}
     fn clear_all(&mut self) {}
 }
@@ -32,7 +38,9 @@ pub(crate) struct DummyTooltip;
 impl TooltipManager for DummyTooltip {
     fn show(&mut self, _: String, _: Point) {}
     fn hide(&mut self) {}
-    fn current(&self) -> Option<&TooltipState> { None }
+    fn current(&self) -> Option<&TooltipState> {
+        None
+    }
     fn update(&mut self, _: u64) {}
 }
 

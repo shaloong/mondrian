@@ -37,10 +37,16 @@ mod tests {
 
     struct StackTestWidget(WidgetId);
     impl Widget for StackTestWidget {
-        fn id(&self) -> WidgetId { self.0 }
-        fn measure(&self, _c: LayoutConstraint) -> Size { Size::new(100.0, 100.0) }
+        fn id(&self) -> WidgetId {
+            self.0
+        }
+        fn measure(&self, _c: LayoutConstraint) -> Size {
+            Size::new(100.0, 100.0)
+        }
         fn layout(&mut self, _b: Rect) {}
-        fn event(&mut self, _e: &UiEvent, _ctx: &mut EventContext) -> EventResult { EventResult::Ignored }
+        fn event(&mut self, _e: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+            EventResult::Ignored
+        }
         fn paint(&self, _ctx: &mut PaintContext) {}
     }
 

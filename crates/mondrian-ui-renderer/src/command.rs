@@ -46,17 +46,13 @@ pub enum DrawCommand {
     },
 
     /// 裁剪区域（后续命令在裁剪区域内绘制）
-    PushClip {
-        bounds: Rect,
-    },
+    PushClip { bounds: Rect },
 
     /// 弹出最近的裁剪区域
     PopClip,
 
     /// 平移变换
-    PushTranslate {
-        offset: Vec2,
-    },
+    PushTranslate { offset: Vec2 },
 
     /// 弹出最近的平移变换
     PopTransform,
@@ -107,11 +103,7 @@ impl DrawEncoder {
     }
 
     pub fn draw_rect(&mut self, bounds: Rect, color: Color, corner_radius: f32) {
-        self.commands.push(DrawCommand::Rect {
-            bounds,
-            color,
-            corner_radius,
-        });
+        self.commands.push(DrawCommand::Rect { bounds, color, corner_radius });
     }
 
     pub fn draw_text(&mut self, text: &str, style: &TextStyle, position: Point, color: Color) {
@@ -124,17 +116,11 @@ impl DrawEncoder {
     }
 
     pub fn draw_image(&mut self, bounds: Rect, uv_rect: Rect, tint: Color) {
-        self.commands
-            .push(DrawCommand::Image { bounds, uv_rect, tint });
+        self.commands.push(DrawCommand::Image { bounds, uv_rect, tint });
     }
 
     pub fn draw_line(&mut self, start: Point, end: Point, width: f32, color: Color) {
-        self.commands.push(DrawCommand::Line {
-            start,
-            end,
-            width,
-            color,
-        });
+        self.commands.push(DrawCommand::Line { start, end, width, color });
     }
 
     pub fn is_empty(&self) -> bool {
@@ -147,10 +133,7 @@ impl DrawEncoder {
 
     /// 消耗编码器，返回收集到的命令列表
     pub fn finish(self) -> Vec<DrawCommand> {
-        assert_eq!(
-            self.clip_depth, 0,
-            "DrawEncoder: unbalanced clip push/pop"
-        );
+        assert_eq!(self.clip_depth, 0, "DrawEncoder: unbalanced clip push/pop");
         assert_eq!(
             self.transform_depth, 0,
             "DrawEncoder: unbalanced transform push/pop"

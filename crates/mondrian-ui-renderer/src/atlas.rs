@@ -62,10 +62,7 @@ impl TextureAtlas {
         let w = item_width as f32 / self.width as f32;
         let h = item_height as f32 / self.height as f32;
 
-        let entry = AtlasEntry {
-            rect: Rect::new(x, y, w, h),
-            allocated: true,
-        };
+        let entry = AtlasEntry { rect: Rect::new(x, y, w, h), allocated: true };
 
         self.entries.insert(key.to_string(), entry);
         self.next_x += item_width;

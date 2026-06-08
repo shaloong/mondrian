@@ -39,13 +39,7 @@ pub struct ConsoleLogLayer {
 impl ConsoleLogLayer {
     pub fn new(max_lines: usize) -> (Self, LogBuffer) {
         let buffer = Arc::new(Mutex::new(VecDeque::with_capacity(max_lines)));
-        (
-            Self {
-                buffer: buffer.clone(),
-                max_lines,
-            },
-            buffer,
-        )
+        (Self { buffer: buffer.clone(), max_lines }, buffer)
     }
 }
 

@@ -4,16 +4,21 @@ use std::sync::Arc;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Simple: just confirm we can get red/blue on screen with our real pipeline
     let el = winit::event_loop::EventLoop::new()?;
-    let w = Arc::new(el.create_window(winit::window::Window::default_attributes()
-        .with_title("Pipeline Raw Test")
-        .with_inner_size(winit::dpi::LogicalSize::new(600, 400)))?);
+    let w = Arc::new(
+        el.create_window(
+            winit::window::Window::default_attributes()
+                .with_title("Pipeline Raw Test")
+                .with_inner_size(winit::dpi::LogicalSize::new(600, 400)),
+        )?,
+    );
     let inst = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let surf = inst.create_surface(w.clone())?;
     let adap = pollster::block_on(inst.request_adapter(&wgpu::RequestAdapterOptions {
         compatible_surface: Some(&surf),
         power_preference: wgpu::PowerPreference::HighPerformance,
         ..Default::default()
-    })).unwrap();
+    }))
+    .unwrap();
     let (dev, q) = pollster::block_on(adap.request_device(&wgpu::DeviceDescriptor::default()))?;
     let sz = w.inner_size();
     let mut cfg = surf.get_default_config(&adap, sz.width, sz.height).unwrap();
@@ -24,17 +29,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let renderer = UiRenderer::new(&dev, cfg.format);
 
     el.run(move |ev, elwt| {
-        use winit::event_loop::ControlFlow;
         use winit::event::{Event, WindowEvent};
+        use winit::event_loop::ControlFlow;
         elwt.set_control_flow(ControlFlow::Wait);
         match ev {
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. }
-            | Event::WindowEvent { event: WindowEvent::KeyboardInput {
-                event: winit::event::KeyEvent {
-                    logical_key: winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape),
-                    state: winit::event::ElementState::Pressed, ..
-                }, ..
-            }, .. } => elwt.exit(),
+            | Event::WindowEvent {
+                event:
+                    WindowEvent::KeyboardInput {
+                        event:
+                            winit::event::KeyEvent {
+                                logical_key:
+                                    winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape),
+                                state: winit::event::ElementState::Pressed,
+                                ..
+                            },
+                        ..
+                    },
+                ..
+            } => elwt.exit(),
             Event::WindowEvent { event: WindowEvent::RedrawRequested, .. } => {
                 let mut enc = DrawEncoder::new();
                 // Background gray
@@ -58,7 +71,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let cmds = enc.finish();
                 let cur = surf.get_current_texture();
                 match cur {
-                    wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => {
+                    wgpu::CurrentSurfaceTexture::Success(f)
+                    | wgpu::CurrentSurfaceTexture::Suboptimal(f) => {
                         let v = f.texture.create_view(&Default::default());
                         renderer.render(&dev, &q, &v, &cmds, (sz.width, sz.height));
                         f.present();
@@ -73,7 +87,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     surf.configure(&dev, &cfg);
                 }
             }
-            Event::AboutToWait => { w.request_redraw(); }
+            Event::AboutToWait => {
+                w.request_redraw();
+            }
             _ => {}
         }
     })?;

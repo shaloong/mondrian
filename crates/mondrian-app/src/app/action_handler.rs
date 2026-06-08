@@ -71,8 +71,7 @@ impl AppState {
 
             // ── 项目操作 ──────────────────────────────────────────────────
             Action::SaveProject => {
-                self.save_project()
-                    .map_err(mondrian_core::MondrianError::Other)?;
+                self.save_project().map_err(mondrian_core::MondrianError::Other)?;
                 Ok(())
             }
             Action::CloseProject => {

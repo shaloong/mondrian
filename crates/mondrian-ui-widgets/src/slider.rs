@@ -52,11 +52,9 @@ impl Widget for Slider {
 
     fn event(&mut self, event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
         match event {
-            UiEvent::MouseDown {
-                position,
-                button: MouseButton::Left,
-                ..
-            } if self.bounds.contains(*position) => {
+            UiEvent::MouseDown { position, button: MouseButton::Left, .. }
+                if self.bounds.contains(*position) =>
+            {
                 self.dragging = true;
                 self.update_value(position);
                 EventResult::Handled
@@ -65,10 +63,7 @@ impl Widget for Slider {
                 self.update_value(position);
                 EventResult::Handled
             }
-            UiEvent::MouseUp {
-                button: MouseButton::Left,
-                ..
-            } if self.dragging => {
+            UiEvent::MouseUp { button: MouseButton::Left, .. } if self.dragging => {
                 self.dragging = false;
                 EventResult::Handled
             }
@@ -83,22 +78,15 @@ impl Widget for Slider {
         let track_y = self.bounds.y + self.bounds.height * 0.5 - self.track_height * 0.5;
 
         // Track background
-        let track_bg = Rect::new(
-            self.bounds.x,
-            track_y,
-            self.bounds.width,
-            self.track_height,
-        );
-        ctx.encoder
-            .draw_rect(track_bg, tokens.accent, spacing.radius_sm);
+        let track_bg = Rect::new(self.bounds.x, track_y, self.bounds.width, self.track_height);
+        ctx.encoder.draw_rect(track_bg, tokens.accent, spacing.radius_sm);
 
         // Filled track
         let ratio = (self.value - self.min) / (self.max - self.min);
         let fill_w = self.bounds.width * ratio;
         if fill_w > 0.0 {
             let track_fill = Rect::new(self.bounds.x, track_y, fill_w, self.track_height);
-            ctx.encoder
-                .draw_rect(track_fill, tokens.primary, spacing.radius_sm);
+            ctx.encoder.draw_rect(track_fill, tokens.primary, spacing.radius_sm);
         }
 
         // Thumb
@@ -113,8 +101,7 @@ impl Widget for Slider {
             self.thumb_size,
             self.thumb_size,
         );
-        ctx.encoder
-            .draw_rect(thumb_rect, tokens.primary, spacing.radius_full);
+        ctx.encoder.draw_rect(thumb_rect, tokens.primary, spacing.radius_full);
     }
 
     fn hit_test(&self, point: Point) -> bool {
@@ -132,7 +119,7 @@ impl Slider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{DummyFocus, DummyShortcut, DummyTooltip, make_event_ctx};
+    use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
 
     fn event_ctx() -> EventContext<'static> {
         let f: &'static mut DummyFocus = Box::leak(Box::new(DummyFocus));

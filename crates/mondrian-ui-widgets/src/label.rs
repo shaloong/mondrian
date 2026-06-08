@@ -66,8 +66,12 @@ impl Widget for Label {
 
     fn paint(&self, ctx: &mut PaintContext) {
         if !self.text.is_empty() {
-            ctx.encoder.draw_text(&self.text, self.font_size,
-                Point::new(self.bounds.x + 4.0, self.bounds.y + 2.0), self.color);
+            ctx.encoder.draw_text(
+                &self.text,
+                self.font_size,
+                Point::new(self.bounds.x + 4.0, self.bounds.y + 2.0),
+                self.color,
+            );
         }
     }
 

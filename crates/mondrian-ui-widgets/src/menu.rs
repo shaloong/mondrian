@@ -55,11 +55,15 @@ impl Dropdown {
 }
 
 impl Widget for Dropdown {
-    fn id(&self) -> WidgetId { self.id }
+    fn id(&self) -> WidgetId {
+        self.id
+    }
 
     fn measure(&self, _constraint: LayoutConstraint) -> Size {
         if self.open {
-            let w = self.items.iter()
+            let w = self
+                .items
+                .iter()
                 .map(|m| m.label.chars().count() as f32 * 8.0 + 32.0)
                 .fold(120.0f32, f32::max);
             let h = self.item_height * self.items.len() as f32 + 4.0;
@@ -81,8 +85,10 @@ impl Widget for Dropdown {
                     let menu_y = self.bounds.y + 28.0;
                     for (i, _item) in self.items.iter().enumerate() {
                         let item_rect = Rect::new(
-                            self.bounds.x, menu_y + i as f32 * self.item_height,
-                            self.bounds.width.max(120.0), self.item_height,
+                            self.bounds.x,
+                            menu_y + i as f32 * self.item_height,
+                            self.bounds.width.max(120.0),
+                            self.item_height,
                         );
                         if item_rect.contains(*position) && self.items[i].enabled {
                             (ctx.dispatch)(self.items[i].action.clone());
@@ -98,12 +104,15 @@ impl Widget for Dropdown {
                 }
                 UiEvent::MouseMove { position, .. } => {
                     let menu_y = self.bounds.y + 28.0;
-                    self.hovered_index = self.items.iter().enumerate()
-                        .position(|(i, _)| {
-                            let r = Rect::new(self.bounds.x, menu_y + i as f32 * self.item_height,
-                                self.bounds.width.max(120.0), self.item_height);
-                            r.contains(*position)
-                        });
+                    self.hovered_index = self.items.iter().enumerate().position(|(i, _)| {
+                        let r = Rect::new(
+                            self.bounds.x,
+                            menu_y + i as f32 * self.item_height,
+                            self.bounds.width.max(120.0),
+                            self.item_height,
+                        );
+                        r.contains(*position)
+                    });
                     return EventResult::Handled;
                 }
                 _ => return EventResult::Handled,
@@ -126,24 +135,35 @@ impl Widget for Dropdown {
 
         // Trigger button
         let btn_rect = Rect::new(self.bounds.x, self.bounds.y, self.bounds.width, 28.0);
-        let bg = if self.open { tokens.primary } else { tokens.card };
+        let bg = if self.open {
+            tokens.primary
+        } else {
+            tokens.card
+        };
         ctx.encoder.draw_rect(btn_rect, bg, spacing.radius_sm);
 
         // Dropdown arrow indicator
         if !self.label.is_empty() {
-            ctx.encoder.draw_text(&self.label, 13.0, Point::new(btn_rect.x + 8.0, btn_rect.y + 5.0), tokens.foreground);
+            ctx.encoder.draw_text(
+                &self.label,
+                13.0,
+                Point::new(btn_rect.x + 8.0, btn_rect.y + 5.0),
+                tokens.foreground,
+            );
         }
         let arrow_x = btn_rect.x + btn_rect.width - 16.0;
         let arrow_y = btn_rect.y + btn_rect.height * 0.5;
         ctx.encoder.draw_line(
             Point::new(arrow_x - 4.0, arrow_y - 2.0),
             Point::new(arrow_x, arrow_y + 2.0),
-            1.5, tokens.foreground,
+            1.5,
+            tokens.foreground,
         );
         ctx.encoder.draw_line(
             Point::new(arrow_x, arrow_y + 2.0),
             Point::new(arrow_x + 4.0, arrow_y - 2.0),
-            1.5, tokens.foreground,
+            1.5,
+            tokens.foreground,
         );
 
         // Menu items
@@ -152,14 +172,22 @@ impl Widget for Dropdown {
             let menu_w = self.bounds.width.max(120.0);
 
             // Menu background
-            let menu_bg = Rect::new(self.bounds.x, menu_y, menu_w,
-                self.item_height * self.items.len() as f32 + 4.0);
+            let menu_bg = Rect::new(
+                self.bounds.x,
+                menu_y,
+                menu_w,
+                self.item_height * self.items.len() as f32 + 4.0,
+            );
             ctx.encoder.draw_rect(menu_bg, tokens.popover, spacing.radius_sm);
             ctx.encoder.draw_rect(menu_bg, tokens.border, 0.0);
 
             for (i, item) in self.items.iter().enumerate() {
-                let item_rect = Rect::new(self.bounds.x + 2.0, menu_y + i as f32 * self.item_height,
-                    menu_w - 4.0, self.item_height);
+                let item_rect = Rect::new(
+                    self.bounds.x + 2.0,
+                    menu_y + i as f32 * self.item_height,
+                    menu_w - 4.0,
+                    self.item_height,
+                );
 
                 let fill = if self.hovered_index == Some(i) && item.enabled {
                     tokens.accent
@@ -169,14 +197,25 @@ impl Widget for Dropdown {
                 ctx.encoder.draw_rect(item_rect, fill, 0.0);
 
                 // Item label
-                ctx.encoder.draw_text(&item.label, 13.0,
+                ctx.encoder.draw_text(
+                    &item.label,
+                    13.0,
                     Point::new(item_rect.x + 6.0, item_rect.y + 5.0),
-                    if item.enabled { tokens.foreground } else { tokens.muted_foreground });
+                    if item.enabled {
+                        tokens.foreground
+                    } else {
+                        tokens.muted_foreground
+                    },
+                );
                 if !item.enabled {
                     ctx.encoder.draw_line(
                         Point::new(item_rect.x + 4.0, item_rect.y + item_rect.height * 0.5),
-                        Point::new(item_rect.x + item_rect.width - 4.0, item_rect.y + item_rect.height * 0.5),
-                        1.0, tokens.muted_foreground,
+                        Point::new(
+                            item_rect.x + item_rect.width - 4.0,
+                            item_rect.y + item_rect.height * 0.5,
+                        ),
+                        1.0,
+                        tokens.muted_foreground,
                     );
                 }
             }
@@ -191,62 +230,86 @@ impl Widget for Dropdown {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{DummyFocus, DummyShortcut, DummyTooltip, make_event_ctx};
+    use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use std::cell::RefCell;
 
     #[test]
     fn dropdown_new_is_closed() {
-        let d = Dropdown::new("File", vec![
-            MenuItem::new("Open", Action::OpenProject("".into())),
-        ]);
+        let d = Dropdown::new(
+            "File",
+            vec![MenuItem::new("Open", Action::OpenProject("".into()))],
+        );
         assert!(!d.open);
     }
 
     #[test]
     fn dropdown_click_opens() {
-        let mut d = Dropdown::new("File", vec![
-            MenuItem::new("Open", Action::OpenProject("".into())),
-        ]);
+        let mut d = Dropdown::new(
+            "File",
+            vec![MenuItem::new("Open", Action::OpenProject("".into()))],
+        );
         d.layout(Rect::new(0.0, 0.0, 120.0, 28.0));
 
-        let mut f = DummyFocus; let mut s = DummyShortcut; let mut t = DummyTooltip;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
         let cell = RefCell::new(Vec::new());
-        let dispatch_fn = |a: Action| { cell.borrow_mut().push(a); };
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
         let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch_fn);
 
-        d.event(&UiEvent::MouseDown {
-            position: Point::new(60.0, 14.0),
-            button: MouseButton::Left,
-            modifiers: Modifiers::none(),
-        }, &mut ctx);
+        d.event(
+            &UiEvent::MouseDown {
+                position: Point::new(60.0, 14.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
         assert!(d.open);
     }
 
     #[test]
     fn dropdown_select_dispatches_and_closes() {
-        let mut d = Dropdown::new("File", vec![
-            MenuItem::new("Save", Action::SaveProject),
-            MenuItem::new("Quit", Action::CloseProject),
-        ]);
+        let mut d = Dropdown::new(
+            "File",
+            vec![
+                MenuItem::new("Save", Action::SaveProject),
+                MenuItem::new("Quit", Action::CloseProject),
+            ],
+        );
         d.layout(Rect::new(0.0, 0.0, 120.0, 28.0));
 
-        let mut f = DummyFocus; let mut s = DummyShortcut; let mut t = DummyTooltip;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
         let cell = RefCell::new(Vec::new());
-        let dispatch_fn = |a: Action| { cell.borrow_mut().push(a); };
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
         let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch_fn);
 
         // Open
-        d.event(&UiEvent::MouseDown {
-            position: Point::new(60.0, 14.0),
-            button: MouseButton::Left, modifiers: Modifiers::none(),
-        }, &mut ctx);
+        d.event(
+            &UiEvent::MouseDown {
+                position: Point::new(60.0, 14.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
         assert!(d.open);
 
         // Click first item at y = 28 + 0*24 = 28 → should dispatch SaveProject
-        d.event(&UiEvent::MouseDown {
-            position: Point::new(60.0, 40.0),
-            button: MouseButton::Left, modifiers: Modifiers::none(),
-        }, &mut ctx);
+        d.event(
+            &UiEvent::MouseDown {
+                position: Point::new(60.0, 40.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
 
         assert!(!d.open);
         let actions = cell.into_inner();

@@ -69,7 +69,13 @@ pub trait DrawCommandEncoder {
     fn pop_clip(&mut self);
     fn draw_rect(&mut self, bounds: Rect, color: mondrian_core::Color, corner_radius: f32);
     fn draw_line(&mut self, start: Point, end: Point, width: f32, color: mondrian_core::Color);
-    fn draw_text(&mut self, text: &str, font_size: f32, position: Point, color: mondrian_core::Color);
+    fn draw_text(
+        &mut self,
+        text: &str,
+        font_size: f32,
+        position: Point,
+        color: mondrian_core::Color,
+    );
     fn push_translate(&mut self, offset: glam::Vec2);
     fn pop_transform(&mut self);
 }
@@ -163,7 +169,8 @@ mod tests {
 
     fn mock_paint_ctx<'a>(encoder: &'a mut MockEncoder) -> PaintContext<'a> {
         // Use a leaked dark theme to satisfy lifetime — safe in tests
-        let theme: &'static Theme = Box::leak(Box::new(mondrian_ui_theme::ThemePreset::Dark.build()));
+        let theme: &'static Theme =
+            Box::leak(Box::new(mondrian_ui_theme::ThemePreset::Dark.build()));
         PaintContext {
             encoder,
             theme,
@@ -189,7 +196,9 @@ mod tests {
     }
 
     impl Widget for TestWidget {
-        fn id(&self) -> WidgetId { self.id }
+        fn id(&self) -> WidgetId {
+            self.id
+        }
 
         fn measure(&self, _constraint: LayoutConstraint) -> Size {
             Size::new(100.0, 50.0)
@@ -266,10 +275,16 @@ mod tests {
         // A widget that doesn't override hit_test should reject all clicks.
         struct NoHitTestWidget;
         impl Widget for NoHitTestWidget {
-            fn id(&self) -> WidgetId { WidgetId::new() }
-            fn measure(&self, _c: LayoutConstraint) -> Size { Size::ZERO }
+            fn id(&self) -> WidgetId {
+                WidgetId::new()
+            }
+            fn measure(&self, _c: LayoutConstraint) -> Size {
+                Size::ZERO
+            }
             fn layout(&mut self, _b: Rect) {}
-            fn event(&mut self, _e: &UiEvent, _c: &mut EventContext) -> EventResult { EventResult::Ignored }
+            fn event(&mut self, _e: &UiEvent, _c: &mut EventContext) -> EventResult {
+                EventResult::Ignored
+            }
             fn paint(&self, _c: &mut PaintContext) {}
         }
 

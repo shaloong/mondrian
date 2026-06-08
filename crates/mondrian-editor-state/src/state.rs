@@ -257,7 +257,10 @@ mod tests {
     #[test]
     fn panel_kind_display_name_non_empty() {
         for kind in PanelKind::ALL {
-            assert!(!kind.display_name().is_empty(), "{kind:?} has empty display_name");
+            assert!(
+                !kind.display_name().is_empty(),
+                "{kind:?} has empty display_name"
+            );
         }
     }
 
@@ -287,9 +290,18 @@ mod tests {
     #[test]
     fn panel_kind_json_format() {
         // Verify stable format — changing these breaks saved workspaces
-        assert_eq!(serde_json::to_string(&PanelKind::Viewer).unwrap(), "\"Viewer\"");
-        assert_eq!(serde_json::to_string(&PanelKind::Timeline).unwrap(), "\"Timeline\"");
-        assert_eq!(serde_json::to_string(&PanelKind::Console).unwrap(), "\"Console\"");
+        assert_eq!(
+            serde_json::to_string(&PanelKind::Viewer).unwrap(),
+            "\"Viewer\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PanelKind::Timeline).unwrap(),
+            "\"Timeline\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PanelKind::Console).unwrap(),
+            "\"Console\""
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -447,7 +459,10 @@ mod tests {
         let default_state = EditorState::default();
         // Note: can't compare directly (EventBus is not PartialEq), but we
         // can compare the fields that are comparable
-        assert_eq!(new_state.has_open_project(), default_state.has_open_project());
+        assert_eq!(
+            new_state.has_open_project(),
+            default_state.has_open_project()
+        );
         assert_eq!(new_state.workspace, default_state.workspace);
         assert_eq!(new_state.playback, default_state.playback);
     }

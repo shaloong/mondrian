@@ -87,7 +87,9 @@ mod tests {
     }
 
     impl Widget for ParentWidget {
-        fn id(&self) -> WidgetId { self.id }
+        fn id(&self) -> WidgetId {
+            self.id
+        }
 
         fn measure(&self, _constraint: LayoutConstraint) -> Size {
             Size::new(200.0, 200.0)
@@ -125,12 +127,18 @@ mod tests {
 
     impl LeafWidget {
         fn new() -> Self {
-            Self { id: WidgetId::new(), bounds: Rect::ZERO, painted_count: std::cell::Cell::new(0) }
+            Self {
+                id: WidgetId::new(),
+                bounds: Rect::ZERO,
+                painted_count: std::cell::Cell::new(0),
+            }
         }
     }
 
     impl Widget for LeafWidget {
-        fn id(&self) -> WidgetId { self.id }
+        fn id(&self) -> WidgetId {
+            self.id
+        }
 
         fn measure(&self, _constraint: LayoutConstraint) -> Size {
             Size::new(100.0, 100.0)
@@ -159,7 +167,9 @@ mod tests {
     }
 
     impl MockEncoder {
-        fn new() -> Self { Self { rect_count: 0 } }
+        fn new() -> Self {
+            Self { rect_count: 0 }
+        }
     }
 
     impl DrawCommandEncoder for MockEncoder {

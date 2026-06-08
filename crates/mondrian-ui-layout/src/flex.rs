@@ -64,11 +64,17 @@ impl Default for FlexLayout {
 
 impl FlexLayout {
     pub fn row() -> Self {
-        Self { direction: FlexDirection::Row, ..Default::default() }
+        Self {
+            direction: FlexDirection::Row,
+            ..Default::default()
+        }
     }
 
     pub fn column() -> Self {
-        Self { direction: FlexDirection::Column, ..Default::default() }
+        Self {
+            direction: FlexDirection::Column,
+            ..Default::default()
+        }
     }
 
     /// 给定父 bounds 和子 widget 列表，计算每个子的 Rect
@@ -94,7 +100,8 @@ impl FlexLayout {
         // ── Step 2: Main axis allocation ──
         let main_size = if is_row { inner.width } else { inner.height };
         let total_gap = self.gap * (n - 1.0).max(0.0);
-        let total_preferred: f32 = measured.iter().map(|s| if is_row { s.width } else { s.height }).sum();
+        let total_preferred: f32 =
+            measured.iter().map(|s| if is_row { s.width } else { s.height }).sum();
         let remaining = (main_size - total_preferred - total_gap).max(0.0);
 
         let total_flex: f32 = 1.0; // currently all flex equally
@@ -186,17 +193,29 @@ mod tests {
         preferred: Size,
     }
     impl Widget for TestWidget {
-        fn id(&self) -> WidgetId { self.id }
-        fn measure(&self, _c: LayoutConstraint) -> Size { self.preferred }
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+        fn measure(&self, _c: LayoutConstraint) -> Size {
+            self.preferred
+        }
         fn layout(&mut self, _b: Rect) {}
-        fn event(&mut self, _e: &UiEvent, _ctx: &mut EventContext) -> EventResult { EventResult::Ignored }
+        fn event(&mut self, _e: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+            EventResult::Ignored
+        }
         fn paint(&self, _ctx: &mut PaintContext) {}
     }
 
     #[test]
     fn column_layout_stacks_vertically() {
-        let w1 = TestWidget { id: WidgetId::new(), preferred: Size::new(100.0, 30.0) };
-        let w2 = TestWidget { id: WidgetId::new(), preferred: Size::new(100.0, 40.0) };
+        let w1 = TestWidget {
+            id: WidgetId::new(),
+            preferred: Size::new(100.0, 30.0),
+        };
+        let w2 = TestWidget {
+            id: WidgetId::new(),
+            preferred: Size::new(100.0, 40.0),
+        };
         let children: Vec<&dyn Widget> = vec![&w1, &w2];
 
         let layout = FlexLayout::column();
@@ -204,13 +223,22 @@ mod tests {
         let rects = layout.compute(parent, &children);
 
         assert_eq!(rects.len(), 2);
-        assert!(rects[1].y > rects[0].y, "second child should be below first");
+        assert!(
+            rects[1].y > rects[0].y,
+            "second child should be below first"
+        );
     }
 
     #[test]
     fn row_layout_aligns_horizontally() {
-        let w1 = TestWidget { id: WidgetId::new(), preferred: Size::new(50.0, 30.0) };
-        let w2 = TestWidget { id: WidgetId::new(), preferred: Size::new(60.0, 30.0) };
+        let w1 = TestWidget {
+            id: WidgetId::new(),
+            preferred: Size::new(50.0, 30.0),
+        };
+        let w2 = TestWidget {
+            id: WidgetId::new(),
+            preferred: Size::new(60.0, 30.0),
+        };
         let children: Vec<&dyn Widget> = vec![&w1, &w2];
 
         let layout = FlexLayout::row();
@@ -218,12 +246,18 @@ mod tests {
         let rects = layout.compute(parent, &children);
 
         assert_eq!(rects.len(), 2);
-        assert!(rects[1].x > rects[0].x, "second child should be right of first");
+        assert!(
+            rects[1].x > rects[0].x,
+            "second child should be right of first"
+        );
     }
 
     #[test]
     fn center_alignment() {
-        let w1 = TestWidget { id: WidgetId::new(), preferred: Size::new(50.0, 30.0) };
+        let w1 = TestWidget {
+            id: WidgetId::new(),
+            preferred: Size::new(50.0, 30.0),
+        };
         let children: Vec<&dyn Widget> = vec![&w1];
 
         let layout = FlexLayout {
@@ -240,9 +274,18 @@ mod tests {
 
     #[test]
     fn space_between_justify() {
-        let w1 = TestWidget { id: WidgetId::new(), preferred: Size::new(30.0, 20.0) };
-        let w2 = TestWidget { id: WidgetId::new(), preferred: Size::new(30.0, 20.0) };
-        let w3 = TestWidget { id: WidgetId::new(), preferred: Size::new(30.0, 20.0) };
+        let w1 = TestWidget {
+            id: WidgetId::new(),
+            preferred: Size::new(30.0, 20.0),
+        };
+        let w2 = TestWidget {
+            id: WidgetId::new(),
+            preferred: Size::new(30.0, 20.0),
+        };
+        let w3 = TestWidget {
+            id: WidgetId::new(),
+            preferred: Size::new(30.0, 20.0),
+        };
         let children: Vec<&dyn Widget> = vec![&w1, &w2, &w3];
 
         let layout = FlexLayout {
@@ -261,13 +304,13 @@ mod tests {
 
     #[test]
     fn end_alignment() {
-        let w1 = TestWidget { id: WidgetId::new(), preferred: Size::new(50.0, 30.0) };
+        let w1 = TestWidget {
+            id: WidgetId::new(),
+            preferred: Size::new(50.0, 30.0),
+        };
         let children: Vec<&dyn Widget> = vec![&w1];
 
-        let layout = FlexLayout {
-            align_items: AlignItems::End,
-            ..FlexLayout::row()
-        };
+        let layout = FlexLayout { align_items: AlignItems::End, ..FlexLayout::row() };
         let parent = Rect::new(0.0, 0.0, 200.0, 100.0);
         let rects = layout.compute(parent, &children);
 
@@ -278,8 +321,14 @@ mod tests {
 
     #[test]
     fn flex_with_gap() {
-        let w1 = TestWidget { id: WidgetId::new(), preferred: Size::new(100.0, 20.0) };
-        let w2 = TestWidget { id: WidgetId::new(), preferred: Size::new(100.0, 20.0) };
+        let w1 = TestWidget {
+            id: WidgetId::new(),
+            preferred: Size::new(100.0, 20.0),
+        };
+        let w2 = TestWidget {
+            id: WidgetId::new(),
+            preferred: Size::new(100.0, 20.0),
+        };
         let children: Vec<&dyn Widget> = vec![&w1, &w2];
 
         let no_gap = FlexLayout::column();
@@ -304,7 +353,10 @@ mod tests {
 
     #[test]
     fn flex_with_padding() {
-        let w1 = TestWidget { id: WidgetId::new(), preferred: Size::new(100.0, 30.0) };
+        let w1 = TestWidget {
+            id: WidgetId::new(),
+            preferred: Size::new(100.0, 30.0),
+        };
         let children: Vec<&dyn Widget> = vec![&w1];
 
         let layout = FlexLayout {
@@ -322,7 +374,10 @@ mod tests {
 
     #[test]
     fn stretch_cross_axis() {
-        let w1 = TestWidget { id: WidgetId::new(), preferred: Size::new(50.0, 30.0) };
+        let w1 = TestWidget {
+            id: WidgetId::new(),
+            preferred: Size::new(50.0, 30.0),
+        };
         let children: Vec<&dyn Widget> = vec![&w1];
 
         let layout = FlexLayout {

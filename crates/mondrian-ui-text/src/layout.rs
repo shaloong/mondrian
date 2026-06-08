@@ -2,7 +2,9 @@
 //!
 //! 基于 cosmic-text 0.19 Buffer 的单行/多行排版。
 
-use cosmic_text::{Align, Attrs, Buffer, FontSystem, LayoutGlyph, LayoutRun, Metrics, Shaping, Wrap};
+use cosmic_text::{
+    Align, Attrs, Buffer, FontSystem, LayoutGlyph, LayoutRun, Metrics, Shaping, Wrap,
+};
 
 pub struct TextLayout {
     buffer: Buffer,
@@ -72,10 +74,7 @@ impl TextLayout {
     }
 
     pub fn glyphs(&self) -> Vec<cosmic_text::LayoutGlyph> {
-        self.buffer
-            .layout_runs()
-            .flat_map(|run| run.glyphs.to_vec())
-            .collect()
+        self.buffer.layout_runs().flat_map(|run| run.glyphs.to_vec()).collect()
     }
 
     pub fn buffer(&self) -> &Buffer {

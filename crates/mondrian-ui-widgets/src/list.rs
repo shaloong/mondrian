@@ -49,12 +49,18 @@ impl List {
         }
     }
 
-    pub fn selected_index(&self) -> Option<usize> { self.selected }
-    pub fn set_selected(&mut self, idx: Option<usize>) { self.selected = idx; }
+    pub fn selected_index(&self) -> Option<usize> {
+        self.selected
+    }
+    pub fn set_selected(&mut self, idx: Option<usize>) {
+        self.selected = idx;
+    }
 }
 
 impl Widget for List {
-    fn id(&self) -> WidgetId { self.id }
+    fn id(&self) -> WidgetId {
+        self.id
+    }
 
     fn measure(&self, _c: LayoutConstraint) -> Size {
         Size::new(200.0, self.items.len() as f32 * self.row_height)
@@ -87,7 +93,8 @@ impl Widget for List {
                 };
             }
             UiEvent::MouseWheel { delta, .. } => {
-                let max_scroll = (self.items.len() as f32 * self.row_height - self.bounds.height).max(0.0);
+                let max_scroll =
+                    (self.items.len() as f32 * self.row_height - self.bounds.height).max(0.0);
                 self.scroll_offset = (self.scroll_offset + delta).clamp(0.0, max_scroll);
                 return EventResult::Handled;
             }
@@ -109,7 +116,12 @@ impl Widget for List {
         for i in visible {
             let item = &self.items[i];
             let y = self.bounds.y + i as f32 * self.row_height - self.scroll_offset;
-            let row = Rect::new(self.bounds.x + 2.0, y, self.bounds.width - 4.0, self.row_height);
+            let row = Rect::new(
+                self.bounds.x + 2.0,
+                y,
+                self.bounds.width - 4.0,
+                self.row_height,
+            );
 
             let fill = if self.selected == Some(i) {
                 tokens.primary
@@ -120,7 +132,12 @@ impl Widget for List {
             };
             ctx.encoder.draw_rect(row, fill, spacing.radius_sm);
             if !item.label.is_empty() {
-                ctx.encoder.draw_text(&item.label, 13.0, Point::new(row.x + 8.0, row.y + 5.0), tokens.foreground);
+                ctx.encoder.draw_text(
+                    &item.label,
+                    13.0,
+                    Point::new(row.x + 8.0, row.y + 5.0),
+                    tokens.foreground,
+                );
             }
         }
 
@@ -135,23 +152,31 @@ impl Widget for List {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
-    use crate::test_utils::{DummyFocus, DummyShortcut, DummyTooltip, make_event_ctx};
+
+    use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
 
     #[test]
     fn list_click_selects_item() {
         let mut list = List::new(vec![
-            ListItem::new("A"), ListItem::new("B"), ListItem::new("C"),
+            ListItem::new("A"),
+            ListItem::new("B"),
+            ListItem::new("C"),
         ]);
         list.layout(Rect::new(0.0, 0.0, 200.0, 100.0));
 
-        let mut f = DummyFocus; let mut s = DummyShortcut; let mut t = DummyTooltip;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
         let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
 
-        list.event(&UiEvent::MouseDown {
-            position: Point::new(100.0, 42.0), // second item (y=28-56)
-            button: MouseButton::Left, modifiers: Modifiers::none(),
-        }, &mut ctx);
+        list.event(
+            &UiEvent::MouseDown {
+                position: Point::new(100.0, 42.0), // second item (y=28-56)
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
         assert_eq!(list.selected_index(), Some(1));
     }
 
@@ -160,12 +185,18 @@ mod tests {
         let mut list = List::new(vec![ListItem::new("A")]);
         list.layout(Rect::new(0.0, 0.0, 200.0, 100.0));
 
-        let mut f = DummyFocus; let mut s = DummyShortcut; let mut t = DummyTooltip;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
         let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
-        list.event(&UiEvent::MouseDown {
-            position: Point::new(300.0, 50.0),
-            button: MouseButton::Left, modifiers: Modifiers::none(),
-        }, &mut ctx);
+        list.event(
+            &UiEvent::MouseDown {
+                position: Point::new(300.0, 50.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
         assert_eq!(list.selected_index(), None);
     }
 }

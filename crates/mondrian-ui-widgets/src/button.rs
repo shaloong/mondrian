@@ -61,19 +61,13 @@ impl Widget for Button {
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
         match event {
-            UiEvent::MouseDown {
-                position,
-                button: MouseButton::Left,
-                ..
-            } if self.bounds.contains(*position) => {
+            UiEvent::MouseDown { position, button: MouseButton::Left, .. }
+                if self.bounds.contains(*position) =>
+            {
                 self.state = ButtonState::Pressed;
                 EventResult::Handled
             }
-            UiEvent::MouseUp {
-                position,
-                button: MouseButton::Left,
-                ..
-            } => {
+            UiEvent::MouseUp { position, button: MouseButton::Left, .. } => {
                 if self.state == ButtonState::Pressed && self.bounds.contains(*position) {
                     if let Some(action) = &self.on_click {
                         (ctx.dispatch)(action.clone());
@@ -121,7 +115,12 @@ impl Widget for Button {
             let font_size = 13.0;
             let tx = mondrian_ui_core::types::center_text_x(self.bounds, &self.label, font_size);
             let ty = self.bounds.y + (self.bounds.height - font_size * 1.3).max(0.0) * 0.5;
-            ctx.encoder.draw_text(&self.label, font_size, Point::new(tx, ty), tokens.foreground);
+            ctx.encoder.draw_text(
+                &self.label,
+                font_size,
+                Point::new(tx, ty),
+                tokens.foreground,
+            );
         }
     }
 
@@ -133,8 +132,8 @@ impl Widget for Button {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use std::cell::RefCell;
-    use crate::test_utils::{DummyFocus, DummyShortcut, DummyTooltip, make_event_ctx};
 
     fn event_ctx_with_capture<'a>(
         focus: &'a mut DummyFocus,
@@ -163,14 +162,23 @@ mod tests {
     fn button_mouse_down_in_bounds_sets_pressed() {
         let mut b = Button::new("OK");
         b.layout(Rect::new(0.0, 0.0, 100.0, 30.0));
-        let mut f = DummyFocus; let mut s = DummyShortcut; let mut t = DummyTooltip;
-        let cell = RefCell::new(Vec::new()); let dispatch_fn = |a: Action| { cell.borrow_mut().push(a); };
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let cell = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
         let mut ctx = event_ctx_with_capture(&mut f, &mut s, &mut t, &dispatch_fn);
 
-        b.event(&UiEvent::MouseDown {
-            position: Point::new(50.0, 15.0),
-            button: MouseButton::Left, modifiers: Modifiers::none(),
-        }, &mut ctx);
+        b.event(
+            &UiEvent::MouseDown {
+                position: Point::new(50.0, 15.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
         assert_eq!(b.state(), ButtonState::Pressed);
     }
 
@@ -178,14 +186,23 @@ mod tests {
     fn button_mouse_down_outside_bounds_ignored() {
         let mut b = Button::new("OK");
         b.layout(Rect::new(0.0, 0.0, 100.0, 30.0));
-        let mut f = DummyFocus; let mut s = DummyShortcut; let mut t = DummyTooltip;
-        let cell = RefCell::new(Vec::new()); let dispatch_fn = |a: Action| { cell.borrow_mut().push(a); };
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let cell = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
         let mut ctx = event_ctx_with_capture(&mut f, &mut s, &mut t, &dispatch_fn);
 
-        let r = b.event(&UiEvent::MouseDown {
-            position: Point::new(200.0, 200.0),
-            button: MouseButton::Left, modifiers: Modifiers::none(),
-        }, &mut ctx);
+        let r = b.event(
+            &UiEvent::MouseDown {
+                position: Point::new(200.0, 200.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
         assert_eq!(r, EventResult::Ignored);
         assert_eq!(b.state(), ButtonState::Normal);
     }
@@ -194,18 +211,31 @@ mod tests {
     fn button_click_dispatches_action() {
         let mut b = Button::new("OK").on_click(Action::Play);
         b.layout(Rect::new(0.0, 0.0, 100.0, 30.0));
-        let mut f = DummyFocus; let mut s = DummyShortcut; let mut t = DummyTooltip;
-        let cell = RefCell::new(Vec::new()); let dispatch_fn = |a: Action| { cell.borrow_mut().push(a); };
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let cell = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
         let mut ctx = event_ctx_with_capture(&mut f, &mut s, &mut t, &dispatch_fn);
 
-        b.event(&UiEvent::MouseDown {
-            position: Point::new(50.0, 15.0),
-            button: MouseButton::Left, modifiers: Modifiers::none(),
-        }, &mut ctx);
-        b.event(&UiEvent::MouseUp {
-            position: Point::new(50.0, 15.0),
-            button: MouseButton::Left, modifiers: Modifiers::none(),
-        }, &mut ctx);
+        b.event(
+            &UiEvent::MouseDown {
+                position: Point::new(50.0, 15.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        b.event(
+            &UiEvent::MouseUp {
+                position: Point::new(50.0, 15.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
 
         assert_eq!(b.state(), ButtonState::Normal);
         let actions = cell.into_inner();
@@ -217,18 +247,31 @@ mod tests {
     fn button_release_outside_no_click() {
         let mut b = Button::new("OK").on_click(Action::Play);
         b.layout(Rect::new(0.0, 0.0, 100.0, 30.0));
-        let mut f = DummyFocus; let mut s = DummyShortcut; let mut t = DummyTooltip;
-        let cell = RefCell::new(Vec::new()); let dispatch_fn = |a: Action| { cell.borrow_mut().push(a); };
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let cell = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
         let mut ctx = event_ctx_with_capture(&mut f, &mut s, &mut t, &dispatch_fn);
 
-        b.event(&UiEvent::MouseDown {
-            position: Point::new(50.0, 15.0),
-            button: MouseButton::Left, modifiers: Modifiers::none(),
-        }, &mut ctx);
-        b.event(&UiEvent::MouseUp {
-            position: Point::new(200.0, 200.0),
-            button: MouseButton::Left, modifiers: Modifiers::none(),
-        }, &mut ctx);
+        b.event(
+            &UiEvent::MouseDown {
+                position: Point::new(50.0, 15.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        b.event(
+            &UiEvent::MouseUp {
+                position: Point::new(200.0, 200.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
 
         assert!(cell.into_inner().is_empty());
     }
@@ -236,8 +279,13 @@ mod tests {
     #[test]
     fn button_focus_gained_sets_hovered() {
         let mut b = Button::new("OK");
-        let mut f = DummyFocus; let mut s = DummyShortcut; let mut t = DummyTooltip;
-        let cell = RefCell::new(Vec::new()); let dispatch_fn = |a: Action| { cell.borrow_mut().push(a); };
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let cell = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
         let mut ctx = event_ctx_with_capture(&mut f, &mut s, &mut t, &dispatch_fn);
 
         b.event(&UiEvent::FocusGained, &mut ctx);
@@ -248,8 +296,13 @@ mod tests {
     fn button_focus_lost_clears_hovered() {
         let mut b = Button::new("OK");
         b.state = ButtonState::Hovered;
-        let mut f = DummyFocus; let mut s = DummyShortcut; let mut t = DummyTooltip;
-        let cell = RefCell::new(Vec::new()); let dispatch_fn = |a: Action| { cell.borrow_mut().push(a); };
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let cell = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
         let mut ctx = event_ctx_with_capture(&mut f, &mut s, &mut t, &dispatch_fn);
 
         b.event(&UiEvent::FocusLost, &mut ctx);
@@ -260,18 +313,31 @@ mod tests {
     fn button_no_click_without_action() {
         let mut b = Button::new("OK");
         b.layout(Rect::new(0.0, 0.0, 100.0, 30.0));
-        let mut f = DummyFocus; let mut s = DummyShortcut; let mut t = DummyTooltip;
-        let cell = RefCell::new(Vec::new()); let dispatch_fn = |a: Action| { cell.borrow_mut().push(a); };
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let cell = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
         let mut ctx = event_ctx_with_capture(&mut f, &mut s, &mut t, &dispatch_fn);
 
-        b.event(&UiEvent::MouseDown {
-            position: Point::new(50.0, 15.0),
-            button: MouseButton::Left, modifiers: Modifiers::none(),
-        }, &mut ctx);
-        b.event(&UiEvent::MouseUp {
-            position: Point::new(50.0, 15.0),
-            button: MouseButton::Left, modifiers: Modifiers::none(),
-        }, &mut ctx);
+        b.event(
+            &UiEvent::MouseDown {
+                position: Point::new(50.0, 15.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        b.event(
+            &UiEvent::MouseUp {
+                position: Point::new(50.0, 15.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
 
         assert!(cell.into_inner().is_empty());
     }
@@ -280,13 +346,18 @@ mod tests {
     fn button_mouse_move_in_sets_hovered() {
         let mut b = Button::new("OK");
         b.layout(Rect::new(0.0, 0.0, 100.0, 30.0));
-        let mut f = DummyFocus; let mut s = DummyShortcut; let mut t = DummyTooltip;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
         let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
 
-        let r = b.event(&UiEvent::MouseMove {
-            position: Point::new(50.0, 15.0),
-            modifiers: Modifiers::none(),
-        }, &mut ctx);
+        let r = b.event(
+            &UiEvent::MouseMove {
+                position: Point::new(50.0, 15.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
         assert_eq!(r, EventResult::Handled);
         assert_eq!(b.state(), ButtonState::Hovered);
     }
@@ -296,13 +367,18 @@ mod tests {
         let mut b = Button::new("OK");
         b.layout(Rect::new(0.0, 0.0, 100.0, 30.0));
         b.state = ButtonState::Hovered;
-        let mut f = DummyFocus; let mut s = DummyShortcut; let mut t = DummyTooltip;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
         let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
 
-        let r = b.event(&UiEvent::MouseMove {
-            position: Point::new(200.0, 15.0),
-            modifiers: Modifiers::none(),
-        }, &mut ctx);
+        let r = b.event(
+            &UiEvent::MouseMove {
+                position: Point::new(200.0, 15.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
         assert_eq!(r, EventResult::Handled);
         assert_eq!(b.state(), ButtonState::Normal);
     }
@@ -312,13 +388,18 @@ mod tests {
         let mut b = Button::new("OK");
         b.layout(Rect::new(0.0, 0.0, 100.0, 30.0));
         b.state = ButtonState::Pressed;
-        let mut f = DummyFocus; let mut s = DummyShortcut; let mut t = DummyTooltip;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
         let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
 
-        let r = b.event(&UiEvent::MouseMove {
-            position: Point::new(200.0, 15.0),
-            modifiers: Modifiers::none(),
-        }, &mut ctx);
+        let r = b.event(
+            &UiEvent::MouseMove {
+                position: Point::new(200.0, 15.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
         // During press, MouseMove does NOT change state (guard: self.state != Pressed)
         assert_eq!(r, EventResult::Ignored);
         assert_eq!(b.state(), ButtonState::Pressed);

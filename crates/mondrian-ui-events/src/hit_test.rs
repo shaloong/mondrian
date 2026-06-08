@@ -52,14 +52,26 @@ mod tests {
         children: Vec<Box<dyn Widget>>,
     }
     impl Widget for HitWidget {
-        fn id(&self) -> WidgetId { self.id }
-        fn measure(&self, _c: LayoutConstraint) -> Size { Size::new(self.bounds.width, self.bounds.height) }
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+        fn measure(&self, _c: LayoutConstraint) -> Size {
+            Size::new(self.bounds.width, self.bounds.height)
+        }
         fn layout(&mut self, _b: Rect) {}
-        fn event(&mut self, _e: &UiEvent, _ctx: &mut EventContext) -> EventResult { EventResult::Ignored }
+        fn event(&mut self, _e: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+            EventResult::Ignored
+        }
         fn paint(&self, _ctx: &mut PaintContext) {}
-        fn hit_test(&self, point: Point) -> bool { self.bounds.contains(point) }
-        fn children(&self) -> &[Box<dyn Widget>] { &self.children }
-        fn children_mut(&mut self) -> &mut [Box<dyn Widget>] { &mut self.children }
+        fn hit_test(&self, point: Point) -> bool {
+            self.bounds.contains(point)
+        }
+        fn children(&self) -> &[Box<dyn Widget>] {
+            &self.children
+        }
+        fn children_mut(&mut self) -> &mut [Box<dyn Widget>] {
+            &mut self.children
+        }
     }
 
     struct TestTree {
@@ -74,12 +86,17 @@ mod tests {
         fn get_mut(&mut self, id: WidgetId) -> Option<&mut dyn Widget> {
             self.widgets.get_mut(&id).map(|w| w as &mut dyn Widget)
         }
-        fn root_id(&self) -> WidgetId { self.root }
+        fn root_id(&self) -> WidgetId {
+            self.root
+        }
         fn parent_id(&self, id: WidgetId) -> Option<WidgetId> {
             self.parents.get(&id).copied()
         }
         fn children_ids(&self, id: WidgetId) -> Vec<WidgetId> {
-            self.widgets.get(&id).map(|w| w.children.iter().map(|c| c.id()).collect()).unwrap_or_default()
+            self.widgets
+                .get(&id)
+                .map(|w| w.children.iter().map(|c| c.id()).collect())
+                .unwrap_or_default()
         }
     }
 
@@ -101,9 +118,14 @@ mod tests {
 
         let mut widgets = std::collections::HashMap::new();
         widgets.insert(parent_id, parent);
-        widgets.insert(child_id, HitWidget {
-            id: child_id, bounds: Rect::new(10.0, 10.0, 80.0, 80.0), children: vec![]
-        });
+        widgets.insert(
+            child_id,
+            HitWidget {
+                id: child_id,
+                bounds: Rect::new(10.0, 10.0, 80.0, 80.0),
+                children: vec![],
+            },
+        );
 
         let mut parents = std::collections::HashMap::new();
         parents.insert(child_id, parent_id);

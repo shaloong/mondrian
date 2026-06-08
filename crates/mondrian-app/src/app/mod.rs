@@ -57,13 +57,13 @@ mod animation_state;
 mod audio_rendering;
 mod bootstrap;
 mod chrome;
-mod ui_demo;
 mod new_project;
 mod playback;
 mod preferences;
 mod project_lifecycle;
 mod timeline_commands;
 mod timeline_editing;
+mod ui_demo;
 
 use audio_rendering::*;
 use timeline_editing::*;

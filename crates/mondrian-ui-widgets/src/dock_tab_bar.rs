@@ -82,11 +82,7 @@ impl Widget for DockTabBar {
 
     fn event(&mut self, event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
         match event {
-            UiEvent::MouseDown {
-                position,
-                button: MouseButton::Left,
-                ..
-            } => {
+            UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
                 let rects = self.tab_rects();
                 for (i, r) in rects.iter().enumerate() {
                     if r.contains(*position) {
@@ -155,8 +151,7 @@ impl Widget for DockTabBar {
                     inset.width - 8.0,
                     2.0,
                 );
-                ctx.encoder
-                    .draw_rect(indicator, tokens.primary, 0.0);
+                ctx.encoder.draw_rect(indicator, tokens.primary, 0.0);
             }
         }
     }
@@ -210,9 +205,7 @@ mod tests {
 
     #[test]
     fn tab_bar_no_active_returns_zero() {
-        let bar = DockTabBar::new(vec![
-            TabInfo { label: "X".into(), active: false },
-        ]);
+        let bar = DockTabBar::new(vec![TabInfo { label: "X".into(), active: false }]);
         assert_eq!(bar.active_index(), 0);
     }
 
