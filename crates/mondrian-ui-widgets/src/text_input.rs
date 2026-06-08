@@ -1,8 +1,19 @@
 //! 文本输入框控件
 //!
-//! 单行文本编辑，支持光标移动、退格删除、Home/End、鼠标拖拽选择。
+//! 单行文本编辑。支持：
+//! - 光标移动、退格删除、Home/End
+//! - 鼠标拖拽选择（可超出控件边界）
+//! - Shift+Click / Shift+Arrow 选区扩展
+//! - Ctrl+A/C/X/V 剪贴板操作
+//! - Ctrl+Left/Right 按词跳转
+//! - IME 多字符输入
+//! - 基于 grapheme cluster 的光标（正确处理 emoji / 组合字符）
+//! - 时间驱动的闪烁光标（500ms 周期）
 
 use std::cell::Cell;
+use std::time::Instant;
+
+use unicode_segmentation::UnicodeSegmentation;
 
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
@@ -14,13 +25,20 @@ pub struct TextInput {
     text: String,
     placeholder: String,
     bounds: Rect,
+    /// Cursor position as grapheme cluster index.
     cursor: usize,
     focused: bool,
-    cursor_visible: Cell<bool>,
-    /// Selection anchor (char index). None means no selection.
+    /// Selection anchor as grapheme cluster index.
     selection_start: Option<usize>,
-    /// Track whether the mouse is pressed on this widget for drag-selection.
+    /// Whether the mouse is pressed on this widget.
     mouse_down: bool,
+    /// Blink: cursor visibility and last toggle time.
+    cursor_visible: Cell<bool>,
+    last_blink: Cell<Instant>,
+    /// Horizontal scroll offset to keep cursor visible.
+    scroll_x: Cell<f32>,
+    /// IME composition text shown before the platform commits it.
+    ime_preedit: String,
 }
 
 impl TextInput {
@@ -32,15 +50,18 @@ impl TextInput {
             bounds: Rect::ZERO,
             cursor: 0,
             focused: false,
-            cursor_visible: Cell::new(true),
             selection_start: None,
             mouse_down: false,
+            cursor_visible: Cell::new(true),
+            last_blink: Cell::new(Instant::now()),
+            scroll_x: Cell::new(0.0),
+            ime_preedit: String::new(),
         }
     }
 
     pub fn with_text(mut self, text: impl Into<String>) -> Self {
         let t = text.into();
-        self.cursor = t.chars().count();
+        self.cursor = self.grapheme_count(&t);
         self.text = t;
         self
     }
@@ -50,7 +71,7 @@ impl TextInput {
     }
 
     pub fn set_text(&mut self, text: String) {
-        self.cursor = text.chars().count();
+        self.cursor = self.grapheme_count(&text);
         self.text = text;
         self.clear_selection();
     }
@@ -61,63 +82,80 @@ impl TextInput {
         self.clear_selection();
     }
 
+    // ── Grapheme helpers ──────────────────────────────────────────────────
+
+    /// Number of grapheme clusters in the current text.
+    fn grapheme_count(&self, s: &str) -> usize {
+        s.graphemes(true).count()
+    }
+
+    /// Byte offset of the grapheme at `g_idx`. Returns `text.len()` if index
+    /// is past the end.
+    fn grapheme_byte_idx(&self, g_idx: usize) -> usize {
+        self.text
+            .grapheme_indices(true)
+            .nth(g_idx)
+            .map(|(i, _)| i)
+            .unwrap_or(self.text.len())
+    }
+
+    /// Byte offset for the current cursor position.
+    fn cursor_byte_idx(&self) -> usize {
+        self.grapheme_byte_idx(self.cursor)
+    }
+
+    /// Total grapheme count of the text.
+    fn len_graphemes(&self) -> usize {
+        self.grapheme_count(&self.text)
+    }
+
+    // ── Selection helpers ─────────────────────────────────────────────────
+
     fn clear_selection(&mut self) {
         self.selection_start = None;
     }
 
-    fn has_selection(&self) -> bool {
+    pub fn has_selection(&self) -> bool {
         self.selection_start.is_some_and(|s| s != self.cursor)
     }
 
-    /// Return the byte range [start, end) of the selection, or None.
-    fn selection_byte_range(&self) -> Option<(usize, usize)> {
+    /// Byte range [start, end) of the current selection, or None.
+    pub fn selection_byte_range(&self) -> Option<(usize, usize)> {
         let anchor = self.selection_start?;
         if anchor == self.cursor {
             return None;
         }
         let from = anchor.min(self.cursor);
         let to = anchor.max(self.cursor);
-        let byte_start = self.char_to_byte(from);
-        let byte_end = self.char_to_byte(to);
+        let byte_start = self.grapheme_byte_idx(from);
+        let byte_end = self.grapheme_byte_idx(to);
         Some((byte_start, byte_end))
     }
 
-    /// Delete the currently selected text (if any). Returns true if deletion happened.
+    /// Delete selected text. Returns true if anything was deleted.
     fn delete_selection(&mut self) -> bool {
         let Some((start, end)) = self.selection_byte_range() else {
             return false;
         };
         self.text.replace_range(start..end, "");
-        let char_count = self.text.chars().count();
         let anchor = self.selection_start.unwrap_or(self.cursor);
         self.cursor = self.cursor.min(anchor);
-        if self.cursor > char_count {
-            self.cursor = char_count;
+        let total = self.len_graphemes();
+        if self.cursor > total {
+            self.cursor = total;
         }
         self.clear_selection();
         true
     }
 
-    fn char_to_byte(&self, char_idx: usize) -> usize {
-        self.text
-            .char_indices()
-            .nth(char_idx)
-            .map(|(i, _)| i)
-            .unwrap_or(self.text.len())
-    }
-
-    fn cursor_byte_idx(&self) -> usize {
-        self.char_to_byte(self.cursor)
-    }
-
-    /// Set cursor position from a pixel x coordinate relative to text start.
+    /// Set cursor from a pixel x-coordinate relative to text start.
     fn set_cursor_from_x(&mut self, pixel_x: f32, font_size: f32) {
         let mut best = 0;
         let mut best_dist = f32::MAX;
-        let char_count = self.text.chars().count();
-        for i in 0..=char_count {
-            let prefix = &self.text[..self.char_to_byte(i)];
-            let w = estimate_text_width(prefix, font_size);
+        let total = self.len_graphemes();
+        for i in 0..=total {
+            let prefix_byte = self.grapheme_byte_idx(i);
+            let w = estimate_text_width(&self.text[..prefix_byte], font_size);
             let dist = (pixel_x - w).abs();
             if dist < best_dist {
                 best_dist = dist;
@@ -125,6 +163,133 @@ impl TextInput {
             }
         }
         self.cursor = best;
+        self.update_scroll(font_size);
+    }
+    fn update_scroll(&self, font_size: f32) {
+        let text_w = if self.text.is_empty() {
+            0.0
+        } else {
+            estimate_text_width(&self.text, font_size)
+        };
+        let visible_w = (self.bounds.width - 16.0).max(1.0); // 8px padding each side
+        let cursor_x = if self.text.is_empty() {
+            0.0
+        } else {
+            estimate_text_width(&self.text[..self.cursor_byte_idx()], font_size)
+        };
+        let sx = self.scroll_x.get();
+        // Cursor to the right of visible area → scroll left
+        if cursor_x - sx > visible_w - 4.0 {
+            self.scroll_x.set((cursor_x - visible_w + 4.0).min(text_w - visible_w).max(0.0));
+        }
+        // Cursor to the left of visible area → scroll right
+        else if cursor_x - sx < 0.0 {
+            self.scroll_x.set(cursor_x.max(0.0));
+        }
+        // Clamp: don't scroll past the text end
+        let max_scroll = (text_w - visible_w).max(0.0);
+        if self.scroll_x.get() > max_scroll {
+            self.scroll_x.set(max_scroll);
+        }
+    }
+
+    /// Delete one grapheme before the cursor (for Backspace).
+    fn delete_grapheme_before(&mut self) -> bool {
+        if self.cursor == 0 {
+            return false;
+        }
+        let target = self.cursor - 1;
+        let byte_idx = self.grapheme_byte_idx(target);
+        let next_byte = self.grapheme_byte_idx(self.cursor);
+        self.text.replace_range(byte_idx..next_byte, "");
+        self.cursor = target;
+        true
+    }
+
+    /// Delete one grapheme at the cursor (for Delete).
+    fn delete_grapheme_at(&mut self) -> bool {
+        let total = self.len_graphemes();
+        if self.cursor >= total {
+            return false;
+        }
+        let byte_idx = self.grapheme_byte_idx(self.cursor);
+        let next_byte = self.grapheme_byte_idx(self.cursor + 1);
+        self.text.replace_range(byte_idx..next_byte, "");
+        true
+    }
+
+    /// Insert text at cursor, updating cursor by grapheme count.
+    fn insert_at_cursor(&mut self, s: &str) {
+        let count = self.grapheme_count(s);
+        let idx = self.cursor_byte_idx();
+        self.text.insert_str(idx, s);
+        self.cursor += count;
+        self.update_scroll(14.0);
+    }
+
+    /// Move cursor and keep it visible.
+    fn move_cursor_to(&mut self, pos: usize) {
+        self.cursor = pos;
+        self.update_scroll(14.0);
+    }
+
+    // ── Word navigation ───────────────────────────────────────────────────
+
+    // ── Word navigation ───────────────────────────────────────────────────
+
+    fn next_word_boundary(&self, from: usize) -> usize {
+        let total = self.len_graphemes();
+        let mut i = from;
+        // Skip word characters
+        while i < total {
+            let b = self.grapheme_byte_idx(i);
+            let nb = self.grapheme_byte_idx((i + 1).min(total));
+            if &self.text[b..nb] != " " {
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        // Skip spaces
+        while i < total {
+            let b = self.grapheme_byte_idx(i);
+            let nb = self.grapheme_byte_idx((i + 1).min(total));
+            if &self.text[b..nb] == " " {
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        i
+    }
+
+    fn prev_word_boundary(&self, from: usize) -> usize {
+        if from == 0 {
+            return 0;
+        }
+        let total = self.len_graphemes();
+        let mut i = from.min(total);
+        // Skip trailing spaces
+        while i > 0 {
+            let b = self.grapheme_byte_idx(i - 1);
+            let nb = self.grapheme_byte_idx(i.min(total));
+            if &self.text[b..nb] == " " {
+                i -= 1;
+            } else {
+                break;
+            }
+        }
+        // Skip word characters
+        while i > 0 {
+            let b = self.grapheme_byte_idx(i - 1);
+            let nb = self.grapheme_byte_idx(i.min(total));
+            if &self.text[b..nb] != " " {
+                i -= 1;
+            } else {
+                break;
+            }
+        }
+        i
     }
 }
 
@@ -143,30 +308,48 @@ impl Widget for TextInput {
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
         match event {
-            UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
+            // ── Mouse ──────────────────────────────────────────────────
+            UiEvent::MouseDown { position, button: MouseButton::Left, modifiers } => {
                 let clicked = self.bounds.contains(*position);
                 if clicked {
                     ctx.focus
                         .request_focus(self.id, mondrian_editor_state::state::PanelKind::Console);
                     let rel_x = position.x - (self.bounds.x + 8.0);
-                    self.set_cursor_from_x(rel_x, 14.0);
-                    self.clear_selection();
+                    if modifiers.shift {
+                        // Shift+Click: extend selection from anchor (or current cursor)
+                        if self.selection_start.is_none() {
+                            self.selection_start = Some(self.cursor);
+                        }
+                        self.set_cursor_from_x(rel_x, 14.0);
+                    } else {
+                        self.set_cursor_from_x(rel_x, 14.0);
+                        self.clear_selection();
+                    }
                     self.mouse_down = true;
+                    self.ime_preedit.clear();
+                    ctx.request_pointer_capture(self.id);
+                    ctx.set_ime_enabled(true, Some(self.bounds));
                 } else {
                     self.focused = false;
                     self.clear_selection();
                     self.mouse_down = false;
+                    self.ime_preedit.clear();
+                    ctx.release_pointer_capture(self.id);
+                    ctx.set_ime_enabled(false, None);
                 }
                 self.focused = clicked;
                 EventResult::Handled
             }
             UiEvent::MouseMove { position, .. } => {
-                if self.mouse_down && self.bounds.contains(*position) {
+                if self.mouse_down {
                     if self.selection_start.is_none() {
                         self.selection_start = Some(self.cursor);
                     }
+                    // Allow drag beyond bounds — clamp to valid range
                     let rel_x = position.x - (self.bounds.x + 8.0);
-                    self.set_cursor_from_x(rel_x, 14.0);
+                    let max_x = estimate_text_width(&self.text, 14.0) + 8.0;
+                    let clamped_x = rel_x.clamp(0.0, max_x);
+                    self.set_cursor_from_x(clamped_x, 14.0);
                     EventResult::Handled
                 } else {
                     EventResult::Ignored
@@ -174,68 +357,99 @@ impl Widget for TextInput {
             }
             UiEvent::MouseUp { button: MouseButton::Left, .. } => {
                 self.mouse_down = false;
+                ctx.release_pointer_capture(self.id);
                 EventResult::Handled
             }
+            // ── Focus ──────────────────────────────────────────────────
             UiEvent::FocusGained => {
                 self.focused = true;
+                self.cursor_visible.set(true);
+                self.last_blink.set(Instant::now());
+                ctx.set_ime_enabled(true, Some(self.bounds));
                 EventResult::Handled
             }
             UiEvent::FocusLost => {
                 self.focused = false;
                 self.mouse_down = false;
+                self.clear_selection();
+                self.ime_preedit.clear();
+                ctx.release_pointer_capture(self.id);
+                ctx.set_ime_enabled(false, None);
                 EventResult::Handled
             }
+            // ── Keyboard ───────────────────────────────────────────────
             UiEvent::KeyDown { key, modifiers } if self.focused => {
                 let shift = modifiers.shift;
                 let ctrl = modifiers.ctrl;
 
                 match key {
+                    // ── Ctrl shortcuts ─────────────────────────────────
                     KeyCode::A if ctrl => {
-                        self.cursor = self.text.chars().count();
+                        self.move_cursor_to(self.len_graphemes());
                         self.selection_start = Some(0);
                         EventResult::Handled
                     }
                     KeyCode::C if ctrl => {
                         if let Some((start, end)) = self.selection_byte_range() {
-                            let selected = &self.text[start..end];
-                            ctx.platform.clipboard_copy(selected);
+                            ctx.platform.clipboard_copy(&self.text[start..end]);
+                            EventResult::Handled
+                        } else {
+                            EventResult::Ignored
                         }
-                        EventResult::Handled
                     }
                     KeyCode::V if ctrl => {
                         self.delete_selection();
                         if let Some(clip) = ctx.platform.clipboard_paste() {
                             if !clip.is_empty() {
-                                let insert_idx = self.cursor_byte_idx();
-                                self.text.insert_str(insert_idx, &clip);
-                                self.cursor += clip.chars().count();
+                                self.insert_at_cursor(&clip);
                             }
                         }
                         EventResult::Handled
                     }
                     KeyCode::X if ctrl => {
                         if let Some((start, end)) = self.selection_byte_range() {
-                            let selected = &self.text[start..end];
-                            ctx.platform.clipboard_copy(selected);
+                            ctx.platform.clipboard_copy(&self.text[start..end]);
                             self.delete_selection();
+                            EventResult::Handled
+                        } else {
+                            EventResult::Ignored
                         }
+                    }
+                    // ── Word navigation ────────────────────────────────
+                    KeyCode::Left if ctrl => {
+                        if !shift {
+                            self.clear_selection();
+                        } else if self.selection_start.is_none() {
+                            self.selection_start = Some(self.cursor);
+                        }
+                        self.move_cursor_to(self.prev_word_boundary(self.cursor));
                         EventResult::Handled
                     }
-                    KeyCode::Backspace => {
-                        if !self.delete_selection() && self.cursor > 0 {
-                            let idx = self.char_to_byte(self.cursor - 1);
-                            self.text.remove(idx);
-                            self.cursor -= 1;
+                    KeyCode::Right if ctrl => {
+                        if !shift {
+                            self.clear_selection();
+                        } else if self.selection_start.is_none() {
+                            self.selection_start = Some(self.cursor);
                         }
+                        self.move_cursor_to(self.next_word_boundary(self.cursor));
+                        EventResult::Handled
+                    }
+                    // ── Deletion ────────────────────────────────────────
+                    KeyCode::Backspace => {
+                        if !self.delete_selection() {
+                            self.delete_grapheme_before();
+                        }
+                        self.update_scroll(14.0);
                         EventResult::Handled
                     }
                     KeyCode::Delete => {
-                        if !self.delete_selection() && self.cursor < self.text.chars().count() {
-                            let idx = self.char_to_byte(self.cursor);
-                            self.text.remove(idx);
+                        if !self.delete_selection() {
+                            self.delete_grapheme_at();
                         }
+                        self.update_scroll(14.0);
                         EventResult::Handled
                     }
+                    // ── Navigation ──────────────────────────────────────
                     KeyCode::Left => {
                         if shift {
                             if self.selection_start.is_none() {
@@ -245,7 +459,7 @@ impl Widget for TextInput {
                             self.clear_selection();
                         }
                         if self.cursor > 0 {
-                            self.cursor -= 1;
+                            self.move_cursor_to(self.cursor - 1);
                         }
                         EventResult::Handled
                     }
@@ -257,37 +471,53 @@ impl Widget for TextInput {
                         } else {
                             self.clear_selection();
                         }
-                        if self.cursor < self.text.chars().count() {
-                            self.cursor += 1;
+                        let total = self.len_graphemes();
+                        if self.cursor < total {
+                            self.move_cursor_to(self.cursor + 1);
                         }
                         EventResult::Handled
                     }
                     KeyCode::Home => {
-                        if !shift {
+                        if shift {
+                            if self.selection_start.is_none() {
+                                self.selection_start = Some(self.cursor);
+                            }
+                        } else {
                             self.clear_selection();
-                        } else if self.selection_start.is_none() {
-                            self.selection_start = Some(self.cursor);
                         }
-                        self.cursor = 0;
+                        self.move_cursor_to(0);
                         EventResult::Handled
                     }
                     KeyCode::End => {
-                        if !shift {
+                        if shift {
+                            if self.selection_start.is_none() {
+                                self.selection_start = Some(self.cursor);
+                            }
+                        } else {
                             self.clear_selection();
-                        } else if self.selection_start.is_none() {
-                            self.selection_start = Some(self.cursor);
                         }
-                        self.cursor = self.text.chars().count();
+                        self.move_cursor_to(self.len_graphemes());
                         EventResult::Handled
                     }
                     _ => EventResult::Ignored,
                 }
             }
+            // ── Text input ─────────────────────────────────────────────
             UiEvent::TextInput(ch) if self.focused => {
                 self.delete_selection();
-                let insert_idx = self.cursor_byte_idx();
-                self.text.insert(insert_idx, ch.chars().next().unwrap_or(' '));
-                self.cursor += 1;
+                self.insert_at_cursor(ch);
+                self.ime_preedit.clear();
+                EventResult::Handled
+            }
+            UiEvent::ImeCommit(ch) if self.focused => {
+                self.delete_selection();
+                self.ime_preedit.clear();
+                self.insert_at_cursor(ch);
+                EventResult::Handled
+            }
+            UiEvent::ImePreedit(preedit) if self.focused => {
+                self.ime_preedit = preedit.clone();
+                ctx.request_repaint();
                 EventResult::Handled
             }
             _ => EventResult::Ignored,
@@ -305,8 +535,6 @@ impl Widget for TextInput {
             tokens.card
         };
         let border = tokens.border_for_state(self.focused);
-
-        // Rounded border via larger rect behind fill
         let border_inset = 1.0;
         ctx.encoder.draw_rect(
             self.bounds.inset(-border_inset, -border_inset),
@@ -315,7 +543,12 @@ impl Widget for TextInput {
         );
         ctx.encoder.draw_rect(self.bounds, bg, spacing.radius_sm);
 
-        let text_x = self.bounds.x + 8.0;
+        // Clip text content to padded area
+        let clip = self.bounds.inset(4.0, 0.0);
+        ctx.encoder.push_clip(clip);
+
+        let sx = self.scroll_x.get();
+        let text_x = self.bounds.x + 8.0 - sx;
         let text_y = self.bounds.y + (self.bounds.height - font_size * 1.3).max(0.0) * 0.5;
 
         // Selection highlight
@@ -328,29 +561,29 @@ impl Widget for TextInput {
                 .draw_rect(Rect::new(sel_x, sel_y, sel_w, sel_h), tokens.primary, 0.0);
         }
 
-        // Blinking cursor when focused
+        // Blinking cursor
         if self.focused {
-            let visible = self.cursor_visible.get();
-            self.cursor_visible.set(!visible);
-            if visible {
-                let prefix = if self.text.is_empty() {
-                    ""
+            let now = Instant::now();
+            let elapsed = now.duration_since(self.last_blink.get());
+            if elapsed.as_millis() >= 500 {
+                self.cursor_visible.set(!self.cursor_visible.get());
+                self.last_blink.set(now);
+            }
+            if self.cursor_visible.get() {
+                let prefix_byte = if self.text.is_empty() {
+                    0
                 } else {
-                    &self.text[..self.cursor_byte_idx()]
+                    self.grapheme_byte_idx(self.cursor)
                 };
-                let cursor_x = text_x + estimate_text_width(prefix, font_size);
+                let cursor_x = text_x + estimate_text_width(&self.text[..prefix_byte], font_size);
                 let cy = self.bounds.y + 4.0;
                 let ch = self.bounds.height - 8.0;
-                ctx.encoder.draw_line(
-                    Point::new(cursor_x, cy),
-                    Point::new(cursor_x, cy + ch),
-                    1.5,
-                    if self.has_selection() {
-                        tokens.primary
-                    } else {
-                        tokens.foreground
-                    },
-                );
+                let cursor_color = if self.has_selection() {
+                    tokens.primary
+                } else {
+                    tokens.foreground
+                };
+                ctx.encoder.draw_rect(Rect::new(cursor_x, cy, 2.0, ch), cursor_color, 0.0);
             }
         }
 
@@ -369,6 +602,27 @@ impl Widget for TextInput {
                 tokens.muted_foreground,
             );
         }
+
+        if self.focused && !self.ime_preedit.is_empty() {
+            let prefix_byte = self.grapheme_byte_idx(self.cursor);
+            let preedit_x = text_x + estimate_text_width(&self.text[..prefix_byte], font_size);
+            ctx.encoder.draw_text(
+                &self.ime_preedit,
+                font_size,
+                Point::new(preedit_x, text_y),
+                tokens.foreground,
+            );
+            let underline_y = text_y + font_size * 1.25;
+            let underline_w = estimate_text_width(&self.ime_preedit, font_size).max(4.0);
+            ctx.encoder.draw_line(
+                Point::new(preedit_x, underline_y),
+                Point::new(preedit_x + underline_w, underline_y),
+                1.0,
+                tokens.primary,
+            );
+        }
+
+        ctx.encoder.pop_clip();
     }
 
     fn hit_test(&self, point: Point) -> bool {
@@ -380,164 +634,581 @@ impl Widget for TextInput {
 mod tests {
     use super::*;
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use mondrian_editor_state::Action;
+    use std::cell::RefCell;
+
+    fn layout(ti: &mut TextInput) {
+        ti.layout(Rect::new(0.0, 0.0, 200.0, 28.0));
+    }
+    fn mk_ctx<'a>(
+        f: &'a mut DummyFocus,
+        s: &'a mut DummyShortcut,
+        t: &'a mut DummyTooltip,
+    ) -> EventContext<'a> {
+        make_event_ctx(f, s, t, &|_| {})
+    }
+    fn md(ti: &mut TextInput, x: f32, y: f32, ctx: &mut EventContext) {
+        ti.event(
+            &UiEvent::MouseDown {
+                position: Point::new(x, y),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            ctx,
+        );
+    }
+    fn md_shift(ti: &mut TextInput, x: f32, y: f32, ctx: &mut EventContext) {
+        ti.event(
+            &UiEvent::MouseDown {
+                position: Point::new(x, y),
+                button: MouseButton::Left,
+                modifiers: Modifiers::shift(),
+            },
+            ctx,
+        );
+    }
+    fn mm(ti: &mut TextInput, x: f32, y: f32, ctx: &mut EventContext) {
+        ti.event(
+            &UiEvent::MouseMove {
+                position: Point::new(x, y),
+                modifiers: Modifiers::none(),
+            },
+            ctx,
+        );
+    }
+    fn mu(ti: &mut TextInput, ctx: &mut EventContext) {
+        ti.event(
+            &UiEvent::MouseUp {
+                position: Point::ZERO,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            ctx,
+        );
+    }
+    fn kd(ti: &mut TextInput, key: KeyCode, ctx: &mut EventContext) {
+        ti.event(&UiEvent::KeyDown { key, modifiers: Modifiers::none() }, ctx);
+    }
+    fn kd_shift(ti: &mut TextInput, key: KeyCode, ctx: &mut EventContext) {
+        ti.event(
+            &UiEvent::KeyDown { key, modifiers: Modifiers::shift() },
+            ctx,
+        );
+    }
+    fn kd_ctrl(ti: &mut TextInput, key: KeyCode, ctx: &mut EventContext) {
+        ti.event(&UiEvent::KeyDown { key, modifiers: Modifiers::ctrl() }, ctx);
+    }
+    fn tp(ti: &mut TextInput, ch: &str, ctx: &mut EventContext) {
+        ti.event(&UiEvent::TextInput(ch.to_string()), ctx);
+    }
+
+    // ── Construction ─────────────────────────────────────────────────────
 
     #[test]
-    fn text_input_new_is_empty() {
-        let ti = TextInput::new("placeholder");
+    fn new_is_empty() {
+        let ti = TextInput::new("ph");
         assert!(ti.text().is_empty());
         assert_eq!(ti.cursor, 0);
+        assert!(!ti.has_selection());
+        assert!(!ti.focused);
     }
 
     #[test]
-    fn text_input_with_text() {
+    fn with_text() {
         let ti = TextInput::new("ph").with_text("hello");
         assert_eq!(ti.text(), "hello");
         assert_eq!(ti.cursor, 5);
     }
 
     #[test]
-    fn text_input_click_gains_focus() {
-        let mut ti = TextInput::new("ph");
-        ti.layout(Rect::new(0.0, 0.0, 200.0, 28.0));
-        assert!(!ti.focused);
+    fn with_text_cjk() {
+        let ti = TextInput::new("ph").with_text("你好世界");
+        assert_eq!(ti.text(), "你好世界");
+        assert_eq!(ti.cursor, 4);
+    }
 
+    // ── Focus ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn click_inside_focuses() {
+        let mut ti = TextInput::new("ph");
+        layout(&mut ti);
         let mut f = DummyFocus;
         let mut s = DummyShortcut;
         let mut t = DummyTooltip;
-        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
-
-        ti.event(
-            &UiEvent::MouseDown {
-                position: Point::new(100.0, 14.0),
-                button: MouseButton::Left,
-                modifiers: Modifiers::none(),
-            },
-            &mut ctx,
-        );
+        let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
+        md(&mut ti, 100.0, 14.0, &mut ctx);
         assert!(ti.focused);
     }
 
     #[test]
-    fn text_input_type_characters() {
+    fn click_outside_blurs() {
+        let mut ti = TextInput::new("ph").with_text("abc");
+        ti.focused = true;
+        layout(&mut ti);
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
+        md(&mut ti, 300.0, 14.0, &mut ctx);
+        assert!(!ti.focused);
+    }
+
+    #[test]
+    fn focus_lost_clears_selection() {
+        let mut ti = TextInput::new("ph").with_text("abc");
+        ti.focused = true;
+        ti.selection_start = Some(0);
+        ti.cursor = 2;
+        assert!(ti.has_selection());
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
+        ti.event(&UiEvent::FocusLost, &mut ctx);
+        assert!(!ti.focused);
+        assert!(!ti.has_selection());
+    }
+
+    // ── Typing / IME ─────────────────────────────────────────────────────
+
+    #[test]
+    fn type_chars() {
         let mut ti = TextInput::new("ph");
         ti.focused = true;
-
         let mut f = DummyFocus;
         let mut s = DummyShortcut;
         let mut t = DummyTooltip;
-        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
-
-        ti.event(&UiEvent::TextInput("a".into()), &mut ctx);
-        ti.event(&UiEvent::TextInput("b".into()), &mut ctx);
+        let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
+        tp(&mut ti, "a", &mut ctx);
+        tp(&mut ti, "b", &mut ctx);
         assert_eq!(ti.text(), "ab");
         assert_eq!(ti.cursor, 2);
     }
 
     #[test]
-    fn text_input_backspace() {
-        let mut ti = TextInput::new("ph").with_text("abc");
+    fn type_multi_char_ime() {
+        let mut ti = TextInput::new("ph");
         ti.focused = true;
-
         let mut f = DummyFocus;
         let mut s = DummyShortcut;
         let mut t = DummyTooltip;
-        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
-
-        ti.event(
-            &UiEvent::KeyDown {
-                key: KeyCode::Backspace,
-                modifiers: Modifiers::none(),
-            },
-            &mut ctx,
-        );
-        assert_eq!(ti.text(), "ab");
+        let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
+        tp(&mut ti, "你好", &mut ctx);
+        assert_eq!(ti.text(), "你好");
         assert_eq!(ti.cursor, 2);
     }
 
     #[test]
-    fn text_input_left_right() {
-        let mut ti = TextInput::new("ph").with_text("abc");
+    fn ime_preedit_is_stored_until_commit() {
+        let mut ti = TextInput::new("ph").with_text("ni");
         ti.focused = true;
-
         let mut f = DummyFocus;
         let mut s = DummyShortcut;
         let mut t = DummyTooltip;
-        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
+        let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
 
-        ti.event(
-            &UiEvent::KeyDown { key: KeyCode::Left, modifiers: Modifiers::none() },
-            &mut ctx,
-        );
+        let result = ti.event(&UiEvent::ImePreedit("你".into()), &mut ctx);
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(ti.ime_preedit, "你");
+
+        let result = ti.event(&UiEvent::ImeCommit("你".into()), &mut ctx);
+        assert_eq!(result, EventResult::Handled);
+        assert!(ti.ime_preedit.is_empty());
+    }
+
+    #[test]
+    fn type_replaces_selection() {
+        let mut ti = TextInput::new("ph").with_text("hello");
+        ti.focused = true;
+        ti.selection_start = Some(1);
+        ti.cursor = 4;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
+        tp(&mut ti, "X", &mut ctx);
+        assert_eq!(ti.text(), "hXo");
         assert_eq!(ti.cursor, 2);
-        ti.event(
-            &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
-            &mut ctx,
-        );
+        assert!(!ti.has_selection());
+    }
+
+    // ── Grapheme cluster ─────────────────────────────────────────────────
+
+    #[test]
+    fn emoji_grapheme_cluster() {
+        let ti = TextInput::new("ph").with_text("👨‍👩‍👧‍👦abc");
+        // Family emoji is one grapheme cluster (multiple chars/bytes)
+        assert_eq!(ti.len_graphemes(), 4); // family + a + b + c
+    }
+
+    #[test]
+    fn backspace_deletes_grapheme() {
+        let mut ti = TextInput::new("ph").with_text("a😊b");
+        ti.focused = true;
+        ti.cursor = 2; // after the emoji
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
+        kd(&mut ti, KeyCode::Backspace, &mut ctx);
+        assert_eq!(ti.text(), "ab");
+        assert_eq!(ti.cursor, 1);
+    }
+
+    #[test]
+    fn delete_deletes_grapheme() {
+        let mut ti = TextInput::new("ph").with_text("a😊b");
+        ti.focused = true;
+        ti.cursor = 1; // before the emoji
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
+        kd(&mut ti, KeyCode::Delete, &mut ctx);
+        assert_eq!(ti.text(), "ab");
+        assert_eq!(ti.cursor, 1);
+    }
+
+    // ── Backspace / Delete ───────────────────────────────────────────────
+
+    #[test]
+    fn backspace_at_start_noop() {
+        let mut ti = TextInput::new("ph").with_text("abc");
+        ti.focused = true;
+        ti.cursor = 0;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
+        kd(&mut ti, KeyCode::Backspace, &mut ctx);
+        assert_eq!(ti.text(), "abc");
+    }
+
+    #[test]
+    fn backspace_deletes_selection() {
+        let mut ti = TextInput::new("ph").with_text("hello");
+        ti.focused = true;
+        ti.selection_start = Some(1);
+        ti.cursor = 4;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
+        kd(&mut ti, KeyCode::Backspace, &mut ctx);
+        assert_eq!(ti.text(), "ho");
+        assert_eq!(ti.cursor, 1);
+    }
+
+    #[test]
+    fn delete_at_end_noop() {
+        let mut ti = TextInput::new("ph").with_text("abc");
+        ti.focused = true;
+        ti.cursor = 3;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
+        kd(&mut ti, KeyCode::Delete, &mut ctx);
+        assert_eq!(ti.text(), "abc");
+    }
+
+    #[test]
+    fn delete_selection_select_all() {
+        let mut ti = TextInput::new("ph").with_text("hello");
+        ti.focused = true;
+        ti.selection_start = Some(0);
+        ti.cursor = 5;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
+        kd(&mut ti, KeyCode::Delete, &mut ctx);
+        assert_eq!(ti.text(), "");
+        assert_eq!(ti.cursor, 0);
+    }
+
+    // ── Arrow / Home / End ───────────────────────────────────────────────
+
+    #[test]
+    fn left_right_navigate() {
+        let mut ti = TextInput::new("ph").with_text("abc");
+        ti.focused = true;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
+        kd(&mut ti, KeyCode::Left, &mut ctx);
+        assert_eq!(ti.cursor, 2);
+        kd(&mut ti, KeyCode::Right, &mut ctx);
         assert_eq!(ti.cursor, 3);
     }
 
     #[test]
-    fn text_input_home_end() {
+    fn home_end() {
         let mut ti = TextInput::new("ph").with_text("abc");
         ti.focused = true;
         ti.cursor = 1;
-
         let mut f = DummyFocus;
         let mut s = DummyShortcut;
         let mut t = DummyTooltip;
-        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
-
-        ti.event(
-            &UiEvent::KeyDown { key: KeyCode::Home, modifiers: Modifiers::none() },
-            &mut ctx,
-        );
+        let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
+        kd(&mut ti, KeyCode::Home, &mut ctx);
         assert_eq!(ti.cursor, 0);
-        ti.event(
-            &UiEvent::KeyDown { key: KeyCode::End, modifiers: Modifiers::none() },
-            &mut ctx,
-        );
+        kd(&mut ti, KeyCode::End, &mut ctx);
         assert_eq!(ti.cursor, 3);
     }
 
+    // ── Word navigation ──────────────────────────────────────────────────
+
     #[test]
-    fn text_input_set_text() {
-        let mut ti = TextInput::new("ph");
-        ti.set_text("new".into());
-        assert_eq!(ti.text(), "new");
-        assert_eq!(ti.cursor, 3);
+    fn ctrl_left_word() {
+        let mut ti = TextInput::new("ph").with_text("hello world foo");
+        ti.focused = true;
+        // "hello world foo" = 15 graphemes: hello(5) + space(1) + world(5) + space(1) + foo(3)
+        ti.cursor = 15; // end
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
+        kd_ctrl(&mut ti, KeyCode::Left, &mut ctx);
+        assert_eq!(ti.cursor, 12); // start of "foo"
+        kd_ctrl(&mut ti, KeyCode::Left, &mut ctx);
+        assert_eq!(ti.cursor, 6); // start of "world"
+        kd_ctrl(&mut ti, KeyCode::Left, &mut ctx);
+        assert_eq!(ti.cursor, 0); // start of "hello"
     }
 
     #[test]
-    fn text_input_clear() {
-        let mut ti = TextInput::new("ph").with_text("hello");
-        ti.clear();
-        assert!(ti.text().is_empty());
-        assert_eq!(ti.cursor, 0);
+    fn ctrl_right_word() {
+        let mut ti = TextInput::new("ph").with_text("hello world");
+        ti.focused = true;
+        // "hello world" = 11 graphemes: hello(5) + space(1) + world(5)
+        ti.cursor = 0;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
+        kd_ctrl(&mut ti, KeyCode::Right, &mut ctx);
+        assert_eq!(ti.cursor, 6); // past "hello" + space, at "world" start
+        kd_ctrl(&mut ti, KeyCode::Right, &mut ctx);
+        assert_eq!(ti.cursor, 11); // past "world", at end
     }
 
+    // ── Shift selection ──────────────────────────────────────────────────
+
     #[test]
-    fn text_input_has_selection() {
-        let mut ti = TextInput::new("ph").with_text("hello");
-        ti.selection_start = Some(0);
+    fn shift_left_selects() {
+        let mut ti = TextInput::new("ph").with_text("abc");
+        ti.focused = true;
         ti.cursor = 3;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
+        kd_shift(&mut ti, KeyCode::Left, &mut ctx);
         assert!(ti.has_selection());
+        assert_eq!(ti.selection_start, Some(3));
     }
 
     #[test]
-    fn text_input_no_selection_when_cursor_equals_anchor() {
+    fn shift_click_extends() {
+        let mut ti = TextInput::new("ph").with_text("hello world");
+        layout(&mut ti);
+        ti.focused = true;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
+        // First click at start
+        md(&mut ti, 8.0, 14.0, &mut ctx);
+        assert_eq!(ti.cursor, 0);
+        // Shift+click near end
+        md_shift(&mut ti, 150.0, 14.0, &mut ctx);
+        assert!(ti.has_selection());
+        assert_eq!(ti.selection_start, Some(0));
+        assert!(ti.cursor > 0);
+    }
+
+    // ── Selection byte range ─────────────────────────────────────────────
+
+    #[test]
+    fn selection_range_forward() {
         let mut ti = TextInput::new("ph").with_text("hello");
-        ti.selection_start = Some(2);
-        ti.cursor = 2;
+        ti.selection_start = Some(1);
+        ti.cursor = 4;
+        assert_eq!(ti.selection_byte_range(), Some((1, 4)));
+    }
+
+    #[test]
+    fn selection_range_reverse() {
+        let mut ti = TextInput::new("ph").with_text("hello");
+        ti.selection_start = Some(4);
+        ti.cursor = 1;
+        assert_eq!(ti.selection_byte_range(), Some((1, 4)));
+    }
+
+    // ── Ctrl shortcuts ───────────────────────────────────────────────────
+
+    #[test]
+    fn ctrl_a_select_all() {
+        let mut ti = TextInput::new("ph").with_text("hello");
+        ti.focused = true;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
+        kd_ctrl(&mut ti, KeyCode::A, &mut ctx);
+        assert_eq!(ti.cursor, 5);
+        assert_eq!(ti.selection_start, Some(0));
+    }
+
+    #[test]
+    fn ctrl_x_cuts() {
+        let mut ti = TextInput::new("ph").with_text("hello");
+        ti.focused = true;
+        ti.selection_start = Some(1);
+        ti.cursor = 4;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let cell = RefCell::new(Vec::new());
+        let binding = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &binding);
+        kd_ctrl(&mut ti, KeyCode::X, &mut ctx);
+        assert_eq!(ti.text(), "ho");
+        assert_eq!(ti.cursor, 1);
         assert!(!ti.has_selection());
     }
 
     #[test]
-    fn text_input_delete_selection() {
+    fn ctrl_c_without_selection_is_ignored_for_global_copy() {
         let mut ti = TextInput::new("ph").with_text("hello");
-        ti.selection_start = Some(1); // anchor at 'e'
-        ti.cursor = 4; // cursor at 'o'
+        ti.focused = true;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
+
+        let result = ti.event(
+            &UiEvent::KeyDown { key: KeyCode::C, modifiers: Modifiers::ctrl() },
+            &mut ctx,
+        );
+        assert_eq!(result, EventResult::Ignored);
+    }
+
+    // ── Mouse drag ───────────────────────────────────────────────────────
+
+    #[test]
+    fn drag_selects() {
+        let mut ti = TextInput::new("ph").with_text("hello world");
+        layout(&mut ti);
+        ti.focused = true;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
+        md(&mut ti, 8.0, 14.0, &mut ctx);
+        assert!(!ti.has_selection());
+        mm(&mut ti, 80.0, 14.0, &mut ctx);
+        assert!(ti.has_selection());
+        mu(&mut ti, &mut ctx);
+        assert!(ti.has_selection());
+    }
+
+    #[test]
+    fn drag_beyond_bounds_continues() {
+        let mut ti = TextInput::new("ph").with_text("hello world");
+        layout(&mut ti);
+        ti.focused = true;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
+        md(&mut ti, 8.0, 14.0, &mut ctx);
+        // Drag way past the right edge
+        mm(&mut ti, 500.0, 14.0, &mut ctx);
+        assert!(ti.has_selection());
+        // Should have selected to end
+        assert_eq!(ti.cursor, ti.len_graphemes());
+    }
+
+    #[test]
+    fn click_clears_selection() {
+        let mut ti = TextInput::new("ph").with_text("hello");
+        layout(&mut ti);
+        ti.selection_start = Some(0);
+        ti.cursor = 3;
+        assert!(ti.has_selection());
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
+        md(&mut ti, 8.0, 14.0, &mut ctx);
+        assert!(!ti.has_selection());
+    }
+
+    // ── Edge cases ───────────────────────────────────────────────────────
+
+    #[test]
+    fn empty_backspace_delete_noop() {
+        let mut ti = TextInput::new("ph");
+        ti.focused = true;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
+        kd(&mut ti, KeyCode::Backspace, &mut ctx);
+        kd(&mut ti, KeyCode::Delete, &mut ctx);
+        assert_eq!(ti.text(), "");
+    }
+
+    #[test]
+    fn delete_selection_at_boundary() {
+        let mut ti = TextInput::new("ph").with_text("a");
+        ti.selection_start = Some(0);
+        ti.cursor = 1;
         assert!(ti.delete_selection());
-        assert_eq!(ti.text(), "ho");
-        assert_eq!(ti.cursor, 1);
+        assert_eq!(ti.text(), "");
+        assert_eq!(ti.cursor, 0);
+        assert!(!ti.delete_selection());
+    }
+
+    #[test]
+    fn set_text_clears_selection() {
+        let mut ti = TextInput::new("ph").with_text("old");
+        ti.selection_start = Some(0);
+        ti.cursor = 2;
+        ti.set_text("new".into());
+        assert_eq!(ti.text(), "new");
+        assert_eq!(ti.cursor, 3);
+        assert!(!ti.has_selection());
+    }
+
+    #[test]
+    fn clear_resets_all() {
+        let mut ti = TextInput::new("ph").with_text("hello");
+        ti.selection_start = Some(1);
+        ti.clear();
+        assert!(ti.text().is_empty());
+        assert_eq!(ti.cursor, 0);
+        assert!(!ti.has_selection());
+    }
+
+    #[test]
+    fn measure_respects_constraint() {
+        let ti = TextInput::new("ph");
+        let sz = ti.measure(LayoutConstraint::tight(50.0, 20.0));
+        assert_eq!(sz, Size::new(50.0, 20.0));
+    }
+
+    #[test]
+    fn hit_test_respects_bounds() {
+        let mut ti = TextInput::new("ph");
+        ti.layout(Rect::new(10.0, 10.0, 200.0, 28.0));
+        assert!(ti.hit_test(Point::new(110.0, 24.0)));
+        assert!(!ti.hit_test(Point::new(0.0, 0.0)));
     }
 }

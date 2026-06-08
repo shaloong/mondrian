@@ -382,6 +382,10 @@ pub enum UiEvent {
         modifiers: Modifiers,
     },
     TextInput(String),
+    /// IME composition preview (underlined text shown during composition)
+    ImePreedit(String),
+    /// IME committed text (final result of composition)
+    ImeCommit(String),
     FocusGained,
     FocusLost,
     DragEnter {

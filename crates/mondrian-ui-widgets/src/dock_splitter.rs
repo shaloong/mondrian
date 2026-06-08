@@ -150,11 +150,12 @@ impl Widget for DockSplitter {
         }
     }
 
-    fn event(&mut self, event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+    fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
         match event {
             UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
                 if self.grab_rect.contains(*position) {
                     self.dragging = true;
+                    ctx.request_pointer_capture(self.id);
                     return EventResult::Handled;
                 }
             }
@@ -183,6 +184,7 @@ impl Widget for DockSplitter {
             UiEvent::MouseUp { button: MouseButton::Left, .. } => {
                 if self.dragging {
                     self.dragging = false;
+                    ctx.release_pointer_capture(self.id);
                     return EventResult::Handled;
                 }
             }
@@ -205,7 +207,7 @@ impl Widget for DockSplitter {
 
         // Forward to children
         for child in &mut self.children {
-            if child.event(event, _ctx) == EventResult::Handled {
+            if child.event(event, ctx) == EventResult::Handled {
                 return EventResult::Handled;
             }
         }

@@ -56,6 +56,7 @@ impl Widget for Slider {
                 if self.bounds.contains(*position) =>
             {
                 self.dragging = true;
+                _ctx.request_pointer_capture(self.id);
                 self.update_value(position);
                 EventResult::Handled
             }
@@ -65,6 +66,7 @@ impl Widget for Slider {
             }
             UiEvent::MouseUp { button: MouseButton::Left, .. } if self.dragging => {
                 self.dragging = false;
+                _ctx.release_pointer_capture(self.id);
                 EventResult::Handled
             }
             _ => EventResult::Ignored,

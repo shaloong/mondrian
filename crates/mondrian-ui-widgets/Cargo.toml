@@ -15,3 +15,4 @@ mondrian-editor-state = { workspace = true }
 mondrian-platform     = { workspace = true }
 
 glam = { workspace = true }
+unicode-segmentation = { workspace = true }

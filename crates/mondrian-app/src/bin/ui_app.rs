@@ -10,12 +10,12 @@ use mondrian_core::Color;
 use mondrian_editor_state::state::PanelKind;
 use mondrian_editor_state::Action;
 use mondrian_panel_console::tracing_layer::ConsoleLogLayer;
-use mondrian_platform::NoopPlatformService;
+use mondrian_platform::SystemPlatformService;
 use mondrian_ui_core::focus::FocusManager;
 use mondrian_ui_core::shortcut::{ShortcutBinding, ShortcutManager, ShortcutScope};
 use mondrian_ui_core::tooltip::{TooltipManager, TooltipState};
 use mondrian_ui_core::types::*;
-use mondrian_ui_core::widget::{EventContext, PaintContext};
+use mondrian_ui_core::widget::{EventContext, EventRequests, PaintContext};
 use mondrian_ui_core::widgets::ColoredBox;
 use mondrian_ui_core::{EventResult, TreeWalker, Widget};
 use mondrian_ui_renderer::command::DrawEncoder;
@@ -319,13 +319,16 @@ fn dummy_event_ctx() -> EventContext<'static> {
     static mut F: DummyFocus = DummyFocus;
     static mut S: DummyShortcut = DummyShortcut;
     static mut T: DummyTooltip = DummyTooltip;
+    static mut R: EventRequests =
+        EventRequests { pointer_capture: None, ime: None, repaint: false };
     unsafe {
         EventContext {
             focus: &mut *std::ptr::addr_of_mut!(F),
             shortcut: &mut *std::ptr::addr_of_mut!(S),
             tooltip: &mut *std::ptr::addr_of_mut!(T),
             dispatch: &|_| {},
-            platform: &NoopPlatformService,
+            platform: &SystemPlatformService,
+            requests: &mut *std::ptr::addr_of_mut!(R),
         }
     }
 }

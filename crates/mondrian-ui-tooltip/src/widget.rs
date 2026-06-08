@@ -71,7 +71,7 @@ impl Widget for TooltipWidget {
 
         // Estimate tooltip size from text
         let char_count = self.state.text.chars().count() as f32;
-        let tw = (char_count * 8.0 + 16.0).max(40.0);
+        let tw = (char_count * 8.0 + 16.0).max(40.0).min(spacing.tooltip_max_width);
         let th = 24.0;
         let offset = spacing.tooltip_offset;
 
@@ -82,13 +82,17 @@ impl Widget for TooltipWidget {
         let bg = Rect::new(x, y, tw, th);
         let border = tokens.ring;
 
-        // Background
-        ctx.encoder.draw_rect(bg, tokens.popover, spacing.radius_sm);
-        // Simple border by drawing a slightly larger rect behind
+        // Simple border by drawing a slightly larger rect behind the fill.
         let border_rect = bg.inset(-1.0, -1.0);
         ctx.encoder.draw_rect(border_rect, border, spacing.radius_sm);
+        ctx.encoder.draw_rect(bg, tokens.popover, spacing.radius_sm);
 
-        // Text is not drawn in paint() — handled by app-level TextRenderer pass
+        ctx.encoder.draw_text(
+            &self.state.text,
+            ctx.theme.typography.body.font_size,
+            Point::new(bg.x + 8.0, bg.y + 4.0),
+            tokens.popover_foreground,
+        );
     }
 
     fn hit_test(&self, point: Point) -> bool {

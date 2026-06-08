@@ -139,8 +139,8 @@ impl Widget for Checkbox {
             let start = Point::new(cx - side * 0.20, cy + side * 0.04);
             let mid = Point::new(cx - side * 0.04, cy + side * 0.20);
             let end = Point::new(cx + side * 0.24, cy - side * 0.18);
-            ctx.encoder.draw_line(start, mid, 3.0, tokens.foreground);
-            ctx.encoder.draw_line(mid, end, 3.0, tokens.foreground);
+            ctx.encoder.draw_line(start, mid, 3.0, tokens.primary_foreground);
+            ctx.encoder.draw_line(mid, end, 3.0, tokens.primary_foreground);
         }
 
         // Label text

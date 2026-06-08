@@ -109,6 +109,47 @@ impl PlatformService for NoopPlatformService {
     fn send_notification(&self, _title: &str, _body: &str) {}
 }
 
+/// Default desktop platform implementation.
+///
+/// Stage 1 implements clipboard operations. File dialogs, URL opening, file
+/// reveal, and notifications intentionally stay as no-ops until their app-shell
+/// policies are defined.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemPlatformService;
+
+impl PlatformService for SystemPlatformService {
+    fn clipboard_copy(&self, text: &str) {
+        let _ = arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text));
+    }
+
+    fn clipboard_paste(&self) -> Option<String> {
+        arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()).ok()
+    }
+
+    fn open_file_dialog(&self, _title: &str, _filters: &[FileFilter]) -> Option<Vec<PathBuf>> {
+        None
+    }
+
+    fn save_file_dialog(
+        &self,
+        _title: &str,
+        _default_name: &str,
+        _filters: &[FileFilter],
+    ) -> Option<PathBuf> {
+        None
+    }
+
+    fn open_folder_dialog(&self, _title: &str) -> Option<PathBuf> {
+        None
+    }
+
+    fn open_url(&self, _url: &str) {}
+
+    fn reveal_in_file_manager(&self, _path: &Path) {}
+
+    fn send_notification(&self, _title: &str, _body: &str) {}
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -179,8 +179,9 @@ impl Widget for Dropdown {
                 menu_w,
                 self.item_height * self.items.len() as f32 + 4.0,
             );
-            ctx.encoder.draw_rect(menu_bg, tokens.popover, spacing.radius_sm);
             ctx.encoder.draw_rect(menu_bg, tokens.border, 0.0);
+            ctx.encoder
+                .draw_rect(menu_bg.inset(1.0, 1.0), tokens.popover, spacing.radius_sm);
 
             for (i, item) in self.items.iter().enumerate() {
                 let item_rect = Rect::new(
@@ -224,7 +225,20 @@ impl Widget for Dropdown {
     }
 
     fn hit_test(&self, point: Point) -> bool {
-        self.bounds.contains(point)
+        if self.bounds.contains(point) {
+            return true;
+        }
+        if self.open {
+            let menu_h = self.item_height * self.items.len() as f32 + 4.0;
+            let menu_rect = Rect::new(
+                self.bounds.x,
+                self.bounds.y + 28.0,
+                self.bounds.width.max(120.0),
+                menu_h,
+            );
+            return menu_rect.contains(point);
+        }
+        false
     }
 }
 

@@ -6,7 +6,7 @@ use mondrian_ui_core::focus::FocusManager;
 use mondrian_ui_core::shortcut::{ShortcutBinding, ShortcutManager, ShortcutScope};
 use mondrian_ui_core::tooltip::{TooltipManager, TooltipState};
 use mondrian_ui_core::types::{KeyCode, Modifiers, Point, WidgetId};
-use mondrian_ui_core::widget::EventContext;
+use mondrian_ui_core::widget::{EventContext, EventRequests};
 
 pub(crate) struct DummyFocus;
 impl FocusManager for DummyFocus {
@@ -50,11 +50,13 @@ pub(crate) fn make_event_ctx<'a>(
     tooltip: &'a mut dyn TooltipManager,
     dispatch: &'a dyn Fn(Action),
 ) -> EventContext<'a> {
+    let requests: &'a mut EventRequests = Box::leak(Box::new(EventRequests::default()));
     EventContext {
         focus,
         shortcut,
         tooltip,
         dispatch,
         platform: &NoopPlatformService,
+        requests,
     }
 }

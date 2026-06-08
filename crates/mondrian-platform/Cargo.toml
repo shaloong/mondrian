@@ -9,3 +9,4 @@ rust-version.workspace = true
 
 [dependencies]
 mondrian-core = { workspace = true }
+arboard       = { workspace = true }

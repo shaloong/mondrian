@@ -19,6 +19,87 @@ pub trait WidgetTree {
     fn children_ids(&self, id: WidgetId) -> Vec<WidgetId>;
 }
 
+/// Borrowed adapter that exposes any `Widget` subtree through `WidgetTree`.
+///
+/// This is useful for demos and simple app shells that already own a root
+/// widget tree and do not maintain a parallel retained node map.
+pub struct WidgetTreeView<'a> {
+    root: &'a mut dyn Widget,
+    root_id: WidgetId,
+}
+
+impl<'a> WidgetTreeView<'a> {
+    pub fn new(root: &'a mut dyn Widget) -> Self {
+        let root_id = root.id();
+        Self { root, root_id }
+    }
+}
+
+impl WidgetTree for WidgetTreeView<'_> {
+    fn get(&self, id: WidgetId) -> Option<&dyn Widget> {
+        find_widget(self.root, id)
+    }
+
+    fn get_mut(&mut self, id: WidgetId) -> Option<&mut dyn Widget> {
+        find_widget_mut(self.root, id)
+    }
+
+    fn root_id(&self) -> WidgetId {
+        self.root_id
+    }
+
+    fn parent_id(&self, id: WidgetId) -> Option<WidgetId> {
+        find_parent_id(self.root, id, None)
+    }
+
+    fn children_ids(&self, id: WidgetId) -> Vec<WidgetId> {
+        find_widget(self.root, id)
+            .map(|widget| widget.children().iter().map(|child| child.id()).collect())
+            .unwrap_or_default()
+    }
+}
+
+fn find_widget(widget: &dyn Widget, id: WidgetId) -> Option<&dyn Widget> {
+    if widget.id() == id {
+        return Some(widget);
+    }
+    for child in widget.children() {
+        if let Some(found) = find_widget(child.as_ref(), id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn find_widget_mut(widget: &mut dyn Widget, id: WidgetId) -> Option<&mut dyn Widget> {
+    if widget.id() == id {
+        return Some(widget);
+    }
+    for child in widget.children_mut() {
+        if let Some(found) = find_widget_mut(child.as_mut(), id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn find_parent_id(
+    widget: &dyn Widget,
+    target: WidgetId,
+    parent: Option<WidgetId>,
+) -> Option<WidgetId> {
+    if widget.id() == target {
+        return parent;
+    }
+    let current = Some(widget.id());
+    for child in widget.children() {
+        if let Some(found) = find_parent_id(child.as_ref(), target, current) {
+            return Some(found);
+        }
+    }
+    None
+}
+
 /// Widget 树遍历工具
 pub struct TreeWalker;
 
@@ -316,5 +397,70 @@ mod tests {
         // Stage B placeholder — returns None
         assert_eq!(TreeWalker::focus_next(&mut tree, root_id), None);
         assert_eq!(TreeWalker::focus_prev(&mut tree, root_id), None);
+    }
+
+    #[test]
+    fn widget_tree_view_finds_nested_children() {
+        let child = LeafWidget::new();
+        let child_id = child.id();
+        let mut root = ParentWidget::new(vec![Box::new(child)]);
+        let root_id = root.id();
+
+        let view = WidgetTreeView::new(&mut root);
+
+        assert_eq!(view.root_id(), root_id);
+        assert!(view.get(root_id).is_some());
+        assert!(view.get(child_id).is_some());
+        assert_eq!(view.parent_id(child_id), Some(root_id));
+        assert_eq!(view.children_ids(root_id), vec![child_id]);
+    }
+
+    #[test]
+    fn widget_tree_view_get_mut_updates_nested_child() {
+        let child = HitLeafWidget::new();
+        let child_id = child.id();
+        let mut root = ParentWidget::new(vec![Box::new(child)]);
+
+        let mut view = WidgetTreeView::new(&mut root);
+        let child = view.get_mut(child_id).expect("child should exist");
+        child.layout(Rect::new(1.0, 2.0, 3.0, 4.0));
+
+        let child = view.get(child_id).expect("child should still exist");
+        assert!(child.hit_test(Point::new(2.0, 3.0)));
+    }
+
+    struct HitLeafWidget {
+        id: WidgetId,
+        bounds: Rect,
+    }
+
+    impl HitLeafWidget {
+        fn new() -> Self {
+            Self { id: WidgetId::new(), bounds: Rect::ZERO }
+        }
+    }
+
+    impl Widget for HitLeafWidget {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+
+        fn measure(&self, _constraint: LayoutConstraint) -> Size {
+            Size::new(10.0, 10.0)
+        }
+
+        fn layout(&mut self, bounds: Rect) {
+            self.bounds = bounds;
+        }
+
+        fn event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+            EventResult::Ignored
+        }
+
+        fn paint(&self, _ctx: &mut PaintContext) {}
+
+        fn hit_test(&self, point: Point) -> bool {
+            self.bounds.contains(point)
+        }
     }
 }

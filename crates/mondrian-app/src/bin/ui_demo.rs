@@ -13,12 +13,11 @@ use std::sync::Arc;
 
 use mondrian_core::Color;
 use mondrian_editor_state::Action;
-use mondrian_platform::NoopPlatformService;
 use mondrian_ui_core::focus::FocusManager;
 use mondrian_ui_core::shortcut::{ShortcutBinding, ShortcutManager, ShortcutScope};
 use mondrian_ui_core::tooltip::{TooltipManager, TooltipState};
 use mondrian_ui_core::types::{self as ui_types, *};
-use mondrian_ui_core::widget::{EventContext, PaintContext};
+use mondrian_ui_core::widget::{EventContext, EventRequests, PaintContext};
 use mondrian_ui_core::widgets::ColoredBox;
 use mondrian_ui_core::{EventResult, TreeWalker, Widget};
 use mondrian_ui_renderer::command::DrawEncoder;
@@ -179,6 +178,7 @@ impl Widget for GalleryWidget {
                 *last_action.borrow_mut() = format!("{a:?}");
             },
             platform: ctx.platform,
+            requests: ctx.requests,
         };
 
         // If a child captured the mouse (drag/selection in progress), route
@@ -628,13 +628,18 @@ fn dummy_event_ctx() -> EventContext<'static> {
     static mut FOCUS: DummyFocus = DummyFocus;
     static mut SHORTCUT: DummyShortcut = DummyShortcut;
     static mut TOOLTIP: DummyTooltip = DummyTooltip;
+    static mut REQUESTS: EventRequests =
+        EventRequests { pointer_capture: None, ime: None, repaint: false };
+    static PLATFORM: mondrian_platform::SystemPlatformService =
+        mondrian_platform::SystemPlatformService;
     unsafe {
         EventContext {
             focus: &mut *std::ptr::addr_of_mut!(FOCUS),
             shortcut: &mut *std::ptr::addr_of_mut!(SHORTCUT),
             tooltip: &mut *std::ptr::addr_of_mut!(TOOLTIP),
             dispatch: &|_| {},
-            platform: &NoopPlatformService,
+            platform: &PLATFORM,
+            requests: &mut *std::ptr::addr_of_mut!(REQUESTS),
         }
     }
 }
@@ -686,6 +691,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let window_attrs = winit::window::Window::default_attributes()
         .with_title("Mondrian UI — 控件画廊 (Gallery)")
         .with_inner_size(winit::dpi::LogicalSize::new(1440, 860));
+
     let window = Arc::new(event_loop.create_window(window_attrs)?);
 
     let instance_desc = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
@@ -719,6 +725,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut last_cursor = Point::new(0.0, 0.0);
     let current_bounds = std::cell::Cell::new(bounds);
+    let mut modifiers_state = Modifiers::none();
 
     event_loop.run(move |event, elwt| {
         use winit::event::ElementState;
@@ -754,23 +761,70 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     },
                 ..
             } => {
-                if state == ElementState::Pressed {
+                // Track modifier key state
+                let pressed = state == ElementState::Pressed;
+                match &logical_key {
+                    winit::keyboard::Key::Named(winit::keyboard::NamedKey::Control) => {
+                        modifiers_state.ctrl = pressed;
+                    }
+                    winit::keyboard::Key::Named(winit::keyboard::NamedKey::Alt) => {
+                        modifiers_state.alt = pressed;
+                    }
+                    winit::keyboard::Key::Named(winit::keyboard::NamedKey::Shift) => {
+                        modifiers_state.shift = pressed;
+                    }
+                    _ => {}
+                }
+
+                if pressed {
                     if let Some(kc) = winit_key_to_keycode(&logical_key) {
-                        let modifiers = Modifiers::none();
                         let _ = root.event(
-                            &UiEvent::KeyDown { key: kc, modifiers },
+                            &UiEvent::KeyDown { key: kc, modifiers: modifiers_state },
                             &mut dummy_event_ctx(),
                         );
                     }
-                    if let Some(txt) = text {
-                        if !txt.is_empty() && !txt.chars().any(|c| c.is_control()) {
-                            let _ = root.event(
-                                &UiEvent::TextInput(txt.to_string()),
-                                &mut dummy_event_ctx(),
-                            );
+                    // Only send TextInput for printable characters when Ctrl is NOT held
+                    if !modifiers_state.ctrl {
+                        if let Some(txt) = text {
+                            if !txt.is_empty() && !txt.chars().any(|c| c.is_control()) {
+                                let _ = root.event(
+                                    &UiEvent::TextInput(txt.to_string()),
+                                    &mut dummy_event_ctx(),
+                                );
+                            }
                         }
                     }
                 }
+                window.request_redraw();
+            }
+
+            // IME composition events
+            Event::WindowEvent {
+                event: WindowEvent::Ime(winit::event::Ime::Commit(text)),
+                ..
+            } => {
+                let _ = root.event(&UiEvent::ImeCommit(text), &mut dummy_event_ctx());
+                window.request_redraw();
+            }
+            Event::WindowEvent {
+                event: WindowEvent::Ime(winit::event::Ime::Preedit(text, _cursor)),
+                ..
+            } => {
+                let _ = root.event(&UiEvent::ImePreedit(text), &mut dummy_event_ctx());
+                window.request_redraw();
+            }
+            Event::WindowEvent {
+                event: WindowEvent::Ime(winit::event::Ime::Enabled),
+                ..
+            } => {
+                // IME enabled — no action needed, just acknowledge
+            }
+            Event::WindowEvent {
+                event: WindowEvent::Ime(winit::event::Ime::Disabled),
+                ..
+            } => {
+                // IME disabled — clear any pending preedit
+                let _ = root.event(&UiEvent::ImePreedit(String::new()), &mut dummy_event_ctx());
                 window.request_redraw();
             }
 

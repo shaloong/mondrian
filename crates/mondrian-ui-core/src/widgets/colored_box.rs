@@ -82,7 +82,7 @@ impl Widget for ColoredBox {
 mod tests {
     use super::*;
     use crate::types::Modifiers;
-    use crate::widget::DrawCommandEncoder;
+    use crate::widget::{DrawCommandEncoder, EventRequests};
     use crate::EventContext;
     use glam::Vec2;
     use mondrian_editor_state::state::PanelKind;
@@ -199,6 +199,7 @@ mod tests {
         let mut shortcut = MockShortcut;
         let mut tooltip = MockTooltip;
         let platform = NoopPlatformService;
+        let mut requests = EventRequests::default();
 
         let mut ctx = EventContext {
             focus: &mut focus,
@@ -206,6 +207,7 @@ mod tests {
             tooltip: &mut tooltip,
             dispatch: &|_| {},
             platform: &platform,
+            requests: &mut requests,
         };
 
         let result = w.event(&UiEvent::FocusGained, &mut ctx);
@@ -223,12 +225,14 @@ mod tests {
         let mut shortcut = MockShortcut;
         let mut tooltip = MockTooltip;
         let platform = NoopPlatformService;
+        let mut requests = EventRequests::default();
         let mut ctx = EventContext {
             focus: &mut focus,
             shortcut: &mut shortcut,
             tooltip: &mut tooltip,
             dispatch: &|_| {},
             platform: &platform,
+            requests: &mut requests,
         };
 
         w.event(&UiEvent::FocusLost, &mut ctx);
@@ -243,12 +247,14 @@ mod tests {
         let mut shortcut = MockShortcut;
         let mut tooltip = MockTooltip;
         let platform = NoopPlatformService;
+        let mut requests = EventRequests::default();
         let mut ctx = EventContext {
             focus: &mut focus,
             shortcut: &mut shortcut,
             tooltip: &mut tooltip,
             dispatch: &|_| {},
             platform: &platform,
+            requests: &mut requests,
         };
 
         let result = w.event(

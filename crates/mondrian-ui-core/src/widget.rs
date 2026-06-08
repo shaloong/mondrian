@@ -19,6 +19,57 @@ use mondrian_editor_state::Action;
 use mondrian_platform::PlatformService;
 use mondrian_ui_theme::Theme;
 
+/// Pointer capture requested by a widget during event handling.
+///
+/// Capture keeps pointer move/up events flowing to the requesting widget until
+/// it explicitly releases capture or the router clears it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerCaptureRequest {
+    Capture(WidgetId),
+    Release(WidgetId),
+    Clear,
+}
+
+/// Input method state requested by a focused text widget.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ImeRequest {
+    pub enabled: bool,
+    pub cursor_area: Option<Rect>,
+}
+
+/// Side-effect requests emitted by widgets while handling an input event.
+///
+/// Widgets stay platform independent: they record intent here, and the app or
+/// event router decides how to apply it to winit/the OS.
+#[derive(Debug, Clone, Default)]
+pub struct EventRequests {
+    pub pointer_capture: Option<PointerCaptureRequest>,
+    pub ime: Option<ImeRequest>,
+    pub repaint: bool,
+}
+
+impl EventRequests {
+    pub fn request_pointer_capture(&mut self, widget: WidgetId) {
+        self.pointer_capture = Some(PointerCaptureRequest::Capture(widget));
+    }
+
+    pub fn release_pointer_capture(&mut self, widget: WidgetId) {
+        self.pointer_capture = Some(PointerCaptureRequest::Release(widget));
+    }
+
+    pub fn clear_pointer_capture(&mut self) {
+        self.pointer_capture = Some(PointerCaptureRequest::Clear);
+    }
+
+    pub fn set_ime_enabled(&mut self, enabled: bool, cursor_area: Option<Rect>) {
+        self.ime = Some(ImeRequest { enabled, cursor_area });
+    }
+
+    pub fn request_repaint(&mut self) {
+        self.repaint = true;
+    }
+}
+
 /// 事件上下文（event 方法使用，可 dispatch Action）
 pub struct EventContext<'a> {
     /// 焦点管理器
@@ -31,6 +82,30 @@ pub struct EventContext<'a> {
     pub dispatch: &'a dyn Fn(Action),
     /// 平台服务
     pub platform: &'a dyn PlatformService,
+    /// Widget-to-router/app side-effect requests for this event.
+    pub requests: &'a mut EventRequests,
+}
+
+impl EventContext<'_> {
+    pub fn request_pointer_capture(&mut self, widget: WidgetId) {
+        self.requests.request_pointer_capture(widget);
+    }
+
+    pub fn release_pointer_capture(&mut self, widget: WidgetId) {
+        self.requests.release_pointer_capture(widget);
+    }
+
+    pub fn clear_pointer_capture(&mut self) {
+        self.requests.clear_pointer_capture();
+    }
+
+    pub fn set_ime_enabled(&mut self, enabled: bool, cursor_area: Option<Rect>) {
+        self.requests.set_ime_enabled(enabled, cursor_area);
+    }
+
+    pub fn request_repaint(&mut self) {
+        self.requests.request_repaint();
+    }
 }
 
 /// 绘制上下文（paint 方法使用）
