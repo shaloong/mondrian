@@ -68,6 +68,12 @@ Keyboard, text, and IME events route to `FocusManager::focused_widget()`.
 composition text, and inserts committed IME text through the same grapheme-aware
 editing path as normal text input.
 
+Single-line text input maintains a horizontal viewport owned by the widget. The
+cursor is scrolled into view after layout, editing, navigation, or selection
+changes; pointer hit testing accounts for the current scroll offset. IME cursor
+areas use the caret rect rather than the full widget bounds so platform
+composition windows can anchor near the insertion point.
+
 Text copy/cut shortcuts are consumed by `TextInput` only when a selection exists.
 If there is no selection, `Ctrl+C` and `Ctrl+X` are ignored so panel-level
 commands, such as copying clips or keyframes, can handle them.

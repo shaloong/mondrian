@@ -19,6 +19,10 @@ use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
+const DEFAULT_FONT_SIZE: f32 = 14.0;
+const HORIZONTAL_PADDING: f32 = 8.0;
+const VERTICAL_PADDING: f32 = 4.0;
+
 /// TextInput Widget —— 单行文本输入框
 pub struct TextInput {
     id: WidgetId,
@@ -74,12 +78,14 @@ impl TextInput {
         self.cursor = self.grapheme_count(&text);
         self.text = text;
         self.clear_selection();
+        self.update_scroll(DEFAULT_FONT_SIZE);
     }
 
     pub fn clear(&mut self) {
         self.text.clear();
         self.cursor = 0;
         self.clear_selection();
+        self.update_scroll(DEFAULT_FONT_SIZE);
     }
 
     // ── Grapheme helpers ──────────────────────────────────────────────────
@@ -145,11 +151,12 @@ impl TextInput {
             self.cursor = total;
         }
         self.clear_selection();
+        self.update_scroll(DEFAULT_FONT_SIZE);
         true
     }
 
     /// Set cursor from a pixel x-coordinate relative to text start.
-    fn set_cursor_from_x(&mut self, pixel_x: f32, font_size: f32) {
+    fn set_cursor_from_text_x(&mut self, pixel_x: f32, font_size: f32) {
         let mut best = 0;
         let mut best_dist = f32::MAX;
         let total = self.len_graphemes();
@@ -165,18 +172,77 @@ impl TextInput {
         self.cursor = best;
         self.update_scroll(font_size);
     }
+
+    fn visible_width(&self) -> f32 {
+        (self.bounds.width - HORIZONTAL_PADDING * 2.0).max(1.0)
+    }
+
+    fn content_left(&self) -> f32 {
+        self.bounds.x + HORIZONTAL_PADDING
+    }
+
+    fn content_right(&self) -> f32 {
+        (self.bounds.x + self.bounds.width - HORIZONTAL_PADDING).max(self.content_left())
+    }
+
+    fn line_height(font_size: f32) -> f32 {
+        font_size * 1.3
+    }
+
+    fn text_y(&self, font_size: f32) -> f32 {
+        self.bounds.y + (self.bounds.height - Self::line_height(font_size)).max(0.0) * 0.5
+    }
+
+    fn text_x(&self) -> f32 {
+        self.content_left() - self.scroll_x.get()
+    }
+
+    fn cursor_text_x(&self, font_size: f32) -> f32 {
+        if self.text.is_empty() {
+            0.0
+        } else {
+            estimate_text_width(&self.text[..self.cursor_byte_idx()], font_size)
+        }
+    }
+
+    fn cursor_screen_x(&self, font_size: f32) -> f32 {
+        self.text_x() + self.cursor_text_x(font_size)
+    }
+
+    fn cursor_area(&self, font_size: f32) -> Rect {
+        let x = self.cursor_screen_x(font_size).clamp(self.content_left(), self.content_right());
+        Rect::new(
+            x,
+            self.bounds.y + VERTICAL_PADDING,
+            2.0,
+            (self.bounds.height - VERTICAL_PADDING * 2.0).max(1.0),
+        )
+    }
+
+    fn refresh_ime_area(&self, ctx: &mut EventContext) {
+        if self.focused {
+            ctx.set_ime_enabled(true, Some(self.cursor_area(DEFAULT_FONT_SIZE)));
+        }
+    }
+
+    fn text_x_from_pointer(&self, position: Point) -> f32 {
+        if position.x < self.content_left() {
+            0.0
+        } else if position.x > self.content_right() {
+            estimate_text_width(&self.text, DEFAULT_FONT_SIZE)
+        } else {
+            (position.x - self.content_left() + self.scroll_x.get()).max(0.0)
+        }
+    }
+
     fn update_scroll(&self, font_size: f32) {
         let text_w = if self.text.is_empty() {
             0.0
         } else {
             estimate_text_width(&self.text, font_size)
         };
-        let visible_w = (self.bounds.width - 16.0).max(1.0); // 8px padding each side
-        let cursor_x = if self.text.is_empty() {
-            0.0
-        } else {
-            estimate_text_width(&self.text[..self.cursor_byte_idx()], font_size)
-        };
+        let visible_w = self.visible_width();
+        let cursor_x = self.cursor_text_x(font_size);
         let sx = self.scroll_x.get();
         // Cursor to the right of visible area → scroll left
         if cursor_x - sx > visible_w - 4.0 {
@@ -224,16 +290,14 @@ impl TextInput {
         let idx = self.cursor_byte_idx();
         self.text.insert_str(idx, s);
         self.cursor += count;
-        self.update_scroll(14.0);
+        self.update_scroll(DEFAULT_FONT_SIZE);
     }
 
     /// Move cursor and keep it visible.
     fn move_cursor_to(&mut self, pos: usize) {
         self.cursor = pos;
-        self.update_scroll(14.0);
+        self.update_scroll(DEFAULT_FONT_SIZE);
     }
-
-    // ── Word navigation ───────────────────────────────────────────────────
 
     // ── Word navigation ───────────────────────────────────────────────────
 
@@ -304,6 +368,7 @@ impl Widget for TextInput {
 
     fn layout(&mut self, bounds: Rect) {
         self.bounds = bounds;
+        self.update_scroll(DEFAULT_FONT_SIZE);
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
@@ -314,21 +379,20 @@ impl Widget for TextInput {
                 if clicked {
                     ctx.focus
                         .request_focus(self.id, mondrian_editor_state::state::PanelKind::Console);
-                    let rel_x = position.x - (self.bounds.x + 8.0);
+                    let text_x = self.text_x_from_pointer(*position);
                     if modifiers.shift {
                         // Shift+Click: extend selection from anchor (or current cursor)
                         if self.selection_start.is_none() {
                             self.selection_start = Some(self.cursor);
                         }
-                        self.set_cursor_from_x(rel_x, 14.0);
+                        self.set_cursor_from_text_x(text_x, DEFAULT_FONT_SIZE);
                     } else {
-                        self.set_cursor_from_x(rel_x, 14.0);
+                        self.set_cursor_from_text_x(text_x, DEFAULT_FONT_SIZE);
                         self.clear_selection();
                     }
                     self.mouse_down = true;
                     self.ime_preedit.clear();
                     ctx.request_pointer_capture(self.id);
-                    ctx.set_ime_enabled(true, Some(self.bounds));
                 } else {
                     self.focused = false;
                     self.clear_selection();
@@ -338,6 +402,7 @@ impl Widget for TextInput {
                     ctx.set_ime_enabled(false, None);
                 }
                 self.focused = clicked;
+                self.refresh_ime_area(ctx);
                 EventResult::Handled
             }
             UiEvent::MouseMove { position, .. } => {
@@ -346,10 +411,9 @@ impl Widget for TextInput {
                         self.selection_start = Some(self.cursor);
                     }
                     // Allow drag beyond bounds — clamp to valid range
-                    let rel_x = position.x - (self.bounds.x + 8.0);
-                    let max_x = estimate_text_width(&self.text, 14.0) + 8.0;
-                    let clamped_x = rel_x.clamp(0.0, max_x);
-                    self.set_cursor_from_x(clamped_x, 14.0);
+                    let text_x = self.text_x_from_pointer(*position);
+                    self.set_cursor_from_text_x(text_x, DEFAULT_FONT_SIZE);
+                    self.refresh_ime_area(ctx);
                     EventResult::Handled
                 } else {
                     EventResult::Ignored
@@ -365,7 +429,8 @@ impl Widget for TextInput {
                 self.focused = true;
                 self.cursor_visible.set(true);
                 self.last_blink.set(Instant::now());
-                ctx.set_ime_enabled(true, Some(self.bounds));
+                self.update_scroll(DEFAULT_FONT_SIZE);
+                self.refresh_ime_area(ctx);
                 EventResult::Handled
             }
             UiEvent::FocusLost => {
@@ -382,7 +447,7 @@ impl Widget for TextInput {
                 let shift = modifiers.shift;
                 let ctrl = modifiers.ctrl;
 
-                match key {
+                let result = match key {
                     // ── Ctrl shortcuts ─────────────────────────────────
                     KeyCode::A if ctrl => {
                         self.move_cursor_to(self.len_graphemes());
@@ -439,14 +504,14 @@ impl Widget for TextInput {
                         if !self.delete_selection() {
                             self.delete_grapheme_before();
                         }
-                        self.update_scroll(14.0);
+                        self.update_scroll(DEFAULT_FONT_SIZE);
                         EventResult::Handled
                     }
                     KeyCode::Delete => {
                         if !self.delete_selection() {
                             self.delete_grapheme_at();
                         }
-                        self.update_scroll(14.0);
+                        self.update_scroll(DEFAULT_FONT_SIZE);
                         EventResult::Handled
                     }
                     // ── Navigation ──────────────────────────────────────
@@ -500,23 +565,30 @@ impl Widget for TextInput {
                         EventResult::Handled
                     }
                     _ => EventResult::Ignored,
+                };
+                if result == EventResult::Handled {
+                    self.refresh_ime_area(ctx);
                 }
+                result
             }
             // ── Text input ─────────────────────────────────────────────
             UiEvent::TextInput(ch) if self.focused => {
                 self.delete_selection();
                 self.insert_at_cursor(ch);
                 self.ime_preedit.clear();
+                self.refresh_ime_area(ctx);
                 EventResult::Handled
             }
             UiEvent::ImeCommit(ch) if self.focused => {
                 self.delete_selection();
                 self.ime_preedit.clear();
                 self.insert_at_cursor(ch);
+                self.refresh_ime_area(ctx);
                 EventResult::Handled
             }
             UiEvent::ImePreedit(preedit) if self.focused => {
                 self.ime_preedit = preedit.clone();
+                self.refresh_ime_area(ctx);
                 ctx.request_repaint();
                 EventResult::Handled
             }
@@ -548,8 +620,8 @@ impl Widget for TextInput {
         ctx.encoder.push_clip(clip);
 
         let sx = self.scroll_x.get();
-        let text_x = self.bounds.x + 8.0 - sx;
-        let text_y = self.bounds.y + (self.bounds.height - font_size * 1.3).max(0.0) * 0.5;
+        let text_x = self.content_left() - sx;
+        let text_y = self.text_y(font_size);
 
         // Selection highlight
         if let Some((byte_start, byte_end)) = self.selection_byte_range() {
@@ -559,32 +631,6 @@ impl Widget for TextInput {
             let sel_y = self.bounds.y + (self.bounds.height - sel_h).max(0.0) * 0.5;
             ctx.encoder
                 .draw_rect(Rect::new(sel_x, sel_y, sel_w, sel_h), tokens.primary, 0.0);
-        }
-
-        // Blinking cursor
-        if self.focused {
-            let now = Instant::now();
-            let elapsed = now.duration_since(self.last_blink.get());
-            if elapsed.as_millis() >= 500 {
-                self.cursor_visible.set(!self.cursor_visible.get());
-                self.last_blink.set(now);
-            }
-            if self.cursor_visible.get() {
-                let prefix_byte = if self.text.is_empty() {
-                    0
-                } else {
-                    self.grapheme_byte_idx(self.cursor)
-                };
-                let cursor_x = text_x + estimate_text_width(&self.text[..prefix_byte], font_size);
-                let cy = self.bounds.y + 4.0;
-                let ch = self.bounds.height - 8.0;
-                let cursor_color = if self.has_selection() {
-                    tokens.primary
-                } else {
-                    tokens.foreground
-                };
-                ctx.encoder.draw_rect(Rect::new(cursor_x, cy, 2.0, ch), cursor_color, 0.0);
-            }
         }
 
         if !self.text.is_empty() {
@@ -622,6 +668,25 @@ impl Widget for TextInput {
             );
         }
 
+        // Blinking cursor. Draw last so it remains visible over text/preedit.
+        if self.focused {
+            let now = Instant::now();
+            let elapsed = now.duration_since(self.last_blink.get());
+            if elapsed.as_millis() >= 500 {
+                self.cursor_visible.set(!self.cursor_visible.get());
+                self.last_blink.set(now);
+            }
+            if self.cursor_visible.get() {
+                let cursor_area = self.cursor_area(font_size);
+                let cursor_color = if self.has_selection() {
+                    tokens.primary
+                } else {
+                    tokens.foreground
+                };
+                ctx.encoder.draw_rect(cursor_area, cursor_color, 0.0);
+            }
+        }
+
         ctx.encoder.pop_clip();
     }
 
@@ -635,6 +700,8 @@ mod tests {
     use super::*;
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_editor_state::Action;
+    use mondrian_ui_core::widget::DrawCommandEncoder;
+    use mondrian_ui_theme::ThemePreset;
     use std::cell::RefCell;
 
     fn layout(ti: &mut TextInput) {
@@ -700,6 +767,58 @@ mod tests {
     }
     fn tp(ti: &mut TextInput, ch: &str, ctx: &mut EventContext) {
         ti.event(&UiEvent::TextInput(ch.to_string()), ctx);
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum PaintOp {
+        PushClip,
+        PopClip,
+        Rect,
+        Text(String),
+        Line,
+    }
+
+    #[derive(Default)]
+    struct RecordingEncoder {
+        ops: Vec<PaintOp>,
+    }
+
+    impl DrawCommandEncoder for RecordingEncoder {
+        fn push_clip(&mut self, _bounds: Rect) {
+            self.ops.push(PaintOp::PushClip);
+        }
+
+        fn pop_clip(&mut self) {
+            self.ops.push(PaintOp::PopClip);
+        }
+
+        fn draw_rect(&mut self, _bounds: Rect, _color: mondrian_core::Color, _corner_radius: f32) {
+            self.ops.push(PaintOp::Rect);
+        }
+
+        fn draw_line(
+            &mut self,
+            _start: Point,
+            _end: Point,
+            _width: f32,
+            _color: mondrian_core::Color,
+        ) {
+            self.ops.push(PaintOp::Line);
+        }
+
+        fn draw_text(
+            &mut self,
+            text: &str,
+            _font_size: f32,
+            _position: Point,
+            _color: mondrian_core::Color,
+        ) {
+            self.ops.push(PaintOp::Text(text.into()));
+        }
+
+        fn push_translate(&mut self, _offset: glam::Vec2) {}
+
+        fn pop_transform(&mut self) {}
     }
 
     // ── Construction ─────────────────────────────────────────────────────
@@ -815,6 +934,46 @@ mod tests {
         let result = ti.event(&UiEvent::ImeCommit("你".into()), &mut ctx);
         assert_eq!(result, EventResult::Handled);
         assert!(ti.ime_preedit.is_empty());
+    }
+
+    #[test]
+    fn mouse_down_requests_ime_at_caret() {
+        let mut ti = TextInput::new("ph").with_text("abc");
+        layout(&mut ti);
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
+
+        md(&mut ti, 8.0, 14.0, &mut ctx);
+
+        let ime = ctx.requests.ime.expect("mouse down should enable IME");
+        assert!(ime.enabled);
+        let area = ime.cursor_area.expect("IME should receive a caret rect");
+        assert!((area.x - ti.content_left()).abs() <= 0.1);
+        assert!(area.height > 0.0);
+    }
+
+    #[test]
+    fn key_navigation_updates_ime_caret_area() {
+        let mut ti = TextInput::new("ph").with_text("abc");
+        layout(&mut ti);
+        ti.focused = true;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
+
+        kd(&mut ti, KeyCode::Left, &mut ctx);
+
+        let area = ctx
+            .requests
+            .ime
+            .expect("handled key navigation should update IME")
+            .cursor_area
+            .expect("IME should receive a caret rect");
+        let expected = ti.cursor_area(DEFAULT_FONT_SIZE);
+        assert!((area.x - expected.x).abs() <= 0.1);
     }
 
     #[test]
@@ -1136,6 +1295,33 @@ mod tests {
     }
 
     #[test]
+    fn layout_scrolls_long_text_to_end_cursor() {
+        let mut ti = TextInput::new("ph").with_text("abcdefghijklmnopqrstuvwxyz");
+        ti.layout(Rect::new(0.0, 0.0, 80.0, 28.0));
+
+        assert!(ti.scroll_x.get() > 0.0);
+        let caret = ti.cursor_area(DEFAULT_FONT_SIZE);
+        assert!(caret.x >= ti.content_left() - 0.1);
+        assert!(caret.x <= ti.content_right() + 0.1);
+    }
+
+    #[test]
+    fn click_uses_scroll_offset_for_long_text() {
+        let mut ti = TextInput::new("ph").with_text("abcdefghijklmnopqrstuvwxyz");
+        ti.layout(Rect::new(0.0, 0.0, 80.0, 28.0));
+        assert!(ti.scroll_x.get() > 0.0);
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
+        let click_x = ti.content_left();
+
+        md(&mut ti, click_x, 14.0, &mut ctx);
+
+        assert!(ti.cursor > 0);
+    }
+
+    #[test]
     fn click_clears_selection() {
         let mut ti = TextInput::new("ph").with_text("hello");
         layout(&mut ti);
@@ -1210,5 +1396,40 @@ mod tests {
         ti.layout(Rect::new(10.0, 10.0, 200.0, 28.0));
         assert!(ti.hit_test(Point::new(110.0, 24.0)));
         assert!(!ti.hit_test(Point::new(0.0, 0.0)));
+    }
+
+    #[test]
+    fn paint_draws_caret_after_text() {
+        let ti = {
+            let mut input = TextInput::new("ph").with_text("abc");
+            input.focused = true;
+            input.layout(Rect::new(0.0, 0.0, 200.0, 28.0));
+            input
+        };
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 200.0, 28.0),
+        };
+
+        ti.paint(&mut ctx);
+
+        let text_idx = encoder
+            .ops
+            .iter()
+            .position(|op| *op == PaintOp::Text("abc".into()))
+            .expect("paint should emit text");
+        let pop_idx = encoder
+            .ops
+            .iter()
+            .position(|op| *op == PaintOp::PopClip)
+            .expect("paint should pop content clip");
+        let caret_idx = encoder.ops[..pop_idx]
+            .iter()
+            .rposition(|op| *op == PaintOp::Rect)
+            .expect("paint should draw caret rect");
+        assert!(caret_idx > text_idx);
     }
 }
