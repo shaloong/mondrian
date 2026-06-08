@@ -63,7 +63,6 @@ mod preferences;
 mod project_lifecycle;
 mod timeline_commands;
 mod timeline_editing;
-mod ui_demo;
 
 use audio_rendering::*;
 use timeline_editing::*;

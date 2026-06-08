@@ -595,6 +595,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let b = current_bounds.get();
                 encoder.draw_rect(b, theme.colors.background, 0.0);
                 TreeWalker::paint(&root, &mut encoder, &theme);
+                draw_shape_test_patterns(&mut encoder);
                 let commands = resolve_text_commands(encoder.finish(), &mut text_renderer);
                 let pending: Vec<mondrian_ui_renderer::GlyphUpload> = text_renderer
                     .take_pending_uploads()
@@ -714,4 +715,132 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     Ok(())
+}
+
+// ── Shape Test Patterns ──────────────────────────────────────────────────────
+// 目视验证圆形/正方形对齐。绘制多个分层对比以快速定位问题。
+
+/// 用 DrawEncoder 绘制全套形状测试图案，叠加在 widget 上方。
+///
+/// 每个测试对包含：
+/// 1. 实心方形（纯色，corner_radius=0）—— 尺寸参考
+/// 2. 半透明圆形（同一尺寸，corner_radius=size/2）—— 理想内接圆
+/// 3. 白色定位标记 —— 上/下/左/右边缘中点 + 圆心
+///
+/// 如果圆形完美内接，圆恰好与白色定位标记相切，
+/// 圆心标记与方形中心重合。
+fn draw_shape_test_patterns(encoder: &mut DrawEncoder) {
+    use mondrian_core::Color;
+    use mondrian_ui_core::types::Rect;
+
+    // 50px 间隔参考网格（用细矩形绘制）
+    let grid_color = Color { r: 0.3, g: 0.3, b: 0.3, a: 0.25 };
+    for gx in (0..800).step_by(50) {
+        encoder.draw_rect(Rect::new(gx as f32, 0.0, 1.0, 580.0), grid_color, 0.0);
+    }
+    for gy in (0..580).step_by(50) {
+        encoder.draw_rect(Rect::new(0.0, gy as f32, 800.0, 1.0), grid_color, 0.0);
+    }
+
+    // 测试对：(x, y, size, 方形色, 圆形色)
+    let pairs = [
+        (
+            30.0,
+            30.0,
+            200.0,
+            0xFF3333,
+            Color { r: 0.2, g: 0.4, b: 1.0, a: 0.35 },
+        ),
+        (
+            260.0,
+            30.0,
+            100.0,
+            0x33FF33,
+            Color { r: 1.0, g: 1.0, b: 0.2, a: 0.35 },
+        ),
+        (
+            260.0,
+            160.0,
+            60.0,
+            0xFF9800,
+            Color { r: 0.2, g: 1.0, b: 1.0, a: 0.35 },
+        ),
+        (
+            30.0,
+            260.0,
+            80.0,
+            0x9C27B0,
+            Color { r: 0.7, g: 0.3, b: 1.0, a: 0.35 },
+        ),
+        (
+            140.0,
+            260.0,
+            40.0,
+            0xE91E63,
+            Color { r: 0.5, g: 1.0, b: 0.2, a: 0.35 },
+        ),
+    ];
+
+    for &(x, y, size, sq_hex, circle_color) in &pairs {
+        let half = size * 0.5;
+        let cx = x + half;
+        let cy = y + half;
+
+        // 第 1 层：实心方形（reference）
+        encoder.draw_rect(Rect::new(x, y, size, size), Color::from_hex(sq_hex), 0.0);
+
+        // 第 2 层：半透明圆形（corner_radius = half → 内接圆）
+        encoder.draw_rect(Rect::new(x, y, size, size), circle_color, half);
+
+        // 第 3 层：白色圆心标记 (3x3)
+        encoder.draw_rect(Rect::new(cx - 1.5, cy - 1.5, 3.0, 3.0), Color::WHITE, 0.0);
+
+        // 第 4 层：边缘中点定位标记（4 个小白条, 8x2 px）
+        let ml = 8.0; // marker length
+        let mw = 2.0; // marker width
+                      // 上边缘中点：从方形上方往内
+        encoder.draw_rect(Rect::new(cx - mw * 0.5, y - ml, mw, ml), Color::WHITE, 0.0);
+        // 下边缘中点
+        encoder.draw_rect(
+            Rect::new(cx - mw * 0.5, y + size, mw, ml),
+            Color::WHITE,
+            0.0,
+        );
+        // 左边缘中点
+        encoder.draw_rect(Rect::new(x - ml, cy - mw * 0.5, ml, mw), Color::WHITE, 0.0);
+        // 右边缘中点
+        encoder.draw_rect(
+            Rect::new(x + size, cy - mw * 0.5, ml, mw),
+            Color::WHITE,
+            0.0,
+        );
+    }
+
+    // ── 胶囊形测试（短轴 50x100, r=25) ──────────────────────────────
+    encoder.draw_rect(
+        Rect::new(390.0, 30.0, 50.0, 100.0),
+        Color::from_hex(0x7C4DFF),
+        25.0,
+    );
+    encoder.draw_rect(
+        Rect::new(390.0, 30.0, 50.0, 100.0),
+        Color { r: 1.0, g: 1.0, b: 1.0, a: 0.3 },
+        25.0,
+    );
+    let chx = 390.0 + 25.0;
+    let chy = 30.0 + 50.0;
+    encoder.draw_rect(Rect::new(chx - 1.5, chy - 1.5, 3.0, 3.0), Color::WHITE, 0.0);
+
+    // ── 极小圆形（20x20, r=10) ──────────────────────────────────────
+    encoder.draw_rect(
+        Rect::new(470.0, 30.0, 20.0, 20.0),
+        Color::from_hex(0xFF5722),
+        10.0,
+    );
+    encoder.draw_rect(
+        Rect::new(470.0, 30.0, 20.0, 20.0),
+        Color { r: 1.0, g: 1.0, b: 1.0, a: 0.4 },
+        10.0,
+    );
+    encoder.draw_rect(Rect::new(479.5, 39.5, 3.0, 3.0), Color::WHITE, 0.0);
 }
