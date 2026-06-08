@@ -98,6 +98,14 @@ menus. Tooltip requests preserve their delay timer when the same tooltip is
 reported repeatedly during hover, and tooltip painting clamps to the current
 clip rect.
 
+Dropdowns request pointer capture while open so outside clicks, Escape, wheel
+events, and release events continue to route to the popup even when the pointer
+is over another widget. The opening click's release is suppressed so it cannot
+accidentally select the first item under the cursor; item actions dispatch only
+when a press and release land on the same enabled row. Long dropdown menus clip
+their item list and scroll with the same positive-delta-means-content-down
+offset convention as `ScrollView`.
+
 ## Scroll Views
 
 Scroll containers translate pointer events from screen coordinates into child

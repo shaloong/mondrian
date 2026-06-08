@@ -90,7 +90,14 @@ impl GalleryWidget {
         let dropdown_items = vec![
             MenuItem::new("选项 Alpha", demo_action("alpha")),
             MenuItem::new("选项 Beta", demo_action("beta")),
-            MenuItem::new("选项 Gamma (禁用)", demo_action("gamma")).disabled(),
+            MenuItem::new("选项 Gamma", demo_action("gamma")),
+            MenuItem::new("选项 Delta", demo_action("delta")),
+            MenuItem::new("选项 Epsilon", demo_action("epsilon")),
+            MenuItem::new("选项 Zeta", demo_action("zeta")),
+            MenuItem::new("选项 Eta", demo_action("eta")),
+            MenuItem::new("选项 Theta", demo_action("theta")),
+            MenuItem::new("选项 Iota (禁用)", demo_action("iota")).disabled(),
+            MenuItem::new("选项 Kappa", demo_action("kappa")),
         ];
         let list_items = vec![
             ListItem::new("列表项 1").with_action(demo_action("item1")),
@@ -113,7 +120,7 @@ impl GalleryWidget {
             checkbox_b: Checkbox::new("启用特性 B", true),
             text_input: TextInput::new("输入文本..."),
             slider: Slider::new(50.0, 0.0, 100.0),
-            dropdown: Dropdown::new("选择选项", dropdown_items),
+            dropdown: Dropdown::new("选择选项", dropdown_items).with_max_visible_items(5),
             list: List::new(list_items),
             scroll_area: ScrollView::new(Some(Box::new(scroll_content))),
             tooltip_trigger: Rect::ZERO,
