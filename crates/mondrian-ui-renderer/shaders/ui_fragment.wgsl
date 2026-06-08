@@ -11,9 +11,7 @@ struct VertexOutput {
     @location(1) color: vec4<f32>,
     @location(2) @interpolate(flat) rect_size: vec2<f32>,
     @location(3) @interpolate(flat) corner_radius_px: f32,
-    @location(4) local_px: vec2<f32>,
-    @location(5) @interpolate(flat) render_mode: u32,
-    @location(6) @interpolate(flat) aa_floor: f32,
+    @location(4) @interpolate(flat) render_mode: u32,
 };
 
 @group(1) @binding(0) var glyph_sampler: sampler;
@@ -35,9 +33,10 @@ fn main(in: VertexOutput) -> @location(0) vec4<f32> {
     let r = clamp(in.corner_radius_px, 0.0, min(in.rect_size.x, in.rect_size.y) * 0.5);
     if r <= 0.0 { return in.color; }
 
-    let d = sd_rounded_box_px(in.local_px, in.rect_size, r);
-    let aa = max(fwidth(d), in.aa_floor);
-    let alpha = 1.0 - smoothstep(-aa * 0.5, aa * 0.5, d);
+    let p = in.tex_coord * in.rect_size;
+    let d = sd_rounded_box_px(p, in.rect_size, r);
+    let aa = clamp(fwidth(d), 0.75, 1.5);
+    let alpha = smoothstep(aa * 0.5, -aa * 0.5, d);
     if alpha <= 0.001 { discard; }
     return vec4<f32>(in.color.rgb, in.color.a * alpha);
 }

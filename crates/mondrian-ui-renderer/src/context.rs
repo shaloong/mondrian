@@ -14,8 +14,7 @@ use crate::shape::RectVertex;
 #[derive(Debug, Clone, Copy, Pod, bytemuck::Zeroable)]
 struct Uniforms {
     screen_size: [f32; 2],
-    aa_floor: f32,
-    _pad: f32,
+    _pad: [f32; 2],
 }
 
 /// 字形上传数据
@@ -128,12 +127,9 @@ impl UiRenderer {
     ) {
         let batches = build_batches(commands, screen_size);
 
-                let ref_height = 1080.0_f32;
-        let aa_floor = (ref_height / (screen_size.1.max(1) as f32)).clamp(0.5, 1.5);
         let uniform_data = Uniforms {
             screen_size: [screen_size.0 as f32, screen_size.1 as f32],
-            aa_floor,
-            _pad: 0.0,
+            _pad: [0.0; 2],
         };
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("ui_uniform"),
