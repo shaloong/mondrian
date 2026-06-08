@@ -163,6 +163,15 @@ pub trait Widget {
     /// 返回 `Handled` 则停止冒泡，`Ignored` 则继续向父级传递。
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult;
 
+    /// Called on ancestors after a descendant handled an event.
+    ///
+    /// This is for parent-owned state that depends on a child interaction, such
+    /// as a tab container rebuilding content after its tab bar changes active
+    /// index. It must not re-dispatch the event to children.
+    fn after_child_event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+        EventResult::Ignored
+    }
+
     /// 发出绘制命令。纯读操作。encoder 通过 &mut 访问。
     fn paint(&self, ctx: &mut PaintContext);
 
@@ -182,6 +191,27 @@ pub trait Widget {
     /// 可变子 Widget 访问
     fn children_mut(&mut self) -> &mut [Box<dyn Widget>] {
         &mut []
+    }
+
+    /// Number of logical children.
+    ///
+    /// Containers with children stored as named fields can override this and
+    /// `child()` / `child_mut()` without reshaping their storage into a Vec.
+    fn child_count(&self) -> usize {
+        self.children().len()
+    }
+
+    /// Immutable child access by logical z/order index.
+    fn child(&self, index: usize) -> Option<&dyn Widget> {
+        self.children().get(index).map(|child| child.as_ref())
+    }
+
+    /// Mutable child access by logical z/order index.
+    fn child_mut(&mut self, index: usize) -> Option<&mut dyn Widget> {
+        match self.children_mut().get_mut(index) {
+            Some(child) => Some(child.as_mut()),
+            None => None,
+        }
     }
 
     /// 向下转型支持。默认返回 None。具体 Widget 可重写以支持类型检测。

@@ -301,6 +301,42 @@ impl Widget for GalleryWidget {
     fn hit_test(&self, p: Point) -> bool {
         self.bounds.contains(p)
     }
+
+    fn child_count(&self) -> usize {
+        9 + usize::from(self.context_menu.is_some())
+    }
+
+    fn child(&self, index: usize) -> Option<&dyn Widget> {
+        match index {
+            0 => Some(&self.button_click),
+            1 => Some(&self.button_no_action),
+            2 => Some(&self.checkbox_a),
+            3 => Some(&self.checkbox_b),
+            4 => Some(&self.text_input),
+            5 => Some(&self.slider),
+            6 => Some(&self.dropdown),
+            7 => Some(&self.list),
+            8 => Some(&self.scroll_area),
+            9 => self.context_menu.as_ref().map(|menu| menu as &dyn Widget),
+            _ => None,
+        }
+    }
+
+    fn child_mut(&mut self, index: usize) -> Option<&mut dyn Widget> {
+        match index {
+            0 => Some(&mut self.button_click),
+            1 => Some(&mut self.button_no_action),
+            2 => Some(&mut self.checkbox_a),
+            3 => Some(&mut self.checkbox_b),
+            4 => Some(&mut self.text_input),
+            5 => Some(&mut self.slider),
+            6 => Some(&mut self.dropdown),
+            7 => Some(&mut self.list),
+            8 => Some(&mut self.scroll_area),
+            9 => self.context_menu.as_mut().map(|menu| menu as &mut dyn Widget),
+            _ => None,
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -403,6 +439,19 @@ impl VerticalTabbedSlot {
             last_active: active,
         }
     }
+
+    fn sync_active_tab(&mut self) {
+        let now_active = self.tab_bar.active_index();
+        if now_active != self.last_active {
+            self.last_active = now_active;
+            self.content = Box::new(PanelSlot::new(
+                self.kind,
+                slot_content_for_tab(self.kind, now_active),
+            ));
+            let bounds = self.bounds;
+            self.layout(bounds);
+        }
+    }
 }
 
 impl Widget for VerticalTabbedSlot {
@@ -425,20 +474,16 @@ impl Widget for VerticalTabbedSlot {
     }
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
         let result = self.tab_bar.event(event, ctx);
-        let now_active = self.tab_bar.active_index();
-        if now_active != self.last_active {
-            self.last_active = now_active;
-            self.content = Box::new(PanelSlot::new(
-                self.kind,
-                slot_content_for_tab(self.kind, now_active),
-            ));
-            let bounds = self.bounds;
-            self.layout(bounds);
-        }
+        self.sync_active_tab();
         if result == EventResult::Handled {
             return EventResult::Handled;
         }
         self.content.event(event, ctx)
+    }
+
+    fn after_child_event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+        self.sync_active_tab();
+        EventResult::Ignored
     }
     fn paint(&self, ctx: &mut PaintContext) {
         self.tab_bar.paint(ctx);
@@ -446,6 +491,26 @@ impl Widget for VerticalTabbedSlot {
     }
     fn hit_test(&self, p: Point) -> bool {
         self.bounds.contains(p)
+    }
+
+    fn child_count(&self) -> usize {
+        2
+    }
+
+    fn child(&self, index: usize) -> Option<&dyn Widget> {
+        match index {
+            0 => Some(&self.tab_bar),
+            1 => Some(self.content.as_ref()),
+            _ => None,
+        }
+    }
+
+    fn child_mut(&mut self, index: usize) -> Option<&mut dyn Widget> {
+        match index {
+            0 => Some(&mut self.tab_bar),
+            1 => Some(self.content.as_mut()),
+            _ => None,
+        }
     }
 }
 

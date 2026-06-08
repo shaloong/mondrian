@@ -45,12 +45,21 @@ crates.
 
 `WidgetTreeView` adapts a borrowed `&mut dyn Widget` subtree into the
 `WidgetTree` interface used by `EventRouter`. It recursively discovers widgets
-through each container's `children()` and `children_mut()` methods.
+through the indexed `child_count()`, `child()`, and `child_mut()` accessors.
+The default implementation delegates to `children()` and `children_mut()` so
+simple vector-backed containers stay compact.
 
-Custom containers must expose their logical children through those methods to
-participate in deepest-hit routing and router-level pointer capture. Containers
-that manually forward events can continue to work, but they should be migrated
-toward transparent children before the main editor panels move to the new UI.
+Custom containers with named child fields should expose their logical children
+through the indexed accessors to participate in deepest-hit routing and
+router-level pointer capture without reshaping their storage into a `Vec`.
+Containers that manually forward events can continue to work, but they should
+be migrated toward transparent children before the main editor panels move to
+the new UI.
+
+Ancestors receive `after_child_event()` after a descendant handles an event.
+This hook is for parent-owned state synchronization, such as rebuilding tab
+content after a tab bar changes active index. It must not redispatch the event
+to children.
 
 ## Focused Text Input
 

@@ -141,7 +141,10 @@ impl EventRouter {
                             self.focused = self.focus_mgr.focused_widget();
                             self.apply_event_requests(requests);
                             match result {
-                                EventResult::Handled => return EventResult::Handled,
+                                EventResult::Handled => {
+                                    self.after_child_handled(tree, id, &event, dispatch);
+                                    return EventResult::Handled;
+                                }
                                 EventResult::Ignored => {
                                     current = tree.parent_id(id);
                                 }
@@ -194,7 +197,10 @@ impl EventRouter {
                             self.focused = self.focus_mgr.focused_widget();
                             self.apply_event_requests(requests);
                             match result {
-                                EventResult::Handled => return EventResult::Handled,
+                                EventResult::Handled => {
+                                    self.after_child_handled(tree, id, &event, dispatch);
+                                    return EventResult::Handled;
+                                }
                                 EventResult::Ignored => {
                                     current = tree.parent_id(id);
                                 }
@@ -235,6 +241,29 @@ impl EventRouter {
             }
             Some(PointerCaptureRequest::Clear) => self.captured = None,
             _ => {}
+        }
+    }
+
+    fn after_child_handled(
+        &mut self,
+        tree: &mut dyn WidgetTree,
+        child_id: WidgetId,
+        event: &UiEvent,
+        dispatch: &dyn Fn(Action),
+    ) {
+        let mut current = tree.parent_id(child_id);
+        while let Some(id) = current {
+            let parent_id = tree.parent_id(id);
+            if let Some(widget) = tree.get_mut(id) {
+                let mut requests = EventRequests::default();
+                {
+                    let mut ctx = self.make_event_context(dispatch, &mut requests);
+                    let _ = widget.after_child_event(event, &mut ctx);
+                }
+                self.focused = self.focus_mgr.focused_widget();
+                self.apply_event_requests(requests);
+            }
+            current = parent_id;
         }
     }
 }
@@ -441,5 +470,117 @@ mod tests {
             &|_| {},
         );
         assert_eq!(router.captured(), None);
+    }
+
+    struct ParentPostWidget {
+        id: WidgetId,
+        bounds: Rect,
+        child_id: WidgetId,
+        log: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl Widget for ParentPostWidget {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+
+        fn measure(&self, _constraint: LayoutConstraint) -> Size {
+            Size::new(self.bounds.width, self.bounds.height)
+        }
+
+        fn layout(&mut self, bounds: Rect) {
+            self.bounds = bounds;
+        }
+
+        fn event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+            EventResult::Ignored
+        }
+
+        fn after_child_event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+            self.log.borrow_mut().push("parent-after".into());
+            EventResult::Handled
+        }
+
+        fn paint(&self, _ctx: &mut PaintContext) {}
+
+        fn hit_test(&self, point: Point) -> bool {
+            self.bounds.contains(point)
+        }
+    }
+
+    struct ParentChildTree {
+        parent: ParentPostWidget,
+        child: RecordingWidget,
+    }
+
+    impl WidgetTree for ParentChildTree {
+        fn get(&self, id: WidgetId) -> Option<&dyn Widget> {
+            if id == self.parent.id {
+                Some(&self.parent)
+            } else if id == self.child.id {
+                Some(&self.child)
+            } else {
+                None
+            }
+        }
+
+        fn get_mut(&mut self, id: WidgetId) -> Option<&mut dyn Widget> {
+            if id == self.parent.id {
+                Some(&mut self.parent)
+            } else if id == self.child.id {
+                Some(&mut self.child)
+            } else {
+                None
+            }
+        }
+
+        fn root_id(&self) -> WidgetId {
+            self.parent.id
+        }
+
+        fn parent_id(&self, id: WidgetId) -> Option<WidgetId> {
+            if id == self.child.id {
+                Some(self.parent.id)
+            } else {
+                None
+            }
+        }
+
+        fn children_ids(&self, id: WidgetId) -> Vec<WidgetId> {
+            if id == self.parent.id {
+                vec![self.parent.child_id]
+            } else {
+                vec![]
+            }
+        }
+    }
+
+    #[test]
+    fn router_calls_parent_after_child_event() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let child = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let child_id = child.id();
+        let parent = ParentPostWidget {
+            id: WidgetId::new(),
+            bounds: Rect::new(0.0, 0.0, 100.0, 30.0),
+            child_id,
+            log: Rc::clone(&log),
+        };
+        let root = parent.id;
+        let mut tree = ParentChildTree { parent, child };
+        let mut router = EventRouter::new(root);
+
+        let result = router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert!(log.borrow().contains(&"parent-after".into()));
     }
 }

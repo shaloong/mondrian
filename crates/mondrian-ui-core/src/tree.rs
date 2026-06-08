@@ -41,7 +41,8 @@ impl WidgetTree for WidgetTreeView<'_> {
     }
 
     fn get_mut(&mut self, id: WidgetId) -> Option<&mut dyn Widget> {
-        find_widget_mut(self.root, id)
+        let path = find_widget_path(self.root, id)?;
+        widget_mut_at_path(self.root, &path)
     }
 
     fn root_id(&self) -> WidgetId {
@@ -53,9 +54,7 @@ impl WidgetTree for WidgetTreeView<'_> {
     }
 
     fn children_ids(&self, id: WidgetId) -> Vec<WidgetId> {
-        find_widget(self.root, id)
-            .map(|widget| widget.children().iter().map(|child| child.id()).collect())
-            .unwrap_or_default()
+        find_widget(self.root, id).map(child_ids).unwrap_or_default()
     }
 }
 
@@ -63,24 +62,50 @@ fn find_widget(widget: &dyn Widget, id: WidgetId) -> Option<&dyn Widget> {
     if widget.id() == id {
         return Some(widget);
     }
-    for child in widget.children() {
-        if let Some(found) = find_widget(child.as_ref(), id) {
-            return Some(found);
+    for index in 0..widget.child_count() {
+        if let Some(child) = widget.child(index) {
+            if let Some(found) = find_widget(child, id) {
+                return Some(found);
+            }
         }
     }
     None
 }
 
-fn find_widget_mut(widget: &mut dyn Widget, id: WidgetId) -> Option<&mut dyn Widget> {
-    if widget.id() == id {
-        return Some(widget);
+fn child_ids(widget: &dyn Widget) -> Vec<WidgetId> {
+    let mut ids = Vec::with_capacity(widget.child_count());
+    for index in 0..widget.child_count() {
+        if let Some(child) = widget.child(index) {
+            ids.push(child.id());
+        }
     }
-    for child in widget.children_mut() {
-        if let Some(found) = find_widget_mut(child.as_mut(), id) {
-            return Some(found);
+    ids
+}
+
+fn find_widget_path(widget: &dyn Widget, id: WidgetId) -> Option<Vec<usize>> {
+    if widget.id() == id {
+        return Some(Vec::new());
+    }
+    for index in 0..widget.child_count() {
+        if let Some(child) = widget.child(index) {
+            if let Some(mut path) = find_widget_path(child, id) {
+                path.insert(0, index);
+                return Some(path);
+            }
         }
     }
     None
+}
+
+fn widget_mut_at_path<'a>(
+    widget: &'a mut dyn Widget,
+    path: &[usize],
+) -> Option<&'a mut dyn Widget> {
+    let Some((&index, rest)) = path.split_first() else {
+        return Some(widget);
+    };
+    let child = widget.child_mut(index)?;
+    widget_mut_at_path(child, rest)
 }
 
 fn find_parent_id(
@@ -92,9 +117,11 @@ fn find_parent_id(
         return parent;
     }
     let current = Some(widget.id());
-    for child in widget.children() {
-        if let Some(found) = find_parent_id(child.as_ref(), target, current) {
-            return Some(found);
+    for index in 0..widget.child_count() {
+        if let Some(child) = widget.child(index) {
+            if let Some(found) = find_parent_id(child, target, current) {
+                return Some(found);
+            }
         }
     }
     None

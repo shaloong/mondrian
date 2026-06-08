@@ -128,11 +128,17 @@ impl Widget for MenuBar {
     fn hit_test(&self, p: Point) -> bool {
         self.bounds.contains(p)
     }
-    fn children(&self) -> &[Box<dyn Widget>] {
-        &[]
+
+    fn child_count(&self) -> usize {
+        self.menus.len()
     }
-    fn children_mut(&mut self) -> &mut [Box<dyn Widget>] {
-        &mut []
+
+    fn child(&self, index: usize) -> Option<&dyn Widget> {
+        self.menus.get(index).map(|menu| menu as &dyn Widget)
+    }
+
+    fn child_mut(&mut self, index: usize) -> Option<&mut dyn Widget> {
+        self.menus.get_mut(index).map(|menu| menu as &mut dyn Widget)
     }
 }
 
@@ -188,12 +194,25 @@ impl Widget for AppRoot {
     fn hit_test(&self, p: Point) -> bool {
         self.bounds.contains(p)
     }
-    fn children(&self) -> &[Box<dyn Widget>] {
-        // Children managed manually via layout/event/paint delegation
-        &[]
+
+    fn child_count(&self) -> usize {
+        2
     }
-    fn children_mut(&mut self) -> &mut [Box<dyn Widget>] {
-        &mut []
+
+    fn child(&self, index: usize) -> Option<&dyn Widget> {
+        match index {
+            0 => Some(&self.menu_bar),
+            1 => Some(&self.dock),
+            _ => None,
+        }
+    }
+
+    fn child_mut(&mut self, index: usize) -> Option<&mut dyn Widget> {
+        match index {
+            0 => Some(&mut self.menu_bar),
+            1 => Some(&mut self.dock),
+            _ => None,
+        }
     }
 }
 
@@ -303,6 +322,26 @@ impl Widget for VerticalTabbedSlot {
     }
     fn hit_test(&self, p: Point) -> bool {
         self.bounds.contains(p)
+    }
+
+    fn child_count(&self) -> usize {
+        2
+    }
+
+    fn child(&self, index: usize) -> Option<&dyn Widget> {
+        match index {
+            0 => Some(&self.tab_bar),
+            1 => Some(self.content.as_ref()),
+            _ => None,
+        }
+    }
+
+    fn child_mut(&mut self, index: usize) -> Option<&mut dyn Widget> {
+        match index {
+            0 => Some(&mut self.tab_bar),
+            1 => Some(self.content.as_mut()),
+            _ => None,
+        }
     }
 }
 
