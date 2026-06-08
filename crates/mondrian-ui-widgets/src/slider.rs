@@ -35,6 +35,44 @@ impl Slider {
     pub fn value(&self) -> f32 {
         self.value
     }
+
+    fn range(&self) -> f32 {
+        self.max - self.min
+    }
+
+    fn ratio(&self) -> f32 {
+        let range = self.range();
+        if range > 0.0 {
+            ((self.value - self.min) / range).clamp(0.0, 1.0)
+        } else {
+            0.5
+        }
+    }
+
+    fn effective_thumb_size(&self) -> f32 {
+        self.thumb_size.min((self.bounds.height - 2.0).max(1.0))
+    }
+
+    fn track_rect(&self) -> Rect {
+        let thumb_size = self.effective_thumb_size();
+        let track_height = self.track_height.min(self.bounds.height.max(1.0));
+        let track_y = self.bounds.y + self.bounds.height * 0.5 - track_height * 0.5;
+        Rect::new(
+            self.bounds.x + thumb_size * 0.5,
+            track_y,
+            (self.bounds.width - thumb_size).max(0.0),
+            track_height,
+        )
+    }
+
+    fn thumb_rect(&self) -> Rect {
+        let thumb_size = self.effective_thumb_size();
+        let track = self.track_rect();
+        let center_x = track.x + track.width * self.ratio();
+        let x = center_x - thumb_size * 0.5;
+        let y = self.bounds.y + (self.bounds.height - thumb_size) * 0.5;
+        Rect::new(x, y, thumb_size, thumb_size)
+    }
 }
 
 impl Widget for Slider {
@@ -77,35 +115,20 @@ impl Widget for Slider {
         let tokens = &ctx.theme.colors;
         let spacing = &ctx.theme.spacing;
 
-        let track_y = self.bounds.y + self.bounds.height * 0.5 - self.track_height * 0.5;
-        let range = self.max - self.min;
-
         // Track background
-        let track_bg = Rect::new(self.bounds.x, track_y, self.bounds.width, self.track_height);
-        ctx.encoder.draw_rect(track_bg, tokens.accent, spacing.radius_sm);
+        let track = self.track_rect();
+        ctx.encoder.draw_rect(track, tokens.accent, spacing.radius_full);
 
-        // Filled track (guard against zero range)
-        let ratio = if range > 0.0 {
-            ((self.value - self.min) / range).clamp(0.0, 1.0)
-        } else {
-            0.5
-        };
-        let fill_w = self.bounds.width * ratio;
+        // Filled track
+        let ratio = self.ratio();
+        let fill_w = track.width * ratio;
         if fill_w > 0.0 {
-            let track_fill = Rect::new(self.bounds.x, track_y, fill_w, self.track_height);
-            ctx.encoder.draw_rect(track_fill, tokens.primary, spacing.radius_sm);
+            let track_fill = Rect::new(track.x, track.y, fill_w, track.height);
+            ctx.encoder.draw_rect(track_fill, tokens.primary, spacing.radius_full);
         }
 
-        // Thumb (use half thumb_size for a perfect circle via rounded rect)
-        let thumb_radius = self.thumb_size * 0.5;
-        let thumb_cy = self.bounds.y + (self.bounds.height - self.thumb_size).max(0.0) * 0.5;
-        let thumb_x = self.bounds.x + fill_w - self.thumb_size * 0.5;
-        let thumb_x = thumb_x.clamp(
-            self.bounds.x,
-            self.bounds.x + self.bounds.width - self.thumb_size,
-        );
-        let thumb_rect = Rect::new(thumb_x, thumb_cy, self.thumb_size, self.thumb_size);
-        ctx.encoder.draw_rect(thumb_rect, tokens.primary, thumb_radius);
+        let thumb_rect = self.thumb_rect();
+        ctx.encoder.draw_rect(thumb_rect, tokens.primary, thumb_rect.height * 0.5);
     }
 
     fn hit_test(&self, point: Point) -> bool {
@@ -115,11 +138,18 @@ impl Widget for Slider {
 
 impl Slider {
     fn update_value(&mut self, position: &Point) {
-        let range = self.max - self.min;
+        let range = self.range();
         if range <= 0.0 {
             return;
         }
-        let ratio = ((position.x - self.bounds.x) / self.bounds.width).clamp(0.0, 1.0);
+        let track = self.track_rect();
+        let ratio = if track.width > 0.0 {
+            ((position.x - track.x) / track.width).clamp(0.0, 1.0)
+        } else if position.x >= self.bounds.x + self.bounds.width * 0.5 {
+            1.0
+        } else {
+            0.0
+        };
         self.value = self.min + range * ratio;
     }
 }
@@ -128,6 +158,45 @@ impl Slider {
 mod tests {
     use super::*;
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use mondrian_ui_core::widget::DrawCommandEncoder;
+    use mondrian_ui_theme::ThemePreset;
+
+    #[derive(Default)]
+    struct RecordingEncoder {
+        rects: Vec<Rect>,
+    }
+
+    impl DrawCommandEncoder for RecordingEncoder {
+        fn push_clip(&mut self, _bounds: Rect) {}
+
+        fn pop_clip(&mut self) {}
+
+        fn draw_rect(&mut self, bounds: Rect, _color: mondrian_core::Color, _corner_radius: f32) {
+            self.rects.push(bounds);
+        }
+
+        fn draw_line(
+            &mut self,
+            _start: Point,
+            _end: Point,
+            _width: f32,
+            _color: mondrian_core::Color,
+        ) {
+        }
+
+        fn draw_text(
+            &mut self,
+            _text: &str,
+            _font_size: f32,
+            _position: Point,
+            _color: mondrian_core::Color,
+        ) {
+        }
+
+        fn push_translate(&mut self, _offset: glam::Vec2) {}
+
+        fn pop_transform(&mut self) {}
+    }
 
     fn event_ctx() -> EventContext<'static> {
         let f: &'static mut DummyFocus = Box::leak(Box::new(DummyFocus));
@@ -167,6 +236,32 @@ mod tests {
     }
 
     #[test]
+    fn slider_drag_uses_thumb_center_track_range() {
+        let mut s = Slider::new(0.0, 0.0, 100.0);
+        s.layout(Rect::new(0.0, 0.0, 200.0, 20.0));
+
+        let mut ctx = event_ctx();
+        s.event(
+            &UiEvent::MouseDown {
+                position: Point::new(7.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(s.value(), 0.0);
+
+        s.event(
+            &UiEvent::MouseMove {
+                position: Point::new(193.0, 10.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(s.value(), 100.0);
+    }
+
+    #[test]
     fn slider_mouse_move_updates_value_during_drag() {
         let mut s = Slider::new(0.0, 0.0, 100.0);
         s.layout(Rect::new(0.0, 0.0, 200.0, 20.0));
@@ -180,9 +275,11 @@ mod tests {
             },
             &mut ctx,
         );
+        let track = s.track_rect();
+        let x_75 = track.x + track.width * 0.75;
         s.event(
             &UiEvent::MouseMove {
-                position: Point::new(150.0, 10.0),
+                position: Point::new(x_75, 10.0),
                 modifiers: Modifiers::none(),
             },
             &mut ctx,
@@ -248,5 +345,37 @@ mod tests {
             &mut ctx,
         );
         assert_eq!(s.value(), 100.0); // clamped to max via update_value ratio clamp
+    }
+
+    #[test]
+    fn slider_thumb_rect_stays_inside_bounds() {
+        let mut s = Slider::new(50.0, 0.0, 100.0);
+        s.layout(Rect::new(10.0, 20.0, 160.0, 18.0));
+
+        let thumb = s.thumb_rect();
+
+        assert!(thumb.x >= s.bounds.x);
+        assert!(thumb.y >= s.bounds.y);
+        assert!(thumb.x + thumb.width <= s.bounds.x + s.bounds.width);
+        assert!(thumb.y + thumb.height <= s.bounds.y + s.bounds.height);
+    }
+
+    #[test]
+    fn slider_paint_shrinks_thumb_for_short_bounds() {
+        let mut s = Slider::new(50.0, 0.0, 100.0);
+        s.layout(Rect::new(0.0, 0.0, 100.0, 10.0));
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 100.0, 10.0),
+        };
+
+        s.paint(&mut ctx);
+
+        let thumb = encoder.rects.last().expect("paint should draw a thumb");
+        assert!(thumb.y >= s.bounds.y);
+        assert!(thumb.y + thumb.height <= s.bounds.y + s.bounds.height);
     }
 }

@@ -85,6 +85,10 @@ Drag widgets request capture on mouse down and release capture on mouse up.
 Timeline clip drags, curve editor handles, and color picker gestures should use
 the same request path.
 
+Slider value mapping uses the same thumb-centered track for painting and
+pointer updates. The thumb rect must remain inside widget bounds; if a parent
+gives a short row, the thumb shrinks vertically instead of being clipped.
+
 ## Rendering Notes
 
 Widgets emit draw commands only. Checkbox checkmarks are vector line commands,
