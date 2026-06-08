@@ -2,8 +2,6 @@
 //!
 //! 在指定位置弹出菜单项列表。点击选项或外部区域关闭。
 
-#[allow(unused_imports)]
-use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
@@ -129,6 +127,18 @@ impl Widget for ContextMenu {
                 tokens.popover
             };
             ctx.encoder.draw_rect(r, fill, 0.0);
+
+            let text_color = if item.enabled {
+                tokens.foreground
+            } else {
+                tokens.muted_foreground
+            };
+            ctx.encoder.draw_text(
+                &item.label,
+                ctx.theme.typography.body.font_size,
+                Point::new(r.x + 8.0, r.y + 4.0),
+                text_color,
+            );
         }
     }
 
@@ -141,6 +151,7 @@ impl Widget for ContextMenu {
 mod tests {
     use super::*;
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use mondrian_editor_state::Action;
     use std::cell::RefCell;
 
     #[test]

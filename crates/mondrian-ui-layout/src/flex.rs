@@ -77,8 +77,30 @@ impl FlexLayout {
         }
     }
 
-    /// 给定父 bounds 和子 widget 列表，计算每个子的 Rect
+    /// 给定父 bounds 和子 widget 列表，计算每个子的 Rect。
+    /// 所有子等权重分配剩余空间（flex_grow = 1.0）。
     pub fn compute(&self, parent: Rect, children: &[&dyn Widget]) -> Vec<Rect> {
+        let flex_grows = vec![1.0; children.len()];
+        self.compute_with_flex(parent, children, &flex_grows)
+    }
+
+    /// 给定父 bounds、子 widget 列表和每个子的 flex_grow 权重，计算每个子的 Rect。
+    ///
+    /// `flex_grows` 长度必须等于 `children` 长度。
+    /// flex_grow = 0 表示子节点只占期望尺寸，不参与剩余空间分配。
+    /// 剩余空间按 flex_grow 的比例分配。
+    pub fn compute_with_flex(
+        &self,
+        parent: Rect,
+        children: &[&dyn Widget],
+        flex_grows: &[f32],
+    ) -> Vec<Rect> {
+        assert_eq!(
+            children.len(),
+            flex_grows.len(),
+            "flex_grows must match children count"
+        );
+
         if children.is_empty() {
             return vec![];
         }
@@ -91,7 +113,7 @@ impl FlexLayout {
         );
 
         let is_row = matches!(self.direction, FlexDirection::Row);
-        let n = children.len() as f32;
+        let n = children.len();
 
         // ── Step 1: Measure all children ──
         let constraint = LayoutConstraint::LOOSE;
@@ -99,20 +121,17 @@ impl FlexLayout {
 
         // ── Step 2: Main axis allocation ──
         let main_size = if is_row { inner.width } else { inner.height };
-        let total_gap = self.gap * (n - 1.0).max(0.0);
+        let total_gap = self.gap * (n as f32 - 1.0).max(0.0);
         let total_preferred: f32 =
             measured.iter().map(|s| if is_row { s.width } else { s.height }).sum();
         let remaining = (main_size - total_preferred - total_gap).max(0.0);
+        let total_flex: f32 = flex_grows.iter().sum();
 
-        let total_flex: f32 = 1.0; // currently all flex equally
-
-        let mut main_sizes: Vec<f32> = Vec::with_capacity(children.len());
+        let mut main_sizes: Vec<f32> = Vec::with_capacity(n);
         for (i, m) in measured.iter().enumerate() {
             let preferred = if is_row { m.width } else { m.height };
-            let flex_share = if total_flex > 0.0 && i == children.len() - 1 {
-                remaining
-            } else if total_flex > 0.0 {
-                remaining / n
+            let flex_share = if total_flex > 0.0 {
+                remaining * flex_grows[i] / total_flex
             } else {
                 0.0
             };
@@ -140,16 +159,16 @@ impl FlexLayout {
         };
 
         let space_between_gap = match self.justify_content {
-            JustifyContent::SpaceBetween if n > 1.0 => {
-                (main_size - total_final_main).max(0.0) / (n - 1.0)
+            JustifyContent::SpaceBetween if n > 1 => {
+                (main_size - total_final_main).max(0.0) / (n as f32 - 1.0)
             }
             _ => 0.0,
         };
 
-        let mut rects = Vec::with_capacity(children.len());
+        let mut rects = Vec::with_capacity(n);
         let mut cursor = start_offset;
 
-        for i in 0..children.len() {
+        for i in 0..n {
             let cross_pos = match self.align_items {
                 AlignItems::Start => 0.0,
                 AlignItems::Center => (cross_size - cross_sizes[i]).max(0.0) * 0.5,
@@ -296,7 +315,6 @@ mod tests {
         let rects = layout.compute(parent, &children);
 
         assert_eq!(rects.len(), 3);
-        // First at top, last at bottom, middle in between
         assert!((rects[0].y - 0.0).abs() < 0.01, "first should be at top");
         assert!(rects[1].y > rects[0].y, "middle between first and last");
         assert!(rects[2].y > rects[1].y, "last below middle");
@@ -315,7 +333,6 @@ mod tests {
         let rects = layout.compute(parent, &children);
 
         assert_eq!(rects.len(), 1);
-        // In a row layout with End alignment, the item should be at the bottom
         assert!(rects[0].y > 0.0, "should be at bottom");
     }
 
@@ -338,7 +355,6 @@ mod tests {
         let rects_no_gap = no_gap.compute(parent, &children);
         let rects_with_gap = with_gap.compute(parent, &children);
 
-        // Second child should be further down with gap
         assert!(rects_with_gap[1].y > rects_no_gap[1].y);
     }
 
@@ -367,7 +383,6 @@ mod tests {
         let rects = layout.compute(parent, &children);
 
         assert_eq!(rects.len(), 1);
-        // Child should be inset by padding
         assert!(rects[0].x >= 10.0);
         assert!(rects[0].y >= 10.0);
     }
@@ -388,7 +403,54 @@ mod tests {
         let rects = layout.compute(parent, &children);
 
         assert_eq!(rects.len(), 1);
-        // Stretch should expand the cross-axis to fill parent (minus padding)
         assert!(rects[0].height > 30.0, "should stretch to fill cross-axis");
+    }
+
+    #[test]
+    fn flex_grow_distributes_remaining_space() {
+        let w1 = TestWidget {
+            id: WidgetId::new(),
+            preferred: Size::new(50.0, 20.0),
+        };
+        let w2 = TestWidget {
+            id: WidgetId::new(),
+            preferred: Size::new(50.0, 20.0),
+        };
+        let children: Vec<&dyn Widget> = vec![&w1, &w2];
+
+        let layout = FlexLayout::column();
+        let parent = Rect::new(0.0, 0.0, 200.0, 200.0);
+        // w1 flex_grow=2, w2 flex_grow=1 → w1 gets 2/3 of remaining, w2 gets 1/3
+        let rects = layout.compute_with_flex(parent, &children, &[2.0, 1.0]);
+
+        assert_eq!(rects.len(), 2);
+        // remaining = 200 - 20 - 20 = 160 → w1 gets 2/3, w2 gets 1/3
+        assert!(
+            rects[0].height > rects[1].height,
+            "flex_grow=2 should get more space than flex_grow=1"
+        );
+    }
+
+    #[test]
+    fn flex_grow_zero_uses_preferred_only() {
+        let w1 = TestWidget {
+            id: WidgetId::new(),
+            preferred: Size::new(50.0, 30.0),
+        };
+        let w2 = TestWidget {
+            id: WidgetId::new(),
+            preferred: Size::new(50.0, 30.0),
+        };
+        let children: Vec<&dyn Widget> = vec![&w1, &w2];
+
+        let layout = FlexLayout::column();
+        let parent = Rect::new(0.0, 0.0, 200.0, 200.0);
+        let rects = layout.compute_with_flex(parent, &children, &[0.0, 1.0]);
+
+        assert_eq!(rects.len(), 2);
+        assert_eq!(
+            rects[0].height, 30.0,
+            "flex_grow=0 should use preferred height only"
+        );
     }
 }

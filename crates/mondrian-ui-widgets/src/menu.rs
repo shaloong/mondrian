@@ -79,7 +79,6 @@ impl Widget for Dropdown {
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
         if self.open {
-            // When open: handle item hover and click
             match event {
                 UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
                     let menu_y = self.bounds.y + 28.0;
@@ -96,7 +95,6 @@ impl Widget for Dropdown {
                             return EventResult::Handled;
                         }
                     }
-                    // Click outside menu → close
                     if !self.bounds.contains(*position) {
                         self.open = false;
                         return EventResult::Handled;
@@ -115,15 +113,16 @@ impl Widget for Dropdown {
                     });
                     return EventResult::Handled;
                 }
-                _ => return EventResult::Handled,
-            }
-        } else {
-            // Closed: click to open
-            if let UiEvent::MouseDown { position, button: MouseButton::Left, .. } = event {
-                if self.bounds.contains(*position) {
-                    self.open = true;
+                UiEvent::KeyDown { key: KeyCode::Escape, .. } => {
+                    self.open = false;
                     return EventResult::Handled;
                 }
+                _ => {}
+            }
+        } else if let UiEvent::MouseDown { position, button: MouseButton::Left, .. } = event {
+            if self.bounds.contains(*position) {
+                self.open = true;
+                return EventResult::Handled;
             }
         }
         EventResult::Ignored
@@ -132,6 +131,8 @@ impl Widget for Dropdown {
     fn paint(&self, ctx: &mut PaintContext) {
         let tokens = &ctx.theme.colors;
         let spacing = &ctx.theme.spacing;
+
+        let font_size = ctx.theme.typography.body.font_size;
 
         // Trigger button
         let btn_rect = Rect::new(self.bounds.x, self.bounds.y, self.bounds.width, 28.0);
@@ -146,7 +147,7 @@ impl Widget for Dropdown {
         if !self.label.is_empty() {
             ctx.encoder.draw_text(
                 &self.label,
-                13.0,
+                font_size,
                 Point::new(btn_rect.x + 8.0, btn_rect.y + 5.0),
                 tokens.foreground,
             );
@@ -199,7 +200,7 @@ impl Widget for Dropdown {
                 // Item label
                 ctx.encoder.draw_text(
                     &item.label,
-                    13.0,
+                    font_size,
                     Point::new(item_rect.x + 6.0, item_rect.y + 5.0),
                     if item.enabled {
                         tokens.foreground

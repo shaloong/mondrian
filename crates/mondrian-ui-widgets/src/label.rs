@@ -23,7 +23,7 @@ impl Label {
             text: text.into(),
             bounds: Rect::ZERO,
             color: Color::WHITE,
-            font_size: 14.0,
+            font_size: 14.0, // body default; overridden in paint() from theme
         }
     }
 

@@ -10,7 +10,6 @@ use mondrian_ui_core::{EventResult, UiEvent, Widget};
 pub struct TextInput {
     id: WidgetId,
     text: String,
-    #[allow(dead_code)]
     placeholder: String,
     bounds: Rect,
     cursor: usize,
@@ -56,8 +55,8 @@ impl Widget for TextInput {
         self.id
     }
 
-    fn measure(&self, _constraint: LayoutConstraint) -> Size {
-        Size::new(200.0, 28.0)
+    fn measure(&self, constraint: LayoutConstraint) -> Size {
+        constraint.constrain(Size::new(200.0, 28.0))
     }
 
     fn layout(&mut self, bounds: Rect) {
@@ -127,7 +126,8 @@ impl Widget for TextInput {
                 _ => EventResult::Ignored,
             },
             UiEvent::TextInput(ch) if self.focused => {
-                self.text.insert(self.cursor_char_idx(), ch.chars().next().unwrap_or(' '));
+                let insert_idx = self.cursor_byte_idx();
+                self.text.insert(insert_idx, ch.chars().next().unwrap_or(' '));
                 self.cursor += 1;
                 EventResult::Handled
             }
@@ -138,6 +138,7 @@ impl Widget for TextInput {
     fn paint(&self, ctx: &mut PaintContext) {
         let tokens = &ctx.theme.colors;
         let spacing = &ctx.theme.spacing;
+        let font_size = ctx.theme.typography.body.font_size;
 
         let bg = if self.focused {
             tokens.popover
@@ -149,32 +150,35 @@ impl Widget for TextInput {
         ctx.encoder.draw_rect(self.bounds, bg, spacing.radius_sm);
         ctx.encoder.draw_rect(self.bounds, border, 0.0);
 
-        // Cursor bar when focused
-        if self.focused {
-            let cursor_x = self.bounds.x + 8.0 + self.cursor as f32 * 8.0;
-            let cy = self.bounds.y + 4.0;
-            let ch = self.bounds.height - 8.0;
-            ctx.encoder.draw_line(
-                Point::new(cursor_x, cy),
-                Point::new(cursor_x, cy + ch),
-                1.0,
-                tokens.foreground,
-            );
-        }
+        let text_x = self.bounds.x + 8.0;
+        let text_y = self.bounds.y + (self.bounds.height - font_size * 1.3).max(0.0) * 0.5;
 
-        // Text drawn by app-level TextRenderer
         if !self.text.is_empty() {
+            // Cursor bar when focused
+            if self.focused {
+                let cursor_x =
+                    text_x + estimate_text_width(&self.text[..self.cursor_byte_idx()], font_size);
+                let cy = self.bounds.y + 4.0;
+                let ch = self.bounds.height - 8.0;
+                ctx.encoder.draw_line(
+                    Point::new(cursor_x, cy),
+                    Point::new(cursor_x, cy + ch),
+                    1.0,
+                    tokens.foreground,
+                );
+            }
+
             ctx.encoder.draw_text(
                 &self.text,
-                13.0,
-                Point::new(self.bounds.x + 8.0, self.bounds.y + 5.0),
+                font_size,
+                Point::new(text_x, text_y),
                 tokens.foreground,
             );
-        } else if self.focused {
+        } else {
             ctx.encoder.draw_text(
                 &self.placeholder,
-                13.0,
-                Point::new(self.bounds.x + 8.0, self.bounds.y + 5.0),
+                font_size,
+                Point::new(text_x, text_y),
                 tokens.muted_foreground,
             );
         }
@@ -186,7 +190,7 @@ impl Widget for TextInput {
 }
 
 impl TextInput {
-    fn cursor_char_idx(&self) -> usize {
+    fn cursor_byte_idx(&self) -> usize {
         self.text
             .char_indices()
             .nth(self.cursor)

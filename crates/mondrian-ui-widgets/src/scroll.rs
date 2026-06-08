@@ -138,11 +138,17 @@ impl Widget for ScrollView {
     }
 
     fn children(&self) -> &[Box<dyn Widget>] {
-        &[]
+        match &self.child {
+            Some(c) => std::slice::from_ref(c),
+            None => &[],
+        }
     }
 
     fn children_mut(&mut self) -> &mut [Box<dyn Widget>] {
-        &mut []
+        match &mut self.child {
+            Some(c) => std::slice::from_mut(c),
+            None => &mut [],
+        }
     }
 }
 

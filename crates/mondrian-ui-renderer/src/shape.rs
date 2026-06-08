@@ -151,10 +151,10 @@ pub fn generate_rect_vertices(
 /// 对应 WGSL 片段着色器 let d = sd_rounded_box_px(p, size, r)：
 /// - p — 像素坐标 (0..size)，从矩形左上角开始
 /// - size — 矩形尺寸（像素）
-/// - r -- 圆角半径（像素，已 clamp 至 min(size) * 0.5）
-
+/// - r — 圆角半径（像素，已 clamp 至 min(size) * 0.5）
 ///
 /// 返回值为负数表示在形状内部，0 表示在边界上，正数表示在外部。
+#[cfg(test)]
 fn sd_rounded_box_px_rust(p: [f32; 2], size: [f32; 2], r: f32) -> f32 {
     let half_x = size[0] * 0.5;
     let half_y = size[1] * 0.5;

@@ -99,11 +99,19 @@ impl Widget for Container {
     }
 
     fn children(&self) -> &[Box<dyn Widget>] {
-        &[]
+        // SAFETY: transmute Option<&Box<dyn Widget>> to &[Box<dyn Widget>]
+        // We only have 0 or 1 child, returned as a slice for the trait.
+        match &self.child {
+            Some(c) => std::slice::from_ref(c),
+            None => &[],
+        }
     }
 
     fn children_mut(&mut self) -> &mut [Box<dyn Widget>] {
-        &mut []
+        match &mut self.child {
+            Some(c) => std::slice::from_mut(c),
+            None => &mut [],
+        }
     }
 }
 
@@ -139,11 +147,15 @@ mod tests {
     }
 
     #[test]
-    fn container_children_returns_empty_slice() {
+    fn container_children_reports_child() {
         let child = Spacer::new(10.0, 10.0);
         let c = Container::new(Some(Box::new(child)));
-        // Known issue: Container::children() returns empty,
-        // children are handled manually in paint/layout/event
+        assert_eq!(c.children().len(), 1);
+    }
+
+    #[test]
+    fn container_without_child_returns_empty_children() {
+        let c = Container::new(None);
         assert!(c.children().is_empty());
     }
 

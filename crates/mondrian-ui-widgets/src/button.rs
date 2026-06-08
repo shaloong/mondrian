@@ -50,9 +50,10 @@ impl Widget for Button {
         self.id
     }
 
-    fn measure(&self, _constraint: LayoutConstraint) -> Size {
+    fn measure(&self, constraint: LayoutConstraint) -> Size {
         let char_count = self.label.chars().count() as f32;
-        Size::new(12.0 * char_count + 24.0, 28.0)
+        let preferred = Size::new(12.0 * char_count + 24.0, 28.0);
+        constraint.constrain(preferred)
     }
 
     fn layout(&mut self, bounds: Rect) {
@@ -68,13 +69,16 @@ impl Widget for Button {
                 EventResult::Handled
             }
             UiEvent::MouseUp { position, button: MouseButton::Left, .. } => {
-                if self.state == ButtonState::Pressed && self.bounds.contains(*position) {
-                    if let Some(action) = &self.on_click {
-                        (ctx.dispatch)(action.clone());
+                if self.state == ButtonState::Pressed {
+                    if self.bounds.contains(*position) {
+                        if let Some(action) = &self.on_click {
+                            (ctx.dispatch)(action.clone());
+                        }
                     }
+                    self.state = ButtonState::Normal;
+                    return EventResult::Handled;
                 }
-                self.state = ButtonState::Normal;
-                EventResult::Handled
+                EventResult::Ignored
             }
             UiEvent::MouseMove { position, .. } if self.state != ButtonState::Pressed => {
                 let was_hovered = self.state == ButtonState::Hovered;
@@ -103,6 +107,7 @@ impl Widget for Button {
     fn paint(&self, ctx: &mut PaintContext) {
         let tokens = &ctx.theme.colors;
         let spacing = &ctx.theme.spacing;
+        let font_size = ctx.theme.typography.button.font_size;
 
         let bg = match self.state {
             ButtonState::Normal => tokens.card,
@@ -112,7 +117,6 @@ impl Widget for Button {
 
         ctx.encoder.draw_rect(self.bounds, bg, spacing.radius_md);
         if !self.label.is_empty() {
-            let font_size = 13.0;
             let tx = mondrian_ui_core::types::center_text_x(self.bounds, &self.label, font_size);
             let ty = self.bounds.y + (self.bounds.height - font_size * 1.3).max(0.0) * 0.5;
             ctx.encoder.draw_text(

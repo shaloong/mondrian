@@ -19,20 +19,6 @@ use mondrian_editor_state::Action;
 use mondrian_platform::PlatformService;
 use mondrian_ui_theme::Theme;
 
-/// Widget 布局/事件上下文（event 方法使用）
-pub struct WidgetContext<'a> {
-    /// 当前 Widget 的 bounds（布局后的）
-    pub bounds: Rect,
-    /// 焦点管理器
-    pub focus: &'a mut dyn FocusManager,
-    /// 快捷键管理器
-    pub shortcut: &'a mut dyn ShortcutManager,
-    /// Tooltip 管理器
-    pub tooltip: &'a mut dyn TooltipManager,
-    /// 平台服务
-    pub platform: &'a dyn PlatformService,
-}
-
 /// 事件上下文（event 方法使用，可 dispatch Action）
 pub struct EventContext<'a> {
     /// 焦点管理器

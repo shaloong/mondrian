@@ -25,4 +25,4 @@ pub use shortcut::{ShortcutBinding, ShortcutManager, ShortcutScope};
 pub use tooltip::{TooltipManager, TooltipState};
 pub use tree::{TreeWalker, WidgetTree};
 pub use types::*;
-pub use widget::{DrawCommandEncoder, EventContext, PaintContext, Widget, WidgetContext};
+pub use widget::{DrawCommandEncoder, EventContext, PaintContext, Widget};

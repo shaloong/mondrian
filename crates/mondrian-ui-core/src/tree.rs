@@ -33,19 +33,14 @@ impl TreeWalker {
         root.layout(bounds);
     }
 
-    /// 递归执行 paint：前序遍历
+    /// 递归执行 paint。
     ///
-    /// 按深度优先顺序收集绘制命令到 encoder。
+    /// 只调用 root.paint()。每个 Widget 的 paint() 负责递归绘制其子节点。
+    /// 这样 ScrollView 等容器可以在绘制子节点前设置 clip/transform。
     pub fn paint(root: &dyn Widget, encoder: &mut dyn DrawCommandEncoder, theme: &Theme) {
         let clip_rect = Rect::new(0.0, 0.0, f32::MAX, f32::MAX);
-        {
-            let mut ctx = PaintContext { encoder, theme, clip_rect };
-            root.paint(&mut ctx);
-        }
-
-        for child in root.children() {
-            Self::paint(child.as_ref(), encoder, theme);
-        }
+        let mut ctx = PaintContext { encoder, theme, clip_rect };
+        root.paint(&mut ctx);
     }
 
     /// 在 Widget 树中查找下一个可聚焦的 Widget（Tab 顺序）
@@ -211,20 +206,18 @@ mod tests {
     }
 
     #[test]
-    fn tree_walker_paint_recurse_into_children() {
+    fn tree_walker_paint_calls_root_paint_only() {
         let leaf1 = LeafWidget::new();
         let leaf2 = LeafWidget::new();
         let parent = ParentWidget::new(vec![Box::new(leaf1), Box::new(leaf2)]);
-        let children = parent.children();
 
-        assert_eq!(children.len(), 2);
-        // TreeWalker will iterate children and call paint on each
         let mut encoder = MockEncoder::new();
         let theme = mondrian_ui_theme::ThemePreset::Dark.build();
 
         TreeWalker::paint(&parent, &mut encoder, &theme);
-        // root (1) + child1 (1) + child2 (1) = 3 rects
-        assert_eq!(encoder.rect_count, 3);
+        // Only root.paint() is called by TreeWalker.
+        // Children are painted by the parent widget's own paint() method.
+        assert_eq!(encoder.rect_count, 1);
     }
 
     // ═══════════════════════════════════════════════════════════════════════

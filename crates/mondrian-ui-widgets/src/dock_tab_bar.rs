@@ -73,7 +73,7 @@ impl Widget for DockTabBar {
     }
 
     fn measure(&self, constraint: LayoutConstraint) -> Size {
-        Size::new(constraint.max.width.min(600.0), self.bar_height)
+        constraint.constrain(Size::new(constraint.max.width.min(600.0), self.bar_height))
     }
 
     fn layout(&mut self, bounds: Rect) {
@@ -137,7 +137,7 @@ impl Widget for DockTabBar {
             ctx.encoder.draw_rect(inset, fill, spacing.radius_sm);
 
             if !tab.label.is_empty() {
-                let font_size = 13.0;
+                let font_size = ctx.theme.typography.tab_label.font_size;
                 let tx = mondrian_ui_core::types::center_text_x(inset, &tab.label, font_size);
                 let ty = inset.y + (inset.height - font_size * 1.3).max(0.0) * 0.5;
                 let pos = mondrian_ui_core::types::snap_point(Point::new(tx, ty));

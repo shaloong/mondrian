@@ -71,10 +71,16 @@ impl Widget for PanelSlot {
     }
 
     fn children(&self) -> &[Box<dyn Widget>] {
-        &[]
+        match &self.content {
+            Some(c) => std::slice::from_ref(c),
+            None => &[],
+        }
     }
 
     fn children_mut(&mut self) -> &mut [Box<dyn Widget>] {
-        &mut []
+        match &mut self.content {
+            Some(c) => std::slice::from_mut(c),
+            None => &mut [],
+        }
     }
 }

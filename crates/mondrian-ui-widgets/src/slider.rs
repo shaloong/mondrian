@@ -42,8 +42,8 @@ impl Widget for Slider {
         self.id
     }
 
-    fn measure(&self, _constraint: LayoutConstraint) -> Size {
-        Size::new(100.0, self.thumb_size + 4.0)
+    fn measure(&self, constraint: LayoutConstraint) -> Size {
+        constraint.constrain(Size::new(100.0, self.thumb_size + 4.0))
     }
 
     fn layout(&mut self, bounds: Rect) {
@@ -76,13 +76,18 @@ impl Widget for Slider {
         let spacing = &ctx.theme.spacing;
 
         let track_y = self.bounds.y + self.bounds.height * 0.5 - self.track_height * 0.5;
+        let range = self.max - self.min;
 
         // Track background
         let track_bg = Rect::new(self.bounds.x, track_y, self.bounds.width, self.track_height);
         ctx.encoder.draw_rect(track_bg, tokens.accent, spacing.radius_sm);
 
-        // Filled track
-        let ratio = (self.value - self.min) / (self.max - self.min);
+        // Filled track (guard against zero range)
+        let ratio = if range > 0.0 {
+            ((self.value - self.min) / range).clamp(0.0, 1.0)
+        } else {
+            0.5
+        };
         let fill_w = self.bounds.width * ratio;
         if fill_w > 0.0 {
             let track_fill = Rect::new(self.bounds.x, track_y, fill_w, self.track_height);
@@ -111,8 +116,12 @@ impl Widget for Slider {
 
 impl Slider {
     fn update_value(&mut self, position: &Point) {
+        let range = self.max - self.min;
+        if range <= 0.0 {
+            return;
+        }
         let ratio = ((position.x - self.bounds.x) / self.bounds.width).clamp(0.0, 1.0);
-        self.value = self.min + (self.max - self.min) * ratio;
+        self.value = self.min + range * ratio;
     }
 }
 

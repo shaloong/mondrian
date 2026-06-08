@@ -94,7 +94,19 @@ impl Widget for DockSplitter {
     }
 
     fn measure(&self, constraint: LayoutConstraint) -> Size {
-        constraint.constrain(Size::new(200.0, 100.0))
+        let child_a = self.children.first().map(|c| c.measure(constraint)).unwrap_or(Size::ZERO);
+        let child_b = self.children.get(1).map(|c| c.measure(constraint)).unwrap_or(Size::ZERO);
+        let preferred = match self.direction {
+            SplitDirection::Horizontal => Size::new(
+                child_a.width + child_b.width + self.handle_size,
+                child_a.height.max(child_b.height),
+            ),
+            SplitDirection::Vertical => Size::new(
+                child_a.width.max(child_b.width),
+                child_a.height + child_b.height + self.handle_size,
+            ),
+        };
+        constraint.constrain(preferred)
     }
 
     fn layout(&mut self, bounds: Rect) {
@@ -237,8 +249,10 @@ impl Widget for DockSplitter {
             }
         }
 
-        // 子节点绘制由 TreeWalker 通过 children() 递归完成；
-        // DockSplitter::paint 只负责绘制分割线把手。
+        // Paint children
+        for child in &self.children {
+            child.paint(ctx);
+        }
     }
 
     fn hit_test(&self, point: Point) -> bool {

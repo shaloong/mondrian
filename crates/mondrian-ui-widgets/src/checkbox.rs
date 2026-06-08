@@ -14,6 +14,7 @@ pub struct Checkbox {
     checked: bool,
     bounds: Rect,
     hovered: bool,
+    pressed: bool,
     pub on_toggle: Option<Action>,
 }
 
@@ -25,6 +26,7 @@ impl Checkbox {
             checked,
             bounds: Rect::ZERO,
             hovered: false,
+            pressed: false,
             on_toggle: None,
         }
     }
@@ -48,9 +50,10 @@ impl Widget for Checkbox {
         self.id
     }
 
-    fn measure(&self, _constraint: LayoutConstraint) -> Size {
+    fn measure(&self, constraint: LayoutConstraint) -> Size {
         let char_count = self.label.chars().count() as f32;
-        Size::new(16.0 + 8.0 + 12.0 * char_count, 22.0)
+        let preferred = Size::new(16.0 + 8.0 + 12.0 * char_count, 22.0);
+        constraint.constrain(preferred)
     }
 
     fn layout(&mut self, bounds: Rect) {
@@ -62,10 +65,17 @@ impl Widget for Checkbox {
             UiEvent::MouseDown { position, button: MouseButton::Left, .. }
                 if self.bounds.contains(*position) =>
             {
-                self.checked = !self.checked;
-                if let Some(action) = &self.on_toggle {
-                    (ctx.dispatch)(action.clone());
+                self.pressed = true;
+                EventResult::Handled
+            }
+            UiEvent::MouseUp { position, button: MouseButton::Left, .. } => {
+                if self.pressed && self.bounds.contains(*position) {
+                    self.checked = !self.checked;
+                    if let Some(action) = &self.on_toggle {
+                        (ctx.dispatch)(action.clone());
+                    }
                 }
+                self.pressed = false;
                 EventResult::Handled
             }
             UiEvent::MouseMove { position, .. } => {
@@ -82,6 +92,7 @@ impl Widget for Checkbox {
             }
             UiEvent::FocusLost => {
                 self.hovered = false;
+                self.pressed = false;
                 EventResult::Handled
             }
             _ => EventResult::Ignored,
@@ -136,11 +147,17 @@ impl Widget for Checkbox {
             );
         }
 
-        // Label text drawn by app-level TextRenderer
+        // Label text
         if !self.label.is_empty() {
+            let font_size = ctx.theme.typography.body.font_size;
             let tx = self.bounds.x + 20.0;
-            let ty = self.bounds.y + (self.bounds.height - 12.0) * 0.5;
-            ctx.encoder.draw_text(&self.label, 13.0, Point::new(tx, ty), tokens.foreground);
+            let ty = self.bounds.y + (self.bounds.height - font_size * 1.3).max(0.0) * 0.5;
+            ctx.encoder.draw_text(
+                &self.label,
+                font_size,
+                Point::new(tx, ty),
+                tokens.foreground,
+            );
         }
     }
 
@@ -181,15 +198,25 @@ mod tests {
         };
         let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch_fn);
 
+        let pos = Point::new(50.0, 11.0);
         cb.event(
             &UiEvent::MouseDown {
-                position: Point::new(50.0, 11.0),
+                position: pos,
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
             &mut ctx,
         );
-        assert!(cb.is_checked());
+        assert!(!cb.is_checked()); // not yet toggled on MouseDown
+        cb.event(
+            &UiEvent::MouseUp {
+                position: pos,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert!(cb.is_checked()); // toggled on MouseUp
     }
 
     #[test]
@@ -202,6 +229,39 @@ mod tests {
         let mut t = DummyTooltip;
         let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
 
+        let pos = Point::new(50.0, 11.0);
+        let md = UiEvent::MouseDown {
+            position: pos,
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        };
+        let mu = UiEvent::MouseUp {
+            position: pos,
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        };
+        cb.event(&md, &mut ctx);
+        cb.event(&mu, &mut ctx);
+        assert!(cb.is_checked());
+        cb.event(&md, &mut ctx);
+        cb.event(&mu, &mut ctx);
+        assert!(!cb.is_checked());
+    }
+
+    #[test]
+    fn checkbox_release_outside_no_toggle() {
+        let mut cb = Checkbox::new("Opt", false);
+        cb.layout(Rect::new(0.0, 0.0, 100.0, 22.0));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let cell = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch_fn);
+
         cb.event(
             &UiEvent::MouseDown {
                 position: Point::new(50.0, 11.0),
@@ -211,14 +271,15 @@ mod tests {
             &mut ctx,
         );
         cb.event(
-            &UiEvent::MouseDown {
-                position: Point::new(50.0, 11.0),
+            &UiEvent::MouseUp {
+                position: Point::new(200.0, 200.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
             &mut ctx,
         );
         assert!(!cb.is_checked());
+        assert!(cell.into_inner().is_empty());
     }
 
     #[test]
@@ -242,9 +303,18 @@ mod tests {
         };
         let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch_fn);
 
+        let pos = Point::new(50.0, 11.0);
         cb.event(
             &UiEvent::MouseDown {
-                position: Point::new(50.0, 11.0),
+                position: pos,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        cb.event(
+            &UiEvent::MouseUp {
+                position: pos,
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
