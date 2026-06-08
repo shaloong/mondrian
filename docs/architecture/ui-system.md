@@ -89,6 +89,15 @@ Slider value mapping uses the same thumb-centered track for painting and
 pointer updates. The thumb rect must remain inside widget bounds; if a parent
 gives a short row, the thumb shrinks vertically instead of being clipped.
 
+## Overlays
+
+Dropdowns, context menus, and tooltips derive event hit regions and paint
+geometry from the same rect helpers. Disabled menu items consume pointer input
+without dispatching actions or closing the overlay; outside clicks close open
+menus. Tooltip requests preserve their delay timer when the same tooltip is
+reported repeatedly during hover, and tooltip painting clamps to the current
+clip rect.
+
 ## Rendering Notes
 
 Widgets emit draw commands only. Checkbox checkmarks are vector line commands,

@@ -40,13 +40,29 @@ impl ContextMenu {
         self.visible
     }
 
-    fn menu_rect(&self, idx: usize) -> Rect {
+    fn bounds_rect(&self) -> Rect {
+        Rect::new(
+            self.anchor.x,
+            self.anchor.y,
+            self.min_width + 8.0,
+            8.0 + self.items.len() as f32 * self.item_height,
+        )
+    }
+
+    fn item_rect(&self, idx: usize) -> Rect {
         Rect::new(
             self.anchor.x + 4.0,
             self.anchor.y + 4.0 + idx as f32 * self.item_height,
             self.min_width,
             self.item_height,
         )
+    }
+
+    fn item_at(&self, position: Point) -> Option<usize> {
+        self.items
+            .iter()
+            .enumerate()
+            .position(|(i, _)| self.item_rect(i).contains(position))
     }
 }
 
@@ -75,24 +91,20 @@ impl Widget for ContextMenu {
 
         match event {
             UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
-                for (i, item) in self.items.iter().enumerate() {
-                    if self.menu_rect(i).contains(*position) && item.enabled {
-                        (ctx.dispatch)(item.action.clone());
+                if let Some(index) = self.item_at(*position) {
+                    if self.items[index].enabled {
+                        (ctx.dispatch)(self.items[index].action.clone());
                         self.visible = false;
-                        return EventResult::Handled;
                     }
+                    return EventResult::Handled;
                 }
-                // Click outside → close
-                self.visible = false;
+                if !self.bounds_rect().contains(*position) {
+                    self.visible = false;
+                }
                 EventResult::Handled
             }
             UiEvent::MouseMove { position, .. } => {
-                self.hovered = self
-                    .items
-                    .iter()
-                    .enumerate()
-                    .find(|(i, _)| self.menu_rect(*i).contains(*position))
-                    .map(|(i, _)| i);
+                self.hovered = self.item_at(*position);
                 EventResult::Handled
             }
             UiEvent::MouseDown { button: MouseButton::Right, .. } => {
@@ -111,14 +123,13 @@ impl Widget for ContextMenu {
         let tokens = &ctx.theme.colors;
         let spacing = &ctx.theme.spacing;
 
-        let total_h = 8.0 + self.items.len() as f32 * self.item_height;
-        let bg = Rect::new(self.anchor.x, self.anchor.y, self.min_width + 8.0, total_h);
+        let bg = self.bounds_rect();
 
-        ctx.encoder.draw_rect(bg, tokens.popover, spacing.radius_md);
-        ctx.encoder.draw_rect(bg, tokens.border, 0.0);
+        ctx.encoder.draw_rect(bg, tokens.border, spacing.radius_md);
+        ctx.encoder.draw_rect(bg.inset(1.0, 1.0), tokens.popover, spacing.radius_md);
 
         for (i, item) in self.items.iter().enumerate() {
-            let r = self.menu_rect(i);
+            let r = self.item_rect(i);
             let fill = if !item.enabled {
                 tokens.popover
             } else if self.hovered == Some(i) {
@@ -208,5 +219,74 @@ mod tests {
             &mut ctx,
         );
         assert!(!menu.visible);
+    }
+
+    #[test]
+    fn context_menu_disabled_item_consumes_without_dispatch_or_close() {
+        let mut menu = ContextMenu::new(
+            Point::new(100.0, 100.0),
+            vec![
+                MenuItem::new("Copy", Action::Copy),
+                MenuItem::new("Disabled", Action::Paste).disabled(),
+            ],
+        );
+        menu.layout(Rect::ZERO);
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let cell = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch_fn);
+
+        let result = menu.event(
+            &UiEvent::MouseDown {
+                position: Point::new(120.0, 138.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert!(menu.visible);
+        assert!(cell.into_inner().is_empty());
+    }
+
+    #[test]
+    fn context_menu_hover_tracks_items() {
+        let mut menu = ContextMenu::new(
+            Point::new(100.0, 100.0),
+            vec![
+                MenuItem::new("Cut", Action::Cut),
+                MenuItem::new("Copy", Action::Copy),
+            ],
+        );
+        menu.layout(Rect::ZERO);
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
+
+        menu.event(
+            &UiEvent::MouseMove {
+                position: Point::new(120.0, 138.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(menu.hovered, Some(1));
+
+        menu.event(
+            &UiEvent::MouseMove {
+                position: Point::new(10.0, 10.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(menu.hovered, None);
     }
 }

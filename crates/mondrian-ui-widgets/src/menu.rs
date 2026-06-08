@@ -52,6 +52,39 @@ impl Dropdown {
             item_height: 24.0,
         }
     }
+
+    fn trigger_rect(&self) -> Rect {
+        Rect::new(self.bounds.x, self.bounds.y, self.bounds.width, 28.0)
+    }
+
+    fn menu_width(&self) -> f32 {
+        self.bounds.width.max(120.0)
+    }
+
+    fn menu_rect(&self) -> Rect {
+        Rect::new(
+            self.bounds.x,
+            self.bounds.y + 28.0,
+            self.menu_width(),
+            self.item_height * self.items.len() as f32 + 4.0,
+        )
+    }
+
+    fn item_rect(&self, index: usize) -> Rect {
+        Rect::new(
+            self.bounds.x + 2.0,
+            self.bounds.y + 28.0 + index as f32 * self.item_height,
+            self.menu_width() - 4.0,
+            self.item_height,
+        )
+    }
+
+    fn item_at(&self, position: Point) -> Option<usize> {
+        self.items
+            .iter()
+            .enumerate()
+            .position(|(i, _)| self.item_rect(i).contains(position))
+    }
 }
 
 impl Widget for Dropdown {
@@ -81,40 +114,33 @@ impl Widget for Dropdown {
         if self.open {
             match event {
                 UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
-                    let menu_y = self.bounds.y + 28.0;
-                    for (i, _item) in self.items.iter().enumerate() {
-                        let item_rect = Rect::new(
-                            self.bounds.x,
-                            menu_y + i as f32 * self.item_height,
-                            self.bounds.width.max(120.0),
-                            self.item_height,
-                        );
-                        if item_rect.contains(*position) && self.items[i].enabled {
-                            (ctx.dispatch)(self.items[i].action.clone());
-                            self.open = false;
-                            return EventResult::Handled;
-                        }
-                    }
-                    if !self.bounds.contains(*position) {
+                    if self.trigger_rect().contains(*position) {
                         self.open = false;
+                        self.hovered_index = None;
                         return EventResult::Handled;
                     }
+                    if let Some(i) = self.item_at(*position) {
+                        if self.items[i].enabled {
+                            (ctx.dispatch)(self.items[i].action.clone());
+                            self.open = false;
+                            self.hovered_index = None;
+                        }
+                        return EventResult::Handled;
+                    }
+                    if !self.menu_rect().contains(*position) {
+                        self.open = false;
+                        self.hovered_index = None;
+                        return EventResult::Handled;
+                    }
+                    return EventResult::Handled;
                 }
                 UiEvent::MouseMove { position, .. } => {
-                    let menu_y = self.bounds.y + 28.0;
-                    self.hovered_index = self.items.iter().enumerate().position(|(i, _)| {
-                        let r = Rect::new(
-                            self.bounds.x,
-                            menu_y + i as f32 * self.item_height,
-                            self.bounds.width.max(120.0),
-                            self.item_height,
-                        );
-                        r.contains(*position)
-                    });
+                    self.hovered_index = self.item_at(*position);
                     return EventResult::Handled;
                 }
                 UiEvent::KeyDown { key: KeyCode::Escape, .. } => {
                     self.open = false;
+                    self.hovered_index = None;
                     return EventResult::Handled;
                 }
                 _ => {}
@@ -135,7 +161,7 @@ impl Widget for Dropdown {
         let font_size = ctx.theme.typography.body.font_size;
 
         // Trigger button
-        let btn_rect = Rect::new(self.bounds.x, self.bounds.y, self.bounds.width, 28.0);
+        let btn_rect = self.trigger_rect();
         let bg = if self.open {
             tokens.primary
         } else {
@@ -169,27 +195,14 @@ impl Widget for Dropdown {
 
         // Menu items
         if self.open {
-            let menu_y = self.bounds.y + 28.0;
-            let menu_w = self.bounds.width.max(120.0);
-
             // Menu background
-            let menu_bg = Rect::new(
-                self.bounds.x,
-                menu_y,
-                menu_w,
-                self.item_height * self.items.len() as f32 + 4.0,
-            );
+            let menu_bg = self.menu_rect();
             ctx.encoder.draw_rect(menu_bg, tokens.border, 0.0);
             ctx.encoder
                 .draw_rect(menu_bg.inset(1.0, 1.0), tokens.popover, spacing.radius_sm);
 
             for (i, item) in self.items.iter().enumerate() {
-                let item_rect = Rect::new(
-                    self.bounds.x + 2.0,
-                    menu_y + i as f32 * self.item_height,
-                    menu_w - 4.0,
-                    self.item_height,
-                );
+                let item_rect = self.item_rect(i);
 
                 let fill = if self.hovered_index == Some(i) && item.enabled {
                     tokens.accent
@@ -229,14 +242,7 @@ impl Widget for Dropdown {
             return true;
         }
         if self.open {
-            let menu_h = self.item_height * self.items.len() as f32 + 4.0;
-            let menu_rect = Rect::new(
-                self.bounds.x,
-                self.bounds.y + 28.0,
-                self.bounds.width.max(120.0),
-                menu_h,
-            );
-            return menu_rect.contains(point);
+            return self.menu_rect().contains(point);
         }
         false
     }
@@ -330,5 +336,93 @@ mod tests {
         let actions = cell.into_inner();
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0], Action::SaveProject);
+    }
+
+    #[test]
+    fn dropdown_click_trigger_when_open_closes() {
+        let mut d = Dropdown::new(
+            "File",
+            vec![MenuItem::new("Open", Action::OpenProject("".into()))],
+        );
+        d.layout(Rect::new(0.0, 0.0, 120.0, 28.0));
+        d.open = true;
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
+
+        let result = d.event(
+            &UiEvent::MouseDown {
+                position: Point::new(60.0, 14.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert!(!d.open);
+    }
+
+    #[test]
+    fn dropdown_disabled_item_consumes_without_dispatch_or_close() {
+        let mut d = Dropdown::new(
+            "File",
+            vec![
+                MenuItem::new("Save", Action::SaveProject),
+                MenuItem::new("Disabled", Action::CloseProject).disabled(),
+            ],
+        );
+        d.layout(Rect::new(0.0, 0.0, 120.0, 28.0));
+        d.open = true;
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let cell = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch_fn);
+
+        let result = d.event(
+            &UiEvent::MouseDown {
+                position: Point::new(60.0, 64.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert!(d.open);
+        assert!(cell.into_inner().is_empty());
+    }
+
+    #[test]
+    fn dropdown_outside_click_closes_when_open() {
+        let mut d = Dropdown::new(
+            "File",
+            vec![MenuItem::new("Open", Action::OpenProject("".into()))],
+        );
+        d.layout(Rect::new(0.0, 0.0, 120.0, 28.0));
+        d.open = true;
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
+
+        d.event(
+            &UiEvent::MouseDown {
+                position: Point::new(300.0, 300.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert!(!d.open);
     }
 }

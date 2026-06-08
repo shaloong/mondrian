@@ -3385,6 +3385,7 @@ dependencies = [
 name = "mondrian-ui-tooltip"
 version = "0.1.0"
 dependencies = [
+ "glam",
  "mondrian-core",
  "mondrian-ui-core",
  "mondrian-ui-theme",
