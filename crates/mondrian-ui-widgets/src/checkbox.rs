@@ -118,31 +118,51 @@ impl Widget for Checkbox {
 
         ctx.encoder.draw_rect(box_rect, fill, spacing.radius_sm);
 
-        // Border via slightly larger background rect behind fill
+        // Border lines around the checkbox box
         let border_color = if self.checked || self.hovered {
             tokens.primary
         } else {
             tokens.border
         };
-        let border_inset = 1.0;
-        let border_rect = box_rect.inset(-border_inset, -border_inset);
-        // Redraw fill on top of the border rect at original size
-        ctx.encoder
-            .draw_rect(border_rect, border_color, spacing.radius_sm + border_inset);
-        ctx.encoder.draw_rect(box_rect, fill, spacing.radius_sm);
+        let bx = box_rect.x;
+        let by = box_rect.y;
+        let bw = box_rect.width;
+        let bh = box_rect.height;
+        ctx.encoder.draw_line(
+            Point::new(bx, by),
+            Point::new(bx + bw, by),
+            1.0,
+            border_color,
+        );
+        ctx.encoder.draw_line(
+            Point::new(bx, by + bh),
+            Point::new(bx + bw, by + bh),
+            1.0,
+            border_color,
+        );
+        ctx.encoder.draw_line(
+            Point::new(bx, by),
+            Point::new(bx, by + bh),
+            1.0,
+            border_color,
+        );
+        ctx.encoder.draw_line(
+            Point::new(bx + bw, by),
+            Point::new(bx + bw, by + bh),
+            1.0,
+            border_color,
+        );
 
-        // Check mark using text glyph (lines have GPU rendering issues)
+        // Check mark — egui-style V shape
         if self.checked {
-            let font_size = box_rect.height * 0.85;
+            let side = box_rect.width.min(box_rect.height);
             let cx = box_rect.x + box_rect.width * 0.5;
             let cy = box_rect.y + box_rect.height * 0.5;
-            let tw = estimate_text_width("✓", font_size);
-            ctx.encoder.draw_text(
-                "✓",
-                font_size,
-                Point::new(cx - tw * 0.5, cy - font_size * 0.55),
-                tokens.foreground,
-            );
+            let start = Point::new(cx - side * 0.20, cy + side * 0.04);
+            let mid = Point::new(cx - side * 0.04, cy + side * 0.20);
+            let end = Point::new(cx + side * 0.24, cy - side * 0.18);
+            ctx.encoder.draw_line(start, mid, 2.0, tokens.foreground);
+            ctx.encoder.draw_line(mid, end, 2.0, tokens.foreground);
         }
 
         // Label text

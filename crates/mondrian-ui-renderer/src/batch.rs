@@ -117,19 +117,22 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
 
                 let screen_start = Point::new(sx * n_start.x + tx, sy * n_start.y + ty);
                 let screen_end = Point::new(sx * n_end.x + tx, sy * n_end.y + ty);
-                let screen_hw = hw * sx.max(sy.abs()).abs();
-                let screen_nx = nx * sx.max(sy.abs()).abs();
-                let screen_ny = ny * sx.max(sy.abs()).abs();
+                // Half-width in NDC: scale pixel width exactly once
+                let ndc_scale = sx.max(sy.abs());
+                let screen_hw = hw * ndc_scale;
+                // Unit normal, not scaled — multiplied by screen_hw below
+                let off_x = nx * screen_hw;
+                let off_y = ny * screen_hw;
 
                 // Build a thin quad extruded along the line normal
-                let x0 = screen_start.x - screen_nx * screen_hw;
-                let y0 = screen_start.y - screen_ny * screen_hw;
-                let x1 = screen_start.x + screen_nx * screen_hw;
-                let y1 = screen_start.y + screen_ny * screen_hw;
-                let x2 = screen_end.x - screen_nx * screen_hw;
-                let y2 = screen_end.y - screen_ny * screen_hw;
-                let x3 = screen_end.x + screen_nx * screen_hw;
-                let y3 = screen_end.y + screen_ny * screen_hw;
+                let x0 = screen_start.x - off_x;
+                let y0 = screen_start.y - off_y;
+                let x1 = screen_start.x + off_x;
+                let y1 = screen_start.y + off_y;
+                let x2 = screen_end.x - off_x;
+                let y2 = screen_end.y - off_y;
+                let x3 = screen_end.x + off_x;
+                let y3 = screen_end.y + off_y;
 
                 let verts = vec![
                     RectVertex::new(
