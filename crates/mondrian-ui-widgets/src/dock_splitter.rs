@@ -177,12 +177,8 @@ impl Widget for DockSplitter {
                     self.layout(bounds);
                     return EventResult::Handled;
                 }
-                // 检查 hover
-                let was_hovered = self.handle_hovered;
+                // 检查 hover (don't stop propagation — let children receive MouseMove too)
                 self.handle_hovered = self.grab_rect.contains(*position);
-                if self.handle_hovered != was_hovered {
-                    return EventResult::Handled;
-                }
             }
             UiEvent::MouseUp { button: MouseButton::Left, .. } => {
                 if self.dragging {

@@ -94,19 +94,16 @@ impl Widget for Slider {
             ctx.encoder.draw_rect(track_fill, tokens.primary, spacing.radius_sm);
         }
 
-        // Thumb
+        // Thumb (use half thumb_size for a perfect circle via rounded rect)
+        let thumb_radius = self.thumb_size * 0.5;
+        let thumb_cy = self.bounds.y + (self.bounds.height - self.thumb_size).max(0.0) * 0.5;
         let thumb_x = self.bounds.x + fill_w - self.thumb_size * 0.5;
         let thumb_x = thumb_x.clamp(
             self.bounds.x,
             self.bounds.x + self.bounds.width - self.thumb_size,
         );
-        let thumb_rect = Rect::new(
-            thumb_x,
-            self.bounds.y + (self.bounds.height - self.thumb_size) * 0.5,
-            self.thumb_size,
-            self.thumb_size,
-        );
-        ctx.encoder.draw_rect(thumb_rect, tokens.primary, spacing.radius_full);
+        let thumb_rect = Rect::new(thumb_x, thumb_cy, self.thumb_size, self.thumb_size);
+        ctx.encoder.draw_rect(thumb_rect, tokens.primary, thumb_radius);
     }
 
     fn hit_test(&self, point: Point) -> bool {

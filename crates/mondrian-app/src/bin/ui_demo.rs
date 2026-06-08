@@ -8,6 +8,7 @@
 //!   Interactive: Button, Checkbox, TextInput, Slider, List, Dropdown, ContextMenu
 //!   Layout: DockSplitter, DockTabBar, PanelSlot, ScrollView
 
+use std::cell::Cell;
 use std::sync::Arc;
 
 use mondrian_core::Color;
@@ -41,6 +42,10 @@ fn demo_action(name: &str) -> Action {
         name: name.into(),
         payload: serde_json::Value::Null,
     }
+}
+
+thread_local! {
+    static TEXT_INPUT_BOUNDS: Cell<Option<Rect>> = const { Cell::new(None) };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -127,6 +132,7 @@ impl Widget for GalleryWidget {
         y += row_h + gap;
 
         self.text_input.layout(Rect::new(x0, y, col_w, row_h));
+        TEXT_INPUT_BOUNDS.with(|b| b.set(Some(Rect::new(x0, y, col_w, row_h))));
         y += row_h + gap;
 
         self.slider.layout(Rect::new(x0, y, col_w, row_h));
@@ -336,37 +342,25 @@ impl Widget for ViewerWidget {
 struct VerticalTabbedSlot {
     id: WidgetId,
     tab_bar: DockTabBar,
+    kind: SlotKind,
     content: Box<dyn Widget>,
     bounds: Rect,
+    last_active: usize,
 }
 
 impl VerticalTabbedSlot {
     fn new(kind: SlotKind) -> Self {
-        let tabs = if kind == SlotKind::Timeline {
-            vec![
-                TabInfo { label: "时间线".to_string(), active: true },
-                TabInfo { label: "音频".to_string(), active: false },
-                TabInfo { label: "效果".to_string(), active: false },
-            ]
-        } else if kind == SlotKind::Inspector {
-            vec![
-                TabInfo { label: "检查器".to_string(), active: true },
-                TabInfo { label: "属性".to_string(), active: false },
-            ]
-        } else {
-            vec![TabInfo {
-                label: kind.display_name().to_string(),
-                active: true,
-            }]
-        };
-
+        let tabs = tab_infos(kind);
+        let active = tabs.iter().position(|t| t.active).unwrap_or(0);
         let tab_bar = DockTabBar::new(tabs);
-        let content = PanelSlot::new(kind, slot_content(kind));
+        let content = PanelSlot::new(kind, slot_content_for_tab(kind, active));
         Self {
             id: WidgetId::new(),
             tab_bar,
+            kind,
             content: Box::new(content),
             bounds: Rect::ZERO,
+            last_active: active,
         }
     }
 }
@@ -390,7 +384,18 @@ impl Widget for VerticalTabbedSlot {
         ));
     }
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
-        if self.tab_bar.event(event, ctx) == EventResult::Handled {
+        let result = self.tab_bar.event(event, ctx);
+        let now_active = self.tab_bar.active_index();
+        if now_active != self.last_active {
+            self.last_active = now_active;
+            self.content = Box::new(PanelSlot::new(
+                self.kind,
+                slot_content_for_tab(self.kind, now_active),
+            ));
+            let bounds = self.bounds;
+            self.layout(bounds);
+        }
+        if result == EventResult::Handled {
             return EventResult::Handled;
         }
         self.content.event(event, ctx)
@@ -404,19 +409,68 @@ impl Widget for VerticalTabbedSlot {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Slot content factory
-// ═══════════════════════════════════════════════════════════════════════════
+fn tab_infos(kind: SlotKind) -> Vec<TabInfo> {
+    match kind {
+        SlotKind::Timeline => vec![
+            TabInfo { label: "时间线".into(), active: true },
+            TabInfo { label: "音频".into(), active: false },
+            TabInfo { label: "效果".into(), active: false },
+        ],
 
-fn slot_content(kind: SlotKind) -> Box<dyn Widget> {
+        SlotKind::Inspector => vec![
+            TabInfo { label: "检查器".into(), active: true },
+            TabInfo { label: "属性".into(), active: false },
+        ],
+        SlotKind::Console => vec![
+            TabInfo { label: "控件".into(), active: true },
+            TabInfo { label: "文本".into(), active: false },
+            TabInfo { label: "形状".into(), active: false },
+        ],
+        SlotKind::Assets => vec![
+            TabInfo { label: "资源".into(), active: true },
+            TabInfo { label: "库".into(), active: false },
+        ],
+        _ => vec![TabInfo { label: kind.display_name().into(), active: true }],
+    }
+}
+
+fn slot_content_for_tab(kind: SlotKind, tab_index: usize) -> Box<dyn Widget> {
     match kind {
         SlotKind::Viewer => Box::new(ViewerWidget::new()),
-        // Top-left: red — easy diagnostic reference
-        SlotKind::Assets => Box::new(ColoredBox::new(Color::from_hex(0xCC2222), 1.0, 1.0)),
-        // Bottom-left: interactive widget gallery
-        SlotKind::Console => Box::new(GalleryWidget::new()),
-        SlotKind::Inspector => Box::new(ColoredBox::new(Color::from_hex(0x1E2A3A), 1.0, 1.0)),
-        SlotKind::Timeline => Box::new(ColoredBox::new(Color::from_hex(0x16213E), 1.0, 1.0)),
+        SlotKind::Console => match tab_index {
+            0 => Box::new(GalleryWidget::new()),
+            1 => Box::new(ViewerWidget::new()),
+            _ => Box::new(
+                ColoredBox::new(Color::from_hex(0x2A1A3A), 1.0, 1.0).with_label("形状测试"),
+            ),
+        },
+        SlotKind::Assets => match tab_index {
+            0 => Box::new(
+                ColoredBox::new(Color::from_hex(0xCC2222), 1.0, 1.0).with_label("资源面板"),
+            ),
+            _ => {
+                Box::new(ColoredBox::new(Color::from_hex(0x22CC22), 1.0, 1.0).with_label("素材库"))
+            }
+        },
+        SlotKind::Inspector => match tab_index {
+            0 => {
+                Box::new(ColoredBox::new(Color::from_hex(0x1E2A3A), 1.0, 1.0).with_label("检查器"))
+            }
+            _ => Box::new(
+                ColoredBox::new(Color::from_hex(0x2A1E3A), 1.0, 1.0).with_label("属性面板"),
+            ),
+        },
+        SlotKind::Timeline => match tab_index {
+            0 => {
+                Box::new(ColoredBox::new(Color::from_hex(0x16213E), 1.0, 1.0).with_label("时间线"))
+            }
+            1 => Box::new(
+                ColoredBox::new(Color::from_hex(0x1E3A16), 1.0, 1.0).with_label("音频轨道"),
+            ),
+            _ => Box::new(
+                ColoredBox::new(Color::from_hex(0x3A1621), 1.0, 1.0).with_label("效果面板"),
+            ),
+        },
         _ => Box::new(ColoredBox::new(Color::from_hex(0x1A1A1A), 1.0, 1.0)),
     }
 }
@@ -466,6 +520,67 @@ fn mouse_button(b: winit::event::MouseButton) -> MouseButton {
         winit::event::MouseButton::Right => MouseButton::Right,
         winit::event::MouseButton::Middle => MouseButton::Middle,
         _ => MouseButton::Left,
+    }
+}
+
+fn winit_key_to_keycode(key: &winit::keyboard::Key) -> Option<KeyCode> {
+    use winit::keyboard::{Key, NamedKey};
+    match key {
+        Key::Named(named) => match named {
+            NamedKey::Backspace => Some(KeyCode::Backspace),
+            NamedKey::Delete => Some(KeyCode::Delete),
+            NamedKey::ArrowLeft => Some(KeyCode::Left),
+            NamedKey::ArrowRight => Some(KeyCode::Right),
+            NamedKey::ArrowUp => Some(KeyCode::Up),
+            NamedKey::ArrowDown => Some(KeyCode::Down),
+            NamedKey::Home => Some(KeyCode::Home),
+            NamedKey::End => Some(KeyCode::End),
+            NamedKey::Enter => Some(KeyCode::Enter),
+            NamedKey::Space => Some(KeyCode::Space),
+            NamedKey::Tab => Some(KeyCode::Tab),
+            NamedKey::Escape => None, // handled separately
+            _ => None,
+        },
+        Key::Character(ch) => match ch.as_str() {
+            "a" => Some(KeyCode::A),
+            "b" => Some(KeyCode::B),
+            "c" => Some(KeyCode::C),
+            "d" => Some(KeyCode::D),
+            "e" => Some(KeyCode::E),
+            "f" => Some(KeyCode::F),
+            "g" => Some(KeyCode::G),
+            "h" => Some(KeyCode::H),
+            "i" => Some(KeyCode::I),
+            "j" => Some(KeyCode::J),
+            "k" => Some(KeyCode::K),
+            "l" => Some(KeyCode::L),
+            "m" => Some(KeyCode::M),
+            "n" => Some(KeyCode::N),
+            "o" => Some(KeyCode::O),
+            "p" => Some(KeyCode::P),
+            "q" => Some(KeyCode::Q),
+            "r" => Some(KeyCode::R),
+            "s" => Some(KeyCode::S),
+            "t" => Some(KeyCode::T),
+            "u" => Some(KeyCode::U),
+            "v" => Some(KeyCode::V),
+            "w" => Some(KeyCode::W),
+            "x" => Some(KeyCode::X),
+            "y" => Some(KeyCode::Y),
+            "z" => Some(KeyCode::Z),
+            "0" => Some(KeyCode::Digit0),
+            "1" => Some(KeyCode::Digit1),
+            "2" => Some(KeyCode::Digit2),
+            "3" => Some(KeyCode::Digit3),
+            "4" => Some(KeyCode::Digit4),
+            "5" => Some(KeyCode::Digit5),
+            "6" => Some(KeyCode::Digit6),
+            "7" => Some(KeyCode::Digit7),
+            "8" => Some(KeyCode::Digit8),
+            "9" => Some(KeyCode::Digit9),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -573,8 +688,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         elwt.set_control_flow(ControlFlow::Wait);
 
         match event {
-            Event::WindowEvent { event: WindowEvent::CloseRequested, .. }
-            | Event::WindowEvent {
+            Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => elwt.exit(),
+
+            Event::WindowEvent {
                 event:
                     WindowEvent::KeyboardInput {
                         event:
@@ -588,6 +704,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     },
                 ..
             } => elwt.exit(),
+
+            // Keyboard input → dispatch KeyDown / TextInput to widget tree
+            Event::WindowEvent {
+                event:
+                    WindowEvent::KeyboardInput {
+                        event: winit::event::KeyEvent { logical_key, state, text, .. },
+                        ..
+                    },
+                ..
+            } => {
+                if state == ElementState::Pressed {
+                    if let Some(kc) = winit_key_to_keycode(&logical_key) {
+                        let modifiers = Modifiers::none();
+                        let _ = root.event(
+                            &UiEvent::KeyDown { key: kc, modifiers },
+                            &mut dummy_event_ctx(),
+                        );
+                    }
+                    if let Some(txt) = text {
+                        if !txt.is_empty() && !txt.chars().any(|c| c.is_control()) {
+                            let _ = root.event(
+                                &UiEvent::TextInput(txt.to_string()),
+                                &mut dummy_event_ctx(),
+                            );
+                        }
+                    }
+                }
+                window.request_redraw();
+            }
 
             Event::WindowEvent { event: WindowEvent::RedrawRequested, .. } => {
                 let mut encoder = DrawEncoder::new();
@@ -665,7 +810,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         window.set_cursor_icon(winit::window::CursorIcon::RowResize);
                     }
                     None => {
-                        window.set_cursor_icon(winit::window::CursorIcon::Default);
+                        let is_text = TEXT_INPUT_BOUNDS
+                            .with(|b| b.get().is_some_and(|r| r.contains(last_cursor)));
+                        if is_text {
+                            window.set_cursor_icon(winit::window::CursorIcon::Text);
+                        } else {
+                            window.set_cursor_icon(winit::window::CursorIcon::Default);
+                        }
                     }
                 }
                 window.request_redraw();

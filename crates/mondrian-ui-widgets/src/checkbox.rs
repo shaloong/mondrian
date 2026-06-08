@@ -79,11 +79,7 @@ impl Widget for Checkbox {
                 EventResult::Handled
             }
             UiEvent::MouseMove { position, .. } => {
-                let now_inside = self.bounds.contains(*position);
-                if now_inside != self.hovered {
-                    self.hovered = now_inside;
-                    return EventResult::Handled;
-                }
+                self.hovered = self.bounds.contains(*position);
                 EventResult::Ignored
             }
             UiEvent::FocusGained => {
@@ -103,7 +99,7 @@ impl Widget for Checkbox {
         let tokens = &ctx.theme.colors;
         let spacing = &ctx.theme.spacing;
 
-        let box_size = 14.0;
+        let box_size = 16.0;
         let box_rect = Rect::new(
             self.bounds.x + 2.0,
             self.bounds.y + (self.bounds.height - box_size) * 0.5,
@@ -119,30 +115,32 @@ impl Widget for Checkbox {
         } else {
             tokens.card
         };
-        let border = if self.checked || self.hovered {
+
+        ctx.encoder.draw_rect(box_rect, fill, spacing.radius_sm);
+
+        // Border via slightly larger background rect behind fill
+        let border_color = if self.checked || self.hovered {
             tokens.primary
         } else {
             tokens.border
         };
-
+        let border_inset = 1.0;
+        let border_rect = box_rect.inset(-border_inset, -border_inset);
+        // Redraw fill on top of the border rect at original size
+        ctx.encoder
+            .draw_rect(border_rect, border_color, spacing.radius_sm + border_inset);
         ctx.encoder.draw_rect(box_rect, fill, spacing.radius_sm);
-        ctx.encoder.draw_rect(box_rect, border, 0.0);
 
-        // Check mark (simple cross)
+        // Check mark using text glyph (lines have GPU rendering issues)
         if self.checked {
-            let inset = 3.0;
+            let font_size = box_rect.height * 0.85;
             let cx = box_rect.x + box_rect.width * 0.5;
             let cy = box_rect.y + box_rect.height * 0.5;
-            ctx.encoder.draw_line(
-                Point::new(box_rect.x + inset, cy),
-                Point::new(cx, box_rect.y + box_rect.height - inset),
-                1.5,
-                tokens.foreground,
-            );
-            ctx.encoder.draw_line(
-                Point::new(cx, box_rect.y + box_rect.height - inset),
-                Point::new(box_rect.x + box_rect.width - inset, box_rect.y + inset),
-                1.5,
+            let tw = estimate_text_width("✓", font_size);
+            ctx.encoder.draw_text(
+                "✓",
+                font_size,
+                Point::new(cx - tw * 0.5, cy - font_size * 0.55),
                 tokens.foreground,
             );
         }
@@ -339,7 +337,7 @@ mod tests {
             },
             &mut ctx,
         );
-        assert_eq!(r, EventResult::Handled);
+        assert_eq!(r, EventResult::Ignored);
         assert!(cb.hovered);
     }
 
@@ -360,7 +358,7 @@ mod tests {
             },
             &mut ctx,
         );
-        assert_eq!(r, EventResult::Handled);
+        assert_eq!(r, EventResult::Ignored);
         assert!(!cb.hovered);
     }
 
@@ -381,6 +379,7 @@ mod tests {
             },
             &mut ctx,
         );
-        assert_eq!(r, EventResult::Ignored); // already hovered, no state change
+        assert_eq!(r, EventResult::Ignored);
+        assert!(cb.hovered);
     }
 }

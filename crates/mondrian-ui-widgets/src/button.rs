@@ -85,10 +85,8 @@ impl Widget for Button {
                 let now_inside = self.bounds.contains(*position);
                 if now_inside && !was_hovered {
                     self.state = ButtonState::Hovered;
-                    return EventResult::Handled;
                 } else if !now_inside && was_hovered {
                     self.state = ButtonState::Normal;
-                    return EventResult::Handled;
                 }
                 EventResult::Ignored
             }
@@ -362,7 +360,7 @@ mod tests {
             },
             &mut ctx,
         );
-        assert_eq!(r, EventResult::Handled);
+        assert_eq!(r, EventResult::Ignored); // hover change does not stop propagation
         assert_eq!(b.state(), ButtonState::Hovered);
     }
 
@@ -383,7 +381,7 @@ mod tests {
             },
             &mut ctx,
         );
-        assert_eq!(r, EventResult::Handled);
+        assert_eq!(r, EventResult::Ignored);
         assert_eq!(b.state(), ButtonState::Normal);
     }
 

@@ -121,8 +121,16 @@ impl EventRouter {
                     _ => Point::ZERO,
                 };
 
+                let is_keyboard = matches!(
+                    &event,
+                    UiEvent::KeyDown { .. } | UiEvent::KeyUp { .. } | UiEvent::TextInput(_)
+                );
+
                 let target = if let Some(captured) = self.captured {
                     Some(captured)
+                } else if is_keyboard {
+                    // Keyboard events go to the focused widget, not hit-tested
+                    self.focused
                 } else {
                     hit_test_deepest(tree, position)
                 };

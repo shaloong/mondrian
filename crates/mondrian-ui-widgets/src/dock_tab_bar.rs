@@ -93,11 +93,7 @@ impl Widget for DockTabBar {
             }
             UiEvent::MouseMove { position, .. } => {
                 let rects = self.tab_rects();
-                let new_hover = rects.iter().position(|r| r.contains(*position));
-                if new_hover != self.hovered_tab {
-                    self.hovered_tab = new_hover;
-                    return EventResult::Handled;
-                }
+                self.hovered_tab = rects.iter().position(|r| r.contains(*position));
             }
             _ => {}
         }

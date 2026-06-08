@@ -2,6 +2,8 @@
 //!
 //! 单行文本编辑，支持光标移动、退格删除、Home/End。
 
+use std::cell::Cell;
+
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
@@ -14,6 +16,7 @@ pub struct TextInput {
     bounds: Rect,
     cursor: usize,
     focused: bool,
+    cursor_visible: Cell<bool>,
 }
 
 impl TextInput {
@@ -25,6 +28,7 @@ impl TextInput {
             bounds: Rect::ZERO,
             cursor: 0,
             focused: false,
+            cursor_visible: Cell::new(true),
         }
     }
 
@@ -63,10 +67,15 @@ impl Widget for TextInput {
         self.bounds = bounds;
     }
 
-    fn event(&mut self, event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+    fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
         match event {
             UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
-                self.focused = self.bounds.contains(*position);
+                let clicked = self.bounds.contains(*position);
+                if clicked {
+                    ctx.focus
+                        .request_focus(self.id, mondrian_editor_state::state::PanelKind::Console);
+                }
+                self.focused = clicked;
                 EventResult::Handled
             }
             UiEvent::FocusGained => {
@@ -145,36 +154,47 @@ impl Widget for TextInput {
         } else {
             tokens.card
         };
-        let border = tokens.border_for_state(self.focused);
-
         ctx.encoder.draw_rect(self.bounds, bg, spacing.radius_sm);
-        ctx.encoder.draw_rect(self.bounds, border, 0.0);
+
+        // Border via background rect behind fill
+        let border = tokens.border_for_state(self.focused);
+        let r = self.bounds.inset(-1.0, -1.0);
+        ctx.encoder.draw_rect(r, border, spacing.radius_sm + 1.0);
+        ctx.encoder.draw_rect(self.bounds, bg, spacing.radius_sm);
 
         let text_x = self.bounds.x + 8.0;
         let text_y = self.bounds.y + (self.bounds.height - font_size * 1.3).max(0.0) * 0.5;
 
-        if !self.text.is_empty() {
-            // Cursor bar when focused
-            if self.focused {
-                let cursor_x =
-                    text_x + estimate_text_width(&self.text[..self.cursor_byte_idx()], font_size);
+        // Blinking cursor bar when focused
+        if self.focused {
+            let visible = self.cursor_visible.get();
+            self.cursor_visible.set(!visible);
+            if visible {
+                let prefix = if self.text.is_empty() {
+                    ""
+                } else {
+                    &self.text[..self.cursor_byte_idx()]
+                };
+                let cursor_w = 1.5;
+                let cursor_x = text_x + estimate_text_width(prefix, font_size);
                 let cy = self.bounds.y + 4.0;
                 let ch = self.bounds.height - 8.0;
-                ctx.encoder.draw_line(
-                    Point::new(cursor_x, cy),
-                    Point::new(cursor_x, cy + ch),
-                    1.0,
+                ctx.encoder.draw_rect(
+                    Rect::new(cursor_x, cy, cursor_w, ch),
                     tokens.foreground,
+                    0.0,
                 );
             }
+        }
 
+        if !self.text.is_empty() {
             ctx.encoder.draw_text(
                 &self.text,
                 font_size,
                 Point::new(text_x, text_y),
                 tokens.foreground,
             );
-        } else {
+        } else if !self.focused {
             ctx.encoder.draw_text(
                 &self.placeholder,
                 font_size,
