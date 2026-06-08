@@ -545,9 +545,7 @@ fn slot_content_for_tab(kind: SlotKind, tab_index: usize) -> Box<dyn Widget> {
         SlotKind::Console => match tab_index {
             0 => Box::new(GalleryWidget::new()),
             1 => Box::new(ViewerWidget::new()),
-            _ => Box::new(
-                ColoredBox::new(Color::from_hex(0x2A1A3A), 1.0, 1.0).with_label("形状测试"),
-            ),
+            _ => Box::new(ShapePanelWidget::new()),
         },
         SlotKind::Assets => match tab_index {
             0 => Box::new(
@@ -899,7 +897,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let b = current_bounds.get();
                 encoder.draw_rect(b, theme.colors.background, 0.0);
                 TreeWalker::paint(&root, &mut encoder, &theme);
-                draw_shape_test_patterns(&mut encoder);
                 let commands = resolve_text_commands(encoder.finish(), &mut text_renderer);
                 let pending: Vec<mondrian_ui_renderer::GlyphUpload> = text_renderer
                     .take_pending_uploads()
@@ -1027,130 +1024,157 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// ── Shape Test Patterns ──────────────────────────────────────────────────────
-// 目视验证圆形/正方形对齐。绘制多个分层对比以快速定位问题。
+// ── Shape Panel Widget ────────────────────────────────────────────────────────
+/// 形状面板：在 Console → 形状 标签页中绘制 3 个圆形（大/中/小），
+/// 中号圆形不绘制背景矩形。
 
-/// 用 DrawEncoder 绘制全套形状测试图案，叠加在 widget 上方。
-///
-/// 每个测试对包含：
-/// 1. 实心方形（纯色，corner_radius=0）—— 尺寸参考
-/// 2. 半透明圆形（同一尺寸，corner_radius=size/2）—— 理想内接圆
-/// 3. 白色定位标记 —— 上/下/左/右边缘中点 + 圆心
-///
-/// 如果圆形完美内接，圆恰好与白色定位标记相切，
-/// 圆心标记与方形中心重合。
-fn draw_shape_test_patterns(encoder: &mut DrawEncoder) {
-    use mondrian_core::Color;
-    use mondrian_ui_core::types::Rect;
+struct ShapePanelWidget {
+    id: WidgetId,
+    bounds: Rect,
+}
 
-    // 50px 间隔参考网格（用细矩形绘制）
-    let grid_color = Color { r: 0.3, g: 0.3, b: 0.3, a: 0.25 };
-    for gx in (0..800).step_by(50) {
-        encoder.draw_rect(Rect::new(gx as f32, 0.0, 1.0, 580.0), grid_color, 0.0);
+impl ShapePanelWidget {
+    fn new() -> Self {
+        Self { id: WidgetId::new(), bounds: Rect::ZERO }
     }
-    for gy in (0..580).step_by(50) {
-        encoder.draw_rect(Rect::new(0.0, gy as f32, 800.0, 1.0), grid_color, 0.0);
+}
+
+impl Widget for ShapePanelWidget {
+    fn id(&self) -> WidgetId {
+        self.id
     }
+    fn measure(&self, _c: LayoutConstraint) -> Size {
+        Size::new(500.0, 300.0)
+    }
+    fn layout(&mut self, b: Rect) {
+        self.bounds = b;
+    }
+    fn event(&mut self, _e: &UiEvent, _c: &mut EventContext) -> EventResult {
+        EventResult::Ignored
+    }
+    fn paint(&self, ctx: &mut PaintContext) {
+        let tokens = &ctx.theme.colors;
+        let anchor_bg = Color::from_hex(0x3A3A5A);
+        // Snap base origin to integer pixel to eliminate subpixel jitter from
+        // dock-splitter fractional layout.
+        let bx = self.bounds.x.round();
+        let by = self.bounds.y.round();
 
-    // 测试对：(x, y, size, 方形色, 圆形色)
-    let pairs = [
-        (
-            30.0,
-            30.0,
-            200.0,
-            0xFF3333,
-            Color { r: 0.2, g: 0.4, b: 1.0, a: 0.35 },
-        ),
-        (
-            260.0,
-            30.0,
-            100.0,
-            0x33FF33,
-            Color { r: 1.0, g: 1.0, b: 0.2, a: 0.35 },
-        ),
-        (
-            260.0,
-            160.0,
-            60.0,
-            0xFF9800,
-            Color { r: 0.2, g: 1.0, b: 1.0, a: 0.35 },
-        ),
-        (
-            30.0,
-            260.0,
-            80.0,
-            0x9C27B0,
-            Color { r: 0.7, g: 0.3, b: 1.0, a: 0.35 },
-        ),
-        (
-            140.0,
-            260.0,
-            40.0,
-            0xE91E63,
-            Color { r: 0.5, g: 1.0, b: 0.2, a: 0.35 },
-        ),
-    ];
-
-    for &(x, y, size, sq_hex, circle_color) in &pairs {
-        let half = size * 0.5;
-        let cx = x + half;
-        let cy = y + half;
-
-        // 第 1 层：实心方形（reference）
-        encoder.draw_rect(Rect::new(x, y, size, size), Color::from_hex(sq_hex), 0.0);
-
-        // 第 2 层：半透明圆形（corner_radius = half → 内接圆）
-        encoder.draw_rect(Rect::new(x, y, size, size), circle_color, half);
-
-        // 第 3 层：白色圆心标记 (3x3)
-        encoder.draw_rect(Rect::new(cx - 1.5, cy - 1.5, 3.0, 3.0), Color::WHITE, 0.0);
-
-        // 第 4 层：边缘中点定位标记（4 个小白条, 8x2 px）
-        let ml = 8.0; // marker length
-        let mw = 2.0; // marker width
-                      // 上边缘中点：从方形上方往内
-        encoder.draw_rect(Rect::new(cx - mw * 0.5, y - ml, mw, ml), Color::WHITE, 0.0);
-        // 下边缘中点
-        encoder.draw_rect(
-            Rect::new(cx - mw * 0.5, y + size, mw, ml),
-            Color::WHITE,
+        // 大圆 — 200x200，有背景矩形 + 四边定位标记 + 圆心
+        let large_size = 200.0;
+        let large_x = bx + 30.0;
+        let large_y = by + 40.0;
+        let large_color = Color { r: 0.94, g: 0.27, b: 0.27, a: 0.65 };
+        ctx.encoder.draw_rect(
+            Rect::new(large_x, large_y, large_size, large_size),
+            anchor_bg,
             0.0,
         );
-        // 左边缘中点
-        encoder.draw_rect(Rect::new(x - ml, cy - mw * 0.5, ml, mw), Color::WHITE, 0.0);
-        // 右边缘中点
-        encoder.draw_rect(
-            Rect::new(x + size, cy - mw * 0.5, ml, mw),
-            Color::WHITE,
+        ctx.encoder.draw_rect(
+            Rect::new(large_x, large_y, large_size, large_size),
+            large_color,
+            large_size * 0.5,
+        );
+        // 圆心 + 四边中点标记
+        let cx = large_x + large_size * 0.5;
+        let cy = large_y + large_size * 0.5;
+        let marker = Color::WHITE;
+        let ms = 4.0; // 标记半宽
+        ctx.encoder
+            .draw_rect(Rect::new(cx - ms, cy - ms, ms * 2.0, ms * 2.0), marker, 0.0);
+        ctx.encoder.draw_rect(
+            Rect::new(cx - ms, large_y - 8.0, ms * 2.0, 8.0),
+            marker,
             0.0,
         );
+        ctx.encoder.draw_rect(
+            Rect::new(cx - ms, large_y + large_size, ms * 2.0, 8.0),
+            marker,
+            0.0,
+        );
+        ctx.encoder.draw_rect(
+            Rect::new(large_x - 8.0, cy - ms, 8.0, ms * 2.0),
+            marker,
+            0.0,
+        );
+        ctx.encoder.draw_rect(
+            Rect::new(large_x + large_size, cy - ms, 8.0, ms * 2.0),
+            marker,
+            0.0,
+        );
+        ctx.encoder.draw_text(
+            "r=100 大圆",
+            11.0,
+            ui_types::snap_point(Point::new(large_x, large_y + large_size + 14.0)),
+            tokens.foreground,
+        );
+
+        // 中圆 — 80x80，无背景矩形
+        let med_size = 80.0;
+        let med_x = large_x + large_size + 40.0;
+        let med_y = large_y + 100.0;
+        let med_color = Color { r: 0.13, g: 0.77, b: 0.37, a: 0.65 };
+        ctx.encoder.draw_rect(
+            Rect::new(med_x, med_y, med_size, med_size),
+            med_color,
+            med_size * 0.5,
+        );
+        let mcx = med_x + med_size * 0.5;
+        let mcy = med_y + med_size * 0.5;
+        ctx.encoder.draw_rect(
+            Rect::new(mcx - ms, mcy - ms, ms * 2.0, ms * 2.0),
+            marker,
+            0.0,
+        );
+        ctx.encoder.draw_text(
+            "r=40 中圆",
+            11.0,
+            ui_types::snap_point(Point::new(med_x, med_y + med_size + 14.0)),
+            tokens.foreground,
+        );
+
+        // 小圆 — 24x24，有背景矩形
+        let sm_size = 24.0;
+        let sm_x = med_x + med_size + 40.0;
+        let sm_y = med_y + 40.0;
+        let sm_color = Color { r: 0.23, g: 0.51, b: 0.96, a: 0.75 };
+        ctx.encoder.draw_rect(Rect::new(sm_x, sm_y, sm_size, sm_size), anchor_bg, 0.0);
+        ctx.encoder.draw_rect(
+            Rect::new(sm_x, sm_y, sm_size, sm_size),
+            sm_color,
+            sm_size * 0.5,
+        );
+        let scx = sm_x + sm_size * 0.5;
+        let scy = sm_y + sm_size * 0.5;
+        ctx.encoder.draw_rect(
+            Rect::new(scx - ms, scy - ms, ms * 2.0, ms * 2.0),
+            marker,
+            0.0,
+        );
+        ctx.encoder.draw_text(
+            "r=12 小圆",
+            11.0,
+            ui_types::snap_point(Point::new(sm_x, sm_y + sm_size + 14.0)),
+            tokens.foreground,
+        );
+
+        // 胶囊形 — 60x120, r=30，有背景矩形
+        let cap_w = 60.0;
+        let cap_h = 120.0;
+        let cap_r = cap_w * 0.5;
+        let cap_x = large_x;
+        let cap_y = large_y + large_size + 40.0;
+        let cap_color = Color { r: 0.70, g: 0.30, b: 1.00, a: 0.75 };
+        ctx.encoder.draw_rect(Rect::new(cap_x, cap_y, cap_w, cap_h), anchor_bg, 0.0);
+        ctx.encoder.draw_rect(Rect::new(cap_x, cap_y, cap_w, cap_h), cap_color, cap_r);
+        ctx.encoder.draw_text(
+            "r=30 胶囊",
+            11.0,
+            ui_types::snap_point(Point::new(cap_x, cap_y + cap_h + 14.0)),
+            tokens.foreground,
+        );
     }
-
-    // ── 胶囊形测试（短轴 50x100, r=25) ──────────────────────────────
-    encoder.draw_rect(
-        Rect::new(390.0, 30.0, 50.0, 100.0),
-        Color::from_hex(0x7C4DFF),
-        25.0,
-    );
-    encoder.draw_rect(
-        Rect::new(390.0, 30.0, 50.0, 100.0),
-        Color { r: 1.0, g: 1.0, b: 1.0, a: 0.3 },
-        25.0,
-    );
-    let chx = 390.0 + 25.0;
-    let chy = 30.0 + 50.0;
-    encoder.draw_rect(Rect::new(chx - 1.5, chy - 1.5, 3.0, 3.0), Color::WHITE, 0.0);
-
-    // ── 极小圆形（20x20, r=10) ──────────────────────────────────────
-    encoder.draw_rect(
-        Rect::new(470.0, 30.0, 20.0, 20.0),
-        Color::from_hex(0xFF5722),
-        10.0,
-    );
-    encoder.draw_rect(
-        Rect::new(470.0, 30.0, 20.0, 20.0),
-        Color { r: 1.0, g: 1.0, b: 1.0, a: 0.4 },
-        10.0,
-    );
-    encoder.draw_rect(Rect::new(479.5, 39.5, 3.0, 3.0), Color::WHITE, 0.0);
+    fn hit_test(&self, _p: Point) -> bool {
+        false
+    }
 }
