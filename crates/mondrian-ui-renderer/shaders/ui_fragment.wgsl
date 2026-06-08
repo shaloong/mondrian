@@ -9,9 +9,9 @@ struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) tex_coord: vec2<f32>,
     @location(1) color: vec4<f32>,
-    @location(2) rect_size: vec2<f32>,
-    @location(3) corner_radius_px: f32,
-    @location(4) local_pos: vec2<f32>,
+    @location(2) @interpolate(flat) rect_size: vec2<f32>,
+    @location(3) @interpolate(flat) corner_radius_px: f32,
+    @location(4) local_px: vec2<f32>,
     @location(5) @interpolate(flat) render_mode: u32,
 };
 
@@ -36,9 +36,9 @@ fn main(in: VertexOutput) -> @location(0) vec4<f32> {
     let r = clamp(in.corner_radius_px, 0.0, min(in.rect_size.x, in.rect_size.y) * 0.5);
     if r <= 0.0 { return in.color; }
 
-    let p = in.local_pos * in.rect_size;
-    let d = sd_rounded_box_px(p, in.rect_size, r);
-    let aa = fwidth(d);
-    let alpha = 1.0 - smoothstep(0.0, aa, d);
+    let d = sd_rounded_box_px(in.local_px, in.rect_size, r);
+    let aa = max(fwidth(d), 1.0);
+    let alpha = 1.0 - smoothstep(-aa * 0.5, aa * 0.5, d);
+    if alpha <= 0.001 { discard; }
     return vec4<f32>(in.color.rgb, in.color.a * alpha);
 }
