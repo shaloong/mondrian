@@ -113,6 +113,11 @@ content coordinates using `screen - viewport_origin + scroll_offset`, matching
 the inverse of their paint transform. Wheel events are handled only inside the
 viewport and offsets are clamped after wheel input and layout.
 
+`ScrollView` exposes a draggable vertical scrollbar thumb when content
+overflows. Thumb drags request pointer capture, map thumb-track movement back
+to content scroll offset, and release capture on mouse up. Clicking the
+scrollbar track outside the thumb pages the viewport by one visible span.
+
 ## Color Input
 
 Color parsing and conversion live in `mondrian-core`, not in the widget layer.
