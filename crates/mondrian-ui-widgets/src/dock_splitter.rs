@@ -8,7 +8,7 @@ use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
 /// DockSplitter —— 可拖拽调整比例的双子节点分割容器
 ///
-/// 视觉分割线为 1px，但拖拽热区为 `grab_zone`（默认 8px），
+/// 视觉分割线为 1px，但拖拽热区为 `grab_zone`（默认 6px），
 /// 鼠标接近分割线即可拖拽，无需精确命中 1px 线条。
 pub struct DockSplitter {
     id: WidgetId,
@@ -46,7 +46,7 @@ impl DockSplitter {
             dragging: false,
             handle_hovered: false,
             handle_size: 1.0,
-            grab_zone: 8.0,
+            grab_zone: 6.0,
         }
     }
 
@@ -54,7 +54,7 @@ impl DockSplitter {
         self.handle_hovered
     }
 
-    /// 设置交互热区宽度（默认 8.0）
+    /// 设置交互热区宽度（默认 6.0）
     pub fn with_grab_zone(mut self, width: f32) -> Self {
         self.grab_zone = width.max(2.0);
         self
@@ -85,6 +85,51 @@ impl DockSplitter {
                 Rect::new(self.bounds.x, cy - hw, self.bounds.width, self.grab_zone)
             }
         }
+    }
+
+    fn handle_pointer_event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        match event {
+            UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
+                if self.grab_rect.contains(*position) {
+                    self.dragging = true;
+                    self.handle_hovered = true;
+                    ctx.request_pointer_capture(self.id);
+                    return EventResult::Handled;
+                }
+            }
+            UiEvent::MouseMove { position, .. } => {
+                if self.dragging {
+                    match self.direction {
+                        SplitDirection::Horizontal => {
+                            let rel = (position.x - self.bounds.x - self.handle_size * 0.5)
+                                / (self.bounds.width - self.handle_size);
+                            self.ratio = rel.clamp(0.1, 0.9);
+                        }
+                        SplitDirection::Vertical => {
+                            let rel = (position.y - self.bounds.y - self.handle_size * 0.5)
+                                / (self.bounds.height - self.handle_size);
+                            self.ratio = rel.clamp(0.1, 0.9);
+                        }
+                    }
+                    let bounds = self.bounds;
+                    self.layout(bounds);
+                    return EventResult::Handled;
+                }
+                self.handle_hovered = self.grab_rect.contains(*position);
+                if self.handle_hovered {
+                    return EventResult::Handled;
+                }
+            }
+            UiEvent::MouseUp { button: MouseButton::Left, .. } => {
+                if self.dragging {
+                    self.dragging = false;
+                    ctx.release_pointer_capture(self.id);
+                    return EventResult::Handled;
+                }
+            }
+            _ => {}
+        }
+        EventResult::Ignored
     }
 }
 
@@ -151,51 +196,17 @@ impl Widget for DockSplitter {
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
-        match event {
-            UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
-                if self.grab_rect.contains(*position) {
-                    self.dragging = true;
-                    ctx.request_pointer_capture(self.id);
-                    return EventResult::Handled;
-                }
-            }
-            UiEvent::MouseMove { position, .. } => {
-                if self.dragging {
-                    match self.direction {
-                        SplitDirection::Horizontal => {
-                            let rel = (position.x - self.bounds.x - self.handle_size * 0.5)
-                                / (self.bounds.width - self.handle_size);
-                            self.ratio = rel.clamp(0.1, 0.9);
-                        }
-                        SplitDirection::Vertical => {
-                            let rel = (position.y - self.bounds.y - self.handle_size * 0.5)
-                                / (self.bounds.height - self.handle_size);
-                            self.ratio = rel.clamp(0.1, 0.9);
-                        }
-                    }
-                    // Re-layout children with the updated ratio
-                    let bounds = self.bounds;
-                    self.layout(bounds);
-                    return EventResult::Handled;
-                }
-                // 检查 hover (don't stop propagation — let children receive MouseMove too)
-                self.handle_hovered = self.grab_rect.contains(*position);
-            }
-            UiEvent::MouseUp { button: MouseButton::Left, .. } => {
-                if self.dragging {
-                    self.dragging = false;
-                    ctx.release_pointer_capture(self.id);
-                    return EventResult::Handled;
-                }
-            }
-            _ => {}
+        let handle_result = self.handle_pointer_event(event, ctx);
+        if handle_result == EventResult::Handled {
+            return EventResult::Handled;
         }
 
         // Block movement events in the grab zone to prevent accidental child
-        // interactions during a drag. MouseDown is NOT blocked here — it is
-        // only caught by the before-match check when truly starting a drag.
+        // interactions during a drag.
         if self.grab_rect.contains(match event {
-            UiEvent::MouseMove { position, .. }
+            UiEvent::MouseDown { position, .. }
+            | UiEvent::MouseUp { position, .. }
+            | UiEvent::MouseMove { position, .. }
             | UiEvent::MouseWheel { position, .. }
             | UiEvent::DragEnter { position, .. }
             | UiEvent::DragOver { position, .. }
@@ -214,6 +225,10 @@ impl Widget for DockSplitter {
         EventResult::Ignored
     }
 
+    fn before_child_event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        self.handle_pointer_event(event, ctx)
+    }
+
     fn paint(&self, ctx: &mut PaintContext) {
         let tokens = &ctx.theme.colors;
 
@@ -225,6 +240,19 @@ impl Widget for DockSplitter {
         } else {
             tokens.border
         };
+        let handle_width = if self.dragging {
+            4.0
+        } else if self.handle_hovered {
+            3.0
+        } else {
+            1.0
+        };
+
+        // Paint children first so the splitter handle always remains visible
+        // above tab bars and panel backgrounds.
+        for child in &self.children {
+            child.paint(ctx);
+        }
 
         // 绘制把手线条（视觉上保持细线，在热区中心）
         let (hx, hy) = (self.grab_rect.center().x, self.grab_rect.center().y);
@@ -233,7 +261,7 @@ impl Widget for DockSplitter {
                 ctx.encoder.draw_line(
                     Point::new(hx, self.bounds.y + 4.0),
                     Point::new(hx, self.bounds.y + self.bounds.height - 4.0),
-                    2.0,
+                    handle_width,
                     handle_color,
                 );
             }
@@ -241,15 +269,10 @@ impl Widget for DockSplitter {
                 ctx.encoder.draw_line(
                     Point::new(self.bounds.x + 4.0, hy),
                     Point::new(self.bounds.x + self.bounds.width - 4.0, hy),
-                    2.0,
+                    handle_width,
                     handle_color,
                 );
             }
-        }
-
-        // Paint children
-        for child in &self.children {
-            child.paint(ctx);
         }
     }
 
@@ -267,5 +290,171 @@ impl Widget for DockSplitter {
 
     fn as_any(&self) -> Option<&dyn std::any::Any> {
         Some(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use mondrian_ui_core::widget::DrawCommandEncoder;
+
+    struct EmptyWidget {
+        id: WidgetId,
+        bounds: Rect,
+    }
+
+    impl EmptyWidget {
+        fn new() -> Self {
+            Self { id: WidgetId::new(), bounds: Rect::ZERO }
+        }
+    }
+
+    impl Widget for EmptyWidget {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+
+        fn measure(&self, constraint: LayoutConstraint) -> Size {
+            constraint.constrain(Size::new(10.0, 10.0))
+        }
+
+        fn layout(&mut self, bounds: Rect) {
+            self.bounds = bounds;
+        }
+
+        fn event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+            EventResult::Ignored
+        }
+
+        fn paint(&self, _ctx: &mut PaintContext) {}
+
+        fn hit_test(&self, point: Point) -> bool {
+            self.bounds.contains(point)
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingEncoder {
+        line_widths: Vec<f32>,
+    }
+
+    impl DrawCommandEncoder for RecordingEncoder {
+        fn push_clip(&mut self, _bounds: Rect) {}
+
+        fn pop_clip(&mut self) {}
+
+        fn draw_rect(&mut self, _bounds: Rect, _color: mondrian_core::Color, _corner_radius: f32) {}
+
+        fn draw_line(
+            &mut self,
+            _start: Point,
+            _end: Point,
+            width: f32,
+            _color: mondrian_core::Color,
+        ) {
+            self.line_widths.push(width);
+        }
+
+        fn draw_text(
+            &mut self,
+            _text: &str,
+            _font_size: f32,
+            _position: Point,
+            _color: mondrian_core::Color,
+        ) {
+        }
+
+        fn push_translate(&mut self, _offset: glam::Vec2) {}
+
+        fn pop_transform(&mut self) {}
+    }
+
+    fn splitter(direction: SplitDirection) -> DockSplitter {
+        let mut splitter = DockSplitter::new(
+            direction,
+            0.5,
+            Box::new(EmptyWidget::new()),
+            Box::new(EmptyWidget::new()),
+        );
+        splitter.layout(Rect::new(0.0, 0.0, 200.0, 100.0));
+        splitter
+    }
+
+    fn event_ctx<'a>(
+        focus: &'a mut DummyFocus,
+        shortcut: &'a mut DummyShortcut,
+        tooltip: &'a mut DummyTooltip,
+    ) -> EventContext<'a> {
+        make_event_ctx(focus, shortcut, tooltip, &|_| {})
+    }
+
+    #[test]
+    fn default_grab_zone_is_six_pixels() {
+        let splitter = splitter(SplitDirection::Horizontal);
+        assert_eq!(splitter.grab_rect.width, 6.0);
+    }
+
+    #[test]
+    fn before_child_event_captures_in_grab_zone() {
+        let mut splitter = splitter(SplitDirection::Horizontal);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = event_ctx(&mut focus, &mut shortcut, &mut tooltip);
+
+        let result = splitter.before_child_event(
+            &UiEvent::MouseDown {
+                position: splitter.grab_rect.center(),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert!(splitter.dragging);
+        assert!(ctx.requests.pointer_capture.is_some());
+    }
+
+    #[test]
+    fn handle_width_grows_on_hover_and_drag() {
+        let mut splitter = splitter(SplitDirection::Vertical);
+        let theme = mondrian_ui_theme::ThemePreset::Dark.build();
+
+        let mut encoder = RecordingEncoder::default();
+        {
+            let mut ctx = PaintContext {
+                encoder: &mut encoder,
+                theme: &theme,
+                clip_rect: Rect::new(0.0, 0.0, 200.0, 100.0),
+            };
+            splitter.paint(&mut ctx);
+        }
+        assert_eq!(encoder.line_widths.last(), Some(&1.0));
+
+        splitter.handle_hovered = true;
+        let mut encoder = RecordingEncoder::default();
+        {
+            let mut ctx = PaintContext {
+                encoder: &mut encoder,
+                theme: &theme,
+                clip_rect: Rect::new(0.0, 0.0, 200.0, 100.0),
+            };
+            splitter.paint(&mut ctx);
+        }
+        assert_eq!(encoder.line_widths.last(), Some(&3.0));
+
+        splitter.dragging = true;
+        let mut encoder = RecordingEncoder::default();
+        {
+            let mut ctx = PaintContext {
+                encoder: &mut encoder,
+                theme: &theme,
+                clip_rect: Rect::new(0.0, 0.0, 200.0, 100.0),
+            };
+            splitter.paint(&mut ctx);
+        }
+        assert_eq!(encoder.line_widths.last(), Some(&4.0));
     }
 }

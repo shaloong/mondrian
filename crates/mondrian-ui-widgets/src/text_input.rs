@@ -185,6 +185,15 @@ impl TextInput {
         (self.bounds.x + self.bounds.width - HORIZONTAL_PADDING).max(self.content_left())
     }
 
+    fn content_clip_rect(&self) -> Rect {
+        Rect::new(
+            self.content_left(),
+            self.bounds.y,
+            self.visible_width(),
+            self.bounds.height,
+        )
+    }
+
     fn line_height(font_size: f32) -> f32 {
         font_size * 1.3
     }
@@ -616,7 +625,7 @@ impl Widget for TextInput {
         ctx.encoder.draw_rect(self.bounds, bg, spacing.radius_sm);
 
         // Clip text content to padded area
-        let clip = self.bounds.inset(4.0, 0.0);
+        let clip = self.content_clip_rect();
         ctx.encoder.push_clip(clip);
 
         let sx = self.scroll_x.get();
@@ -781,10 +790,13 @@ mod tests {
     #[derive(Default)]
     struct RecordingEncoder {
         ops: Vec<PaintOp>,
+        clips: Vec<Rect>,
+        texts: Vec<(String, Point)>,
     }
 
     impl DrawCommandEncoder for RecordingEncoder {
-        fn push_clip(&mut self, _bounds: Rect) {
+        fn push_clip(&mut self, bounds: Rect) {
+            self.clips.push(bounds);
             self.ops.push(PaintOp::PushClip);
         }
 
@@ -810,9 +822,10 @@ mod tests {
             &mut self,
             text: &str,
             _font_size: f32,
-            _position: Point,
+            position: Point,
             _color: mondrian_core::Color,
         ) {
+            self.texts.push((text.into(), position));
             self.ops.push(PaintOp::Text(text.into()));
         }
 
@@ -1431,5 +1444,46 @@ mod tests {
             .rposition(|op| *op == PaintOp::Rect)
             .expect("paint should draw caret rect");
         assert!(caret_idx > text_idx);
+    }
+
+    #[test]
+    fn paint_clips_text_to_padded_content_rect() {
+        let mut ti = TextInput::new("ph").with_text("abcdefghijklmnopqrstuvwxyz");
+        ti.layout(Rect::new(10.0, 20.0, 100.0, 28.0));
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 200.0, 100.0),
+        };
+
+        ti.paint(&mut ctx);
+
+        assert_eq!(encoder.clips[0], Rect::new(18.0, 20.0, 84.0, 28.0));
+    }
+
+    #[test]
+    fn long_text_paint_relies_on_clip_when_scrolled() {
+        let mut ti = TextInput::new("ph").with_text("abcdefghijklmnopqrstuvwxyz");
+        ti.layout(Rect::new(0.0, 0.0, 80.0, 28.0));
+        ti.scroll_x.set(40.0);
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 200.0, 100.0),
+        };
+
+        ti.paint(&mut ctx);
+
+        let (_, text_pos) = encoder
+            .texts
+            .iter()
+            .find(|(text, _)| text == "abcdefghijklmnopqrstuvwxyz")
+            .expect("paint should emit long text");
+        assert!(text_pos.x < 0.0);
+        assert_eq!(encoder.clips[0], Rect::new(8.0, 0.0, 64.0, 28.0));
     }
 }

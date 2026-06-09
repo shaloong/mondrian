@@ -112,17 +112,7 @@ impl EventRouter {
                             let mut requests = EventRequests::default();
                             {
                                 let mut ctx = self.make_event_context(dispatch, &mut requests);
-                                old.event(&UiEvent::FocusLost, &mut ctx);
-                            }
-                            self.apply_event_requests(requests);
-                        }
-                    }
-                    if let Some(new_id) = target {
-                        if let Some(new) = tree.get_mut(new_id) {
-                            let mut requests = EventRequests::default();
-                            {
-                                let mut ctx = self.make_event_context(dispatch, &mut requests);
-                                new.event(&UiEvent::FocusGained, &mut ctx);
+                                old.event(&event, &mut ctx);
                             }
                             self.apply_event_requests(requests);
                         }
@@ -130,6 +120,11 @@ impl EventRouter {
                     self.hovered = target;
                 }
                 if let Some(target_id) = target {
+                    if self.captured.is_none()
+                        && self.before_child_event(tree, target_id, &event, dispatch)
+                    {
+                        return EventResult::Handled;
+                    }
                     let mut current = Some(target_id);
                     while let Some(id) = current {
                         if let Some(widget) = tree.get_mut(id) {
@@ -186,6 +181,12 @@ impl EventRouter {
                 };
 
                 if let Some(target_id) = target {
+                    if self.captured.is_none()
+                        && !is_keyboard
+                        && self.before_child_event(tree, target_id, &event, dispatch)
+                    {
+                        return EventResult::Handled;
+                    }
                     let mut current = Some(target_id);
                     while let Some(id) = current {
                         if let Some(widget) = tree.get_mut(id) {
@@ -265,6 +266,33 @@ impl EventRouter {
             }
             current = parent_id;
         }
+    }
+
+    fn before_child_event(
+        &mut self,
+        tree: &mut dyn WidgetTree,
+        child_id: WidgetId,
+        event: &UiEvent,
+        dispatch: &dyn Fn(Action),
+    ) -> bool {
+        let mut current = tree.parent_id(child_id);
+        while let Some(id) = current {
+            let parent_id = tree.parent_id(id);
+            if let Some(widget) = tree.get_mut(id) {
+                let mut requests = EventRequests::default();
+                let result = {
+                    let mut ctx = self.make_event_context(dispatch, &mut requests);
+                    widget.before_child_event(event, &mut ctx)
+                };
+                self.focused = self.focus_mgr.focused_widget();
+                self.apply_event_requests(requests);
+                if result == EventResult::Handled {
+                    return true;
+                }
+            }
+            current = parent_id;
+        }
+        false
     }
 }
 
@@ -472,10 +500,71 @@ mod tests {
         assert_eq!(router.captured(), None);
     }
 
+    struct FocusEventWidget {
+        id: WidgetId,
+        bounds: Rect,
+        log: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl Widget for FocusEventWidget {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+
+        fn measure(&self, _constraint: LayoutConstraint) -> Size {
+            Size::new(self.bounds.width, self.bounds.height)
+        }
+
+        fn layout(&mut self, bounds: Rect) {
+            self.bounds = bounds;
+        }
+
+        fn event(&mut self, event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+            if matches!(event, UiEvent::FocusGained) {
+                self.log.borrow_mut().push("focus-gained".into());
+            }
+            EventResult::Ignored
+        }
+
+        fn paint(&self, _ctx: &mut PaintContext) {}
+
+        fn hit_test(&self, point: Point) -> bool {
+            self.bounds.contains(point)
+        }
+    }
+
+    #[test]
+    fn router_mouse_hover_does_not_send_focus_gained() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = FocusEventWidget {
+            id: WidgetId::new(),
+            bounds: Rect::new(0.0, 0.0, 100.0, 30.0),
+            log: Rc::clone(&log),
+        };
+        let root = widget.id;
+        let mut nodes = HashMap::new();
+        nodes.insert(root, Box::new(widget) as Box<dyn Widget>);
+        let mut tree = TestTree { root, nodes };
+        let mut router = EventRouter::new(root);
+
+        router.route(
+            UiEvent::MouseMove {
+                position: Point::new(10.0, 10.0),
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert!(log.borrow().is_empty());
+        assert_eq!(router.focused(), None);
+    }
+
     struct ParentPostWidget {
         id: WidgetId,
         bounds: Rect,
         child_id: WidgetId,
+        handle_before: bool,
         log: Rc<RefCell<Vec<String>>>,
     }
 
@@ -494,6 +583,15 @@ mod tests {
 
         fn event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
             EventResult::Ignored
+        }
+
+        fn before_child_event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+            if self.handle_before {
+                self.log.borrow_mut().push("parent-before".into());
+                EventResult::Handled
+            } else {
+                EventResult::Ignored
+            }
         }
 
         fn after_child_event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
@@ -564,6 +662,7 @@ mod tests {
             id: WidgetId::new(),
             bounds: Rect::new(0.0, 0.0, 100.0, 30.0),
             child_id,
+            handle_before: false,
             log: Rc::clone(&log),
         };
         let root = parent.id;
@@ -582,5 +681,35 @@ mod tests {
 
         assert_eq!(result, EventResult::Handled);
         assert!(log.borrow().contains(&"parent-after".into()));
+    }
+
+    #[test]
+    fn router_allows_parent_before_child_to_handle_pointer_event() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let child = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let child_id = child.id();
+        let parent = ParentPostWidget {
+            id: WidgetId::new(),
+            bounds: Rect::new(0.0, 0.0, 100.0, 30.0),
+            child_id,
+            handle_before: true,
+            log: Rc::clone(&log),
+        };
+        let root = parent.id;
+        let mut tree = ParentChildTree { parent, child };
+        let mut router = EventRouter::new(root);
+
+        let result = router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(log.borrow().as_slice(), ["parent-before"]);
     }
 }

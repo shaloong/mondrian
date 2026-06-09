@@ -163,6 +163,15 @@ pub trait Widget {
     /// 返回 `Handled` 则停止冒泡，`Ignored` 则继续向父级传递。
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult;
 
+    /// Called on ancestors before a descendant receives an event.
+    ///
+    /// This is for parent-owned chrome that must win over child hit targets,
+    /// such as dock splitter handles. It must not re-dispatch the event to
+    /// children.
+    fn before_child_event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+        EventResult::Ignored
+    }
+
     /// Called on ancestors after a descendant handled an event.
     ///
     /// This is for parent-owned state that depends on a child interaction, such

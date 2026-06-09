@@ -74,6 +74,10 @@ changes; pointer hit testing accounts for the current scroll offset. IME cursor
 areas use the caret rect rather than the full widget bounds so platform
 composition windows can anchor near the insertion point.
 
+Text content is clipped to the padded content rect, not the outer widget
+bounds. App shells should show an I-beam cursor for text inputs only after the
+input owns focus; hover alone should not switch the pointer shape.
+
 Text copy/cut shortcuts are consumed by `TextInput` only when a selection exists.
 If there is no selection, `Ctrl+C` and `Ctrl+X` are ignored so panel-level
 commands, such as copying clips or keyframes, can handle them.
@@ -84,6 +88,11 @@ Drag widgets request capture on mouse down and release capture on mouse up.
 `Slider`, `DockSplitter`, and text selection depend on this behavior. Future
 Timeline clip drags, curve editor handles, and color picker gestures should use
 the same request path.
+
+Parent-owned chrome that must win over child hit targets, such as
+`DockSplitter` handles over tab bars, uses `Widget::before_child_event()`.
+Splitter handles paint above children, use a narrower 6px interaction zone by
+default, and grow in stroke width while hovered or dragged.
 
 Slider value mapping uses the same thumb-centered track for painting and
 pointer updates. The thumb rect must remain inside widget bounds; if a parent
@@ -105,6 +114,11 @@ accidentally select the first item under the cursor; item actions dispatch only
 when a press and release land on the same enabled row. Long dropdown menus clip
 their item list and scroll with the same positive-delta-means-content-down
 offset convention as `ScrollView`.
+
+Tooltip positions are anchored when the pointer enters a trigger and then
+clamped by the tooltip widget to the current clip rect. Repeating the same
+tooltip request keeps the original anchor so the popup does not chase pointer
+movement.
 
 ## Scroll Views
 
@@ -138,3 +152,8 @@ splitter handles, and scrollbar thumbs visually stable after window resizing.
 Text positions are left to the text renderer and caller-side layout policy, and
 image UVs remain unsnapped because they are texture coordinates rather than
 screen-space geometry.
+
+The renderer must flush draw batches when clip state changes. A command emitted
+inside `PushClip`/`PopClip` must not share a batch with unclipped geometry,
+otherwise glyph images and other later-resolved commands can bleed outside
+their widget content rects.

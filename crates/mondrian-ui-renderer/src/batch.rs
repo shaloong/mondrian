@@ -38,10 +38,20 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
     for cmd in commands {
         match cmd {
             DrawCommand::PushClip { bounds } => {
+                finish_batch_if_needed(
+                    &mut batches,
+                    &mut current_batch,
+                    clip_stack.last().copied(),
+                );
                 let transformed = apply_transform(bounds, &transform_stack);
                 clip_stack.push(transformed);
             }
             DrawCommand::PopClip => {
+                finish_batch_if_needed(
+                    &mut batches,
+                    &mut current_batch,
+                    clip_stack.last().copied(),
+                );
                 clip_stack.pop();
             }
             DrawCommand::PushTranslate { offset } => {
@@ -239,13 +249,25 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
     }
 
     if !current_batch.vertices.is_empty() {
-        if let Some(clip) = clip_stack.last().copied() {
-            current_batch.clip_rect = Some(clip);
-        }
-        batches.push(current_batch);
+        finish_batch_if_needed(&mut batches, &mut current_batch, clip_stack.last().copied());
     }
 
     batches
+}
+
+fn finish_batch_if_needed(
+    batches: &mut Vec<DrawBatch>,
+    current_batch: &mut DrawBatch,
+    clip_rect: Option<Rect>,
+) {
+    if current_batch.vertices.is_empty() {
+        return;
+    }
+    current_batch.clip_rect = clip_rect;
+    batches.push(std::mem::replace(
+        current_batch,
+        DrawBatch { vertices: Vec::new(), clip_rect, texture_key: None },
+    ));
 }
 
 /// Convert pixel-space rect to NDC coordinates with Y-flip.
@@ -369,8 +391,32 @@ mod tests {
             },
         ];
         let batches = build_batches(&cmds, (1920, 1080));
-        assert_eq!(batches.len(), 1);
+        assert_eq!(batches.len(), 2);
+        assert!(batches[0].clip_rect.is_some());
+        assert!(batches[1].clip_rect.is_none());
+    }
+
+    #[test]
+    fn build_batches_flushes_before_clip_state_changes() {
+        let cmds = [
+            DrawCommand::Rect {
+                bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
+                color: Color::WHITE,
+                corner_radius: 0.0,
+            },
+            DrawCommand::PushClip { bounds: Rect::new(0.0, 0.0, 50.0, 50.0) },
+            DrawCommand::Rect {
+                bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                color: Color::BLACK,
+                corner_radius: 0.0,
+            },
+            DrawCommand::PopClip,
+        ];
+
+        let batches = build_batches(&cmds, (1920, 1080));
+        assert_eq!(batches.len(), 2);
         assert!(batches[0].clip_rect.is_none());
+        assert!(batches[1].clip_rect.is_some());
     }
 
     // ═══════════════════════════════════════════════════════════════════════

@@ -41,11 +41,9 @@ impl TooltipManagerImpl {
 impl TooltipManager for TooltipManagerImpl {
     fn show(&mut self, text: String, position: Point) {
         if self.pending_text.as_ref() == Some(&text) {
-            self.pending_position = position;
             return;
         }
         if self.state.as_ref().is_some_and(|state| state.text == text) {
-            self.state = Some(TooltipState { text, position, visible: true });
             return;
         }
         self.pending_text = Some(text);
@@ -127,7 +125,7 @@ mod tests {
     }
 
     #[test]
-    fn tooltip_same_show_preserves_timer_and_updates_position() {
+    fn tooltip_same_show_preserves_timer_and_position() {
         let mut mgr = TooltipManagerImpl::new(500);
         mgr.show("same".into(), Point::new(1.0, 1.0));
         mgr.update(300);
@@ -136,11 +134,11 @@ mod tests {
 
         let state = mgr.current().unwrap();
         assert_eq!(state.text, "same");
-        assert_eq!(state.position, Point::new(8.0, 9.0));
+        assert_eq!(state.position, Point::new(1.0, 1.0));
     }
 
     #[test]
-    fn tooltip_same_visible_show_moves_current_tooltip() {
+    fn tooltip_same_visible_show_preserves_current_position() {
         let mut mgr = TooltipManagerImpl::new(0);
         mgr.show("same".into(), Point::new(1.0, 1.0));
         mgr.update(0);
@@ -148,7 +146,7 @@ mod tests {
         mgr.show("same".into(), Point::new(3.0, 4.0));
 
         let state = mgr.current().unwrap();
-        assert_eq!(state.position, Point::new(3.0, 4.0));
+        assert_eq!(state.position, Point::new(1.0, 1.0));
     }
 
     #[test]

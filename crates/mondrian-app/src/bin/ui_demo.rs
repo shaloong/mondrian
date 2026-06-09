@@ -47,6 +47,7 @@ fn demo_action(name: &str) -> Action {
 
 thread_local! {
     static TEXT_INPUT_BOUNDS: Cell<Option<Rect>> = const { Cell::new(None) };
+    static TEXT_INPUT_ID: Cell<Option<WidgetId>> = const { Cell::new(None) };
     static DEMO_LAST_ACTION: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
@@ -78,6 +79,7 @@ struct GalleryWidget {
     scroll_area: ScrollView,
     tooltip_trigger: Rect,
     tooltip: TooltipWidget,
+    tooltip_active: bool,
     context_menu: Option<ContextMenu>,
     last_action: String,
     last_slider_value: f32,
@@ -125,6 +127,7 @@ impl GalleryWidget {
             scroll_area: ScrollView::new(Some(Box::new(scroll_content))),
             tooltip_trigger: Rect::ZERO,
             tooltip: TooltipWidget::new(),
+            tooltip_active: false,
             context_menu: None,
             last_action: String::new(),
             last_slider_value: 50.0,
@@ -134,12 +137,19 @@ impl GalleryWidget {
 
     fn update_hover_tooltip(&mut self, position: Point) {
         if self.tooltip_trigger.contains(position) {
-            self.tooltip.update_state(TooltipState {
-                text: "Tooltip 示例：用于检查悬停提示、边界夹紧和文字绘制。".into(),
-                position,
-                visible: true,
-            });
+            if !self.tooltip_active {
+                self.tooltip_active = true;
+                self.tooltip.update_state(TooltipState {
+                    text: "Tooltip 示例：用于检查悬停提示、边界夹紧和文字绘制。".into(),
+                    position: Point::new(
+                        self.tooltip_trigger.x,
+                        self.tooltip_trigger.y + self.tooltip_trigger.height,
+                    ),
+                    visible: true,
+                });
+            }
         } else {
+            self.tooltip_active = false;
             self.tooltip.clear();
         }
     }
@@ -184,6 +194,7 @@ impl Widget for GalleryWidget {
 
         self.text_input.layout(Rect::new(x0, y, col_w, row_h));
         TEXT_INPUT_BOUNDS.with(|b| b.set(Some(Rect::new(x0, y, col_w, row_h))));
+        TEXT_INPUT_ID.with(|id| id.set(Some(self.text_input.id())));
         y += row_h + gap;
 
         self.slider.layout(Rect::new(x0, y, col_w, row_h));
@@ -1008,7 +1019,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     None => {
                         let is_text = TEXT_INPUT_BOUNDS
-                            .with(|b| b.get().is_some_and(|r| r.contains(last_cursor)));
+                            .with(|b| b.get().is_some_and(|r| r.contains(last_cursor)))
+                            && TEXT_INPUT_ID.with(|id| id.get()) == router.focused();
                         if is_text {
                             window.set_cursor_icon(winit::window::CursorIcon::Text);
                         } else {
