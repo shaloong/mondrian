@@ -100,11 +100,6 @@ impl Widget for TooltipWidget {
             spacing.tooltip_offset,
             ctx.clip_rect,
         );
-        let border = tokens.ring;
-
-        // Simple border by drawing a slightly larger rect behind the fill.
-        let border_rect = bg.inset(-1.0, -1.0);
-        ctx.encoder.draw_rect(border_rect, border, spacing.radius_sm);
         ctx.encoder.draw_rect(bg, tokens.popover, spacing.radius_sm);
 
         ctx.encoder.draw_text(
@@ -211,9 +206,10 @@ mod tests {
             widget.paint(&mut ctx);
         }
 
-        let fill = encoder.rects.get(1).expect("paint should draw border and fill");
+        let fill = encoder.rects.first().expect("paint should draw fill");
         assert!(fill.x + fill.width <= clip_rect.x + clip_rect.width + 0.1);
         assert!(fill.y + fill.height <= clip_rect.y + clip_rect.height + 0.1);
+        assert_eq!(encoder.rects.len(), 1);
         assert_eq!(encoder.texts.len(), 1);
     }
 }

@@ -7,7 +7,7 @@ use mondrian_editor_state::Action;
 use mondrian_platform::{NoopPlatformService, PlatformService};
 use mondrian_ui_core::focus::FocusManager;
 use mondrian_ui_core::types::{EventResult, Point, UiEvent, WidgetId};
-use mondrian_ui_core::widget::{EventContext, EventRequests, PointerCaptureRequest};
+use mondrian_ui_core::widget::{EventContext, EventRequests, ImeRequest, PointerCaptureRequest};
 use mondrian_ui_core::WidgetTree;
 
 use crate::focus_manager::FocusManagerImpl;
@@ -27,6 +27,7 @@ pub struct EventRouter {
     focus_mgr: FocusManagerImpl,
     shortcut_mgr: ShortcutManagerImpl,
     platform: Box<dyn PlatformService>,
+    last_ime_request: Option<ImeRequest>,
 }
 
 struct DummyTooltip;
@@ -49,6 +50,7 @@ impl EventRouter {
             focus_mgr: FocusManagerImpl::new(),
             shortcut_mgr: ShortcutManagerImpl::new(),
             platform: Box::new(NoopPlatformService),
+            last_ime_request: None,
         }
     }
 
@@ -61,6 +63,7 @@ impl EventRouter {
             focus_mgr: FocusManagerImpl::new(),
             shortcut_mgr: ShortcutManagerImpl::new(),
             platform,
+            last_ime_request: None,
         }
     }
 
@@ -72,6 +75,15 @@ impl EventRouter {
     }
     pub fn captured(&self) -> Option<WidgetId> {
         self.captured
+    }
+
+    /// Take the latest platform IME request emitted by a widget event.
+    ///
+    /// The router owns focus and capture state, but the application owns the
+    /// native window, so IME requests are exposed for the app shell to apply to
+    /// winit or another platform backend.
+    pub fn take_ime_request(&mut self) -> Option<ImeRequest> {
+        self.last_ime_request.take()
     }
 
     pub fn set_capture(&mut self, widget: Option<WidgetId>) {
@@ -180,6 +192,19 @@ impl EventRouter {
                     hit_test_deepest(tree, position)
                 };
 
+                if matches!(&event, UiEvent::MouseDown { .. }) {
+                    if let Some(focused) = self.focus_mgr.focused_widget() {
+                        let clicked_inside_focus = target.is_some_and(|target_id| {
+                            self.is_ancestor_or_self(tree, focused, target_id)
+                        });
+                        if !clicked_inside_focus {
+                            self.send_focus_lost(tree, focused, dispatch);
+                            self.focus_mgr.release_focus(focused);
+                            self.focused = self.focus_mgr.focused_widget();
+                        }
+                    }
+                }
+
                 if let Some(target_id) = target {
                     if self.captured.is_none()
                         && !is_keyboard
@@ -217,6 +242,39 @@ impl EventRouter {
         }
     }
 
+    fn is_ancestor_or_self(
+        &self,
+        tree: &dyn WidgetTree,
+        maybe_ancestor: WidgetId,
+        mut child: WidgetId,
+    ) -> bool {
+        loop {
+            if child == maybe_ancestor {
+                return true;
+            }
+            let Some(parent) = tree.parent_id(child) else {
+                return false;
+            };
+            child = parent;
+        }
+    }
+
+    fn send_focus_lost(
+        &mut self,
+        tree: &mut dyn WidgetTree,
+        widget_id: WidgetId,
+        dispatch: &dyn Fn(Action),
+    ) {
+        if let Some(widget) = tree.get_mut(widget_id) {
+            let mut requests = EventRequests::default();
+            {
+                let mut ctx = self.make_event_context(dispatch, &mut requests);
+                widget.event(&UiEvent::FocusLost, &mut ctx);
+            }
+            self.apply_event_requests(requests);
+        }
+    }
+
     #[allow(static_mut_refs)]
     fn make_event_context<'a>(
         &'a mut self,
@@ -235,6 +293,9 @@ impl EventRouter {
     }
 
     fn apply_event_requests(&mut self, requests: EventRequests) {
+        if let Some(ime) = requests.ime {
+            self.last_ime_request = Some(ime);
+        }
         match requests.pointer_capture {
             Some(PointerCaptureRequest::Capture(id)) => self.captured = Some(id),
             Some(PointerCaptureRequest::Release(id)) if self.captured == Some(id) => {
@@ -368,6 +429,7 @@ mod tests {
                 UiEvent::MouseDown { .. } => {
                     ctx.focus.request_focus(self.id, PanelKind::Console);
                     ctx.request_pointer_capture(self.id);
+                    ctx.set_ime_enabled(true, Some(Rect::new(1.0, 2.0, 3.0, 4.0)));
                     self.log.borrow_mut().push("down".into());
                     EventResult::Handled
                 }
@@ -382,6 +444,11 @@ mod tests {
                 }
                 UiEvent::ImeCommit(text) => {
                     self.log.borrow_mut().push(format!("commit:{text}"));
+                    EventResult::Handled
+                }
+                UiEvent::FocusLost => {
+                    ctx.set_ime_enabled(false, None);
+                    self.log.borrow_mut().push("focus-lost".into());
                     EventResult::Handled
                 }
                 _ => EventResult::Ignored,
@@ -453,10 +520,61 @@ mod tests {
         );
         assert_eq!(result, EventResult::Handled);
         assert_eq!(router.focused(), Some(root));
+        let ime = router.take_ime_request().expect("focused text widget should enable IME");
+        assert!(ime.enabled);
+        assert_eq!(ime.cursor_area, Some(Rect::new(1.0, 2.0, 3.0, 4.0)));
+        assert!(router.take_ime_request().is_none());
 
         let result = router.route(UiEvent::ImeCommit("你好".into()), &mut tree, &|_| {});
         assert_eq!(result, EventResult::Handled);
         assert!(log.borrow().contains(&"commit:你好".into()));
+    }
+
+    #[test]
+    fn router_blurs_focused_widget_on_pointer_down_outside() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let root = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(root);
+
+        router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.focused(), Some(root));
+        let _ = router.take_ime_request();
+        router.route(
+            UiEvent::MouseUp {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.captured(), None);
+
+        router.route(
+            UiEvent::MouseDown {
+                position: Point::new(500.0, 500.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(router.focused(), None);
+        assert!(log.borrow().contains(&"focus-lost".into()));
+        let ime = router.take_ime_request().expect("blur should disable IME");
+        assert!(!ime.enabled);
+        assert_eq!(ime.cursor_area, None);
     }
 
     #[test]

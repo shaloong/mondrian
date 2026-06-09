@@ -133,14 +133,21 @@ impl Widget for Checkbox {
 
         // Check mark — two line segments forming a V
         if self.checked {
-            let side = box_rect.width.min(box_rect.height);
-            let cx = box_rect.x + box_rect.width * 0.5;
-            let cy = box_rect.y + box_rect.height * 0.5;
-            let start = Point::new(cx - side * 0.20, cy + side * 0.04);
-            let mid = Point::new(cx - side * 0.04, cy + side * 0.20);
-            let end = Point::new(cx + side * 0.24, cy - side * 0.18);
-            ctx.encoder.draw_line(start, mid, 3.0, tokens.primary_foreground);
-            ctx.encoder.draw_line(mid, end, 3.0, tokens.primary_foreground);
+            let start = Point::new(
+                box_rect.x + box_rect.width * 0.28,
+                box_rect.y + box_rect.height * 0.54,
+            );
+            let mid = Point::new(
+                box_rect.x + box_rect.width * 0.43,
+                box_rect.y + box_rect.height * 0.68,
+            );
+            let end = Point::new(
+                box_rect.x + box_rect.width * 0.74,
+                box_rect.y + box_rect.height * 0.34,
+            );
+            let stroke = 2.4;
+            ctx.encoder.draw_line(start, mid, stroke, tokens.primary_foreground);
+            ctx.encoder.draw_line(mid, end, stroke, tokens.primary_foreground);
         }
 
         // Label text
@@ -166,7 +173,45 @@ impl Widget for Checkbox {
 mod tests {
     use super::*;
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use mondrian_ui_core::widget::DrawCommandEncoder;
+    use mondrian_ui_theme::ThemePreset;
     use std::cell::RefCell;
+
+    #[derive(Default)]
+    struct RecordingEncoder {
+        lines: Vec<(Point, Point, f32)>,
+    }
+
+    impl DrawCommandEncoder for RecordingEncoder {
+        fn push_clip(&mut self, _bounds: Rect) {}
+
+        fn pop_clip(&mut self) {}
+
+        fn draw_rect(&mut self, _bounds: Rect, _color: mondrian_core::Color, _corner_radius: f32) {}
+
+        fn draw_line(
+            &mut self,
+            start: Point,
+            end: Point,
+            width: f32,
+            _color: mondrian_core::Color,
+        ) {
+            self.lines.push((start, end, width));
+        }
+
+        fn draw_text(
+            &mut self,
+            _text: &str,
+            _font_size: f32,
+            _position: Point,
+            _color: mondrian_core::Color,
+        ) {
+        }
+
+        fn push_translate(&mut self, _offset: glam::Vec2) {}
+
+        fn pop_transform(&mut self) {}
+    }
 
     #[test]
     fn checkbox_new_unchecked() {
@@ -283,6 +328,26 @@ mod tests {
         let mut cb = Checkbox::new("Opt", false);
         cb.set_checked(true);
         assert!(cb.is_checked());
+    }
+
+    #[test]
+    fn checkbox_checked_paints_two_stable_checkmark_segments() {
+        let mut cb = Checkbox::new("Opt", true);
+        cb.layout(Rect::new(0.0, 0.0, 100.0, 22.0));
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 100.0, 22.0),
+        };
+
+        cb.paint(&mut ctx);
+
+        assert_eq!(encoder.lines.len(), 2);
+        assert_eq!(encoder.lines[0].2, 2.4);
+        assert_eq!(encoder.lines[1].2, 2.4);
+        assert_eq!(encoder.lines[0].1, encoder.lines[1].0);
     }
 
     #[test]

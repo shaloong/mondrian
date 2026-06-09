@@ -80,6 +80,11 @@ input owns focus; hover alone should not switch the pointer shape.
 Text inputs use the same `mondrian-ui-text` measurement path as glyph rendering
 for cursor movement, selection geometry, hit testing, and horizontal scroll;
 approximate width estimates are not used for editable text internals.
+IME is a platform side effect: text widgets emit `EventRequests::ime`, the
+event router exposes the latest request, and the app shell applies it to the
+native window (`set_ime_allowed` plus cursor area for winit). Pointer clicks
+outside the focused widget send `FocusLost` so IME is disabled when editing
+ends.
 
 Text copy/cut shortcuts are consumed by `TextInput` only when a selection exists.
 If there is no selection, `Ctrl+C` and `Ctrl+X` are ignored so panel-level
@@ -95,7 +100,8 @@ the same request path.
 Parent-owned chrome that must win over child hit targets, such as
 `DockSplitter` handles over tab bars, uses `Widget::before_child_event()`.
 Splitter handles paint above children, use a narrower 6px interaction zone by
-default, and grow in stroke width while hovered or dragged.
+default, grow in stroke width while hovered or dragged, and span the full
+splitter bounds without endpoint gaps.
 
 Slider value mapping uses the same thumb-centered track for painting and
 pointer updates. The thumb rect must remain inside widget bounds; if a parent
@@ -121,7 +127,8 @@ offset convention as `ScrollView`.
 Tooltip positions are anchored when the pointer enters a trigger and then
 clamped by the tooltip widget to the current clip rect. Repeating the same
 tooltip request keeps the original anchor so the popup does not chase pointer
-movement.
+movement. Tooltips draw the popover fill directly without a high-emphasis ring
+border.
 
 ## Scroll Views
 
@@ -164,4 +171,5 @@ content rects.
 
 Line commands are expanded to quads with front-facing triangle winding for every
 orientation. This matters for splitter handles because the UI pipeline keeps
-back-face culling enabled.
+back-face culling enabled. Line geometry uses square caps so diagonal strokes,
+including checkbox checkmarks, do not look clipped at segment endpoints.

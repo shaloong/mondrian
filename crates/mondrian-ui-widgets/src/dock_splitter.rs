@@ -259,16 +259,16 @@ impl Widget for DockSplitter {
         match self.direction {
             SplitDirection::Horizontal => {
                 ctx.encoder.draw_line(
-                    Point::new(hx, self.bounds.y + 4.0),
-                    Point::new(hx, self.bounds.y + self.bounds.height - 4.0),
+                    Point::new(hx, self.bounds.y),
+                    Point::new(hx, self.bounds.y + self.bounds.height),
                     handle_width,
                     handle_color,
                 );
             }
             SplitDirection::Vertical => {
                 ctx.encoder.draw_line(
-                    Point::new(self.bounds.x + 4.0, hy),
-                    Point::new(self.bounds.x + self.bounds.width - 4.0, hy),
+                    Point::new(self.bounds.x, hy),
+                    Point::new(self.bounds.x + self.bounds.width, hy),
                     handle_width,
                     handle_color,
                 );
@@ -337,6 +337,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingEncoder {
         line_widths: Vec<f32>,
+        lines: Vec<(Point, Point)>,
     }
 
     impl DrawCommandEncoder for RecordingEncoder {
@@ -348,12 +349,13 @@ mod tests {
 
         fn draw_line(
             &mut self,
-            _start: Point,
-            _end: Point,
+            start: Point,
+            end: Point,
             width: f32,
             _color: mondrian_core::Color,
         ) {
             self.line_widths.push(width);
+            self.lines.push((start, end));
         }
 
         fn draw_text(
@@ -456,5 +458,38 @@ mod tests {
             splitter.paint(&mut ctx);
         }
         assert_eq!(encoder.line_widths.last(), Some(&4.0));
+    }
+
+    #[test]
+    fn handle_lines_span_full_splitter_bounds() {
+        let theme = mondrian_ui_theme::ThemePreset::Dark.build();
+
+        let horizontal = splitter(SplitDirection::Horizontal);
+        let mut encoder = RecordingEncoder::default();
+        {
+            let mut ctx = PaintContext {
+                encoder: &mut encoder,
+                theme: &theme,
+                clip_rect: Rect::new(0.0, 0.0, 200.0, 100.0),
+            };
+            horizontal.paint(&mut ctx);
+        }
+        let (start, end) = encoder.lines.last().copied().expect("splitter should draw handle");
+        assert_eq!(start.y, 0.0);
+        assert_eq!(end.y, 100.0);
+
+        let vertical = splitter(SplitDirection::Vertical);
+        let mut encoder = RecordingEncoder::default();
+        {
+            let mut ctx = PaintContext {
+                encoder: &mut encoder,
+                theme: &theme,
+                clip_rect: Rect::new(0.0, 0.0, 200.0, 100.0),
+            };
+            vertical.paint(&mut ctx);
+        }
+        let (start, end) = encoder.lines.last().copied().expect("splitter should draw handle");
+        assert_eq!(start.x, 0.0);
+        assert_eq!(end.x, 200.0);
     }
 }

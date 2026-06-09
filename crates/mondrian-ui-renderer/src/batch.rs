@@ -120,10 +120,16 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                 let len = (dx * dx + dy * dy).sqrt().max(0.001);
                 let nx = -dy / len;
                 let ny = dx / len;
+                let ux = dx / len;
+                let uy = dy / len;
                 let hw = (*width).max(1.0) * 0.5;
 
-                let n_start = apply_transform_point(start, &transform_stack);
-                let n_end = apply_transform_point(end, &transform_stack);
+                let mut n_start = apply_transform_point(start, &transform_stack);
+                let mut n_end = apply_transform_point(end, &transform_stack);
+                n_start.x -= ux * hw;
+                n_start.y -= uy * hw;
+                n_end.x += ux * hw;
+                n_end.y += uy * hw;
 
                 let screen_start = Point::new(sx * n_start.x + tx, sy * n_start.y + ty);
                 let screen_end = Point::new(sx * n_end.x + tx, sy * n_end.y + ty);
@@ -477,6 +483,26 @@ mod tests {
             let c = (tri[2].position[0], tri[2].position[1]);
             assert!(signed_triangle_area(a, b, c) > 0.0);
         }
+    }
+
+    #[test]
+    fn build_batches_line_uses_square_caps() {
+        let cmds = [DrawCommand::Line {
+            start: Point::new(10.0, 50.0),
+            end: Point::new(90.0, 50.0),
+            width: 4.0,
+            color: Color::WHITE,
+        }];
+        let batches = build_batches(&cmds, (100, 100));
+        let min_x = batches[0].vertices.iter().map(|v| v.position[0]).fold(f32::INFINITY, f32::min);
+        let max_x = batches[0]
+            .vertices
+            .iter()
+            .map(|v| v.position[0])
+            .fold(f32::NEG_INFINITY, f32::max);
+
+        assert!((min_x - (-0.84)).abs() < 0.001);
+        assert!((max_x - 0.84).abs() < 0.001);
     }
 
     // ═══════════════════════════════════════════════════════════════════════

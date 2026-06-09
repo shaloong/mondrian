@@ -17,7 +17,7 @@ use mondrian_editor_state::Action;
 use mondrian_ui_core::tooltip::TooltipState;
 use mondrian_ui_core::tree::WidgetTreeView;
 use mondrian_ui_core::types::{self as ui_types, *};
-use mondrian_ui_core::widget::{EventContext, PaintContext};
+use mondrian_ui_core::widget::{EventContext, ImeRequest, PaintContext};
 use mondrian_ui_core::widgets::ColoredBox;
 use mondrian_ui_core::{EventResult, TreeWalker, Widget};
 use mondrian_ui_events::EventRouter;
@@ -787,6 +787,34 @@ fn route_demo_event(
     router.route(event, &mut tree, &record_demo_action)
 }
 
+fn route_demo_window_event(
+    window: &winit::window::Window,
+    router: &mut EventRouter,
+    root: &mut dyn Widget,
+    event: UiEvent,
+) -> EventResult {
+    let result = route_demo_event(router, root, event);
+    if let Some(request) = router.take_ime_request() {
+        apply_ime_request(window, request);
+    }
+    result
+}
+
+fn apply_ime_request(window: &winit::window::Window, request: ImeRequest) {
+    window.set_ime_allowed(request.enabled);
+    if request.enabled {
+        if let Some(area) = request.cursor_area {
+            window.set_ime_cursor_area(
+                winit::dpi::PhysicalPosition::new(area.x as f64, area.y as f64),
+                winit::dpi::PhysicalSize::new(
+                    area.width.max(1.0) as u32,
+                    area.height.max(1.0) as u32,
+                ),
+            );
+        }
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Main
 // ═══════════════════════════════════════════════════════════════════════════
@@ -889,7 +917,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 if pressed {
                     if let Some(kc) = winit_key_to_keycode(&logical_key) {
-                        let _ = route_demo_event(
+                        let _ = route_demo_window_event(
+                            &window,
                             &mut router,
                             &mut root,
                             UiEvent::KeyDown { key: kc, modifiers: modifiers_state },
@@ -899,7 +928,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if !modifiers_state.ctrl {
                         if let Some(txt) = text {
                             if !txt.is_empty() && !txt.chars().any(|c| c.is_control()) {
-                                let _ = route_demo_event(
+                                let _ = route_demo_window_event(
+                                    &window,
                                     &mut router,
                                     &mut root,
                                     UiEvent::TextInput(txt.to_string()),
@@ -916,14 +946,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 event: WindowEvent::Ime(winit::event::Ime::Commit(text)),
                 ..
             } => {
-                let _ = route_demo_event(&mut router, &mut root, UiEvent::ImeCommit(text));
+                let _ = route_demo_window_event(
+                    &window,
+                    &mut router,
+                    &mut root,
+                    UiEvent::ImeCommit(text),
+                );
                 window.request_redraw();
             }
             Event::WindowEvent {
                 event: WindowEvent::Ime(winit::event::Ime::Preedit(text, _cursor)),
                 ..
             } => {
-                let _ = route_demo_event(&mut router, &mut root, UiEvent::ImePreedit(text));
+                let _ = route_demo_window_event(
+                    &window,
+                    &mut router,
+                    &mut root,
+                    UiEvent::ImePreedit(text),
+                );
                 window.request_redraw();
             }
             Event::WindowEvent {
@@ -937,8 +977,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ..
             } => {
                 // IME disabled — clear any pending preedit
-                let _ =
-                    route_demo_event(&mut router, &mut root, UiEvent::ImePreedit(String::new()));
+                let _ = route_demo_window_event(
+                    &window,
+                    &mut router,
+                    &mut root,
+                    UiEvent::ImePreedit(String::new()),
+                );
                 window.request_redraw();
             }
 
@@ -999,7 +1043,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 event: WindowEvent::CursorMoved { position, .. }, ..
             } => {
                 last_cursor = Point::new(position.x as f32, position.y as f32);
-                let _ = route_demo_event(
+                let _ = route_demo_window_event(
+                    &window,
                     &mut router,
                     &mut root,
                     UiEvent::MouseMove {
@@ -1047,7 +1092,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         modifiers: Modifiers::none(),
                     },
                 };
-                let _ = route_demo_event(&mut router, &mut root, event);
+                let _ = route_demo_window_event(&window, &mut router, &mut root, event);
                 window.request_redraw();
             }
 
@@ -1056,7 +1101,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     winit::event::MouseScrollDelta::LineDelta(_, y) => -y * 20.0,
                     winit::event::MouseScrollDelta::PixelDelta(pos) => -(pos.y as f32),
                 };
-                let _ = route_demo_event(
+                let _ = route_demo_window_event(
+                    &window,
                     &mut router,
                     &mut root,
                     UiEvent::MouseWheel {
