@@ -11,6 +11,7 @@ rust-version.workspace = true
 mondrian-core         = { workspace = true }
 mondrian-ui-core      = { workspace = true }
 mondrian-ui-theme     = { workspace = true }
+mondrian-ui-text      = { workspace = true }
 mondrian-editor-state = { workspace = true }
 mondrian-platform     = { workspace = true }
 

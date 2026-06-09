@@ -33,6 +33,35 @@ pub struct UiRenderer {
     glyph_bind_group: wgpu::BindGroup,
 }
 
+fn scissor_rect_for_clip(
+    clip_rect: Option<mondrian_ui_core::types::Rect>,
+    screen_size: (u32, u32),
+) -> Option<(u32, u32, u32, u32)> {
+    let (screen_w, screen_h) = screen_size;
+    if screen_w == 0 || screen_h == 0 {
+        return None;
+    }
+
+    let Some(clip) = clip_rect else {
+        return Some((0, 0, screen_w, screen_h));
+    };
+
+    let max_x = screen_w as f32;
+    let max_y = screen_h as f32;
+    let left = clip.x.floor().clamp(0.0, max_x) as u32;
+    let top = clip.y.floor().clamp(0.0, max_y) as u32;
+    let right = (clip.x + clip.width).ceil().clamp(0.0, max_x) as u32;
+    let bottom = (clip.y + clip.height).ceil().clamp(0.0, max_y) as u32;
+
+    let width = right.saturating_sub(left);
+    let height = bottom.saturating_sub(top);
+    if width == 0 || height == 0 {
+        None
+    } else {
+        Some((left, top, width, height))
+    }
+}
+
 impl UiRenderer {
     pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
         let pipeline = UiPipeline::new(device, surface_format);
@@ -175,6 +204,13 @@ impl UiRenderer {
                 if batch.vertices.is_empty() {
                     continue;
                 }
+                let Some((x, y, width, height)) =
+                    scissor_rect_for_clip(batch.clip_rect, screen_size)
+                else {
+                    continue;
+                };
+                rpass.set_scissor_rect(x, y, width, height);
+
                 let vertex_data: &[RectVertex] = &batch.vertices;
                 let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("ui_vb"),
@@ -187,5 +223,35 @@ impl UiRenderer {
         }
 
         queue.submit(std::iter::once(encoder.finish()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mondrian_ui_core::types::Rect;
+
+    #[test]
+    fn scissor_none_uses_full_screen() {
+        assert_eq!(
+            scissor_rect_for_clip(None, (1920, 1080)),
+            Some((0, 0, 1920, 1080))
+        );
+    }
+
+    #[test]
+    fn scissor_clamps_to_screen_and_uses_conservative_bounds() {
+        assert_eq!(
+            scissor_rect_for_clip(Some(Rect::new(-2.4, 10.2, 20.3, 8.1)), (100, 50)),
+            Some((0, 10, 18, 9))
+        );
+    }
+
+    #[test]
+    fn scissor_empty_clip_skips_batch() {
+        assert_eq!(
+            scissor_rect_for_clip(Some(Rect::new(120.0, 10.0, 20.0, 20.0)), (100, 50)),
+            None
+        );
     }
 }

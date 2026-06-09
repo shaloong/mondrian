@@ -3400,6 +3400,7 @@ dependencies = [
  "mondrian-editor-state",
  "mondrian-platform",
  "mondrian-ui-core",
+ "mondrian-ui-text",
  "mondrian-ui-theme",
  "unicode-segmentation",
 ]

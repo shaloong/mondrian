@@ -10,7 +10,7 @@
 //! - 基于 grapheme cluster 的光标（正确处理 emoji / 组合字符）
 //! - 时间驱动的闪烁光标（500ms 周期）
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::time::Instant;
 
 use unicode_segmentation::UnicodeSegmentation;
@@ -18,10 +18,22 @@ use unicode_segmentation::UnicodeSegmentation;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
+use mondrian_ui_text::TextRenderer;
 
 const DEFAULT_FONT_SIZE: f32 = 14.0;
 const HORIZONTAL_PADDING: f32 = 8.0;
 const VERTICAL_PADDING: f32 = 4.0;
+
+thread_local! {
+    static TEXT_METRICS: RefCell<TextRenderer> = RefCell::new(TextRenderer::new());
+}
+
+fn measure_text_width(text: &str, font_size: f32) -> f32 {
+    if text.is_empty() {
+        return 0.0;
+    }
+    TEXT_METRICS.with_borrow_mut(|renderer| renderer.measure_text(text, font_size).0)
+}
 
 /// TextInput Widget —— 单行文本输入框
 pub struct TextInput {
@@ -162,7 +174,7 @@ impl TextInput {
         let total = self.len_graphemes();
         for i in 0..=total {
             let prefix_byte = self.grapheme_byte_idx(i);
-            let w = estimate_text_width(&self.text[..prefix_byte], font_size);
+            let w = measure_text_width(&self.text[..prefix_byte], font_size);
             let dist = (pixel_x - w).abs();
             if dist < best_dist {
                 best_dist = dist;
@@ -210,7 +222,7 @@ impl TextInput {
         if self.text.is_empty() {
             0.0
         } else {
-            estimate_text_width(&self.text[..self.cursor_byte_idx()], font_size)
+            measure_text_width(&self.text[..self.cursor_byte_idx()], font_size)
         }
     }
 
@@ -219,11 +231,13 @@ impl TextInput {
     }
 
     fn cursor_area(&self, font_size: f32) -> Rect {
-        let x = self.cursor_screen_x(font_size).clamp(self.content_left(), self.content_right());
+        let caret_width = 2.0;
+        let max_x = (self.content_right() - caret_width).max(self.content_left());
+        let x = self.cursor_screen_x(font_size).clamp(self.content_left(), max_x);
         Rect::new(
             x,
             self.bounds.y + VERTICAL_PADDING,
-            2.0,
+            caret_width,
             (self.bounds.height - VERTICAL_PADDING * 2.0).max(1.0),
         )
     }
@@ -238,7 +252,7 @@ impl TextInput {
         if position.x < self.content_left() {
             0.0
         } else if position.x > self.content_right() {
-            estimate_text_width(&self.text, DEFAULT_FONT_SIZE)
+            measure_text_width(&self.text, DEFAULT_FONT_SIZE)
         } else {
             (position.x - self.content_left() + self.scroll_x.get()).max(0.0)
         }
@@ -248,7 +262,7 @@ impl TextInput {
         let text_w = if self.text.is_empty() {
             0.0
         } else {
-            estimate_text_width(&self.text, font_size)
+            measure_text_width(&self.text, font_size)
         };
         let visible_w = self.visible_width();
         let cursor_x = self.cursor_text_x(font_size);
@@ -634,8 +648,8 @@ impl Widget for TextInput {
 
         // Selection highlight
         if let Some((byte_start, byte_end)) = self.selection_byte_range() {
-            let sel_x = text_x + estimate_text_width(&self.text[..byte_start], font_size);
-            let sel_w = estimate_text_width(&self.text[byte_start..byte_end], font_size);
+            let sel_x = text_x + measure_text_width(&self.text[..byte_start], font_size);
+            let sel_w = measure_text_width(&self.text[byte_start..byte_end], font_size);
             let sel_h = font_size * 1.3;
             let sel_y = self.bounds.y + (self.bounds.height - sel_h).max(0.0) * 0.5;
             ctx.encoder
@@ -660,7 +674,7 @@ impl Widget for TextInput {
 
         if self.focused && !self.ime_preedit.is_empty() {
             let prefix_byte = self.grapheme_byte_idx(self.cursor);
-            let preedit_x = text_x + estimate_text_width(&self.text[..prefix_byte], font_size);
+            let preedit_x = text_x + measure_text_width(&self.text[..prefix_byte], font_size);
             ctx.encoder.draw_text(
                 &self.ime_preedit,
                 font_size,
@@ -668,7 +682,7 @@ impl Widget for TextInput {
                 tokens.foreground,
             );
             let underline_y = text_y + font_size * 1.25;
-            let underline_w = estimate_text_width(&self.ime_preedit, font_size).max(4.0);
+            let underline_w = measure_text_width(&self.ime_preedit, font_size).max(4.0);
             ctx.encoder.draw_line(
                 Point::new(preedit_x, underline_y),
                 Point::new(preedit_x + underline_w, underline_y),
@@ -1319,6 +1333,27 @@ mod tests {
     }
 
     #[test]
+    fn long_text_scroll_uses_renderer_metrics() {
+        let text = "abcdefghijklmnopqrstuvwxyz";
+        let mut ti = TextInput::new("ph").with_text(text);
+        ti.layout(Rect::new(0.0, 0.0, 80.0, 28.0));
+
+        let expected_scroll =
+            (measure_text_width(text, DEFAULT_FONT_SIZE) - ti.visible_width()).max(0.0);
+        assert!((ti.scroll_x.get() - expected_scroll).abs() <= 0.1);
+    }
+
+    #[test]
+    fn long_text_caret_stays_inside_content_rect() {
+        let mut ti = TextInput::new("ph").with_text("abcdefghijklmnopqrstuvwxyz");
+        ti.layout(Rect::new(0.0, 0.0, 80.0, 28.0));
+
+        let caret = ti.cursor_area(DEFAULT_FONT_SIZE);
+        assert!(caret.x >= ti.content_left());
+        assert!(caret.x + caret.width <= ti.content_right() + 0.1);
+    }
+
+    #[test]
     fn click_uses_scroll_offset_for_long_text() {
         let mut ti = TextInput::new("ph").with_text("abcdefghijklmnopqrstuvwxyz");
         ti.layout(Rect::new(0.0, 0.0, 80.0, 28.0));
@@ -1417,6 +1452,8 @@ mod tests {
             let mut input = TextInput::new("ph").with_text("abc");
             input.focused = true;
             input.layout(Rect::new(0.0, 0.0, 200.0, 28.0));
+            input.cursor_visible.set(true);
+            input.last_blink.set(Instant::now());
             input
         };
         let theme = ThemePreset::Dark.build();

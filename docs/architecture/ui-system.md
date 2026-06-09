@@ -77,6 +77,9 @@ composition windows can anchor near the insertion point.
 Text content is clipped to the padded content rect, not the outer widget
 bounds. App shells should show an I-beam cursor for text inputs only after the
 input owns focus; hover alone should not switch the pointer shape.
+Text inputs use the same `mondrian-ui-text` measurement path as glyph rendering
+for cursor movement, selection geometry, hit testing, and horizontal scroll;
+approximate width estimates are not used for editable text internals.
 
 Text copy/cut shortcuts are consumed by `TextInput` only when a selection exists.
 If there is no selection, `Ctrl+C` and `Ctrl+X` are ignored so panel-level
@@ -153,7 +156,12 @@ Text positions are left to the text renderer and caller-side layout policy, and
 image UVs remain unsnapped because they are texture coordinates rather than
 screen-space geometry.
 
-The renderer must flush draw batches when clip state changes. A command emitted
-inside `PushClip`/`PopClip` must not share a batch with unclipped geometry,
-otherwise glyph images and other later-resolved commands can bleed outside
-their widget content rects.
+The renderer must flush draw batches when clip state changes and must apply the
+batch clip rect as a GPU scissor before drawing. A command emitted inside
+`PushClip`/`PopClip` must not share a batch with unclipped geometry, otherwise
+glyph images and other later-resolved commands can bleed outside their widget
+content rects.
+
+Line commands are expanded to quads with front-facing triangle winding for every
+orientation. This matters for splitter handles because the UI pipeline keeps
+back-face culling enabled.

@@ -142,92 +142,7 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                 let x3 = screen_end.x + off_x;
                 let y3 = screen_end.y + off_y;
 
-                let verts = vec![
-                    RectVertex::new(
-                        x0,
-                        y0,
-                        0.0,
-                        0.0,
-                        color.r,
-                        color.g,
-                        color.b,
-                        color.a,
-                        1.0,
-                        1.0,
-                        0.0,
-                        RenderMode::Shape,
-                    ),
-                    RectVertex::new(
-                        x2,
-                        y2,
-                        0.0,
-                        0.0,
-                        color.r,
-                        color.g,
-                        color.b,
-                        color.a,
-                        1.0,
-                        1.0,
-                        0.0,
-                        RenderMode::Shape,
-                    ),
-                    RectVertex::new(
-                        x1,
-                        y1,
-                        0.0,
-                        0.0,
-                        color.r,
-                        color.g,
-                        color.b,
-                        color.a,
-                        1.0,
-                        1.0,
-                        0.0,
-                        RenderMode::Shape,
-                    ),
-                    RectVertex::new(
-                        x1,
-                        y1,
-                        0.0,
-                        0.0,
-                        color.r,
-                        color.g,
-                        color.b,
-                        color.a,
-                        1.0,
-                        1.0,
-                        0.0,
-                        RenderMode::Shape,
-                    ),
-                    RectVertex::new(
-                        x2,
-                        y2,
-                        0.0,
-                        0.0,
-                        color.r,
-                        color.g,
-                        color.b,
-                        color.a,
-                        1.0,
-                        1.0,
-                        0.0,
-                        RenderMode::Shape,
-                    ),
-                    RectVertex::new(
-                        x3,
-                        y3,
-                        0.0,
-                        0.0,
-                        color.r,
-                        color.g,
-                        color.b,
-                        color.a,
-                        1.0,
-                        1.0,
-                        0.0,
-                        RenderMode::Shape,
-                    ),
-                ];
+                let verts = line_vertices([(x0, y0), (x1, y1), (x2, y2), (x3, y3)], color);
                 current_batch.vertices.extend(verts);
             }
         }
@@ -253,6 +168,36 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
     }
 
     batches
+}
+
+fn line_vertices(points: [(f32, f32); 4], color: &mondrian_core::Color) -> [RectVertex; 6] {
+    let [p0, p1, p2, p3] = points;
+    let order = if signed_triangle_area(p0, p2, p1) >= 0.0 {
+        [p0, p2, p1, p1, p2, p3]
+    } else {
+        [p0, p1, p2, p2, p1, p3]
+    };
+
+    order.map(|(x, y)| {
+        RectVertex::new(
+            x,
+            y,
+            0.0,
+            0.0,
+            color.r,
+            color.g,
+            color.b,
+            color.a,
+            1.0,
+            1.0,
+            0.0,
+            RenderMode::Shape,
+        )
+    })
+}
+
+fn signed_triangle_area(a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> f32 {
+    (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)
 }
 
 fn finish_batch_if_needed(
@@ -513,6 +458,25 @@ mod tests {
         }];
         let batches = build_batches(&cmds, (1920, 1080));
         assert_eq!(batches.len(), 1);
+    }
+
+    #[test]
+    fn build_batches_vertical_line_triangles_are_front_facing() {
+        let cmds = [DrawCommand::Line {
+            start: Point::new(50.0, 10.0),
+            end: Point::new(50.0, 90.0),
+            width: 4.0,
+            color: Color::WHITE,
+        }];
+        let batches = build_batches(&cmds, (100, 100));
+        let vertices = &batches[0].vertices;
+
+        for tri in vertices.chunks_exact(3) {
+            let a = (tri[0].position[0], tri[0].position[1]);
+            let b = (tri[1].position[0], tri[1].position[1]);
+            let c = (tri[2].position[0], tri[2].position[1]);
+            assert!(signed_triangle_area(a, b, c) > 0.0);
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════════
