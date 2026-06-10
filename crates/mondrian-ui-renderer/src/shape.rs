@@ -146,6 +146,50 @@ pub fn generate_rect_vertices(
     ]
 }
 
+/// Generate a rectangle whose color is interpolated by the GPU.
+///
+/// Color order is top-left, top-right, bottom-left, bottom-right.
+pub fn generate_gradient_rect_vertices(
+    rect: Rect,
+    colors: &[mondrian_core::Color; 4],
+    pixel_w: f32,
+    pixel_h: f32,
+    corner_radius_px: f32,
+    render_mode: RenderMode,
+) -> [RectVertex; 6] {
+    let x0 = rect.x;
+    let y0 = rect.y;
+    let x1 = rect.x + rect.width;
+    let y1 = rect.y + rect.height;
+    let [top_left, top_right, bottom_left, bottom_right] = *colors;
+
+    let v = |x: f32, y: f32, u: f32, v: f32, color: mondrian_core::Color| {
+        RectVertex::new(
+            x,
+            y,
+            u,
+            v,
+            color.r,
+            color.g,
+            color.b,
+            color.a,
+            pixel_w,
+            pixel_h,
+            corner_radius_px,
+            render_mode,
+        )
+    };
+
+    [
+        v(x0, y0, 0.0, 0.0, top_left),
+        v(x1, y0, 1.0, 0.0, top_right),
+        v(x0, y1, 0.0, 1.0, bottom_left),
+        v(x0, y1, 0.0, 1.0, bottom_left),
+        v(x1, y0, 1.0, 0.0, top_right),
+        v(x1, y1, 1.0, 1.0, bottom_right),
+    ]
+}
+
 /// Rust 端等价于 WGSL 的 sd_rounded_box_px，用于 CPU 侧 SDF 验证。
 ///
 /// 对应 WGSL 片段着色器 let d = sd_rounded_box_px(p, size, r)：

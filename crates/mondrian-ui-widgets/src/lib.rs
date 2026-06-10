@@ -4,7 +4,9 @@
 
 pub mod button;
 pub mod checkbox;
+pub mod color_picker;
 pub mod context_menu;
+pub mod curve_editor;
 pub mod dock_splitter;
 pub mod dock_tab_bar;
 pub mod label;
@@ -20,7 +22,12 @@ mod test_utils;
 
 pub use button::Button;
 pub use checkbox::Checkbox;
+pub use color_picker::{
+    ColorPicker, ColorPickerAreaMode, ColorPickerMode, ColorPickerTrigger,
+    ColorPickerTriggerOptions,
+};
 pub use context_menu::ContextMenu;
+pub use curve_editor::{CurveEditor, CurvePoint};
 pub use dock_splitter::DockSplitter;
 pub use dock_tab_bar::{DockTabBar, TabInfo};
 pub use label::Label;

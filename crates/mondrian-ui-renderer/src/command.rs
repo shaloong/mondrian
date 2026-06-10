@@ -34,6 +34,12 @@ fn snap_vec2(offset: Vec2) -> Vec2 {
     Vec2::new(snap_scalar(offset.x), snap_scalar(offset.y))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShapeMask {
+    pub bounds: Rect,
+    pub corner_radius: f32,
+}
+
 /// 2D 绘制命令
 ///
 /// 每个命令描述一个 GPU 可执行的绘制操作。
@@ -47,11 +53,22 @@ pub enum DrawCommand {
         corner_radius: f32, // px; 0 = sharp
     },
 
+    /// GPU-interpolated rectangle gradient.
+    ///
+    /// Color order is top-left, top-right, bottom-left, bottom-right.
+    GradientRect {
+        bounds: Rect,
+        colors: [Color; 4],
+        corner_radius: f32,
+    },
+
     /// 文字
     Text {
         text: String,
         style: TextStyle,
         position: Point,
+        /// Maximum paragraph width in pixels. `None` keeps single-line layout.
+        max_width: Option<f32>,
         color: Color,
     },
 
@@ -68,6 +85,18 @@ pub enum DrawCommand {
         end: Point,
         width: f32,
         color: Color,
+    },
+
+    /// 填充三角形列表。每三个点构成一个独立三角形。
+    Triangles { vertices: Vec<Point>, color: Color },
+
+    /// Per-vertex colored triangle list. Every three vertices form one triangle.
+    ///
+    /// `mask` lets non-rectangular UI like color wheels reuse the same SDF
+    /// antialiasing path as rounded rectangles and circles.
+    ColoredTriangles {
+        vertices: Vec<(Point, Color)>,
+        mask: Option<ShapeMask>,
     },
 
     /// 裁剪区域（后续命令在裁剪区域内绘制）
@@ -132,11 +161,41 @@ impl DrawEncoder {
             .push(DrawCommand::Rect { bounds: snap_rect(bounds), color, corner_radius });
     }
 
+    /// Record a GPU-interpolated gradient rectangle.
+    ///
+    /// Color order is top-left, top-right, bottom-left, bottom-right.
+    pub fn draw_gradient_rect(&mut self, bounds: Rect, colors: [Color; 4], corner_radius: f32) {
+        self.commands.push(DrawCommand::GradientRect {
+            bounds: snap_rect(bounds),
+            colors,
+            corner_radius,
+        });
+    }
+
     pub fn draw_text(&mut self, text: &str, style: &TextStyle, position: Point, color: Color) {
         self.commands.push(DrawCommand::Text {
             text: text.to_string(),
             style: style.clone(),
             position,
+            max_width: None,
+            color,
+        });
+    }
+
+    /// Record a wrapped text command constrained to `max_width` pixels.
+    pub fn draw_text_box(
+        &mut self,
+        text: &str,
+        style: &TextStyle,
+        position: Point,
+        max_width: f32,
+        color: Color,
+    ) {
+        self.commands.push(DrawCommand::Text {
+            text: text.to_string(),
+            style: style.clone(),
+            position,
+            max_width: Some(max_width.max(1.0)),
             color,
         });
     }
@@ -152,6 +211,56 @@ impl DrawEncoder {
             end: snap_point(end),
             width,
             color,
+        });
+    }
+
+    pub fn draw_triangles(&mut self, vertices: &[Point], color: Color) {
+        let triangle_vertex_count = vertices.len() - vertices.len() % 3;
+        if triangle_vertex_count == 0 {
+            return;
+        }
+
+        let vertices = vertices
+            .iter()
+            .take(triangle_vertex_count)
+            .map(|point| snap_point(*point))
+            .collect();
+        self.commands.push(DrawCommand::Triangles { vertices, color });
+    }
+
+    pub fn draw_colored_triangles(&mut self, vertices: &[(Point, Color)]) {
+        let triangle_vertex_count = vertices.len() - vertices.len() % 3;
+        if triangle_vertex_count == 0 {
+            return;
+        }
+
+        let vertices = vertices
+            .iter()
+            .take(triangle_vertex_count)
+            .map(|(point, color)| (snap_point(*point), *color))
+            .collect();
+        self.commands.push(DrawCommand::ColoredTriangles { vertices, mask: None });
+    }
+
+    pub fn draw_colored_triangles_in_rect(
+        &mut self,
+        vertices: &[(Point, Color)],
+        mask_bounds: Rect,
+        corner_radius: f32,
+    ) {
+        let triangle_vertex_count = vertices.len() - vertices.len() % 3;
+        if triangle_vertex_count == 0 {
+            return;
+        }
+
+        let vertices = vertices
+            .iter()
+            .take(triangle_vertex_count)
+            .map(|(point, color)| (snap_point(*point), *color))
+            .collect();
+        self.commands.push(DrawCommand::ColoredTriangles {
+            vertices,
+            mask: Some(ShapeMask { bounds: snap_rect(mask_bounds), corner_radius }),
         });
     }
 
@@ -191,8 +300,29 @@ impl DrawCommandEncoder for DrawEncoder {
         self.draw_rect(bounds, color, corner_radius);
     }
 
+    fn draw_gradient_rect(&mut self, bounds: Rect, colors: [Color; 4], corner_radius: f32) {
+        self.draw_gradient_rect(bounds, colors, corner_radius);
+    }
+
     fn draw_line(&mut self, start: Point, end: Point, width: f32, color: Color) {
         self.draw_line(start, end, width, color);
+    }
+
+    fn draw_triangles(&mut self, vertices: &[Point], color: Color) {
+        self.draw_triangles(vertices, color);
+    }
+
+    fn draw_colored_triangles(&mut self, vertices: &[(Point, Color)]) {
+        self.draw_colored_triangles(vertices);
+    }
+
+    fn draw_colored_triangles_in_rect(
+        &mut self,
+        vertices: &[(Point, Color)],
+        mask_bounds: Rect,
+        corner_radius: f32,
+    ) {
+        self.draw_colored_triangles_in_rect(vertices, mask_bounds, corner_radius);
     }
 
     fn draw_text(&mut self, text: &str, font_size: f32, position: Point, color: Color) {
@@ -204,6 +334,24 @@ impl DrawCommandEncoder for DrawEncoder {
             letter_spacing: 0.0,
         };
         self.draw_text(text, &style, position, color);
+    }
+
+    fn draw_text_box(
+        &mut self,
+        text: &str,
+        font_size: f32,
+        position: Point,
+        max_width: f32,
+        color: Color,
+    ) {
+        use mondrian_ui_theme::typography::FontWeight;
+        let style = TextStyle {
+            font_size,
+            line_height: font_size * 1.3,
+            font_weight: FontWeight::Regular,
+            letter_spacing: 0.0,
+        };
+        self.draw_text_box(text, &style, position, max_width, color);
     }
 
     fn push_translate(&mut self, offset: Vec2) {
@@ -251,6 +399,28 @@ mod tests {
     }
 
     #[test]
+    fn encoder_draw_gradient_rect_records_corner_colors() {
+        let mut enc = DrawEncoder::new();
+        enc.draw_gradient_rect(
+            rect(),
+            [Color::WHITE, Color::BLACK, Color::TRANSPARENT, color()],
+            4.0,
+        );
+
+        let commands = enc.finish();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            DrawCommand::GradientRect { colors, corner_radius, .. } => {
+                assert_eq!(*corner_radius, 4.0);
+                assert_eq!(colors[0], Color::WHITE);
+                assert_eq!(colors[1], Color::BLACK);
+                assert_eq!(colors[2], Color::TRANSPARENT);
+            }
+            other => panic!("expected gradient rect command, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn encoder_multiple_draws() {
         let mut enc = DrawEncoder::new();
         enc.draw_rect(rect(), color(), 0.0);
@@ -267,6 +437,55 @@ mod tests {
     }
 
     #[test]
+    fn encoder_draw_triangles_snaps_and_drops_incomplete_tail() {
+        let mut enc = DrawEncoder::new();
+        enc.draw_triangles(
+            &[
+                Point::new(0.2, 0.8),
+                Point::new(10.1, 0.1),
+                Point::new(0.4, 10.7),
+                Point::new(99.0, 99.0),
+            ],
+            color(),
+        );
+
+        let commands = enc.finish();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            DrawCommand::Triangles { vertices, .. } => {
+                assert_eq!(vertices.len(), 3);
+                assert_eq!(vertices[0], Point::new(0.0, 1.0));
+                assert_eq!(vertices[1], Point::new(10.0, 0.0));
+                assert_eq!(vertices[2], Point::new(0.0, 11.0));
+            }
+            other => panic!("expected triangles command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn encoder_draw_colored_triangles_snaps_and_drops_incomplete_tail() {
+        let mut enc = DrawEncoder::new();
+        enc.draw_colored_triangles(&[
+            (Point::new(0.2, 0.8), Color::WHITE),
+            (Point::new(10.1, 0.1), Color::BLACK),
+            (Point::new(0.4, 10.7), Color::TRANSPARENT),
+            (Point::new(99.0, 99.0), color()),
+        ]);
+
+        let commands = enc.finish();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            DrawCommand::ColoredTriangles { vertices, mask } => {
+                assert!(mask.is_none());
+                assert_eq!(vertices.len(), 3);
+                assert_eq!(vertices[0].0, Point::new(0.0, 1.0));
+                assert_eq!(vertices[1].1, Color::BLACK);
+            }
+            other => panic!("expected colored triangles command, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn encoder_draw_text() {
         let mut enc = DrawEncoder::new();
         let style = TextStyle {
@@ -277,6 +496,25 @@ mod tests {
         };
         enc.draw_text("hello", &style, Point::ZERO, color());
         assert_eq!(enc.command_count(), 1);
+    }
+
+    #[test]
+    fn encoder_draw_text_box_records_max_width() {
+        let mut enc = DrawEncoder::new();
+        let style = TextStyle {
+            font_size: 14.0,
+            line_height: 20.0,
+            font_weight: mondrian_ui_theme::typography::FontWeight::Regular,
+            letter_spacing: 0.0,
+        };
+        enc.draw_text_box("hello world", &style, Point::ZERO, 120.0, color());
+
+        let commands = enc.finish();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            DrawCommand::Text { max_width, .. } => assert_eq!(*max_width, Some(120.0)),
+            other => panic!("expected text command, got {other:?}"),
+        }
     }
 
     #[test]

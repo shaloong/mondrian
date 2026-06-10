@@ -129,7 +129,28 @@ pub trait DrawCommandEncoder {
     fn push_clip(&mut self, bounds: Rect);
     fn pop_clip(&mut self);
     fn draw_rect(&mut self, bounds: Rect, color: mondrian_core::Color, corner_radius: f32);
+    /// Draw a GPU-interpolated rectangle gradient.
+    ///
+    /// Color order is top-left, top-right, bottom-left, bottom-right.
+    fn draw_gradient_rect(
+        &mut self,
+        bounds: Rect,
+        colors: [mondrian_core::Color; 4],
+        corner_radius: f32,
+    ) {
+        self.draw_rect(bounds, colors[0], corner_radius);
+    }
     fn draw_line(&mut self, start: Point, end: Point, width: f32, color: mondrian_core::Color);
+    fn draw_triangles(&mut self, _vertices: &[Point], _color: mondrian_core::Color) {}
+    fn draw_colored_triangles(&mut self, _vertices: &[(Point, mondrian_core::Color)]) {}
+    fn draw_colored_triangles_in_rect(
+        &mut self,
+        vertices: &[(Point, mondrian_core::Color)],
+        _mask_bounds: Rect,
+        _corner_radius: f32,
+    ) {
+        self.draw_colored_triangles(vertices);
+    }
     fn draw_text(
         &mut self,
         text: &str,
@@ -137,6 +158,23 @@ pub trait DrawCommandEncoder {
         position: Point,
         color: mondrian_core::Color,
     );
+
+    /// Draw wrapped text constrained to `max_width`.
+    ///
+    /// Implementations that do not support paragraph layout may fall back to
+    /// single-line text; the production renderer resolves this through
+    /// `mondrian-ui-text` and cosmic-text.
+    fn draw_text_box(
+        &mut self,
+        text: &str,
+        font_size: f32,
+        position: Point,
+        max_width: f32,
+        color: mondrian_core::Color,
+    ) {
+        let _ = max_width;
+        self.draw_text(text, font_size, position, color);
+    }
     fn push_translate(&mut self, offset: glam::Vec2);
     fn pop_transform(&mut self);
 }
@@ -183,6 +221,18 @@ pub trait Widget {
 
     /// 发出绘制命令。纯读操作。encoder 通过 &mut 访问。
     fn paint(&self, ctx: &mut PaintContext);
+
+    /// 发出顶层覆盖物绘制命令。默认递归绘制子树 overlay。
+    ///
+    /// Popover、dropdown、context menu、tooltip 等不应被后绘制的普通
+    /// 内容压住的 UI chrome 应在这里绘制。
+    fn paint_overlay(&self, ctx: &mut PaintContext) {
+        for index in 0..self.child_count() {
+            if let Some(child) = self.child(index) {
+                child.paint_overlay(ctx);
+            }
+        }
+    }
 
     /// 判断点是否命中此 Widget（用于 HitTest）
     ///

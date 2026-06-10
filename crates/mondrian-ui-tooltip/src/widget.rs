@@ -3,14 +3,27 @@
 //! 在指定锚点附近绘制带背景的文字提示。
 
 use mondrian_ui_core::tooltip::TooltipState;
-use mondrian_ui_core::types::{estimate_text_width, *};
+use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
+use mondrian_ui_text::TextRenderer;
+use std::cell::RefCell;
 
 const DEFAULT_MAX_WIDTH: f32 = 320.0;
 const DEFAULT_OFFSET: f32 = 8.0;
 const HORIZONTAL_PADDING: f32 = 8.0;
 const VERTICAL_PADDING: f32 = 5.0;
+const MIN_WIDTH: f32 = 40.0;
+
+#[derive(Debug, Clone, PartialEq)]
+struct TooltipLayout {
+    size: Size,
+    content_width: f32,
+}
+
+thread_local! {
+    static TEXT_MEASURER: RefCell<TextRenderer> = RefCell::new(TextRenderer::new());
+}
 
 /// Tooltip 弹出框 Widget
 ///
@@ -41,15 +54,23 @@ impl TooltipWidget {
         self.state.visible = false;
     }
 
-    fn estimated_size(&self, font_size: f32, max_width: f32) -> Size {
+    fn text_layout(&self, font_size: f32, max_width: f32) -> TooltipLayout {
         if !self.state.visible || self.state.text.is_empty() {
-            return Size::ZERO;
+            return TooltipLayout { size: Size::ZERO, content_width: 0.0 };
         }
-        let width = (estimate_text_width(&self.state.text, font_size) + HORIZONTAL_PADDING * 2.0)
-            .max(40.0)
-            .min(max_width);
-        let height = (font_size * 1.3 + VERTICAL_PADDING * 2.0).max(24.0);
-        Size::new(width, height)
+
+        let content_max_width = (max_width - HORIZONTAL_PADDING * 2.0).max(1.0);
+        let (measured_w, measured_h) =
+            measure_text_box(&self.state.text, font_size, content_max_width);
+        let content_width = measured_w.min(content_max_width);
+        let width = (content_width + HORIZONTAL_PADDING * 2.0).max(MIN_WIDTH).min(max_width);
+        let height = (measured_h + VERTICAL_PADDING * 2.0).max(24.0);
+
+        TooltipLayout { size: Size::new(width, height), content_width }
+    }
+
+    fn estimated_size(&self, font_size: f32, max_width: f32) -> Size {
+        self.text_layout(font_size, max_width).size
     }
 
     fn raw_rect(&self, font_size: f32, max_width: f32, offset: f32) -> Rect {
@@ -85,7 +106,9 @@ impl Widget for TooltipWidget {
         EventResult::Ignored
     }
 
-    fn paint(&self, ctx: &mut PaintContext) {
+    fn paint(&self, _ctx: &mut PaintContext) {}
+
+    fn paint_overlay(&self, ctx: &mut PaintContext) {
         if !self.state.visible || self.state.text.is_empty() {
             return;
         }
@@ -94,20 +117,22 @@ impl Widget for TooltipWidget {
         let spacing = &ctx.theme.spacing;
 
         let font_size = ctx.theme.typography.body.font_size;
-        let bg = self.clamped_rect(
-            font_size,
-            spacing.tooltip_max_width,
-            spacing.tooltip_offset,
-            ctx.clip_rect,
-        );
+        let max_width = spacing.tooltip_max_width.min(ctx.clip_rect.width.max(1.0));
+        let layout = self.text_layout(font_size, max_width);
+        let bg = self.clamped_rect(font_size, max_width, spacing.tooltip_offset, ctx.clip_rect);
+        let border_rect = bg.inset(-1.0, -1.0);
+        ctx.encoder.draw_rect(border_rect, tokens.border, spacing.radius_sm + 1.0);
         ctx.encoder.draw_rect(bg, tokens.popover, spacing.radius_sm);
 
-        ctx.encoder.draw_text(
+        ctx.encoder.push_clip(bg);
+        ctx.encoder.draw_text_box(
             &self.state.text,
             font_size,
             Point::new(bg.x + HORIZONTAL_PADDING, bg.y + VERTICAL_PADDING),
+            layout.content_width.max(1.0),
             tokens.popover_foreground,
         );
+        ctx.encoder.pop_clip();
     }
 
     fn hit_test(&self, point: Point) -> bool {
@@ -116,6 +141,10 @@ impl Widget for TooltipWidget {
         }
         self.raw_rect(14.0, DEFAULT_MAX_WIDTH, DEFAULT_OFFSET).contains(point)
     }
+}
+
+fn measure_text_box(text: &str, font_size: f32, max_width: f32) -> (f32, f32) {
+    TEXT_MEASURER.with_borrow_mut(|renderer| renderer.measure_text_box(text, font_size, max_width))
 }
 
 impl Default for TooltipWidget {
@@ -134,6 +163,7 @@ mod tests {
     struct RecordingEncoder {
         rects: Vec<Rect>,
         texts: Vec<(String, Point)>,
+        text_boxes: Vec<(String, Point, f32)>,
     }
 
     impl DrawCommandEncoder for RecordingEncoder {
@@ -162,6 +192,17 @@ mod tests {
             _color: mondrian_core::Color,
         ) {
             self.texts.push((text.into(), position));
+        }
+
+        fn draw_text_box(
+            &mut self,
+            text: &str,
+            _font_size: f32,
+            position: Point,
+            max_width: f32,
+            _color: mondrian_core::Color,
+        ) {
+            self.text_boxes.push((text.into(), position, max_width));
         }
 
         fn push_translate(&mut self, _offset: glam::Vec2) {}
@@ -203,13 +244,130 @@ mod tests {
 
         {
             let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
-            widget.paint(&mut ctx);
+            widget.paint_overlay(&mut ctx);
         }
 
-        let fill = encoder.rects.first().expect("paint should draw fill");
+        let fill = encoder.rects.get(1).expect("paint should draw border and fill");
         assert!(fill.x + fill.width <= clip_rect.x + clip_rect.width + 0.1);
         assert!(fill.y + fill.height <= clip_rect.y + clip_rect.height + 0.1);
-        assert_eq!(encoder.rects.len(), 1);
-        assert_eq!(encoder.texts.len(), 1);
+        assert_eq!(encoder.rects.len(), 2);
+        assert_eq!(encoder.text_boxes.len(), 1);
+    }
+
+    #[test]
+    fn long_tooltip_text_uses_cosmic_text_box_measurement() {
+        let mut widget = TooltipWidget::new();
+        widget.update_state(TooltipState {
+            text: "ThisIsAReallyLongTooltipTokenWithoutSpacesThatMustWrapInsideThePopover".into(),
+            position: Point::new(10.0, 10.0),
+            visible: true,
+        });
+
+        let font_size = 14.0;
+        let max_width = 160.0;
+        let layout = widget.text_layout(font_size, max_width);
+        let single_line = measure_text_box(&widget.state.text, font_size, f32::MAX / 4.0);
+
+        assert!(layout.size.width <= max_width);
+        assert!(layout.content_width <= max_width - HORIZONTAL_PADDING * 2.0 + 0.1);
+        assert!(layout.size.height > single_line.1 + VERTICAL_PADDING * 2.0);
+    }
+
+    #[test]
+    fn cjk_tooltip_text_uses_cosmic_text_box_measurement() {
+        let mut widget = TooltipWidget::new();
+        widget.update_state(TooltipState {
+            text: "这是一个很长很长的中文提示文本它需要在没有空格的时候自动换行".into(),
+            position: Point::new(10.0, 10.0),
+            visible: true,
+        });
+
+        let font_size = 14.0;
+        let max_width = 150.0;
+        let layout = widget.text_layout(font_size, max_width);
+
+        assert!(layout.size.width <= max_width);
+        assert!(layout.content_width <= max_width - HORIZONTAL_PADDING * 2.0 + 0.1);
+        assert!(layout.size.height > font_size * 1.3 + VERTICAL_PADDING * 2.0);
+    }
+
+    #[test]
+    fn paint_draws_wrapped_text_box_command() {
+        let mut widget = TooltipWidget::new();
+        widget.update_state(TooltipState {
+            text: "Tooltip text that should wrap into more than one line at this width".into(),
+            position: Point::new(10.0, 10.0),
+            visible: true,
+        });
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let clip_rect = Rect::new(0.0, 0.0, 180.0, 200.0);
+
+        {
+            let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+            widget.paint_overlay(&mut ctx);
+        }
+
+        assert!(encoder.texts.is_empty());
+        assert_eq!(encoder.text_boxes.len(), 1);
+        assert!(encoder.text_boxes[0].2 <= clip_rect.width - HORIZONTAL_PADDING * 2.0 + 0.1);
+    }
+
+    #[test]
+    fn paint_wraps_to_available_clip_width() {
+        let mut widget = TooltipWidget::new();
+        widget.update_state(TooltipState {
+            text: "Tooltip text that must wrap to the narrow viewport width".into(),
+            position: Point::new(0.0, 0.0),
+            visible: true,
+        });
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let clip_rect = Rect::new(0.0, 0.0, 120.0, 200.0);
+        {
+            let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+            widget.paint_overlay(&mut ctx);
+        }
+
+        let fill = encoder.rects.get(1).expect("paint should draw border and fill");
+        assert!(fill.width <= clip_rect.width);
+        assert_eq!(encoder.text_boxes.len(), 1);
+        assert!(encoder.text_boxes[0].2 <= clip_rect.width - HORIZONTAL_PADDING * 2.0 + 0.1);
+    }
+
+    #[test]
+    fn visible_tooltip_paints_only_in_overlay_layer() {
+        let mut widget = TooltipWidget::new();
+        widget.update_state(TooltipState {
+            text: "Tooltip should be a top-layer popover".into(),
+            position: Point::new(10.0, 10.0),
+            visible: true,
+        });
+        let theme = ThemePreset::Dark.build();
+        let clip_rect = Rect::new(0.0, 0.0, 180.0, 200.0);
+
+        let mut normal_encoder = RecordingEncoder::default();
+        {
+            let mut ctx = PaintContext {
+                encoder: &mut normal_encoder,
+                theme: &theme,
+                clip_rect,
+            };
+            widget.paint(&mut ctx);
+        }
+        assert!(normal_encoder.rects.is_empty());
+        assert!(normal_encoder.text_boxes.is_empty());
+
+        let mut overlay_encoder = RecordingEncoder::default();
+        {
+            let mut ctx = PaintContext {
+                encoder: &mut overlay_encoder,
+                theme: &theme,
+                clip_rect,
+            };
+            widget.paint_overlay(&mut ctx);
+        }
+        assert_eq!(overlay_encoder.rects.len(), 2);
+        assert_eq!(overlay_encoder.text_boxes.len(), 1);
     }
 }

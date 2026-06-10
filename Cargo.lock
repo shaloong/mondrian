@@ -3388,6 +3388,7 @@ dependencies = [
  "glam",
  "mondrian-core",
  "mondrian-ui-core",
+ "mondrian-ui-text",
  "mondrian-ui-theme",
 ]
 

@@ -43,6 +43,12 @@ impl Button {
     pub fn state(&self) -> ButtonState {
         self.state
     }
+
+    fn activate(&self, ctx: &mut EventContext) {
+        if let Some(action) = &self.on_click {
+            (ctx.dispatch)(action.clone());
+        }
+    }
 }
 
 impl Widget for Button {
@@ -71,9 +77,7 @@ impl Widget for Button {
             UiEvent::MouseUp { position, button: MouseButton::Left, .. } => {
                 if self.state == ButtonState::Pressed {
                     if self.bounds.contains(*position) {
-                        if let Some(action) = &self.on_click {
-                            (ctx.dispatch)(action.clone());
-                        }
+                        self.activate(ctx);
                     }
                     self.state = ButtonState::Normal;
                     return EventResult::Handled;
@@ -97,6 +101,18 @@ impl Widget for Button {
             UiEvent::FocusLost => {
                 self.state = ButtonState::Normal;
                 EventResult::Handled
+            }
+            UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, .. } => {
+                self.state = ButtonState::Pressed;
+                self.activate(ctx);
+                EventResult::Handled
+            }
+            UiEvent::KeyUp { key: KeyCode::Enter | KeyCode::Space, .. } => {
+                if self.state == ButtonState::Pressed {
+                    self.state = ButtonState::Hovered;
+                    return EventResult::Handled;
+                }
+                EventResult::Ignored
             }
             _ => EventResult::Ignored,
         }
@@ -341,6 +357,58 @@ mod tests {
             &mut ctx,
         );
 
+        assert!(cell.into_inner().is_empty());
+    }
+
+    #[test]
+    fn button_enter_dispatches_action_and_releases_on_key_up() {
+        let mut b = Button::new("OK").on_click(Action::Play);
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let cell = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
+        let mut ctx = event_ctx_with_capture(&mut f, &mut s, &mut t, &dispatch_fn);
+
+        let result = b.event(
+            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(b.state(), ButtonState::Pressed);
+        assert_eq!(cell.borrow().as_slice(), &[Action::Play]);
+
+        let result = b.event(
+            &UiEvent::KeyUp { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(b.state(), ButtonState::Hovered);
+    }
+
+    #[test]
+    fn button_space_without_action_is_handled_but_dispatches_nothing() {
+        let mut b = Button::new("OK");
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let cell = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
+        let mut ctx = event_ctx_with_capture(&mut f, &mut s, &mut t, &dispatch_fn);
+
+        let result = b.event(
+            &UiEvent::KeyDown { key: KeyCode::Space, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(b.state(), ButtonState::Pressed);
         assert!(cell.into_inner().is_empty());
     }
 

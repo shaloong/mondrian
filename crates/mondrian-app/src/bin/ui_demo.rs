@@ -27,7 +27,9 @@ use mondrian_ui_text::{resolve_text_commands, TextRenderer};
 use mondrian_ui_tooltip::TooltipWidget;
 use mondrian_ui_widgets::button::Button;
 use mondrian_ui_widgets::checkbox::Checkbox;
+use mondrian_ui_widgets::color_picker::{ColorPicker, ColorPickerAreaMode, ColorPickerTrigger};
 use mondrian_ui_widgets::context_menu::ContextMenu;
+use mondrian_ui_widgets::curve_editor::{CurveEditor, CurvePoint};
 use mondrian_ui_widgets::dock_splitter::DockSplitter;
 use mondrian_ui_widgets::dock_tab_bar::{DockTabBar, TabInfo};
 use mondrian_ui_widgets::list::{List, ListItem};
@@ -65,6 +67,9 @@ fn take_demo_action() -> Option<String> {
 // Gallery Widget
 // ═══════════════════════════════════════════════════════════════════════════
 
+const GALLERY_CHILD_COUNT: usize = 12;
+const GALLERY_FOCUSABLE_CHILDREN: [usize; 10] = [0, 1, 2, 3, 4, 5, 6, 9, 10, 11];
+
 struct GalleryWidget {
     id: WidgetId,
     bounds: Rect,
@@ -77,14 +82,22 @@ struct GalleryWidget {
     dropdown: Dropdown,
     list: List,
     scroll_area: ScrollView,
+    color_picker: ColorPicker,
+    color_trigger: ColorPickerTrigger,
+    curve_editor: CurveEditor,
     tooltip_trigger: Rect,
     tooltip: TooltipWidget,
     tooltip_active: bool,
     context_menu: Option<ContextMenu>,
     last_action: String,
     last_slider_value: f32,
+    last_color_value: Color,
+    last_trigger_color_value: Color,
+    last_curve_points: Vec<CurvePoint>,
     /// Index of the child that captured the mouse (during drag/selection)
     captured: Option<usize>,
+    /// Demo-local keyboard focus for hand-written gallery routing.
+    focused: Option<usize>,
 }
 
 impl GalleryWidget {
@@ -113,6 +126,14 @@ impl GalleryWidget {
 
         let scroll_content = ColoredBox::new(Color::from_hex(0x2A2A4A), 180.0, 500.0);
 
+        let initial_color = Color::from_hex(0x336699);
+
+        let mut color_trigger = ColorPickerTrigger::new(Color::from_hex(0xD946EF));
+        color_trigger.picker_mut().set_area_mode(ColorPickerAreaMode::Wheel);
+        color_trigger.picker_mut().set_show_swatch(false);
+        let curve_editor = CurveEditor::new();
+        let last_curve_points = curve_editor.points().to_vec();
+
         Self {
             id: WidgetId::new(),
             bounds: Rect::ZERO,
@@ -125,14 +146,108 @@ impl GalleryWidget {
             dropdown: Dropdown::new("选择选项", dropdown_items).with_max_visible_items(5),
             list: List::new(list_items),
             scroll_area: ScrollView::new(Some(Box::new(scroll_content))),
+            color_picker: ColorPicker::new(initial_color),
+            color_trigger,
+            curve_editor,
             tooltip_trigger: Rect::ZERO,
             tooltip: TooltipWidget::new(),
             tooltip_active: false,
             context_menu: None,
             last_action: String::new(),
             last_slider_value: 50.0,
+            last_color_value: initial_color,
+            last_trigger_color_value: Color::from_hex(0xD946EF),
+            last_curve_points,
             captured: None,
+            focused: None,
         }
+    }
+
+    fn is_focusable_child(index: usize) -> bool {
+        GALLERY_FOCUSABLE_CHILDREN.contains(&index)
+    }
+
+    fn child_dispatches_action(index: usize) -> bool {
+        matches!(index, 0 | 2 | 3 | 6 | 7)
+    }
+
+    fn event_targets_focus(event: &UiEvent) -> bool {
+        matches!(
+            event,
+            UiEvent::KeyDown { .. }
+                | UiEvent::KeyUp { .. }
+                | UiEvent::TextInput(_)
+                | UiEvent::ImePreedit(_)
+                | UiEvent::ImeCommit(_)
+        )
+    }
+
+    fn child_event(
+        &mut self,
+        index: usize,
+        event: &UiEvent,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        match index {
+            0 => self.button_click.event(event, ctx),
+            1 => self.button_no_action.event(event, ctx),
+            2 => self.checkbox_a.event(event, ctx),
+            3 => self.checkbox_b.event(event, ctx),
+            4 => self.text_input.event(event, ctx),
+            5 => self.slider.event(event, ctx),
+            6 => self.dropdown.event(event, ctx),
+            7 => self.list.event(event, ctx),
+            8 => self.scroll_area.event(event, ctx),
+            9 => self.color_picker.event(event, ctx),
+            10 => self.color_trigger.event(event, ctx),
+            11 => self.curve_editor.event(event, ctx),
+            _ => EventResult::Ignored,
+        }
+    }
+
+    fn set_focused_child(&mut self, next: Option<usize>, ctx: &mut EventContext) {
+        let next = next.filter(|index| Self::is_focusable_child(*index));
+        if self.focused == next {
+            return;
+        }
+
+        if let Some(previous) = self.focused.take() {
+            let _ = self.child_event(previous, &UiEvent::FocusLost, ctx);
+        }
+
+        self.focused = next;
+        if let Some(current) = self.focused {
+            let _ = self.child_event(current, &UiEvent::FocusGained, ctx);
+        }
+    }
+
+    fn focus_next_child(&mut self, reverse: bool, ctx: &mut EventContext) {
+        let focusables = &GALLERY_FOCUSABLE_CHILDREN;
+        let current_position = self
+            .focused
+            .and_then(|current| focusables.iter().position(|index| *index == current));
+
+        let next_position = match (current_position, reverse) {
+            (Some(0), true) | (None, true) => focusables.len() - 1,
+            (Some(position), true) => position - 1,
+            (Some(position), false) => (position + 1) % focusables.len(),
+            (None, false) => 0,
+        };
+        self.set_focused_child(Some(focusables[next_position]), ctx);
+    }
+
+    fn apply_child_feedback(&mut self, index: usize, local_action: &RefCell<String>) {
+        if Self::child_dispatches_action(index) {
+            let action = local_action.borrow();
+            if !action.is_empty() {
+                self.last_action = action.clone();
+            }
+        }
+        if index == 5 {
+            self.last_slider_value = self.slider.value();
+            self.last_action = format!("slider={:.1}", self.last_slider_value);
+        }
+        self.sync_child_feedback();
     }
 
     fn update_hover_tooltip(&mut self, position: Point) {
@@ -162,6 +277,20 @@ impl GalleryWidget {
         if (slider_value - self.last_slider_value).abs() > 0.05 {
             self.last_slider_value = slider_value;
             self.last_action = format!("slider={slider_value:.1}");
+        }
+        let color_value = self.color_picker.color();
+        if color_value != self.last_color_value {
+            self.last_color_value = color_value;
+            self.last_action = format!("color={}", color_value.to_hex_rgba());
+        }
+        let trigger_color = self.color_trigger.color();
+        if trigger_color != self.last_trigger_color_value {
+            self.last_trigger_color_value = trigger_color;
+            self.last_action = format!("trigger_color={}", trigger_color.to_hex_rgba());
+        }
+        if self.curve_editor.points() != self.last_curve_points.as_slice() {
+            self.last_curve_points = self.curve_editor.points().to_vec();
+            self.last_action = "curve edited".into();
         }
     }
 }
@@ -219,6 +348,13 @@ impl Widget for GalleryWidget {
             col_w * 0.45 - 8.0,
             list_h,
         ));
+        y += list_h + 12.0;
+
+        self.color_picker.layout(Rect::new(x0, y, col_w, 292.0));
+        y += 292.0 + 12.0;
+
+        self.color_trigger.layout(Rect::new(x0, y, 32.0, 32.0));
+        self.curve_editor.layout(Rect::new(x0 + 44.0, y, (col_w - 44.0).max(1.0), 96.0));
 
         if let Some(ref mut cm) = &mut self.context_menu {
             let cm_size = cm.measure(LayoutConstraint::LOOSE);
@@ -253,23 +389,28 @@ impl Widget for GalleryWidget {
             requests: ctx.requests,
         };
 
+        if let UiEvent::KeyDown { key: KeyCode::Tab, modifiers } = event {
+            self.focus_next_child(modifiers.shift, inner_ctx);
+            return EventResult::Handled;
+        }
+
+        if Self::event_targets_focus(event) {
+            if let Some(index) = self.focused {
+                let result = self.child_event(index, event, inner_ctx);
+                if result == EventResult::Handled {
+                    self.apply_child_feedback(index, &last_action);
+                    return EventResult::Handled;
+                }
+            }
+            return EventResult::Ignored;
+        }
+
         // If a child captured the mouse (drag/selection in progress), route
         // MouseMove and MouseUp to it first. MouseUp clears the capture.
         // On MouseDown: if captured child ignores it, fall through to normal
         // dispatch so other widgets can receive the click.
         if let Some(idx) = self.captured {
-            let handled = match idx {
-                0 => self.button_click.event(event, inner_ctx),
-                1 => self.button_no_action.event(event, inner_ctx),
-                2 => self.checkbox_a.event(event, inner_ctx),
-                3 => self.checkbox_b.event(event, inner_ctx),
-                4 => self.text_input.event(event, inner_ctx),
-                5 => self.slider.event(event, inner_ctx),
-                6 => self.dropdown.event(event, inner_ctx),
-                7 => self.list.event(event, inner_ctx),
-                8 => self.scroll_area.event(event, inner_ctx),
-                _ => EventResult::Ignored,
-            };
+            let handled = self.child_event(idx, event, inner_ctx);
             if matches!(event, UiEvent::MouseUp { .. }) {
                 self.captured = None;
             }
@@ -280,12 +421,7 @@ impl Widget for GalleryWidget {
                 // fall through to normal dispatch below
             } else {
                 if handled == EventResult::Handled {
-                    if idx == 5 {
-                        self.last_action = format!("slider={:.1}", self.slider.value());
-                        self.last_slider_value = self.slider.value();
-                    } else {
-                        self.last_action = last_action.into_inner();
-                    }
+                    self.apply_child_feedback(idx, &last_action);
                     return EventResult::Handled;
                 }
                 return EventResult::Ignored;
@@ -294,35 +430,25 @@ impl Widget for GalleryWidget {
 
         // Normal event dispatch. On MouseDown, record which child captures.
         let mut handled = EventResult::Ignored;
-        let mut children: [(&mut dyn Widget, usize, bool); 9] = [
-            (&mut self.button_click, 0, true),
-            (&mut self.button_no_action, 1, false),
-            (&mut self.checkbox_a, 2, true),
-            (&mut self.checkbox_b, 3, true),
-            (&mut self.text_input, 4, false),
-            (&mut self.slider, 5, false),
-            (&mut self.dropdown, 6, true),
-            (&mut self.list, 7, true),
-            (&mut self.scroll_area, 8, false),
-        ];
-        for (child, idx, show_action) in &mut children {
-            if child.event(event, inner_ctx) == EventResult::Handled {
+        for idx in 0..GALLERY_CHILD_COUNT {
+            if self.child_event(idx, event, inner_ctx) == EventResult::Handled {
                 if matches!(event, UiEvent::MouseDown { .. }) {
-                    self.captured = Some(*idx);
+                    self.captured = Some(idx);
+                    self.set_focused_child(Some(idx), inner_ctx);
                 }
-                if *show_action {
-                    self.last_action = last_action.into_inner();
-                }
-                if *idx == 5 {
-                    self.last_action = format!("slider={:.1}", self.slider.value());
-                    self.last_slider_value = self.slider.value();
-                }
+                self.apply_child_feedback(idx, &last_action);
                 handled = EventResult::Handled;
                 break;
             }
         }
         if handled == EventResult::Handled {
             return EventResult::Handled;
+        }
+
+        if let UiEvent::MouseDown { position, button: MouseButton::Left, .. } = event {
+            if self.bounds.contains(*position) {
+                self.set_focused_child(None, inner_ctx);
+            }
         }
 
         // Right-click opens context menu
@@ -332,7 +458,7 @@ impl Widget for GalleryWidget {
                     MenuItem::new("剪切", Action::Cut),
                     MenuItem::new("复制", Action::Copy),
                     MenuItem::new("粘贴", Action::Paste),
-                    MenuItem::new("————", demo_action("sep")).disabled(),
+                    MenuItem::separator(),
                     MenuItem::new("删除", demo_action("delete")),
                 ];
                 self.context_menu = Some(ContextMenu::new(*position, items));
@@ -373,10 +499,9 @@ impl Widget for GalleryWidget {
         );
         self.list.paint(ctx);
         self.scroll_area.paint(ctx);
-        if let Some(ref cm) = &self.context_menu {
-            cm.paint(ctx);
-        }
-        self.tooltip.paint(ctx);
+        self.color_picker.paint(ctx);
+        self.color_trigger.paint(ctx);
+        self.curve_editor.paint(ctx);
 
         let p = ui_types::snap_point(Point::new(self.bounds.x + 12.0, self.bounds.y + 6.0));
         ctx.encoder
@@ -389,12 +514,22 @@ impl Widget for GalleryWidget {
         }
     }
 
+    fn paint_overlay(&self, ctx: &mut PaintContext) {
+        self.dropdown.paint_overlay(ctx);
+        self.color_picker.paint_overlay(ctx);
+        self.color_trigger.paint_overlay(ctx);
+        if let Some(ref cm) = &self.context_menu {
+            cm.paint_overlay(ctx);
+        }
+        self.tooltip.paint_overlay(ctx);
+    }
+
     fn hit_test(&self, p: Point) -> bool {
         self.bounds.contains(p)
     }
 
     fn child_count(&self) -> usize {
-        9 + usize::from(self.context_menu.is_some())
+        12 + usize::from(self.context_menu.is_some())
     }
 
     fn child(&self, index: usize) -> Option<&dyn Widget> {
@@ -408,7 +543,10 @@ impl Widget for GalleryWidget {
             6 => Some(&self.dropdown),
             7 => Some(&self.list),
             8 => Some(&self.scroll_area),
-            9 => self.context_menu.as_ref().map(|menu| menu as &dyn Widget),
+            9 => Some(&self.color_picker),
+            10 => Some(&self.color_trigger),
+            11 => Some(&self.curve_editor),
+            12 => self.context_menu.as_ref().map(|menu| menu as &dyn Widget),
             _ => None,
         }
     }
@@ -424,7 +562,10 @@ impl Widget for GalleryWidget {
             6 => Some(&mut self.dropdown),
             7 => Some(&mut self.list),
             8 => Some(&mut self.scroll_area),
-            9 => self.context_menu.as_mut().map(|menu| menu as &mut dyn Widget),
+            9 => Some(&mut self.color_picker),
+            10 => Some(&mut self.color_trigger),
+            11 => Some(&mut self.curve_editor),
+            12 => self.context_menu.as_mut().map(|menu| menu as &mut dyn Widget),
             _ => None,
         }
     }
@@ -889,7 +1030,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ..
                     },
                 ..
-            } => elwt.exit(),
+            } => {
+                let result = route_demo_window_event(
+                    &window,
+                    &mut router,
+                    &mut root,
+                    UiEvent::KeyDown { key: KeyCode::Escape, modifiers: modifiers_state },
+                );
+                if result == EventResult::Ignored {
+                    elwt.exit();
+                }
+                window.request_redraw();
+            }
 
             // Keyboard input → dispatch KeyDown / TextInput to widget tree
             Event::WindowEvent {
@@ -915,15 +1067,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     _ => {}
                 }
 
-                if pressed {
-                    if let Some(kc) = winit_key_to_keycode(&logical_key) {
+                if let Some(kc) = winit_key_to_keycode(&logical_key) {
+                    if pressed {
                         let _ = route_demo_window_event(
                             &window,
                             &mut router,
                             &mut root,
                             UiEvent::KeyDown { key: kc, modifiers: modifiers_state },
                         );
+                    } else {
+                        let _ = route_demo_window_event(
+                            &window,
+                            &mut router,
+                            &mut root,
+                            UiEvent::KeyUp { key: kc, modifiers: modifiers_state },
+                        );
                     }
+                }
+                if pressed {
                     // Only send TextInput for printable characters when Ctrl is NOT held
                     if !modifiers_state.ctrl {
                         if let Some(txt) = text {

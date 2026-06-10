@@ -227,7 +227,12 @@ impl TextInput {
     }
 
     fn cursor_screen_x(&self, font_size: f32) -> f32 {
-        self.text_x() + self.cursor_text_x(font_size)
+        let preedit_w = if self.ime_preedit.is_empty() {
+            0.0
+        } else {
+            measure_text_width(&self.ime_preedit, font_size)
+        };
+        self.text_x() + self.cursor_text_x(font_size) + preedit_w
     }
 
     fn cursor_area(&self, font_size: f32) -> Rect {
@@ -423,6 +428,8 @@ impl Widget for TextInput {
                     self.ime_preedit.clear();
                     ctx.release_pointer_capture(self.id);
                     ctx.set_ime_enabled(false, None);
+                    self.refresh_ime_area(ctx);
+                    return EventResult::Ignored;
                 }
                 self.focused = clicked;
                 self.refresh_ime_area(ctx);
@@ -896,8 +903,16 @@ mod tests {
         let mut s = DummyShortcut;
         let mut t = DummyTooltip;
         let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
-        md(&mut ti, 300.0, 14.0, &mut ctx);
+        let result = ti.event(
+            &UiEvent::MouseDown {
+                position: Point::new(300.0, 14.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
         assert!(!ti.focused);
+        assert_eq!(result, EventResult::Ignored);
     }
 
     #[test]
@@ -961,6 +976,31 @@ mod tests {
         let result = ti.event(&UiEvent::ImeCommit("你".into()), &mut ctx);
         assert_eq!(result, EventResult::Handled);
         assert!(ti.ime_preedit.is_empty());
+    }
+
+    #[test]
+    fn ime_preedit_moves_caret_after_composition_text() {
+        let mut ti = TextInput::new("ph").with_text("ab");
+        layout(&mut ti);
+        ti.focused = true;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
+
+        let result = ti.event(&UiEvent::ImePreedit("ni".into()), &mut ctx);
+
+        assert_eq!(result, EventResult::Handled);
+        let area = ctx
+            .requests
+            .ime
+            .expect("preedit should update IME cursor area")
+            .cursor_area
+            .expect("preedit should keep IME cursor visible");
+        let expected_x = ti.content_left()
+            + measure_text_width("ab", DEFAULT_FONT_SIZE)
+            + measure_text_width("ni", DEFAULT_FONT_SIZE);
+        assert!((area.x - expected_x).abs() <= 0.1);
     }
 
     #[test]

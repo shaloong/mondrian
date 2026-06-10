@@ -43,6 +43,13 @@ impl Checkbox {
     pub fn set_checked(&mut self, checked: bool) {
         self.checked = checked;
     }
+
+    fn toggle(&mut self, ctx: &mut EventContext) {
+        self.checked = !self.checked;
+        if let Some(action) = &self.on_toggle {
+            (ctx.dispatch)(action.clone());
+        }
+    }
 }
 
 impl Widget for Checkbox {
@@ -70,10 +77,7 @@ impl Widget for Checkbox {
             }
             UiEvent::MouseUp { position, button: MouseButton::Left, .. } => {
                 if self.pressed && self.bounds.contains(*position) {
-                    self.checked = !self.checked;
-                    if let Some(action) = &self.on_toggle {
-                        (ctx.dispatch)(action.clone());
-                    }
+                    self.toggle(ctx);
                 }
                 self.pressed = false;
                 EventResult::Handled
@@ -91,6 +95,18 @@ impl Widget for Checkbox {
                 self.pressed = false;
                 EventResult::Handled
             }
+            UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, .. } => {
+                self.pressed = true;
+                self.toggle(ctx);
+                EventResult::Handled
+            }
+            UiEvent::KeyUp { key: KeyCode::Enter | KeyCode::Space, .. } => {
+                if self.pressed {
+                    self.pressed = false;
+                    return EventResult::Handled;
+                }
+                EventResult::Ignored
+            }
             _ => EventResult::Ignored,
         }
     }
@@ -101,8 +117,8 @@ impl Widget for Checkbox {
 
         let box_size = 16.0;
         let box_rect = Rect::new(
-            self.bounds.x + 2.0,
-            self.bounds.y + (self.bounds.height - box_size) * 0.5,
+            (self.bounds.x + 2.0).round(),
+            (self.bounds.y + (self.bounds.height - box_size) * 0.5).round(),
             box_size,
             box_size,
         );
@@ -131,23 +147,10 @@ impl Widget for Checkbox {
         // Fill on top
         ctx.encoder.draw_rect(box_rect, fill, spacing.radius_sm);
 
-        // Check mark — two line segments forming a V
+        // Check mark — one filled shape, not two independent stroked lines.
         if self.checked {
-            let start = Point::new(
-                box_rect.x + box_rect.width * 0.28,
-                box_rect.y + box_rect.height * 0.54,
-            );
-            let mid = Point::new(
-                box_rect.x + box_rect.width * 0.43,
-                box_rect.y + box_rect.height * 0.68,
-            );
-            let end = Point::new(
-                box_rect.x + box_rect.width * 0.74,
-                box_rect.y + box_rect.height * 0.34,
-            );
-            let stroke = 2.4;
-            ctx.encoder.draw_line(start, mid, stroke, tokens.primary_foreground);
-            ctx.encoder.draw_line(mid, end, stroke, tokens.primary_foreground);
+            let vertices = checkmark_triangles(box_rect);
+            ctx.encoder.draw_triangles(&vertices, tokens.primary_foreground);
         }
 
         // Label text
@@ -169,6 +172,17 @@ impl Widget for Checkbox {
     }
 }
 
+fn checkmark_triangles(box_rect: Rect) -> [Point; 12] {
+    let p0 = Point::new(box_rect.x + 3.0, box_rect.y + 9.0);
+    let p1 = Point::new(box_rect.x + 5.0, box_rect.y + 7.0);
+    let p2 = Point::new(box_rect.x + 7.0, box_rect.y + 9.0);
+    let p3 = Point::new(box_rect.x + 12.0, box_rect.y + 4.0);
+    let p4 = Point::new(box_rect.x + 14.0, box_rect.y + 6.0);
+    let p5 = Point::new(box_rect.x + 7.0, box_rect.y + 13.0);
+
+    [p5, p0, p1, p5, p1, p2, p5, p2, p3, p3, p4, p5]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,6 +194,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingEncoder {
         lines: Vec<(Point, Point, f32)>,
+        triangles: Vec<Point>,
     }
 
     impl DrawCommandEncoder for RecordingEncoder {
@@ -197,6 +212,10 @@ mod tests {
             _color: mondrian_core::Color,
         ) {
             self.lines.push((start, end, width));
+        }
+
+        fn draw_triangles(&mut self, vertices: &[Point], _color: mondrian_core::Color) {
+            self.triangles.extend_from_slice(vertices);
         }
 
         fn draw_text(
@@ -331,7 +350,7 @@ mod tests {
     }
 
     #[test]
-    fn checkbox_checked_paints_two_stable_checkmark_segments() {
+    fn checkbox_checked_paints_one_filled_checkmark_shape() {
         let mut cb = Checkbox::new("Opt", true);
         cb.layout(Rect::new(0.0, 0.0, 100.0, 22.0));
         let theme = ThemePreset::Dark.build();
@@ -344,10 +363,14 @@ mod tests {
 
         cb.paint(&mut ctx);
 
-        assert_eq!(encoder.lines.len(), 2);
-        assert_eq!(encoder.lines[0].2, 2.4);
-        assert_eq!(encoder.lines[1].2, 2.4);
-        assert_eq!(encoder.lines[0].1, encoder.lines[1].0);
+        assert!(encoder.lines.is_empty());
+        assert_eq!(encoder.triangles.len(), 12);
+        for point in &encoder.triangles {
+            assert_eq!(point.x.fract(), 0.0);
+            assert_eq!(point.y.fract(), 0.0);
+            assert!((2.0..=18.0).contains(&point.x));
+            assert!((3.0..=19.0).contains(&point.y));
+        }
     }
 
     #[test]
@@ -382,6 +405,59 @@ mod tests {
             &mut ctx,
         );
         assert_eq!(cell.into_inner(), vec![Action::TogglePlay]);
+    }
+
+    #[test]
+    fn checkbox_space_toggles_and_dispatches() {
+        let mut cb = Checkbox::new("Opt", false).on_toggle(Action::TogglePlay);
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let cell = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch_fn);
+
+        let result = cb.event(
+            &UiEvent::KeyDown { key: KeyCode::Space, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert!(cb.is_checked());
+        assert!(cb.pressed);
+        assert_eq!(cell.borrow().as_slice(), &[Action::TogglePlay]);
+
+        let result = cb.event(
+            &UiEvent::KeyUp { key: KeyCode::Space, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert!(!cb.pressed);
+    }
+
+    #[test]
+    fn checkbox_enter_without_action_toggles_without_dispatch() {
+        let mut cb = Checkbox::new("Opt", false);
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let cell = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch_fn);
+
+        let result = cb.event(
+            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert!(cb.is_checked());
+        assert!(cell.into_inner().is_empty());
     }
 
     #[test]

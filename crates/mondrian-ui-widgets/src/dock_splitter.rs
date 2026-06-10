@@ -232,20 +232,21 @@ impl Widget for DockSplitter {
     fn paint(&self, ctx: &mut PaintContext) {
         let tokens = &ctx.theme.colors;
 
-        // Handle color: highlight when dragging or hovered
-        let handle_color = if self.dragging {
+        let base_color = tokens.border;
+        let active_color = if self.dragging {
             tokens.primary
         } else if self.handle_hovered {
-            tokens.ring
+            tokens.accent
         } else {
             tokens.border
         };
-        let handle_width = if self.dragging {
-            4.0
-        } else if self.handle_hovered {
+        let base_width = 1.0;
+        let active_width = if self.dragging {
             3.0
+        } else if self.handle_hovered {
+            2.0
         } else {
-            1.0
+            0.0
         };
 
         // Paint children first so the splitter handle always remains visible
@@ -254,24 +255,59 @@ impl Widget for DockSplitter {
             child.paint(ctx);
         }
 
-        // 绘制把手线条（视觉上保持细线，在热区中心）
+        // Draw a crisp full-span separator, then a slightly thicker active
+        // affordance on hover/drag. Both are geometry, not font glyphs.
         let (hx, hy) = (self.grab_rect.center().x, self.grab_rect.center().y);
         match self.direction {
             SplitDirection::Horizontal => {
-                ctx.encoder.draw_line(
-                    Point::new(hx, self.bounds.y),
-                    Point::new(hx, self.bounds.y + self.bounds.height),
-                    handle_width,
-                    handle_color,
+                let x = hx.round();
+                ctx.encoder.draw_rect(
+                    Rect::new(
+                        x - base_width * 0.5,
+                        self.bounds.y,
+                        base_width,
+                        self.bounds.height,
+                    ),
+                    base_color,
+                    0.0,
                 );
+                if active_width > 0.0 {
+                    ctx.encoder.draw_rect(
+                        Rect::new(
+                            x - active_width * 0.5,
+                            self.bounds.y,
+                            active_width,
+                            self.bounds.height,
+                        ),
+                        active_color,
+                        active_width * 0.5,
+                    );
+                }
             }
             SplitDirection::Vertical => {
-                ctx.encoder.draw_line(
-                    Point::new(self.bounds.x, hy),
-                    Point::new(self.bounds.x + self.bounds.width, hy),
-                    handle_width,
-                    handle_color,
+                let y = hy.round();
+                ctx.encoder.draw_rect(
+                    Rect::new(
+                        self.bounds.x,
+                        y - base_width * 0.5,
+                        self.bounds.width,
+                        base_width,
+                    ),
+                    base_color,
+                    0.0,
                 );
+                if active_width > 0.0 {
+                    ctx.encoder.draw_rect(
+                        Rect::new(
+                            self.bounds.x,
+                            y - active_width * 0.5,
+                            self.bounds.width,
+                            active_width,
+                        ),
+                        active_color,
+                        active_width * 0.5,
+                    );
+                }
             }
         }
     }
@@ -336,8 +372,7 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingEncoder {
-        line_widths: Vec<f32>,
-        lines: Vec<(Point, Point)>,
+        rects: Vec<Rect>,
     }
 
     impl DrawCommandEncoder for RecordingEncoder {
@@ -345,7 +380,9 @@ mod tests {
 
         fn pop_clip(&mut self) {}
 
-        fn draw_rect(&mut self, _bounds: Rect, _color: mondrian_core::Color, _corner_radius: f32) {}
+        fn draw_rect(&mut self, bounds: Rect, _color: mondrian_core::Color, _corner_radius: f32) {
+            self.rects.push(bounds);
+        }
 
         fn draw_line(
             &mut self,
@@ -354,8 +391,7 @@ mod tests {
             width: f32,
             _color: mondrian_core::Color,
         ) {
-            self.line_widths.push(width);
-            self.lines.push((start, end));
+            let _ = (start, end, width);
         }
 
         fn draw_text(
@@ -420,7 +456,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_width_grows_on_hover_and_drag() {
+    fn handle_geometry_grows_on_hover_and_drag() {
         let mut splitter = splitter(SplitDirection::Vertical);
         let theme = mondrian_ui_theme::ThemePreset::Dark.build();
 
@@ -433,7 +469,7 @@ mod tests {
             };
             splitter.paint(&mut ctx);
         }
-        assert_eq!(encoder.line_widths.last(), Some(&1.0));
+        assert_eq!(encoder.rects.last().map(|r| r.height), Some(1.0));
 
         splitter.handle_hovered = true;
         let mut encoder = RecordingEncoder::default();
@@ -445,7 +481,7 @@ mod tests {
             };
             splitter.paint(&mut ctx);
         }
-        assert_eq!(encoder.line_widths.last(), Some(&3.0));
+        assert_eq!(encoder.rects.last().map(|r| r.height), Some(2.0));
 
         splitter.dragging = true;
         let mut encoder = RecordingEncoder::default();
@@ -457,11 +493,11 @@ mod tests {
             };
             splitter.paint(&mut ctx);
         }
-        assert_eq!(encoder.line_widths.last(), Some(&4.0));
+        assert_eq!(encoder.rects.last().map(|r| r.height), Some(3.0));
     }
 
     #[test]
-    fn handle_lines_span_full_splitter_bounds() {
+    fn handle_rects_span_full_splitter_bounds() {
         let theme = mondrian_ui_theme::ThemePreset::Dark.build();
 
         let horizontal = splitter(SplitDirection::Horizontal);
@@ -474,9 +510,9 @@ mod tests {
             };
             horizontal.paint(&mut ctx);
         }
-        let (start, end) = encoder.lines.last().copied().expect("splitter should draw handle");
-        assert_eq!(start.y, 0.0);
-        assert_eq!(end.y, 100.0);
+        let rect = encoder.rects.last().copied().expect("splitter should draw handle");
+        assert_eq!(rect.y, 0.0);
+        assert_eq!(rect.height, 100.0);
 
         let vertical = splitter(SplitDirection::Vertical);
         let mut encoder = RecordingEncoder::default();
@@ -488,8 +524,8 @@ mod tests {
             };
             vertical.paint(&mut ctx);
         }
-        let (start, end) = encoder.lines.last().copied().expect("splitter should draw handle");
-        assert_eq!(start.x, 0.0);
-        assert_eq!(end.x, 200.0);
+        let rect = encoder.rects.last().copied().expect("splitter should draw handle");
+        assert_eq!(rect.x, 0.0);
+        assert_eq!(rect.width, 200.0);
     }
 }

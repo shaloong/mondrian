@@ -149,6 +149,7 @@ impl TreeWalker {
         let clip_rect = Rect::new(0.0, 0.0, f32::MAX, f32::MAX);
         let mut ctx = PaintContext { encoder, theme, clip_rect };
         root.paint(&mut ctx);
+        root.paint_overlay(&mut ctx);
     }
 
     /// 在 Widget 树中查找下一个可聚焦的 Widget（Tab 顺序）
@@ -267,19 +268,21 @@ mod tests {
 
     struct MockEncoder {
         rect_count: usize,
+        rect_colors: Vec<Color>,
     }
 
     impl MockEncoder {
         fn new() -> Self {
-            Self { rect_count: 0 }
+            Self { rect_count: 0, rect_colors: Vec::new() }
         }
     }
 
     impl DrawCommandEncoder for MockEncoder {
         fn push_clip(&mut self, _bounds: Rect) {}
         fn pop_clip(&mut self) {}
-        fn draw_rect(&mut self, _bounds: Rect, _color: Color, _corner_radius: f32) {
+        fn draw_rect(&mut self, _bounds: Rect, color: Color, _corner_radius: f32) {
             self.rect_count += 1;
+            self.rect_colors.push(color);
         }
         fn draw_line(&mut self, _start: Point, _end: Point, _width: f32, _color: Color) {}
         fn draw_text(&mut self, _text: &str, _font_size: f32, _position: Point, _color: Color) {}
@@ -326,6 +329,54 @@ mod tests {
         // Only root.paint() is called by TreeWalker.
         // Children are painted by the parent widget's own paint() method.
         assert_eq!(encoder.rect_count, 1);
+    }
+
+    struct OverlayWidget {
+        id: WidgetId,
+    }
+
+    impl OverlayWidget {
+        fn new() -> Self {
+            Self { id: WidgetId::new() }
+        }
+    }
+
+    impl Widget for OverlayWidget {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+
+        fn measure(&self, _constraint: LayoutConstraint) -> Size {
+            Size::new(100.0, 100.0)
+        }
+
+        fn layout(&mut self, _bounds: Rect) {}
+
+        fn event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+            EventResult::Ignored
+        }
+
+        fn paint(&self, ctx: &mut PaintContext) {
+            ctx.encoder.draw_rect(Rect::ZERO, Color::from_hex(0x111111), 0.0);
+        }
+
+        fn paint_overlay(&self, ctx: &mut PaintContext) {
+            ctx.encoder.draw_rect(Rect::ZERO, Color::from_hex(0xEEEEEE), 0.0);
+        }
+    }
+
+    #[test]
+    fn tree_walker_paint_draws_overlay_after_normal_content() {
+        let root = OverlayWidget::new();
+        let mut encoder = MockEncoder::new();
+        let theme = mondrian_ui_theme::ThemePreset::Dark.build();
+
+        TreeWalker::paint(&root, &mut encoder, &theme);
+
+        assert_eq!(
+            encoder.rect_colors,
+            vec![Color::from_hex(0x111111), Color::from_hex(0xEEEEEE)]
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════

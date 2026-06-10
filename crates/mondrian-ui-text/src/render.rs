@@ -42,22 +42,13 @@ impl TextRenderer {
             TextLayout::new_single_line(font_system, text, attrs, font_size)
         };
 
-        // Real font ascent: distance from line_top to baseline (cosmic-text measured)
-        let ascent = layout
-            .buffer()
-            .layout_runs()
-            .next()
-            .map(|run| run.line_y - run.line_top)
-            .unwrap_or(font_size * 0.75);
-        let baseline_y = position.y + ascent;
-
         let mut commands = Vec::new();
-        for (_line_y, glyph) in layout.positioned_glyphs() {
+        for (line_y, glyph) in layout.positioned_glyphs() {
             if let Some((uv_rect, bmp_w, bmp_h, top, left)) =
                 self.atlas.get_or_rasterize(font_system, glyph, 0.0)
             {
                 let bitmap_x = position.x + glyph.x + left as f32;
-                let bitmap_top = baseline_y - top as f32;
+                let bitmap_top = position.y + line_y - top as f32;
                 commands.push(DrawCommand::Image {
                     bounds: Rect::new(bitmap_x, bitmap_top, bmp_w as f32, bmp_h as f32),
                     uv_rect,
@@ -74,6 +65,22 @@ impl TextRenderer {
             .weight(cosmic_text::Weight::NORMAL);
         let layout =
             TextLayout::new_single_line(&mut self.font_manager.font_system, text, attrs, font_size);
+        layout.size()
+    }
+
+    /// Measure wrapped paragraph text using the same cosmic-text layout path
+    /// used by `layout_and_render`.
+    pub fn measure_text_box(&mut self, text: &str, font_size: f32, max_width: f32) -> (f32, f32) {
+        let attrs = cosmic_text::Attrs::new()
+            .family(cosmic_text::Family::SansSerif)
+            .weight(cosmic_text::Weight::NORMAL);
+        let layout = TextLayout::new_multiline(
+            &mut self.font_manager.font_system,
+            text,
+            attrs,
+            font_size,
+            max_width.max(1.0),
+        );
         layout.size()
     }
 
@@ -94,9 +101,14 @@ pub fn resolve_text_commands(
     let mut resolved = Vec::with_capacity(commands.len());
     for cmd in commands {
         match cmd {
-            DrawCommand::Text { text, style, position, color } => {
-                let glyph_cmds =
-                    text_renderer.layout_and_render(&text, style.font_size, position, color, None);
+            DrawCommand::Text { text, style, position, max_width, color } => {
+                let glyph_cmds = text_renderer.layout_and_render(
+                    &text,
+                    style.font_size,
+                    position,
+                    color,
+                    max_width,
+                );
                 resolved.extend(glyph_cmds);
             }
             _ => resolved.push(cmd),
@@ -166,6 +178,36 @@ mod tests {
         let mut r = TextRenderer::new();
         let (w, _h) = r.measure_text("", 16.0);
         assert_eq!(w, 0.0);
+    }
+
+    #[test]
+    fn measure_text_box_wraps_to_max_width() {
+        let mut r = TextRenderer::new();
+        let text = "Tooltip text that should wrap into multiple lines";
+        let (single_w, single_h) = r.measure_text(text, 16.0);
+        let (wrapped_w, wrapped_h) = r.measure_text_box(text, 16.0, 120.0);
+
+        assert!(single_w > 120.0);
+        assert!(wrapped_w <= 120.0);
+        assert!(wrapped_h > single_h);
+    }
+
+    #[test]
+    fn layout_and_render_text_box_uses_multiple_baselines() {
+        let mut r = TextRenderer::new();
+        let text = "Tooltip text that should wrap into multiple lines";
+        let _ = r.layout_and_render(text, 16.0, Point::ZERO, Color::WHITE, Some(120.0));
+        let _ = r.take_pending_uploads();
+        let cmds = r.layout_and_render(text, 16.0, Point::ZERO, Color::WHITE, Some(120.0));
+        let mut ys: Vec<i32> =
+            image_bounds(&cmds).iter().map(|bounds| bounds.y.round() as i32).collect();
+        ys.sort_unstable();
+        ys.dedup();
+
+        assert!(
+            ys.len() > 1,
+            "wrapped text should render on multiple y positions"
+        );
     }
 
     #[test]
@@ -659,6 +701,7 @@ mod tests {
                 letter_spacing: 0.0,
             },
             position: Point::new(10.0, 20.0),
+            max_width: None,
             color: Color::WHITE,
         }];
         // First pass: rasterizes

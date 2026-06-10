@@ -89,6 +89,10 @@ ends.
 Text copy/cut shortcuts are consumed by `TextInput` only when a selection exists.
 If there is no selection, `Ctrl+C` and `Ctrl+X` are ignored so panel-level
 commands, such as copying clips or keyframes, can handle them.
+When a `TextInput` receives an outside mouse down directly, it clears local
+focus and IME state but returns `Ignored`; the clicked sibling must still receive
+the event. Intentional focus loss that should stop propagation is delivered by
+the router through `FocusLost`.
 
 ## Pointer Capture
 
@@ -97,11 +101,20 @@ Drag widgets request capture on mouse down and release capture on mouse up.
 Timeline clip drags, curve editor handles, and color picker gestures should use
 the same request path.
 
+Composite widgets that own internal popup controls must not leak private child
+`WidgetId`s into router-level capture. If the inner control is not a real node
+in the widget tree, the wrapper translates capture/release requests to the
+wrapper's own id before returning from `event()`.
+Composite widgets with private text fields should also route pointer input to
+the hit field first and route keyboard/IME input only to the focused private
+field, rather than broadcasting events to every private child.
+
 Parent-owned chrome that must win over child hit targets, such as
 `DockSplitter` handles over tab bars, uses `Widget::before_child_event()`.
 Splitter handles paint above children, use a narrower 6px interaction zone by
-default, grow in stroke width while hovered or dragged, and span the full
-splitter bounds without endpoint gaps.
+default, draw full-span geometric rectangles instead of text or glyphs, grow
+while hovered or dragged, and span the full splitter bounds without endpoint
+gaps.
 
 Slider value mapping uses the same thumb-centered track for painting and
 pointer updates. The thumb rect must remain inside widget bounds; if a parent
@@ -110,11 +123,22 @@ gives a short row, the thumb shrinks vertically instead of being clipped.
 ## Overlays
 
 Dropdowns, context menus, and tooltips derive event hit regions and paint
-geometry from the same rect helpers. Disabled menu items consume pointer input
+geometry from shared rect helpers. Dropdown triggers, context-menu popup chrome,
+rows, separators, active indicators, and scrollbars are painted through shared
+menu helpers so action-backed dropdowns, context menus, and internal selectors
+keep the same visual language. Disabled menu items consume pointer input
 without dispatching actions or closing the overlay; outside clicks close open
 menus. Tooltip requests preserve their delay timer when the same tooltip is
 reported repeatedly during hover, and tooltip painting clamps to the current
 clip rect.
+
+Overlay-capable widgets paint their normal trigger chrome in `paint()` and
+their floating chrome in `paint_overlay()`. `TreeWalker::paint()` runs the
+overlay pass after the root's normal paint pass, so dropdown menus and similar
+popups are not hidden by siblings that happen to paint later in the normal
+content tree. Tooltip popups are overlay-only: a composite widget that owns a
+tooltip must forward it from `paint_overlay()` instead of drawing it inside the
+panel's normal `paint()` method.
 
 Dropdowns request pointer capture while open so outside clicks, Escape, wheel
 events, and release events continue to route to the popup even when the pointer
@@ -122,13 +146,34 @@ is over another widget. The opening click's release is suppressed so it cannot
 accidentally select the first item under the cursor; item actions dispatch only
 when a press and release land on the same enabled row. Long dropdown menus clip
 their item list and scroll with the same positive-delta-means-content-down
-offset convention as `ScrollView`.
+offset convention as `ScrollView`. Menu separators are explicit non-action
+items and paint geometric divider rects; disabled items only mute their text and
+must not draw strikethroughs or divider-like chrome.
+Open menus support keyboard navigation: Up/Down cycles through enabled action
+rows while skipping separators and disabled rows, Enter/Space activates the
+highlighted row, and Escape closes the popup. Internal selectors such as the
+ColorPicker mode menu follow the same keys but commit local widget state instead
+of dispatching editor actions.
+
+Keyboard activation for focused controls follows desktop conventions: Button
+handles Enter/Space as an activation gesture, and Checkbox handles Enter/Space
+as a toggle gesture. KeyDown performs the semantic action and enters the pressed
+visual state; the matching KeyUp clears the pressed state. Keyboard events are
+routed by focus, so these handlers do not perform hit testing.
+
+Color pickers reuse the shared color model conversions from `mondrian-core`
+(`Color`, `RgbaColor`, `HslColor`, `HsvColor`, and `CmykColor`). The widget
+layer owns layout, text fields, swatch painting, and model tabs only; conversion
+math and hex parsing stay out of UI crates.
 
 Tooltip positions are anchored when the pointer enters a trigger and then
 clamped by the tooltip widget to the current clip rect. Repeating the same
 tooltip request keeps the original anchor so the popup does not chase pointer
-movement. Tooltips draw the popover fill directly without a high-emphasis ring
-border.
+movement. Tooltips use a low-emphasis border token, not primary/ring colors.
+Tooltip text uses `draw_text_box` and `mondrian-ui-text` paragraph measurement
+before painting its background. The text layer uses cosmic-text wrapping with
+word breaks and glyph fallback for overlong tokens, so tooltip widgets do not
+own line-breaking logic.
 
 ## Scroll Views
 
@@ -147,13 +192,51 @@ scrollbar track outside the thumb pages the viewport by one visible span.
 Color parsing and conversion live in `mondrian-core`, not in the widget layer.
 ColorPicker and inspector controls should use the shared HEX/RGBA/HSL/HSV/CMYK
 models so text inputs, swatches, and future effect parameters round-trip through
-the same math.
+the same math. The custom `ColorPicker` owns HSV area, hue bar, alpha bar,
+mode selection, keyboard nudging, eyedropper state, and text-field
+synchronization.
+
+The renderer exposes gradient rectangle and per-vertex colored triangle draw
+commands backed by the existing batch pipeline. Colored triangle fans may carry
+an optional rounded-rect mask so non-rectangular gradients reuse the same SDF
+antialiasing path as circles and rounded rectangles. Widgets should prefer
+these primitives for UI gradients instead of tessellating many sampled
+rectangles or adding UI-local shaders. The `ColorPicker` uses gradient
+rectangles for its HSV area overlays, hue ramp, and alpha ramp. It uses a
+masked colored triangle fan for the optional hue/saturation wheel.
+Checkerboards are low-count deterministic colored-triangle geometry and use
+the same rounded mask path when they sit inside rounded swatches. A compact
+`ColorPickerTrigger` wraps the full picker for inspector rows and toolbar use:
+the trigger paints the current color above a checkerboard and opens the full
+picker in the overlay pass. Trigger-owned popups may hide the picker's internal
+swatch to avoid duplicated color chips, while embedded inspector pickers can
+still use `ColorPicker` directly. Color model fields use mode-specific compact
+columns: HEX gets one full-width field, RGB/HSL/HSV fit four channels on one
+row, and CMYKA fits five compact numeric fields on one row. The picker exposes
+a visible geometric eyedropper button that enters sampling mode; platform or
+viewer integrations complete the operation by calling `apply_sampled_color()`.
+The mode selector shares the generic dropdown's token vocabulary and overlay
+behavior, but it remains an internal selector because changing color models is
+local widget state rather than an editor `Action`.
+
+## Curve Editing
+
+Curve editing starts as a domain-independent widget primitive in
+`mondrian-ui-widgets`. `CurveEditor` owns normalized `0.0..=1.0` point layout,
+hit testing, pointer capture, monotonic-x dragging, keyboard nudging, and themed
+grid/curve/handle painting. Timeline keyframes, effect graph curves, and color
+curves should map their domain data into this primitive and commit semantic
+mutations at the panel/app layer instead of teaching the widget about clips,
+effects, or undo history.
 
 ## Rendering Notes
 
-Widgets emit draw commands only. Checkbox checkmarks are vector line commands,
-not font glyphs, so they are stable across operating systems and font stacks.
-Tooltip widgets draw border, fill, and text commands in that order.
+Widgets emit draw commands only. Checkbox checkmarks are filled triangle-list
+commands, not font glyphs or paired line strokes, so they are stable across
+operating systems and font stacks. Wrapped text is represented as a constrained
+text box draw command and resolved by `mondrian-ui-text`, not manually wrapped
+inside individual widgets. Tooltip widgets draw border, fill, and text commands
+in that order.
 
 `DrawEncoder` snaps axis-aligned UI geometry to whole pixels at command
 recording time: rectangle bounds, line endpoints, clip bounds, image bounds,
@@ -171,5 +254,7 @@ content rects.
 
 Line commands are expanded to quads with front-facing triangle winding for every
 orientation. This matters for splitter handles because the UI pipeline keeps
-back-face culling enabled. Line geometry uses square caps so diagonal strokes,
-including checkbox checkmarks, do not look clipped at segment endpoints.
+back-face culling enabled. Filled triangle-list commands are also normalized to
+front-facing winding after the pixel-to-NDC y flip. Checkbox checkmarks use one
+filled triangle-list shape on the 16px checkbox grid instead of two independent
+line strokes, so the elbow has a single joined fill and cannot form a visual X.

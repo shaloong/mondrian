@@ -5,7 +5,9 @@
 use mondrian_ui_core::types::{Point, Rect};
 
 use crate::command::DrawCommand;
-use crate::shape::{generate_rect_vertices, RectVertex, RenderMode};
+use crate::shape::{
+    generate_gradient_rect_vertices, generate_rect_vertices, RectVertex, RenderMode,
+};
 
 /// 一个绘制批次 —— 一组顶点 + 可选的裁剪矩形
 #[derive(Debug, Clone)]
@@ -80,6 +82,23 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                 );
                 current_batch.vertices.extend(vertices);
             }
+            DrawCommand::GradientRect { bounds, colors, corner_radius } => {
+                let pixel_w = bounds.width.max(1.0);
+                let pixel_h = bounds.height.max(1.0);
+
+                let rect = apply_transform(bounds, &transform_stack);
+                let screen_rect = pixel_to_ndc_rect(rect, sx, sy, tx, ty);
+
+                let vertices = generate_gradient_rect_vertices(
+                    screen_rect,
+                    colors,
+                    pixel_w,
+                    pixel_h,
+                    *corner_radius,
+                    RenderMode::Shape,
+                );
+                current_batch.vertices.extend(vertices);
+            }
             DrawCommand::Text { .. } => {
                 // Stage B: text placeholder — skip
             }
@@ -120,16 +139,10 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                 let len = (dx * dx + dy * dy).sqrt().max(0.001);
                 let nx = -dy / len;
                 let ny = dx / len;
-                let ux = dx / len;
-                let uy = dy / len;
                 let hw = (*width).max(1.0) * 0.5;
 
-                let mut n_start = apply_transform_point(start, &transform_stack);
-                let mut n_end = apply_transform_point(end, &transform_stack);
-                n_start.x -= ux * hw;
-                n_start.y -= uy * hw;
-                n_end.x += ux * hw;
-                n_end.y += uy * hw;
+                let n_start = apply_transform_point(start, &transform_stack);
+                let n_end = apply_transform_point(end, &transform_stack);
 
                 let screen_start = Point::new(sx * n_start.x + tx, sy * n_start.y + ty);
                 let screen_end = Point::new(sx * n_end.x + tx, sy * n_end.y + ty);
@@ -150,6 +163,64 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
 
                 let verts = line_vertices([(x0, y0), (x1, y1), (x2, y2), (x3, y3)], color);
                 current_batch.vertices.extend(verts);
+            }
+            DrawCommand::Triangles { vertices, color } => {
+                for triangle in vertices.chunks_exact(3) {
+                    let points = [
+                        point_to_ndc(
+                            apply_transform_point(&triangle[0], &transform_stack),
+                            sx,
+                            sy,
+                            tx,
+                            ty,
+                        ),
+                        point_to_ndc(
+                            apply_transform_point(&triangle[1], &transform_stack),
+                            sx,
+                            sy,
+                            tx,
+                            ty,
+                        ),
+                        point_to_ndc(
+                            apply_transform_point(&triangle[2], &transform_stack),
+                            sx,
+                            sy,
+                            tx,
+                            ty,
+                        ),
+                    ];
+                    current_batch.vertices.extend(triangle_vertices(points, color));
+                }
+            }
+            DrawCommand::ColoredTriangles { vertices, mask } => {
+                let mask_rect = mask.map(|mask| apply_transform(&mask.bounds, &transform_stack));
+                for triangle in vertices.chunks_exact(3) {
+                    let point = |index: usize| {
+                        let (point, color) = triangle[index];
+                        let transformed = apply_transform_point(&point, &transform_stack);
+                        let tex_coord = mask_rect
+                            .map(|rect| {
+                                [
+                                    ((transformed.x - rect.x) / rect.width.max(1.0))
+                                        .clamp(0.0, 1.0),
+                                    ((transformed.y - rect.y) / rect.height.max(1.0))
+                                        .clamp(0.0, 1.0),
+                                ]
+                            })
+                            .unwrap_or([0.0, 0.0]);
+                        (point_to_ndc(transformed, sx, sy, tx, ty), color, tex_coord)
+                    };
+                    let points = [point(0), point(1), point(2)];
+                    let rect_size = mask
+                        .map(|mask| [mask.bounds.width.max(1.0), mask.bounds.height.max(1.0)])
+                        .unwrap_or([1.0, 1.0]);
+                    let corner_radius = mask.map(|mask| mask.corner_radius).unwrap_or(0.0);
+                    current_batch.vertices.extend(colored_triangle_vertices(
+                        points,
+                        rect_size,
+                        corner_radius,
+                    ));
+                }
             }
         }
 
@@ -197,6 +268,66 @@ fn line_vertices(points: [(f32, f32); 4], color: &mondrian_core::Color) -> [Rect
             1.0,
             1.0,
             0.0,
+            RenderMode::Shape,
+        )
+    })
+}
+
+fn triangle_vertices(points: [Point; 3], color: &mondrian_core::Color) -> [RectVertex; 3] {
+    let mut points = [
+        (points[0].x, points[0].y),
+        (points[1].x, points[1].y),
+        (points[2].x, points[2].y),
+    ];
+    if signed_triangle_area(points[0], points[1], points[2]) < 0.0 {
+        points.swap(1, 2);
+    }
+
+    points.map(|(x, y)| {
+        RectVertex::new(
+            x,
+            y,
+            0.0,
+            0.0,
+            color.r,
+            color.g,
+            color.b,
+            color.a,
+            1.0,
+            1.0,
+            0.0,
+            RenderMode::Shape,
+        )
+    })
+}
+
+fn colored_triangle_vertices(
+    points: [(Point, mondrian_core::Color, [f32; 2]); 3],
+    rect_size: [f32; 2],
+    corner_radius: f32,
+) -> [RectVertex; 3] {
+    let mut points = [
+        ((points[0].0.x, points[0].0.y), points[0].1, points[0].2),
+        ((points[1].0.x, points[1].0.y), points[1].1, points[1].2),
+        ((points[2].0.x, points[2].0.y), points[2].1, points[2].2),
+    ];
+    if signed_triangle_area(points[0].0, points[1].0, points[2].0) < 0.0 {
+        points.swap(1, 2);
+    }
+
+    points.map(|((x, y), color, tex_coord)| {
+        RectVertex::new(
+            x,
+            y,
+            tex_coord[0],
+            tex_coord[1],
+            color.r,
+            color.g,
+            color.b,
+            color.a,
+            rect_size[0],
+            rect_size[1],
+            corner_radius,
             RenderMode::Shape,
         )
     })
@@ -259,6 +390,10 @@ fn apply_transform_point(p: &Point, stack: &[glam::Vec2]) -> Point {
     Point::new(p.x + offset.x, p.y + offset.y)
 }
 
+fn point_to_ndc(point: Point, sx: f32, sy: f32, tx: f32, ty: f32) -> Point {
+    Point::new(sx * point.x + tx, sy * point.y + ty)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,6 +419,80 @@ mod tests {
         let batches = build_batches(&cmds, (1920, 1080));
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].vertices.len(), 6);
+    }
+
+    #[test]
+    fn build_batches_gradient_rect_uses_six_vertices_with_corner_colors() {
+        let colors = [
+            Color::from_rgba8(255, 0, 0, 255),
+            Color::from_rgba8(0, 255, 0, 255),
+            Color::from_rgba8(0, 0, 255, 255),
+            Color::from_rgba8(255, 255, 255, 255),
+        ];
+        let cmds = [DrawCommand::GradientRect {
+            bounds: Rect::new(0.0, 0.0, 100.0, 50.0),
+            colors,
+            corner_radius: 0.0,
+        }];
+
+        let batches = build_batches(&cmds, (100, 100));
+
+        assert_eq!(batches.len(), 1);
+        let vertices = &batches[0].vertices;
+        assert_eq!(vertices.len(), 6);
+        assert_eq!(vertices[0].color, [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(vertices[1].color, [0.0, 1.0, 0.0, 1.0]);
+        assert_eq!(vertices[2].color, [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(vertices[5].color, [1.0, 1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn build_batches_colored_triangles_preserves_vertex_colors() {
+        let cmds = [DrawCommand::ColoredTriangles {
+            vertices: vec![
+                (Point::new(0.0, 0.0), Color::from_rgba8(255, 0, 0, 255)),
+                (Point::new(10.0, 0.0), Color::from_rgba8(0, 255, 0, 255)),
+                (Point::new(0.0, 10.0), Color::from_rgba8(0, 0, 255, 255)),
+            ],
+            mask: None,
+        }];
+
+        let batches = build_batches(&cmds, (100, 100));
+
+        assert_eq!(batches.len(), 1);
+        let vertices = &batches[0].vertices;
+        assert_eq!(vertices.len(), 3);
+        let colors = vertices.iter().map(|vertex| vertex.color).collect::<Vec<_>>();
+        assert!(colors.contains(&[1.0, 0.0, 0.0, 1.0]));
+        assert!(colors.contains(&[0.0, 1.0, 0.0, 1.0]));
+        assert!(colors.contains(&[0.0, 0.0, 1.0, 1.0]));
+    }
+
+    #[test]
+    fn build_batches_masked_colored_triangles_passes_sdf_mask_data() {
+        let cmds = [DrawCommand::ColoredTriangles {
+            vertices: vec![
+                (Point::new(10.0, 10.0), Color::from_rgba8(255, 0, 0, 255)),
+                (Point::new(90.0, 10.0), Color::from_rgba8(0, 255, 0, 255)),
+                (Point::new(50.0, 90.0), Color::from_rgba8(0, 0, 255, 255)),
+            ],
+            mask: Some(crate::command::ShapeMask {
+                bounds: Rect::new(10.0, 10.0, 80.0, 80.0),
+                corner_radius: 40.0,
+            }),
+        }];
+
+        let batches = build_batches(&cmds, (100, 100));
+
+        assert_eq!(batches.len(), 1);
+        let vertices = &batches[0].vertices;
+        assert_eq!(vertices.len(), 3);
+        for vertex in vertices {
+            assert_eq!(vertex.rect_size, [80.0, 80.0]);
+            assert_eq!(vertex.corner_radius_px, 40.0);
+            assert!(vertex.tex_coord[0] >= 0.0 && vertex.tex_coord[0] <= 1.0);
+            assert!(vertex.tex_coord[1] >= 0.0 && vertex.tex_coord[1] <= 1.0);
+        }
     }
 
     #[test]
@@ -486,7 +695,7 @@ mod tests {
     }
 
     #[test]
-    fn build_batches_line_uses_square_caps() {
+    fn build_batches_line_uses_stable_butt_caps() {
         let cmds = [DrawCommand::Line {
             start: Point::new(10.0, 50.0),
             end: Point::new(90.0, 50.0),
@@ -501,8 +710,37 @@ mod tests {
             .map(|v| v.position[0])
             .fold(f32::NEG_INFINITY, f32::max);
 
-        assert!((min_x - (-0.84)).abs() < 0.001);
-        assert!((max_x - 0.84).abs() < 0.001);
+        assert!((min_x - (-0.8)).abs() < 0.001);
+        assert!((max_x - 0.8).abs() < 0.001);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Triangle command
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn build_batches_triangles_are_front_facing_after_y_flip() {
+        let cmds = [DrawCommand::Triangles {
+            vertices: vec![
+                Point::new(10.0, 10.0),
+                Point::new(90.0, 10.0),
+                Point::new(10.0, 90.0),
+                Point::new(90.0, 10.0),
+                Point::new(90.0, 90.0),
+                Point::new(10.0, 90.0),
+            ],
+            color: Color::WHITE,
+        }];
+        let batches = build_batches(&cmds, (100, 100));
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].vertices.len(), 6);
+        for tri in batches[0].vertices.chunks_exact(3) {
+            let a = (tri[0].position[0], tri[0].position[1]);
+            let b = (tri[1].position[0], tri[1].position[1]);
+            let c = (tri[2].position[0], tri[2].position[1]);
+            assert!(signed_triangle_area(a, b, c) > 0.0);
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -538,6 +776,7 @@ mod tests {
             text: "hello".into(),
             style,
             position: Point::ZERO,
+            max_width: None,
             color: Color::WHITE,
         }];
         let batches = build_batches(&cmds, (1920, 1080));

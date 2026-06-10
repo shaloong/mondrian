@@ -14,6 +14,7 @@ pub struct Slider {
     max: f32,
     bounds: Rect,
     dragging: bool,
+    focused: bool,
     track_height: f32,
     thumb_size: f32,
 }
@@ -27,6 +28,7 @@ impl Slider {
             max,
             bounds: Rect::ZERO,
             dragging: false,
+            focused: false,
             track_height: 6.0,
             thumb_size: 14.0,
         }
@@ -73,6 +75,37 @@ impl Slider {
         let y = self.bounds.y + (self.bounds.height - thumb_size) * 0.5;
         Rect::new(x, y, thumb_size, thumb_size)
     }
+
+    fn set_value(&mut self, value: f32) -> bool {
+        let next = value.clamp(self.min, self.max);
+        if (next - self.value).abs() <= f32::EPSILON {
+            return false;
+        }
+        self.value = next;
+        true
+    }
+
+    fn keyboard_step(&self, modifiers: Modifiers) -> f32 {
+        let range = self.range().abs();
+        if modifiers.alt {
+            range / 1000.0
+        } else if modifiers.shift {
+            range / 10.0
+        } else {
+            range / 100.0
+        }
+    }
+
+    fn nudge(&mut self, delta: f32) -> EventResult {
+        if self.range() <= 0.0 {
+            return EventResult::Ignored;
+        }
+        if self.set_value(self.value + delta) {
+            EventResult::Handled
+        } else {
+            EventResult::Ignored
+        }
+    }
 }
 
 impl Widget for Slider {
@@ -94,6 +127,7 @@ impl Widget for Slider {
                 if self.bounds.contains(*position) =>
             {
                 self.dragging = true;
+                self.focused = true;
                 _ctx.request_pointer_capture(self.id);
                 self.update_value(position);
                 EventResult::Handled
@@ -106,6 +140,40 @@ impl Widget for Slider {
                 self.dragging = false;
                 _ctx.release_pointer_capture(self.id);
                 EventResult::Handled
+            }
+            UiEvent::FocusGained => {
+                self.focused = true;
+                EventResult::Handled
+            }
+            UiEvent::FocusLost => {
+                self.focused = false;
+                self.dragging = false;
+                _ctx.release_pointer_capture(self.id);
+                EventResult::Handled
+            }
+            UiEvent::KeyDown { key, modifiers } if self.focused => {
+                let step = self.keyboard_step(*modifiers);
+                match key {
+                    KeyCode::Left | KeyCode::Down => self.nudge(-step),
+                    KeyCode::Right | KeyCode::Up => self.nudge(step),
+                    KeyCode::PageDown => self.nudge(-(self.range().abs() / 10.0)),
+                    KeyCode::PageUp => self.nudge(self.range().abs() / 10.0),
+                    KeyCode::Home => {
+                        if self.set_value(self.min) {
+                            EventResult::Handled
+                        } else {
+                            EventResult::Ignored
+                        }
+                    }
+                    KeyCode::End => {
+                        if self.set_value(self.max) {
+                            EventResult::Handled
+                        } else {
+                            EventResult::Ignored
+                        }
+                    }
+                    _ => EventResult::Ignored,
+                }
             }
             _ => EventResult::Ignored,
         }
@@ -128,6 +196,17 @@ impl Widget for Slider {
         }
 
         let thumb_rect = self.thumb_rect();
+        if self.focused {
+            let mut ring = tokens.ring;
+            ring.a = 0.38;
+            let halo = Rect::new(
+                thumb_rect.x - 3.0,
+                thumb_rect.y - 3.0,
+                thumb_rect.width + 6.0,
+                thumb_rect.height + 6.0,
+            );
+            ctx.encoder.draw_rect(halo, ring, halo.height * 0.5);
+        }
         ctx.encoder.draw_rect(thumb_rect, tokens.primary, thumb_rect.height * 0.5);
     }
 
@@ -318,6 +397,72 @@ mod tests {
             &mut ctx,
         );
         assert_eq!(s.value(), 0.0); // unchanged from MouseDown at x=0
+    }
+
+    #[test]
+    fn slider_keyboard_ignores_without_focus() {
+        let mut s = Slider::new(50.0, 0.0, 100.0);
+        let mut ctx = event_ctx();
+
+        let result = s.event(
+            &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(s.value(), 50.0);
+    }
+
+    #[test]
+    fn slider_arrow_keys_adjust_when_focused() {
+        let mut s = Slider::new(50.0, 0.0, 100.0);
+        let mut ctx = event_ctx();
+
+        s.event(&UiEvent::FocusGained, &mut ctx);
+        s.event(
+            &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(s.value(), 51.0);
+
+        s.event(
+            &UiEvent::KeyDown { key: KeyCode::Left, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(s.value(), 50.0);
+    }
+
+    #[test]
+    fn slider_keyboard_shift_uses_large_step() {
+        let mut s = Slider::new(50.0, 0.0, 100.0);
+        let mut ctx = event_ctx();
+
+        s.event(&UiEvent::FocusGained, &mut ctx);
+        s.event(
+            &UiEvent::KeyDown { key: KeyCode::Up, modifiers: Modifiers::shift() },
+            &mut ctx,
+        );
+
+        assert_eq!(s.value(), 60.0);
+    }
+
+    #[test]
+    fn slider_home_end_jump_to_bounds() {
+        let mut s = Slider::new(50.0, 0.0, 100.0);
+        let mut ctx = event_ctx();
+
+        s.event(&UiEvent::FocusGained, &mut ctx);
+        s.event(
+            &UiEvent::KeyDown { key: KeyCode::Home, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(s.value(), 0.0);
+
+        s.event(
+            &UiEvent::KeyDown { key: KeyCode::End, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(s.value(), 100.0);
     }
 
     #[test]
