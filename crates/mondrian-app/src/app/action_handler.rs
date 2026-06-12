@@ -8,10 +8,11 @@
 
 use crate::app::timeline_editing::{find_clip_mut, set_clip_disabled};
 use crate::app::ui_actions::{
-    InspectorClipTransformField, InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
-    InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload, TimelineMoveClipPayload,
-    TimelineSeekPayload, TimelineSelectClipPayload, TimelineTrimClipPayload,
-    TimelineTrimPayloadEdge, INSPECTOR_NAMESPACE, INSPECTOR_SET_CLIP_ENABLED,
+    EffectsAddToClipPayload, InspectorClipTransformField, InspectorSetClipEnabledPayload,
+    InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+    InspectorSetClipTransformFieldPayload, TimelineMoveClipPayload, TimelineSeekPayload,
+    TimelineSelectClipPayload, TimelineTrimClipPayload, TimelineTrimPayloadEdge,
+    EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE, INSPECTOR_SET_CLIP_ENABLED,
     INSPECTOR_SET_CLIP_OPACITY, INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD,
     TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_SEEK, TIMELINE_SELECT_CLIP,
     TIMELINE_TRIM_CLIP,
@@ -98,6 +99,9 @@ impl AppState {
             }
             Action::Custom { namespace, name, payload } if namespace == INSPECTOR_NAMESPACE => {
                 self.dispatch_inspector_ui_action(&name, payload)
+            }
+            Action::Custom { namespace, name, payload } if namespace == EFFECTS_NAMESPACE => {
+                self.dispatch_effects_ui_action(&name, payload)
             }
 
             // ── 尚未实现的操作（Stage B-F 逐步添加）─────────────────────
@@ -224,6 +228,34 @@ impl AppState {
                 tracing::debug!(
                     target: "mondrian::action",
                     "Unknown self-hosted inspector action: {name}"
+                );
+                Ok(())
+            }
+        }
+    }
+
+    fn dispatch_effects_ui_action(&mut self, name: &str, payload: serde_json::Value) -> Result<()> {
+        match name {
+            EFFECTS_ADD_TO_CLIP => {
+                let payload = parse_ui_payload::<EffectsAddToClipPayload>(
+                    "effects_ui_action",
+                    name,
+                    payload,
+                )?;
+                self.add_effect_to_clip(
+                    SelectedClipRef {
+                        track_id: payload.clip.track_id,
+                        is_video_track: payload.clip.is_video_track,
+                        clip_id: payload.clip.clip_id,
+                    },
+                    payload.effect_type,
+                )
+                .map(|_| ())
+            }
+            _ => {
+                tracing::debug!(
+                    target: "mondrian::action",
+                    "Unknown self-hosted effects action: {name}"
                 );
                 Ok(())
             }
@@ -430,15 +462,17 @@ fn clip_exists(seq: &mondrian_timeline::sequence::Sequence, clip_id: ClipId) -> 
 mod tests {
     use super::*;
     use crate::app::ui_actions::{
-        inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
-        inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
-        timeline_move_clip_action, timeline_seek_action, timeline_select_clip_action,
-        timeline_trim_clip_action, InspectorClipRefPayload, InspectorClipTransformField,
-        InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
-        InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
+        effects_add_to_clip_action, inspector_set_clip_enabled_action,
+        inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
+        inspector_set_clip_transform_field_action, timeline_move_clip_action, timeline_seek_action,
+        timeline_select_clip_action, timeline_trim_clip_action, EffectsAddToClipPayload,
+        InspectorClipRefPayload, InspectorClipTransformField, InspectorSetClipEnabledPayload,
+        InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+        InspectorSetClipTransformFieldPayload,
     };
     use mondrian_core::types::{AssetId, TimeCode};
     use mondrian_core::Color;
+    use mondrian_effects::EffectType;
     use mondrian_timeline::clip::Clip;
     use mondrian_timeline::sequence::Sequence;
 
@@ -626,6 +660,23 @@ mod tests {
             .and_then(|value| value.as_f32())
             .expect("rotation value");
         assert!((rotation + 12.5).abs() < f32::EPSILON);
+        assert!(state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_effects_ui_adds_effect_to_selected_clip() {
+        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+
+        state
+            .dispatch_action(effects_add_to_clip_action(EffectsAddToClipPayload {
+                clip: inspector_clip_payload(track_id, clip_id),
+                effect_type: EffectType::GaussianBlur,
+            }))
+            .expect("dispatch add effect");
+
+        let clip = &state.sequence.as_ref().expect("sequence").video_tracks[0].clips[0];
+        assert_eq!(clip.effects.len(), 1);
+        assert_eq!(clip.effects[0].effect_type, EffectType::GaussianBlur);
         assert!(state.can_undo_action());
     }
 }

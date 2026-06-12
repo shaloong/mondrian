@@ -3,6 +3,7 @@
 //! Reusable widget crates remain domain-light. UI adapters attach stable app ids
 //! to `Action::Custom` payloads before actions reach the app state layer.
 
+use mondrian_core::effect_data::EffectType;
 use mondrian_core::types::{ClipId, TrackId};
 use mondrian_editor_state::Action;
 use serde::{Deserialize, Serialize};
@@ -30,6 +31,12 @@ pub const INSPECTOR_SET_CLIP_OPACITY: &str = "set_clip_opacity";
 pub const INSPECTOR_SET_CLIP_TINT: &str = "set_clip_tint";
 /// Action name for changing one selected clip transform field.
 pub const INSPECTOR_SET_CLIP_TRANSFORM_FIELD: &str = "set_clip_transform_field";
+
+/// Custom action namespace for effect browser operations.
+pub const EFFECTS_NAMESPACE: &str = "ui.effects";
+
+/// Action name for adding an effect to a selected clip.
+pub const EFFECTS_ADD_TO_CLIP: &str = "add_to_clip";
 
 /// Clip edge being trimmed by a timeline UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,6 +149,15 @@ pub struct InspectorSetClipTransformFieldPayload {
     pub value: f32,
 }
 
+/// Add an effect from the effect browser to a clip.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectsAddToClipPayload {
+    /// Clip targeted by the effect insertion.
+    pub clip: InspectorClipRefPayload,
+    /// Effect type to instantiate with defaults.
+    pub effect_type: EffectType,
+}
+
 /// Build an action that selects a clip in the active timeline.
 pub fn timeline_select_clip_action(payload: TimelineSelectClipPayload) -> Action {
     custom_timeline_action(TIMELINE_SELECT_CLIP, payload)
@@ -184,6 +200,11 @@ pub fn inspector_set_clip_transform_field_action(
     custom_inspector_action(INSPECTOR_SET_CLIP_TRANSFORM_FIELD, payload)
 }
 
+/// Build an action that adds an effect to a selected clip.
+pub fn effects_add_to_clip_action(payload: EffectsAddToClipPayload) -> Action {
+    custom_effects_action(EFFECTS_ADD_TO_CLIP, payload)
+}
+
 fn custom_timeline_action<T: Serialize>(name: &'static str, payload: T) -> Action {
     Action::Custom {
         namespace: TIMELINE_NAMESPACE.into(),
@@ -195,6 +216,14 @@ fn custom_timeline_action<T: Serialize>(name: &'static str, payload: T) -> Actio
 fn custom_inspector_action<T: Serialize>(name: &'static str, payload: T) -> Action {
     Action::Custom {
         namespace: INSPECTOR_NAMESPACE.into(),
+        name: name.into(),
+        payload: serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
+    }
+}
+
+fn custom_effects_action<T: Serialize>(name: &'static str, payload: T) -> Action {
+    Action::Custom {
+        namespace: EFFECTS_NAMESPACE.into(),
         name: name.into(),
         payload: serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
     }

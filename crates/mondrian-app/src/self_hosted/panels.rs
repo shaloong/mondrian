@@ -29,11 +29,12 @@ use mondrian_ui_widgets::{
 };
 
 use crate::app::ui_actions::{
-    inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
-    inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
-    timeline_move_clip_action, timeline_seek_action, timeline_select_clip_action,
-    timeline_trim_clip_action, InspectorClipRefPayload, InspectorClipTransformField,
-    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+    effects_add_to_clip_action, inspector_set_clip_enabled_action,
+    inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
+    inspector_set_clip_transform_field_action, timeline_move_clip_action, timeline_seek_action,
+    timeline_select_clip_action, timeline_trim_clip_action, EffectsAddToClipPayload,
+    InspectorClipRefPayload, InspectorClipTransformField, InspectorSetClipEnabledPayload,
+    InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
     InspectorSetClipTransformFieldPayload, TimelineMoveClipPayload, TimelineSelectClipPayload,
     TimelineTrimClipPayload, TimelineTrimPayloadEdge,
 };
@@ -57,7 +58,9 @@ impl SelfHostedPanelModels {
     pub fn from_app_state(state: &AppState) -> Self {
         Self {
             assets: PanelListModel::from_asset_library(state.asset_library.as_deref()),
-            effects: PanelListModel::from_effect_registry(),
+            effects: PanelListModel::from_effect_registry(
+                state.selection.selected_clips.first().copied(),
+            ),
             console: PanelListModel::from_app_status(state),
             timeline: state
                 .sequence
@@ -76,7 +79,9 @@ impl SelfHostedPanelModels {
     pub fn demo_from_app_state(state: &AppState) -> Self {
         Self {
             assets: demo_asset_model(),
-            effects: demo_effects_model(),
+            effects: PanelListModel::from_effect_registry(
+                state.selection.selected_clips.first().copied(),
+            ),
             console: demo_console_model(),
             timeline: state
                 .sequence
@@ -181,7 +186,8 @@ impl PanelListModel {
     }
 
     /// Build the visible effect browser from the shared effect registry.
-    pub fn from_effect_registry() -> Self {
+    pub fn from_effect_registry(selected_clip: Option<SelectedClipRef>) -> Self {
+        let effect_target = selected_clip.filter(|selection| selection.is_video_track);
         let effects = effect_library_types();
         let items = if effects.is_empty() {
             vec![PanelListItem::new("No effects available")
@@ -193,17 +199,22 @@ impl PanelListModel {
                 .map(|effect_type| {
                     let name = effect_display_name(&effect_type);
                     let category = effect_type.category_path().join(" / ");
-                    PanelListItem::new(name)
+                    let mut item = PanelListItem::new(name)
                         .with_subtitle(category)
                         .with_badge(effect_badge(&effect_type))
                         .with_select_action(panel_action(&format!(
                             "effects.select.{}",
                             effect_type.key()
-                        )))
-                        .with_activate_action(panel_action(&format!(
-                            "effects.apply.{}",
-                            effect_type.key()
-                        )))
+                        )));
+                    if let Some(selection) = effect_target {
+                        item = item.with_activate_action(effects_add_to_clip_action(
+                            EffectsAddToClipPayload {
+                                clip: inspector_clip_payload(selection),
+                                effect_type,
+                            },
+                        ));
+                    }
+                    item
                 })
                 .collect()
         };
@@ -680,32 +691,6 @@ fn demo_asset_model() -> PanelListModel {
     )
     .with_subtitle("Project library")
     .with_activate_prefix("assets.activate")
-}
-
-fn demo_effects_model() -> PanelListModel {
-    PanelListModel::new(
-        "Effects",
-        vec![
-            PanelListItem::new("Color Balance")
-                .with_subtitle("Lift, gamma, gain")
-                .with_badge("GPU")
-                .with_select_action(panel_action("effects.select.color_balance")),
-            PanelListItem::new("Gaussian Blur")
-                .with_subtitle("Radius and edge behavior")
-                .with_badge("GPU")
-                .with_select_action(panel_action("effects.select.blur")),
-            PanelListItem::new("LUT")
-                .with_subtitle("Creative look transform")
-                .with_badge("3D")
-                .with_select_action(panel_action("effects.select.lut")),
-            PanelListItem::new("Optical Flow")
-                .with_subtitle("Coming after render cache integration")
-                .with_badge("Soon")
-                .disabled(true),
-        ],
-    )
-    .with_subtitle("Effect browser")
-    .with_activate_prefix("effects.apply")
 }
 
 fn demo_console_model() -> PanelListModel {
@@ -1309,10 +1294,35 @@ mod tests {
 
     #[test]
     fn effect_panel_model_uses_stable_item_actions_without_dynamic_prefix() {
-        let model = PanelListModel::from_effect_registry();
+        let model = PanelListModel::from_effect_registry(None);
 
         assert!(model.activate_prefix.is_none());
-        assert!(model.items.iter().any(|item| item.activate_action.is_some()));
+        assert!(model.items.iter().any(|item| item.select_action.is_some()));
+        assert!(model.items.iter().all(|item| item.activate_action.is_none()));
+    }
+
+    #[test]
+    fn effect_panel_model_adds_effect_actions_for_selected_video_clip() {
+        let mut sequence = Sequence::new("edit");
+        let tb = sequence.time_base();
+        let clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(30, tb));
+        let clip_id = clip.id;
+        let track_id = sequence.video_tracks[0].id;
+        sequence.video_tracks[0].add_clip(clip).expect("add video clip");
+        let selection = SelectedClipRef { track_id, is_video_track: true, clip_id };
+
+        let model = PanelListModel::from_effect_registry(Some(selection));
+
+        assert!(model.activate_prefix.is_none());
+        let action = model
+            .items
+            .iter()
+            .find_map(|item| item.activate_action.as_ref())
+            .expect("effect activate action");
+        let debug = format!("{action:?}");
+        assert!(debug.contains("ui.effects"));
+        assert!(debug.contains("add_to_clip"));
+        assert!(debug.contains(&clip_id.to_string()));
     }
 
     #[test]

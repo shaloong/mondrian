@@ -84,6 +84,10 @@ enabled, opacity, solid/tint color, and basic transform field actions resolve
 through `AppState` snapshot commands and `mondrian-timeline` property hosts.
 Inspector timing controls reuse timeline trim actions for clip In/Out changes
 instead of introducing a parallel editing path.
+Effects browser activation uses the same protocol family: when a video clip is
+selected, effect rows carry a `ui.effects` add-to-clip payload with the selected
+clip id and serialized `EffectType`, and `AppState` routes it through
+`add_effect_to_clip`.
 This keeps reusable widgets index/value-based and UI-agnostic while avoiding
 string parsing in business logic.
 
@@ -319,9 +323,11 @@ ad-hoc colored placeholders or one-off row painting. `PanelList` owns local
 selection, disabled rows, keyboard navigation, activation, and internal
 positive-delta scrolling, but exposes static and value-aware action adapters so
 Assets, Effects, presets, and similar panels can bind to editor state outside
-the widget crate. The `self_hosted_app` and `ui_demo` Assets/Effects-style
-panels use this shared surface as the tracer bullet for migrating list-heavy
-egui panels.
+the widget crate. The self-hosted Effects panel builds rows from the shared
+effect registry and, when a video clip is selected, activates rows through
+undoable `AppState::add_effect_to_clip` commands. The `self_hosted_app` and
+`ui_demo` Assets/Effects-style panels use this shared surface as the tracer
+bullet for migrating list-heavy egui panels.
 
 Timeline migration starts with the domain-light `TimelineView` surface in
 `mondrian-ui-widgets`. It renders frame-space tracks, clips, ruler ticks,
