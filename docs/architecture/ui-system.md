@@ -173,7 +173,9 @@ overlaps, ripple behavior, linked media, or undo snapshots. Those semantics stay
 in `mondrian-app` / `mondrian-timeline` command handling. Timelines expose
 overlay horizontal and vertical scrollbars when content overflows; scrollbar
 thumb drags and track paging must win hit testing over clip selection and
-seeking.
+seeking. Timeline surfaces are focusable: while focused they may handle
+timeline-local navigation such as playhead nudging, but global editor commands
+remain outside the widget layer.
 
 ## Overlays
 

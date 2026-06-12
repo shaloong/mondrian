@@ -164,6 +164,8 @@ pub struct TimelineView {
     pixels_per_frame: f32,
     scroll_x: f32,
     scroll_y: f32,
+    focused: bool,
+    focus_visible: bool,
     track_height: f32,
     header_width: f32,
     ruler_height: f32,
@@ -216,6 +218,8 @@ impl TimelineView {
             pixels_per_frame: 4.0,
             scroll_x: 0.0,
             scroll_y: 0.0,
+            focused: false,
+            focus_visible: false,
             track_height: 50.0,
             header_width: 96.0,
             ruler_height: 30.0,
@@ -292,6 +296,10 @@ impl TimelineView {
     }
 
     fn content_width(&self) -> f32 {
+        self.max_content_frame() as f32 * self.pixels_per_frame + 160.0
+    }
+
+    fn max_content_frame(&self) -> i64 {
         let max_frame = self
             .tracks
             .iter()
@@ -299,7 +307,7 @@ impl TimelineView {
             .max()
             .unwrap_or(240)
             .max(240);
-        max_frame as f32 * self.pixels_per_frame + 160.0
+        max_frame
     }
 
     fn content_height(&self) -> f32 {
@@ -604,6 +612,24 @@ impl TimelineView {
         }
     }
 
+    fn keyboard_seek(
+        &mut self,
+        key: KeyCode,
+        modifiers: Modifiers,
+        ctx: &mut EventContext,
+    ) -> bool {
+        let step = if modifiers.shift { 10 } else { 1 };
+        let target = match key {
+            KeyCode::Left => self.playhead_frame.saturating_sub(step),
+            KeyCode::Right => self.playhead_frame.saturating_add(step),
+            KeyCode::Home => 0,
+            KeyCode::End => self.max_content_frame(),
+            _ => return false,
+        };
+        self.seek_from_input(target, ctx);
+        true
+    }
+
     fn zoom_at(&mut self, anchor_x: f32, factor: f32) {
         let frame_at_anchor = self.x_to_frame(anchor_x) as f32;
         let old = self.pixels_per_frame;
@@ -900,6 +926,8 @@ impl Widget for TimelineView {
                 if !self.bounds.contains(*position) {
                     return EventResult::Ignored;
                 }
+                self.focused = true;
+                self.focus_visible = false;
                 if let Some(thumb) = self.horizontal_scrollbar_thumb_rect() {
                     if thumb.contains(*position) {
                         self.scrollbar_drag = Some(TimelineScrollbarDrag {
@@ -1030,6 +1058,25 @@ impl Widget for TimelineView {
                 ctx.request_repaint();
                 return EventResult::Handled;
             }
+            UiEvent::FocusGained => {
+                self.focused = true;
+                self.focus_visible = true;
+                return EventResult::Handled;
+            }
+            UiEvent::FocusLost => {
+                self.focused = false;
+                self.focus_visible = false;
+                self.playhead_dragging = false;
+                self.clip_drag = None;
+                self.scrollbar_drag = None;
+                ctx.release_pointer_capture(self.id);
+                return EventResult::Handled;
+            }
+            UiEvent::KeyDown { key, modifiers } if self.focused => {
+                if self.keyboard_seek(*key, *modifiers, ctx) {
+                    return EventResult::Handled;
+                }
+            }
             UiEvent::MouseWheel { delta, position, modifiers } => {
                 if !self.bounds.contains(*position) {
                     return EventResult::Ignored;
@@ -1058,6 +1105,15 @@ impl Widget for TimelineView {
     fn paint(&self, ctx: &mut PaintContext) {
         let colors = &ctx.theme.colors;
         ctx.encoder.draw_rect(self.bounds, colors.background, 0.0);
+        if self.focus_visible {
+            let mut ring = colors.ring;
+            ring.a = 0.38;
+            ctx.encoder.draw_rect(
+                self.bounds.inset(1.0, 1.0),
+                ring,
+                ctx.theme.spacing.radius_sm,
+            );
+        }
         ctx.encoder.draw_rect(
             Rect::new(
                 self.bounds.x,
@@ -1093,6 +1149,10 @@ impl Widget for TimelineView {
 
     fn hit_test(&self, point: Point) -> bool {
         self.bounds.contains(point)
+    }
+
+    fn can_focus(&self) -> bool {
+        true
     }
 }
 
@@ -1818,6 +1878,88 @@ mod tests {
 
         assert!(view.pixels_per_frame() > before);
         assert_eq!(view.x_to_frame(260.0), frame_before);
+    }
+
+    #[test]
+    fn keyboard_seek_ignores_events_without_focus() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut view = timeline().on_seek(|_| Action::Play);
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let result = view.event(
+            &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(view.playhead_frame(), 12);
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn focused_keyboard_seek_moves_playhead_and_dispatches() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut view = timeline().on_seek(|frame| Action::Custom {
+            namespace: "timeline.seek".into(),
+            name: frame.to_string(),
+            payload: Default::default(),
+        });
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        view.event(&UiEvent::FocusGained, &mut ctx);
+        let result = view.event(
+            &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::shift() },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(view.playhead_frame(), 22);
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[Action::Custom {
+                namespace: "timeline.seek".into(),
+                name: "22".into(),
+                payload: Default::default(),
+            }]
+        );
+
+        view.event(
+            &UiEvent::KeyDown { key: KeyCode::Home, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(view.playhead_frame(), 0);
+
+        view.event(
+            &UiEvent::KeyDown { key: KeyCode::End, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(view.playhead_frame(), view.max_content_frame());
     }
 
     #[test]
