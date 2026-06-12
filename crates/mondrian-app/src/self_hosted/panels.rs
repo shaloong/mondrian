@@ -23,9 +23,9 @@ use mondrian_ui_widgets::dock_tab_bar::TabInfo;
 use mondrian_ui_widgets::panel_slot::SlotKind;
 use mondrian_ui_widgets::{
     Button, Checkbox, ColorPickerAreaMode, ColorPickerTrigger, CurveEditor, CurvePoint, DockPanel,
-    PanelList, PanelListItem, PropertyPanel, PropertyRow, PropertySection, ScrollView, Slider,
-    TimelineClip, TimelineClipMove, TimelineClipRef, TimelineClipTrim, TimelineTrack,
-    TimelineTrimEdge, TimelineView,
+    FlexChild, FlexContainer, PanelList, PanelListItem, PropertyPanel, PropertyRow,
+    PropertySection, ScrollView, Slider, TimelineClip, TimelineClipMove, TimelineClipRef,
+    TimelineClipTrim, TimelineTrack, TimelineTrimEdge, TimelineView,
 };
 
 use crate::app::ui_actions::{
@@ -1010,16 +1010,24 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
             section = section.with_row(PropertyRow::new(
                 effect.label.clone(),
                 Box::new(
-                    Checkbox::new("Enabled", effect.enabled).on_change(move |enabled| {
-                        inspector_effect_enabled_action(selected_clip, effect_id, enabled)
-                    }),
-                ),
-            ));
-            section = section.with_row(PropertyRow::new(
-                "",
-                Box::new(
-                    Button::new("Remove")
-                        .on_click(inspector_remove_effect_row_action(selected_clip, effect_id)),
+                    FlexContainer::row(vec![
+                        FlexChild::flex(
+                            Box::new(Checkbox::new("Enabled", effect.enabled).on_change(
+                                move |enabled| {
+                                    inspector_effect_enabled_action(
+                                        selected_clip,
+                                        effect_id,
+                                        enabled,
+                                    )
+                                },
+                            )),
+                            1.0,
+                        ),
+                        FlexChild::fixed(Box::new(Button::new("Remove").on_click(
+                            inspector_remove_effect_row_action(selected_clip, effect_id),
+                        ))),
+                    ])
+                    .with_gap(8.0),
                 ),
             ));
         }
