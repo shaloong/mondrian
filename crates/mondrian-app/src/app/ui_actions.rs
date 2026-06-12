@@ -19,6 +19,16 @@ pub const TIMELINE_TRIM_CLIP: &str = "trim_clip";
 /// Action name for seeking the active timeline.
 pub const TIMELINE_SEEK: &str = "seek";
 
+/// Custom action namespace for inspector UI operations.
+pub const INSPECTOR_NAMESPACE: &str = "ui.inspector";
+
+/// Action name for toggling a selected clip's enabled state.
+pub const INSPECTOR_SET_CLIP_ENABLED: &str = "set_clip_enabled";
+/// Action name for changing a selected clip's opacity percentage.
+pub const INSPECTOR_SET_CLIP_OPACITY: &str = "set_clip_opacity";
+/// Action name for changing a selected clip's solid/tint color.
+pub const INSPECTOR_SET_CLIP_TINT: &str = "set_clip_tint";
+
 /// Clip edge being trimmed by a timeline UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TimelineTrimPayloadEdge {
@@ -68,6 +78,44 @@ pub struct TimelineSeekPayload {
     pub frame: i64,
 }
 
+/// Application-level identity for an inspector-selected clip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InspectorClipRefPayload {
+    /// Track that owned the selected clip when the panel snapshot was built.
+    pub track_id: TrackId,
+    /// Whether `track_id` was a video track rather than an audio track.
+    pub is_video_track: bool,
+    /// Clip targeted by the inspector mutation.
+    pub clip_id: ClipId,
+}
+
+/// Toggle the enabled state for a clip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InspectorSetClipEnabledPayload {
+    /// Clip targeted by the inspector mutation.
+    pub clip: InspectorClipRefPayload,
+    /// `true` when the clip should participate in rendering/playback.
+    pub enabled: bool,
+}
+
+/// Change a clip opacity value in UI percentage units.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct InspectorSetClipOpacityPayload {
+    /// Clip targeted by the inspector mutation.
+    pub clip: InspectorClipRefPayload,
+    /// Opacity in the same `0.0..=100.0` percentage range used by the slider.
+    pub opacity_percent: f32,
+}
+
+/// Change a clip solid/tint color.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct InspectorSetClipTintPayload {
+    /// Clip targeted by the inspector mutation.
+    pub clip: InspectorClipRefPayload,
+    /// New color value.
+    pub color: mondrian_core::Color,
+}
+
 /// Build an action that selects a clip in the active timeline.
 pub fn timeline_select_clip_action(payload: TimelineSelectClipPayload) -> Action {
     custom_timeline_action(TIMELINE_SELECT_CLIP, payload)
@@ -88,9 +136,32 @@ pub fn timeline_seek_action(frame: i64) -> Action {
     custom_timeline_action(TIMELINE_SEEK, TimelineSeekPayload { frame: frame.max(0) })
 }
 
+/// Build an action that toggles a clip enabled state from an inspector panel.
+pub fn inspector_set_clip_enabled_action(payload: InspectorSetClipEnabledPayload) -> Action {
+    custom_inspector_action(INSPECTOR_SET_CLIP_ENABLED, payload)
+}
+
+/// Build an action that changes clip opacity from an inspector panel.
+pub fn inspector_set_clip_opacity_action(payload: InspectorSetClipOpacityPayload) -> Action {
+    custom_inspector_action(INSPECTOR_SET_CLIP_OPACITY, payload)
+}
+
+/// Build an action that changes clip solid/tint color from an inspector panel.
+pub fn inspector_set_clip_tint_action(payload: InspectorSetClipTintPayload) -> Action {
+    custom_inspector_action(INSPECTOR_SET_CLIP_TINT, payload)
+}
+
 fn custom_timeline_action<T: Serialize>(name: &'static str, payload: T) -> Action {
     Action::Custom {
         namespace: TIMELINE_NAMESPACE.into(),
+        name: name.into(),
+        payload: serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
+    }
+}
+
+fn custom_inspector_action<T: Serialize>(name: &'static str, payload: T) -> Action {
+    Action::Custom {
+        namespace: INSPECTOR_NAMESPACE.into(),
         name: name.into(),
         payload: serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
     }

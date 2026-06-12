@@ -76,10 +76,14 @@ state must not depend on widget modules.
 
 UI actions that need stable application ids use `mondrian-app::app::ui_actions`.
 Self-hosted panel adapters translate domain-light widget events, such as
-timeline clip indices, into `Action::Custom` payloads carrying track and clip
-ids. `AppState::dispatch_action` consumes that app-layer protocol and calls the
-existing timeline command methods. This keeps reusable widgets index-based and
-UI-agnostic while avoiding string parsing in business logic.
+timeline clip indices or inspector value changes, into `Action::Custom` payloads
+carrying track and clip ids. `AppState::dispatch_action` consumes that app-layer
+protocol and calls existing undoable command/property-mutation paths. Timeline
+move/trim/seek actions resolve through timeline command methods; Inspector clip
+enabled, opacity, and solid/tint color actions resolve through `AppState`
+snapshot commands and `mondrian-timeline` property hosts. This keeps reusable
+widgets index/value-based and UI-agnostic while avoiding string parsing in
+business logic.
 
 ## Event Requests
 
@@ -296,10 +300,12 @@ forwarding. App entrypoints should call panel adapters in
 `mondrian-app::self_hosted::panels` instead of reimplementing tab/content
 synchronization. The `self_hosted_app` Inspector slot uses this path with real
 self-hosted widgets (checkbox, slider, and color trigger) instead of a colored
-placeholder, so focus routing, overlay popups, repaint requests, and shell
-runtime behavior can be validated in the same dock tree that future panels will
-use. Timeline migration should reuse this path after scrollbars, overlays, and
-property controls are stable.
+placeholder. Its panel snapshot carries the selected clip identity, and user
+edits emit stable inspector actions that mutate the selected clip through
+undoable app state commands. This lets focus routing, overlay popups, repaint
+requests, shell runtime behavior, and editor-state dispatch be validated in the
+same dock tree that future panels will use. Timeline migration should reuse
+this path after scrollbars, overlays, and property controls are stable.
 
 Browser-style panels should use `PanelList` / `PanelListItem` instead of
 ad-hoc colored placeholders or one-off row painting. `PanelList` owns local

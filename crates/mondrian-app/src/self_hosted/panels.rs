@@ -28,9 +28,12 @@ use mondrian_ui_widgets::{
 };
 
 use crate::app::ui_actions::{
-    timeline_move_clip_action, timeline_seek_action, timeline_select_clip_action,
-    timeline_trim_clip_action, TimelineMoveClipPayload, TimelineSelectClipPayload,
-    TimelineTrimClipPayload, TimelineTrimPayloadEdge,
+    inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
+    inspector_set_clip_tint_action, timeline_move_clip_action, timeline_seek_action,
+    timeline_select_clip_action, timeline_trim_clip_action, InspectorClipRefPayload,
+    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+    TimelineMoveClipPayload, TimelineSelectClipPayload, TimelineTrimClipPayload,
+    TimelineTrimPayloadEdge,
 };
 use crate::app::{AppState, SelectedClipRef};
 
@@ -344,6 +347,8 @@ impl TimelinePanelModel {
 /// Inspector fixture data independent from a concrete property widget tree.
 #[derive(Debug, Clone)]
 pub struct InspectorPanelModel {
+    /// Selected clip targeted by value edits, if the model is backed by app state.
+    pub selected_clip: Option<SelectedClipRef>,
     pub enabled: bool,
     pub opacity: f32,
     pub tint: Color,
@@ -366,6 +371,7 @@ impl InspectorPanelModel {
         let time = state.current_time_code().unwrap_or(sequence.playhead);
         let opacity = (clip.transform.evaluate_opacity(time) * 100.0).clamp(0.0, 100.0);
         Self {
+            selected_clip: Some(*selection),
             enabled: !clip.is_disabled,
             opacity,
             tint: clip
@@ -379,6 +385,7 @@ impl InspectorPanelModel {
 
     pub fn demo() -> Self {
         Self {
+            selected_clip: None,
             enabled: true,
             opacity: 72.0,
             tint: Color::from_rgba8(132, 180, 255, 220),
@@ -845,6 +852,7 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
     tint.picker_mut().set_area_mode(model.tint_area_mode);
     let curve =
         CurveEditor::with_points(model.curve_points.clone()).on_change(inspector_curve_action);
+    let selected_clip = model.selected_clip;
     PropertyPanel::new("Inspector")
         .with_subtitle("Selected clip")
         .with_section(
@@ -852,19 +860,23 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                 .with_row(PropertyRow::new(
                     "Enabled",
                     Box::new(
-                        Checkbox::new("启用效果", model.enabled).on_change(inspector_bool_action),
+                        Checkbox::new("启用效果", model.enabled)
+                            .on_change(move |value| inspector_bool_action(selected_clip, value)),
                     ),
                 ))
                 .with_row(PropertyRow::new(
                     "Opacity",
                     Box::new(
-                        Slider::new(model.opacity, 0.0, 100.0)
-                            .on_change(|value| inspector_value_action("opacity", value)),
+                        Slider::new(model.opacity, 0.0, 100.0).on_change(move |value| {
+                            inspector_value_action(selected_clip, "opacity", value)
+                        }),
                     ),
                 ))
                 .with_row(PropertyRow::new(
                     "Tint",
-                    Box::new(tint.on_change(inspector_color_action)),
+                    Box::new(
+                        tint.on_change(move |color| inspector_color_action(selected_clip, color)),
+                    ),
                 )),
         )
         .with_section(
@@ -873,29 +885,41 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
         )
 }
 
-fn inspector_value_action(name: &'static str, value: f32) -> Action {
-    Action::Custom {
-        namespace: "ui.inspector".into(),
-        name: format!("{name}:{value:.3}"),
-        payload: serde_json::Value::Null,
+fn inspector_value_action(
+    selection: Option<SelectedClipRef>,
+    name: &'static str,
+    value: f32,
+) -> Action {
+    if name == "opacity" {
+        if let Some(selection) = selection {
+            return inspector_set_clip_opacity_action(InspectorSetClipOpacityPayload {
+                clip: inspector_clip_payload(selection),
+                opacity_percent: value,
+            });
+        }
     }
+    legacy_inspector_action(format!("{name}:{value:.3}"))
 }
 
-fn inspector_bool_action(value: bool) -> Action {
-    Action::Custom {
-        namespace: "ui.inspector".into(),
-        name: format!("enabled:{value}"),
-        payload: serde_json::Value::Null,
+fn inspector_bool_action(selection: Option<SelectedClipRef>, value: bool) -> Action {
+    if let Some(selection) = selection {
+        return inspector_set_clip_enabled_action(InspectorSetClipEnabledPayload {
+            clip: inspector_clip_payload(selection),
+            enabled: value,
+        });
     }
+    legacy_inspector_action(format!("enabled:{value}"))
 }
 
-fn inspector_color_action(color: Color) -> Action {
+fn inspector_color_action(selection: Option<SelectedClipRef>, color: Color) -> Action {
+    if let Some(selection) = selection {
+        return inspector_set_clip_tint_action(InspectorSetClipTintPayload {
+            clip: inspector_clip_payload(selection),
+            color,
+        });
+    }
     let [r, g, b, a] = color.to_rgba8();
-    Action::Custom {
-        namespace: "ui.inspector".into(),
-        name: format!("tint:{r},{g},{b},{a}"),
-        payload: serde_json::Value::Null,
-    }
+    legacy_inspector_action(format!("tint:{r},{g},{b},{a}"))
 }
 
 fn inspector_curve_action(points: &[CurvePoint]) -> Action {
@@ -903,6 +927,22 @@ fn inspector_curve_action(points: &[CurvePoint]) -> Action {
     for point in points {
         name.push_str(&format!(":{:.3},{:.3}", point.x, point.y));
     }
+    Action::Custom {
+        namespace: "ui.inspector".into(),
+        name,
+        payload: serde_json::Value::Null,
+    }
+}
+
+fn inspector_clip_payload(selection: SelectedClipRef) -> InspectorClipRefPayload {
+    InspectorClipRefPayload {
+        track_id: selection.track_id,
+        is_video_track: selection.is_video_track,
+        clip_id: selection.clip_id,
+    }
+}
+
+fn legacy_inspector_action(name: String) -> Action {
     Action::Custom {
         namespace: "ui.inspector".into(),
         name,

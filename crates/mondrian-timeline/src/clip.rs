@@ -548,6 +548,19 @@ impl PropertyHost for Clip {
         let mut blend_mode_property = AnimatedProperty::from_descriptor(blend_mode_descriptor);
         blend_mode_property.set_static_value(PropertyValue::Text(blend_mode_text));
         properties.upsert(blend_mode_property);
+        if self.is_solid_color() || self.solid_color.is_some() {
+            let solid_color = self.solid_color.unwrap_or_else(|| Color::from_hex(0x000000));
+            let mut solid_color_descriptor = PropertyDescriptor::new(
+                Self::SOLID_COLOR_PATH,
+                "纯色",
+                PropertyValue::Color(solid_color),
+            );
+            solid_color_descriptor.is_animatable = false;
+            let mut solid_color_property =
+                AnimatedProperty::from_descriptor(solid_color_descriptor);
+            solid_color_property.set_static_value(PropertyValue::Color(solid_color));
+            properties.upsert(solid_color_property);
+        }
         if !self.is_adjustment_layer() && !self.is_nested_sequence() {
             properties.upsert(self.speed.property().clone());
         }
@@ -585,6 +598,28 @@ impl PropertyHost for Clip {
                 });
             };
             self.blend_mode = blend_mode_from_text(value)?;
+            Ok(())
+        } else if path == Self::SOLID_COLOR_PATH {
+            if matches!(mutation, PropertyMutation::RemoveProperty { .. }) {
+                return Err(MondrianError::WorkflowStepFailed {
+                    step_id: "clip_apply_property_mutation".to_string(),
+                    reason: "内建 clip.solid_color 属性不可移除".to_string(),
+                });
+            }
+
+            let PropertyMutation::SetStaticValue { value, .. } = mutation else {
+                return Err(MondrianError::WorkflowStepFailed {
+                    step_id: "clip_apply_property_mutation".to_string(),
+                    reason: "clip.solid_color 只支持静态颜色值".to_string(),
+                });
+            };
+            let PropertyValue::Color(color) = value else {
+                return Err(MondrianError::WorkflowStepFailed {
+                    step_id: "clip_apply_property_mutation".to_string(),
+                    reason: "clip.solid_color 需要 color 值".to_string(),
+                });
+            };
+            self.solid_color = Some(color);
             Ok(())
         } else if !self.is_adjustment_layer()
             && !self.is_nested_sequence()
@@ -759,6 +794,37 @@ mod tests {
         .expect("set blend mode");
 
         assert_eq!(clip.blend_mode, Some(BlendMode::Multiply));
+    }
+
+    #[test]
+    fn clip_property_bag_exposes_solid_color_as_static_property() {
+        let color = Color::from_rgba8(12, 34, 56, 200);
+        let clip = Clip::new_solid_color(AssetId::new(), color, tc(0), tc(40));
+
+        let bag = clip.property_bag().expect("property bag should build");
+        let property =
+            bag.property(Clip::SOLID_COLOR_PATH).expect("solid color property should exist");
+
+        assert!(!property.descriptor.is_animatable);
+        assert_eq!(
+            property.evaluate(timecode_to_ticks(tc(0))),
+            PropertyValue::Color(color)
+        );
+    }
+
+    #[test]
+    fn clip_property_mutation_updates_solid_color_without_keyframes() {
+        let mut clip =
+            Clip::new_solid_color(AssetId::new(), Color::from_hex(0x112233), tc(0), tc(40));
+        let color = Color::from_rgba8(200, 120, 40, 180);
+
+        clip.apply_property_mutation(PropertyMutation::SetStaticValue {
+            path: Clip::SOLID_COLOR_PATH.to_string(),
+            value: PropertyValue::Color(color),
+        })
+        .expect("set solid color");
+
+        assert_eq!(clip.solid_color, Some(color));
     }
 
     #[test]
