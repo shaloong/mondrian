@@ -6,35 +6,39 @@
 //! 包含的 Widget 类型：
 //!   Core: ColoredBox
 //!   Interactive: Button, Checkbox, TextInput, Slider, List, Dropdown, ContextMenu
-//!   Layout: DockSplitter, DockTabBar, PanelSlot, ScrollView
+//!   Layout: DockSplitter, DockPanel, DockTabBar, PanelSlot, ScrollView
 
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::sync::Arc;
 
+use mondrian_app::ui_runtime::WinitUiRuntime;
 use mondrian_core::Color;
 use mondrian_editor_state::Action;
 use mondrian_ui_core::tooltip::TooltipState;
-use mondrian_ui_core::tree::WidgetTreeView;
 use mondrian_ui_core::types::{self as ui_types, *};
-use mondrian_ui_core::widget::{EventContext, ImeRequest, PaintContext};
+use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::widgets::ColoredBox;
 use mondrian_ui_core::{EventResult, TreeWalker, Widget};
 use mondrian_ui_events::EventRouter;
 use mondrian_ui_renderer::command::DrawEncoder;
 use mondrian_ui_renderer::UiRenderer;
 use mondrian_ui_text::{resolve_text_commands, TextRenderer};
+use mondrian_ui_tooltip::TooltipManagerImpl;
 use mondrian_ui_tooltip::TooltipWidget;
 use mondrian_ui_widgets::button::Button;
 use mondrian_ui_widgets::checkbox::Checkbox;
 use mondrian_ui_widgets::color_picker::{ColorPicker, ColorPickerAreaMode, ColorPickerTrigger};
 use mondrian_ui_widgets::context_menu::ContextMenu;
 use mondrian_ui_widgets::curve_editor::{CurveEditor, CurvePoint};
+use mondrian_ui_widgets::dock_panel::DockPanel;
 use mondrian_ui_widgets::dock_splitter::DockSplitter;
-use mondrian_ui_widgets::dock_tab_bar::{DockTabBar, TabInfo};
+use mondrian_ui_widgets::dock_tab_bar::TabInfo;
 use mondrian_ui_widgets::list::{List, ListItem};
 use mondrian_ui_widgets::menu::{Dropdown, MenuItem};
-use mondrian_ui_widgets::panel_slot::{PanelSlot, SlotKind};
+use mondrian_ui_widgets::panel_list::{PanelList, PanelListItem};
+use mondrian_ui_widgets::panel_slot::SlotKind;
+use mondrian_ui_widgets::property_panel::{PropertyPanel, PropertyRow, PropertySection};
 use mondrian_ui_widgets::scroll::ScrollView;
 use mondrian_ui_widgets::slider::Slider;
 use mondrian_ui_widgets::text_input::TextInput;
@@ -644,106 +648,11 @@ impl Widget for ViewerWidget {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// VerticalTabbedSlot
+// Tab and panel content factories
 // ═══════════════════════════════════════════════════════════════════════════
 
-struct VerticalTabbedSlot {
-    id: WidgetId,
-    tab_bar: DockTabBar,
-    kind: SlotKind,
-    content: Box<dyn Widget>,
-    bounds: Rect,
-    last_active: usize,
-}
-
-impl VerticalTabbedSlot {
-    fn new(kind: SlotKind) -> Self {
-        let tabs = tab_infos(kind);
-        let active = tabs.iter().position(|t| t.active).unwrap_or(0);
-        let tab_bar = DockTabBar::new(tabs);
-        let content = PanelSlot::new(kind, slot_content_for_tab(kind, active));
-        Self {
-            id: WidgetId::new(),
-            tab_bar,
-            kind,
-            content: Box::new(content),
-            bounds: Rect::ZERO,
-            last_active: active,
-        }
-    }
-
-    fn sync_active_tab(&mut self) {
-        let now_active = self.tab_bar.active_index();
-        if now_active != self.last_active {
-            self.last_active = now_active;
-            self.content = Box::new(PanelSlot::new(
-                self.kind,
-                slot_content_for_tab(self.kind, now_active),
-            ));
-            let bounds = self.bounds;
-            self.layout(bounds);
-        }
-    }
-}
-
-impl Widget for VerticalTabbedSlot {
-    fn id(&self) -> WidgetId {
-        self.id
-    }
-    fn measure(&self, c: LayoutConstraint) -> Size {
-        c.constrain(Size::new(100.0, 100.0))
-    }
-    fn layout(&mut self, bounds: Rect) {
-        self.bounds = bounds;
-        let tab_h = 26.0;
-        self.tab_bar.layout(Rect::new(bounds.x, bounds.y, bounds.width, tab_h));
-        self.content.layout(Rect::new(
-            bounds.x,
-            bounds.y + tab_h,
-            bounds.width,
-            (bounds.height - tab_h).max(0.0),
-        ));
-    }
-    fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
-        let result = self.tab_bar.event(event, ctx);
-        self.sync_active_tab();
-        if result == EventResult::Handled {
-            return EventResult::Handled;
-        }
-        self.content.event(event, ctx)
-    }
-
-    fn after_child_event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
-        self.sync_active_tab();
-        EventResult::Ignored
-    }
-    fn paint(&self, ctx: &mut PaintContext) {
-        self.tab_bar.paint(ctx);
-        self.content.paint(ctx);
-    }
-    fn hit_test(&self, p: Point) -> bool {
-        self.bounds.contains(p)
-    }
-
-    fn child_count(&self) -> usize {
-        2
-    }
-
-    fn child(&self, index: usize) -> Option<&dyn Widget> {
-        match index {
-            0 => Some(&self.tab_bar),
-            1 => Some(self.content.as_ref()),
-            _ => None,
-        }
-    }
-
-    fn child_mut(&mut self, index: usize) -> Option<&mut dyn Widget> {
-        match index {
-            0 => Some(&mut self.tab_bar),
-            1 => Some(self.content.as_mut()),
-            _ => None,
-        }
-    }
+fn dock_panel(kind: SlotKind) -> Box<dyn Widget> {
+    Box::new(DockPanel::new(kind, tab_infos(kind), slot_content_for_tab))
 }
 
 fn tab_infos(kind: SlotKind) -> Vec<TabInfo> {
@@ -780,33 +689,263 @@ fn slot_content_for_tab(kind: SlotKind, tab_index: usize) -> Box<dyn Widget> {
             _ => Box::new(ShapePanelWidget::new()),
         },
         SlotKind::Assets => match tab_index {
-            0 => Box::new(
-                ColoredBox::new(Color::from_hex(0xCC2222), 1.0, 1.0).with_label("资源面板"),
-            ),
-            _ => {
-                Box::new(ColoredBox::new(Color::from_hex(0x22CC22), 1.0, 1.0).with_label("素材库"))
-            }
+            0 => Box::new(demo_asset_panel()),
+            _ => Box::new(demo_library_panel()),
         },
         SlotKind::Inspector => match tab_index {
-            0 => {
-                Box::new(ColoredBox::new(Color::from_hex(0x1E2A3A), 1.0, 1.0).with_label("检查器"))
-            }
-            _ => Box::new(
-                ColoredBox::new(Color::from_hex(0x2A1E3A), 1.0, 1.0).with_label("属性面板"),
-            ),
+            0 => inspector_demo_panel(),
+            _ => Box::new(demo_property_browser_panel()),
         },
         SlotKind::Timeline => match tab_index {
             0 => {
                 Box::new(ColoredBox::new(Color::from_hex(0x16213E), 1.0, 1.0).with_label("时间线"))
             }
-            1 => Box::new(
-                ColoredBox::new(Color::from_hex(0x1E3A16), 1.0, 1.0).with_label("音频轨道"),
-            ),
-            _ => Box::new(
-                ColoredBox::new(Color::from_hex(0x3A1621), 1.0, 1.0).with_label("效果面板"),
-            ),
+            1 => Box::new(demo_audio_panel()),
+            _ => Box::new(demo_effect_panel()),
         },
         _ => Box::new(ColoredBox::new(Color::from_hex(0x1A1A1A), 1.0, 1.0)),
+    }
+}
+
+fn demo_asset_panel() -> PanelList {
+    PanelList::new(
+        "Assets",
+        vec![
+            PanelListItem::new("A001_Camera_Main.mov")
+                .with_subtitle("00:01:24:12 - Rec.709 - 4K")
+                .with_badge("Video")
+                .with_select_action(demo_action("assets.select.video")),
+            PanelListItem::new("VO_Take_03.wav")
+                .with_subtitle("48 kHz stereo - normalized")
+                .with_badge("Audio")
+                .with_select_action(demo_action("assets.select.audio")),
+            PanelListItem::new("Brand_Pack")
+                .with_subtitle("Logos, colors, and lower thirds")
+                .with_badge("Folder")
+                .with_select_action(demo_action("assets.select.folder")),
+            PanelListItem::new("Missing_Reference.psd")
+                .with_subtitle("Offline media placeholder")
+                .with_badge("Offline")
+                .disabled(true),
+        ],
+    )
+    .with_subtitle("Project media")
+    .on_activate(|index, item| demo_action(&format!("assets.activate.{index}.{}", item.title)))
+}
+
+fn demo_library_panel() -> PanelList {
+    PanelList::new(
+        "Library",
+        vec![
+            PanelListItem::new("Stock transitions")
+                .with_subtitle("Cross dissolve, dip to color, push")
+                .with_badge("12")
+                .with_select_action(demo_action("library.select.transitions")),
+            PanelListItem::new("Motion presets")
+                .with_subtitle("Position and scale keyframe templates")
+                .with_badge("9")
+                .with_select_action(demo_action("library.select.motion")),
+            PanelListItem::new("Team shared bins")
+                .with_subtitle("Network-backed media collection")
+                .with_badge("Beta")
+                .disabled(true),
+        ],
+    )
+    .with_subtitle("Reusable resources")
+}
+
+fn demo_audio_panel() -> PanelList {
+    PanelList::new(
+        "Audio",
+        vec![
+            PanelListItem::new("Dialogue")
+                .with_subtitle("Voice cleanup, EQ, dynamics")
+                .with_badge("A1")
+                .with_select_action(demo_action("audio.select.dialogue")),
+            PanelListItem::new("Music")
+                .with_subtitle("Ducking and stem balance")
+                .with_badge("A2")
+                .with_select_action(demo_action("audio.select.music")),
+            PanelListItem::new("Ambience")
+                .with_subtitle("Room tone and location beds")
+                .with_badge("A3")
+                .with_select_action(demo_action("audio.select.ambience")),
+        ],
+    )
+    .with_subtitle("Track lanes")
+}
+
+fn demo_effect_panel() -> PanelList {
+    PanelList::new(
+        "Effects",
+        vec![
+            PanelListItem::new("Color Balance")
+                .with_subtitle("Lift, gamma, gain")
+                .with_badge("GPU")
+                .with_select_action(demo_action("effects.select.color_balance")),
+            PanelListItem::new("Gaussian Blur")
+                .with_subtitle("Separable blur preview")
+                .with_badge("GPU")
+                .with_select_action(demo_action("effects.select.blur")),
+            PanelListItem::new("Transform")
+                .with_subtitle("Position, scale, rotation")
+                .with_badge("Core")
+                .with_select_action(demo_action("effects.select.transform")),
+            PanelListItem::new("Optical Flow")
+                .with_subtitle("Disabled row smoke test")
+                .with_badge("Soon")
+                .disabled(true),
+        ],
+    )
+    .with_subtitle("Apply to selected clip")
+    .on_activate(|index, item| demo_action(&format!("effects.apply.{index}.{}", item.title)))
+}
+
+fn demo_property_browser_panel() -> PanelList {
+    PanelList::new(
+        "Properties",
+        vec![
+            PanelListItem::new("Clip metadata")
+                .with_subtitle("Name, labels, source path")
+                .with_select_action(demo_action("properties.select.metadata")),
+            PanelListItem::new("Playback")
+                .with_subtitle("Speed, reverse, frame sampling")
+                .with_select_action(demo_action("properties.select.playback")),
+            PanelListItem::new("Render cache")
+                .with_subtitle("Cache policy and invalidation")
+                .with_select_action(demo_action("properties.select.cache")),
+        ],
+    )
+    .with_subtitle("Inspector categories")
+}
+
+fn inspector_demo_panel() -> Box<dyn Widget> {
+    let mut tint = ColorPickerTrigger::new(Color::from_rgba8(190, 156, 255, 220));
+    tint.picker_mut().set_area_mode(ColorPickerAreaMode::Wheel);
+
+    let panel = PropertyPanel::new("Inspector")
+        .with_subtitle("Selected clip")
+        .with_section(
+            PropertySection::new("Clip")
+                .with_row(PropertyRow::new(
+                    "Enabled",
+                    Box::new(Checkbox::new("启用效果", true).on_change(inspector_bool_action)),
+                ))
+                .with_row(PropertyRow::new(
+                    "Opacity",
+                    Box::new(
+                        Slider::new(72.0, 0.0, 100.0)
+                            .on_change(|value| inspector_value_action("opacity", value)),
+                    ),
+                ))
+                .with_row(PropertyRow::new(
+                    "Tint",
+                    Box::new(tint.on_change(inspector_color_action)),
+                )),
+        )
+        .with_section(
+            PropertySection::new("Transform")
+                .with_row(PropertyRow::new(
+                    "Position X",
+                    Box::new(
+                        Slider::new(12.0, -100.0, 100.0)
+                            .on_change(|value| inspector_value_action("position_x", value)),
+                    ),
+                ))
+                .with_row(PropertyRow::new(
+                    "Position Y",
+                    Box::new(
+                        Slider::new(-8.0, -100.0, 100.0)
+                            .on_change(|value| inspector_value_action("position_y", value)),
+                    ),
+                ))
+                .with_row(PropertyRow::new(
+                    "Scale",
+                    Box::new(
+                        Slider::new(100.0, 25.0, 400.0)
+                            .on_change(|value| inspector_value_action("scale", value)),
+                    ),
+                ))
+                .with_row(PropertyRow::new(
+                    "Rotation",
+                    Box::new(
+                        Slider::new(0.0, -180.0, 180.0)
+                            .on_change(|value| inspector_value_action("rotation", value)),
+                    ),
+                )),
+        )
+        .with_section(
+            PropertySection::new("Timing")
+                .with_row(PropertyRow::new(
+                    "In",
+                    Box::new(
+                        Slider::new(0.0, 0.0, 240.0)
+                            .on_change(|value| inspector_value_action("in", value)),
+                    ),
+                ))
+                .with_row(PropertyRow::new(
+                    "Out",
+                    Box::new(
+                        Slider::new(96.0, 0.0, 240.0)
+                            .on_change(|value| inspector_value_action("out", value)),
+                    ),
+                )),
+        )
+        .with_section(
+            PropertySection::new("Animation").with_row(
+                PropertyRow::new(
+                    "Curve",
+                    Box::new(
+                        CurveEditor::with_points(vec![
+                            CurvePoint::new(0.0, 0.0),
+                            CurvePoint::new(0.35, 0.68),
+                            CurvePoint::new(0.72, 0.42),
+                            CurvePoint::new(1.0, 1.0),
+                        ])
+                        .on_change(inspector_curve_action),
+                    ),
+                )
+                .with_height(118.0),
+            ),
+        );
+
+    Box::new(ScrollView::new(Some(Box::new(panel))))
+}
+
+fn inspector_value_action(name: &'static str, value: f32) -> Action {
+    Action::Custom {
+        namespace: "demo.inspector".into(),
+        name: format!("{name}:{value:.3}"),
+        payload: serde_json::Value::Null,
+    }
+}
+
+fn inspector_bool_action(value: bool) -> Action {
+    Action::Custom {
+        namespace: "demo.inspector".into(),
+        name: format!("enabled:{value}"),
+        payload: serde_json::Value::Null,
+    }
+}
+
+fn inspector_color_action(color: Color) -> Action {
+    let [r, g, b, a] = color.to_rgba8();
+    Action::Custom {
+        namespace: "demo.inspector".into(),
+        name: format!("tint:{r},{g},{b},{a}"),
+        payload: serde_json::Value::Null,
+    }
+}
+
+fn inspector_curve_action(points: &[CurvePoint]) -> Action {
+    let mut name = String::from("curve");
+    for point in points {
+        name.push_str(&format!(":{:.3},{:.3}", point.x, point.y));
+    }
+    Action::Custom {
+        namespace: "demo.inspector".into(),
+        name,
+        payload: serde_json::Value::Null,
     }
 }
 
@@ -819,21 +958,21 @@ fn build_dock_tree() -> DockSplitter {
     let left = DockSplitter::new(
         SplitDirection::Vertical,
         0.35,
-        Box::new(VerticalTabbedSlot::new(SlotKind::Assets)),
-        Box::new(VerticalTabbedSlot::new(SlotKind::Console)),
+        dock_panel(SlotKind::Assets),
+        dock_panel(SlotKind::Console),
     );
 
     let right_bottom = DockSplitter::new(
         SplitDirection::Horizontal,
         0.65,
-        Box::new(VerticalTabbedSlot::new(SlotKind::Timeline)),
-        Box::new(VerticalTabbedSlot::new(SlotKind::Inspector)),
+        dock_panel(SlotKind::Timeline),
+        dock_panel(SlotKind::Inspector),
     );
 
     let right = DockSplitter::new(
         SplitDirection::Vertical,
         0.5,
-        Box::new(VerticalTabbedSlot::new(SlotKind::Viewer)),
+        dock_panel(SlotKind::Viewer),
         Box::new(right_bottom),
     );
 
@@ -919,41 +1058,14 @@ fn winit_key_to_keycode(key: &winit::keyboard::Key) -> Option<KeyCode> {
     }
 }
 
-fn route_demo_event(
-    router: &mut EventRouter,
-    root: &mut dyn Widget,
-    event: UiEvent,
-) -> EventResult {
-    let mut tree = WidgetTreeView::new(root);
-    router.route(event, &mut tree, &record_demo_action)
-}
-
 fn route_demo_window_event(
     window: &winit::window::Window,
     router: &mut EventRouter,
     root: &mut dyn Widget,
     event: UiEvent,
+    runtime: &mut WinitUiRuntime,
 ) -> EventResult {
-    let result = route_demo_event(router, root, event);
-    if let Some(request) = router.take_ime_request() {
-        apply_ime_request(window, request);
-    }
-    result
-}
-
-fn apply_ime_request(window: &winit::window::Window, request: ImeRequest) {
-    window.set_ime_allowed(request.enabled);
-    if request.enabled {
-        if let Some(area) = request.cursor_area {
-            window.set_ime_cursor_area(
-                winit::dpi::PhysicalPosition::new(area.x as f64, area.y as f64),
-                winit::dpi::PhysicalSize::new(
-                    area.width.max(1.0) as u32,
-                    area.height.max(1.0) as u32,
-                ),
-            );
-        }
-    }
+    runtime.route_window_event(window, router, root, event, &record_demo_action)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -998,14 +1110,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut root = build_dock_tree();
     let bounds = Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
     TreeWalker::layout(&mut root, bounds);
-    let mut router = EventRouter::with_platform(
+    let mut router = EventRouter::with_platform_and_tooltip(
         root.id(),
         Box::new(mondrian_platform::SystemPlatformService),
+        Box::new(TooltipManagerImpl::new(450)),
     );
 
     let mut last_cursor = Point::new(0.0, 0.0);
     let current_bounds = std::cell::Cell::new(bounds);
     let mut modifiers_state = Modifiers::none();
+    let mut ui_runtime = WinitUiRuntime::new();
+    window.request_redraw();
 
     event_loop.run(move |event, elwt| {
         use winit::event::ElementState;
@@ -1036,6 +1151,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &mut router,
                     &mut root,
                     UiEvent::KeyDown { key: KeyCode::Escape, modifiers: modifiers_state },
+                    &mut ui_runtime,
                 );
                 if result == EventResult::Ignored {
                     elwt.exit();
@@ -1074,6 +1190,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &mut router,
                             &mut root,
                             UiEvent::KeyDown { key: kc, modifiers: modifiers_state },
+                            &mut ui_runtime,
                         );
                     } else {
                         let _ = route_demo_window_event(
@@ -1081,6 +1198,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &mut router,
                             &mut root,
                             UiEvent::KeyUp { key: kc, modifiers: modifiers_state },
+                            &mut ui_runtime,
                         );
                     }
                 }
@@ -1094,6 +1212,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     &mut router,
                                     &mut root,
                                     UiEvent::TextInput(txt.to_string()),
+                                    &mut ui_runtime,
                                 );
                             }
                         }
@@ -1112,6 +1231,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &mut router,
                     &mut root,
                     UiEvent::ImeCommit(text),
+                    &mut ui_runtime,
                 );
                 window.request_redraw();
             }
@@ -1124,6 +1244,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &mut router,
                     &mut root,
                     UiEvent::ImePreedit(text),
+                    &mut ui_runtime,
                 );
                 window.request_redraw();
             }
@@ -1143,6 +1264,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &mut router,
                     &mut root,
                     UiEvent::ImePreedit(String::new()),
+                    &mut ui_runtime,
                 );
                 window.request_redraw();
             }
@@ -1153,6 +1275,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let b = current_bounds.get();
                 encoder.draw_rect(b, theme.colors.background, 0.0);
                 TreeWalker::paint(&root, &mut encoder, &theme);
+
+                ui_runtime.paint_shell_overlays(&mut encoder, &theme, b, last_cursor, &router);
+
                 let commands = resolve_text_commands(encoder.finish(), &mut text_renderer);
                 let pending: Vec<mondrian_ui_renderer::GlyphUpload> = text_renderer
                     .take_pending_uploads()
@@ -1204,6 +1329,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 event: WindowEvent::CursorMoved { position, .. }, ..
             } => {
                 last_cursor = Point::new(position.x as f32, position.y as f32);
+
+                ui_runtime.update_eyedropper_preview_at_window_point(&window, last_cursor);
+
                 let _ = route_demo_window_event(
                     &window,
                     &mut router,
@@ -1212,25 +1340,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         position: last_cursor,
                         modifiers: Modifiers::none(),
                     },
+                    &mut ui_runtime,
                 );
                 let grab_zones = root.collect_grab_zones();
                 let direction =
                     grab_zones.iter().find(|(z, _)| z.contains(last_cursor)).map(|(_, d)| *d);
-                match direction {
-                    Some(SplitDirection::Horizontal) => {
-                        window.set_cursor_icon(winit::window::CursorIcon::ColResize);
-                    }
-                    Some(SplitDirection::Vertical) => {
-                        window.set_cursor_icon(winit::window::CursorIcon::RowResize);
-                    }
-                    None => {
-                        let is_text = TEXT_INPUT_BOUNDS
-                            .with(|b| b.get().is_some_and(|r| r.contains(last_cursor)))
-                            && TEXT_INPUT_ID.with(|id| id.get()) == router.focused();
-                        if is_text {
-                            window.set_cursor_icon(winit::window::CursorIcon::Text);
-                        } else {
-                            window.set_cursor_icon(winit::window::CursorIcon::Default);
+                if ui_runtime.is_eyedropper_active() {
+                    window.set_cursor_icon(winit::window::CursorIcon::Crosshair);
+                } else {
+                    match direction {
+                        Some(SplitDirection::Horizontal) => {
+                            window.set_cursor_icon(winit::window::CursorIcon::ColResize);
+                        }
+                        Some(SplitDirection::Vertical) => {
+                            window.set_cursor_icon(winit::window::CursorIcon::RowResize);
+                        }
+                        None => {
+                            let is_text = TEXT_INPUT_BOUNDS
+                                .with(|b| b.get().is_some_and(|r| r.contains(last_cursor)))
+                                && TEXT_INPUT_ID.with(|id| id.get()) == router.focused();
+                            if is_text {
+                                window.set_cursor_icon(winit::window::CursorIcon::Text);
+                            } else {
+                                window.set_cursor_icon(winit::window::CursorIcon::Default);
+                            }
                         }
                     }
                 }
@@ -1253,7 +1386,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         modifiers: Modifiers::none(),
                     },
                 };
-                let _ = route_demo_window_event(&window, &mut router, &mut root, event);
+                let is_press =
+                    matches!(event, UiEvent::MouseDown { button: MouseButton::Left, .. });
+
+                if is_press && ui_runtime.is_eyedropper_active() {
+                    ui_runtime.finish_eyedropper_at_window_point(
+                        &window,
+                        &mut router,
+                        &mut root,
+                        last_cursor,
+                        &record_demo_action,
+                    );
+                } else {
+                    let _ = route_demo_window_event(
+                        &window,
+                        &mut router,
+                        &mut root,
+                        event,
+                        &mut ui_runtime,
+                    );
+                }
                 window.request_redraw();
             }
 
@@ -1271,12 +1423,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         position: last_cursor,
                         modifiers: Modifiers::none(),
                     },
+                    &mut ui_runtime,
                 );
                 window.request_redraw();
             }
 
             Event::AboutToWait => {
-                window.request_redraw();
+                ui_runtime.drive_timers(&window, &mut router, elwt);
+                if ui_runtime.is_eyedropper_active() {
+                    ui_runtime.poll_eyedropper(
+                        &window,
+                        &mut router,
+                        &mut root,
+                        &mut last_cursor,
+                        &record_demo_action,
+                    );
+                    window.request_redraw();
+                    elwt.set_control_flow(ControlFlow::Poll);
+                }
             }
             _ => {}
         }

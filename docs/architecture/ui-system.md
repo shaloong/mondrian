@@ -24,8 +24,11 @@ router or app shell applies those requests.
 `mondrian-platform` owns OS integration. Text widgets use `PlatformService`
 for clipboard operations instead of calling platform APIs directly.
 `SystemPlatformService` currently provides desktop clipboard copy/paste through
-`arboard`; other platform hooks remain policy no-ops until their app-shell
-behavior is specified.
+`arboard`. `DesktopEyedropper` owns desktop-coordinate screen sampling and
+best-effort global pointer polling for color picking. `mondrian-app` centralizes
+the winit adapter in `ui_runtime`: it drains router side-effect requests,
+translates between window-local and desktop coordinates, paints the shell-owned
+eyedropper overlay, and feeds sampled colors back into the widget tree.
 
 ## Event Requests
 
@@ -35,8 +38,21 @@ Widgets can request side effects while handling an event:
   drags or text selection.
 - IME state: enable or disable text input composition for the focused text
   widget.
+- cursor state: request shell-owned cursor changes, such as crosshair during
+  eyedropper mode.
+- eyedropper state: enter or leave platform color sampling. The router records
+  the request and the app shell delegates desktop sampling to
+  `mondrian-platform`.
+- tooltip state: widgets call the injected `TooltipManager` through
+  `EventContext`; winit shells inject the real manager and `ui_runtime` paints
+  the resulting tooltip in the top overlay pass.
 - repaint: request another frame for composition previews, cursor blink, or
-  delayed UI.
+  delayed UI. The app shell consumes this through `EventRouter` and schedules a
+  native window redraw.
+- timer wakeups: delayed UI state, such as tooltip reveal timing, reports its
+  next required update through the manager layer. `ui_runtime` advances timers
+  in `AboutToWait` and uses native `WaitUntil` scheduling instead of idle
+  repaint loops.
 
 This keeps widgets testable and avoids leaking winit types into reusable UI
 crates.
@@ -175,17 +191,67 @@ before painting its background. The text layer uses cosmic-text wrapping with
 word breaks and glyph fallback for overlong tokens, so tooltip widgets do not
 own line-breaking logic.
 
+## Overlay Contract
+
+Dropdowns, popovers, context menus, tooltips, and shell affordances paint in
+the overlay pass after normal widget content. A widget with an open top-layer
+popup that needs outside-click dismissal must make `hit_test()` catch the
+window while open, then decide in `event()` whether the pointer is inside the
+trigger, inside the popup, or outside. Dragging popup internals should use
+pointer capture so move/up events remain routed to the owning widget.
+
 ## Scroll Views
 
 Scroll containers translate pointer events from screen coordinates into child
 content coordinates using `screen - viewport_origin + scroll_offset`, matching
 the inverse of their paint transform. Wheel events are handled only inside the
-viewport and offsets are clamped after wheel input and layout.
+viewport and offsets are clamped after wheel input and layout. Offset-changing
+wheel, track, thumb drag, and scrollbar hover transitions request repaint
+through `EventRequests`.
 
 `ScrollView` exposes a draggable vertical scrollbar thumb when content
-overflows. Thumb drags request pointer capture, map thumb-track movement back
-to content scroll offset, and release capture on mouse up. Clicking the
+overflows. The scrollbar is an overlay affordance and does not reserve child
+layout width. Thumb drags request pointer capture, map thumb-track movement
+back to content scroll offset, and release capture on mouse up. Clicking the
 scrollbar track outside the thumb pages the viewport by one visible span.
+
+## Panel Migration
+
+Panel migration should start with low-risk inspector/property surfaces before
+Timeline. Inspector-style controls should be assembled with the reusable
+`PropertyPanel` / `PropertySection` / `PropertyRow` container in
+`mondrian-ui-widgets`, then bound to editor state and undoable commands at the
+panel/app layer. Docked panel chrome belongs to `DockPanel`, which owns the
+`DockTabBar`, active-tab content rebuilding, `PanelSlot`, and overlay
+forwarding. App entry points should provide tab metadata and content factories
+instead of reimplementing tab/content synchronization. The custom `ui_app`
+Inspector slot uses this path with real self-hosted widgets (checkbox, slider,
+and color trigger) instead of a colored placeholder, so focus routing, overlay
+popups, repaint requests, and shell runtime behavior can be validated in the
+same dock tree that future panels will use. Timeline migration should reuse this
+path after scrollbars, overlays, and property controls are stable.
+
+Browser-style panels should use `PanelList` / `PanelListItem` instead of
+ad-hoc colored placeholders or one-off row painting. `PanelList` owns local
+selection, disabled rows, keyboard navigation, activation, and internal
+positive-delta scrolling, but exposes static and value-aware action adapters so
+Assets, Effects, presets, and similar panels can bind to editor state outside
+the widget crate. The `ui_app` and `ui_demo` Assets/Effects-style panels use
+this shared surface as the tracer bullet for migrating list-heavy egui panels.
+
+Value widgets stay editor-state agnostic. `Slider`, `Checkbox`, `ColorPicker`,
+`ColorPickerTrigger`, and `CurveEditor` expose value-aware action adapters such
+as `on_change(...)`, but they do not know about clips, effects, keyframes, or
+undo history. Real panels map widget values to semantic `Action`s or command
+objects at the panel/app layer. Programmatic state synchronization uses setters
+such as `set_color()` / `set_points()` and must not emit actions; only user
+input paths dispatch changes and request repaint.
+
+General panel composition should use `FlexContainer` rather than ad-hoc
+coordinate code. `FlexContainer` is only a widget adapter over the pure
+`mondrian-ui-layout::FlexLayout` algorithm, so layout math remains testable in
+the layout crate while panels get normal widget-tree behavior: event routing,
+overlay forwarding, hit testing, and child traversal.
 
 ## Color Input
 
@@ -213,8 +279,13 @@ swatch to avoid duplicated color chips, while embedded inspector pickers can
 still use `ColorPicker` directly. Color model fields use mode-specific compact
 columns: HEX gets one full-width field, RGB/HSL/HSV fit four channels on one
 row, and CMYKA fits five compact numeric fields on one row. The picker exposes
-a visible geometric eyedropper button that enters sampling mode; platform or
-viewer integrations complete the operation by calling `apply_sampled_color()`.
+a visible geometric eyedropper button that enters sampling mode. The widget
+stays platform-neutral: it emits `EventRequests::eyedropper`, handles
+`UiEvent::EyedropperSample` / `UiEvent::EyedropperCancel`, and never calls
+screen-capture or OS pointer APIs directly. Winit shells complete sampling via
+`mondrian_app::ui_runtime::WinitUiRuntime`, which delegates platform work to
+`mondrian-platform::DesktopEyedropper` and routes the sampled color back as
+`UiEvent::EyedropperSample`.
 The mode selector shares the generic dropdown's token vocabulary and overlay
 behavior, but it remains an internal selector because changing color models is
 local widget state rather than an editor `Action`.

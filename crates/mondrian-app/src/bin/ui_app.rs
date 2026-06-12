@@ -6,25 +6,29 @@
 
 use std::sync::Arc;
 
+use mondrian_app::ui_runtime::WinitUiRuntime;
 use mondrian_core::Color;
 use mondrian_editor_state::state::PanelKind;
 use mondrian_editor_state::Action;
 use mondrian_panel_console::tracing_layer::ConsoleLogLayer;
 use mondrian_platform::SystemPlatformService;
-use mondrian_ui_core::focus::FocusManager;
-use mondrian_ui_core::shortcut::{ShortcutBinding, ShortcutManager, ShortcutScope};
-use mondrian_ui_core::tooltip::{TooltipManager, TooltipState};
 use mondrian_ui_core::types::*;
-use mondrian_ui_core::widget::{EventContext, EventRequests, PaintContext};
+use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::widgets::ColoredBox;
 use mondrian_ui_core::{EventResult, TreeWalker, Widget};
+use mondrian_ui_events::EventRouter;
 use mondrian_ui_renderer::command::DrawEncoder;
 use mondrian_ui_renderer::UiRenderer;
 use mondrian_ui_text::{resolve_text_commands, TextRenderer};
+use mondrian_ui_tooltip::TooltipManagerImpl;
 use mondrian_ui_widgets::dock_splitter::DockSplitter;
-use mondrian_ui_widgets::dock_tab_bar::{DockTabBar, TabInfo};
+use mondrian_ui_widgets::dock_tab_bar::TabInfo;
 use mondrian_ui_widgets::menu::{Dropdown, MenuItem};
-use mondrian_ui_widgets::panel_slot::{PanelSlot, SlotKind};
+use mondrian_ui_widgets::panel_slot::SlotKind;
+use mondrian_ui_widgets::{
+    Checkbox, ColorPickerAreaMode, ColorPickerTrigger, CurveEditor, CurvePoint, DockPanel,
+    PanelList, PanelListItem, PropertyPanel, PropertyRow, PropertySection, ScrollView, Slider,
+};
 use tracing_subscriber::prelude::*;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -255,93 +259,178 @@ fn build_dock_tree() -> DockSplitter {
 }
 
 fn slot(kind: SlotKind) -> Box<dyn Widget> {
-    let color = match kind {
-        SlotKind::Viewer => Color::from_hex(0x1A1A2E),
-        SlotKind::Timeline => Color::from_hex(0x16213E),
-        SlotKind::Assets => Color::from_hex(0x0F3460),
-        SlotKind::Inspector => Color::from_hex(0x1E2A3A),
-        SlotKind::Effects => Color::from_hex(0x2A1A3E),
-        SlotKind::Project => Color::from_hex(0x1E3A2A),
-        SlotKind::Console => Color::from_hex(0x0D1117),
-        _ => Color::from_hex(0x1A1A1A),
-    };
-    let tab_bar = DockTabBar::new(vec![TabInfo {
+    if kind == SlotKind::Inspector {
+        return Box::new(DockPanel::new(kind, single_tab(kind), |_kind, _active| {
+            Box::new(ScrollView::new(Some(Box::new(inspector_panel()))))
+        }));
+    }
+
+    Box::new(DockPanel::new(kind, single_tab(kind), |kind, _active| {
+        panel_content_for_slot(kind)
+    }))
+}
+
+fn single_tab(kind: SlotKind) -> Vec<TabInfo> {
+    vec![TabInfo {
         label: kind.display_name().to_string(),
         active: true,
-    }]);
-    let content = PanelSlot::new(kind, Box::new(ColoredBox::new(color, 1.0, 1.0)));
-    Box::new(VerticalTabbedSlot::new(tab_bar, content))
+    }]
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Helpers
-// ═══════════════════════════════════════════════════════════════════════════
-
-struct VerticalTabbedSlot {
-    id: WidgetId,
-    tab_bar: DockTabBar,
-    content: Box<dyn Widget>,
-    bounds: Rect,
-}
-impl VerticalTabbedSlot {
-    fn new(tab_bar: DockTabBar, content: PanelSlot) -> Self {
-        Self {
-            id: WidgetId::new(),
-            tab_bar,
-            content: Box::new(content),
-            bounds: Rect::ZERO,
-        }
+fn panel_content_for_slot(kind: SlotKind) -> Box<dyn Widget> {
+    match kind {
+        SlotKind::Assets => Box::new(asset_panel()),
+        SlotKind::Effects => Box::new(effects_panel()),
+        SlotKind::Console => Box::new(console_panel()),
+        SlotKind::Viewer => Box::new(ColoredBox::new(Color::from_hex(0x1A1A2E), 1.0, 1.0)),
+        SlotKind::Timeline => Box::new(ColoredBox::new(Color::from_hex(0x16213E), 1.0, 1.0)),
+        SlotKind::Project => Box::new(ColoredBox::new(Color::from_hex(0x1E3A2A), 1.0, 1.0)),
+        _ => Box::new(ColoredBox::new(Color::from_hex(0x1A1A1A), 1.0, 1.0)),
     }
 }
-impl Widget for VerticalTabbedSlot {
-    fn id(&self) -> WidgetId {
-        self.id
-    }
-    fn measure(&self, c: LayoutConstraint) -> Size {
-        c.constrain(Size::new(100.0, 100.0))
-    }
-    fn layout(&mut self, bounds: Rect) {
-        self.bounds = bounds;
-        self.tab_bar.layout(Rect::new(bounds.x, bounds.y, bounds.width, 26.0));
-        self.content.layout(Rect::new(
-            bounds.x,
-            bounds.y + 26.0,
-            bounds.width,
-            (bounds.height - 26.0).max(0.0),
-        ));
-    }
-    fn event(&mut self, e: &UiEvent, ctx: &mut EventContext) -> EventResult {
-        if self.tab_bar.event(e, ctx) == EventResult::Handled {
-            return EventResult::Handled;
-        }
-        self.content.event(e, ctx)
-    }
-    fn paint(&self, ctx: &mut PaintContext) {
-        self.tab_bar.paint(ctx);
-        self.content.paint(ctx);
-    }
-    fn hit_test(&self, p: Point) -> bool {
-        self.bounds.contains(p)
-    }
 
-    fn child_count(&self) -> usize {
-        2
-    }
+fn asset_panel() -> PanelList {
+    PanelList::new(
+        "Assets",
+        vec![
+            PanelListItem::new("Footage")
+                .with_subtitle("Imported camera clips")
+                .with_badge("12")
+                .with_select_action(panel_action("assets.select.footage")),
+            PanelListItem::new("Audio")
+                .with_subtitle("Music, voiceover, and ambience")
+                .with_badge("5")
+                .with_select_action(panel_action("assets.select.audio")),
+            PanelListItem::new("Images")
+                .with_subtitle("Still frames and references")
+                .with_badge("8")
+                .with_select_action(panel_action("assets.select.images")),
+            PanelListItem::new("Sequences")
+                .with_subtitle("Nested edits and reusable timelines")
+                .with_badge("2")
+                .with_select_action(panel_action("assets.select.sequences")),
+        ],
+    )
+    .with_subtitle("Project library")
+    .on_activate(|index, item| panel_action(&format!("assets.activate.{index}.{}", item.title)))
+}
 
-    fn child(&self, index: usize) -> Option<&dyn Widget> {
-        match index {
-            0 => Some(&self.tab_bar),
-            1 => Some(self.content.as_ref()),
-            _ => None,
-        }
-    }
+fn effects_panel() -> PanelList {
+    PanelList::new(
+        "Effects",
+        vec![
+            PanelListItem::new("Color Balance")
+                .with_subtitle("Lift, gamma, gain")
+                .with_badge("GPU")
+                .with_select_action(panel_action("effects.select.color_balance")),
+            PanelListItem::new("Gaussian Blur")
+                .with_subtitle("Radius and edge behavior")
+                .with_badge("GPU")
+                .with_select_action(panel_action("effects.select.blur")),
+            PanelListItem::new("LUT")
+                .with_subtitle("Creative look transform")
+                .with_badge("3D")
+                .with_select_action(panel_action("effects.select.lut")),
+            PanelListItem::new("Optical Flow")
+                .with_subtitle("Coming after render cache integration")
+                .with_badge("Soon")
+                .disabled(true),
+        ],
+    )
+    .with_subtitle("Effect browser")
+    .on_activate(|index, item| panel_action(&format!("effects.apply.{index}.{}", item.title)))
+}
 
-    fn child_mut(&mut self, index: usize) -> Option<&mut dyn Widget> {
-        match index {
-            0 => Some(&mut self.tab_bar),
-            1 => Some(self.content.as_mut()),
-            _ => None,
-        }
+fn console_panel() -> PanelList {
+    PanelList::new(
+        "Console",
+        vec![
+            PanelListItem::new("UI runtime ready").with_subtitle("Event router attached"),
+            PanelListItem::new("Renderer warm").with_subtitle("wgpu command encoder active"),
+            PanelListItem::new("Text atlas").with_subtitle("cosmic-text layout path"),
+        ],
+    )
+    .with_subtitle("Runtime messages")
+}
+
+fn panel_action(name: &str) -> Action {
+    Action::Custom {
+        namespace: "ui.panel".into(),
+        name: name.into(),
+        payload: serde_json::Value::Null,
+    }
+}
+
+fn inspector_panel() -> PropertyPanel {
+    let mut tint = ColorPickerTrigger::new(Color::from_rgba8(132, 180, 255, 220));
+    tint.picker_mut().set_area_mode(ColorPickerAreaMode::Wheel);
+    let curve = CurveEditor::with_points(vec![
+        CurvePoint::new(0.0, 0.0),
+        CurvePoint::new(0.35, 0.68),
+        CurvePoint::new(0.72, 0.42),
+        CurvePoint::new(1.0, 1.0),
+    ])
+    .on_change(inspector_curve_action);
+    PropertyPanel::new("Inspector")
+        .with_subtitle("Selected clip")
+        .with_section(
+            PropertySection::new("Clip Style")
+                .with_row(PropertyRow::new(
+                    "Enabled",
+                    Box::new(Checkbox::new("启用效果", true).on_change(inspector_bool_action)),
+                ))
+                .with_row(PropertyRow::new(
+                    "Opacity",
+                    Box::new(
+                        Slider::new(72.0, 0.0, 100.0)
+                            .on_change(|value| inspector_value_action("opacity", value)),
+                    ),
+                ))
+                .with_row(PropertyRow::new(
+                    "Tint",
+                    Box::new(tint.on_change(inspector_color_action)),
+                )),
+        )
+        .with_section(
+            PropertySection::new("Animation")
+                .with_row(PropertyRow::new("Curve", Box::new(curve)).with_height(118.0)),
+        )
+}
+
+fn inspector_value_action(name: &'static str, value: f32) -> Action {
+    Action::Custom {
+        namespace: "ui.inspector".into(),
+        name: format!("{name}:{value:.3}"),
+        payload: serde_json::Value::Null,
+    }
+}
+
+fn inspector_bool_action(value: bool) -> Action {
+    Action::Custom {
+        namespace: "ui.inspector".into(),
+        name: format!("enabled:{value}"),
+        payload: serde_json::Value::Null,
+    }
+}
+
+fn inspector_color_action(color: Color) -> Action {
+    let [r, g, b, a] = color.to_rgba8();
+    Action::Custom {
+        namespace: "ui.inspector".into(),
+        name: format!("tint:{r},{g},{b},{a}"),
+        payload: serde_json::Value::Null,
+    }
+}
+
+fn inspector_curve_action(points: &[CurvePoint]) -> Action {
+    let mut name = String::from("curve");
+    for point in points {
+        name.push_str(&format!(":{:.3},{:.3}", point.x, point.y));
+    }
+    Action::Custom {
+        namespace: "ui.inspector".into(),
+        name,
+        payload: serde_json::Value::Null,
     }
 }
 
@@ -354,56 +443,8 @@ fn mouse_button(b: winit::event::MouseButton) -> MouseButton {
     }
 }
 
-fn dummy_event_ctx() -> EventContext<'static> {
-    static mut F: DummyFocus = DummyFocus;
-    static mut S: DummyShortcut = DummyShortcut;
-    static mut T: DummyTooltip = DummyTooltip;
-    static mut R: EventRequests =
-        EventRequests { pointer_capture: None, ime: None, repaint: false };
-    unsafe {
-        EventContext {
-            focus: &mut *std::ptr::addr_of_mut!(F),
-            shortcut: &mut *std::ptr::addr_of_mut!(S),
-            tooltip: &mut *std::ptr::addr_of_mut!(T),
-            dispatch: &|_| {},
-            platform: &SystemPlatformService,
-            requests: &mut *std::ptr::addr_of_mut!(R),
-        }
-    }
-}
-
-struct DummyFocus;
-impl FocusManager for DummyFocus {
-    fn focused_widget(&self) -> Option<WidgetId> {
-        None
-    }
-    fn focused_panel(&self) -> Option<PanelKind> {
-        None
-    }
-    fn request_focus(&mut self, _: WidgetId, _: PanelKind) {}
-    fn release_focus(&mut self, _: WidgetId) {}
-    fn focus_next(&mut self) {}
-    fn focus_prev(&mut self) {}
-    fn clear_focus(&mut self) {}
-}
-struct DummyShortcut;
-impl ShortcutManager for DummyShortcut {
-    fn register(&mut self, _: ShortcutScope, _: ShortcutBinding, _: Action) {}
-    fn unregister(&mut self, _: ShortcutScope, _: &ShortcutBinding) {}
-    fn resolve(&self, _: KeyCode, _: Modifiers) -> Option<Action> {
-        None
-    }
-    fn clear_scope(&mut self, _: ShortcutScope) {}
-    fn clear_all(&mut self) {}
-}
-struct DummyTooltip;
-impl TooltipManager for DummyTooltip {
-    fn show(&mut self, _: String, _: Point) {}
-    fn hide(&mut self) {}
-    fn current(&self) -> Option<&TooltipState> {
-        None
-    }
-    fn update(&mut self, _: u64) {}
+fn record_app_action(action: Action) {
+    tracing::debug!(?action, "custom UI action");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -454,11 +495,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut root = AppRoot::new(menu_bar, dock);
     let bounds = Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
     TreeWalker::layout(&mut root, bounds);
+    let mut router = EventRouter::with_platform_and_tooltip(
+        root.id(),
+        Box::new(SystemPlatformService),
+        Box::new(TooltipManagerImpl::new(450)),
+    );
+    let mut ui_runtime = WinitUiRuntime::new();
 
     let mut last_cursor = Point::new(0.0, 0.0);
     let current_bounds = std::cell::Cell::new(bounds);
 
     tracing::info!("UI initialized — {}x{}", size.width, size.height);
+    window.request_redraw();
 
     event_loop.run(move |event, elwt| {
         use winit::event::ElementState;
@@ -489,6 +537,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let b = current_bounds.get();
                 encoder.draw_rect(b, theme.colors.background, 0.0);
                 TreeWalker::paint(&root, &mut encoder, &theme);
+                ui_runtime.paint_shell_overlays(&mut encoder, &theme, b, last_cursor, &router);
                 let commands = resolve_text_commands(encoder.finish(), &mut text_renderer);
                 // Upload any newly rasterized glyphs to GPU atlas
                 let pending: Vec<mondrian_ui_renderer::GlyphUpload> = text_renderer
@@ -540,20 +589,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 event: WindowEvent::CursorMoved { position, .. }, ..
             } => {
                 last_cursor = Point::new(position.x as f32, position.y as f32);
-                let _ = root.event(
-                    &UiEvent::MouseMove {
+                ui_runtime.update_eyedropper_preview_at_window_point(&window, last_cursor);
+                let _ = ui_runtime.route_window_event(
+                    &window,
+                    &mut router,
+                    &mut root,
+                    UiEvent::MouseMove {
                         position: last_cursor,
                         modifiers: Modifiers::none(),
                     },
-                    &mut dummy_event_ctx(),
+                    &record_app_action,
                 );
                 let zones = root.dock().collect_grab_zones();
                 let dir = zones.iter().find(|(z, _)| z.contains(last_cursor)).map(|(_, d)| *d);
-                window.set_cursor_icon(match dir {
-                    Some(SplitDirection::Horizontal) => winit::window::CursorIcon::ColResize,
-                    Some(SplitDirection::Vertical) => winit::window::CursorIcon::RowResize,
-                    None => winit::window::CursorIcon::Default,
-                });
+                if ui_runtime.is_eyedropper_active() {
+                    window.set_cursor_icon(winit::window::CursorIcon::Crosshair);
+                } else {
+                    window.set_cursor_icon(match dir {
+                        Some(SplitDirection::Horizontal) => winit::window::CursorIcon::ColResize,
+                        Some(SplitDirection::Vertical) => winit::window::CursorIcon::RowResize,
+                        None => winit::window::CursorIcon::Default,
+                    });
+                }
                 window.request_redraw();
             }
 
@@ -573,7 +630,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         modifiers: Modifiers::none(),
                     },
                 };
-                let _ = root.event(&evt, &mut dummy_event_ctx());
+                let is_press = matches!(evt, UiEvent::MouseDown { button: MouseButton::Left, .. });
+                if is_press && ui_runtime.is_eyedropper_active() {
+                    ui_runtime.finish_eyedropper_at_window_point(
+                        &window,
+                        &mut router,
+                        &mut root,
+                        last_cursor,
+                        &record_app_action,
+                    );
+                } else {
+                    let _ = ui_runtime.route_window_event(
+                        &window,
+                        &mut router,
+                        &mut root,
+                        evt,
+                        &record_app_action,
+                    );
+                }
                 window.request_redraw();
             }
 
@@ -582,19 +656,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     winit::event::MouseScrollDelta::LineDelta(_, y) => -y * 20.0,
                     winit::event::MouseScrollDelta::PixelDelta(pos) => -(pos.y as f32),
                 };
-                let _ = root.event(
-                    &UiEvent::MouseWheel {
+                let _ = ui_runtime.route_window_event(
+                    &window,
+                    &mut router,
+                    &mut root,
+                    UiEvent::MouseWheel {
                         delta: dy,
                         position: last_cursor,
                         modifiers: Modifiers::none(),
                     },
-                    &mut dummy_event_ctx(),
+                    &record_app_action,
                 );
                 window.request_redraw();
             }
 
             Event::AboutToWait => {
-                window.request_redraw();
+                ui_runtime.drive_timers(&window, &mut router, elwt);
+                if ui_runtime.is_eyedropper_active() {
+                    ui_runtime.poll_eyedropper(
+                        &window,
+                        &mut router,
+                        &mut root,
+                        &mut last_cursor,
+                        &record_app_action,
+                    );
+                    window.request_redraw();
+                    elwt.set_control_flow(ControlFlow::Poll);
+                }
             }
             _ => {}
         }
