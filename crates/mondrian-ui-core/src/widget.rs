@@ -37,6 +37,21 @@ pub struct ImeRequest {
     pub cursor_area: Option<Rect>,
 }
 
+/// Cursor icon requested by a widget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorRequest {
+    Crosshair,
+    Default,
+}
+
+/// Eyedropper mode requested by a widget (for screen color sampling).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EyedropperRequest {
+    pub active: bool,
+    /// Position of the eyedropper button or magnifier hotspot in widget-local coords.
+    pub hotspot: Option<Point>,
+}
+
 /// Side-effect requests emitted by widgets while handling an input event.
 ///
 /// Widgets stay platform independent: they record intent here, and the app or
@@ -45,6 +60,8 @@ pub struct ImeRequest {
 pub struct EventRequests {
     pub pointer_capture: Option<PointerCaptureRequest>,
     pub ime: Option<ImeRequest>,
+    pub cursor: Option<CursorRequest>,
+    pub eyedropper: Option<EyedropperRequest>,
     pub repaint: bool,
 }
 
@@ -63,6 +80,14 @@ impl EventRequests {
 
     pub fn set_ime_enabled(&mut self, enabled: bool, cursor_area: Option<Rect>) {
         self.ime = Some(ImeRequest { enabled, cursor_area });
+    }
+
+    pub fn set_cursor(&mut self, cursor: CursorRequest) {
+        self.cursor = Some(cursor);
+    }
+
+    pub fn set_eyedropper(&mut self, active: bool, hotspot: Option<Point>) {
+        self.eyedropper = Some(EyedropperRequest { active, hotspot });
     }
 
     pub fn request_repaint(&mut self) {
@@ -101,6 +126,14 @@ impl EventContext<'_> {
 
     pub fn set_ime_enabled(&mut self, enabled: bool, cursor_area: Option<Rect>) {
         self.requests.set_ime_enabled(enabled, cursor_area);
+    }
+
+    pub fn set_cursor(&mut self, cursor: CursorRequest) {
+        self.requests.set_cursor(cursor);
+    }
+
+    pub fn set_eyedropper(&mut self, active: bool, hotspot: Option<Point>) {
+        self.requests.set_eyedropper(active, hotspot);
     }
 
     pub fn request_repaint(&mut self) {
@@ -225,7 +258,9 @@ pub trait Widget {
     /// 发出顶层覆盖物绘制命令。默认递归绘制子树 overlay。
     ///
     /// Popover、dropdown、context menu、tooltip 等不应被后绘制的普通
-    /// 内容压住的 UI chrome 应在这里绘制。
+    /// 内容压住的 UI chrome 应在这里绘制。需要外部点击关闭的顶层弹层
+    /// 在打开时应让 `hit_test()` 覆盖整个窗口，再在 `event()` 内区分
+    /// 内部/外部命中并关闭或处理事件。
     fn paint_overlay(&self, ctx: &mut PaintContext) {
         for index in 0..self.child_count() {
             if let Some(child) = self.child(index) {
@@ -276,6 +311,15 @@ pub trait Widget {
     /// 向下转型支持。默认返回 None。具体 Widget 可重写以支持类型检测。
     fn as_any(&self) -> Option<&dyn std::any::Any> {
         None
+    }
+
+    /// Whether this widget can receive keyboard focus (Tab/Shift+Tab traversal).
+    ///
+    /// Defaults to `false`. Interactive widgets (Button, Checkbox, Slider,
+    /// TextInput, ColorPicker, Dropdown, CurveEditor, List) override to return
+    /// `true`.
+    fn can_focus(&self) -> bool {
+        false
     }
 }
 

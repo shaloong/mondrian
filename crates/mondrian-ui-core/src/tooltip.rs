@@ -36,4 +36,11 @@ pub trait TooltipManager {
 
     /// 每帧更新（处理延迟显示计时器）
     fn update(&mut self, delta_ms: u64);
+
+    /// Milliseconds until the manager needs another timer update.
+    ///
+    /// Returns `None` when no delayed tooltip or timed transition is pending.
+    fn next_update_in_ms(&self) -> Option<u64> {
+        None
+    }
 }

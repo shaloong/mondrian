@@ -17,6 +17,13 @@ impl FocusManagerImpl {
     pub fn new() -> Self {
         Self { widget: None, panel: None }
     }
+
+    /// Set the focused widget directly (used by EventRouter during Tab traversal
+    /// and click-to-focus orchestration).
+    pub fn set_focused_widget(&mut self, widget: Option<WidgetId>, panel: Option<PanelKind>) {
+        self.widget = widget;
+        self.panel = panel;
+    }
 }
 
 impl FocusManager for FocusManagerImpl {

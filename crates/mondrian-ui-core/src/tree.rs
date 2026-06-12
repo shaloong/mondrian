@@ -127,6 +127,24 @@ fn find_parent_id(
     None
 }
 
+fn collect_focusable(tree: &dyn WidgetTree) -> Vec<WidgetId> {
+    let mut order = Vec::new();
+    let root = tree.root_id();
+    collect_focusable_recursive(tree, root, &mut order);
+    order
+}
+
+fn collect_focusable_recursive(tree: &dyn WidgetTree, node: WidgetId, order: &mut Vec<WidgetId>) {
+    if let Some(w) = tree.get(node) {
+        if w.can_focus() {
+            order.push(node);
+        }
+    }
+    for child_id in tree.children_ids(node) {
+        collect_focusable_recursive(tree, child_id, order);
+    }
+}
+
 /// Widget 树遍历工具
 pub struct TreeWalker;
 
@@ -153,13 +171,30 @@ impl TreeWalker {
     }
 
     /// 在 Widget 树中查找下一个可聚焦的 Widget（Tab 顺序）
-    pub fn focus_next(_tree: &mut dyn WidgetTree, _from: WidgetId) -> Option<WidgetId> {
-        None
+    pub fn focus_next(tree: &dyn WidgetTree, from: WidgetId) -> Option<WidgetId> {
+        let order = collect_focusable(tree);
+        if order.is_empty() {
+            return None;
+        }
+        let pos = order.iter().position(|id| *id == from);
+        match pos {
+            Some(i) => Some(order[(i + 1) % order.len()]),
+            None => Some(order[0]),
+        }
     }
 
     /// 在 Widget 树中查找上一个可聚焦的 Widget（Shift+Tab 顺序）
-    pub fn focus_prev(_tree: &mut dyn WidgetTree, _from: WidgetId) -> Option<WidgetId> {
-        None
+    pub fn focus_prev(tree: &dyn WidgetTree, from: WidgetId) -> Option<WidgetId> {
+        let order = collect_focusable(tree);
+        if order.is_empty() {
+            return None;
+        }
+        let pos = order.iter().position(|id| *id == from);
+        let next = match pos {
+            Some(0) | None => order.len() - 1,
+            Some(i) => i - 1,
+        };
+        Some(order[next])
     }
 }
 
@@ -460,21 +495,101 @@ mod tests {
     }
 
     #[test]
-    fn tree_walker_focus_next_returns_none() {
+    fn tree_walker_focus_next_returns_none_for_empty_tree() {
         let root_id = WidgetId::new();
         let mut nodes = HashMap::new();
         nodes.insert(root_id, Box::new(LeafWidget::new()) as Box<dyn Widget>);
 
-        let mut tree = TestTree {
+        let tree = TestTree {
             nodes,
             parents: HashMap::new(),
             children: HashMap::new(),
             root: root_id,
         };
 
-        // Stage B placeholder — returns None
-        assert_eq!(TreeWalker::focus_next(&mut tree, root_id), None);
-        assert_eq!(TreeWalker::focus_prev(&mut tree, root_id), None);
+        // LeafWidget doesn't override can_focus (defaults to false), so focus_next returns None
+        assert_eq!(TreeWalker::focus_next(&tree, root_id), None);
+        assert_eq!(TreeWalker::focus_prev(&tree, root_id), None);
+    }
+
+    struct FocusableWidget {
+        id: WidgetId,
+    }
+
+    impl FocusableWidget {
+        fn new(id: WidgetId) -> Self {
+            Self { id }
+        }
+    }
+
+    impl Widget for FocusableWidget {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+
+        fn measure(&self, _constraint: LayoutConstraint) -> Size {
+            Size::new(100.0, 100.0)
+        }
+
+        fn layout(&mut self, _bounds: Rect) {}
+
+        fn event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+            EventResult::Ignored
+        }
+
+        fn paint(&self, _ctx: &mut PaintContext) {}
+
+        fn can_focus(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn tree_walker_focus_next_cycles_through_focusable() {
+        let a = WidgetId::new();
+        let b = WidgetId::new();
+        let c = WidgetId::new();
+        let mut nodes: HashMap<WidgetId, Box<dyn Widget>> = HashMap::new();
+        nodes.insert(a, Box::new(FocusableWidget::new(a)));
+        nodes.insert(b, Box::new(FocusableWidget::new(b)));
+        nodes.insert(c, Box::new(FocusableWidget::new(c)));
+
+        let mut children = HashMap::new();
+        children.insert(a, vec![b]);
+        children.insert(b, vec![c]);
+        children.insert(c, vec![]);
+
+        let mut parents = HashMap::new();
+        parents.insert(b, a);
+        parents.insert(c, b);
+
+        let tree = TestTree { nodes, parents, children, root: a };
+
+        // Forward cycle: a -> b -> c -> a
+        assert_eq!(TreeWalker::focus_next(&tree, a), Some(b));
+        assert_eq!(TreeWalker::focus_next(&tree, b), Some(c));
+        assert_eq!(TreeWalker::focus_next(&tree, c), Some(a));
+
+        // Backward cycle: a -> c -> b -> a
+        assert_eq!(TreeWalker::focus_prev(&tree, a), Some(c));
+        assert_eq!(TreeWalker::focus_prev(&tree, c), Some(b));
+        assert_eq!(TreeWalker::focus_prev(&tree, b), Some(a));
+    }
+
+    #[test]
+    fn tree_walker_focus_next_unknown_id_starts_from_first() {
+        let a = WidgetId::new();
+        let b = WidgetId::new();
+        let mut nodes: HashMap<WidgetId, Box<dyn Widget>> = HashMap::new();
+        nodes.insert(a, Box::new(FocusableWidget::new(a)));
+        nodes.insert(b, Box::new(FocusableWidget::new(b)));
+
+        let children = HashMap::from([(a, vec![b]), (b, vec![])]);
+        let tree = TestTree { nodes, parents: HashMap::new(), children, root: a };
+
+        let unknown = WidgetId::new();
+        assert_eq!(TreeWalker::focus_next(&tree, unknown), Some(a));
+        assert_eq!(TreeWalker::focus_prev(&tree, unknown), Some(b));
     }
 
     #[test]

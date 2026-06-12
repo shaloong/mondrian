@@ -6,9 +6,13 @@
 use mondrian_editor_state::Action;
 use mondrian_platform::{NoopPlatformService, PlatformService};
 use mondrian_ui_core::focus::FocusManager;
-use mondrian_ui_core::types::{EventResult, Point, UiEvent, WidgetId};
-use mondrian_ui_core::widget::{EventContext, EventRequests, ImeRequest, PointerCaptureRequest};
-use mondrian_ui_core::WidgetTree;
+use mondrian_ui_core::tooltip::{TooltipManager, TooltipState};
+use mondrian_ui_core::types::{EventResult, KeyCode, Point, UiEvent, WidgetId};
+use mondrian_ui_core::widget::{
+    CursorRequest, EventContext, EventRequests, EyedropperRequest, ImeRequest,
+    PointerCaptureRequest,
+};
+use mondrian_ui_core::{TreeWalker, WidgetTree};
 
 use crate::focus_manager::FocusManagerImpl;
 use crate::hit_test::hit_test_deepest;
@@ -27,14 +31,18 @@ pub struct EventRouter {
     focus_mgr: FocusManagerImpl,
     shortcut_mgr: ShortcutManagerImpl,
     platform: Box<dyn PlatformService>,
+    tooltip: Box<dyn TooltipManager>,
     last_ime_request: Option<ImeRequest>,
+    last_cursor_request: Option<CursorRequest>,
+    last_eyedropper_request: Option<EyedropperRequest>,
+    repaint_requested: bool,
 }
 
-struct DummyTooltip;
-impl mondrian_ui_core::tooltip::TooltipManager for DummyTooltip {
+struct NoopTooltip;
+impl TooltipManager for NoopTooltip {
     fn show(&mut self, _: String, _: Point) {}
     fn hide(&mut self) {}
-    fn current(&self) -> Option<&mondrian_ui_core::tooltip::TooltipState> {
+    fn current(&self) -> Option<&TooltipState> {
         None
     }
     fn update(&mut self, _: u64) {}
@@ -50,7 +58,11 @@ impl EventRouter {
             focus_mgr: FocusManagerImpl::new(),
             shortcut_mgr: ShortcutManagerImpl::new(),
             platform: Box::new(NoopPlatformService),
+            tooltip: Box::new(NoopTooltip),
             last_ime_request: None,
+            last_cursor_request: None,
+            last_eyedropper_request: None,
+            repaint_requested: false,
         }
     }
 
@@ -63,7 +75,36 @@ impl EventRouter {
             focus_mgr: FocusManagerImpl::new(),
             shortcut_mgr: ShortcutManagerImpl::new(),
             platform,
+            tooltip: Box::new(NoopTooltip),
             last_ime_request: None,
+            last_cursor_request: None,
+            last_eyedropper_request: None,
+            repaint_requested: false,
+        }
+    }
+
+    /// Create a router with explicit platform and tooltip services.
+    ///
+    /// App shells use this when they want widget tooltip requests to be backed
+    /// by a real tooltip manager instead of the default no-op service.
+    pub fn with_platform_and_tooltip(
+        root_widget_id: WidgetId,
+        platform: Box<dyn PlatformService>,
+        tooltip: Box<dyn TooltipManager>,
+    ) -> Self {
+        Self {
+            root_widget_id,
+            hovered: None,
+            focused: None,
+            captured: None,
+            focus_mgr: FocusManagerImpl::new(),
+            shortcut_mgr: ShortcutManagerImpl::new(),
+            platform,
+            tooltip,
+            last_ime_request: None,
+            last_cursor_request: None,
+            last_eyedropper_request: None,
+            repaint_requested: false,
         }
     }
 
@@ -86,6 +127,28 @@ impl EventRouter {
         self.last_ime_request.take()
     }
 
+    /// Take the latest cursor request emitted by a widget event.
+    pub fn take_cursor_request(&mut self) -> Option<CursorRequest> {
+        self.last_cursor_request.take()
+    }
+
+    /// Take the latest eyedropper request emitted by a widget event.
+    pub fn take_eyedropper_request(&mut self) -> Option<EyedropperRequest> {
+        self.last_eyedropper_request.take()
+    }
+
+    /// Peek the latest eyedropper request without consuming it.
+    pub fn peek_eyedropper_request(&self) -> Option<&EyedropperRequest> {
+        self.last_eyedropper_request.as_ref()
+    }
+
+    /// Take whether any widget requested another frame since the last call.
+    pub fn take_repaint_request(&mut self) -> bool {
+        let requested = self.repaint_requested;
+        self.repaint_requested = false;
+        requested
+    }
+
     pub fn set_capture(&mut self, widget: Option<WidgetId>) {
         self.captured = widget;
     }
@@ -101,6 +164,21 @@ impl EventRouter {
     }
     pub fn shortcut_manager_mut(&mut self) -> &mut ShortcutManagerImpl {
         &mut self.shortcut_mgr
+    }
+
+    /// Return the currently visible tooltip, if the injected manager has one.
+    pub fn current_tooltip(&self) -> Option<&TooltipState> {
+        self.tooltip.current()
+    }
+
+    /// Advance tooltip timers in the injected manager.
+    pub fn update_tooltip(&mut self, delta_ms: u64) {
+        self.tooltip.update(delta_ms);
+    }
+
+    /// Return when the injected tooltip manager next needs a timer update.
+    pub fn next_tooltip_update_in_ms(&self) -> Option<u64> {
+        self.tooltip.next_update_in_ms()
     }
 
     /// 将事件路由到正确的 Widget
@@ -164,6 +242,31 @@ impl EventRouter {
                 EventResult::Ignored
             }
             _ => {
+                // ── Tab / Shift+Tab: framework-level focus traversal ──────────
+                if let UiEvent::KeyDown { key: KeyCode::Tab, modifiers } = &event {
+                    let reverse = modifiers.shift;
+                    let current = self.focus_mgr.focused_widget();
+                    // Preserve the panel from the currently focused widget.
+                    let panel = self.focus_mgr.focused_panel();
+                    let traversal_origin = current.unwrap_or_default();
+                    let next = if reverse {
+                        TreeWalker::focus_prev(tree, traversal_origin)
+                    } else {
+                        TreeWalker::focus_next(tree, traversal_origin)
+                    };
+                    // Blur current
+                    if let Some(current_id) = current {
+                        self.send_focus_lost(tree, current_id, dispatch);
+                    }
+                    // Focus next
+                    if let Some(next_id) = next {
+                        self.send_focus_gained(tree, next_id, dispatch);
+                    }
+                    self.focus_mgr.set_focused_widget(next, panel);
+                    self.focused = self.focus_mgr.focused_widget();
+                    return EventResult::Handled;
+                }
+
                 let position = match &event {
                     UiEvent::MouseDown { position, .. }
                     | UiEvent::MouseUp { position, .. }
@@ -193,15 +296,36 @@ impl EventRouter {
                 };
 
                 if matches!(&event, UiEvent::MouseDown { .. }) {
-                    if let Some(focused) = self.focus_mgr.focused_widget() {
-                        let clicked_inside_focus = target.is_some_and(|target_id| {
-                            self.is_ancestor_or_self(tree, focused, target_id)
-                        });
-                        if !clicked_inside_focus {
-                            self.send_focus_lost(tree, focused, dispatch);
-                            self.focus_mgr.release_focus(focused);
+                    let current_focused = self.focus_mgr.focused_widget();
+                    let target_is_focusable =
+                        target.is_some_and(|id| tree.get(id).is_some_and(|w| w.can_focus()));
+                    if let Some(clicked_id) = target {
+                        if Some(clicked_id) != current_focused {
+                            if target_is_focusable {
+                                // Click-to-focus: blur old, focus new before
+                                // delivering MouseDown so widgets can set their
+                                // internal focused state while MouseDown can
+                                // still suppress keyboard-only focus rings.
+                                if let Some(old) = current_focused {
+                                    self.send_focus_lost(tree, old, dispatch);
+                                }
+                                let panel = self.focus_mgr.focused_panel();
+                                self.send_focus_gained(tree, clicked_id, dispatch);
+                                self.focus_mgr.set_focused_widget(Some(clicked_id), panel);
+                            } else if let Some(old) = current_focused {
+                                let clicked_inside_focus =
+                                    self.is_ancestor_or_self(tree, old, clicked_id);
+                                if !clicked_inside_focus {
+                                    self.send_focus_lost(tree, old, dispatch);
+                                    self.focus_mgr.release_focus(old);
+                                }
+                            }
                             self.focused = self.focus_mgr.focused_widget();
                         }
+                    } else if let Some(old) = current_focused {
+                        self.send_focus_lost(tree, old, dispatch);
+                        self.focus_mgr.release_focus(old);
+                        self.focused = self.focus_mgr.focused_widget();
                     }
                 }
 
@@ -275,17 +399,31 @@ impl EventRouter {
         }
     }
 
-    #[allow(static_mut_refs)]
+    fn send_focus_gained(
+        &mut self,
+        tree: &mut dyn WidgetTree,
+        widget_id: WidgetId,
+        dispatch: &dyn Fn(Action),
+    ) {
+        if let Some(widget) = tree.get_mut(widget_id) {
+            let mut requests = EventRequests::default();
+            {
+                let mut ctx = self.make_event_context(dispatch, &mut requests);
+                widget.event(&UiEvent::FocusGained, &mut ctx);
+            }
+            self.apply_event_requests(requests);
+        }
+    }
+
     fn make_event_context<'a>(
         &'a mut self,
         dispatch: &'a dyn Fn(Action),
         requests: &'a mut EventRequests,
     ) -> EventContext<'a> {
-        static mut TT: DummyTooltip = DummyTooltip;
         EventContext {
             focus: &mut self.focus_mgr,
             shortcut: &mut self.shortcut_mgr,
-            tooltip: unsafe { &mut TT },
+            tooltip: self.tooltip.as_mut(),
             dispatch,
             platform: self.platform.as_ref(),
             requests,
@@ -295,6 +433,15 @@ impl EventRouter {
     fn apply_event_requests(&mut self, requests: EventRequests) {
         if let Some(ime) = requests.ime {
             self.last_ime_request = Some(ime);
+        }
+        if let Some(cursor) = requests.cursor {
+            self.last_cursor_request = Some(cursor);
+        }
+        if let Some(eyedropper) = requests.eyedropper {
+            self.last_eyedropper_request = Some(eyedropper);
+        }
+        if requests.repaint {
+            self.repaint_requested = true;
         }
         match requests.pointer_capture {
             Some(PointerCaptureRequest::Capture(id)) => self.captured = Some(id),
@@ -433,7 +580,9 @@ mod tests {
                     self.log.borrow_mut().push("down".into());
                     EventResult::Handled
                 }
-                UiEvent::MouseMove { .. } => {
+                UiEvent::MouseMove { position, .. } => {
+                    ctx.tooltip.show("tip".into(), *position);
+                    ctx.request_repaint();
                     self.log.borrow_mut().push("move".into());
                     EventResult::Handled
                 }
@@ -499,6 +648,27 @@ mod tests {
         fn children_ids(&self, _id: WidgetId) -> Vec<WidgetId> {
             vec![]
         }
+    }
+
+    #[derive(Default)]
+    struct ImmediateTooltip {
+        state: Option<TooltipState>,
+    }
+
+    impl TooltipManager for ImmediateTooltip {
+        fn show(&mut self, text: String, position: Point) {
+            self.state = Some(TooltipState { text, position, visible: true });
+        }
+
+        fn hide(&mut self) {
+            self.state = None;
+        }
+
+        fn current(&self) -> Option<&TooltipState> {
+            self.state.as_ref()
+        }
+
+        fn update(&mut self, _delta_ms: u64) {}
     }
 
     #[test]
@@ -618,6 +788,54 @@ mod tests {
         assert_eq!(router.captured(), None);
     }
 
+    #[test]
+    fn router_exposes_repaint_request_until_taken() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let root = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(root);
+
+        router.route(
+            UiEvent::MouseMove {
+                position: Point::new(10.0, 10.0),
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert!(router.take_repaint_request());
+        assert!(!router.take_repaint_request());
+    }
+
+    #[test]
+    fn router_uses_injected_tooltip_manager() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let root = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::with_platform_and_tooltip(
+            root,
+            Box::new(NoopPlatformService),
+            Box::new(ImmediateTooltip::default()),
+        );
+
+        router.route(
+            UiEvent::MouseMove {
+                position: Point::new(10.0, 20.0),
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        let tooltip = router.current_tooltip().expect("tooltip should be visible");
+        assert_eq!(tooltip.text, "tip");
+        assert_eq!(tooltip.position, Point::new(10.0, 20.0));
+        assert!(tooltip.visible);
+    }
+
     struct FocusEventWidget {
         id: WidgetId,
         bounds: Rect,
@@ -649,6 +867,10 @@ mod tests {
         fn hit_test(&self, point: Point) -> bool {
             self.bounds.contains(point)
         }
+
+        fn can_focus(&self) -> bool {
+            true
+        }
     }
 
     #[test]
@@ -676,6 +898,34 @@ mod tests {
 
         assert!(log.borrow().is_empty());
         assert_eq!(router.focused(), None);
+    }
+
+    #[test]
+    fn router_click_to_focus_sends_focus_gained_before_mouse_down() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = FocusEventWidget {
+            id: WidgetId::new(),
+            bounds: Rect::new(0.0, 0.0, 100.0, 30.0),
+            log: Rc::clone(&log),
+        };
+        let root = widget.id;
+        let mut nodes = HashMap::new();
+        nodes.insert(root, Box::new(widget) as Box<dyn Widget>);
+        let mut tree = TestTree { root, nodes };
+        let mut router = EventRouter::new(root);
+
+        router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(router.focused(), Some(root));
+        assert_eq!(log.borrow().as_slice(), ["focus-gained"]);
     }
 
     struct ParentPostWidget {

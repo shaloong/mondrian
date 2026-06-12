@@ -400,6 +400,13 @@ pub enum UiEvent {
         payload: DragPayload,
         position: Point,
     },
+    /// Color sampled by the platform eyedropper. Sent by the app shell after
+    /// the user clicks when `EyedropperRequest { active: true }` was set.
+    EyedropperSample {
+        color: mondrian_core::types::Color,
+    },
+    /// Eyedropper cancelled by the platform (e.g. user pressed Escape at the OS level).
+    EyedropperCancel,
 }
 
 #[cfg(test)]

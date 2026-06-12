@@ -76,6 +76,10 @@ impl TooltipManager for TooltipManagerImpl {
             });
         }
     }
+
+    fn next_update_in_ms(&self) -> Option<u64> {
+        self.pending_text.as_ref().map(|_| self.delay_ms.saturating_sub(self.hover_ms))
+    }
 }
 
 #[cfg(test)]
@@ -154,5 +158,21 @@ mod tests {
         let mut mgr = TooltipManagerImpl::new(500);
         mgr.update(1000);
         assert!(mgr.current().is_none());
+    }
+
+    #[test]
+    fn tooltip_reports_next_update_while_pending() {
+        let mut mgr = TooltipManagerImpl::new(500);
+        assert_eq!(mgr.next_update_in_ms(), None);
+
+        mgr.show("hello".into(), Point::ZERO);
+        assert_eq!(mgr.next_update_in_ms(), Some(500));
+
+        mgr.update(125);
+        assert_eq!(mgr.next_update_in_ms(), Some(375));
+
+        mgr.update(375);
+        assert_eq!(mgr.next_update_in_ms(), None);
+        assert!(mgr.current().is_some());
     }
 }

@@ -10,3 +10,5 @@ rust-version.workspace = true
 [dependencies]
 mondrian-core = { workspace = true }
 arboard       = { workspace = true }
+xcap          = { workspace = true }
+windows-sys   = { workspace = true }
