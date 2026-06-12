@@ -80,10 +80,10 @@ timeline clip indices or inspector value changes, into `Action::Custom` payloads
 carrying track and clip ids. `AppState::dispatch_action` consumes that app-layer
 protocol and calls existing undoable command/property-mutation paths. Timeline
 move/trim/seek actions resolve through timeline command methods; Inspector clip
-enabled, opacity, and solid/tint color actions resolve through `AppState`
-snapshot commands and `mondrian-timeline` property hosts. This keeps reusable
-widgets index/value-based and UI-agnostic while avoiding string parsing in
-business logic.
+enabled, opacity, solid/tint color, and basic transform field actions resolve
+through `AppState` snapshot commands and `mondrian-timeline` property hosts.
+This keeps reusable widgets index/value-based and UI-agnostic while avoiding
+string parsing in business logic.
 
 ## Event Requests
 
@@ -302,10 +302,13 @@ synchronization. The `self_hosted_app` Inspector slot uses this path with real
 self-hosted widgets (checkbox, slider, and color trigger) instead of a colored
 placeholder. Its panel snapshot carries the selected clip identity, and user
 edits emit stable inspector actions that mutate the selected clip through
-undoable app state commands. This lets focus routing, overlay popups, repaint
-requests, shell runtime behavior, and editor-state dispatch be validated in the
-same dock tree that future panels will use. Timeline migration should reuse
-this path after scrollbars, overlays, and property controls are stable.
+undoable app state commands. Basic transform controls show position in sequence
+pixels, uniform scale in percent units, and rotation in degrees; the app action
+handler converts those UI values back into `Transform2D` property mutations.
+This lets focus routing, overlay popups, repaint requests, shell runtime
+behavior, and editor-state dispatch be validated in the same dock tree that
+future panels will use. Timeline migration should reuse this path after
+scrollbars, overlays, and property controls are stable.
 
 Browser-style panels should use `PanelList` / `PanelListItem` instead of
 ad-hoc colored placeholders or one-off row painting. `PanelList` owns local

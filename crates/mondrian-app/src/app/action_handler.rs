@@ -8,14 +8,16 @@
 
 use crate::app::timeline_editing::{find_clip_mut, set_clip_disabled};
 use crate::app::ui_actions::{
-    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
-    TimelineMoveClipPayload, TimelineSeekPayload, TimelineSelectClipPayload,
-    TimelineTrimClipPayload, TimelineTrimPayloadEdge, INSPECTOR_NAMESPACE,
-    INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY, INSPECTOR_SET_CLIP_TINT,
+    InspectorClipTransformField, InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
+    InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload, TimelineMoveClipPayload,
+    TimelineSeekPayload, TimelineSelectClipPayload, TimelineTrimClipPayload,
+    TimelineTrimPayloadEdge, INSPECTOR_NAMESPACE, INSPECTOR_SET_CLIP_ENABLED,
+    INSPECTOR_SET_CLIP_OPACITY, INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD,
     TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_SEEK, TIMELINE_SELECT_CLIP,
     TIMELINE_TRIM_CLIP,
 };
 use crate::app::{AppState, ClipOverlapMode, SelectedClipRef};
+use glam::Vec2;
 use mondrian_core::automation::{PropertyHost, PropertyMutation, PropertyValue};
 use mondrian_core::types::ClipId;
 use mondrian_core::{MondrianError, Result};
@@ -206,6 +208,18 @@ impl AppState {
                 )?;
                 self.set_clip_tint_from_ui(payload.clip.clip_id, payload.color)
             }
+            INSPECTOR_SET_CLIP_TRANSFORM_FIELD => {
+                let payload = parse_ui_payload::<InspectorSetClipTransformFieldPayload>(
+                    "inspector_ui_action",
+                    name,
+                    payload,
+                )?;
+                self.set_clip_transform_field_from_ui(
+                    payload.clip.clip_id,
+                    payload.field,
+                    payload.value,
+                )
+            }
             _ => {
                 tracing::debug!(
                     target: "mondrian::action",
@@ -285,6 +299,96 @@ impl AppState {
         }
         Ok(())
     }
+
+    fn set_clip_transform_field_from_ui(
+        &mut self,
+        clip_id: ClipId,
+        field: InspectorClipTransformField,
+        value: f32,
+    ) -> Result<()> {
+        if !value.is_finite() {
+            return Err(MondrianError::WorkflowStepFailed {
+                step_id: "inspector_set_clip_transform_field".to_string(),
+                reason: "transform value must be finite".to_string(),
+            });
+        }
+
+        let Some(seq) = self.sequence.as_mut() else {
+            return Err(missing_sequence_error("inspector_set_clip_transform_field"));
+        };
+        let before = seq.clone();
+        let playhead = seq.playhead;
+        let changed = {
+            let clip = find_clip_mut(seq, clip_id)
+                .ok_or_else(|| missing_clip_error("inspector_set_clip_transform_field", clip_id))?;
+            match field {
+                InspectorClipTransformField::PositionX => {
+                    let mut position = clip.transform.get_position(playhead);
+                    if (position.x - value).abs() < f32::EPSILON {
+                        false
+                    } else {
+                        position.x = value;
+                        clip.apply_property_mutation(PropertyMutation::SetStaticValue {
+                            path: Transform2D::POSITION_PATH.to_string(),
+                            value: PropertyValue::Vec2(position),
+                        })?;
+                        true
+                    }
+                }
+                InspectorClipTransformField::PositionY => {
+                    let mut position = clip.transform.get_position(playhead);
+                    if (position.y - value).abs() < f32::EPSILON {
+                        false
+                    } else {
+                        position.y = value;
+                        clip.apply_property_mutation(PropertyMutation::SetStaticValue {
+                            path: Transform2D::POSITION_PATH.to_string(),
+                            value: PropertyValue::Vec2(position),
+                        })?;
+                        true
+                    }
+                }
+                InspectorClipTransformField::ScalePercent => {
+                    let scale = (value.max(0.0)) / 100.0;
+                    let scale = Vec2::splat(scale);
+                    if (clip.transform.get_scale(playhead) - scale).length_squared() < f32::EPSILON
+                    {
+                        false
+                    } else {
+                        clip.apply_property_mutation(PropertyMutation::SetStaticValue {
+                            path: Transform2D::SCALE_PATH.to_string(),
+                            value: PropertyValue::Vec2(scale),
+                        })?;
+                        true
+                    }
+                }
+                InspectorClipTransformField::RotationDegrees => {
+                    let current = clip
+                        .transform
+                        .to_property_bag()
+                        .evaluate(
+                            Transform2D::ROTATION_PATH,
+                            mondrian_core::automation::timecode_to_ticks(playhead),
+                        )
+                        .and_then(|value| value.as_f32())
+                        .unwrap_or(0.0);
+                    if (current - value).abs() < f32::EPSILON {
+                        false
+                    } else {
+                        clip.apply_property_mutation(PropertyMutation::SetStaticValue {
+                            path: Transform2D::ROTATION_PATH.to_string(),
+                            value: PropertyValue::Float(value),
+                        })?;
+                        true
+                    }
+                }
+            }
+        };
+        if changed {
+            self.record_timeline_edit_snapshot("调整片段变换", before);
+        }
+        Ok(())
+    }
 }
 
 fn parse_ui_payload<T: serde::de::DeserializeOwned>(
@@ -327,10 +431,11 @@ mod tests {
     use super::*;
     use crate::app::ui_actions::{
         inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
-        inspector_set_clip_tint_action, timeline_move_clip_action, timeline_seek_action,
-        timeline_select_clip_action, timeline_trim_clip_action, InspectorClipRefPayload,
+        inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
+        timeline_move_clip_action, timeline_seek_action, timeline_select_clip_action,
+        timeline_trim_clip_action, InspectorClipRefPayload, InspectorClipTransformField,
         InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
-        InspectorSetClipTintPayload,
+        InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
     };
     use mondrian_core::types::{AssetId, TimeCode};
     use mondrian_core::Color;
@@ -480,6 +585,47 @@ mod tests {
 
         let clip = &state.sequence.as_ref().expect("sequence").video_tracks[0].clips[0];
         assert_eq!(clip.solid_color, Some(color));
+        assert!(state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_inspector_ui_sets_clip_transform_fields() {
+        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+        let clip_ref = inspector_clip_payload(track_id, clip_id);
+
+        for (field, value) in [
+            (InspectorClipTransformField::PositionX, 128.0),
+            (InspectorClipTransformField::PositionY, 72.0),
+            (InspectorClipTransformField::ScalePercent, 150.0),
+            (InspectorClipTransformField::RotationDegrees, -12.5),
+        ] {
+            state
+                .dispatch_action(inspector_set_clip_transform_field_action(
+                    InspectorSetClipTransformFieldPayload { clip: clip_ref, field, value },
+                ))
+                .expect("dispatch transform");
+        }
+
+        let sequence = state.sequence.as_ref().expect("sequence");
+        let clip = &sequence.video_tracks[0].clips[0];
+        assert_eq!(
+            clip.transform.get_position(sequence.playhead),
+            glam::Vec2::new(128.0, 72.0)
+        );
+        assert_eq!(
+            clip.transform.get_scale(sequence.playhead),
+            glam::Vec2::splat(1.5)
+        );
+        let rotation = clip
+            .transform
+            .to_property_bag()
+            .evaluate(
+                Transform2D::ROTATION_PATH,
+                mondrian_core::automation::timecode_to_ticks(sequence.playhead),
+            )
+            .and_then(|value| value.as_f32())
+            .expect("rotation value");
+        assert!((rotation + 12.5).abs() < f32::EPSILON);
         assert!(state.can_undo_action());
     }
 }

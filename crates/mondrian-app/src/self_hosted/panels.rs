@@ -6,12 +6,13 @@
 //! changing dock layout or widget construction.
 
 use mondrian_assets::{AssetKind, AssetLibrary, AssetRecord};
+use mondrian_core::automation::timecode_to_ticks;
 use mondrian_core::effect_data::EffectType;
 use mondrian_core::types::{AssetId, ClipId, SequenceId, TimeCode, TrackId};
 use mondrian_core::Color;
 use mondrian_editor_state::Action;
 use mondrian_effects::{effect_display_name, effect_library_types};
-use mondrian_timeline::clip::Clip;
+use mondrian_timeline::clip::{Clip, Transform2D};
 use mondrian_timeline::sequence::Sequence;
 use mondrian_timeline::track::Track;
 use mondrian_ui_core::types::SplitDirection;
@@ -29,11 +30,12 @@ use mondrian_ui_widgets::{
 
 use crate::app::ui_actions::{
     inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
-    inspector_set_clip_tint_action, timeline_move_clip_action, timeline_seek_action,
-    timeline_select_clip_action, timeline_trim_clip_action, InspectorClipRefPayload,
+    inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
+    timeline_move_clip_action, timeline_seek_action, timeline_select_clip_action,
+    timeline_trim_clip_action, InspectorClipRefPayload, InspectorClipTransformField,
     InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
-    TimelineMoveClipPayload, TimelineSelectClipPayload, TimelineTrimClipPayload,
-    TimelineTrimPayloadEdge,
+    InspectorSetClipTransformFieldPayload, TimelineMoveClipPayload, TimelineSelectClipPayload,
+    TimelineTrimClipPayload, TimelineTrimPayloadEdge,
 };
 use crate::app::{AppState, SelectedClipRef};
 
@@ -349,10 +351,23 @@ impl TimelinePanelModel {
 pub struct InspectorPanelModel {
     /// Selected clip targeted by value edits, if the model is backed by app state.
     pub selected_clip: Option<SelectedClipRef>,
+    /// Whether the selected clip is enabled.
     pub enabled: bool,
+    /// Opacity shown in UI percent units.
     pub opacity: f32,
+    /// Solid/tint color shown by the color trigger.
     pub tint: Color,
+    /// Horizontal transform position in sequence pixels.
+    pub position_x: f32,
+    /// Vertical transform position in sequence pixels.
+    pub position_y: f32,
+    /// Uniform transform scale shown in UI percent units.
+    pub scale_percent: f32,
+    /// Transform rotation shown in degrees.
+    pub rotation_degrees: f32,
+    /// Preferred color-picker area style for this inspector instance.
     pub tint_area_mode: ColorPickerAreaMode,
+    /// Curve-editor fixture points until animation curves are fully mapped.
     pub curve_points: Vec<CurvePoint>,
 }
 
@@ -370,6 +385,8 @@ impl InspectorPanelModel {
 
         let time = state.current_time_code().unwrap_or(sequence.playhead);
         let opacity = (clip.transform.evaluate_opacity(time) * 100.0).clamp(0.0, 100.0);
+        let position = clip.transform.get_position(time);
+        let scale = clip.transform.get_scale(time);
         Self {
             selected_clip: Some(*selection),
             enabled: !clip.is_disabled,
@@ -378,6 +395,10 @@ impl InspectorPanelModel {
                 .solid_color
                 .or_else(|| timeline_clip_color(clip, selection.is_video_track))
                 .unwrap_or_else(|| Color::from_hex(0x84B4FF)),
+            position_x: position.x,
+            position_y: position.y,
+            scale_percent: scale.x * 100.0,
+            rotation_degrees: clip_rotation_degrees(clip, time),
             tint_area_mode: ColorPickerAreaMode::Wheel,
             curve_points: vec![CurvePoint::new(0.0, 0.0), CurvePoint::new(1.0, 1.0)],
         }
@@ -389,6 +410,10 @@ impl InspectorPanelModel {
             enabled: true,
             opacity: 72.0,
             tint: Color::from_rgba8(132, 180, 255, 220),
+            position_x: 12.0,
+            position_y: -8.0,
+            scale_percent: 100.0,
+            rotation_degrees: 0.0,
             tint_area_mode: ColorPickerAreaMode::Wheel,
             curve_points: vec![
                 CurvePoint::new(0.0, 0.0),
@@ -546,6 +571,14 @@ fn timeline_clip_color(clip: &Clip, is_video_track: bool) -> Option<Color> {
     } else {
         Some(Color::from_hex(0x1D587B))
     }
+}
+
+fn clip_rotation_degrees(clip: &Clip, time: TimeCode) -> f32 {
+    clip.transform
+        .to_property_bag()
+        .evaluate(Transform2D::ROTATION_PATH, timecode_to_ticks(time))
+        .and_then(|value| value.as_f32())
+        .unwrap_or(0.0)
 }
 
 fn panel_item_from_asset(asset: AssetRecord) -> PanelListItem {
@@ -880,6 +913,59 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                 )),
         )
         .with_section(
+            PropertySection::new("Transform")
+                .with_row(PropertyRow::new(
+                    "Position X",
+                    Box::new(Slider::new(model.position_x, -4096.0, 4096.0).on_change(
+                        move |value| {
+                            inspector_transform_action(
+                                selected_clip,
+                                InspectorClipTransformField::PositionX,
+                                value,
+                            )
+                        },
+                    )),
+                ))
+                .with_row(PropertyRow::new(
+                    "Position Y",
+                    Box::new(Slider::new(model.position_y, -4096.0, 4096.0).on_change(
+                        move |value| {
+                            inspector_transform_action(
+                                selected_clip,
+                                InspectorClipTransformField::PositionY,
+                                value,
+                            )
+                        },
+                    )),
+                ))
+                .with_row(PropertyRow::new(
+                    "Scale",
+                    Box::new(Slider::new(model.scale_percent, 0.0, 400.0).on_change(
+                        move |value| {
+                            inspector_transform_action(
+                                selected_clip,
+                                InspectorClipTransformField::ScalePercent,
+                                value,
+                            )
+                        },
+                    )),
+                ))
+                .with_row(PropertyRow::new(
+                    "Rotation",
+                    Box::new(
+                        Slider::new(model.rotation_degrees, -180.0, 180.0).on_change(
+                            move |value| {
+                                inspector_transform_action(
+                                    selected_clip,
+                                    InspectorClipTransformField::RotationDegrees,
+                                    value,
+                                )
+                            },
+                        ),
+                    ),
+                )),
+        )
+        .with_section(
             PropertySection::new("Animation")
                 .with_row(PropertyRow::new("Curve", Box::new(curve)).with_height(118.0)),
         )
@@ -922,6 +1008,21 @@ fn inspector_color_action(selection: Option<SelectedClipRef>, color: Color) -> A
     legacy_inspector_action(format!("tint:{r},{g},{b},{a}"))
 }
 
+fn inspector_transform_action(
+    selection: Option<SelectedClipRef>,
+    field: InspectorClipTransformField,
+    value: f32,
+) -> Action {
+    if let Some(selection) = selection {
+        return inspector_set_clip_transform_field_action(InspectorSetClipTransformFieldPayload {
+            clip: inspector_clip_payload(selection),
+            field,
+            value,
+        });
+    }
+    legacy_inspector_action(format!("transform.{field:?}:{value:.3}"))
+}
+
 fn inspector_curve_action(points: &[CurvePoint]) -> Action {
     let mut name = String::from("curve");
     for point in points {
@@ -953,6 +1054,7 @@ fn legacy_inspector_action(name: String) -> Action {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mondrian_core::automation::{PropertyHost, PropertyMutation, PropertyValue};
     use mondrian_core::types::{AssetId, TimeCode};
 
     #[test]
@@ -1082,6 +1184,13 @@ mod tests {
             TimeCode::new(18, tb),
         );
         clip.is_disabled = true;
+        clip.transform.set_position(glam::Vec2::new(192.0, 108.0));
+        clip.transform.set_scale(glam::Vec2::splat(1.25));
+        clip.apply_property_mutation(PropertyMutation::SetStaticValue {
+            path: Transform2D::ROTATION_PATH.to_string(),
+            value: PropertyValue::Float(15.0),
+        })
+        .expect("set rotation");
         let clip_id = clip.id;
         let track_id = sequence.video_tracks[0].id;
         sequence.video_tracks[0].add_clip(clip).expect("add solid clip");
@@ -1101,6 +1210,10 @@ mod tests {
         assert!(!models.inspector.enabled);
         assert_eq!(models.inspector.opacity, 100.0);
         assert_eq!(models.inspector.tint.to_rgba8(), color.to_rgba8());
+        assert_eq!(models.inspector.position_x, 192.0);
+        assert_eq!(models.inspector.position_y, 108.0);
+        assert_eq!(models.inspector.scale_percent, 125.0);
+        assert_eq!(models.inspector.rotation_degrees, 15.0);
     }
 
     #[test]

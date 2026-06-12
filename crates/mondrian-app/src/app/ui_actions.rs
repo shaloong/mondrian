@@ -28,6 +28,8 @@ pub const INSPECTOR_SET_CLIP_ENABLED: &str = "set_clip_enabled";
 pub const INSPECTOR_SET_CLIP_OPACITY: &str = "set_clip_opacity";
 /// Action name for changing a selected clip's solid/tint color.
 pub const INSPECTOR_SET_CLIP_TINT: &str = "set_clip_tint";
+/// Action name for changing one selected clip transform field.
+pub const INSPECTOR_SET_CLIP_TRANSFORM_FIELD: &str = "set_clip_transform_field";
 
 /// Clip edge being trimmed by a timeline UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,6 +118,30 @@ pub struct InspectorSetClipTintPayload {
     pub color: mondrian_core::Color,
 }
 
+/// Transform field exposed by the self-hosted inspector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InspectorClipTransformField {
+    /// Horizontal position in sequence pixels.
+    PositionX,
+    /// Vertical position in sequence pixels.
+    PositionY,
+    /// Uniform scale displayed in percent units.
+    ScalePercent,
+    /// Rotation in degrees.
+    RotationDegrees,
+}
+
+/// Change a single transform field on a selected clip.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct InspectorSetClipTransformFieldPayload {
+    /// Clip targeted by the inspector mutation.
+    pub clip: InspectorClipRefPayload,
+    /// Transform field being changed.
+    pub field: InspectorClipTransformField,
+    /// New UI-space value for the field.
+    pub value: f32,
+}
+
 /// Build an action that selects a clip in the active timeline.
 pub fn timeline_select_clip_action(payload: TimelineSelectClipPayload) -> Action {
     custom_timeline_action(TIMELINE_SELECT_CLIP, payload)
@@ -149,6 +175,13 @@ pub fn inspector_set_clip_opacity_action(payload: InspectorSetClipOpacityPayload
 /// Build an action that changes clip solid/tint color from an inspector panel.
 pub fn inspector_set_clip_tint_action(payload: InspectorSetClipTintPayload) -> Action {
     custom_inspector_action(INSPECTOR_SET_CLIP_TINT, payload)
+}
+
+/// Build an action that changes a clip transform field from an inspector panel.
+pub fn inspector_set_clip_transform_field_action(
+    payload: InspectorSetClipTransformFieldPayload,
+) -> Action {
+    custom_inspector_action(INSPECTOR_SET_CLIP_TRANSFORM_FIELD, payload)
 }
 
 fn custom_timeline_action<T: Serialize>(name: &'static str, payload: T) -> Action {
