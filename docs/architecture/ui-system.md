@@ -62,6 +62,9 @@ actions. During the migration, the `self_hosted_app` developer binary uses
 `SelfHostedAppRoot::demo()` as the integration shell. When the self-hosted UI
 becomes the product shell, the official `mondrian` entrypoint should call into
 this module with real panel models instead of moving logic back into `src/bin`.
+The developer shell keeps demo panels visible for component testing, but its
+action sink already dispatches through `AppState::dispatch_action` so menu and
+timeline UI actions exercise the same app boundary as the future product shell.
 
 Selection DTOs that describe editor state, such as `SelectedClipRef`, live in
 `mondrian-app::app` rather than legacy UI modules. Legacy egui panels and

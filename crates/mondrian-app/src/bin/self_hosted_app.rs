@@ -4,8 +4,10 @@
 //! 使用自研 UI 框架（winit + wgpu + Dock + Widget）的应用入口。
 //! 运行: cargo run --bin self_hosted_app
 
+use std::cell::RefCell;
 use std::sync::Arc;
 
+use mondrian_app::app::AppState;
 use mondrian_app::self_hosted::runtime::WinitUiRuntime;
 use mondrian_app::self_hosted::shell::SelfHostedAppRoot;
 use mondrian_editor_state::Action;
@@ -31,10 +33,6 @@ fn mouse_button(b: winit::event::MouseButton) -> MouseButton {
         winit::event::MouseButton::Middle => MouseButton::Middle,
         _ => MouseButton::Left,
     }
-}
-
-fn record_app_action(action: Action) {
-    tracing::debug!(?action, "custom UI action");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -89,6 +87,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Box::new(TooltipManagerImpl::new(450)),
     );
     let mut ui_runtime = WinitUiRuntime::new();
+    let app_state = RefCell::new(AppState::new());
 
     let mut last_cursor = Point::new(0.0, 0.0);
     let current_bounds = std::cell::Cell::new(bounds);
@@ -101,6 +100,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         use winit::event::{Event, WindowEvent};
         use winit::event_loop::ControlFlow;
         elwt.set_control_flow(ControlFlow::Wait);
+        let dispatch_action = |action: Action| {
+            tracing::debug!(?action, "custom UI action");
+            if let Err(err) = app_state.borrow_mut().dispatch_action(action) {
+                tracing::warn!("custom UI action failed: {err}");
+            }
+        };
 
         match event {
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. }
@@ -186,7 +191,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         position: last_cursor,
                         modifiers: Modifiers::none(),
                     },
-                    &record_app_action,
+                    &dispatch_action,
                 );
                 let zones = root.dock().collect_grab_zones();
                 let dir = zones.iter().find(|(z, _)| z.contains(last_cursor)).map(|(_, d)| *d);
@@ -225,7 +230,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &mut router,
                         &mut root,
                         last_cursor,
-                        &record_app_action,
+                        &dispatch_action,
                     );
                 } else {
                     let _ = ui_runtime.route_window_event(
@@ -233,7 +238,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &mut router,
                         &mut root,
                         evt,
-                        &record_app_action,
+                        &dispatch_action,
                     );
                 }
                 window.request_redraw();
@@ -253,7 +258,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         position: last_cursor,
                         modifiers: Modifiers::none(),
                     },
-                    &record_app_action,
+                    &dispatch_action,
                 );
                 window.request_redraw();
             }
@@ -266,7 +271,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &mut router,
                         &mut root,
                         &mut last_cursor,
-                        &record_app_action,
+                        &dispatch_action,
                     );
                     window.request_redraw();
                     elwt.set_control_flow(ControlFlow::Poll);
