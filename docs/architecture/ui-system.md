@@ -46,20 +46,22 @@ it is deliberately bridging or deleting legacy egui behavior.
 
 The self-hosted UI application adapter lives under
 `mondrian-app/src/self_hosted`. `self_hosted::runtime` owns winit-side request
-application for reusable widgets. `self_hosted::panels` owns panel adapters that
-map application-facing concepts into generic widget view models. The boundary
-type is `SelfHostedPanelModels`: real `AppState` / `EditorState` adapters should
-produce this model, while `SelfHostedPanelModels::demo()` is only a developer
-fixture. `SelfHostedPanelModels::from_app_state` is the app-side snapshot
-boundary: it reads the current `AppState`, asset library, effect registry,
-selection state, and timeline sequence into generic widget models. Timeline
-adapters start at `TimelinePanelModel::from_sequence`, which maps
-`mondrian-timeline::Sequence` plus app-layer selection DTOs into widget view
-models and stable-id-backed actions. During the migration, the
-`self_hosted_app` developer binary uses `build_demo_dock_tree()` as the
-integration shell. When the self-hosted UI becomes the product shell, the
-official `mondrian` entrypoint should call into this module with real panel
-models instead of moving logic back into `src/bin`.
+application for reusable widgets. `self_hosted::shell` owns reusable root-widget
+composition such as the menu bar plus dock tree; developer binaries should use
+`SelfHostedAppRoot` rather than defining shell widgets inline. `self_hosted::panels`
+owns panel adapters that map application-facing concepts into generic widget
+view models. The boundary type is `SelfHostedPanelModels`: real `AppState` /
+`EditorState` adapters should produce this model, while
+`SelfHostedPanelModels::demo()` is only a developer fixture.
+`SelfHostedPanelModels::from_app_state` is the app-side snapshot boundary: it
+reads the current `AppState`, asset library, effect registry, selection state,
+and timeline sequence into generic widget models. Timeline adapters start at
+`TimelinePanelModel::from_sequence`, which maps `mondrian-timeline::Sequence`
+plus app-layer selection DTOs into widget view models and stable-id-backed
+actions. During the migration, the `self_hosted_app` developer binary uses
+`SelfHostedAppRoot::demo()` as the integration shell. When the self-hosted UI
+becomes the product shell, the official `mondrian` entrypoint should call into
+this module with real panel models instead of moving logic back into `src/bin`.
 
 Selection DTOs that describe editor state, such as `SelectedClipRef`, live in
 `mondrian-app::app` rather than legacy UI modules. Legacy egui panels and

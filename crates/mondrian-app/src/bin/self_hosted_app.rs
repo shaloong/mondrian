@@ -6,219 +6,19 @@
 
 use std::sync::Arc;
 
-use mondrian_app::self_hosted::panels::build_demo_dock_tree;
 use mondrian_app::self_hosted::runtime::WinitUiRuntime;
-use mondrian_editor_state::state::PanelKind;
+use mondrian_app::self_hosted::shell::SelfHostedAppRoot;
 use mondrian_editor_state::Action;
 use mondrian_panel_console::tracing_layer::ConsoleLogLayer;
 use mondrian_platform::SystemPlatformService;
 use mondrian_ui_core::types::*;
-use mondrian_ui_core::widget::{EventContext, PaintContext};
-use mondrian_ui_core::{EventResult, TreeWalker, Widget};
+use mondrian_ui_core::{TreeWalker, Widget};
 use mondrian_ui_events::EventRouter;
 use mondrian_ui_renderer::command::DrawEncoder;
 use mondrian_ui_renderer::UiRenderer;
 use mondrian_ui_text::{resolve_text_commands, TextRenderer};
 use mondrian_ui_tooltip::TooltipManagerImpl;
-use mondrian_ui_widgets::dock_splitter::DockSplitter;
-use mondrian_ui_widgets::menu::{Dropdown, MenuItem};
 use tracing_subscriber::prelude::*;
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Menu bar
-// ═══════════════════════════════════════════════════════════════════════════
-
-fn menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
-    vec![
-        (
-            "File",
-            vec![
-                MenuItem::new("New Project", Action::NewProject),
-                MenuItem::new("Open Project...", Action::OpenProject("".into())),
-                MenuItem::new("Save", Action::SaveProject),
-                MenuItem::new("Save As...", Action::SaveProjectAs("".into())),
-                MenuItem::new("Quit", Action::CloseProject),
-            ],
-        ),
-        (
-            "Edit",
-            vec![
-                MenuItem::new("Undo", Action::Undo),
-                MenuItem::new("Redo", Action::Redo),
-                MenuItem::new("Cut", Action::Cut),
-                MenuItem::new("Copy", Action::Copy),
-                MenuItem::new("Paste", Action::Paste),
-            ],
-        ),
-        (
-            "View",
-            vec![
-                MenuItem::new("Toggle Console", Action::TogglePanel(PanelKind::Console)),
-                MenuItem::new("Toggle Timeline", Action::TogglePanel(PanelKind::Timeline)),
-                MenuItem::new(
-                    "Toggle Inspector",
-                    Action::TogglePanel(PanelKind::Inspector),
-                ),
-            ],
-        ),
-        (
-            "Help",
-            vec![MenuItem::new(
-                "About Mondrian",
-                Action::Custom {
-                    namespace: "app".into(),
-                    name: "about".into(),
-                    payload: serde_json::Value::Null,
-                },
-            )],
-        ),
-    ]
-}
-
-/// Horizontal menu bar wrapping Dropdown widgets
-struct MenuBar {
-    id: WidgetId,
-    menus: Vec<Dropdown>,
-    bounds: Rect,
-}
-
-impl MenuBar {
-    fn new() -> Self {
-        let menus = menu_items()
-            .into_iter()
-            .map(|(label, items)| Dropdown::new(label, items))
-            .collect();
-        Self { id: WidgetId::new(), menus, bounds: Rect::ZERO }
-    }
-}
-
-impl Widget for MenuBar {
-    fn id(&self) -> WidgetId {
-        self.id
-    }
-    fn measure(&self, _c: LayoutConstraint) -> Size {
-        Size::new(600.0, 28.0)
-    }
-    fn layout(&mut self, bounds: Rect) {
-        self.bounds = bounds;
-        let mut x = bounds.x;
-        for menu in &mut self.menus {
-            menu.layout(Rect::new(x, bounds.y, 100.0, 28.0));
-            x += 100.0;
-        }
-    }
-    fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
-        for menu in &mut self.menus {
-            if menu.event(event, ctx) == EventResult::Handled {
-                return EventResult::Handled;
-            }
-        }
-        EventResult::Ignored
-    }
-    fn paint(&self, ctx: &mut PaintContext) {
-        let bar_bg = Rect::new(self.bounds.x, self.bounds.y, self.bounds.width, 28.0);
-        ctx.encoder.draw_rect(bar_bg, ctx.theme.colors.card, 0.0);
-        for menu in &self.menus {
-            menu.paint(ctx);
-        }
-    }
-    fn hit_test(&self, p: Point) -> bool {
-        self.bounds.contains(p)
-    }
-
-    fn child_count(&self) -> usize {
-        self.menus.len()
-    }
-
-    fn child(&self, index: usize) -> Option<&dyn Widget> {
-        self.menus.get(index).map(|menu| menu as &dyn Widget)
-    }
-
-    fn child_mut(&mut self, index: usize) -> Option<&mut dyn Widget> {
-        self.menus.get_mut(index).map(|menu| menu as &mut dyn Widget)
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Root widget: MenuBar + DockSplitter
-// ═══════════════════════════════════════════════════════════════════════════
-
-struct AppRoot {
-    id: WidgetId,
-    menu_bar: MenuBar,
-    dock: DockSplitter,
-    bounds: Rect,
-}
-
-impl AppRoot {
-    fn new(menu_bar: MenuBar, dock: DockSplitter) -> Self {
-        Self {
-            id: WidgetId::new(),
-            menu_bar,
-            dock,
-            bounds: Rect::ZERO,
-        }
-    }
-}
-
-impl Widget for AppRoot {
-    fn id(&self) -> WidgetId {
-        self.id
-    }
-    fn measure(&self, c: LayoutConstraint) -> Size {
-        c.constrain(Size::new(800.0, 600.0))
-    }
-    fn layout(&mut self, bounds: Rect) {
-        self.bounds = bounds;
-        self.menu_bar.layout(Rect::new(bounds.x, bounds.y, bounds.width, 28.0));
-        self.dock.layout(Rect::new(
-            bounds.x,
-            bounds.y + 28.0,
-            bounds.width,
-            (bounds.height - 28.0).max(0.0),
-        ));
-    }
-    fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
-        if self.menu_bar.event(event, ctx) == EventResult::Handled {
-            return EventResult::Handled;
-        }
-        self.dock.event(event, ctx)
-    }
-    fn paint(&self, ctx: &mut PaintContext) {
-        self.menu_bar.paint(ctx);
-        self.dock.paint(ctx);
-    }
-    fn hit_test(&self, p: Point) -> bool {
-        self.bounds.contains(p)
-    }
-
-    fn child_count(&self) -> usize {
-        2
-    }
-
-    fn child(&self, index: usize) -> Option<&dyn Widget> {
-        match index {
-            0 => Some(&self.menu_bar),
-            1 => Some(&self.dock),
-            _ => None,
-        }
-    }
-
-    fn child_mut(&mut self, index: usize) -> Option<&mut dyn Widget> {
-        match index {
-            0 => Some(&mut self.menu_bar),
-            1 => Some(&mut self.dock),
-            _ => None,
-        }
-    }
-}
-
-/// Access the inner DockSplitter for grab zone queries
-impl AppRoot {
-    fn dock(&self) -> &DockSplitter {
-        &self.dock
-    }
-}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
@@ -280,9 +80,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ui_renderer = UiRenderer::new(&device, config.format);
     let mut text_renderer = TextRenderer::new();
 
-    let menu_bar = MenuBar::new();
-    let dock = build_demo_dock_tree();
-    let mut root = AppRoot::new(menu_bar, dock);
+    let mut root = SelfHostedAppRoot::demo();
     let bounds = Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
     TreeWalker::layout(&mut root, bounds);
     let mut router = EventRouter::with_platform_and_tooltip(

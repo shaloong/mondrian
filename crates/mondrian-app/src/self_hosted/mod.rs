@@ -6,3 +6,4 @@
 
 pub mod panels;
 pub mod runtime;
+pub mod shell;
