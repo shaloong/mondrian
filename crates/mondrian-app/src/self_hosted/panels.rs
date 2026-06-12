@@ -5,8 +5,11 @@
 //! factories so real `AppState` / `EditorState` adapters can replace it without
 //! changing dock layout or widget construction.
 
+use mondrian_assets::{AssetKind, AssetLibrary, AssetRecord};
+use mondrian_core::effect_data::EffectType;
 use mondrian_core::Color;
 use mondrian_editor_state::Action;
+use mondrian_effects::{effect_display_name, effect_library_types};
 use mondrian_timeline::clip::Clip;
 use mondrian_timeline::sequence::Sequence;
 use mondrian_timeline::track::Track;
@@ -22,7 +25,7 @@ use mondrian_ui_widgets::{
     TimelineClip, TimelineClipRef, TimelineTrack, TimelineView,
 };
 
-use crate::app::SelectedClipRef;
+use crate::app::{AppState, SelectedClipRef};
 
 /// Complete set of view models needed by the self-hosted panel shell.
 #[derive(Debug, Clone)]
@@ -35,6 +38,27 @@ pub struct SelfHostedPanelModels {
 }
 
 impl SelfHostedPanelModels {
+    /// Snapshot the current application state into self-hosted panel models.
+    ///
+    /// This is a read-only boundary: widgets receive generic view models and
+    /// emit actions, while domain mutations stay in `AppState` handlers.
+    pub fn from_app_state(state: &AppState) -> Self {
+        Self {
+            assets: PanelListModel::from_asset_library(state.asset_library.as_deref()),
+            effects: PanelListModel::from_effect_registry(),
+            console: PanelListModel::from_app_status(state),
+            timeline: state
+                .sequence
+                .as_ref()
+                .map(|sequence| {
+                    TimelinePanelModel::from_sequence(sequence, &state.selection.selected_clips)
+                        .with_playhead_frame(state.current_frame())
+                })
+                .unwrap_or_default(),
+            inspector: InspectorPanelModel::from_app_state(state),
+        }
+    }
+
     /// Demo fixtures used by developer binaries before the real editor state is
     /// wired into the self-hosted shell.
     pub fn demo() -> Self {
@@ -76,10 +100,115 @@ impl PanelListModel {
         self.activate_prefix = Some(prefix.into());
         self
     }
+
+    /// Build the project asset list. Database read failures are represented as
+    /// disabled rows so the panel can render without owning app error handling.
+    pub fn from_asset_library(library: Option<&AssetLibrary>) -> Self {
+        let Some(library) = library else {
+            return PanelListModel::new(
+                "Assets",
+                vec![PanelListItem::new("No project library")
+                    .with_subtitle("Open or create a project to browse assets")
+                    .disabled(true)],
+            )
+            .with_subtitle("Project library");
+        };
+
+        match library.list_assets() {
+            Ok(assets) if assets.is_empty() => PanelListModel::new(
+                "Assets",
+                vec![PanelListItem::new("No assets")
+                    .with_subtitle("Import media or create generated assets")
+                    .disabled(true)],
+            )
+            .with_subtitle("Project library"),
+            Ok(assets) => PanelListModel::new(
+                "Assets",
+                assets.into_iter().map(panel_item_from_asset).collect(),
+            )
+            .with_subtitle("Project library"),
+            Err(err) => PanelListModel::new(
+                "Assets",
+                vec![PanelListItem::new("Asset library unavailable")
+                    .with_subtitle(err.to_string())
+                    .disabled(true)],
+            )
+            .with_subtitle("Project library"),
+        }
+    }
+
+    /// Build the visible effect browser from the shared effect registry.
+    pub fn from_effect_registry() -> Self {
+        let effects = effect_library_types();
+        let items = if effects.is_empty() {
+            vec![PanelListItem::new("No effects available")
+                .with_subtitle("Effect registry is empty")
+                .disabled(true)]
+        } else {
+            effects
+                .into_iter()
+                .map(|effect_type| {
+                    let name = effect_display_name(&effect_type);
+                    let category = effect_type.category_path().join(" / ");
+                    PanelListItem::new(name)
+                        .with_subtitle(category)
+                        .with_badge(effect_badge(&effect_type))
+                        .with_select_action(panel_action(&format!(
+                            "effects.select.{}",
+                            effect_type.key()
+                        )))
+                        .with_activate_action(panel_action(&format!(
+                            "effects.apply.{}",
+                            effect_type.key()
+                        )))
+                })
+                .collect()
+        };
+
+        PanelListModel::new("Effects", items).with_subtitle("Effect browser")
+    }
+
+    /// Summarize app runtime status for the console panel until the real log
+    /// buffer is wired into self-hosted panels.
+    pub fn from_app_status(state: &AppState) -> Self {
+        let mut items = Vec::new();
+        if let Some((message, is_error)) = &state.status_hint {
+            let mut item = PanelListItem::new(if *is_error { "Error" } else { "Status" })
+                .with_subtitle(message.clone());
+            if *is_error {
+                item = item.with_badge("!");
+            }
+            items.push(item);
+        }
+
+        let sequence_label = state
+            .sequence
+            .as_ref()
+            .map(|sequence| sequence.name.clone())
+            .unwrap_or_else(|| "No sequence".to_string());
+        items.push(
+            PanelListItem::new("Sequence")
+                .with_subtitle(sequence_label)
+                .with_badge(format!("F{}", state.current_frame().max(0))),
+        );
+        items.push(
+            PanelListItem::new("Timeline")
+                .with_subtitle(format!("End frame {}", state.last_content_frame().max(0))),
+        );
+        items.push(
+            PanelListItem::new("Assets").with_subtitle(if state.asset_library.is_some() {
+                "Library connected"
+            } else {
+                "Library disconnected"
+            }),
+        );
+
+        PanelListModel::new("Console", items).with_subtitle("Runtime messages")
+    }
 }
 
 /// Timeline panel data in frame space.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TimelinePanelModel {
     pub tracks: Vec<TimelineTrack>,
     pub playhead_frame: i64,
@@ -106,6 +235,13 @@ impl TimelinePanelModel {
             playhead_frame: sequence.playhead.frame.max(0),
         }
     }
+
+    /// Override the playhead frame when the app playback state is newer than
+    /// the serialized sequence playhead.
+    pub fn with_playhead_frame(mut self, frame: i64) -> Self {
+        self.playhead_frame = frame.max(0);
+        self
+    }
 }
 
 /// Inspector fixture data independent from a concrete property widget tree.
@@ -119,6 +255,31 @@ pub struct InspectorPanelModel {
 }
 
 impl InspectorPanelModel {
+    pub fn from_app_state(state: &AppState) -> Self {
+        let Some(sequence) = state.sequence.as_ref() else {
+            return Self::demo();
+        };
+        let Some(selection) = state.selection.selected_clips.first() else {
+            return Self::demo();
+        };
+        let Some(clip) = clip_for_selection(sequence, selection) else {
+            return Self::demo();
+        };
+
+        let time = state.current_time_code().unwrap_or(sequence.playhead);
+        let opacity = (clip.transform.evaluate_opacity(time) * 100.0).clamp(0.0, 100.0);
+        Self {
+            enabled: !clip.is_disabled,
+            opacity,
+            tint: clip
+                .solid_color
+                .or_else(|| timeline_clip_color(clip, selection.is_video_track))
+                .unwrap_or_else(|| Color::from_hex(0x84B4FF)),
+            tint_area_mode: ColorPickerAreaMode::Wheel,
+            curve_points: vec![CurvePoint::new(0.0, 0.0), CurvePoint::new(1.0, 1.0)],
+        }
+    }
+
     pub fn demo() -> Self {
         Self {
             enabled: true,
@@ -281,6 +442,58 @@ fn timeline_clip_color(clip: &Clip, is_video_track: bool) -> Option<Color> {
     } else {
         Some(Color::from_hex(0x1D587B))
     }
+}
+
+fn panel_item_from_asset(asset: AssetRecord) -> PanelListItem {
+    let badge = asset_kind_badge(&asset.kind);
+    let accent = asset_kind_accent(&asset.kind);
+    let subtitle = asset.path.display().to_string();
+    PanelListItem::new(asset.name)
+        .with_subtitle(subtitle)
+        .with_badge(badge)
+        .with_accent(accent)
+        .with_select_action(panel_action(&format!("assets.select.{}", asset.id)))
+        .with_activate_action(panel_action(&format!("assets.activate.{}", asset.id)))
+}
+
+fn asset_kind_badge(kind: &AssetKind) -> &'static str {
+    match kind {
+        AssetKind::Video => "VID",
+        AssetKind::Audio => "AUD",
+        AssetKind::AdjustmentLayer => "ADJ",
+        AssetKind::SolidColor => "CLR",
+    }
+}
+
+fn asset_kind_accent(kind: &AssetKind) -> Color {
+    match kind {
+        AssetKind::Video => Color::from_hex(0x4B7BE5),
+        AssetKind::Audio => Color::from_hex(0x1D587B),
+        AssetKind::AdjustmentLayer => Color::from_hex(0x6D5DD3),
+        AssetKind::SolidColor => Color::from_hex(0xD946EF),
+    }
+}
+
+fn effect_badge(effect_type: &EffectType) -> &'static str {
+    match effect_type {
+        EffectType::Plugin(_) => "PLG",
+        EffectType::GaussianBlur | EffectType::Sharpen => "GPU",
+        EffectType::Lut3D => "3D",
+        EffectType::ChromaKey | EffectType::LumaKey => "KEY",
+        _ => "FX",
+    }
+}
+
+fn clip_for_selection<'a>(sequence: &'a Sequence, selection: &SelectedClipRef) -> Option<&'a Clip> {
+    let tracks = if selection.is_video_track {
+        &sequence.video_tracks
+    } else {
+        &sequence.audio_tracks
+    };
+    tracks
+        .iter()
+        .find(|track| track.id == selection.track_id)
+        .and_then(|track| track.clips.iter().find(|clip| clip.id == selection.clip_id))
 }
 
 fn panel_list(model: &PanelListModel) -> PanelList {
@@ -551,6 +764,20 @@ mod tests {
     }
 
     #[test]
+    fn app_state_models_are_safe_without_an_open_project() {
+        let state = AppState::new();
+        let models = SelfHostedPanelModels::from_app_state(&state);
+
+        assert!(models.timeline.tracks.is_empty());
+        assert_eq!(models.timeline.playhead_frame, 0);
+        assert_eq!(models.assets.items[0].title, "No project library");
+        assert!(models.assets.items[0].disabled);
+        assert!(!models.effects.items.is_empty());
+        assert_eq!(models.console.title, "Console");
+        assert!(!models.console.items.is_empty());
+    }
+
+    #[test]
     fn demo_timeline_model_has_valid_frame_ranges() {
         let model = demo_timeline_model();
         let mut max_end = 0;
@@ -619,6 +846,75 @@ mod tests {
     }
 
     #[test]
+    fn app_state_models_map_sequence_selection_and_basic_inspector_values() {
+        let mut state = AppState::new();
+        let mut sequence = Sequence::new("edit");
+        let tb = sequence.time_base();
+        let color = Color::from_rgba8(20, 90, 160, 180);
+        let mut clip = Clip::new_solid_color(
+            AssetId::new(),
+            color,
+            TimeCode::new(4, tb),
+            TimeCode::new(18, tb),
+        );
+        clip.is_disabled = true;
+        let clip_id = clip.id;
+        let track_id = sequence.video_tracks[0].id;
+        sequence.video_tracks[0].add_clip(clip).expect("add solid clip");
+        state.sequence = Some(sequence);
+        state.selection.selected_clips.push(SelectedClipRef {
+            track_id,
+            is_video_track: true,
+            clip_id,
+        });
+        state.seek(7);
+
+        let models = SelfHostedPanelModels::from_app_state(&state);
+
+        assert_eq!(models.timeline.playhead_frame, 7);
+        assert!(models.timeline.tracks[0].clips[0].selected);
+        assert!(models.timeline.tracks[0].clips[0].disabled);
+        assert!(!models.inspector.enabled);
+        assert_eq!(models.inspector.opacity, 100.0);
+        assert_eq!(models.inspector.tint.to_rgba8(), color.to_rgba8());
+    }
+
+    #[test]
+    fn asset_panel_model_reads_project_library() {
+        let root = unique_temp_dir("asset-panel-model");
+        let library = AssetLibrary::open(root.clone()).expect("open asset library");
+        let asset_id = library
+            .create_solid_color_asset(Some("Brand Purple"))
+            .expect("create solid color asset");
+        let mut state = AppState::new();
+        state.asset_library = Some(library);
+
+        let models = SelfHostedPanelModels::from_app_state(&state);
+
+        assert_eq!(models.assets.items.len(), 1);
+        assert!(models.assets.activate_prefix.is_none());
+        let item = &models.assets.items[0];
+        assert_eq!(item.title, "Brand Purple");
+        assert_eq!(item.badge.as_deref(), Some("CLR"));
+        assert!(item.select_action.is_some());
+        assert!(item.activate_action.is_some());
+        assert!(item
+            .activate_action
+            .as_ref()
+            .is_some_and(|action| format!("{action:?}").contains(&asset_id.to_string())));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn effect_panel_model_uses_stable_item_actions_without_dynamic_prefix() {
+        let model = PanelListModel::from_effect_registry();
+
+        assert!(model.activate_prefix.is_none());
+        assert!(model.items.iter().any(|item| item.activate_action.is_some()));
+    }
+
+    #[test]
     fn timeline_model_uses_solid_color_clip_color() {
         let mut sequence = Sequence::new("edit");
         let tb = sequence.time_base();
@@ -638,5 +934,13 @@ mod tests {
             model.tracks[0].clips[0].color.map(|c| c.to_rgba8()),
             Some(color.to_rgba8())
         );
+    }
+
+    fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("mondrian-{prefix}-{suffix}"))
     }
 }

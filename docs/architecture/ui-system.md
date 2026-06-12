@@ -50,9 +50,12 @@ application for reusable widgets. `self_hosted::panels` owns panel adapters that
 map application-facing concepts into generic widget view models. The boundary
 type is `SelfHostedPanelModels`: real `AppState` / `EditorState` adapters should
 produce this model, while `SelfHostedPanelModels::demo()` is only a developer
-fixture. Timeline adapters start at `TimelinePanelModel::from_sequence`, which
-maps `mondrian-timeline::Sequence` plus app-layer selection DTOs into widget
-view models and stable-id-backed actions. During the migration, the
+fixture. `SelfHostedPanelModels::from_app_state` is the app-side snapshot
+boundary: it reads the current `AppState`, asset library, effect registry,
+selection state, and timeline sequence into generic widget models. Timeline
+adapters start at `TimelinePanelModel::from_sequence`, which maps
+`mondrian-timeline::Sequence` plus app-layer selection DTOs into widget view
+models and stable-id-backed actions. During the migration, the
 `self_hosted_app` developer binary uses `build_demo_dock_tree()` as the
 integration shell. When the self-hosted UI becomes the product shell, the
 official `mondrian` entrypoint should call into this module with real panel
