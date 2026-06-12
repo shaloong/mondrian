@@ -11,6 +11,9 @@ use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
+const SCROLLBAR_THICKNESS: f32 = 8.0;
+const SCROLLBAR_MIN_THUMB: f32 = 28.0;
+
 /// Action factory for clip selection.
 pub type TimelineClipAction = dyn Fn(TimelineClipRef, &TimelineClip) -> Action;
 
@@ -166,6 +169,9 @@ pub struct TimelineView {
     ruler_height: f32,
     playhead_dragging: bool,
     clip_drag: Option<TimelineClipDrag>,
+    scrollbar_drag: Option<TimelineScrollbarDrag>,
+    horizontal_scrollbar_hovered: bool,
+    vertical_scrollbar_hovered: bool,
     on_clip_select: Option<Box<TimelineClipAction>>,
     on_seek: Option<Box<TimelineSeekAction>>,
     on_clip_move: Option<Box<TimelineClipMoveAction>>,
@@ -179,6 +185,19 @@ struct TimelineClipDrag {
     current_start_frame: i64,
     current_track_index: usize,
     moved: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimelineScrollbarAxis {
+    Horizontal,
+    Vertical,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TimelineScrollbarDrag {
+    axis: TimelineScrollbarAxis,
+    start_pointer: f32,
+    start_scroll: f32,
 }
 
 impl TimelineView {
@@ -202,6 +221,9 @@ impl TimelineView {
             ruler_height: 30.0,
             playhead_dragging: false,
             clip_drag: None,
+            scrollbar_drag: None,
+            horizontal_scrollbar_hovered: false,
+            vertical_scrollbar_hovered: false,
             on_clip_select: None,
             on_seek: None,
             on_clip_move: None,
@@ -307,6 +329,103 @@ impl TimelineView {
         let old = self.scroll_y;
         self.scroll_y = scroll_y.clamp(0.0, self.max_scroll_y());
         (self.scroll_y - old).abs() > 0.01
+    }
+
+    fn horizontal_scrollbar_track_rect(&self) -> Option<Rect> {
+        (self.max_scroll_x() > 0.0 && self.body_rect.width > SCROLLBAR_MIN_THUMB).then_some(
+            Rect::new(
+                self.body_rect.x + 4.0,
+                self.body_rect.y + self.body_rect.height - SCROLLBAR_THICKNESS + 2.0,
+                (self.body_rect.width - SCROLLBAR_THICKNESS - 8.0).max(0.0),
+                (SCROLLBAR_THICKNESS - 4.0).max(1.0),
+            ),
+        )
+    }
+
+    fn vertical_scrollbar_track_rect(&self) -> Option<Rect> {
+        (self.max_scroll_y() > 0.0 && self.body_rect.height > SCROLLBAR_MIN_THUMB).then_some(
+            Rect::new(
+                self.body_rect.x + self.body_rect.width - SCROLLBAR_THICKNESS + 2.0,
+                self.body_rect.y + 4.0,
+                (SCROLLBAR_THICKNESS - 4.0).max(1.0),
+                (self.body_rect.height - SCROLLBAR_THICKNESS - 8.0).max(0.0),
+            ),
+        )
+    }
+
+    fn horizontal_scrollbar_thumb_rect(&self) -> Option<Rect> {
+        let track = self.horizontal_scrollbar_track_rect()?;
+        let content_width = self.content_width();
+        let thumb_width = (self.body_rect.width / content_width * track.width)
+            .max(SCROLLBAR_MIN_THUMB)
+            .min(track.width);
+        let travel = (track.width - thumb_width).max(0.0);
+        let offset_ratio = if self.max_scroll_x() > 0.0 {
+            self.scroll_x / self.max_scroll_x()
+        } else {
+            0.0
+        };
+        Some(Rect::new(
+            track.x + travel * offset_ratio,
+            track.y,
+            thumb_width.min(track.width),
+            track.height,
+        ))
+    }
+
+    fn vertical_scrollbar_thumb_rect(&self) -> Option<Rect> {
+        let track = self.vertical_scrollbar_track_rect()?;
+        let content_height = self.content_height();
+        let thumb_height = (self.body_rect.height / content_height * track.height)
+            .max(SCROLLBAR_MIN_THUMB)
+            .min(track.height);
+        let travel = (track.height - thumb_height).max(0.0);
+        let offset_ratio = if self.max_scroll_y() > 0.0 {
+            self.scroll_y / self.max_scroll_y()
+        } else {
+            0.0
+        };
+        Some(Rect::new(
+            track.x,
+            track.y + travel * offset_ratio,
+            track.width,
+            thumb_height.min(track.height),
+        ))
+    }
+
+    fn scroll_x_for_thumb_delta(&self, delta_x: f32, drag: TimelineScrollbarDrag) -> f32 {
+        let Some(track) = self.horizontal_scrollbar_track_rect() else {
+            return self.scroll_x;
+        };
+        let Some(thumb) = self.horizontal_scrollbar_thumb_rect() else {
+            return self.scroll_x;
+        };
+        let travel = (track.width - thumb.width).max(1.0);
+        drag.start_scroll + (delta_x / travel) * self.max_scroll_x()
+    }
+
+    fn scroll_y_for_thumb_delta(&self, delta_y: f32, drag: TimelineScrollbarDrag) -> f32 {
+        let Some(track) = self.vertical_scrollbar_track_rect() else {
+            return self.scroll_y;
+        };
+        let Some(thumb) = self.vertical_scrollbar_thumb_rect() else {
+            return self.scroll_y;
+        };
+        let travel = (track.height - thumb.height).max(1.0);
+        drag.start_scroll + (delta_y / travel) * self.max_scroll_y()
+    }
+
+    fn set_scrollbar_hovered(&mut self, point: Point) -> bool {
+        let horizontal = self
+            .horizontal_scrollbar_thumb_rect()
+            .is_some_and(|thumb| thumb.contains(point));
+        let vertical =
+            self.vertical_scrollbar_thumb_rect().is_some_and(|thumb| thumb.contains(point));
+        let changed = horizontal != self.horizontal_scrollbar_hovered
+            || vertical != self.vertical_scrollbar_hovered;
+        self.horizontal_scrollbar_hovered = horizontal;
+        self.vertical_scrollbar_hovered = vertical;
+        changed
     }
 
     fn frame_to_x(&self, frame: i64) -> f32 {
@@ -685,6 +804,62 @@ impl TimelineView {
         ];
         ctx.encoder.draw_triangles(&marker, colors.timeline_playhead);
     }
+
+    fn paint_scrollbars(&self, ctx: &mut PaintContext) {
+        let colors = &ctx.theme.colors;
+        let radius = ctx.theme.spacing.radius_full;
+        if let (Some(track), Some(mut thumb)) = (
+            self.horizontal_scrollbar_track_rect(),
+            self.horizontal_scrollbar_thumb_rect(),
+        ) {
+            let dragging = self
+                .scrollbar_drag
+                .is_some_and(|drag| drag.axis == TimelineScrollbarAxis::Horizontal);
+            let active = dragging || self.horizontal_scrollbar_hovered;
+            if active {
+                thumb = Rect::new(thumb.x, thumb.y - 1.0, thumb.width, thumb.height + 2.0);
+            }
+            let mut track_color = colors.scrollbar_thumb;
+            track_color.a *= if active { 0.22 } else { 0.12 };
+            ctx.encoder.draw_rect(track, track_color, radius);
+
+            let mut thumb_color = colors.scrollbar_thumb;
+            thumb_color.a *= if dragging {
+                1.0
+            } else if active {
+                0.82
+            } else {
+                0.62
+            };
+            ctx.encoder.draw_rect(thumb, thumb_color, radius);
+        }
+
+        if let (Some(track), Some(mut thumb)) = (
+            self.vertical_scrollbar_track_rect(),
+            self.vertical_scrollbar_thumb_rect(),
+        ) {
+            let dragging = self
+                .scrollbar_drag
+                .is_some_and(|drag| drag.axis == TimelineScrollbarAxis::Vertical);
+            let active = dragging || self.vertical_scrollbar_hovered;
+            if active {
+                thumb = Rect::new(thumb.x - 1.0, thumb.y, thumb.width + 2.0, thumb.height);
+            }
+            let mut track_color = colors.scrollbar_thumb;
+            track_color.a *= if active { 0.22 } else { 0.12 };
+            ctx.encoder.draw_rect(track, track_color, radius);
+
+            let mut thumb_color = colors.scrollbar_thumb;
+            thumb_color.a *= if dragging {
+                1.0
+            } else if active {
+                0.82
+            } else {
+                0.62
+            };
+            ctx.encoder.draw_rect(thumb, thumb_color, radius);
+        }
+    }
 }
 
 impl Widget for TimelineView {
@@ -725,6 +900,66 @@ impl Widget for TimelineView {
                 if !self.bounds.contains(*position) {
                     return EventResult::Ignored;
                 }
+                if let Some(thumb) = self.horizontal_scrollbar_thumb_rect() {
+                    if thumb.contains(*position) {
+                        self.scrollbar_drag = Some(TimelineScrollbarDrag {
+                            axis: TimelineScrollbarAxis::Horizontal,
+                            start_pointer: position.x,
+                            start_scroll: self.scroll_x,
+                        });
+                        self.horizontal_scrollbar_hovered = true;
+                        ctx.request_pointer_capture(self.id);
+                        ctx.request_repaint();
+                        return EventResult::Handled;
+                    }
+                }
+                if let Some(thumb) = self.vertical_scrollbar_thumb_rect() {
+                    if thumb.contains(*position) {
+                        self.scrollbar_drag = Some(TimelineScrollbarDrag {
+                            axis: TimelineScrollbarAxis::Vertical,
+                            start_pointer: position.y,
+                            start_scroll: self.scroll_y,
+                        });
+                        self.vertical_scrollbar_hovered = true;
+                        ctx.request_pointer_capture(self.id);
+                        ctx.request_repaint();
+                        return EventResult::Handled;
+                    }
+                }
+                if let Some(track) = self.horizontal_scrollbar_track_rect() {
+                    if track.contains(*position) {
+                        let thumb = self.horizontal_scrollbar_thumb_rect();
+                        let page = self.body_rect.width.max(1.0);
+                        let changed = if thumb.is_some_and(|thumb| position.x < thumb.x) {
+                            self.set_scroll_x(self.scroll_x - page)
+                        } else if thumb.is_some_and(|thumb| position.x > thumb.x + thumb.width) {
+                            self.set_scroll_x(self.scroll_x + page)
+                        } else {
+                            false
+                        };
+                        if changed {
+                            ctx.request_repaint();
+                        }
+                        return EventResult::Handled;
+                    }
+                }
+                if let Some(track) = self.vertical_scrollbar_track_rect() {
+                    if track.contains(*position) {
+                        let thumb = self.vertical_scrollbar_thumb_rect();
+                        let page = self.body_rect.height.max(1.0);
+                        let changed = if thumb.is_some_and(|thumb| position.y < thumb.y) {
+                            self.set_scroll_y(self.scroll_y - page)
+                        } else if thumb.is_some_and(|thumb| position.y > thumb.y + thumb.height) {
+                            self.set_scroll_y(self.scroll_y + page)
+                        } else {
+                            false
+                        };
+                        if changed {
+                            ctx.request_repaint();
+                        }
+                        return EventResult::Handled;
+                    }
+                }
                 if self.ruler_rect.contains(*position) {
                     self.playhead_dragging = true;
                     ctx.request_pointer_capture(self.id);
@@ -753,6 +988,24 @@ impl Widget for TimelineView {
                     self.drag_clip_to(*position, ctx);
                     return EventResult::Handled;
                 }
+                if let Some(drag) = self.scrollbar_drag {
+                    let changed = match drag.axis {
+                        TimelineScrollbarAxis::Horizontal => self.set_scroll_x(
+                            self.scroll_x_for_thumb_delta(position.x - drag.start_pointer, drag),
+                        ),
+                        TimelineScrollbarAxis::Vertical => self.set_scroll_y(
+                            self.scroll_y_for_thumb_delta(position.y - drag.start_pointer, drag),
+                        ),
+                    };
+                    if changed {
+                        ctx.request_repaint();
+                    }
+                    return EventResult::Handled;
+                }
+                if self.set_scrollbar_hovered(*position) {
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
                 let hovered = self.hit_clip(*position);
                 if hovered != self.hovered_clip {
                     self.hovered_clip = hovered;
@@ -769,6 +1022,12 @@ impl Widget for TimelineView {
             UiEvent::MouseUp { button: MouseButton::Left, .. } if self.clip_drag.is_some() => {
                 self.finish_clip_drag(ctx);
                 ctx.release_pointer_capture(self.id);
+                return EventResult::Handled;
+            }
+            UiEvent::MouseUp { button: MouseButton::Left, .. } if self.scrollbar_drag.is_some() => {
+                self.scrollbar_drag = None;
+                ctx.release_pointer_capture(self.id);
+                ctx.request_repaint();
                 return EventResult::Handled;
             }
             UiEvent::MouseWheel { delta, position, modifiers } => {
@@ -825,6 +1084,10 @@ impl Widget for TimelineView {
             self.ruler_rect.height + self.body_rect.height,
         ));
         self.paint_playhead(ctx);
+        ctx.encoder.pop_clip();
+
+        ctx.encoder.push_clip(self.body_rect);
+        self.paint_scrollbars(ctx);
         ctx.encoder.pop_clip();
     }
 
@@ -1377,6 +1640,151 @@ mod tests {
             &mut ctx,
         );
         assert!(view.scroll_x() > 0.0);
+    }
+
+    #[test]
+    fn horizontal_scrollbar_thumb_drag_updates_offset_and_releases_capture() {
+        let mut view = TimelineView::new(vec![TimelineTrack::video(
+            "V1",
+            vec![TimelineClip::new("Long", 0, 1000)],
+        )]);
+        view.layout(Rect::new(0.0, 0.0, 320.0, 140.0));
+        let thumb = view
+            .horizontal_scrollbar_thumb_rect()
+            .expect("wide timeline should show horizontal scrollbar");
+        let start = thumb.center();
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let dispatch = |_| {};
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        view.event(
+            &UiEvent::MouseDown {
+                position: start,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Capture(view.id()))
+        );
+        view.event(
+            &UiEvent::MouseMove {
+                position: Point::new(start.x + 30.0, start.y),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert!(view.scroll_x() > 0.0);
+        view.event(
+            &UiEvent::MouseUp {
+                position: Point::new(start.x + 30.0, start.y),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Release(view.id()))
+        );
+    }
+
+    #[test]
+    fn vertical_scrollbar_thumb_drag_updates_offset() {
+        let mut view = TimelineView::new(
+            (0..10).map(|track| TimelineTrack::video(format!("V{track}"), vec![])).collect(),
+        );
+        view.layout(Rect::new(0.0, 0.0, 320.0, 140.0));
+        let thumb = view
+            .vertical_scrollbar_thumb_rect()
+            .expect("many tracks should show vertical scrollbar");
+        let start = thumb.center();
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let dispatch = |_| {};
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        view.event(
+            &UiEvent::MouseDown {
+                position: start,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        view.event(
+            &UiEvent::MouseMove {
+                position: Point::new(start.x, start.y + 24.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert!(view.scroll_y() > 0.0);
+    }
+
+    #[test]
+    fn horizontal_scrollbar_track_click_pages_without_seeking() {
+        let mut view = TimelineView::new(vec![TimelineTrack::video(
+            "V1",
+            vec![TimelineClip::new("Long", 0, 1000)],
+        )])
+        .with_playhead(12);
+        view.layout(Rect::new(0.0, 0.0, 320.0, 140.0));
+        let track = view
+            .horizontal_scrollbar_track_rect()
+            .expect("wide timeline should show horizontal scrollbar");
+        let thumb = view.horizontal_scrollbar_thumb_rect().expect("thumb");
+        let click = Point::new(
+            (thumb.x + thumb.width + 24.0).min(track.x + track.width - 1.0),
+            track.center().y,
+        );
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let dispatch = |_| {};
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        view.event(
+            &UiEvent::MouseDown {
+                position: click,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert!(view.scroll_x() > 0.0);
+        assert_eq!(view.playhead_frame(), 12);
     }
 
     #[test]
