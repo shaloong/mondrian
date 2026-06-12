@@ -7,7 +7,7 @@
 
 use mondrian_assets::{AssetKind, AssetLibrary, AssetRecord};
 use mondrian_core::effect_data::EffectType;
-use mondrian_core::types::{ClipId, TrackId};
+use mondrian_core::types::{AssetId, ClipId, SequenceId, TimeCode, TrackId};
 use mondrian_core::Color;
 use mondrian_editor_state::Action;
 use mondrian_effects::{effect_display_name, effect_library_types};
@@ -66,17 +66,48 @@ impl SelfHostedPanelModels {
         }
     }
 
-    /// Demo fixtures used by developer binaries before the real editor state is
-    /// wired into the self-hosted shell.
-    pub fn demo() -> Self {
+    /// Demo fixtures that keep rich browser panels while sourcing timeline and
+    /// inspector state from an `AppState` snapshot.
+    pub fn demo_from_app_state(state: &AppState) -> Self {
         Self {
             assets: demo_asset_model(),
             effects: demo_effects_model(),
             console: demo_console_model(),
-            timeline: demo_timeline_model(),
-            inspector: InspectorPanelModel::demo(),
+            timeline: state
+                .sequence
+                .as_ref()
+                .map(|sequence| {
+                    TimelinePanelModel::from_sequence(sequence, &state.selection.selected_clips)
+                        .with_playhead_frame(state.current_frame())
+                })
+                .unwrap_or_else(demo_timeline_model),
+            inspector: InspectorPanelModel::from_app_state(state),
         }
     }
+
+    /// Demo fixtures used by developer binaries before the real editor state is
+    /// wired into the self-hosted shell.
+    pub fn demo() -> Self {
+        let state = demo_app_state();
+        Self::demo_from_app_state(&state)
+    }
+}
+
+/// Build a synthetic app state for self-hosted developer shells.
+///
+/// The generated timeline is intentionally real domain data so timeline widget
+/// actions carry stable ids and can be dispatched through `AppState`.
+pub fn demo_app_state() -> AppState {
+    let mut state = AppState::new();
+    let mut sequence = demo_sequence();
+    sequence.playhead = TimeCode::new(76, sequence.time_base());
+
+    if let Some(selection) = demo_selection(&sequence) {
+        state.selection.selected_clips = vec![selection];
+    }
+    state.sequence = Some(sequence);
+    state.seek(76);
+    state
 }
 
 /// List panel data independent from a concrete widget instance.
@@ -638,61 +669,102 @@ fn demo_console_model() -> PanelListModel {
 }
 
 fn demo_timeline_model() -> TimelinePanelModel {
-    TimelinePanelModel {
-        tracks: vec![
-            TimelineTrack::video(
-                "V3",
-                vec![
-                    TimelineClip::new("Adjustment", 36, 84)
-                        .with_color(Color::from_hex(0x6D5DD3))
-                        .with_select_action(panel_action("timeline.select.adjustment")),
-                    TimelineClip::new("Title", 132, 48)
-                        .with_color(Color::from_hex(0x4B7BE5))
-                        .with_select_action(panel_action("timeline.select.title")),
-                ],
-            ),
-            TimelineTrack::video(
-                "V2",
-                vec![
-                    TimelineClip::new("B-roll", 18, 72)
-                        .with_color(Color::from_hex(0x2C7A7B))
-                        .with_select_action(panel_action("timeline.select.broll")),
-                    TimelineClip::new("Overlay", 112, 56)
-                        .with_color(Color::from_hex(0x805AD5))
-                        .selected(true)
-                        .with_select_action(panel_action("timeline.select.overlay")),
-                ],
-            ),
-            TimelineTrack::video(
-                "V1",
-                vec![
-                    TimelineClip::new("Interview", 0, 96)
-                        .with_color(Color::from_hex(0x1E3A5F))
-                        .with_select_action(panel_action("timeline.select.interview")),
-                    TimelineClip::new("Cutaway", 104, 72)
-                        .with_color(Color::from_hex(0x2F855A))
-                        .with_select_action(panel_action("timeline.select.cutaway")),
-                    TimelineClip::new("Outro", 190, 44)
-                        .with_color(Color::from_hex(0x744210))
-                        .with_select_action(panel_action("timeline.select.outro")),
-                ],
-            ),
-            TimelineTrack::audio(
-                "A1",
-                vec![TimelineClip::new("Dialogue", 0, 176)
-                    .with_color(Color::from_hex(0x1D587B))
-                    .with_select_action(panel_action("timeline.select.dialogue"))],
-            ),
-            TimelineTrack::audio(
-                "A2",
-                vec![TimelineClip::new("Music Bed", 24, 210)
-                    .with_color(Color::from_hex(0x2B6CB0))
-                    .with_select_action(panel_action("timeline.select.music"))],
-            ),
-        ],
-        playhead_frame: 76,
-        ..TimelinePanelModel::default()
+    let sequence = demo_sequence();
+    let selected = demo_selection(&sequence).into_iter().collect::<Vec<_>>();
+    TimelinePanelModel::from_sequence(&sequence, &selected).with_playhead_frame(76)
+}
+
+fn demo_sequence() -> Sequence {
+    let mut sequence = Sequence::new("Demo edit");
+    while sequence.video_tracks.len() < 3 {
+        sequence.add_video_track();
     }
+    while sequence.audio_tracks.len() < 2 {
+        sequence.add_audio_track();
+    }
+    sequence.video_tracks[0].name = "V3".to_string();
+    sequence.video_tracks[1].name = "V2".to_string();
+    sequence.video_tracks[2].name = "V1".to_string();
+    sequence.audio_tracks[0].name = "A1".to_string();
+    sequence.audio_tracks[1].name = "A2".to_string();
+
+    let tb = sequence.time_base();
+    let nested_id = SequenceId::new();
+
+    let mut adjustment =
+        Clip::new_adjustment_layer(AssetId::new(), TimeCode::new(36, tb), TimeCode::new(84, tb));
+    adjustment.label = Some("Adjustment".to_string());
+    sequence.video_tracks[0].add_clip(adjustment).expect("add adjustment");
+
+    let mut title = Clip::new_nested_sequence(
+        nested_id,
+        TimeCode::new(132, tb),
+        TimeCode::new(48, tb),
+        Some("Title".to_string()),
+    );
+    title.solid_color = Some(Color::from_hex(0x4B7BE5));
+    sequence.video_tracks[0].add_clip(title).expect("add title");
+
+    let mut b_roll = Clip::new(AssetId::new(), TimeCode::new(18, tb), TimeCode::new(72, tb));
+    b_roll.label = Some("B-roll".to_string());
+    b_roll.solid_color = Some(Color::from_hex(0x2C7A7B));
+    sequence.video_tracks[1].add_clip(b_roll).expect("add b-roll");
+
+    let mut overlay = Clip::new_solid_color(
+        AssetId::new(),
+        Color::from_hex(0x805AD5),
+        TimeCode::new(112, tb),
+        TimeCode::new(56, tb),
+    );
+    overlay.label = Some("Overlay".to_string());
+    sequence.video_tracks[1].add_clip(overlay).expect("add overlay");
+
+    let mut interview = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(96, tb));
+    interview.label = Some("Interview".to_string());
+    sequence.video_tracks[2].add_clip(interview).expect("add interview");
+
+    let mut cutaway = Clip::new(
+        AssetId::new(),
+        TimeCode::new(104, tb),
+        TimeCode::new(72, tb),
+    );
+    cutaway.label = Some("Cutaway".to_string());
+    cutaway.solid_color = Some(Color::from_hex(0x2F855A));
+    sequence.video_tracks[2].add_clip(cutaway).expect("add cutaway");
+
+    let mut outro = Clip::new(
+        AssetId::new(),
+        TimeCode::new(190, tb),
+        TimeCode::new(44, tb),
+    );
+    outro.label = Some("Outro".to_string());
+    outro.solid_color = Some(Color::from_hex(0x744210));
+    sequence.video_tracks[2].add_clip(outro).expect("add outro");
+
+    let mut dialogue = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(176, tb));
+    dialogue.label = Some("Dialogue".to_string());
+    sequence.audio_tracks[0].add_clip(dialogue).expect("add dialogue");
+
+    let mut music = Clip::new(
+        AssetId::new(),
+        TimeCode::new(24, tb),
+        TimeCode::new(210, tb),
+    );
+    music.label = Some("Music Bed".to_string());
+    music.solid_color = Some(Color::from_hex(0x2B6CB0));
+    sequence.audio_tracks[1].add_clip(music).expect("add music");
+
+    sequence
+}
+
+fn demo_selection(sequence: &Sequence) -> Option<SelectedClipRef> {
+    sequence.video_tracks.get(1).and_then(|track| {
+        track.clips.get(1).map(|clip| SelectedClipRef {
+            track_id: track.id,
+            is_video_track: true,
+            clip_id: clip.id,
+        })
+    })
 }
 
 fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
@@ -883,6 +955,27 @@ mod tests {
 
         assert!(model.playhead_frame >= 0);
         assert!(model.playhead_frame <= max_end);
+    }
+
+    #[test]
+    fn demo_timeline_model_carries_stable_clip_identity() {
+        let model = demo_timeline_model();
+        let identity = model
+            .clip_identity(TimelineClipRef { track_index: 1, clip_index: 1 })
+            .expect("demo overlay clip identity");
+        let movement = model
+            .move_payload(TimelineClipMove {
+                clip_ref: TimelineClipRef { track_index: 1, clip_index: 1 },
+                old_start_frame: 112,
+                new_start_frame: 120,
+                new_track_index: 2,
+            })
+            .expect("demo move payload");
+
+        assert!(identity.is_video_track);
+        assert_eq!(movement.clip_id, identity.clip_id);
+        assert_eq!(movement.frame, 120);
+        assert_eq!(movement.target_track_id, model.track_refs[2].track_id);
     }
 
     #[test]

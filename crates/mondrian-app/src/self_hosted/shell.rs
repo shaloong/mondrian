@@ -175,6 +175,12 @@ impl SelfHostedAppRoot {
     pub fn dock(&self) -> &DockSplitter {
         &self.dock
     }
+
+    /// Replace panel contents from a fresh model snapshot while preserving the
+    /// root widget id and menu state.
+    pub fn set_models(&mut self, models: SelfHostedPanelModels) {
+        self.dock = build_dock_tree(models);
+    }
 }
 
 impl Widget for SelfHostedAppRoot {

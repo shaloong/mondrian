@@ -65,6 +65,9 @@ this module with real panel models instead of moving logic back into `src/bin`.
 The developer shell keeps demo panels visible for component testing, but its
 action sink already dispatches through `AppState::dispatch_action` so menu and
 timeline UI actions exercise the same app boundary as the future product shell.
+Its timeline fixture is backed by a synthetic `AppState` sequence, so clip
+selection, movement, trimming, and seeking carry stable ids and can refresh the
+dock from a new model snapshot after dispatch.
 
 Selection DTOs that describe editor state, such as `SelectedClipRef`, live in
 `mondrian-app::app` rather than legacy UI modules. Legacy egui panels and
