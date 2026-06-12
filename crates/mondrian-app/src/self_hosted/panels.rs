@@ -7,6 +7,7 @@
 
 use mondrian_assets::{AssetKind, AssetLibrary, AssetRecord};
 use mondrian_core::effect_data::EffectType;
+use mondrian_core::types::{ClipId, TrackId};
 use mondrian_core::Color;
 use mondrian_editor_state::Action;
 use mondrian_effects::{effect_display_name, effect_library_types};
@@ -22,9 +23,15 @@ use mondrian_ui_widgets::panel_slot::SlotKind;
 use mondrian_ui_widgets::{
     Checkbox, ColorPickerAreaMode, ColorPickerTrigger, CurveEditor, CurvePoint, DockPanel,
     PanelList, PanelListItem, PropertyPanel, PropertyRow, PropertySection, ScrollView, Slider,
-    TimelineClip, TimelineClipRef, TimelineTrack, TimelineView,
+    TimelineClip, TimelineClipMove, TimelineClipRef, TimelineClipTrim, TimelineTrack,
+    TimelineTrimEdge, TimelineView,
 };
 
+use crate::app::ui_actions::{
+    timeline_move_clip_action, timeline_seek_action, timeline_select_clip_action,
+    timeline_trim_clip_action, TimelineMoveClipPayload, TimelineSelectClipPayload,
+    TimelineTrimClipPayload, TimelineTrimPayloadEdge,
+};
 use crate::app::{AppState, SelectedClipRef};
 
 /// Complete set of view models needed by the self-hosted panel shell.
@@ -212,6 +219,14 @@ impl PanelListModel {
 pub struct TimelinePanelModel {
     pub tracks: Vec<TimelineTrack>,
     pub playhead_frame: i64,
+    track_refs: Vec<TimelineTrackRef>,
+    clip_refs: Vec<Vec<ClipId>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TimelineTrackRef {
+    track_id: TrackId,
+    is_video_track: bool,
 }
 
 impl TimelinePanelModel {
@@ -221,18 +236,35 @@ impl TimelinePanelModel {
     /// app-side boundary that carries stable track/clip ids into emitted
     /// actions.
     pub fn from_sequence(sequence: &Sequence, selected_clips: &[SelectedClipRef]) -> Self {
-        let video_tracks = sequence
-            .video_tracks
-            .iter()
-            .map(|track| timeline_track_from_sequence_track(track, true, selected_clips));
-        let audio_tracks = sequence
-            .audio_tracks
-            .iter()
-            .map(|track| timeline_track_from_sequence_track(track, false, selected_clips));
+        let video_tracks = sequence.video_tracks.iter().map(|track| {
+            (
+                TimelineTrackRef { track_id: track.id, is_video_track: true },
+                track.clips.iter().map(|clip| clip.id).collect::<Vec<_>>(),
+                timeline_track_from_sequence_track(track, true, selected_clips),
+            )
+        });
+        let audio_tracks = sequence.audio_tracks.iter().map(|track| {
+            (
+                TimelineTrackRef { track_id: track.id, is_video_track: false },
+                track.clips.iter().map(|clip| clip.id).collect::<Vec<_>>(),
+                timeline_track_from_sequence_track(track, false, selected_clips),
+            )
+        });
+
+        let mut tracks = Vec::new();
+        let mut track_refs = Vec::new();
+        let mut clip_refs = Vec::new();
+        for (track_ref, clip_ids, track) in video_tracks.chain(audio_tracks) {
+            track_refs.push(track_ref);
+            clip_refs.push(clip_ids);
+            tracks.push(track);
+        }
 
         Self {
-            tracks: video_tracks.chain(audio_tracks).collect(),
+            tracks,
             playhead_frame: sequence.playhead.frame.max(0),
+            track_refs,
+            clip_refs,
         }
     }
 
@@ -241,6 +273,40 @@ impl TimelinePanelModel {
     pub fn with_playhead_frame(mut self, frame: i64) -> Self {
         self.playhead_frame = frame.max(0);
         self
+    }
+
+    fn clip_identity(&self, clip_ref: TimelineClipRef) -> Option<TimelineSelectClipPayload> {
+        let track = *self.track_refs.get(clip_ref.track_index)?;
+        let clip_id = *self.clip_refs.get(clip_ref.track_index)?.get(clip_ref.clip_index)?;
+        Some(TimelineSelectClipPayload {
+            track_id: track.track_id,
+            is_video_track: track.is_video_track,
+            clip_id,
+        })
+    }
+
+    fn move_payload(&self, movement: TimelineClipMove) -> Option<TimelineMoveClipPayload> {
+        let clip = self.clip_identity(movement.clip_ref)?;
+        let target = *self.track_refs.get(movement.new_track_index)?;
+        Some(TimelineMoveClipPayload {
+            target_track_id: target.track_id,
+            is_video_track: target.is_video_track,
+            clip_id: clip.clip_id,
+            frame: movement.new_start_frame.max(0),
+        })
+    }
+
+    fn trim_payload(&self, trim: TimelineClipTrim) -> Option<TimelineTrimClipPayload> {
+        let clip = self.clip_identity(trim.clip_ref)?;
+        let edge = match trim.edge {
+            TimelineTrimEdge::In => TimelineTrimPayloadEdge::In,
+            TimelineTrimEdge::Out => TimelineTrimPayloadEdge::Out,
+        };
+        let frame = match trim.edge {
+            TimelineTrimEdge::In => trim.new_start_frame,
+            TimelineTrimEdge::Out => trim.new_start_frame + trim.new_duration_frames,
+        };
+        Some(TimelineTrimClipPayload { clip_id: clip.clip_id, edge, frame: frame.max(0) })
     }
 }
 
@@ -625,41 +691,66 @@ fn demo_timeline_model() -> TimelinePanelModel {
             ),
         ],
         playhead_frame: 76,
+        ..TimelinePanelModel::default()
     }
 }
 
 fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
+    let action_model = model.clone();
     TimelineView::new(model.tracks.clone())
         .with_playhead(model.playhead_frame)
-        .on_clip_select(|clip_ref, clip| {
-            timeline_clip_action("timeline.select", clip_ref, &clip.label)
+        .on_clip_select({
+            let action_model = action_model.clone();
+            move |clip_ref, clip| {
+                action_model
+                    .clip_identity(clip_ref)
+                    .map(timeline_select_clip_action)
+                    .unwrap_or_else(|| {
+                        timeline_clip_action("timeline.select", clip_ref, &clip.label)
+                    })
+            }
         })
-        .on_clip_move(|movement, clip| {
-            panel_action(&format!(
-                "timeline.move.{}.{}.track{}->track{}.{}->{}.{}",
-                movement.clip_ref.track_index,
-                movement.clip_ref.clip_index,
-                movement.clip_ref.track_index,
-                movement.new_track_index,
-                movement.old_start_frame,
-                movement.new_start_frame,
-                clip.label
-            ))
+        .on_clip_move({
+            let action_model = action_model.clone();
+            move |movement, clip| {
+                action_model
+                    .move_payload(movement)
+                    .map(timeline_move_clip_action)
+                    .unwrap_or_else(|| {
+                        panel_action(&format!(
+                            "timeline.move.{}.{}.track{}->track{}.{}->{}.{}",
+                            movement.clip_ref.track_index,
+                            movement.clip_ref.clip_index,
+                            movement.clip_ref.track_index,
+                            movement.new_track_index,
+                            movement.old_start_frame,
+                            movement.new_start_frame,
+                            clip.label
+                        ))
+                    })
+            }
         })
-        .on_clip_trim(|trim, clip| {
-            panel_action(&format!(
-                "timeline.trim.{}.{}.{:?}.{}+{}->{}+{}.{}",
-                trim.clip_ref.track_index,
-                trim.clip_ref.clip_index,
-                trim.edge,
-                trim.old_start_frame,
-                trim.old_duration_frames,
-                trim.new_start_frame,
-                trim.new_duration_frames,
-                clip.label
-            ))
+        .on_clip_trim({
+            let action_model = action_model.clone();
+            move |trim, clip| {
+                action_model.trim_payload(trim).map(timeline_trim_clip_action).unwrap_or_else(
+                    || {
+                        panel_action(&format!(
+                            "timeline.trim.{}.{}.{:?}.{}+{}->{}+{}.{}",
+                            trim.clip_ref.track_index,
+                            trim.clip_ref.clip_index,
+                            trim.edge,
+                            trim.old_start_frame,
+                            trim.old_duration_frames,
+                            trim.new_start_frame,
+                            trim.new_duration_frames,
+                            clip.label
+                        ))
+                    },
+                )
+            }
         })
-        .on_seek(|frame| panel_action(&format!("timeline.seek.{frame}")))
+        .on_seek(timeline_seek_action)
 }
 
 fn timeline_clip_action(prefix: &str, clip_ref: TimelineClipRef, label: &str) -> Action {

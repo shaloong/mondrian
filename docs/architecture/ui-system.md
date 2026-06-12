@@ -68,6 +68,13 @@ Selection DTOs that describe editor state, such as `SelectedClipRef`, live in
 self-hosted adapters may both depend on these app-layer DTOs, but app/domain
 state must not depend on widget modules.
 
+UI actions that need stable application ids use `mondrian-app::app::ui_actions`.
+Self-hosted panel adapters translate domain-light widget events, such as
+timeline clip indices, into `Action::Custom` payloads carrying track and clip
+ids. `AppState::dispatch_action` consumes that app-layer protocol and calls the
+existing timeline command methods. This keeps reusable widgets index-based and
+UI-agnostic while avoiding string parsing in business logic.
+
 ## Event Requests
 
 Widgets can request side effects while handling an event:

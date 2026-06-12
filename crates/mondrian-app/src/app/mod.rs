@@ -64,6 +64,7 @@ mod project_lifecycle;
 mod selection;
 mod timeline_commands;
 mod timeline_editing;
+pub mod ui_actions;
 
 use audio_rendering::*;
 pub use selection::SelectedClipRef;
