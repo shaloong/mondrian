@@ -7,6 +7,9 @@
 
 use mondrian_core::Color;
 use mondrian_editor_state::Action;
+use mondrian_timeline::clip::Clip;
+use mondrian_timeline::sequence::Sequence;
+use mondrian_timeline::track::Track;
 use mondrian_ui_core::types::SplitDirection;
 use mondrian_ui_core::widgets::ColoredBox;
 use mondrian_ui_core::Widget;
@@ -18,6 +21,8 @@ use mondrian_ui_widgets::{
     PanelList, PanelListItem, PropertyPanel, PropertyRow, PropertySection, ScrollView, Slider,
     TimelineClip, TimelineClipRef, TimelineTrack, TimelineView,
 };
+
+use crate::app::SelectedClipRef;
 
 /// Complete set of view models needed by the self-hosted panel shell.
 #[derive(Debug, Clone)]
@@ -78,6 +83,29 @@ impl PanelListModel {
 pub struct TimelinePanelModel {
     pub tracks: Vec<TimelineTrack>,
     pub playhead_frame: i64,
+}
+
+impl TimelinePanelModel {
+    /// Map the current timeline sequence into self-hosted timeline view models.
+    ///
+    /// The widget layer stays index-based and domain-light; this adapter is the
+    /// app-side boundary that carries stable track/clip ids into emitted
+    /// actions.
+    pub fn from_sequence(sequence: &Sequence, selected_clips: &[SelectedClipRef]) -> Self {
+        let video_tracks = sequence
+            .video_tracks
+            .iter()
+            .map(|track| timeline_track_from_sequence_track(track, true, selected_clips));
+        let audio_tracks = sequence
+            .audio_tracks
+            .iter()
+            .map(|track| timeline_track_from_sequence_track(track, false, selected_clips));
+
+        Self {
+            tracks: video_tracks.chain(audio_tracks).collect(),
+            playhead_frame: sequence.playhead.frame.max(0),
+        }
+    }
 }
 
 /// Inspector fixture data independent from a concrete property widget tree.
@@ -175,6 +203,83 @@ fn panel_content_for_slot(kind: SlotKind, models: &SelfHostedPanelModels) -> Box
         SlotKind::Timeline => Box::new(timeline_panel(&models.timeline)),
         SlotKind::Project => Box::new(ColoredBox::new(Color::from_hex(0x1E3A2A), 1.0, 1.0)),
         _ => Box::new(ColoredBox::new(Color::from_hex(0x1A1A1A), 1.0, 1.0)),
+    }
+}
+
+fn timeline_track_from_sequence_track(
+    track: &Track,
+    is_video_track: bool,
+    selected_clips: &[SelectedClipRef],
+) -> TimelineTrack {
+    let muted = track.is_muted;
+    let locked = track.is_locked;
+    let clips = track
+        .clips
+        .iter()
+        .map(|clip| timeline_clip_from_sequence_clip(track, is_video_track, clip, selected_clips))
+        .collect();
+
+    let track = if is_video_track {
+        TimelineTrack::video(track.name.clone(), clips)
+    } else {
+        TimelineTrack::audio(track.name.clone(), clips)
+    };
+    track.muted(muted).locked(locked)
+}
+
+fn timeline_clip_from_sequence_clip(
+    track: &Track,
+    is_video_track: bool,
+    clip: &Clip,
+    selected_clips: &[SelectedClipRef],
+) -> TimelineClip {
+    let selected = selected_clips.iter().any(|selection| {
+        selection.track_id == track.id
+            && selection.clip_id == clip.id
+            && selection.is_video_track == is_video_track
+    });
+    let label = clip.label.clone().unwrap_or_else(|| default_clip_label(clip));
+    let mut view = TimelineClip::new(
+        label,
+        clip.position.frame.max(0),
+        clip.duration.frame.max(1),
+    )
+    .selected(selected)
+    .disabled(clip.is_disabled)
+    .with_select_action(panel_action(&format!(
+        "timeline.select.{}.{}",
+        track.id, clip.id
+    )));
+    if let Some(color) = timeline_clip_color(clip, is_video_track) {
+        view = view.with_color(color);
+    }
+    view
+}
+
+fn default_clip_label(clip: &Clip) -> String {
+    if clip.is_adjustment_layer() {
+        "Adjustment".to_string()
+    } else if clip.is_nested_sequence() {
+        "Nested Sequence".to_string()
+    } else if clip.is_solid_color() {
+        "Solid Color".to_string()
+    } else {
+        format!("Clip {}", clip.id)
+    }
+}
+
+fn timeline_clip_color(clip: &Clip, is_video_track: bool) -> Option<Color> {
+    if let Some(color) = clip.solid_color {
+        return Some(color);
+    }
+    if clip.is_adjustment_layer() {
+        Some(Color::from_hex(0x6D5DD3))
+    } else if clip.is_nested_sequence() {
+        Some(Color::from_hex(0x4B7BE5))
+    } else if is_video_track {
+        Some(Color::from_hex(0x1E3A5F))
+    } else {
+        Some(Color::from_hex(0x1D587B))
     }
 }
 
@@ -432,6 +537,7 @@ fn inspector_curve_action(points: &[CurvePoint]) -> Action {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mondrian_core::types::{AssetId, TimeCode};
 
     #[test]
     fn demo_panel_models_cover_primary_editor_surfaces() {
@@ -459,5 +565,78 @@ mod tests {
 
         assert!(model.playhead_frame >= 0);
         assert!(model.playhead_frame <= max_end);
+    }
+
+    #[test]
+    fn timeline_model_maps_sequence_tracks_clips_and_selection() {
+        let mut sequence = Sequence::new("edit");
+        let tb = sequence.time_base();
+        sequence.playhead = TimeCode::new(42, tb);
+
+        let mut video = Clip::new(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(20, tb));
+        video.label = Some("Interview".to_string());
+        let video_id = video.id;
+        let video_track_id = sequence.video_tracks[0].id;
+        sequence.video_tracks[0].add_clip(video).expect("add video clip");
+
+        let mut audio = Clip::new(AssetId::new(), TimeCode::new(12, tb), TimeCode::new(48, tb));
+        audio.label = Some("Dialogue".to_string());
+        audio.is_disabled = true;
+        sequence.audio_tracks[0].add_clip(audio).expect("add audio clip");
+        sequence.audio_tracks[0].is_muted = true;
+        sequence.audio_tracks[0].is_locked = true;
+
+        let selected = SelectedClipRef {
+            track_id: video_track_id,
+            is_video_track: true,
+            clip_id: video_id,
+        };
+        let model = TimelinePanelModel::from_sequence(&sequence, &[selected]);
+
+        assert_eq!(model.playhead_frame, 42);
+        assert_eq!(
+            model.tracks.len(),
+            sequence.video_tracks.len() + sequence.audio_tracks.len()
+        );
+        assert_eq!(model.tracks[0].label, "V1");
+        assert_eq!(
+            model.tracks[0].kind,
+            mondrian_ui_widgets::TimelineTrackKind::Video
+        );
+        assert_eq!(model.tracks[0].clips[0].label, "Interview");
+        assert_eq!(model.tracks[0].clips[0].start_frame, 10);
+        assert_eq!(model.tracks[0].clips[0].duration_frames, 20);
+        assert!(model.tracks[0].clips[0].selected);
+
+        let first_audio = sequence.video_tracks.len();
+        assert_eq!(
+            model.tracks[first_audio].kind,
+            mondrian_ui_widgets::TimelineTrackKind::Audio
+        );
+        assert!(model.tracks[first_audio].muted);
+        assert!(model.tracks[first_audio].locked);
+        assert!(model.tracks[first_audio].clips[0].disabled);
+    }
+
+    #[test]
+    fn timeline_model_uses_solid_color_clip_color() {
+        let mut sequence = Sequence::new("edit");
+        let tb = sequence.time_base();
+        let color = Color::from_rgba8(12, 34, 56, 200);
+        let solid = Clip::new_solid_color(
+            AssetId::new(),
+            color,
+            TimeCode::new(0, tb),
+            TimeCode::new(30, tb),
+        );
+        sequence.video_tracks[0].add_clip(solid).expect("add solid clip");
+
+        let model = TimelinePanelModel::from_sequence(&sequence, &[]);
+
+        assert_eq!(model.tracks[0].clips[0].label, "纯色层");
+        assert_eq!(
+            model.tracks[0].clips[0].color.map(|c| c.to_rgba8()),
+            Some(color.to_rgba8())
+        );
     }
 }
