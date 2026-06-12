@@ -33,6 +33,7 @@ pub struct TimelineClipMove {
     pub clip_ref: TimelineClipRef,
     pub old_start_frame: i64,
     pub new_start_frame: i64,
+    pub new_track_index: usize,
 }
 
 /// Track category used only for styling.
@@ -175,6 +176,8 @@ struct TimelineClipDrag {
     clip_ref: TimelineClipRef,
     old_start_frame: i64,
     pointer_offset_frames: i64,
+    current_start_frame: i64,
+    current_track_index: usize,
     moved: bool,
 }
 
@@ -320,8 +323,22 @@ impl TimelineView {
         self.body_rect.y + track_index as f32 * self.track_height - self.scroll_y
     }
 
+    fn track_index_at(&self, point: Point) -> Option<usize> {
+        if !self.body_rect.contains(point) {
+            return None;
+        }
+        let index = ((point.y - self.body_rect.y + self.scroll_y) / self.track_height).floor();
+        (index >= 0.0)
+            .then_some(index as usize)
+            .filter(|index| *index < self.tracks.len())
+    }
+
     fn clip_rect(&self, track_index: usize, clip: &TimelineClip) -> Rect {
-        let x = self.frame_to_x(clip.start_frame);
+        self.clip_rect_at(track_index, clip.start_frame, clip)
+    }
+
+    fn clip_rect_at(&self, track_index: usize, start_frame: i64, clip: &TimelineClip) -> Rect {
+        let x = self.frame_to_x(start_frame);
         let y = self.track_y(track_index) + 6.0;
         let width = (clip.duration_frames.max(1) as f32 * self.pixels_per_frame).max(8.0);
         Rect::new(x, y, width, self.track_height - 12.0)
@@ -350,14 +367,22 @@ impl TimelineView {
             .and_then(|track| track.clips.get(clip_ref.clip_index))
     }
 
-    fn clip_mut(&mut self, clip_ref: TimelineClipRef) -> Option<&mut TimelineClip> {
-        self.tracks
-            .get_mut(clip_ref.track_index)
-            .and_then(|track| track.clips.get_mut(clip_ref.clip_index))
-    }
-
     fn track_locked(&self, track_index: usize) -> bool {
         self.tracks.get(track_index).is_some_and(|track| track.locked)
+    }
+
+    fn compatible_drag_track(&self, source_track_index: usize, target_track_index: usize) -> usize {
+        let Some(source) = self.tracks.get(source_track_index) else {
+            return source_track_index;
+        };
+        let Some(target) = self.tracks.get(target_track_index) else {
+            return source_track_index;
+        };
+        if target.locked || source.kind != target.kind {
+            source_track_index
+        } else {
+            target_track_index
+        }
     }
 
     fn select_clip_from_input(
@@ -390,6 +415,8 @@ impl TimelineView {
             clip_ref,
             old_start_frame: clip.start_frame,
             pointer_offset_frames: pointer_frame - clip.start_frame,
+            current_start_frame: clip.start_frame,
+            current_track_index: clip_ref.track_index,
             moved: false,
         });
     }
@@ -399,14 +426,21 @@ impl TimelineView {
             return false;
         };
         let new_start_frame = (self.x_to_frame(position.x) - drag.pointer_offset_frames).max(0);
-        let Some(clip) = self.clip_mut(drag.clip_ref) else {
+        if self.clip(drag.clip_ref).is_none() {
             self.clip_drag = None;
             return false;
         };
-        if clip.start_frame == new_start_frame {
+        let target_track_index = self
+            .track_index_at(position)
+            .map(|index| self.compatible_drag_track(drag.clip_ref.track_index, index))
+            .unwrap_or(drag.current_track_index);
+        if drag.current_start_frame == new_start_frame
+            && drag.current_track_index == target_track_index
+        {
             return true;
         }
-        clip.start_frame = new_start_frame;
+        drag.current_start_frame = new_start_frame;
+        drag.current_track_index = target_track_index;
         drag.moved = true;
         self.clip_drag = Some(drag);
         ctx.request_repaint();
@@ -426,9 +460,12 @@ impl TimelineView {
         let movement = TimelineClipMove {
             clip_ref: drag.clip_ref,
             old_start_frame: drag.old_start_frame,
-            new_start_frame: clip.start_frame,
+            new_start_frame: drag.current_start_frame,
+            new_track_index: drag.current_track_index,
         };
-        if movement.old_start_frame != movement.new_start_frame {
+        if movement.old_start_frame != movement.new_start_frame
+            || movement.clip_ref.track_index != movement.new_track_index
+        {
             if let Some(factory) = &self.on_clip_move {
                 (ctx.dispatch)(factory(movement, clip));
             }
@@ -513,7 +550,6 @@ impl TimelineView {
 
     fn paint_tracks(&self, ctx: &mut PaintContext) {
         let colors = &ctx.theme.colors;
-        let spacing = &ctx.theme.spacing;
         for (track_index, track) in self.tracks.iter().enumerate() {
             let y = self.track_y(track_index);
             if y > self.body_rect.y + self.body_rect.height
@@ -555,41 +591,79 @@ impl TimelineView {
             );
 
             for (clip_index, clip) in track.clips.iter().enumerate() {
+                let clip_ref = TimelineClipRef { track_index, clip_index };
+                if self.clip_drag.is_some_and(|drag| drag.clip_ref == clip_ref) {
+                    continue;
+                }
                 let rect = self.clip_rect(track_index, clip);
                 if rect.x > self.body_rect.x + self.body_rect.width
                     || rect.x + rect.width < self.body_rect.x
                 {
                     continue;
                 }
-                let clip_ref = TimelineClipRef { track_index, clip_index };
-                let selected = clip.selected || self.selected_clip == Some(clip_ref);
-                let hovered = self.hovered_clip == Some(clip_ref);
-                let mut fill = clip.color.unwrap_or(match track.kind {
-                    TimelineTrackKind::Video => colors.timeline_clip_video,
-                    TimelineTrackKind::Audio => colors.timeline_clip_audio,
-                });
-                if clip.disabled {
-                    fill.a *= 0.45;
-                } else if hovered {
-                    fill = fill.lerp(colors.primary, 0.18);
-                }
-                if selected {
-                    let mut ring = colors.ring;
-                    ring.a = 0.55;
-                    ctx.encoder.draw_rect(rect.inset(-1.5, -1.5), ring, spacing.radius_sm + 1.5);
-                }
-                ctx.encoder.draw_rect(rect, fill, spacing.radius_sm);
-                ctx.encoder.push_clip(rect.inset(6.0, 2.0));
-                ctx.encoder.draw_text_box(
-                    &clip.label,
-                    ctx.theme.typography.body.font_size,
-                    snap_point(Point::new(rect.x + 8.0, rect.y + 10.0)),
-                    (rect.width - 16.0).max(0.0),
-                    colors.foreground,
-                );
-                ctx.encoder.pop_clip();
+                self.paint_clip(ctx, clip_ref, clip, rect, false);
             }
         }
+
+        if let Some(drag) = self.clip_drag {
+            if let Some(clip) = self.clip(drag.clip_ref) {
+                let rect =
+                    self.clip_rect_at(drag.current_track_index, drag.current_start_frame, clip);
+                if rect.x <= self.body_rect.x + self.body_rect.width
+                    && rect.x + rect.width >= self.body_rect.x
+                    && rect.y <= self.body_rect.y + self.body_rect.height
+                    && rect.y + rect.height >= self.body_rect.y
+                {
+                    self.paint_clip(ctx, drag.clip_ref, clip, rect, true);
+                }
+            }
+        }
+    }
+
+    fn paint_clip(
+        &self,
+        ctx: &mut PaintContext,
+        clip_ref: TimelineClipRef,
+        clip: &TimelineClip,
+        rect: Rect,
+        dragging: bool,
+    ) {
+        let colors = &ctx.theme.colors;
+        let spacing = &ctx.theme.spacing;
+        let track_kind = self
+            .tracks
+            .get(clip_ref.track_index)
+            .map(|track| track.kind)
+            .unwrap_or(TimelineTrackKind::Video);
+        let selected = clip.selected || self.selected_clip == Some(clip_ref) || dragging;
+        let hovered = self.hovered_clip == Some(clip_ref);
+        let mut fill = clip.color.unwrap_or(match track_kind {
+            TimelineTrackKind::Video => colors.timeline_clip_video,
+            TimelineTrackKind::Audio => colors.timeline_clip_audio,
+        });
+        if clip.disabled {
+            fill.a *= 0.45;
+        } else if dragging {
+            fill = fill.lerp(colors.primary, 0.24);
+            fill.a *= 0.92;
+        } else if hovered {
+            fill = fill.lerp(colors.primary, 0.18);
+        }
+        if selected {
+            let mut ring = colors.ring;
+            ring.a = if dragging { 0.72 } else { 0.55 };
+            ctx.encoder.draw_rect(rect.inset(-1.5, -1.5), ring, spacing.radius_sm + 1.5);
+        }
+        ctx.encoder.draw_rect(rect, fill, spacing.radius_sm);
+        ctx.encoder.push_clip(rect.inset(6.0, 2.0));
+        ctx.encoder.draw_text_box(
+            &clip.label,
+            ctx.theme.typography.body.font_size,
+            snap_point(Point::new(rect.x + 8.0, rect.y + 10.0)),
+            (rect.width - 16.0).max(0.0),
+            colors.foreground,
+        );
+        ctx.encoder.pop_clip();
     }
 
     fn paint_playhead(&self, ctx: &mut PaintContext) {
@@ -951,7 +1025,7 @@ mod tests {
     }
 
     #[test]
-    fn dragging_clip_moves_view_model_and_commits_move_on_release() {
+    fn dragging_clip_previews_without_mutating_model_and_commits_move_on_release() {
         let moves = RefCell::new(Vec::new());
         let dispatch = |action| moves.borrow_mut().push(action);
         let mut view = TimelineView::new(vec![TimelineTrack::video(
@@ -961,8 +1035,11 @@ mod tests {
         .on_clip_move(|movement, _clip| Action::Custom {
             namespace: "timeline.move".into(),
             name: format!(
-                "{}:{}->{}",
-                movement.clip_ref.track_index, movement.old_start_frame, movement.new_start_frame
+                "{}->{}:{}->{}",
+                movement.clip_ref.track_index,
+                movement.new_track_index,
+                movement.old_start_frame,
+                movement.new_start_frame
             ),
             payload: Default::default(),
         });
@@ -1000,7 +1077,10 @@ mod tests {
             },
             &mut ctx,
         );
-        assert_eq!(view.tracks[0].clips[0].start_frame, 10);
+        assert_eq!(view.tracks[0].clips[0].start_frame, 0);
+        assert!(view
+            .clip_drag
+            .is_some_and(|drag| drag.current_start_frame == 10 && drag.current_track_index == 0));
         assert!(moves.borrow().is_empty());
 
         view.event(
@@ -1020,7 +1100,145 @@ mod tests {
             moves.borrow().as_slice(),
             &[Action::Custom {
                 namespace: "timeline.move".into(),
-                name: "0:0->10".into(),
+                name: "0->0:0->10".into(),
+                payload: Default::default(),
+            }]
+        );
+    }
+
+    #[test]
+    fn dragging_clip_to_compatible_track_commits_target_track() {
+        let moves = RefCell::new(Vec::new());
+        let dispatch = |action| moves.borrow_mut().push(action);
+        let mut view = TimelineView::new(vec![
+            TimelineTrack::video("V1", vec![TimelineClip::new("Intro", 0, 24)]),
+            TimelineTrack::video("V2", vec![]),
+        ])
+        .on_clip_move(|movement, _clip| Action::Custom {
+            namespace: "timeline.move".into(),
+            name: format!(
+                "{}->{}:{}->{}",
+                movement.clip_ref.track_index,
+                movement.new_track_index,
+                movement.old_start_frame,
+                movement.new_start_frame
+            ),
+            payload: Default::default(),
+        });
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        view.event(
+            &UiEvent::MouseDown {
+                position: Point::new(108.0, 42.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        view.event(
+            &UiEvent::MouseMove {
+                position: Point::new(148.0, 92.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert!(view
+            .clip_drag
+            .is_some_and(|drag| drag.current_start_frame == 10 && drag.current_track_index == 1));
+
+        view.event(
+            &UiEvent::MouseUp {
+                position: Point::new(148.0, 92.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(
+            moves.borrow().as_slice(),
+            &[Action::Custom {
+                namespace: "timeline.move".into(),
+                name: "0->1:0->10".into(),
+                payload: Default::default(),
+            }]
+        );
+    }
+
+    #[test]
+    fn dragging_clip_to_incompatible_track_keeps_source_track() {
+        let moves = RefCell::new(Vec::new());
+        let dispatch = |action| moves.borrow_mut().push(action);
+        let mut view = TimelineView::new(vec![
+            TimelineTrack::video("V1", vec![TimelineClip::new("Intro", 0, 24)]),
+            TimelineTrack::audio("A1", vec![]),
+        ])
+        .on_clip_move(|movement, _clip| Action::Custom {
+            namespace: "timeline.move".into(),
+            name: format!(
+                "{}->{}:{}->{}",
+                movement.clip_ref.track_index,
+                movement.new_track_index,
+                movement.old_start_frame,
+                movement.new_start_frame
+            ),
+            payload: Default::default(),
+        });
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        view.event(
+            &UiEvent::MouseDown {
+                position: Point::new(108.0, 42.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        view.event(
+            &UiEvent::MouseMove {
+                position: Point::new(148.0, 92.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        view.event(
+            &UiEvent::MouseUp {
+                position: Point::new(148.0, 92.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(
+            moves.borrow().as_slice(),
+            &[Action::Custom {
+                namespace: "timeline.move".into(),
+                name: "0->0:0->10".into(),
                 payload: Default::default(),
             }]
         );

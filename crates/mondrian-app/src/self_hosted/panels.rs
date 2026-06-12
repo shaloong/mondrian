@@ -318,9 +318,11 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
         })
         .on_clip_move(|movement, clip| {
             panel_action(&format!(
-                "timeline.move.{}.{}.{}->{}.{}",
+                "timeline.move.{}.{}.track{}->track{}.{}->{}.{}",
                 movement.clip_ref.track_index,
                 movement.clip_ref.clip_index,
+                movement.clip_ref.track_index,
+                movement.new_track_index,
                 movement.old_start_frame,
                 movement.new_start_frame,
                 clip.label

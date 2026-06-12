@@ -840,9 +840,11 @@ fn demo_timeline_panel() -> TimelineView {
     .on_clip_select(|clip_ref, clip| demo_timeline_clip_action(clip_ref, &clip.label))
     .on_clip_move(|movement, clip| {
         demo_action(&format!(
-            "timeline.move.{}.{}.{}->{}.{}",
+            "timeline.move.{}.{}.track{}->track{}.{}->{}.{}",
             movement.clip_ref.track_index,
             movement.clip_ref.clip_index,
+            movement.clip_ref.track_index,
+            movement.new_track_index,
             movement.old_start_frame,
             movement.new_start_frame,
             clip.label
