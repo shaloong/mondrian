@@ -98,6 +98,11 @@ impl CurveEditor {
         if points.is_empty() {
             points.push(CurvePoint::new(0.0, 0.0));
             points.push(CurvePoint::new(1.0, 1.0));
+        } else if points.len() == 1 {
+            let y = points[0].y;
+            points.clear();
+            points.push(CurvePoint::new(0.0, y));
+            points.push(CurvePoint::new(1.0, y));
         }
         points.iter_mut().for_each(|point| {
             *point = CurvePoint::new(point.x, point.y);
@@ -238,6 +243,56 @@ impl CurveEditor {
         }
         self.move_point_from_input(index, next, ctx)
     }
+
+    fn insertion_at(&self, position: Point) -> Option<(usize, CurvePoint)> {
+        let plot = self.plot_rect();
+        if !plot.contains(position) || self.points.len() < 2 {
+            return None;
+        }
+
+        let point = self.screen_to_curve(position);
+        let index = self.points.partition_point(|candidate| candidate.x < point.x);
+        if index == 0 || index >= self.points.len() {
+            return None;
+        }
+
+        let min_x = self.points[index - 1].x + MIN_POINT_GAP;
+        let max_x = self.points[index].x - MIN_POINT_GAP;
+        if min_x > max_x {
+            return None;
+        }
+
+        Some((index, CurvePoint::new(point.x.clamp(min_x, max_x), point.y)))
+    }
+
+    fn insert_point_from_input(
+        &mut self,
+        position: Point,
+        ctx: &mut EventContext,
+    ) -> Option<usize> {
+        let (index, point) = self.insertion_at(position)?;
+        self.points.insert(index, point);
+        self.selected = Some(index);
+        self.dispatch_change(ctx);
+        ctx.request_repaint();
+        Some(index)
+    }
+
+    fn delete_selected_from_input(&mut self, ctx: &mut EventContext) -> bool {
+        let Some(index) = self.selected else {
+            return false;
+        };
+        if index == 0 || index + 1 >= self.points.len() {
+            return false;
+        }
+
+        self.points.remove(index);
+        let last = self.points.len().saturating_sub(1);
+        self.selected = Some(index.min(last.saturating_sub(1)).max(1));
+        self.dispatch_change(ctx);
+        ctx.request_repaint();
+        true
+    }
 }
 
 impl Default for CurveEditor {
@@ -267,6 +322,11 @@ impl Widget for CurveEditor {
                 self.focus_visible = false;
                 if let Some(index) = self.hit_point(*position) {
                     self.selected = Some(index);
+                    self.dragging = Some(index);
+                    ctx.request_pointer_capture(self.id);
+                    return EventResult::Handled;
+                }
+                if let Some(index) = self.insert_point_from_input(*position, ctx) {
                     self.dragging = Some(index);
                     ctx.request_pointer_capture(self.id);
                     return EventResult::Handled;
@@ -302,6 +362,11 @@ impl Widget for CurveEditor {
             UiEvent::KeyDown { key: KeyCode::Escape, .. } if self.selected.is_some() => {
                 self.selected = None;
                 self.dragging = None;
+                EventResult::Handled
+            }
+            UiEvent::KeyDown { key: KeyCode::Delete | KeyCode::Backspace, .. }
+                if self.delete_selected_from_input(ctx) =>
+            {
                 EventResult::Handled
             }
             UiEvent::KeyDown { key, modifiers } if self.nudge_selected(*key, *modifiers, ctx) => {
@@ -466,6 +531,67 @@ mod tests {
         assert_eq!(editor.points()[0], CurvePoint::new(0.0, 1.0));
         assert_eq!(editor.points()[1], CurvePoint::new(0.5, 0.25));
         assert_eq!(editor.points()[2], CurvePoint::new(1.0, 0.0));
+    }
+
+    #[test]
+    fn set_points_expands_single_point_into_anchored_curve() {
+        let editor = CurveEditor::with_points(vec![CurvePoint::new(0.4, 0.25)]);
+
+        assert_eq!(
+            editor.points(),
+            &[CurvePoint::new(0.0, 0.25), CurvePoint::new(1.0, 0.25)]
+        );
+    }
+
+    #[test]
+    fn clicking_empty_plot_inserts_and_selects_point() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut f = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut shortcut, &mut tooltip, &dispatch);
+        let mut editor =
+            CurveEditor::with_points(vec![CurvePoint::new(0.0, 0.0), CurvePoint::new(1.0, 1.0)])
+                .on_change(curve_action);
+        editor.layout(Rect::new(0.0, 0.0, 200.0, 100.0));
+
+        let result = editor.event(
+            &UiEvent::MouseDown {
+                position: Point::new(100.0, 50.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(editor.points().len(), 3);
+        assert_eq!(editor.selected_index(), Some(1));
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[curve_action(editor.points())]
+        );
+        assert!(ctx.requests.repaint);
+    }
+
+    #[test]
+    fn clicking_outside_plot_padding_does_not_insert_point() {
+        let mut editor =
+            CurveEditor::with_points(vec![CurvePoint::new(0.0, 0.0), CurvePoint::new(1.0, 1.0)]);
+        editor.layout(Rect::new(0.0, 0.0, 200.0, 100.0));
+        let mut ctx = event_ctx();
+
+        editor.event(
+            &UiEvent::MouseDown {
+                position: Point::new(4.0, 4.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(editor.points().len(), 2);
     }
 
     #[test]
@@ -672,6 +798,65 @@ mod tests {
         assert_eq!(result, EventResult::Ignored);
         assert!(actions.borrow().is_empty());
         assert!(!ctx.requests.repaint);
+    }
+
+    #[test]
+    fn delete_removes_selected_interior_point_and_dispatches_change() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut f = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut shortcut, &mut tooltip, &dispatch);
+        let mut editor = CurveEditor::with_points(vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.5, 0.5),
+            CurvePoint::new(1.0, 1.0),
+        ])
+        .on_change(curve_action);
+        editor.select(Some(1));
+
+        let result = editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Delete, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(
+            editor.points(),
+            &[CurvePoint::new(0.0, 0.0), CurvePoint::new(1.0, 1.0)]
+        );
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[curve_action(editor.points())]
+        );
+        assert!(ctx.requests.repaint);
+    }
+
+    #[test]
+    fn delete_does_not_remove_endpoints() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut f = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut shortcut, &mut tooltip, &dispatch);
+        let mut editor =
+            CurveEditor::with_points(vec![CurvePoint::new(0.0, 0.0), CurvePoint::new(1.0, 1.0)])
+                .on_change(curve_action);
+        editor.select(Some(0));
+
+        let result = editor.event(
+            &UiEvent::KeyDown {
+                key: KeyCode::Backspace,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(editor.points().len(), 2);
+        assert!(actions.borrow().is_empty());
     }
 
     #[test]

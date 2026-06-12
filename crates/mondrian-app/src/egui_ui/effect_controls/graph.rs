@@ -12,7 +12,7 @@ impl EffectControlsPanel {
         properties: &[(&str, &mondrian_core::automation::AnimatedProperty)],
     ) {
         if properties.is_empty() {
-            crate::ui::widgets::empty_state(
+            crate::egui_ui::widgets::empty_state(
                 ui,
                 Some(theme::UiIcon::Info),
                 "当前片段没有可动画属性",

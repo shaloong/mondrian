@@ -172,7 +172,7 @@ Mondrian 采用以 `8px` 为节奏基线的圆角体系：
 
 ## 8. Token 与实现约束
 
-当前 `crates/mondrian-app/src/ui/theme.rs` 中，以下内容已经作为统一基元使用：
+当前 `crates/mondrian-app/src/egui_ui/theme.rs` 中，以下内容已经作为统一基元使用：
 
 - `panel_frame`
 - `section_frame`

@@ -1,12 +1,11 @@
 mod draw;
 use crate::{
-    app::AppState,
-    ui::theme::{self, palette, tokens, typography},
+    app::{AppState, SelectedClipRef},
+    egui_ui::theme::{self, palette, tokens, typography},
 };
 pub(crate) use draw::*;
 use egui::{Pos2, Rect, Sense, Ui, Vec2};
 
-use crate::ui::timeline_panel::SelectedClipRef;
 use mondrian_core::{
     apply_display_profile_rgba8_in_place,
     automation::timecode_to_ticks,
@@ -47,11 +46,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::ui::viewer::gpu_composite::{
+use crate::egui_ui::viewer::gpu_composite::{
     apply_gpu_color_conversion, create_rgba_texture, gpu_device, gpu_queue, recycle_texture,
     try_gpu_composite_rgba_layers, try_gpu_composite_to_texture, try_reuse_texture,
 };
-use crate::ui::viewer::gpu_texture::CompositedFrame;
+use crate::egui_ui::viewer::gpu_texture::CompositedFrame;
 
 #[derive(Clone)]
 pub(crate) struct LayerDecodeRequest {
@@ -394,7 +393,7 @@ pub struct ViewerPanel {
     ocio_display: Option<String>,
     ocio_view: Option<String>,
     canvas_bg_hex: u32,
-    canvas_transform: crate::ui::viewer::canvas::CanvasTransform,
+    canvas_transform: crate::egui_ui::viewer::canvas::CanvasTransform,
     /// Clip currently selected via canvas click (track_id, is_video, clip_id).
     canvas_selected_clip: Option<(
         mondrian_core::types::TrackId,
@@ -630,7 +629,7 @@ impl Default for ViewerPanel {
             mask_edit: None,
             selected_mask: None,
             context_menu_hit: None,
-            canvas_transform: crate::ui::viewer::canvas::CanvasTransform::fit(
+            canvas_transform: crate::egui_ui::viewer::canvas::CanvasTransform::fit(
                 (1920, 1080),
                 egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(960.0, 540.0)),
             ),
@@ -884,7 +883,7 @@ impl ViewerPanel {
                 .unwrap_or(Resolution { width: 1920, height: 1080 });
             self.canvas_transform.update_canvas_rect(canvas_rect);
             if self.canvas_transform.seq_size != (seq_res.width, seq_res.height) {
-                self.canvas_transform = crate::ui::viewer::canvas::CanvasTransform::fit(
+                self.canvas_transform = crate::egui_ui::viewer::canvas::CanvasTransform::fit(
                     (seq_res.width, seq_res.height),
                     canvas_rect,
                 );
@@ -2097,11 +2096,11 @@ impl ViewerPanel {
                             if ui.selectable_label(false, label).clicked() {
                                 if zoom < 0.0 {
                                     self.canvas_transform.set_zoom_mode(
-                                        crate::ui::viewer::canvas::CanvasZoomMode::Fit,
+                                        crate::egui_ui::viewer::canvas::CanvasZoomMode::Fit,
                                     );
                                 } else {
                                     self.canvas_transform.set_zoom_mode(
-                                        crate::ui::viewer::canvas::CanvasZoomMode::Fixed(zoom),
+                                        crate::egui_ui::viewer::canvas::CanvasZoomMode::Fixed(zoom),
                                     );
                                 }
                             }

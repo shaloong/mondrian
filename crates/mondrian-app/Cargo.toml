@@ -9,6 +9,7 @@ license.workspace    = true
 name = "mondrian"
 path = "src/main.rs"
 
+# Developer gallery for reusable self-hosted widgets.
 [[bin]]
 name = "ui_demo"
 path = "src/bin/ui_demo.rs"
@@ -26,8 +27,9 @@ name = "ui_pipeline_test"
 path = "src/bin/ui_pipeline_test.rs"
 
 [[bin]]
-name = "ui_app"
-path = "src/bin/ui_app.rs"
+# Developer integration shell for the self-hosted editor UI.
+name = "self_hosted_app"
+path = "src/bin/self_hosted_app.rs"
 
 [dependencies]
 mondrian-core     = { workspace = true }

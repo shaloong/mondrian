@@ -1,6 +1,6 @@
 use crate::{
-    app::{AppState, ClipOverlapMode},
-    ui::theme::{self, corner_radius, palette, tokens, typography},
+    app::{AppState, ClipOverlapMode, SelectedClipRef},
+    egui_ui::theme::{self, corner_radius, palette, tokens, typography},
 };
 use egui::{Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use mondrian_core::types::{ClipId, Rational, TrackId};
@@ -134,13 +134,6 @@ struct ClipSelection {
     track_id: mondrian_core::types::TrackId,
     is_video_track: bool,
     clip_id: ClipId,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SelectedClipRef {
-    pub track_id: TrackId,
-    pub is_video_track: bool,
-    pub clip_id: ClipId,
 }
 
 #[derive(Clone, Copy)]

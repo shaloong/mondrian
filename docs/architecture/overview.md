@@ -196,7 +196,7 @@ pub struct AssetId(Uuid);
 实现约定：
 
 - 主题模式持久化在应用配置（`AppPreferences.theme`）。
-- 每帧调用 `ui::theme::apply_theme`，将主题偏好映射到 egui 的 `ThemePreference`。
+- 每帧调用 `egui_ui::theme::apply_theme`，将主题偏好映射到 egui 的 `ThemePreference`。
 - 通过统一 token 表（色板 + 度量）驱动 `Visuals`、字体、间距、圆角等样式，禁止业务面板散落硬编码主题值。
 - 支持插件覆写入口：插件可注册 token override，在不改业务面板代码的前提下覆写颜色与样式度量。
 

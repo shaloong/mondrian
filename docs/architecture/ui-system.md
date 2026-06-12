@@ -26,9 +26,39 @@ for clipboard operations instead of calling platform APIs directly.
 `SystemPlatformService` currently provides desktop clipboard copy/paste through
 `arboard`. `DesktopEyedropper` owns desktop-coordinate screen sampling and
 best-effort global pointer polling for color picking. `mondrian-app` centralizes
-the winit adapter in `ui_runtime`: it drains router side-effect requests,
+the winit adapter in `self_hosted::runtime`: it drains router side-effect requests,
 translates between window-local and desktop coordinates, paints the shell-owned
 eyedropper overlay, and feeds sampled colors back into the widget tree.
+
+## Application Entrypoints and App Modules
+
+`mondrian-app/src/main.rs` is the product entrypoint and builds the current
+production egui shell through `mondrian-app::app::MondrianApp`.
+`mondrian-app/src/bin` is reserved for developer-only binaries: widget
+galleries, pipeline smoke tests, and migration integration shells. Binaries in
+`src/bin` must stay thin; reusable runtime, panel, or mapping logic belongs in
+library modules.
+
+The legacy production egui UI lives under `mondrian-app/src/egui_ui`. That
+module contains egui panels, egui theme tokens, viewer helpers, and the old
+timeline implementation. New self-hosted UI code must not be added there unless
+it is deliberately bridging or deleting legacy egui behavior.
+
+The self-hosted UI application adapter lives under
+`mondrian-app/src/self_hosted`. `self_hosted::runtime` owns winit-side request
+application for reusable widgets. `self_hosted::panels` owns panel adapters that
+map application-facing concepts into generic widget view models. The boundary
+type is `SelfHostedPanelModels`: real `AppState` / `EditorState` adapters should
+produce this model, while `SelfHostedPanelModels::demo()` is only a developer
+fixture. During the migration, the `self_hosted_app` developer binary uses
+`build_demo_dock_tree()` as the integration shell. When the self-hosted UI
+becomes the product shell, the official `mondrian` entrypoint should call into
+this module with real panel models instead of moving logic back into `src/bin`.
+
+Selection DTOs that describe editor state, such as `SelectedClipRef`, live in
+`mondrian-app::app` rather than legacy UI modules. Legacy egui panels and
+self-hosted adapters may both depend on these app-layer DTOs, but app/domain
+state must not depend on widget modules.
 
 ## Event Requests
 
@@ -44,13 +74,13 @@ Widgets can request side effects while handling an event:
   the request and the app shell delegates desktop sampling to
   `mondrian-platform`.
 - tooltip state: widgets call the injected `TooltipManager` through
-  `EventContext`; winit shells inject the real manager and `ui_runtime` paints
+  `EventContext`; winit shells inject the real manager and `self_hosted::runtime` paints
   the resulting tooltip in the top overlay pass.
 - repaint: request another frame for composition previews, cursor blink, or
   delayed UI. The app shell consumes this through `EventRouter` and schedules a
   native window redraw.
 - timer wakeups: delayed UI state, such as tooltip reveal timing, reports its
-  next required update through the manager layer. `ui_runtime` advances timers
+  next required update through the manager layer. `self_hosted::runtime` advances timers
   in `AboutToWait` and uses native `WaitUntil` scheduling instead of idle
   repaint loops.
 
@@ -136,6 +166,12 @@ Slider value mapping uses the same thumb-centered track for painting and
 pointer updates. The thumb rect must remain inside widget bounds; if a parent
 gives a short row, the thumb shrinks vertically instead of being clipped.
 
+Timeline widgets own frame-space presentation interactions: selection, seeking,
+scrolling, zooming, and local drag previews. On mouse release they emit
+domain-light move proposals (`TimelineClipMove`) instead of resolving clip
+overlaps, ripple behavior, linked media, or undo snapshots. Those semantics stay
+in `mondrian-app` / `mondrian-timeline` command handling.
+
 ## Overlays
 
 Dropdowns, context menus, and tooltips derive event hit regions and paint
@@ -182,6 +218,12 @@ Color pickers reuse the shared color model conversions from `mondrian-core`
 layer owns layout, text fields, swatch painting, and model tabs only; conversion
 math and hex parsing stay out of UI crates.
 
+Curve editors own normalized 0..1 point editing, hit testing, insertion,
+deletion, dragging, keyboard nudging, and paint geometry. Domain layers map
+effect keyframes, speed ramps, or tone curves into `CurvePoint` view models and
+commit semantic mutations from the emitted action; timeline/effect command logic
+must not move into the widget crate.
+
 Tooltip positions are anchored when the pointer enters a trigger and then
 clamped by the tooltip widget to the current clip rect. Repeating the same
 tooltip request keeps the original anchor so the popup does not chase pointer
@@ -223,21 +265,33 @@ Timeline. Inspector-style controls should be assembled with the reusable
 `mondrian-ui-widgets`, then bound to editor state and undoable commands at the
 panel/app layer. Docked panel chrome belongs to `DockPanel`, which owns the
 `DockTabBar`, active-tab content rebuilding, `PanelSlot`, and overlay
-forwarding. App entry points should provide tab metadata and content factories
-instead of reimplementing tab/content synchronization. The custom `ui_app`
-Inspector slot uses this path with real self-hosted widgets (checkbox, slider,
-and color trigger) instead of a colored placeholder, so focus routing, overlay
-popups, repaint requests, and shell runtime behavior can be validated in the
-same dock tree that future panels will use. Timeline migration should reuse this
-path after scrollbars, overlays, and property controls are stable.
+forwarding. App entrypoints should call panel adapters in
+`mondrian-app::self_hosted::panels` instead of reimplementing tab/content
+synchronization. The `self_hosted_app` Inspector slot uses this path with real
+self-hosted widgets (checkbox, slider, and color trigger) instead of a colored
+placeholder, so focus routing, overlay popups, repaint requests, and shell
+runtime behavior can be validated in the same dock tree that future panels will
+use. Timeline migration should reuse this path after scrollbars, overlays, and
+property controls are stable.
 
 Browser-style panels should use `PanelList` / `PanelListItem` instead of
 ad-hoc colored placeholders or one-off row painting. `PanelList` owns local
 selection, disabled rows, keyboard navigation, activation, and internal
 positive-delta scrolling, but exposes static and value-aware action adapters so
 Assets, Effects, presets, and similar panels can bind to editor state outside
-the widget crate. The `ui_app` and `ui_demo` Assets/Effects-style panels use
-this shared surface as the tracer bullet for migrating list-heavy egui panels.
+the widget crate. The `self_hosted_app` and `ui_demo` Assets/Effects-style
+panels use this shared surface as the tracer bullet for migrating list-heavy
+egui panels.
+
+Timeline migration starts with the domain-light `TimelineView` surface in
+`mondrian-ui-widgets`. It renders frame-space tracks, clips, ruler ticks,
+playhead, vertical/horizontal scrolling, Ctrl-wheel zoom, clip selection, and
+seek actions, but it does not depend on `mondrian-timeline` or mutate editor
+state directly. Real timeline panels should map `Sequence` / `Track` / `Clip`
+data into `TimelineTrack` / `TimelineClip` view models, then translate
+selection and seek callbacks into semantic `Action`s or undoable commands at
+the app layer. This keeps the renderer-facing timeline primitive testable while
+preserving a clean path for progressively replacing the old egui timeline.
 
 Value widgets stay editor-state agnostic. `Slider`, `Checkbox`, `ColorPicker`,
 `ColorPickerTrigger`, and `CurveEditor` expose value-aware action adapters such
@@ -283,7 +337,7 @@ a visible geometric eyedropper button that enters sampling mode. The widget
 stays platform-neutral: it emits `EventRequests::eyedropper`, handles
 `UiEvent::EyedropperSample` / `UiEvent::EyedropperCancel`, and never calls
 screen-capture or OS pointer APIs directly. Winit shells complete sampling via
-`mondrian_app::ui_runtime::WinitUiRuntime`, which delegates platform work to
+`mondrian_app::self_hosted::runtime::WinitUiRuntime`, which delegates platform work to
 `mondrian-platform::DesktopEyedropper` and routes the sampled color back as
 `UiEvent::EyedropperSample`.
 The mode selector shares the generic dropdown's token vocabulary and overlay

@@ -5,14 +5,15 @@
 //!
 //! 包含的 Widget 类型：
 //!   Core: ColoredBox
-//!   Interactive: Button, Checkbox, TextInput, Slider, List, Dropdown, ContextMenu
-//!   Layout: DockSplitter, DockPanel, DockTabBar, PanelSlot, ScrollView
+//!   Interactive: Button, Checkbox, TextInput, Slider, List, Dropdown, ContextMenu,
+//!     Tooltip, ColorPicker, CurveEditor, TimelineView
+//!   Layout: DockSplitter, DockPanel, DockTabBar, PanelSlot, ScrollView, PropertyPanel
 
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::sync::Arc;
 
-use mondrian_app::ui_runtime::WinitUiRuntime;
+use mondrian_app::self_hosted::runtime::WinitUiRuntime;
 use mondrian_core::Color;
 use mondrian_editor_state::Action;
 use mondrian_ui_core::tooltip::TooltipState;
@@ -42,6 +43,7 @@ use mondrian_ui_widgets::property_panel::{PropertyPanel, PropertyRow, PropertySe
 use mondrian_ui_widgets::scroll::ScrollView;
 use mondrian_ui_widgets::slider::Slider;
 use mondrian_ui_widgets::text_input::TextInput;
+use mondrian_ui_widgets::{TimelineClip, TimelineClipRef, TimelineTrack, TimelineView};
 
 fn demo_action(name: &str) -> Action {
     Action::Custom {
@@ -697,9 +699,7 @@ fn slot_content_for_tab(kind: SlotKind, tab_index: usize) -> Box<dyn Widget> {
             _ => Box::new(demo_property_browser_panel()),
         },
         SlotKind::Timeline => match tab_index {
-            0 => {
-                Box::new(ColoredBox::new(Color::from_hex(0x16213E), 1.0, 1.0).with_label("时间线"))
-            }
+            0 => Box::new(demo_timeline_panel()),
             1 => Box::new(demo_audio_panel()),
             _ => Box::new(demo_effect_panel()),
         },
@@ -773,6 +773,89 @@ fn demo_audio_panel() -> PanelList {
         ],
     )
     .with_subtitle("Track lanes")
+}
+
+fn demo_timeline_panel() -> TimelineView {
+    TimelineView::new(vec![
+        TimelineTrack::video(
+            "V3",
+            vec![
+                TimelineClip::new("Color Grade", 28, 80)
+                    .with_color(Color::from_hex(0x6D5DD3))
+                    .with_select_action(demo_action("timeline.select.grade")),
+                TimelineClip::new("Lower Third", 122, 42)
+                    .with_color(Color::from_hex(0x4B7BE5))
+                    .with_select_action(demo_action("timeline.select.lower_third")),
+            ],
+        ),
+        TimelineTrack::video(
+            "V2",
+            vec![
+                TimelineClip::new("B-roll: Hands", 10, 64)
+                    .with_color(Color::from_hex(0x2C7A7B))
+                    .with_select_action(demo_action("timeline.select.hands")),
+                TimelineClip::new("Screen Insert", 92, 70)
+                    .with_color(Color::from_hex(0x805AD5))
+                    .selected(true)
+                    .with_select_action(demo_action("timeline.select.screen")),
+                TimelineClip::new("Offline Ref", 178, 40)
+                    .with_color(Color::from_hex(0x744210))
+                    .disabled(true),
+            ],
+        ),
+        TimelineTrack::video(
+            "V1",
+            vec![
+                TimelineClip::new("A Cam", 0, 96)
+                    .with_color(Color::from_hex(0x1E3A5F))
+                    .with_select_action(demo_action("timeline.select.acam")),
+                TimelineClip::new("Reaction", 104, 58)
+                    .with_color(Color::from_hex(0x2F855A))
+                    .with_select_action(demo_action("timeline.select.reaction")),
+                TimelineClip::new("Outro", 170, 54)
+                    .with_color(Color::from_hex(0x975A16))
+                    .with_select_action(demo_action("timeline.select.outro")),
+            ],
+        ),
+        TimelineTrack::audio(
+            "A1",
+            vec![TimelineClip::new("Dialogue Mix", 0, 168)
+                .with_color(Color::from_hex(0x1D587B))
+                .with_select_action(demo_action("timeline.select.dialogue"))],
+        ),
+        TimelineTrack::audio(
+            "A2",
+            vec![TimelineClip::new("Music Bed", 20, 204)
+                .with_color(Color::from_hex(0x2B6CB0))
+                .with_select_action(demo_action("timeline.select.music"))],
+        ),
+        TimelineTrack::audio(
+            "A3",
+            vec![TimelineClip::new("Room Tone", 0, 224)
+                .with_color(Color::from_hex(0x2F6F73))
+                .with_select_action(demo_action("timeline.select.room_tone"))],
+        ),
+    ])
+    .with_playhead(68)
+    .on_clip_select(|clip_ref, clip| demo_timeline_clip_action(clip_ref, &clip.label))
+    .on_clip_move(|movement, clip| {
+        demo_action(&format!(
+            "timeline.move.{}.{}.{}->{}.{}",
+            movement.clip_ref.track_index,
+            movement.clip_ref.clip_index,
+            movement.old_start_frame,
+            movement.new_start_frame,
+            clip.label
+        ))
+    })
+    .on_seek(|frame| demo_action(&format!("timeline.seek.{frame}")))
+}
+
+fn demo_timeline_clip_action(clip_ref: TimelineClipRef, label: &str) -> Action {
+    demo_action(&format!(
+        "timeline.select.{}.{}.{}",
+        clip_ref.track_index, clip_ref.clip_index, label
+    ))
 }
 
 fn demo_effect_panel() -> PanelList {

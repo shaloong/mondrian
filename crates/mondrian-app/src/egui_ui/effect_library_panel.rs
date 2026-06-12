@@ -1,9 +1,6 @@
 use crate::{
-    app::AppState,
-    ui::{
-        theme::{self, palette, tokens, typography},
-        timeline_panel::SelectedClipRef,
-    },
+    app::{AppState, SelectedClipRef},
+    egui_ui::theme::{self, palette, tokens, typography},
 };
 use egui::Ui;
 use mondrian_effects::{effect_category_tree, EffectCategoryNode, EffectType};

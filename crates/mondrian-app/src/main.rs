@@ -22,7 +22,7 @@ fn main() -> anyhow::Result<()> {
     // 将 runtime handle 存入 thread-local，供后台任务调度
     let _guard = rt.enter();
 
-    let startup_size = mondrian_app::ui::theme::tokens::startup_viewport_size();
+    let startup_size = mondrian_app::egui_ui::theme::tokens::startup_viewport_size();
 
     // eframe 原生窗口配置
     let native_options = eframe::NativeOptions {

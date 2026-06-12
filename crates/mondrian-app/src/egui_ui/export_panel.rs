@@ -1,5 +1,5 @@
 use crate::app::AppState;
-use crate::ui::theme::{self, palette, tokens, typography};
+use crate::egui_ui::theme::{self, palette, tokens, typography};
 use egui::Ui;
 use mondrian_assets::AssetKind;
 use mondrian_core::types::SequenceId;

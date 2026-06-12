@@ -170,7 +170,7 @@ pub(super) fn run_cache_maintenance_if_needed(app: &mut MondrianApp) {
         }
     }
 
-    let policy = crate::ui::viewer_panel::MediaCachePolicy {
+    let policy = crate::egui_ui::viewer_panel::MediaCachePolicy {
         max_size_bytes: (app.media_cache_max_size_gb.max(1) as u64)
             .saturating_mul(1024)
             .saturating_mul(1024)
@@ -182,7 +182,7 @@ pub(super) fn run_cache_maintenance_if_needed(app: &mut MondrianApp) {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let result =
-            crate::ui::viewer_panel::run_media_cache_maintenance_for_dir(cache_dir, policy);
+            crate::egui_ui::viewer_panel::run_media_cache_maintenance_for_dir(cache_dir, policy);
         let _ = tx.send(result);
     });
     app.cache_maintenance_in_flight = true;
@@ -381,7 +381,7 @@ pub(super) fn draw_preferences_window(app: &mut MondrianApp, ctx: &egui::Context
         .with_active(true);
 
     ctx.show_viewport_immediate(viewport_id, viewport_builder, |viewport_ctx, class| {
-        crate::ui::theme::apply_theme(viewport_ctx, app.theme);
+        crate::egui_ui::theme::apply_theme(viewport_ctx, app.theme);
         viewport_ctx
             .send_viewport_cmd(egui::ViewportCommand::SetTheme(app.theme.to_system_theme()));
 
@@ -410,7 +410,7 @@ pub(super) fn draw_preferences_window(app: &mut MondrianApp, ctx: &egui::Context
                 egui::CentralPanel::default()
                     .frame(
                         egui::Frame::new()
-                            .fill(crate::ui::theme::palette::bg_surface())
+                            .fill(crate::egui_ui::theme::palette::bg_surface())
                             .inner_margin(egui::Margin::symmetric(18, 18)),
                     )
                     .show_inside(viewport_ctx, |ui| {
@@ -454,7 +454,7 @@ fn draw_preferences_panel(app: &mut MondrianApp, ui: &mut egui::Ui) {
                     egui::pos2(divider_rect.center().x, divider_rect.top()),
                     egui::pos2(divider_rect.center().x, divider_rect.bottom()),
                 ],
-                egui::Stroke::new(1.0, crate::ui::theme::palette::panel_divider_strong()),
+                egui::Stroke::new(1.0, crate::egui_ui::theme::palette::panel_divider_strong()),
             );
 
             ui.allocate_ui_with_layout(
@@ -486,9 +486,9 @@ fn draw_preferences_nav(ui: &mut egui::Ui, current_tab: &mut PreferencesTab) {
     ui.add_space(4.0);
     ui.label(
         egui::RichText::new("设置")
-            .font(crate::ui::theme::typography::body_large())
+            .font(crate::egui_ui::theme::typography::body_large())
             .strong()
-            .color(crate::ui::theme::palette::text_primary()),
+            .color(crate::egui_ui::theme::palette::text_primary()),
     );
     ui.add_space(14.0);
 
@@ -511,20 +511,20 @@ fn draw_preferences_nav_button(
     let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click());
     if ui.is_rect_visible(rect) {
         let fill = if selected {
-            crate::ui::theme::palette::accent_secondary().gamma_multiply(0.55)
+            crate::egui_ui::theme::palette::accent_secondary().gamma_multiply(0.55)
         } else if response.hovered() {
-            crate::ui::theme::palette::bg_surface_hover()
+            crate::egui_ui::theme::palette::bg_surface_hover()
         } else {
             egui::Color32::TRANSPARENT
         };
         let stroke = if selected {
-            egui::Stroke::new(1.0, crate::ui::theme::palette::interaction_highlight())
+            egui::Stroke::new(1.0, crate::egui_ui::theme::palette::interaction_highlight())
         } else {
             egui::Stroke::NONE
         };
         ui.painter().rect(
             rect,
-            corner_radius(crate::ui::theme::tokens::button_rounding()),
+            corner_radius(crate::egui_ui::theme::tokens::button_rounding()),
             fill,
             stroke,
             egui::StrokeKind::Inside,
@@ -533,11 +533,11 @@ fn draw_preferences_nav_button(
             rect.left_center() + egui::vec2(14.0, 0.0),
             egui::Align2::LEFT_CENTER,
             label,
-            crate::ui::theme::typography::body(),
+            crate::egui_ui::theme::typography::body(),
             if selected {
-                crate::ui::theme::palette::text_primary()
+                crate::egui_ui::theme::palette::text_primary()
             } else {
-                crate::ui::theme::palette::text_muted()
+                crate::egui_ui::theme::palette::text_muted()
             },
         );
     }
@@ -562,12 +562,12 @@ fn draw_general_preferences(app: &mut MondrianApp, ui: &mut egui::Ui) {
             let previous_theme = app.theme;
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 18.0;
-                for theme_option in crate::ui::theme::Theme::ALL {
+                for theme_option in crate::egui_ui::theme::Theme::ALL {
                     ui.radio_value(
                         &mut app.theme,
                         theme_option,
                         egui::RichText::new(theme_option.display_name())
-                            .color(crate::ui::theme::palette::text_primary()),
+                            .color(crate::egui_ui::theme::palette::text_primary()),
                     );
                 }
             });
@@ -664,19 +664,19 @@ fn draw_media_preferences(app: &mut MondrianApp, ui: &mut egui::Ui) {
                         &mut backend,
                         mondrian_media::PreviewDecodeBackend::Auto,
                         egui::RichText::new("自动")
-                            .color(crate::ui::theme::palette::text_primary()),
+                            .color(crate::egui_ui::theme::palette::text_primary()),
                     );
                     ui.radio_value(
                         &mut backend,
                         mondrian_media::PreviewDecodeBackend::Software,
                         egui::RichText::new("软件")
-                            .color(crate::ui::theme::palette::text_primary()),
+                            .color(crate::egui_ui::theme::palette::text_primary()),
                     );
                     ui.radio_value(
                         &mut backend,
                         mondrian_media::PreviewDecodeBackend::GpuAssist,
                         egui::RichText::new("GPU辅助")
-                            .color(crate::ui::theme::palette::text_primary()),
+                            .color(crate::egui_ui::theme::palette::text_primary()),
                     );
                 });
                 if backend != app.viewer_panel.preview_decode_backend() {
@@ -991,7 +991,7 @@ fn draw_media_preferences(app: &mut MondrianApp, ui: &mut egui::Ui) {
             }
 
             if ui.button("立即执行自动清理").clicked() {
-                let policy = crate::ui::viewer_panel::MediaCachePolicy {
+                let policy = crate::egui_ui::viewer_panel::MediaCachePolicy {
                     max_size_bytes: (app.media_cache_max_size_gb.max(1) as u64)
                         .saturating_mul(1024)
                         .saturating_mul(1024)
@@ -1036,7 +1036,7 @@ fn draw_shortcut_preferences(app: &mut MondrianApp, ui: &mut egui::Ui) {
                     egui::pos2(ui.min_rect().left(), y),
                     egui::pos2(ui.max_rect().right(), y),
                 ],
-                egui::Stroke::new(1.0, crate::ui::theme::palette::border_subtle()),
+                egui::Stroke::new(1.0, crate::egui_ui::theme::palette::border_subtle()),
             );
             ui.add_space(6.0);
         }
@@ -1153,9 +1153,9 @@ fn draw_preferences_header(ui: &mut egui::Ui, title: &str, info: Option<&str>) {
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new(title)
-                .font(crate::ui::theme::typography::body_large())
+                .font(crate::egui_ui::theme::typography::body_large())
                 .strong()
-                .color(crate::ui::theme::palette::text_primary()),
+                .color(crate::egui_ui::theme::palette::text_primary()),
         );
         if let Some(text) = info {
             draw_info_icon(ui, text);
@@ -1171,9 +1171,9 @@ fn draw_preferences_section(
 ) {
     ui.label(
         egui::RichText::new(title)
-            .font(crate::ui::theme::typography::body())
+            .font(crate::egui_ui::theme::typography::body())
             .strong()
-            .color(crate::ui::theme::palette::text_primary()),
+            .color(crate::egui_ui::theme::palette::text_primary()),
     );
     ui.add_space(10.0);
     add_contents(ui);
@@ -1189,7 +1189,7 @@ fn preference_labeled_row<R>(
     const LABEL_WIDTH: f32 = 140.0;
     const INFO_GAP: f32 = 6.0;
     let row_height = ui.spacing().interact_size.y.max(28.0);
-    let label_color = crate::ui::theme::palette::text_primary().gamma_multiply(0.9);
+    let label_color = crate::egui_ui::theme::palette::text_primary().gamma_multiply(0.9);
 
     ui.horizontal(|ui| {
         ui.set_min_height(row_height);
@@ -1198,14 +1198,14 @@ fn preference_labeled_row<R>(
             ui.allocate_exact_size(egui::vec2(LABEL_WIDTH, row_height), egui::Sense::hover());
         let label_galley = ui.painter().layout_no_wrap(
             label.to_owned(),
-            crate::ui::theme::typography::body(),
+            crate::egui_ui::theme::typography::body(),
             label_color,
         );
         ui.painter().text(
             label_rect.left_center(),
             egui::Align2::LEFT_CENTER,
             label,
-            crate::ui::theme::typography::body(),
+            crate::egui_ui::theme::typography::body(),
             label_color,
         );
         if let Some(text) = info {
@@ -1235,7 +1235,7 @@ fn preference_toggle_row(
     ui.horizontal(|ui| {
         ui.set_min_height(ui.spacing().interact_size.y.max(28.0));
         ui.spacing_mut().item_spacing.x = 0.0;
-        let response = crate::ui::theme::checkmark_toggle(ui, current, label);
+        let response = crate::egui_ui::theme::checkmark_toggle(ui, current, label);
         if let Some(text) = info {
             ui.add_space(6.0);
             draw_info_icon(ui, text);
@@ -1249,8 +1249,8 @@ fn preference_status_line(ui: &mut egui::Ui, text: &str, info: Option<&str>) {
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new(text)
-                .font(crate::ui::theme::typography::body_small())
-                .color(crate::ui::theme::palette::text_muted()),
+                .font(crate::egui_ui::theme::typography::body_small())
+                .color(crate::egui_ui::theme::palette::text_muted()),
         );
         if let Some(text) = info {
             draw_info_icon(ui, text);
@@ -1279,8 +1279,8 @@ fn draw_shortcut_row(app: &mut MondrianApp, ui: &mut egui::Ui, action: ShortcutA
                 action_rect.left_center(),
                 egui::Align2::LEFT_CENTER,
                 shortcut_action_title(action),
-                crate::ui::theme::typography::body(),
-                crate::ui::theme::palette::text_primary(),
+                crate::egui_ui::theme::typography::body(),
+                crate::egui_ui::theme::palette::text_primary(),
             );
             ui.add_space(ACTION_GAP);
 
@@ -1332,34 +1332,36 @@ fn draw_shortcut_row(app: &mut MondrianApp, ui: &mut egui::Ui, action: ShortcutA
 
 fn draw_shortcut_value_chip(ui: &mut egui::Ui, width: f32, text: &str, highlighted: bool) {
     let fill = if highlighted {
-        crate::ui::theme::palette::interaction_highlight().gamma_multiply(0.14)
+        crate::egui_ui::theme::palette::interaction_highlight().gamma_multiply(0.14)
     } else {
-        crate::ui::theme::palette::bg_surface_raised()
+        crate::egui_ui::theme::palette::bg_surface_raised()
     };
     let stroke = if highlighted {
-        egui::Stroke::new(1.0, crate::ui::theme::palette::interaction_highlight())
+        egui::Stroke::new(1.0, crate::egui_ui::theme::palette::interaction_highlight())
     } else {
-        egui::Stroke::new(1.0, crate::ui::theme::palette::border_subtle())
+        egui::Stroke::new(1.0, crate::egui_ui::theme::palette::border_subtle())
     };
 
     egui::Frame::new()
         .fill(fill)
         .stroke(stroke)
-        .corner_radius(corner_radius(crate::ui::theme::tokens::button_rounding()))
+        .corner_radius(corner_radius(
+            crate::egui_ui::theme::tokens::button_rounding(),
+        ))
         .inner_margin(egui::Margin::symmetric(10, 4))
         .show(ui, |ui| {
             ui.add_sized(
                 [
                     width - 20.0,
-                    crate::ui::theme::tokens::list_row_content_height(),
+                    crate::egui_ui::theme::tokens::list_row_content_height(),
                 ],
                 egui::Label::new(
                     egui::RichText::new(text)
-                        .font(crate::ui::theme::typography::mono_small())
+                        .font(crate::egui_ui::theme::typography::mono_small())
                         .color(if highlighted {
-                            crate::ui::theme::palette::interaction_highlight()
+                            crate::egui_ui::theme::palette::interaction_highlight()
                         } else {
-                            crate::ui::theme::palette::text_primary()
+                            crate::egui_ui::theme::palette::text_primary()
                         }),
                 )
                 .truncate()
@@ -1384,11 +1386,11 @@ fn draw_info_icon_at(ui: &mut egui::Ui, rect: egui::Rect, text: &str) {
 
 fn paint_info_icon(ui: &mut egui::Ui, rect: egui::Rect, response: egui::Response, text: &str) {
     let icon_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(14.0, 14.0));
-    crate::ui::theme::draw_icon(
+    crate::egui_ui::theme::draw_icon(
         ui.painter(),
         icon_rect,
-        crate::ui::theme::UiIcon::Info,
-        crate::ui::theme::palette::text_muted(),
+        crate::egui_ui::theme::UiIcon::Info,
+        crate::egui_ui::theme::palette::text_muted(),
     );
     response.on_hover_text(text);
 }

@@ -5,7 +5,7 @@
 
 use mondrian_core::types::Color;
 
-use crate::ui::theme::{corner_radius, palette, tokens, typography};
+use crate::egui_ui::theme::{corner_radius, palette, tokens, typography};
 
 // ── Linear ↔ sRGBA conversion ────────────────────────────────────────────
 

@@ -1,5 +1,5 @@
-/// mondrian-app — 主应用程序入口与 egui UI 框架
+/// mondrian-app — product shell, legacy egui UI, and self-hosted UI adapters.
 pub mod app;
+pub mod egui_ui;
+pub mod self_hosted;
 pub mod shortcuts;
-pub mod ui;
-pub mod ui_runtime;

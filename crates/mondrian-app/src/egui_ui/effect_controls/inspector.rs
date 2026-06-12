@@ -398,10 +398,10 @@ impl EffectControlsPanel {
             }
             PropertyValue::Color(value) => {
                 let mut color = *value;
-                let picker_resp = crate::ui::color_picker::color_picker_button(
+                let picker_resp = crate::egui_ui::color_picker::color_picker_button(
                     ui,
                     &mut color,
-                    crate::ui::color_picker::ColorPickerVariant::Inline,
+                    crate::egui_ui::color_picker::ColorPickerVariant::Inline,
                 );
                 if picker_resp.changed {
                     self.commit_value(

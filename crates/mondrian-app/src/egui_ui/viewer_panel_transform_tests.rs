@@ -105,7 +105,7 @@ fn sequence_preview_target_size_preserves_sequence_aspect_ratio() {
 #[test]
 fn canvas_transform_fit_keeps_canvas_centered_with_sequence_ratio() {
     let outer = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(900.0, 700.0));
-    let ct = crate::ui::viewer::canvas::CanvasTransform::fit((1920, 1080), outer);
+    let ct = crate::egui_ui::viewer::canvas::CanvasTransform::fit((1920, 1080), outer);
     let fitted = ct.content_rect();
 
     assert!(fitted.width() <= outer.width());

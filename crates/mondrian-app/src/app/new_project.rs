@@ -20,7 +20,7 @@ pub(super) fn draw_new_project_window(app: &mut MondrianApp, ctx: &egui::Context
         .with_active(true);
 
     ctx.show_viewport_immediate(viewport_id, viewport_builder, |viewport_ctx, class| {
-        crate::ui::theme::apply_theme(viewport_ctx, app.theme);
+        crate::egui_ui::theme::apply_theme(viewport_ctx, app.theme);
         viewport_ctx
             .send_viewport_cmd(egui::ViewportCommand::SetTheme(app.theme.to_system_theme()));
 
@@ -38,7 +38,7 @@ pub(super) fn draw_new_project_window(app: &mut MondrianApp, ctx: &egui::Context
                     .collapsible(false)
                     .resizable(false)
                     .default_size([WINDOW_WIDTH, WINDOW_HEIGHT])
-                    .frame(crate::ui::theme::dialog_frame())
+                    .frame(crate::egui_ui::theme::dialog_frame())
                     .show(viewport_ctx, |ui| {
                         draw_new_project_panel(app, ui);
                     });
@@ -48,7 +48,7 @@ pub(super) fn draw_new_project_window(app: &mut MondrianApp, ctx: &egui::Context
                 egui::CentralPanel::default()
                     .frame(
                         egui::Frame::new()
-                            .fill(crate::ui::theme::palette::bg_surface())
+                            .fill(crate::egui_ui::theme::palette::bg_surface())
                             .inner_margin(egui::Margin::symmetric(18, 16)),
                     )
                     .show_inside(viewport_ctx, |ui| {
@@ -60,10 +60,10 @@ pub(super) fn draw_new_project_window(app: &mut MondrianApp, ctx: &egui::Context
 }
 
 fn draw_new_project_panel(app: &mut MondrianApp, ui: &mut egui::Ui) {
-    let text_primary = crate::ui::theme::palette::text_primary();
-    let text_muted = crate::ui::theme::palette::text_muted();
-    let highlight = crate::ui::theme::palette::interaction_highlight();
-    let bg_card = crate::ui::theme::palette::bg_surface_raised();
+    let text_primary = crate::egui_ui::theme::palette::text_primary();
+    let text_muted = crate::egui_ui::theme::palette::text_muted();
+    let highlight = crate::egui_ui::theme::palette::interaction_highlight();
+    let bg_card = crate::egui_ui::theme::palette::bg_surface_raised();
 
     ui.spacing_mut().item_spacing = egui::vec2(6.0, 8.0);
 
@@ -569,9 +569,9 @@ fn draw_color_mode_cards(ui: &mut egui::Ui, app: &mut MondrianApp) {
         for (mode, label) in modes {
             let selected = app.new_project_draft.color_mode == mode;
             let fill = if selected {
-                crate::ui::theme::palette::interaction_highlight()
+                crate::egui_ui::theme::palette::interaction_highlight()
             } else {
-                crate::ui::theme::palette::bg_surface_raised()
+                crate::egui_ui::theme::palette::bg_surface_raised()
             };
             let (rect, response) =
                 ui.allocate_exact_size(egui::vec2(card_w, card_h), egui::Sense::click());
@@ -582,9 +582,9 @@ fn draw_color_mode_cards(ui: &mut egui::Ui, app: &mut MondrianApp) {
                 label,
                 egui::FontId::proportional(13.0),
                 if selected {
-                    crate::ui::theme::palette::bg_surface()
+                    crate::egui_ui::theme::palette::bg_surface()
                 } else {
-                    crate::ui::theme::palette::text_primary()
+                    crate::egui_ui::theme::palette::text_primary()
                 },
             );
             if response.clicked() {

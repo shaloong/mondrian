@@ -20,6 +20,7 @@ pub mod property_panel;
 pub mod scroll;
 pub mod slider;
 pub mod text_input;
+pub mod timeline_view;
 
 #[cfg(test)]
 mod test_utils;
@@ -45,3 +46,7 @@ pub use property_panel::{PropertyPanel, PropertyPanelOptions, PropertyRow, Prope
 pub use scroll::ScrollView;
 pub use slider::Slider;
 pub use text_input::TextInput;
+pub use timeline_view::{
+    TimelineClip, TimelineClipAction, TimelineClipMove, TimelineClipMoveAction, TimelineClipRef,
+    TimelineSeekAction, TimelineTrack, TimelineTrackKind, TimelineView,
+};

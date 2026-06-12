@@ -4,7 +4,7 @@
 //! building blocks for panels: empty states, search bars, dialogs,
 //! segmented controls, and collapsible sections.
 
-use crate::ui::theme::{self, corner_radius, palette, tokens, typography, UiIcon};
+use crate::egui_ui::theme::{self, corner_radius, palette, tokens, typography, UiIcon};
 
 // ── EmptyState ────────────────────────────────────────────────────────────
 

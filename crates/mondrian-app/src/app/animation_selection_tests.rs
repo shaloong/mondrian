@@ -1,5 +1,5 @@
 use super::*;
-use crate::ui::timeline_panel::SelectedClipRef;
+use crate::app::SelectedClipRef;
 use mondrian_core::automation::{PropertyMutation, PropertyValue};
 use mondrian_timeline::clip::Transform2D;
 

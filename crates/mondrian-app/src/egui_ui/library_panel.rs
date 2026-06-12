@@ -1,6 +1,6 @@
 use crate::{
     app::AppState,
-    ui::theme::{self, corner_radius, palette, tokens, typography},
+    egui_ui::theme::{self, corner_radius, palette, tokens, typography},
 };
 use egui::{Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use mondrian_assets::{AssetKind, AssetRecord};

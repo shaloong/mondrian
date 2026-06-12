@@ -567,8 +567,8 @@ pub(crate) fn decode_composited_rgba(
 /// (OCIde display/view, ICC profile, HDR, or non-standard transfer functions).
 pub(crate) fn gpu_color_params(
     request: &DecodeRequest,
-) -> Option<crate::ui::viewer::gpu_composite::GpuColorConversionParams> {
-    use crate::ui::viewer::gpu_composite::GpuColorConversionParams;
+) -> Option<crate::egui_ui::viewer::gpu_composite::GpuColorConversionParams> {
+    use crate::egui_ui::viewer::gpu_composite::GpuColorConversionParams;
     // Only supported for OCIde-free, ICC-free workflows.
     if request.ocio_display.is_some() || request.ocio_view.is_some() {
         return None;
@@ -643,7 +643,7 @@ pub(crate) fn apply_preview_output_color(data: &mut [u8], request: &DecodeReques
     }
 }
 
-// GPU compositor functions extracted to crate::ui::viewer::gpu_composite.
+// GPU compositor functions extracted to crate::egui_ui::viewer::gpu_composite.
 
 pub(crate) fn global_media_path_cache(cache_root: PathBuf) -> Arc<mondrian_media::MultiLevelCache> {
     static MEDIA_PATH_CACHE: OnceLock<

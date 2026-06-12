@@ -14,7 +14,7 @@ pub(crate) fn quantize_dimension(value: u32, step: u32) -> u32 {
 /// Draw action-safe (90%) and title-safe (80%) overlays.
 pub(crate) fn draw_safe_margins(
     painter: &egui::Painter,
-    ct: &crate::ui::viewer::canvas::CanvasTransform,
+    ct: &crate::egui_ui::viewer::canvas::CanvasTransform,
     seq: &Sequence,
 ) {
     let w = seq.settings.resolution.width as f32;
@@ -76,7 +76,7 @@ pub(crate) fn is_near_corner(rect: Option<Rect>, point: Pos2, radius: f32) -> bo
 pub(crate) fn clip_screen_bounds_with_media(
     clip: &mondrian_timeline::clip::Clip,
     mat: glam::Mat3,
-    ct: &crate::ui::viewer::canvas::CanvasTransform,
+    ct: &crate::egui_ui::viewer::canvas::CanvasTransform,
     state: &AppState,
 ) -> Option<Rect> {
     let (mw, mh) = state
@@ -118,7 +118,7 @@ pub(crate) fn clip_screen_bounds_with_media(
 pub(crate) fn clip_screen_bounds(
     _clip: &mondrian_timeline::clip::Clip,
     mat: glam::Mat3,
-    ct: &crate::ui::viewer::canvas::CanvasTransform,
+    ct: &crate::egui_ui::viewer::canvas::CanvasTransform,
 ) -> Option<Rect> {
     let corners = [
         glam::Vec2::new(0.0, 0.0),
@@ -151,7 +151,7 @@ pub(crate) fn clip_screen_bounds(
 pub(crate) fn draw_transform_handles(
     painter: &egui::Painter,
     state: &AppState,
-    ct: &crate::ui::viewer::canvas::CanvasTransform,
+    ct: &crate::egui_ui::viewer::canvas::CanvasTransform,
     clip_id: mondrian_core::types::ClipId,
 ) {
     let Some(seq) = state.sequence.as_ref() else {
@@ -284,7 +284,7 @@ pub(crate) fn draw_empty_canvas_meta(
 
 pub(crate) fn draw_mask_overlays(
     painter: &egui::Painter,
-    ct: &crate::ui::viewer::canvas::CanvasTransform,
+    ct: &crate::egui_ui::viewer::canvas::CanvasTransform,
     state: &AppState,
     timeline_frame: i64,
     selected_mask: Option<(
@@ -735,7 +735,7 @@ pub(crate) fn mask_hit_test(
     mw: f32,
     mh: f32,
     mat: &glam::Mat3,
-    ct: &crate::ui::viewer::canvas::CanvasTransform,
+    ct: &crate::egui_ui::viewer::canvas::CanvasTransform,
     screen_pos: Pos2,
 ) -> (Option<usize>, bool) {
     let to_scr = |x: f32, y: f32| -> Pos2 {
@@ -844,7 +844,7 @@ pub(crate) fn is_point_in_mask(
     mw: f32,
     mh: f32,
     mat: &glam::Mat3,
-    ct: &crate::ui::viewer::canvas::CanvasTransform,
+    ct: &crate::egui_ui::viewer::canvas::CanvasTransform,
     screen_pos: Pos2,
 ) -> bool {
     // Convert screen → seq → local media coords → normalized.
@@ -964,7 +964,7 @@ pub(crate) fn seq_point_to_clip_normalized(
 pub(crate) fn draw_mask_preview_polygon(
     painter: &egui::Painter,
     pts: &[glam::Vec2],
-    ct: &crate::ui::viewer::canvas::CanvasTransform,
+    ct: &crate::egui_ui::viewer::canvas::CanvasTransform,
     stroke: egui::Stroke,
     closed: bool,
 ) {
@@ -995,7 +995,7 @@ pub(crate) fn mask_next_name(state: &AppState, clip_id: mondrian_core::types::Cl
 /// Draw selection labels at top-left of selected clips and masks on the canvas.
 pub(crate) fn draw_selection_labels(
     painter: &egui::Painter,
-    ct: &crate::ui::viewer::canvas::CanvasTransform,
+    ct: &crate::egui_ui::viewer::canvas::CanvasTransform,
     state: &AppState,
     timeline_frame: i64,
     selected_clip: Option<(
@@ -1136,7 +1136,7 @@ pub(crate) fn move_path_handle(shape: &mut MaskShape, idx: usize, delta: glam::V
 /// Determine edit mode for a path point click: handle drag vs anchor move.
 pub(crate) fn path_point_edit_mode(
     state: &AppState,
-    ct: &crate::ui::viewer::canvas::CanvasTransform,
+    ct: &crate::egui_ui::viewer::canvas::CanvasTransform,
     clip_id: mondrian_core::types::ClipId,
     points: &[mondrian_effects::mask::BezierPoint],
     idx: usize,

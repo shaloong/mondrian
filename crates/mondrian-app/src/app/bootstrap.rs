@@ -8,7 +8,7 @@ impl MondrianApp {
         self.startup_viewport_mode = startup_mode;
 
         if startup_mode {
-            let size = crate::ui::theme::tokens::startup_viewport_size();
+            let size = crate::egui_ui::theme::tokens::startup_viewport_size();
             ctx.send_viewport_cmd(egui::ViewportCommand::Transparent(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(false));

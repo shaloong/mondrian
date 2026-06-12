@@ -38,16 +38,16 @@ use mondrian_timeline::sequence::{
 use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
 
-use crate::shortcuts::{ShortcutAction, ShortcutBinding, ShortcutKey, ShortcutPreferences};
-use crate::ui::{
+use crate::egui_ui::{
     effect_controls_panel::EffectControlsPanel,
     effect_library_panel::EffectLibraryPanel,
     export_panel::ExportPanel,
     library_panel::LibraryPanel,
     startup::{BootstrapAction, BootstrapRecentProjectItem, BootstrapRecoveryItem},
-    timeline_panel::{SelectedClipRef, TimelinePanel},
+    timeline_panel::TimelinePanel,
     viewer_panel::{MediaCacheCleanupStats, ViewerPanel, ViewerPreferences},
 };
+use crate::shortcuts::{ShortcutAction, ShortcutBinding, ShortcutKey, ShortcutPreferences};
 
 const PROJECT_EXTENSION: &str = "mdp";
 const DEFAULT_ADJUSTMENT_LAYER_DURATION_SECS: f64 = 5.0;
@@ -61,10 +61,12 @@ mod new_project;
 mod playback;
 mod preferences;
 mod project_lifecycle;
+mod selection;
 mod timeline_commands;
 mod timeline_editing;
 
 use audio_rendering::*;
+pub use selection::SelectedClipRef;
 use timeline_editing::*;
 
 // ─────────────────────────────────────────────
@@ -112,7 +114,7 @@ pub struct AnimationKeyframeSelection {
 #[derive(Debug, Clone, Default)]
 pub struct SelectionState {
     /// Selected clips (supports multi-select from timeline).
-    pub selected_clips: Vec<crate::ui::timeline_panel::SelectedClipRef>,
+    pub selected_clips: Vec<SelectedClipRef>,
     /// Currently selected mask (canvas → effect controls).
     pub selected_mask: Option<(MaskId, ClipId, TrackId)>,
 }
@@ -297,7 +299,7 @@ enum PendingCloseAction {
 struct AppPreferences {
     version: u32,
     #[serde(default = "default_app_theme")]
-    theme: crate::ui::theme::Theme,
+    theme: crate::egui_ui::theme::Theme,
     #[serde(default = "default_show_effect_controls")]
     show_effect_controls: bool,
     #[serde(default = "default_show_effect_library")]
@@ -492,8 +494,8 @@ const fn default_media_cache_auto_cleanup() -> bool {
     false
 }
 
-const fn default_app_theme() -> crate::ui::theme::Theme {
-    crate::ui::theme::Theme::System
+const fn default_app_theme() -> crate::egui_ui::theme::Theme {
+    crate::egui_ui::theme::Theme::System
 }
 
 const fn default_show_effect_controls() -> bool {
@@ -757,7 +759,7 @@ pub struct MondrianApp {
     viewer_panel: ViewerPanel,
     library_panel: LibraryPanel,
     export_panel: ExportPanel,
-    node_graph_panel: crate::ui::node_graph_panel::NodeGraphPanel,
+    node_graph_panel: crate::egui_ui::node_graph_panel::NodeGraphPanel,
 
     // 面板可见性
     show_effect_controls: bool,
@@ -768,7 +770,7 @@ pub struct MondrianApp {
     show_sequence_settings: bool,
     show_dev_metrics: bool,
     show_preferences_dialog: bool,
-    theme: crate::ui::theme::Theme,
+    theme: crate::egui_ui::theme::Theme,
     preferences_tab: PreferencesTab,
     capturing_shortcut: Option<ShortcutAction>,
     show_new_project_dialog: bool,
@@ -818,12 +820,12 @@ impl MondrianApp {
     const MENU_POPUP_WIDTH: f32 = 196.0;
 
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        crate::ui::fonts::configure_fonts(&cc.egui_ctx);
+        crate::egui_ui::fonts::configure_fonts(&cc.egui_ctx);
         egui_extras::install_image_loaders(&cc.egui_ctx);
 
         // Record surface format for GPU callback pipeline creation.
         if let Some(rs) = cc.wgpu_render_state.as_ref() {
-            crate::ui::viewer::gpu_texture::set_surface_format(rs.target_format);
+            crate::egui_ui::viewer::gpu_texture::set_surface_format(rs.target_format);
         }
 
         let state = AppState::new();
@@ -836,7 +838,7 @@ impl MondrianApp {
             viewer_panel: ViewerPanel::default(),
             library_panel: LibraryPanel::default(),
             export_panel: ExportPanel::default(),
-            node_graph_panel: crate::ui::node_graph_panel::NodeGraphPanel::default(),
+            node_graph_panel: crate::egui_ui::node_graph_panel::NodeGraphPanel::default(),
             show_effect_controls: true,
             show_node_graph: false,
             show_effect_library: true,
@@ -894,7 +896,7 @@ impl MondrianApp {
         mondrian_renderer::profile::init_profiling();
 
         app.load_app_preferences();
-        crate::ui::theme::apply_theme(&cc.egui_ctx, app.theme);
+        crate::egui_ui::theme::apply_theme(&cc.egui_ctx, app.theme);
         cc.egui_ctx
             .send_viewport_cmd(egui::ViewportCommand::SetTheme(app.theme.to_system_theme()));
 
@@ -919,7 +921,7 @@ impl eframe::App for MondrianApp {
         let is_playing = self.state.is_playing();
 
         let theme_started_at = std::time::Instant::now();
-        crate::ui::theme::apply_theme(&ctx, self.theme);
+        crate::egui_ui::theme::apply_theme(&ctx, self.theme);
         ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(
             self.theme.to_system_theme(),
         ));
@@ -1010,7 +1012,7 @@ impl eframe::App for MondrianApp {
                 })
                 .collect::<Vec<_>>();
 
-            if let Some(action) = crate::ui::startup::show_project_bootstrap_window(
+            if let Some(action) = crate::egui_ui::startup::show_project_bootstrap_window(
                 ui,
                 PROJECT_EXTENSION,
                 &recent_items,
@@ -1061,10 +1063,10 @@ impl eframe::App for MondrianApp {
         egui::Panel::top("top_menu")
             .frame(
                 egui::Frame::new()
-                    .fill(crate::ui::theme::palette::bg_surface())
+                    .fill(crate::egui_ui::theme::palette::bg_surface())
                     .stroke(egui::Stroke::new(
                         1.0,
-                        crate::ui::theme::palette::panel_divider_strong(),
+                        crate::egui_ui::theme::palette::panel_divider_strong(),
                     ))
                     .inner_margin(egui::Margin::symmetric(10, 6)),
             )
@@ -1081,10 +1083,10 @@ impl eframe::App for MondrianApp {
             .exact_size(28.0)
             .frame(
                 egui::Frame::new()
-                    .fill(crate::ui::theme::palette::bg_surface())
+                    .fill(crate::egui_ui::theme::palette::bg_surface())
                     .stroke(egui::Stroke::new(
                         1.0,
-                        crate::ui::theme::palette::panel_divider_strong(),
+                        crate::egui_ui::theme::palette::panel_divider_strong(),
                     ))
                     .inner_margin(egui::Margin::symmetric(10, 0)),
             )
@@ -1102,10 +1104,10 @@ impl eframe::App for MondrianApp {
             .resizable(false)
             .frame(
                 egui::Frame::new()
-                    .fill(crate::ui::theme::palette::bg_base())
+                    .fill(crate::egui_ui::theme::palette::bg_base())
                     .stroke(egui::Stroke::new(
                         1.0,
-                        crate::ui::theme::palette::panel_divider_strong(),
+                        crate::egui_ui::theme::palette::panel_divider_strong(),
                     ))
                     .inner_margin(egui::Margin { left: 12, right: 12, top: 0, bottom: 8 }),
             )
@@ -1142,7 +1144,7 @@ impl eframe::App for MondrianApp {
         if self.show_library {
             let library_started_at = std::time::Instant::now();
             let viewer_min = 540.0;
-            let right_reserved = crate::ui::theme::tokens::inspector_panel_min_width() + 208.0; // effect_library min
+            let right_reserved = crate::egui_ui::theme::tokens::inspector_panel_min_width() + 208.0; // effect_library min
             let library_max = (ctx.content_rect().width() - viewer_min - right_reserved).max(220.0);
             egui::Panel::left("library_panel")
                 .default_size(296.0)
@@ -1151,7 +1153,7 @@ impl eframe::App for MondrianApp {
                 .resizable(true)
                 .frame(
                     egui::Frame::new()
-                        .fill(crate::ui::theme::palette::bg_base())
+                        .fill(crate::egui_ui::theme::palette::bg_base())
                         .stroke(egui::Stroke::NONE)
                         .inner_margin(egui::Margin::symmetric(12, 8)),
                 )
@@ -1197,15 +1199,15 @@ impl eframe::App for MondrianApp {
             let left_reserved = 220.0; // library min
             let other_right = if self.show_effect_library { 208.0 } else { 0.0 };
             let ec_max = (ctx.content_rect().width() - viewer_min - left_reserved - other_right)
-                .max(crate::ui::theme::tokens::inspector_panel_min_width());
+                .max(crate::egui_ui::theme::tokens::inspector_panel_min_width());
             egui::Panel::right("effect_controls_panel")
-                .default_size(crate::ui::theme::tokens::inspector_panel_width())
-                .min_size(crate::ui::theme::tokens::inspector_panel_min_width())
+                .default_size(crate::egui_ui::theme::tokens::inspector_panel_width())
+                .min_size(crate::egui_ui::theme::tokens::inspector_panel_min_width())
                 .max_size(ec_max)
                 .resizable(true)
                 .frame(
                     egui::Frame::new()
-                        .fill(crate::ui::theme::palette::bg_base())
+                        .fill(crate::egui_ui::theme::palette::bg_base())
                         .stroke(egui::Stroke::NONE)
                         .inner_margin(egui::Margin::symmetric(12, 8)),
                 )
@@ -1224,7 +1226,7 @@ impl eframe::App for MondrianApp {
             let viewer_min = 540.0;
             let left_reserved = 220.0; // library min
             let other_right = if self.show_effect_controls {
-                crate::ui::theme::tokens::inspector_panel_min_width()
+                crate::egui_ui::theme::tokens::inspector_panel_min_width()
             } else {
                 0.0
             };
@@ -1237,7 +1239,7 @@ impl eframe::App for MondrianApp {
                 .resizable(true)
                 .frame(
                     egui::Frame::new()
-                        .fill(crate::ui::theme::palette::bg_base())
+                        .fill(crate::egui_ui::theme::palette::bg_base())
                         .stroke(egui::Stroke::NONE)
                         .inner_margin(egui::Margin::symmetric(12, 8)),
                 )
@@ -1254,7 +1256,7 @@ impl eframe::App for MondrianApp {
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
-                    .fill(crate::ui::theme::palette::bg_base())
+                    .fill(crate::egui_ui::theme::palette::bg_base())
                     .inner_margin(egui::Margin::symmetric(12, 8)),
             )
             .show_inside(ui, |ui| {
@@ -1294,7 +1296,7 @@ impl eframe::App for MondrianApp {
             egui::Window::new("导出")
                 .open(&mut open)
                 .default_size([560.0, 680.0])
-                .frame(crate::ui::theme::dialog_frame())
+                .frame(crate::egui_ui::theme::dialog_frame())
                 .show(&ctx, |ui| {
                     self.export_panel.show(ui, &mut self.state);
                 });
@@ -1309,7 +1311,7 @@ impl eframe::App for MondrianApp {
             egui::Window::new("序列设置")
                 .open(&mut open)
                 .default_size([520.0, 520.0])
-                .frame(crate::ui::theme::dialog_frame())
+                .frame(crate::egui_ui::theme::dialog_frame())
                 .show(&ctx, |ui| {
                     self.draw_sequence_settings_window(ui);
                 });
@@ -1467,7 +1469,7 @@ impl MondrianApp {
         };
 
         // Initialize the GPU compositor (layer composition).
-        crate::ui::viewer::gpu_composite::init_gpu_compositor(gpu.clone());
+        crate::egui_ui::viewer::gpu_composite::init_gpu_compositor(gpu.clone());
 
         // Initialize GPU compute backend for effect processing.
         let backend = mondrian_renderer::GpuBackend::from_context(gpu);
@@ -2097,7 +2099,7 @@ impl MondrianApp {
             .resizable(false)
             .default_size([460.0, 160.0])
             .open(&mut keep_open)
-            .frame(crate::ui::theme::dialog_frame())
+            .frame(crate::egui_ui::theme::dialog_frame())
             .show(ctx, |ui| {
                 let action_text = match action {
                     PendingCloseAction::CloseProject => "关闭项目",

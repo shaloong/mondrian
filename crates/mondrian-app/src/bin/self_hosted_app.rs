@@ -2,19 +2,18 @@
 //! Mondrian 新 UI 主窗口
 //!
 //! 使用自研 UI 框架（winit + wgpu + Dock + Widget）的应用入口。
-//! 运行: cargo run --bin ui_app
+//! 运行: cargo run --bin self_hosted_app
 
 use std::sync::Arc;
 
-use mondrian_app::ui_runtime::WinitUiRuntime;
-use mondrian_core::Color;
+use mondrian_app::self_hosted::panels::build_demo_dock_tree;
+use mondrian_app::self_hosted::runtime::WinitUiRuntime;
 use mondrian_editor_state::state::PanelKind;
 use mondrian_editor_state::Action;
 use mondrian_panel_console::tracing_layer::ConsoleLogLayer;
 use mondrian_platform::SystemPlatformService;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
-use mondrian_ui_core::widgets::ColoredBox;
 use mondrian_ui_core::{EventResult, TreeWalker, Widget};
 use mondrian_ui_events::EventRouter;
 use mondrian_ui_renderer::command::DrawEncoder;
@@ -22,13 +21,7 @@ use mondrian_ui_renderer::UiRenderer;
 use mondrian_ui_text::{resolve_text_commands, TextRenderer};
 use mondrian_ui_tooltip::TooltipManagerImpl;
 use mondrian_ui_widgets::dock_splitter::DockSplitter;
-use mondrian_ui_widgets::dock_tab_bar::TabInfo;
 use mondrian_ui_widgets::menu::{Dropdown, MenuItem};
-use mondrian_ui_widgets::panel_slot::SlotKind;
-use mondrian_ui_widgets::{
-    Checkbox, ColorPickerAreaMode, ColorPickerTrigger, CurveEditor, CurvePoint, DockPanel,
-    PanelList, PanelListItem, PropertyPanel, PropertyRow, PropertySection, ScrollView, Slider,
-};
 use tracing_subscriber::prelude::*;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -228,211 +221,8 @@ impl AppRoot {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Dock tree (unchanged)
+// Helpers
 // ═══════════════════════════════════════════════════════════════════════════
-
-fn build_dock_tree() -> DockSplitter {
-    let left = DockSplitter::new(
-        SplitDirection::Vertical,
-        0.6,
-        slot(SlotKind::Assets),
-        slot(SlotKind::Console),
-    );
-    let right_bottom = DockSplitter::new(
-        SplitDirection::Horizontal,
-        0.7,
-        slot(SlotKind::Timeline),
-        slot(SlotKind::Inspector),
-    );
-    let right = DockSplitter::new(
-        SplitDirection::Vertical,
-        0.65,
-        slot(SlotKind::Viewer),
-        Box::new(right_bottom),
-    );
-    DockSplitter::new(
-        SplitDirection::Horizontal,
-        0.28,
-        Box::new(left),
-        Box::new(right),
-    )
-}
-
-fn slot(kind: SlotKind) -> Box<dyn Widget> {
-    if kind == SlotKind::Inspector {
-        return Box::new(DockPanel::new(kind, single_tab(kind), |_kind, _active| {
-            Box::new(ScrollView::new(Some(Box::new(inspector_panel()))))
-        }));
-    }
-
-    Box::new(DockPanel::new(kind, single_tab(kind), |kind, _active| {
-        panel_content_for_slot(kind)
-    }))
-}
-
-fn single_tab(kind: SlotKind) -> Vec<TabInfo> {
-    vec![TabInfo {
-        label: kind.display_name().to_string(),
-        active: true,
-    }]
-}
-
-fn panel_content_for_slot(kind: SlotKind) -> Box<dyn Widget> {
-    match kind {
-        SlotKind::Assets => Box::new(asset_panel()),
-        SlotKind::Effects => Box::new(effects_panel()),
-        SlotKind::Console => Box::new(console_panel()),
-        SlotKind::Viewer => Box::new(ColoredBox::new(Color::from_hex(0x1A1A2E), 1.0, 1.0)),
-        SlotKind::Timeline => Box::new(ColoredBox::new(Color::from_hex(0x16213E), 1.0, 1.0)),
-        SlotKind::Project => Box::new(ColoredBox::new(Color::from_hex(0x1E3A2A), 1.0, 1.0)),
-        _ => Box::new(ColoredBox::new(Color::from_hex(0x1A1A1A), 1.0, 1.0)),
-    }
-}
-
-fn asset_panel() -> PanelList {
-    PanelList::new(
-        "Assets",
-        vec![
-            PanelListItem::new("Footage")
-                .with_subtitle("Imported camera clips")
-                .with_badge("12")
-                .with_select_action(panel_action("assets.select.footage")),
-            PanelListItem::new("Audio")
-                .with_subtitle("Music, voiceover, and ambience")
-                .with_badge("5")
-                .with_select_action(panel_action("assets.select.audio")),
-            PanelListItem::new("Images")
-                .with_subtitle("Still frames and references")
-                .with_badge("8")
-                .with_select_action(panel_action("assets.select.images")),
-            PanelListItem::new("Sequences")
-                .with_subtitle("Nested edits and reusable timelines")
-                .with_badge("2")
-                .with_select_action(panel_action("assets.select.sequences")),
-        ],
-    )
-    .with_subtitle("Project library")
-    .on_activate(|index, item| panel_action(&format!("assets.activate.{index}.{}", item.title)))
-}
-
-fn effects_panel() -> PanelList {
-    PanelList::new(
-        "Effects",
-        vec![
-            PanelListItem::new("Color Balance")
-                .with_subtitle("Lift, gamma, gain")
-                .with_badge("GPU")
-                .with_select_action(panel_action("effects.select.color_balance")),
-            PanelListItem::new("Gaussian Blur")
-                .with_subtitle("Radius and edge behavior")
-                .with_badge("GPU")
-                .with_select_action(panel_action("effects.select.blur")),
-            PanelListItem::new("LUT")
-                .with_subtitle("Creative look transform")
-                .with_badge("3D")
-                .with_select_action(panel_action("effects.select.lut")),
-            PanelListItem::new("Optical Flow")
-                .with_subtitle("Coming after render cache integration")
-                .with_badge("Soon")
-                .disabled(true),
-        ],
-    )
-    .with_subtitle("Effect browser")
-    .on_activate(|index, item| panel_action(&format!("effects.apply.{index}.{}", item.title)))
-}
-
-fn console_panel() -> PanelList {
-    PanelList::new(
-        "Console",
-        vec![
-            PanelListItem::new("UI runtime ready").with_subtitle("Event router attached"),
-            PanelListItem::new("Renderer warm").with_subtitle("wgpu command encoder active"),
-            PanelListItem::new("Text atlas").with_subtitle("cosmic-text layout path"),
-        ],
-    )
-    .with_subtitle("Runtime messages")
-}
-
-fn panel_action(name: &str) -> Action {
-    Action::Custom {
-        namespace: "ui.panel".into(),
-        name: name.into(),
-        payload: serde_json::Value::Null,
-    }
-}
-
-fn inspector_panel() -> PropertyPanel {
-    let mut tint = ColorPickerTrigger::new(Color::from_rgba8(132, 180, 255, 220));
-    tint.picker_mut().set_area_mode(ColorPickerAreaMode::Wheel);
-    let curve = CurveEditor::with_points(vec![
-        CurvePoint::new(0.0, 0.0),
-        CurvePoint::new(0.35, 0.68),
-        CurvePoint::new(0.72, 0.42),
-        CurvePoint::new(1.0, 1.0),
-    ])
-    .on_change(inspector_curve_action);
-    PropertyPanel::new("Inspector")
-        .with_subtitle("Selected clip")
-        .with_section(
-            PropertySection::new("Clip Style")
-                .with_row(PropertyRow::new(
-                    "Enabled",
-                    Box::new(Checkbox::new("启用效果", true).on_change(inspector_bool_action)),
-                ))
-                .with_row(PropertyRow::new(
-                    "Opacity",
-                    Box::new(
-                        Slider::new(72.0, 0.0, 100.0)
-                            .on_change(|value| inspector_value_action("opacity", value)),
-                    ),
-                ))
-                .with_row(PropertyRow::new(
-                    "Tint",
-                    Box::new(tint.on_change(inspector_color_action)),
-                )),
-        )
-        .with_section(
-            PropertySection::new("Animation")
-                .with_row(PropertyRow::new("Curve", Box::new(curve)).with_height(118.0)),
-        )
-}
-
-fn inspector_value_action(name: &'static str, value: f32) -> Action {
-    Action::Custom {
-        namespace: "ui.inspector".into(),
-        name: format!("{name}:{value:.3}"),
-        payload: serde_json::Value::Null,
-    }
-}
-
-fn inspector_bool_action(value: bool) -> Action {
-    Action::Custom {
-        namespace: "ui.inspector".into(),
-        name: format!("enabled:{value}"),
-        payload: serde_json::Value::Null,
-    }
-}
-
-fn inspector_color_action(color: Color) -> Action {
-    let [r, g, b, a] = color.to_rgba8();
-    Action::Custom {
-        namespace: "ui.inspector".into(),
-        name: format!("tint:{r},{g},{b},{a}"),
-        payload: serde_json::Value::Null,
-    }
-}
-
-fn inspector_curve_action(points: &[CurvePoint]) -> Action {
-    let mut name = String::from("curve");
-    for point in points {
-        name.push_str(&format!(":{:.3},{:.3}", point.x, point.y));
-    }
-    Action::Custom {
-        namespace: "ui.inspector".into(),
-        name,
-        payload: serde_json::Value::Null,
-    }
-}
 
 fn mouse_button(b: winit::event::MouseButton) -> MouseButton {
     match b {
@@ -491,7 +281,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut text_renderer = TextRenderer::new();
 
     let menu_bar = MenuBar::new();
-    let dock = build_dock_tree();
+    let dock = build_demo_dock_tree();
     let mut root = AppRoot::new(menu_bar, dock);
     let bounds = Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
     TreeWalker::layout(&mut root, bounds);

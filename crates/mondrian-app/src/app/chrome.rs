@@ -105,20 +105,23 @@ impl MondrianApp {
 
             ui.menu_button("视图", |ui| {
                 ui.set_min_width(Self::MENU_POPUP_MIN_WIDTH);
-                let _ = crate::ui::theme::checkmark_menu_toggle(
+                let _ = crate::egui_ui::theme::checkmark_menu_toggle(
                     ui,
                     &mut self.show_effect_controls,
                     "属性面板",
                 );
-                let _ = crate::ui::theme::checkmark_menu_toggle(
+                let _ = crate::egui_ui::theme::checkmark_menu_toggle(
                     ui,
                     &mut self.show_effect_library,
                     "特效库",
                 );
-                let _ =
-                    crate::ui::theme::checkmark_menu_toggle(ui, &mut self.show_library, "素材库");
+                let _ = crate::egui_ui::theme::checkmark_menu_toggle(
+                    ui,
+                    &mut self.show_library,
+                    "素材库",
+                );
                 if cfg!(debug_assertions) {
-                    let _ = crate::ui::theme::checkmark_menu_toggle(
+                    let _ = crate::egui_ui::theme::checkmark_menu_toggle(
                         ui,
                         &mut self.show_dev_metrics,
                         "开发指标",
@@ -173,7 +176,8 @@ impl MondrianApp {
                     } else {
                         sequence.name.clone()
                     };
-                    let response = crate::ui::theme::checkmark_menu_action(ui, is_active, label);
+                    let response =
+                        crate::egui_ui::theme::checkmark_menu_action(ui, is_active, label);
                     response.context_menu(|ui| {
                         if Self::menu_action(ui, "序列设置...", None).clicked() {
                             if let Err(err) = self.state.switch_active_sequence(sequence.id) {
@@ -259,8 +263,8 @@ impl MondrianApp {
             .painter()
             .layout_no_wrap(
                 label.to_owned(),
-                crate::ui::theme::typography::body_small(),
-                crate::ui::theme::palette::text_primary(),
+                crate::egui_ui::theme::typography::body_small(),
+                crate::egui_ui::theme::palette::text_primary(),
             )
             .size()
             .x;
@@ -269,8 +273,8 @@ impl MondrianApp {
                 ui.painter()
                     .layout_no_wrap(
                         shortcut.to_owned(),
-                        crate::ui::theme::typography::body_small(),
-                        crate::ui::theme::palette::text_muted(),
+                        crate::egui_ui::theme::typography::body_small(),
+                        crate::egui_ui::theme::palette::text_muted(),
                     )
                     .size()
                     .x
@@ -306,17 +310,17 @@ impl MondrianApp {
             ui.painter().rect_filled(rect, rounding, fill);
 
             let label_color = if enabled {
-                crate::ui::theme::palette::text_primary()
+                crate::egui_ui::theme::palette::text_primary()
             } else {
-                crate::ui::theme::palette::text_muted()
+                crate::egui_ui::theme::palette::text_muted()
             };
-            let shortcut_color = crate::ui::theme::palette::text_muted().gamma_multiply(0.78);
+            let shortcut_color = crate::egui_ui::theme::palette::text_muted().gamma_multiply(0.78);
 
             ui.painter().text(
                 rect.left_center() + egui::vec2(10.0, 0.0),
                 egui::Align2::LEFT_CENTER,
                 label,
-                crate::ui::theme::typography::body_small(),
+                crate::egui_ui::theme::typography::body_small(),
                 label_color,
             );
 
@@ -325,7 +329,7 @@ impl MondrianApp {
                     rect.right_center() - egui::vec2(10.0, 0.0),
                     egui::Align2::RIGHT_CENTER,
                     shortcut,
-                    crate::ui::theme::typography::body_small(),
+                    crate::egui_ui::theme::typography::body_small(),
                     shortcut_color,
                 );
             }
@@ -342,17 +346,17 @@ impl MondrianApp {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 let (status_text, is_error, is_busy) = self.status_bar_text();
                 let status_color = if is_error {
-                    crate::ui::theme::palette::status_error()
+                    crate::egui_ui::theme::palette::status_error()
                 } else if is_busy {
-                    crate::ui::theme::palette::interaction_highlight()
+                    crate::egui_ui::theme::palette::interaction_highlight()
                 } else {
-                    crate::ui::theme::palette::text_muted()
+                    crate::egui_ui::theme::palette::text_muted()
                 };
 
-                let _ = crate::ui::theme::icon(
+                let _ = crate::egui_ui::theme::icon(
                     ui,
-                    crate::ui::theme::UiIcon::Info,
-                    crate::ui::theme::palette::text_muted(),
+                    crate::egui_ui::theme::UiIcon::Info,
+                    crate::egui_ui::theme::palette::text_muted(),
                 );
                 ui.add(
                     egui::Label::new(egui::RichText::new(status_text).color(status_color))
@@ -368,7 +372,7 @@ impl MondrianApp {
                         .unwrap_or("未命名项目");
                     ui.label(
                         egui::RichText::new(project_name)
-                            .color(crate::ui::theme::palette::text_muted()),
+                            .color(crate::egui_ui::theme::palette::text_muted()),
                     );
                 });
             },

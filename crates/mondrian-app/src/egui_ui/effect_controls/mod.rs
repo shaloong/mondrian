@@ -1,14 +1,13 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    app::{AnimationBubbleHost, AnimationKeyframeSelection, AppState},
-    ui::{
+    app::{AnimationBubbleHost, AnimationKeyframeSelection, AppState, SelectedClipRef},
+    egui_ui::{
         animation_groups::{
             property_display_name, property_group_meta, property_order,
             qualified_property_display_name, AnimationGroupKind, AnimationGroupMeta,
         },
         theme::{self, palette, tokens, typography},
-        timeline_panel::SelectedClipRef,
     },
 };
 use egui::{
