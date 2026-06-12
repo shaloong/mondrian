@@ -8,7 +8,7 @@
 use mondrian_assets::{AssetKind, AssetLibrary, AssetRecord};
 use mondrian_core::automation::timecode_to_ticks;
 use mondrian_core::effect_data::EffectType;
-use mondrian_core::types::{AssetId, ClipId, SequenceId, TimeCode, TrackId};
+use mondrian_core::types::{AssetId, ClipId, EffectId, SequenceId, TimeCode, TrackId};
 use mondrian_core::Color;
 use mondrian_editor_state::Action;
 use mondrian_effects::{effect_display_name, effect_library_types};
@@ -31,11 +31,12 @@ use mondrian_ui_widgets::{
 use crate::app::ui_actions::{
     effects_add_to_clip_action, inspector_set_clip_enabled_action,
     inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
-    inspector_set_clip_transform_field_action, timeline_move_clip_action, timeline_seek_action,
-    timeline_select_clip_action, timeline_trim_clip_action, EffectsAddToClipPayload,
-    InspectorClipRefPayload, InspectorClipTransformField, InspectorSetClipEnabledPayload,
-    InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
-    InspectorSetClipTransformFieldPayload, TimelineMoveClipPayload, TimelineSelectClipPayload,
+    inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
+    timeline_move_clip_action, timeline_seek_action, timeline_select_clip_action,
+    timeline_trim_clip_action, EffectsAddToClipPayload, InspectorClipRefPayload,
+    InspectorClipTransformField, InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
+    InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
+    InspectorSetEffectEnabledPayload, TimelineMoveClipPayload, TimelineSelectClipPayload,
     TimelineTrimClipPayload, TimelineTrimPayloadEdge,
 };
 use crate::app::{AppState, SelectedClipRef};
@@ -386,6 +387,19 @@ pub struct InspectorPanelModel {
     pub tint_area_mode: ColorPickerAreaMode,
     /// Curve-editor fixture points until animation curves are fully mapped.
     pub curve_points: Vec<CurvePoint>,
+    /// Effects currently attached to the selected clip.
+    pub effects: Vec<InspectorEffectModel>,
+}
+
+/// Effect row data shown by the self-hosted inspector.
+#[derive(Debug, Clone)]
+pub struct InspectorEffectModel {
+    /// Effect instance id targeted by enable/disable actions.
+    pub effect_id: EffectId,
+    /// Human-readable effect name.
+    pub label: String,
+    /// Whether the effect is enabled.
+    pub enabled: bool,
 }
 
 impl InspectorPanelModel {
@@ -421,6 +435,15 @@ impl InspectorPanelModel {
             max_frame: sequence.total_duration().frame.max(1) as f32,
             tint_area_mode: ColorPickerAreaMode::Wheel,
             curve_points: vec![CurvePoint::new(0.0, 0.0), CurvePoint::new(1.0, 1.0)],
+            effects: clip
+                .effects
+                .iter()
+                .map(|effect| InspectorEffectModel {
+                    effect_id: effect.id,
+                    label: effect_display_name(&effect.effect_type),
+                    enabled: effect.is_enabled,
+                })
+                .collect(),
         }
     }
 
@@ -444,6 +467,7 @@ impl InspectorPanelModel {
                 CurvePoint::new(0.72, 0.42),
                 CurvePoint::new(1.0, 1.0),
             ],
+            effects: Vec::new(),
         }
     }
 }
@@ -883,118 +907,121 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
     let curve =
         CurveEditor::with_points(model.curve_points.clone()).on_change(inspector_curve_action);
     let selected_clip = model.selected_clip;
-    PropertyPanel::new("Inspector")
-        .with_subtitle("Selected clip")
-        .with_section(
-            PropertySection::new("Clip Style")
-                .with_row(PropertyRow::new(
-                    "Enabled",
-                    Box::new(
-                        Checkbox::new("启用效果", model.enabled)
-                            .on_change(move |value| inspector_bool_action(selected_clip, value)),
-                    ),
-                ))
-                .with_row(PropertyRow::new(
-                    "Opacity",
-                    Box::new(
-                        Slider::new(model.opacity, 0.0, 100.0).on_change(move |value| {
-                            inspector_value_action(selected_clip, "opacity", value)
-                        }),
-                    ),
-                ))
-                .with_row(PropertyRow::new(
-                    "Tint",
-                    Box::new(
-                        tint.on_change(move |color| inspector_color_action(selected_clip, color)),
-                    ),
+    let mut panel = PropertyPanel::new("Inspector").with_subtitle("Selected clip").with_section(
+        PropertySection::new("Clip Style")
+            .with_row(PropertyRow::new(
+                "Enabled",
+                Box::new(
+                    Checkbox::new("启用效果", model.enabled)
+                        .on_change(move |value| inspector_bool_action(selected_clip, value)),
+                ),
+            ))
+            .with_row(PropertyRow::new(
+                "Opacity",
+                Box::new(
+                    Slider::new(model.opacity, 0.0, 100.0).on_change(move |value| {
+                        inspector_value_action(selected_clip, "opacity", value)
+                    }),
+                ),
+            ))
+            .with_row(PropertyRow::new(
+                "Tint",
+                Box::new(tint.on_change(move |color| inspector_color_action(selected_clip, color))),
+            )),
+    );
+
+    panel = panel.with_section(
+        PropertySection::new("Transform")
+            .with_row(PropertyRow::new(
+                "Position X",
+                Box::new(
+                    Slider::new(model.position_x, -4096.0, 4096.0).on_change(move |value| {
+                        inspector_transform_action(
+                            selected_clip,
+                            InspectorClipTransformField::PositionX,
+                            value,
+                        )
+                    }),
+                ),
+            ))
+            .with_row(PropertyRow::new(
+                "Position Y",
+                Box::new(
+                    Slider::new(model.position_y, -4096.0, 4096.0).on_change(move |value| {
+                        inspector_transform_action(
+                            selected_clip,
+                            InspectorClipTransformField::PositionY,
+                            value,
+                        )
+                    }),
+                ),
+            ))
+            .with_row(PropertyRow::new(
+                "Scale",
+                Box::new(
+                    Slider::new(model.scale_percent, 0.0, 400.0).on_change(move |value| {
+                        inspector_transform_action(
+                            selected_clip,
+                            InspectorClipTransformField::ScalePercent,
+                            value,
+                        )
+                    }),
+                ),
+            ))
+            .with_row(PropertyRow::new(
+                "Rotation",
+                Box::new(
+                    Slider::new(model.rotation_degrees, -180.0, 180.0).on_change(move |value| {
+                        inspector_transform_action(
+                            selected_clip,
+                            InspectorClipTransformField::RotationDegrees,
+                            value,
+                        )
+                    }),
+                ),
+            )),
+    );
+
+    panel = panel.with_section(
+        PropertySection::new("Timing")
+            .with_row(PropertyRow::new(
+                "In",
+                Box::new(Slider::new(model.in_frame, 0.0, model.max_frame).on_change(
+                    move |value| {
+                        inspector_timing_action(selected_clip, TimelineTrimPayloadEdge::In, value)
+                    },
                 )),
-        )
-        .with_section(
-            PropertySection::new("Transform")
-                .with_row(PropertyRow::new(
-                    "Position X",
-                    Box::new(Slider::new(model.position_x, -4096.0, 4096.0).on_change(
-                        move |value| {
-                            inspector_transform_action(
-                                selected_clip,
-                                InspectorClipTransformField::PositionX,
-                                value,
-                            )
-                        },
-                    )),
-                ))
-                .with_row(PropertyRow::new(
-                    "Position Y",
-                    Box::new(Slider::new(model.position_y, -4096.0, 4096.0).on_change(
-                        move |value| {
-                            inspector_transform_action(
-                                selected_clip,
-                                InspectorClipTransformField::PositionY,
-                                value,
-                            )
-                        },
-                    )),
-                ))
-                .with_row(PropertyRow::new(
-                    "Scale",
-                    Box::new(Slider::new(model.scale_percent, 0.0, 400.0).on_change(
-                        move |value| {
-                            inspector_transform_action(
-                                selected_clip,
-                                InspectorClipTransformField::ScalePercent,
-                                value,
-                            )
-                        },
-                    )),
-                ))
-                .with_row(PropertyRow::new(
-                    "Rotation",
-                    Box::new(
-                        Slider::new(model.rotation_degrees, -180.0, 180.0).on_change(
-                            move |value| {
-                                inspector_transform_action(
-                                    selected_clip,
-                                    InspectorClipTransformField::RotationDegrees,
-                                    value,
-                                )
-                            },
-                        ),
-                    ),
-                )),
-        )
-        .with_section(
-            PropertySection::new("Timing")
-                .with_row(PropertyRow::new(
-                    "In",
-                    Box::new(Slider::new(model.in_frame, 0.0, model.max_frame).on_change(
-                        move |value| {
-                            inspector_timing_action(
-                                selected_clip,
-                                TimelineTrimPayloadEdge::In,
-                                value,
-                            )
-                        },
-                    )),
-                ))
-                .with_row(PropertyRow::new(
-                    "Out",
-                    Box::new(
-                        Slider::new(model.out_frame, 0.0, model.max_frame).on_change(
-                            move |value| {
-                                inspector_timing_action(
-                                    selected_clip,
-                                    TimelineTrimPayloadEdge::Out,
-                                    value,
-                                )
-                            },
-                        ),
-                    ),
-                )),
-        )
-        .with_section(
-            PropertySection::new("Animation")
-                .with_row(PropertyRow::new("Curve", Box::new(curve)).with_height(118.0)),
-        )
+            ))
+            .with_row(PropertyRow::new(
+                "Out",
+                Box::new(
+                    Slider::new(model.out_frame, 0.0, model.max_frame).on_change(move |value| {
+                        inspector_timing_action(selected_clip, TimelineTrimPayloadEdge::Out, value)
+                    }),
+                ),
+            )),
+    );
+
+    if !model.effects.is_empty() {
+        let mut section = PropertySection::new("Effects");
+        for effect in &model.effects {
+            let effect_id = effect.effect_id;
+            section = section.with_row(PropertyRow::new(
+                effect.label.clone(),
+                Box::new(
+                    Checkbox::new("Enabled", effect.enabled).on_change(move |enabled| {
+                        inspector_effect_enabled_action(selected_clip, effect_id, enabled)
+                    }),
+                ),
+            ));
+        }
+        panel = panel.with_section(section);
+    }
+
+    panel.with_section(
+        PropertySection::new("Animation")
+            .with_row(PropertyRow::new("Curve", Box::new(curve)).with_height(118.0)),
+    )
 }
 
 fn inspector_value_action(
@@ -1069,6 +1096,21 @@ fn inspector_timing_action(
     legacy_inspector_action(format!("timing.{edge:?}:{frame}"))
 }
 
+fn inspector_effect_enabled_action(
+    selection: Option<SelectedClipRef>,
+    effect_id: EffectId,
+    enabled: bool,
+) -> Action {
+    if let Some(selection) = selection {
+        return inspector_set_effect_enabled_action(InspectorSetEffectEnabledPayload {
+            clip: inspector_clip_payload(selection),
+            effect_id,
+            enabled,
+        });
+    }
+    legacy_inspector_action(format!("effect.{effect_id}.enabled:{enabled}"))
+}
+
 fn inspector_curve_action(points: &[CurvePoint]) -> Action {
     let mut name = String::from("curve");
     for point in points {
@@ -1102,6 +1144,7 @@ mod tests {
     use super::*;
     use mondrian_core::automation::{PropertyHost, PropertyMutation, PropertyValue};
     use mondrian_core::types::{AssetId, TimeCode};
+    use mondrian_effects::EffectNodeExt;
 
     #[test]
     fn demo_panel_models_cover_primary_editor_surfaces() {
@@ -1237,6 +1280,10 @@ mod tests {
             value: PropertyValue::Float(15.0),
         })
         .expect("set rotation");
+        let mut effect = mondrian_effects::EffectNode::with_defaults(EffectType::GaussianBlur);
+        effect.is_enabled = false;
+        let effect_id = effect.id;
+        clip.add_effect_node(effect);
         let clip_id = clip.id;
         let track_id = sequence.video_tracks[0].id;
         sequence.video_tracks[0].add_clip(clip).expect("add solid clip");
@@ -1263,6 +1310,13 @@ mod tests {
         assert_eq!(models.inspector.in_frame, 4.0);
         assert_eq!(models.inspector.out_frame, 22.0);
         assert_eq!(models.inspector.max_frame, 22.0);
+        assert_eq!(models.inspector.effects.len(), 1);
+        assert_eq!(models.inspector.effects[0].effect_id, effect_id);
+        assert_eq!(
+            models.inspector.effects[0].label,
+            effect_display_name(&EffectType::GaussianBlur)
+        );
+        assert!(!models.inspector.effects[0].enabled);
     }
 
     #[test]

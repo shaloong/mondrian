@@ -4,7 +4,7 @@
 //! to `Action::Custom` payloads before actions reach the app state layer.
 
 use mondrian_core::effect_data::EffectType;
-use mondrian_core::types::{ClipId, TrackId};
+use mondrian_core::types::{ClipId, EffectId, TrackId};
 use mondrian_editor_state::Action;
 use serde::{Deserialize, Serialize};
 
@@ -31,6 +31,8 @@ pub const INSPECTOR_SET_CLIP_OPACITY: &str = "set_clip_opacity";
 pub const INSPECTOR_SET_CLIP_TINT: &str = "set_clip_tint";
 /// Action name for changing one selected clip transform field.
 pub const INSPECTOR_SET_CLIP_TRANSFORM_FIELD: &str = "set_clip_transform_field";
+/// Action name for toggling one effect on a selected clip.
+pub const INSPECTOR_SET_EFFECT_ENABLED: &str = "set_effect_enabled";
 
 /// Custom action namespace for effect browser operations.
 pub const EFFECTS_NAMESPACE: &str = "ui.effects";
@@ -149,6 +151,17 @@ pub struct InspectorSetClipTransformFieldPayload {
     pub value: f32,
 }
 
+/// Toggle a clip effect enabled state from an inspector panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InspectorSetEffectEnabledPayload {
+    /// Clip targeted by the inspector mutation.
+    pub clip: InspectorClipRefPayload,
+    /// Effect instance being toggled.
+    pub effect_id: EffectId,
+    /// Whether the effect should participate in rendering.
+    pub enabled: bool,
+}
+
 /// Add an effect from the effect browser to a clip.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EffectsAddToClipPayload {
@@ -198,6 +211,11 @@ pub fn inspector_set_clip_transform_field_action(
     payload: InspectorSetClipTransformFieldPayload,
 ) -> Action {
     custom_inspector_action(INSPECTOR_SET_CLIP_TRANSFORM_FIELD, payload)
+}
+
+/// Build an action that toggles an effect on a selected clip.
+pub fn inspector_set_effect_enabled_action(payload: InspectorSetEffectEnabledPayload) -> Action {
+    custom_inspector_action(INSPECTOR_SET_EFFECT_ENABLED, payload)
 }
 
 /// Build an action that adds an effect to a selected clip.

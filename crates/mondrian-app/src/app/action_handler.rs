@@ -10,10 +10,11 @@ use crate::app::timeline_editing::{find_clip_mut, set_clip_disabled};
 use crate::app::ui_actions::{
     EffectsAddToClipPayload, InspectorClipTransformField, InspectorSetClipEnabledPayload,
     InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
-    InspectorSetClipTransformFieldPayload, TimelineMoveClipPayload, TimelineSeekPayload,
-    TimelineSelectClipPayload, TimelineTrimClipPayload, TimelineTrimPayloadEdge,
-    EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE, INSPECTOR_SET_CLIP_ENABLED,
-    INSPECTOR_SET_CLIP_OPACITY, INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD,
+    InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
+    TimelineMoveClipPayload, TimelineSeekPayload, TimelineSelectClipPayload,
+    TimelineTrimClipPayload, TimelineTrimPayloadEdge, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE,
+    INSPECTOR_NAMESPACE, INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY,
+    INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD, INSPECTOR_SET_EFFECT_ENABLED,
     TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_SEEK, TIMELINE_SELECT_CLIP,
     TIMELINE_TRIM_CLIP,
 };
@@ -223,6 +224,23 @@ impl AppState {
                     payload.field,
                     payload.value,
                 )
+            }
+            INSPECTOR_SET_EFFECT_ENABLED => {
+                let payload = parse_ui_payload::<InspectorSetEffectEnabledPayload>(
+                    "inspector_ui_action",
+                    name,
+                    payload,
+                )?;
+                self.set_clip_effect_enabled(
+                    SelectedClipRef {
+                        track_id: payload.clip.track_id,
+                        is_video_track: payload.clip.is_video_track,
+                        clip_id: payload.clip.clip_id,
+                    },
+                    payload.effect_id,
+                    payload.enabled,
+                )
+                .map(|_| ())
             }
             _ => {
                 tracing::debug!(
@@ -464,11 +482,12 @@ mod tests {
     use crate::app::ui_actions::{
         effects_add_to_clip_action, inspector_set_clip_enabled_action,
         inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
-        inspector_set_clip_transform_field_action, timeline_move_clip_action, timeline_seek_action,
-        timeline_select_clip_action, timeline_trim_clip_action, EffectsAddToClipPayload,
-        InspectorClipRefPayload, InspectorClipTransformField, InspectorSetClipEnabledPayload,
+        inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
+        timeline_move_clip_action, timeline_seek_action, timeline_select_clip_action,
+        timeline_trim_clip_action, EffectsAddToClipPayload, InspectorClipRefPayload,
+        InspectorClipTransformField, InspectorSetClipEnabledPayload,
         InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
-        InspectorSetClipTransformFieldPayload,
+        InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
     };
     use mondrian_core::types::{AssetId, TimeCode};
     use mondrian_core::Color;
@@ -677,6 +696,31 @@ mod tests {
         let clip = &state.sequence.as_ref().expect("sequence").video_tracks[0].clips[0];
         assert_eq!(clip.effects.len(), 1);
         assert_eq!(clip.effects[0].effect_type, EffectType::GaussianBlur);
+        assert!(state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_inspector_ui_sets_effect_enabled_state() {
+        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+        let effect: mondrian_effects::EffectNode =
+            mondrian_effects::EffectNodeExt::with_defaults(EffectType::GaussianBlur);
+        let effect_id = effect.id;
+        state.sequence.as_mut().expect("sequence").video_tracks[0].clips[0].add_effect_node(effect);
+
+        state
+            .dispatch_action(inspector_set_effect_enabled_action(
+                InspectorSetEffectEnabledPayload {
+                    clip: inspector_clip_payload(track_id, clip_id),
+                    effect_id,
+                    enabled: false,
+                },
+            ))
+            .expect("dispatch effect enabled");
+
+        let effect =
+            &state.sequence.as_ref().expect("sequence").video_tracks[0].clips[0].effects[0];
+        assert_eq!(effect.id, effect_id);
+        assert!(!effect.is_enabled);
         assert!(state.can_undo_action());
     }
 }
