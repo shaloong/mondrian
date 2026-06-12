@@ -5,6 +5,7 @@
 //! representation and commit mutations outside the widget.
 
 use mondrian_core::Color;
+use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
@@ -35,6 +36,9 @@ impl CurvePoint {
     }
 }
 
+/// Adapter that maps the current curve points to an editor [`Action`].
+pub type CurveChangeAction = dyn Fn(&[CurvePoint]) -> Action;
+
 /// Interactive normalized curve editor.
 pub struct CurveEditor {
     id: WidgetId,
@@ -44,6 +48,9 @@ pub struct CurveEditor {
     dragging: Option<usize>,
     grid_columns: usize,
     grid_rows: usize,
+    focused: bool,
+    focus_visible: bool,
+    on_change: Option<Box<CurveChangeAction>>,
 }
 
 impl CurveEditor {
@@ -67,9 +74,18 @@ impl CurveEditor {
             dragging: None,
             grid_columns: 4,
             grid_rows: 3,
+            focused: false,
+            focus_visible: false,
+            on_change: None,
         };
         editor.set_points(points);
         editor
+    }
+
+    /// Dispatch a value-aware action whenever user input changes curve points.
+    pub fn on_change(mut self, action: impl Fn(&[CurvePoint]) -> Action + 'static) -> Self {
+        self.on_change = Some(Box::new(action));
+        self
     }
 
     /// Current curve points in monotonic-x order.
@@ -179,7 +195,32 @@ impl CurveEditor {
         true
     }
 
-    fn nudge_selected(&mut self, key: KeyCode, modifiers: Modifiers) -> bool {
+    fn move_point_from_input(
+        &mut self,
+        index: usize,
+        point: CurvePoint,
+        ctx: &mut EventContext,
+    ) -> bool {
+        if !self.move_point(index, point) {
+            return false;
+        }
+        self.dispatch_change(ctx);
+        ctx.request_repaint();
+        true
+    }
+
+    fn dispatch_change(&self, ctx: &mut EventContext) {
+        if let Some(action) = &self.on_change {
+            (ctx.dispatch)(action(&self.points));
+        }
+    }
+
+    fn nudge_selected(
+        &mut self,
+        key: KeyCode,
+        modifiers: Modifiers,
+        ctx: &mut EventContext,
+    ) -> bool {
         let Some(index) = self.selected else {
             return false;
         };
@@ -195,7 +236,7 @@ impl CurveEditor {
             KeyCode::Down => next.y -= step,
             _ => return false,
         }
-        self.move_point(index, next)
+        self.move_point_from_input(index, next, ctx)
     }
 }
 
@@ -223,6 +264,7 @@ impl Widget for CurveEditor {
             UiEvent::MouseDown { position, button: MouseButton::Left, .. }
                 if self.bounds.contains(*position) =>
             {
+                self.focus_visible = false;
                 if let Some(index) = self.hit_point(*position) {
                     self.selected = Some(index);
                     self.dragging = Some(index);
@@ -234,7 +276,7 @@ impl Widget for CurveEditor {
             }
             UiEvent::MouseMove { position, .. } => {
                 if let Some(index) = self.dragging {
-                    self.move_point(index, self.screen_to_curve(*position));
+                    self.move_point_from_input(index, self.screen_to_curve(*position), ctx);
                     return EventResult::Handled;
                 }
                 EventResult::Ignored
@@ -244,12 +286,25 @@ impl Widget for CurveEditor {
                 ctx.release_pointer_capture(self.id);
                 EventResult::Handled
             }
-            UiEvent::KeyDown { key, modifiers } if self.nudge_selected(*key, *modifiers) => {
+            UiEvent::FocusGained => {
+                self.focused = true;
+                self.focus_visible = true;
+                EventResult::Handled
+            }
+            UiEvent::FocusLost => {
+                self.focused = false;
+                self.focus_visible = false;
+                self.selected = None;
+                self.dragging = None;
+                ctx.release_pointer_capture(self.id);
                 EventResult::Handled
             }
             UiEvent::KeyDown { key: KeyCode::Escape, .. } if self.selected.is_some() => {
                 self.selected = None;
                 self.dragging = None;
+                EventResult::Handled
+            }
+            UiEvent::KeyDown { key, modifiers } if self.nudge_selected(*key, *modifiers, ctx) => {
                 EventResult::Handled
             }
             _ => EventResult::Ignored,
@@ -270,6 +325,13 @@ impl Widget for CurveEditor {
             color_with_alpha(colors.muted, 0.42),
             spacing.radius_sm,
         );
+
+        if self.focus_visible {
+            let mut ring = colors.ring;
+            ring.a = 0.38;
+            let rect = self.bounds.inset(-2.0, -2.0);
+            ctx.encoder.draw_rect(rect, ring, spacing.radius_md + 2.0);
+        }
 
         for col in 0..=self.grid_columns {
             let x = plot.x + plot.width * col as f32 / self.grid_columns.max(1) as f32;
@@ -329,6 +391,10 @@ impl Widget for CurveEditor {
     fn hit_test(&self, point: Point) -> bool {
         self.bounds.contains(point)
     }
+
+    fn can_focus(&self) -> bool {
+        true
+    }
 }
 
 fn color_with_alpha(mut color: Color, alpha: f32) -> Color {
@@ -342,6 +408,7 @@ mod tests {
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_ui_core::widget::DrawCommandEncoder;
     use mondrian_ui_theme::ThemePreset;
+    use std::cell::RefCell;
 
     #[derive(Default)]
     struct RecordingEncoder {
@@ -374,6 +441,18 @@ mod tests {
         let s: &'static mut DummyShortcut = Box::leak(Box::new(DummyShortcut));
         let t: &'static mut DummyTooltip = Box::leak(Box::new(DummyTooltip));
         make_event_ctx(f, s, t, &|_| {})
+    }
+
+    fn curve_action(points: &[CurvePoint]) -> Action {
+        let mut name = String::from("points");
+        for point in points {
+            name.push_str(&format!(":{:.2},{:.2}", point.x, point.y));
+        }
+        Action::Custom {
+            namespace: "test.curve".into(),
+            name,
+            payload: Default::default(),
+        }
     }
 
     #[test]
@@ -439,6 +518,80 @@ mod tests {
     }
 
     #[test]
+    fn dragging_point_dispatches_changed_curve_and_requests_repaint() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut f = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut shortcut, &mut tooltip, &dispatch);
+        let mut editor = CurveEditor::with_points(vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.5, 0.5),
+            CurvePoint::new(1.0, 1.0),
+        ])
+        .on_change(curve_action);
+        editor.layout(Rect::new(0.0, 0.0, 200.0, 100.0));
+        let start = editor.to_screen(editor.points()[1]);
+
+        editor.event(
+            &UiEvent::MouseDown {
+                position: start,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        editor.event(
+            &UiEvent::MouseMove {
+                position: Point::new(start.x, start.y - 10.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[curve_action(editor.points())]
+        );
+        assert!(ctx.requests.repaint);
+    }
+
+    #[test]
+    fn dragging_point_to_same_position_does_not_dispatch_duplicate_change() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut f = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut shortcut, &mut tooltip, &dispatch);
+        let mut editor = CurveEditor::with_points(vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.5, 0.5),
+            CurvePoint::new(1.0, 1.0),
+        ])
+        .on_change(curve_action);
+        editor.layout(Rect::new(0.0, 0.0, 200.0, 100.0));
+        let start = editor.to_screen(editor.points()[1]);
+
+        editor.event(
+            &UiEvent::MouseDown {
+                position: start,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        editor.event(
+            &UiEvent::MouseMove { position: start, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+
+        assert!(actions.borrow().is_empty());
+        assert!(!ctx.requests.repaint);
+    }
+
+    #[test]
     fn interior_point_cannot_cross_neighbors() {
         let mut editor = CurveEditor::with_points(vec![
             CurvePoint::new(0.0, 0.0),
@@ -467,6 +620,58 @@ mod tests {
         );
 
         assert!(editor.points()[1].y > 0.54);
+    }
+
+    #[test]
+    fn keyboard_nudge_dispatches_changed_curve() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut f = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut shortcut, &mut tooltip, &dispatch);
+        let mut editor = CurveEditor::with_points(vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.5, 0.5),
+            CurvePoint::new(1.0, 1.0),
+        ])
+        .on_change(curve_action);
+        editor.select(Some(1));
+
+        let result = editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[curve_action(editor.points())]
+        );
+        assert!(ctx.requests.repaint);
+    }
+
+    #[test]
+    fn keyboard_nudge_at_endpoint_boundary_does_not_dispatch() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut f = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut shortcut, &mut tooltip, &dispatch);
+        let mut editor =
+            CurveEditor::with_points(vec![CurvePoint::new(0.0, 0.0), CurvePoint::new(1.0, 1.0)])
+                .on_change(curve_action);
+        editor.select(Some(0));
+
+        let result = editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Left, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Ignored);
+        assert!(actions.borrow().is_empty());
+        assert!(!ctx.requests.repaint);
     }
 
     #[test]

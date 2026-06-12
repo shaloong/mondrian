@@ -224,6 +224,8 @@ pub struct Dropdown {
     max_visible_items: usize,
     scroll_offset: f32,
     suppress_next_release: bool,
+    focused: bool,
+    focus_visible: bool,
 }
 
 impl Dropdown {
@@ -240,6 +242,8 @@ impl Dropdown {
             max_visible_items: 8,
             scroll_offset: 0.0,
             suppress_next_release: false,
+            focused: false,
+            focus_visible: false,
         }
     }
 
@@ -516,10 +520,34 @@ impl Widget for Dropdown {
                 }
                 _ => {}
             }
-        } else if let UiEvent::MouseDown { position, button: MouseButton::Left, .. } = event {
-            if self.trigger_rect().contains(*position) {
-                self.open(ctx);
-                return EventResult::Handled;
+        } else {
+            match event {
+                UiEvent::FocusGained => {
+                    self.focused = true;
+                    self.focus_visible = true;
+                    return EventResult::Handled;
+                }
+                UiEvent::FocusLost => {
+                    self.focused = false;
+                    self.focus_visible = false;
+                    return EventResult::Handled;
+                }
+                UiEvent::KeyDown {
+                    key: KeyCode::Enter | KeyCode::Space | KeyCode::Down,
+                    ..
+                } if self.focused => {
+                    self.focus_visible = false;
+                    self.open(ctx);
+                    return EventResult::Handled;
+                }
+                UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
+                    if self.trigger_rect().contains(*position) {
+                        self.focus_visible = false;
+                        self.open(ctx);
+                        return EventResult::Handled;
+                    }
+                }
+                _ => {}
             }
         }
         EventResult::Ignored
@@ -527,6 +555,12 @@ impl Widget for Dropdown {
 
     fn paint(&self, ctx: &mut PaintContext) {
         paint_menu_trigger(ctx, self.trigger_rect(), &self.label, self.open);
+        if self.focus_visible && !self.open {
+            let mut ring = ctx.theme.colors.ring;
+            ring.a = 0.38;
+            let rect = self.trigger_rect().inset(-2.0, -2.0);
+            ctx.encoder.draw_rect(rect, ring, ctx.theme.spacing.radius_sm + 2.0);
+        }
     }
 
     fn paint_overlay(&self, ctx: &mut PaintContext) {
@@ -541,6 +575,10 @@ impl Widget for Dropdown {
             return true;
         }
         false
+    }
+
+    fn can_focus(&self) -> bool {
+        true
     }
 }
 

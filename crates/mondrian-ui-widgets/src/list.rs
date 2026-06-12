@@ -39,6 +39,8 @@ pub struct List {
     hovered: Option<usize>,
     row_height: f32,
     scroll: ScrollView,
+    focused: bool,
+    focus_visible: bool,
 }
 
 impl List {
@@ -53,6 +55,8 @@ impl List {
             hovered: None,
             row_height,
             scroll: ScrollView::new(Some(content)),
+            focused: false,
+            focus_visible: false,
         }
     }
 
@@ -61,7 +65,7 @@ impl List {
     }
 
     pub fn set_selected(&mut self, idx: Option<usize>) {
-        self.selected = idx;
+        self.selected = idx.filter(|index| *index < self.items.len());
         self.rebuild_content();
     }
 
@@ -104,6 +108,7 @@ impl Widget for List {
         match event {
             UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
                 if self.bounds.contains(*position) {
+                    self.focus_visible = false;
                     if let Some(idx) = self.index_at_y(position.y) {
                         self.selected = Some(idx);
                         if let Some(action) = &self.items[idx].action {
@@ -126,6 +131,41 @@ impl Widget for List {
                     return EventResult::Handled;
                 }
             }
+            UiEvent::FocusGained => {
+                self.focused = true;
+                self.focus_visible = true;
+                return EventResult::Handled;
+            }
+            UiEvent::FocusLost => {
+                self.focused = false;
+                self.focus_visible = false;
+                return EventResult::Handled;
+            }
+            UiEvent::KeyDown { key: KeyCode::Down, .. } if self.focused => {
+                if self.items.is_empty() {
+                    return EventResult::Ignored;
+                }
+                let next = self.selected.map_or(0, |s| (s + 1).min(self.items.len() - 1));
+                self.set_selected(Some(next));
+                return EventResult::Handled;
+            }
+            UiEvent::KeyDown { key: KeyCode::Up, .. } if self.focused => {
+                if self.items.is_empty() {
+                    return EventResult::Ignored;
+                }
+                let next = self.selected.map_or(0, |s| s.saturating_sub(1));
+                self.set_selected(Some(next));
+                return EventResult::Handled;
+            }
+            UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, .. } if self.focused => {
+                if let Some(idx) = self.selected.filter(|index| *index < self.items.len()) {
+                    if let Some(action) = &self.items[idx].action {
+                        (ctx.dispatch)(action.clone());
+                    }
+                    return EventResult::Handled;
+                }
+                return EventResult::Ignored;
+            }
             _ => {}
         }
 
@@ -136,10 +176,20 @@ impl Widget for List {
         ctx.encoder.push_clip(self.bounds);
         self.scroll.paint(ctx);
         ctx.encoder.pop_clip();
+        if self.focus_visible {
+            let mut ring = ctx.theme.colors.ring;
+            ring.a = 0.38;
+            let rect = self.bounds.inset(-2.0, -2.0);
+            ctx.encoder.draw_rect(rect, ring, ctx.theme.spacing.radius_sm + 2.0);
+        }
     }
 
     fn hit_test(&self, point: Point) -> bool {
         self.bounds.contains(point)
+    }
+
+    fn can_focus(&self) -> bool {
+        true
     }
 
     fn children(&self) -> &[Box<dyn Widget>] {
@@ -296,6 +346,15 @@ mod tests {
 
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
 
+    fn event_ctx<'a>(
+        f: &'a mut DummyFocus,
+        s: &'a mut DummyShortcut,
+        t: &'a mut DummyTooltip,
+        dispatch: &'a dyn Fn(Action),
+    ) -> EventContext<'a> {
+        make_event_ctx(f, s, t, dispatch)
+    }
+
     #[test]
     fn list_click_selects_item() {
         let mut list = List::new(vec![
@@ -308,7 +367,7 @@ mod tests {
         let mut f = DummyFocus;
         let mut s = DummyShortcut;
         let mut t = DummyTooltip;
-        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
+        let mut ctx = event_ctx(&mut f, &mut s, &mut t, &|_| {});
 
         list.event(
             &UiEvent::MouseDown {
@@ -329,7 +388,7 @@ mod tests {
         let mut f = DummyFocus;
         let mut s = DummyShortcut;
         let mut t = DummyTooltip;
-        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
+        let mut ctx = event_ctx(&mut f, &mut s, &mut t, &|_| {});
         list.event(
             &UiEvent::MouseDown {
                 position: Point::new(300.0, 50.0),
@@ -338,6 +397,38 @@ mod tests {
             },
             &mut ctx,
         );
+        assert_eq!(list.selected_index(), None);
+    }
+
+    #[test]
+    fn list_set_selected_clamps_invalid_index() {
+        let mut list = List::new(vec![ListItem::new("A")]);
+
+        list.set_selected(Some(2));
+
+        assert_eq!(list.selected_index(), None);
+    }
+
+    #[test]
+    fn empty_list_keyboard_navigation_does_not_select_or_panic() {
+        let mut list = List::new(vec![]);
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = event_ctx(&mut f, &mut s, &mut t, &|_| {});
+
+        list.event(&UiEvent::FocusGained, &mut ctx);
+        let down = list.event(
+            &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        let enter = list.event(
+            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+
+        assert_eq!(down, EventResult::Ignored);
+        assert_eq!(enter, EventResult::Ignored);
         assert_eq!(list.selected_index(), None);
     }
 }

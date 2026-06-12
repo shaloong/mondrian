@@ -723,6 +723,10 @@ impl Widget for TextInput {
     fn hit_test(&self, point: Point) -> bool {
         self.bounds.contains(point)
     }
+
+    fn can_focus(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

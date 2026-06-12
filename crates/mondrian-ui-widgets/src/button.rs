@@ -22,6 +22,7 @@ pub struct Button {
     bounds: Rect,
     state: ButtonState,
     pub on_click: Option<Action>,
+    focus_visible: bool,
 }
 
 impl Button {
@@ -32,6 +33,7 @@ impl Button {
             bounds: Rect::ZERO,
             state: ButtonState::Normal,
             on_click: None,
+            focus_visible: false,
         }
     }
 
@@ -72,6 +74,7 @@ impl Widget for Button {
                 if self.bounds.contains(*position) =>
             {
                 self.state = ButtonState::Pressed;
+                self.focus_visible = false;
                 EventResult::Handled
             }
             UiEvent::MouseUp { position, button: MouseButton::Left, .. } => {
@@ -96,10 +99,12 @@ impl Widget for Button {
             }
             UiEvent::FocusGained => {
                 self.state = ButtonState::Hovered;
+                self.focus_visible = true;
                 EventResult::Handled
             }
             UiEvent::FocusLost => {
                 self.state = ButtonState::Normal;
+                self.focus_visible = false;
                 EventResult::Handled
             }
             UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, .. } => {
@@ -130,6 +135,12 @@ impl Widget for Button {
         };
 
         ctx.encoder.draw_rect(self.bounds, bg, spacing.radius_md);
+        if self.focus_visible {
+            let mut ring = tokens.ring;
+            ring.a = 0.38;
+            let rect = self.bounds.inset(-2.0, -2.0);
+            ctx.encoder.draw_rect(rect, ring, spacing.radius_md + 2.0);
+        }
         if !self.label.is_empty() {
             let tx = mondrian_ui_core::types::center_text_x(self.bounds, &self.label, font_size);
             let ty = self.bounds.y + (self.bounds.height - font_size * 1.3).max(0.0) * 0.5;
@@ -144,6 +155,10 @@ impl Widget for Button {
 
     fn hit_test(&self, point: Point) -> bool {
         self.bounds.contains(point)
+    }
+
+    fn can_focus(&self) -> bool {
+        true
     }
 }
 

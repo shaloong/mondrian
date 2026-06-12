@@ -66,8 +66,15 @@ impl Widget for PanelSlot {
         }
     }
 
+    fn paint_overlay(&self, ctx: &mut PaintContext) {
+        if let Some(content) = &self.content {
+            content.paint_overlay(ctx);
+        }
+    }
+
     fn hit_test(&self, point: Point) -> bool {
         self.bounds.contains(point)
+            || self.content.as_ref().is_some_and(|content| content.hit_test(point))
     }
 
     fn children(&self) -> &[Box<dyn Widget>] {
@@ -82,5 +89,112 @@ impl Widget for PanelSlot {
             Some(c) => std::slice::from_mut(c),
             None => &mut [],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mondrian_core::Color;
+    use mondrian_ui_core::widget::DrawCommandEncoder;
+    use mondrian_ui_theme::ThemePreset;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    struct OverlayProbe {
+        id: WidgetId,
+        bounds: Rect,
+        overlay_hit: bool,
+        overlay_painted: Rc<Cell<bool>>,
+    }
+
+    impl OverlayProbe {
+        fn new(overlay_hit: bool, overlay_painted: Rc<Cell<bool>>) -> Self {
+            Self {
+                id: WidgetId::new(),
+                bounds: Rect::ZERO,
+                overlay_hit,
+                overlay_painted,
+            }
+        }
+    }
+
+    impl Widget for OverlayProbe {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+
+        fn measure(&self, constraint: LayoutConstraint) -> Size {
+            constraint.constrain(Size::new(80.0, 24.0))
+        }
+
+        fn layout(&mut self, bounds: Rect) {
+            self.bounds = bounds;
+        }
+
+        fn event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+            EventResult::Ignored
+        }
+
+        fn paint(&self, _ctx: &mut PaintContext) {}
+
+        fn paint_overlay(&self, _ctx: &mut PaintContext) {
+            self.overlay_painted.set(true);
+        }
+
+        fn hit_test(&self, point: Point) -> bool {
+            self.bounds.contains(point) || self.overlay_hit
+        }
+    }
+
+    #[derive(Default)]
+    struct NoopEncoder;
+
+    impl DrawCommandEncoder for NoopEncoder {
+        fn push_clip(&mut self, _bounds: Rect) {}
+
+        fn pop_clip(&mut self) {}
+
+        fn draw_rect(&mut self, _bounds: Rect, _color: Color, _corner_radius: f32) {}
+
+        fn draw_line(&mut self, _start: Point, _end: Point, _width: f32, _color: Color) {}
+
+        fn draw_text(&mut self, _text: &str, _font_size: f32, _position: Point, _color: Color) {}
+
+        fn push_translate(&mut self, _offset: glam::Vec2) {}
+
+        fn pop_transform(&mut self) {}
+    }
+
+    #[test]
+    fn panel_slot_hit_test_includes_content_overlay() {
+        let overlay_painted = Rc::new(Cell::new(false));
+        let mut slot = PanelSlot::new(
+            PanelKind::Inspector,
+            Box::new(OverlayProbe::new(true, overlay_painted)),
+        );
+        slot.layout(Rect::new(0.0, 0.0, 100.0, 100.0));
+
+        assert!(slot.hit_test(Point::new(500.0, 500.0)));
+    }
+
+    #[test]
+    fn panel_slot_paint_overlay_forwards_to_content() {
+        let overlay_painted = Rc::new(Cell::new(false));
+        let slot = PanelSlot::new(
+            PanelKind::Inspector,
+            Box::new(OverlayProbe::new(false, Rc::clone(&overlay_painted))),
+        );
+        let mut encoder = NoopEncoder;
+        let theme = ThemePreset::Dark.build();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 100.0, 100.0),
+        };
+
+        slot.paint_overlay(&mut ctx);
+
+        assert!(overlay_painted.get());
     }
 }

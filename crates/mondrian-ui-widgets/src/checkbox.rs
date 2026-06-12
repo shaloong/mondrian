@@ -7,6 +7,9 @@ use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
+/// Adapter that maps the current checkbox state to an editor [`Action`].
+pub type CheckboxChangeAction = dyn Fn(bool) -> Action;
+
 /// Checkbox Widget —— 可切换的勾选框
 pub struct Checkbox {
     id: WidgetId,
@@ -16,9 +19,11 @@ pub struct Checkbox {
     hovered: bool,
     pressed: bool,
     pub on_toggle: Option<Action>,
+    on_change: Option<Box<CheckboxChangeAction>>,
 }
 
 impl Checkbox {
+    /// Create a checkbox with an initial checked state.
     pub fn new(label: impl Into<String>, checked: bool) -> Self {
         Self {
             id: WidgetId::new(),
@@ -28,18 +33,28 @@ impl Checkbox {
             hovered: false,
             pressed: false,
             on_toggle: None,
+            on_change: None,
         }
     }
 
+    /// Dispatch a static action whenever the checkbox toggles.
     pub fn on_toggle(mut self, action: Action) -> Self {
         self.on_toggle = Some(action);
         self
     }
 
+    /// Dispatch a value-aware action whenever the checkbox toggles.
+    pub fn on_change(mut self, action: impl Fn(bool) -> Action + 'static) -> Self {
+        self.on_change = Some(Box::new(action));
+        self
+    }
+
+    /// Return whether the checkbox is checked.
     pub fn is_checked(&self) -> bool {
         self.checked
     }
 
+    /// Set the checked state without dispatching actions.
     pub fn set_checked(&mut self, checked: bool) {
         self.checked = checked;
     }
@@ -49,6 +64,10 @@ impl Checkbox {
         if let Some(action) = &self.on_toggle {
             (ctx.dispatch)(action.clone());
         }
+        if let Some(action) = &self.on_change {
+            (ctx.dispatch)(action(self.checked));
+        }
+        ctx.request_repaint();
     }
 }
 
@@ -170,6 +189,10 @@ impl Widget for Checkbox {
     fn hit_test(&self, point: Point) -> bool {
         self.bounds.contains(point)
     }
+
+    fn can_focus(&self) -> bool {
+        true
+    }
 }
 
 fn checkmark_triangles(box_rect: Rect) -> [Point; 12] {
@@ -230,6 +253,14 @@ mod tests {
         fn push_translate(&mut self, _offset: glam::Vec2) {}
 
         fn pop_transform(&mut self) {}
+    }
+
+    fn checked_action(checked: bool) -> Action {
+        Action::Custom {
+            namespace: "test.checkbox".into(),
+            name: format!("checked:{checked}"),
+            payload: Default::default(),
+        }
     }
 
     #[test]
@@ -408,6 +439,82 @@ mod tests {
     }
 
     #[test]
+    fn checkbox_on_change_dispatches_new_state_and_requests_repaint() {
+        let mut cb = Checkbox::new("Opt", false).on_change(checked_action);
+        cb.layout(Rect::new(0.0, 0.0, 100.0, 22.0));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let cell = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch_fn);
+
+        let pos = Point::new(50.0, 11.0);
+        cb.event(
+            &UiEvent::MouseDown {
+                position: pos,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        cb.event(
+            &UiEvent::MouseUp {
+                position: pos,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(cell.borrow().as_slice(), &[checked_action(true)]);
+        assert!(ctx.requests.repaint);
+    }
+
+    #[test]
+    fn checkbox_static_and_value_actions_can_dispatch_together() {
+        let mut cb = Checkbox::new("Opt", false)
+            .on_toggle(Action::TogglePlay)
+            .on_change(checked_action);
+        cb.layout(Rect::new(0.0, 0.0, 100.0, 22.0));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let cell = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch_fn);
+
+        let pos = Point::new(50.0, 11.0);
+        cb.event(
+            &UiEvent::MouseDown {
+                position: pos,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        cb.event(
+            &UiEvent::MouseUp {
+                position: pos,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(
+            cell.borrow().as_slice(),
+            &[Action::TogglePlay, checked_action(true)]
+        );
+    }
+
+    #[test]
     fn checkbox_space_toggles_and_dispatches() {
         let mut cb = Checkbox::new("Opt", false).on_toggle(Action::TogglePlay);
         let mut f = DummyFocus;
@@ -428,6 +535,7 @@ mod tests {
         assert!(cb.is_checked());
         assert!(cb.pressed);
         assert_eq!(cell.borrow().as_slice(), &[Action::TogglePlay]);
+        assert!(ctx.requests.repaint);
 
         let result = cb.event(
             &UiEvent::KeyUp { key: KeyCode::Space, modifiers: Modifiers::none() },

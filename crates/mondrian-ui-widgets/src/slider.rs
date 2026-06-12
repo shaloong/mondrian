@@ -2,9 +2,13 @@
 //!
 //! 拖拽滑块，用于数值调节。
 
+use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
+
+/// Adapter that maps the current slider value to an editor [`Action`].
+pub type SliderChangeAction = dyn Fn(f32) -> Action;
 
 /// Slider Widget —— 拖拽滑块控制数值
 pub struct Slider {
@@ -15,11 +19,14 @@ pub struct Slider {
     bounds: Rect,
     dragging: bool,
     focused: bool,
+    focus_visible: bool,
     track_height: f32,
     thumb_size: f32,
+    on_change: Option<Box<SliderChangeAction>>,
 }
 
 impl Slider {
+    /// Create a slider with a clamped initial value.
     pub fn new(value: f32, min: f32, max: f32) -> Self {
         Self {
             id: WidgetId::new(),
@@ -29,13 +36,22 @@ impl Slider {
             bounds: Rect::ZERO,
             dragging: false,
             focused: false,
+            focus_visible: false,
             track_height: 6.0,
             thumb_size: 14.0,
+            on_change: None,
         }
     }
 
+    /// Return the current value.
     pub fn value(&self) -> f32 {
         self.value
+    }
+
+    /// Dispatch an action whenever user input changes the value.
+    pub fn on_change(mut self, action: impl Fn(f32) -> Action + 'static) -> Self {
+        self.on_change = Some(Box::new(action));
+        self
     }
 
     fn range(&self) -> f32 {
@@ -85,6 +101,21 @@ impl Slider {
         true
     }
 
+    fn set_value_from_input(&mut self, value: f32, ctx: &mut EventContext) -> bool {
+        if !self.set_value(value) {
+            return false;
+        }
+        self.dispatch_change(ctx);
+        ctx.request_repaint();
+        true
+    }
+
+    fn dispatch_change(&self, ctx: &mut EventContext) {
+        if let Some(action) = &self.on_change {
+            (ctx.dispatch)(action(self.value));
+        }
+    }
+
     fn keyboard_step(&self, modifiers: Modifiers) -> f32 {
         let range = self.range().abs();
         if modifiers.alt {
@@ -96,11 +127,11 @@ impl Slider {
         }
     }
 
-    fn nudge(&mut self, delta: f32) -> EventResult {
+    fn nudge(&mut self, delta: f32, ctx: &mut EventContext) -> EventResult {
         if self.range() <= 0.0 {
             return EventResult::Ignored;
         }
-        if self.set_value(self.value + delta) {
+        if self.set_value_from_input(self.value + delta, ctx) {
             EventResult::Handled
         } else {
             EventResult::Ignored
@@ -121,52 +152,55 @@ impl Widget for Slider {
         self.bounds = bounds;
     }
 
-    fn event(&mut self, event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+    fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
         match event {
             UiEvent::MouseDown { position, button: MouseButton::Left, .. }
                 if self.bounds.contains(*position) =>
             {
                 self.dragging = true;
                 self.focused = true;
-                _ctx.request_pointer_capture(self.id);
-                self.update_value(position);
+                self.focus_visible = false;
+                ctx.request_pointer_capture(self.id);
+                self.update_value(position, ctx);
                 EventResult::Handled
             }
             UiEvent::MouseMove { position, .. } if self.dragging => {
-                self.update_value(position);
+                self.update_value(position, ctx);
                 EventResult::Handled
             }
             UiEvent::MouseUp { button: MouseButton::Left, .. } if self.dragging => {
                 self.dragging = false;
-                _ctx.release_pointer_capture(self.id);
+                ctx.release_pointer_capture(self.id);
                 EventResult::Handled
             }
             UiEvent::FocusGained => {
                 self.focused = true;
+                self.focus_visible = true;
                 EventResult::Handled
             }
             UiEvent::FocusLost => {
                 self.focused = false;
+                self.focus_visible = false;
                 self.dragging = false;
-                _ctx.release_pointer_capture(self.id);
+                ctx.release_pointer_capture(self.id);
                 EventResult::Handled
             }
             UiEvent::KeyDown { key, modifiers } if self.focused => {
                 let step = self.keyboard_step(*modifiers);
                 match key {
-                    KeyCode::Left | KeyCode::Down => self.nudge(-step),
-                    KeyCode::Right | KeyCode::Up => self.nudge(step),
-                    KeyCode::PageDown => self.nudge(-(self.range().abs() / 10.0)),
-                    KeyCode::PageUp => self.nudge(self.range().abs() / 10.0),
+                    KeyCode::Left | KeyCode::Down => self.nudge(-step, ctx),
+                    KeyCode::Right | KeyCode::Up => self.nudge(step, ctx),
+                    KeyCode::PageDown => self.nudge(-(self.range().abs() / 10.0), ctx),
+                    KeyCode::PageUp => self.nudge(self.range().abs() / 10.0, ctx),
                     KeyCode::Home => {
-                        if self.set_value(self.min) {
+                        if self.set_value_from_input(self.min, ctx) {
                             EventResult::Handled
                         } else {
                             EventResult::Ignored
                         }
                     }
                     KeyCode::End => {
-                        if self.set_value(self.max) {
+                        if self.set_value_from_input(self.max, ctx) {
                             EventResult::Handled
                         } else {
                             EventResult::Ignored
@@ -196,7 +230,7 @@ impl Widget for Slider {
         }
 
         let thumb_rect = self.thumb_rect();
-        if self.focused {
+        if self.focus_visible {
             let mut ring = tokens.ring;
             ring.a = 0.38;
             let halo = Rect::new(
@@ -213,10 +247,14 @@ impl Widget for Slider {
     fn hit_test(&self, point: Point) -> bool {
         self.bounds.contains(point)
     }
+
+    fn can_focus(&self) -> bool {
+        true
+    }
 }
 
 impl Slider {
-    fn update_value(&mut self, position: &Point) {
+    fn update_value(&mut self, position: &Point, ctx: &mut EventContext) {
         let range = self.range();
         if range <= 0.0 {
             return;
@@ -229,7 +267,7 @@ impl Slider {
         } else {
             0.0
         };
-        self.value = self.min + range * ratio;
+        self.set_value_from_input(self.min + range * ratio, ctx);
     }
 }
 
@@ -239,6 +277,7 @@ mod tests {
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_ui_core::widget::DrawCommandEncoder;
     use mondrian_ui_theme::ThemePreset;
+    use std::cell::RefCell;
 
     #[derive(Default)]
     struct RecordingEncoder {
@@ -284,6 +323,14 @@ mod tests {
         make_event_ctx(f, s, t, &|_| {})
     }
 
+    fn value_action(value: f32) -> Action {
+        Action::Custom {
+            namespace: "test.slider".into(),
+            name: format!("change:{value:.1}"),
+            payload: Default::default(),
+        }
+    }
+
     #[test]
     fn slider_new_value_clamped() {
         let s = Slider::new(150.0, 0.0, 100.0);
@@ -312,6 +359,54 @@ mod tests {
             &mut ctx,
         );
         assert_eq!(s.value(), 50.0);
+    }
+
+    #[test]
+    fn slider_mouse_down_dispatches_change_and_requests_repaint_when_value_changes() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut f = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut shortcut, &mut tooltip, &dispatch);
+        let mut s = Slider::new(0.0, 0.0, 100.0).on_change(value_action);
+        s.layout(Rect::new(0.0, 0.0, 200.0, 20.0));
+
+        s.event(
+            &UiEvent::MouseDown {
+                position: Point::new(100.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(actions.borrow().as_slice(), &[value_action(50.0)]);
+        assert!(ctx.requests.repaint);
+    }
+
+    #[test]
+    fn slider_mouse_down_at_same_value_does_not_dispatch_or_repaint() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut f = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut shortcut, &mut tooltip, &dispatch);
+        let mut s = Slider::new(0.0, 0.0, 100.0).on_change(value_action);
+        s.layout(Rect::new(0.0, 0.0, 200.0, 20.0));
+
+        s.event(
+            &UiEvent::MouseDown {
+                position: Point::new(7.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert!(actions.borrow().is_empty());
+        assert!(!ctx.requests.repaint);
     }
 
     #[test]
@@ -444,6 +539,47 @@ mod tests {
         );
 
         assert_eq!(s.value(), 60.0);
+    }
+
+    #[test]
+    fn slider_keyboard_dispatches_once_per_changed_nudge() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut f = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut shortcut, &mut tooltip, &dispatch);
+        let mut s = Slider::new(50.0, 0.0, 100.0).on_change(value_action);
+
+        s.event(&UiEvent::FocusGained, &mut ctx);
+        s.event(
+            &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+
+        assert_eq!(actions.borrow().as_slice(), &[value_action(51.0)]);
+        assert!(ctx.requests.repaint);
+    }
+
+    #[test]
+    fn slider_keyboard_at_boundary_does_not_dispatch_duplicate_change() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut f = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut shortcut, &mut tooltip, &dispatch);
+        let mut s = Slider::new(0.0, 0.0, 100.0).on_change(value_action);
+
+        s.event(&UiEvent::FocusGained, &mut ctx);
+        let result = s.event(
+            &UiEvent::KeyDown { key: KeyCode::Home, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Ignored);
+        assert!(actions.borrow().is_empty());
+        assert!(!ctx.requests.repaint);
     }
 
     #[test]
