@@ -167,10 +167,11 @@ pointer updates. The thumb rect must remain inside widget bounds; if a parent
 gives a short row, the thumb shrinks vertically instead of being clipped.
 
 Timeline widgets own frame-space presentation interactions: selection, seeking,
-scrolling, zooming, and local drag previews. On mouse release they emit
-domain-light move proposals (`TimelineClipMove`) instead of resolving clip
-overlaps, ripple behavior, linked media, or undo snapshots. Those semantics stay
-in `mondrian-app` / `mondrian-timeline` command handling. Timelines expose
+scrolling, zooming, local drag previews, and edge-trim previews. On mouse
+release they emit domain-light move/trim proposals (`TimelineClipMove`,
+`TimelineClipTrim`) instead of resolving clip overlaps, ripple behavior, linked
+media, source in/out offsets, or undo snapshots. Those semantics stay in
+`mondrian-app` / `mondrian-timeline` command handling. Timelines expose
 overlay horizontal and vertical scrollbars when content overflows; scrollbar
 thumb drags and track paging must win hit testing over clip selection and
 seeking. Timeline surfaces are focusable: while focused they may handle

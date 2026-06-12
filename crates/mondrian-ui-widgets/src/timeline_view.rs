@@ -23,6 +23,9 @@ pub type TimelineSeekAction = dyn Fn(i64) -> Action;
 /// Action factory for clip move commits.
 pub type TimelineClipMoveAction = dyn Fn(TimelineClipMove, &TimelineClip) -> Action;
 
+/// Action factory for clip trim commits.
+pub type TimelineClipTrimAction = dyn Fn(TimelineClipTrim, &TimelineClip) -> Action;
+
 /// Stable view reference to a clip inside the timeline surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimelineClipRef {
@@ -37,6 +40,24 @@ pub struct TimelineClipMove {
     pub old_start_frame: i64,
     pub new_start_frame: i64,
     pub new_track_index: usize,
+}
+
+/// Clip edge being trimmed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineTrimEdge {
+    In,
+    Out,
+}
+
+/// Domain-light clip trim proposal emitted when an edge drag commits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimelineClipTrim {
+    pub clip_ref: TimelineClipRef,
+    pub edge: TimelineTrimEdge,
+    pub old_start_frame: i64,
+    pub old_duration_frames: i64,
+    pub new_start_frame: i64,
+    pub new_duration_frames: i64,
 }
 
 /// Track category used only for styling.
@@ -171,12 +192,14 @@ pub struct TimelineView {
     ruler_height: f32,
     playhead_dragging: bool,
     clip_drag: Option<TimelineClipDrag>,
+    trim_drag: Option<TimelineTrimDrag>,
     scrollbar_drag: Option<TimelineScrollbarDrag>,
     horizontal_scrollbar_hovered: bool,
     vertical_scrollbar_hovered: bool,
     on_clip_select: Option<Box<TimelineClipAction>>,
     on_seek: Option<Box<TimelineSeekAction>>,
     on_clip_move: Option<Box<TimelineClipMoveAction>>,
+    on_clip_trim: Option<Box<TimelineClipTrimAction>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -186,6 +209,17 @@ struct TimelineClipDrag {
     pointer_offset_frames: i64,
     current_start_frame: i64,
     current_track_index: usize,
+    moved: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TimelineTrimDrag {
+    clip_ref: TimelineClipRef,
+    edge: TimelineTrimEdge,
+    old_start_frame: i64,
+    old_duration_frames: i64,
+    current_start_frame: i64,
+    current_duration_frames: i64,
     moved: bool,
 }
 
@@ -225,12 +259,14 @@ impl TimelineView {
             ruler_height: 30.0,
             playhead_dragging: false,
             clip_drag: None,
+            trim_drag: None,
             scrollbar_drag: None,
             horizontal_scrollbar_hovered: false,
             vertical_scrollbar_hovered: false,
             on_clip_select: None,
             on_seek: None,
             on_clip_move: None,
+            on_clip_trim: None,
         }
     }
 
@@ -267,6 +303,15 @@ impl TimelineView {
         action: impl Fn(TimelineClipMove, &TimelineClip) -> Action + 'static,
     ) -> Self {
         self.on_clip_move = Some(Box::new(action));
+        self
+    }
+
+    /// Set a dynamic clip-trim action factory.
+    pub fn on_clip_trim(
+        mut self,
+        action: impl Fn(TimelineClipTrim, &TimelineClip) -> Action + 'static,
+    ) -> Self {
+        self.on_clip_trim = Some(Box::new(action));
         self
     }
 
@@ -471,6 +516,18 @@ impl TimelineView {
         Rect::new(x, y, width, self.track_height - 12.0)
     }
 
+    fn clip_rect_for_preview(
+        &self,
+        track_index: usize,
+        start_frame: i64,
+        duration_frames: i64,
+    ) -> Rect {
+        let x = self.frame_to_x(start_frame);
+        let y = self.track_y(track_index) + 6.0;
+        let width = (duration_frames.max(1) as f32 * self.pixels_per_frame).max(8.0);
+        Rect::new(x, y, width, self.track_height - 12.0)
+    }
+
     fn hit_clip(&self, point: Point) -> Option<TimelineClipRef> {
         if !self.body_rect.contains(point) {
             return None;
@@ -486,6 +543,22 @@ impl TimelineView {
             }
         }
         None
+    }
+
+    fn hit_clip_edge(&self, clip_ref: TimelineClipRef, point: Point) -> Option<TimelineTrimEdge> {
+        let clip = self.clip(clip_ref)?;
+        let rect = self.clip_rect(clip_ref.track_index, clip);
+        if !rect.contains(point) {
+            return None;
+        }
+        let edge_width = 6.0_f32.min((rect.width * 0.35).max(3.0));
+        if point.x <= rect.x + edge_width {
+            Some(TimelineTrimEdge::In)
+        } else if point.x >= rect.x + rect.width - edge_width {
+            Some(TimelineTrimEdge::Out)
+        } else {
+            None
+        }
     }
 
     fn clip(&self, clip_ref: TimelineClipRef) -> Option<&TimelineClip> {
@@ -548,6 +621,24 @@ impl TimelineView {
         });
     }
 
+    fn start_trim_drag(&mut self, clip_ref: TimelineClipRef, edge: TimelineTrimEdge) {
+        let Some(clip) = self.clip(clip_ref) else {
+            return;
+        };
+        if self.track_locked(clip_ref.track_index) {
+            return;
+        }
+        self.trim_drag = Some(TimelineTrimDrag {
+            clip_ref,
+            edge,
+            old_start_frame: clip.start_frame,
+            old_duration_frames: clip.duration_frames.max(1),
+            current_start_frame: clip.start_frame,
+            current_duration_frames: clip.duration_frames.max(1),
+            moved: false,
+        });
+    }
+
     fn drag_clip_to(&mut self, position: Point, ctx: &mut EventContext) -> bool {
         let Some(mut drag) = self.clip_drag else {
             return false;
@@ -574,6 +665,37 @@ impl TimelineView {
         true
     }
 
+    fn drag_trim_to(&mut self, position: Point, ctx: &mut EventContext) -> bool {
+        let Some(mut drag) = self.trim_drag else {
+            return false;
+        };
+        let Some(_clip) = self.clip(drag.clip_ref) else {
+            self.trim_drag = None;
+            return false;
+        };
+        let pointer_frame = self.x_to_frame(position.x);
+        let old_end = drag.old_start_frame + drag.old_duration_frames.max(1);
+        let (new_start, new_duration) = match drag.edge {
+            TimelineTrimEdge::In => {
+                let new_start = pointer_frame.clamp(0, old_end - 1);
+                (new_start, old_end - new_start)
+            }
+            TimelineTrimEdge::Out => {
+                let new_end = pointer_frame.max(drag.old_start_frame + 1);
+                (drag.old_start_frame, new_end - drag.old_start_frame)
+            }
+        };
+        if drag.current_start_frame == new_start && drag.current_duration_frames == new_duration {
+            return true;
+        }
+        drag.current_start_frame = new_start;
+        drag.current_duration_frames = new_duration;
+        drag.moved = true;
+        self.trim_drag = Some(drag);
+        ctx.request_repaint();
+        true
+    }
+
     fn finish_clip_drag(&mut self, ctx: &mut EventContext) -> bool {
         let Some(drag) = self.clip_drag.take() else {
             return false;
@@ -595,6 +717,35 @@ impl TimelineView {
         {
             if let Some(factory) = &self.on_clip_move {
                 (ctx.dispatch)(factory(movement, clip));
+            }
+        }
+        ctx.request_repaint();
+        true
+    }
+
+    fn finish_trim_drag(&mut self, ctx: &mut EventContext) -> bool {
+        let Some(drag) = self.trim_drag.take() else {
+            return false;
+        };
+        if !drag.moved {
+            return true;
+        }
+        let Some(clip) = self.clip(drag.clip_ref) else {
+            return true;
+        };
+        let trim = TimelineClipTrim {
+            clip_ref: drag.clip_ref,
+            edge: drag.edge,
+            old_start_frame: drag.old_start_frame,
+            old_duration_frames: drag.old_duration_frames,
+            new_start_frame: drag.current_start_frame,
+            new_duration_frames: drag.current_duration_frames,
+        };
+        if trim.old_start_frame != trim.new_start_frame
+            || trim.old_duration_frames != trim.new_duration_frames
+        {
+            if let Some(factory) = &self.on_clip_trim {
+                (ctx.dispatch)(factory(trim, clip));
             }
         }
         ctx.request_repaint();
@@ -740,6 +891,9 @@ impl TimelineView {
                 if self.clip_drag.is_some_and(|drag| drag.clip_ref == clip_ref) {
                     continue;
                 }
+                if self.trim_drag.is_some_and(|drag| drag.clip_ref == clip_ref) {
+                    continue;
+                }
                 let rect = self.clip_rect(track_index, clip);
                 if rect.x > self.body_rect.x + self.body_rect.width
                     || rect.x + rect.width < self.body_rect.x
@@ -754,6 +908,23 @@ impl TimelineView {
             if let Some(clip) = self.clip(drag.clip_ref) {
                 let rect =
                     self.clip_rect_at(drag.current_track_index, drag.current_start_frame, clip);
+                if rect.x <= self.body_rect.x + self.body_rect.width
+                    && rect.x + rect.width >= self.body_rect.x
+                    && rect.y <= self.body_rect.y + self.body_rect.height
+                    && rect.y + rect.height >= self.body_rect.y
+                {
+                    self.paint_clip(ctx, drag.clip_ref, clip, rect, true);
+                }
+            }
+        }
+
+        if let Some(drag) = self.trim_drag {
+            if let Some(clip) = self.clip(drag.clip_ref) {
+                let rect = self.clip_rect_for_preview(
+                    drag.clip_ref.track_index,
+                    drag.current_start_frame,
+                    drag.current_duration_frames,
+                );
                 if rect.x <= self.body_rect.x + self.body_rect.width
                     && rect.x + rect.width >= self.body_rect.x
                     && rect.y <= self.body_rect.y + self.body_rect.height
@@ -996,8 +1167,12 @@ impl Widget for TimelineView {
                 }
                 if let Some(clip_ref) = self.hit_clip(*position) {
                     let result = self.select_clip_from_input(clip_ref, ctx);
-                    self.start_clip_drag(clip_ref, *position);
-                    if self.clip_drag.is_some() {
+                    if let Some(edge) = self.hit_clip_edge(clip_ref, *position) {
+                        self.start_trim_drag(clip_ref, edge);
+                    } else {
+                        self.start_clip_drag(clip_ref, *position);
+                    }
+                    if self.clip_drag.is_some() || self.trim_drag.is_some() {
                         ctx.request_pointer_capture(self.id);
                     }
                     return result;
@@ -1014,6 +1189,10 @@ impl Widget for TimelineView {
                 }
                 if self.clip_drag.is_some() {
                     self.drag_clip_to(*position, ctx);
+                    return EventResult::Handled;
+                }
+                if self.trim_drag.is_some() {
+                    self.drag_trim_to(*position, ctx);
                     return EventResult::Handled;
                 }
                 if let Some(drag) = self.scrollbar_drag {
@@ -1052,6 +1231,11 @@ impl Widget for TimelineView {
                 ctx.release_pointer_capture(self.id);
                 return EventResult::Handled;
             }
+            UiEvent::MouseUp { button: MouseButton::Left, .. } if self.trim_drag.is_some() => {
+                self.finish_trim_drag(ctx);
+                ctx.release_pointer_capture(self.id);
+                return EventResult::Handled;
+            }
             UiEvent::MouseUp { button: MouseButton::Left, .. } if self.scrollbar_drag.is_some() => {
                 self.scrollbar_drag = None;
                 ctx.release_pointer_capture(self.id);
@@ -1068,6 +1252,7 @@ impl Widget for TimelineView {
                 self.focus_visible = false;
                 self.playhead_dragging = false;
                 self.clip_drag = None;
+                self.trim_drag = None;
                 self.scrollbar_drag = None;
                 ctx.release_pointer_capture(self.id);
                 return EventResult::Handled;
@@ -1604,6 +1789,192 @@ mod tests {
         );
 
         assert_eq!(actions.borrow().as_slice(), &[Action::SaveProject]);
+    }
+
+    #[test]
+    fn dragging_left_clip_edge_previews_trim_and_commits_on_release() {
+        let trims = RefCell::new(Vec::new());
+        let dispatch = |action| trims.borrow_mut().push(action);
+        let mut view = TimelineView::new(vec![TimelineTrack::video(
+            "V1",
+            vec![TimelineClip::new("Intro", 40, 30)],
+        )])
+        .on_clip_trim(|trim, _clip| Action::Custom {
+            namespace: "timeline.trim".into(),
+            name: format!(
+                "{:?}:{}+{}->{}+{}",
+                trim.edge,
+                trim.old_start_frame,
+                trim.old_duration_frames,
+                trim.new_start_frame,
+                trim.new_duration_frames
+            ),
+            payload: Default::default(),
+        });
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        view.event(
+            &UiEvent::MouseDown {
+                position: Point::new(258.0, 42.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert!(view.trim_drag.is_some());
+        view.event(
+            &UiEvent::MouseMove {
+                position: Point::new(278.0, 42.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(view.tracks[0].clips[0].start_frame, 40);
+        assert!(view.trim_drag.is_some_and(|drag| {
+            drag.current_start_frame == 46 && drag.current_duration_frames == 24
+        }));
+        assert!(trims.borrow().is_empty());
+
+        view.event(
+            &UiEvent::MouseUp {
+                position: Point::new(278.0, 42.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(
+            trims.borrow().as_slice(),
+            &[Action::Custom {
+                namespace: "timeline.trim".into(),
+                name: "In:40+30->46+24".into(),
+                payload: Default::default(),
+            }]
+        );
+    }
+
+    #[test]
+    fn dragging_right_clip_edge_commits_out_trim() {
+        let trims = RefCell::new(Vec::new());
+        let dispatch = |action| trims.borrow_mut().push(action);
+        let mut view = TimelineView::new(vec![TimelineTrack::video(
+            "V1",
+            vec![TimelineClip::new("Intro", 40, 30)],
+        )])
+        .on_clip_trim(|trim, _clip| Action::Custom {
+            namespace: "timeline.trim".into(),
+            name: format!(
+                "{:?}:{}+{}->{}+{}",
+                trim.edge,
+                trim.old_start_frame,
+                trim.old_duration_frames,
+                trim.new_start_frame,
+                trim.new_duration_frames
+            ),
+            payload: Default::default(),
+        });
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        view.event(
+            &UiEvent::MouseDown {
+                position: Point::new(374.0, 42.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        view.event(
+            &UiEvent::MouseMove {
+                position: Point::new(394.0, 42.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        view.event(
+            &UiEvent::MouseUp {
+                position: Point::new(394.0, 42.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(
+            trims.borrow().as_slice(),
+            &[Action::Custom {
+                namespace: "timeline.trim".into(),
+                name: "Out:40+30->40+35".into(),
+                payload: Default::default(),
+            }]
+        );
+    }
+
+    #[test]
+    fn clicking_edge_without_motion_does_not_commit_trim() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut view = TimelineView::new(vec![TimelineTrack::video(
+            "V1",
+            vec![TimelineClip::new("Intro", 40, 30)],
+        )])
+        .on_clip_trim(|_, _| Action::DeleteSelection);
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        view.event(
+            &UiEvent::MouseDown {
+                position: Point::new(258.0, 42.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        view.event(
+            &UiEvent::MouseUp {
+                position: Point::new(258.0, 42.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert!(actions.borrow().is_empty());
     }
 
     #[test]

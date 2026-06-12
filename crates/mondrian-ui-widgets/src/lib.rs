@@ -48,5 +48,6 @@ pub use slider::Slider;
 pub use text_input::TextInput;
 pub use timeline_view::{
     TimelineClip, TimelineClipAction, TimelineClipMove, TimelineClipMoveAction, TimelineClipRef,
-    TimelineSeekAction, TimelineTrack, TimelineTrackKind, TimelineView,
+    TimelineClipTrim, TimelineClipTrimAction, TimelineSeekAction, TimelineTrack, TimelineTrackKind,
+    TimelineTrimEdge, TimelineView,
 };

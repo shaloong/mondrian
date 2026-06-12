@@ -328,6 +328,19 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
                 clip.label
             ))
         })
+        .on_clip_trim(|trim, clip| {
+            panel_action(&format!(
+                "timeline.trim.{}.{}.{:?}.{}+{}->{}+{}.{}",
+                trim.clip_ref.track_index,
+                trim.clip_ref.clip_index,
+                trim.edge,
+                trim.old_start_frame,
+                trim.old_duration_frames,
+                trim.new_start_frame,
+                trim.new_duration_frames,
+                clip.label
+            ))
+        })
         .on_seek(|frame| panel_action(&format!("timeline.seek.{frame}")))
 }
 
