@@ -23,6 +23,8 @@ pub mod text_input;
 pub mod timeline_view;
 
 #[cfg(test)]
+mod component_extreme_tests;
+#[cfg(test)]
 mod test_utils;
 
 pub use button::Button;

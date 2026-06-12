@@ -325,6 +325,14 @@ objects at the panel/app layer. Programmatic state synchronization uses setters
 such as `set_color()` / `set_points()` and must not emit actions; only user
 input paths dispatch changes and request repaint.
 
+`mondrian-ui-widgets` keeps extreme interaction and visual-command stability in
+normal Rust tests. The component stress suite drives edge-size layouts, long
+text, dropdown wheel scrolling, pointer-captured slider drags, color-picker
+popovers, and timeline scroll/zoom, then asserts that generated paint geometry
+is finite and clip/transform stacks remain balanced. This does not replace
+human visual QA, but it catches common regressions before manual desktop
+testing.
+
 General panel composition should use `FlexContainer` rather than ad-hoc
 coordinate code. `FlexContainer` is only a widget adapter over the pure
 `mondrian-ui-layout::FlexLayout` algorithm, so layout math remains testable in
