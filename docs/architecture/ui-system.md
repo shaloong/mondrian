@@ -82,6 +82,8 @@ protocol and calls existing undoable command/property-mutation paths. Timeline
 move/trim/seek actions resolve through timeline command methods; Inspector clip
 enabled, opacity, solid/tint color, and basic transform field actions resolve
 through `AppState` snapshot commands and `mondrian-timeline` property hosts.
+Inspector timing controls reuse timeline trim actions for clip In/Out changes
+instead of introducing a parallel editing path.
 This keeps reusable widgets index/value-based and UI-agnostic while avoiding
 string parsing in business logic.
 
@@ -305,6 +307,8 @@ edits emit stable inspector actions that mutate the selected clip through
 undoable app state commands. Basic transform controls show position in sequence
 pixels, uniform scale in percent units, and rotation in degrees; the app action
 handler converts those UI values back into `Transform2D` property mutations.
+Timing controls show absolute timeline frames and dispatch the same trim
+payloads as the Timeline view.
 This lets focus routing, overlay popups, repaint requests, shell runtime
 behavior, and editor-state dispatch be validated in the same dock tree that
 future panels will use. Timeline migration should reuse this path after

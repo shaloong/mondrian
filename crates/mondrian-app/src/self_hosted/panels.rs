@@ -365,6 +365,12 @@ pub struct InspectorPanelModel {
     pub scale_percent: f32,
     /// Transform rotation shown in degrees.
     pub rotation_degrees: f32,
+    /// Clip in point shown as an absolute timeline frame.
+    pub in_frame: f32,
+    /// Clip out point shown as an absolute timeline frame.
+    pub out_frame: f32,
+    /// Maximum timeline frame used by timing sliders.
+    pub max_frame: f32,
     /// Preferred color-picker area style for this inspector instance.
     pub tint_area_mode: ColorPickerAreaMode,
     /// Curve-editor fixture points until animation curves are fully mapped.
@@ -399,6 +405,9 @@ impl InspectorPanelModel {
             position_y: position.y,
             scale_percent: scale.x * 100.0,
             rotation_degrees: clip_rotation_degrees(clip, time),
+            in_frame: clip.position.frame as f32,
+            out_frame: clip.end_position().frame as f32,
+            max_frame: sequence.total_duration().frame.max(1) as f32,
             tint_area_mode: ColorPickerAreaMode::Wheel,
             curve_points: vec![CurvePoint::new(0.0, 0.0), CurvePoint::new(1.0, 1.0)],
         }
@@ -414,6 +423,9 @@ impl InspectorPanelModel {
             position_y: -8.0,
             scale_percent: 100.0,
             rotation_degrees: 0.0,
+            in_frame: 0.0,
+            out_frame: 96.0,
+            max_frame: 240.0,
             tint_area_mode: ColorPickerAreaMode::Wheel,
             curve_points: vec![
                 CurvePoint::new(0.0, 0.0),
@@ -966,6 +978,35 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                 )),
         )
         .with_section(
+            PropertySection::new("Timing")
+                .with_row(PropertyRow::new(
+                    "In",
+                    Box::new(Slider::new(model.in_frame, 0.0, model.max_frame).on_change(
+                        move |value| {
+                            inspector_timing_action(
+                                selected_clip,
+                                TimelineTrimPayloadEdge::In,
+                                value,
+                            )
+                        },
+                    )),
+                ))
+                .with_row(PropertyRow::new(
+                    "Out",
+                    Box::new(
+                        Slider::new(model.out_frame, 0.0, model.max_frame).on_change(
+                            move |value| {
+                                inspector_timing_action(
+                                    selected_clip,
+                                    TimelineTrimPayloadEdge::Out,
+                                    value,
+                                )
+                            },
+                        ),
+                    ),
+                )),
+        )
+        .with_section(
             PropertySection::new("Animation")
                 .with_row(PropertyRow::new("Curve", Box::new(curve)).with_height(118.0)),
         )
@@ -1021,6 +1062,26 @@ fn inspector_transform_action(
         });
     }
     legacy_inspector_action(format!("transform.{field:?}:{value:.3}"))
+}
+
+fn inspector_timing_action(
+    selection: Option<SelectedClipRef>,
+    edge: TimelineTrimPayloadEdge,
+    frame: f32,
+) -> Action {
+    let frame = if frame.is_finite() {
+        frame.round() as i64
+    } else {
+        0
+    };
+    if let Some(selection) = selection {
+        return timeline_trim_clip_action(TimelineTrimClipPayload {
+            clip_id: selection.clip_id,
+            edge,
+            frame: frame.max(0),
+        });
+    }
+    legacy_inspector_action(format!("timing.{edge:?}:{frame}"))
 }
 
 fn inspector_curve_action(points: &[CurvePoint]) -> Action {
@@ -1214,6 +1275,9 @@ mod tests {
         assert_eq!(models.inspector.position_y, 108.0);
         assert_eq!(models.inspector.scale_percent, 125.0);
         assert_eq!(models.inspector.rotation_degrees, 15.0);
+        assert_eq!(models.inspector.in_frame, 4.0);
+        assert_eq!(models.inspector.out_frame, 22.0);
+        assert_eq!(models.inspector.max_frame, 22.0);
     }
 
     #[test]
