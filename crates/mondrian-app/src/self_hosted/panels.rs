@@ -22,22 +22,23 @@ use mondrian_ui_widgets::dock_splitter::DockSplitter;
 use mondrian_ui_widgets::dock_tab_bar::TabInfo;
 use mondrian_ui_widgets::panel_slot::SlotKind;
 use mondrian_ui_widgets::{
-    Checkbox, ColorPickerAreaMode, ColorPickerTrigger, CurveEditor, CurvePoint, DockPanel,
+    Button, Checkbox, ColorPickerAreaMode, ColorPickerTrigger, CurveEditor, CurvePoint, DockPanel,
     PanelList, PanelListItem, PropertyPanel, PropertyRow, PropertySection, ScrollView, Slider,
     TimelineClip, TimelineClipMove, TimelineClipRef, TimelineClipTrim, TimelineTrack,
     TimelineTrimEdge, TimelineView,
 };
 
 use crate::app::ui_actions::{
-    effects_add_to_clip_action, inspector_set_clip_enabled_action,
+    effects_add_to_clip_action, inspector_remove_effect_action, inspector_set_clip_enabled_action,
     inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
     inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
     timeline_move_clip_action, timeline_seek_action, timeline_select_clip_action,
     timeline_trim_clip_action, EffectsAddToClipPayload, InspectorClipRefPayload,
-    InspectorClipTransformField, InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
-    InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
-    InspectorSetEffectEnabledPayload, TimelineMoveClipPayload, TimelineSelectClipPayload,
-    TimelineTrimClipPayload, TimelineTrimPayloadEdge,
+    InspectorClipTransformField, InspectorRemoveEffectPayload, InspectorSetClipEnabledPayload,
+    InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+    InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
+    TimelineMoveClipPayload, TimelineSelectClipPayload, TimelineTrimClipPayload,
+    TimelineTrimPayloadEdge,
 };
 use crate::app::{AppState, SelectedClipRef};
 
@@ -1014,6 +1015,13 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                     }),
                 ),
             ));
+            section = section.with_row(PropertyRow::new(
+                "",
+                Box::new(
+                    Button::new("Remove")
+                        .on_click(inspector_remove_effect_row_action(selected_clip, effect_id)),
+                ),
+            ));
         }
         panel = panel.with_section(section);
     }
@@ -1109,6 +1117,19 @@ fn inspector_effect_enabled_action(
         });
     }
     legacy_inspector_action(format!("effect.{effect_id}.enabled:{enabled}"))
+}
+
+fn inspector_remove_effect_row_action(
+    selection: Option<SelectedClipRef>,
+    effect_id: EffectId,
+) -> Action {
+    if let Some(selection) = selection {
+        return inspector_remove_effect_action(InspectorRemoveEffectPayload {
+            clip: inspector_clip_payload(selection),
+            effect_id,
+        });
+    }
+    legacy_inspector_action(format!("effect.{effect_id}.remove"))
 }
 
 fn inspector_curve_action(points: &[CurvePoint]) -> Action {

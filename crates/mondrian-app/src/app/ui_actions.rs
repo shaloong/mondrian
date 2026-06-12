@@ -33,6 +33,8 @@ pub const INSPECTOR_SET_CLIP_TINT: &str = "set_clip_tint";
 pub const INSPECTOR_SET_CLIP_TRANSFORM_FIELD: &str = "set_clip_transform_field";
 /// Action name for toggling one effect on a selected clip.
 pub const INSPECTOR_SET_EFFECT_ENABLED: &str = "set_effect_enabled";
+/// Action name for removing one effect from a selected clip.
+pub const INSPECTOR_REMOVE_EFFECT: &str = "remove_effect";
 
 /// Custom action namespace for effect browser operations.
 pub const EFFECTS_NAMESPACE: &str = "ui.effects";
@@ -162,6 +164,15 @@ pub struct InspectorSetEffectEnabledPayload {
     pub enabled: bool,
 }
 
+/// Remove an effect instance from a selected clip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InspectorRemoveEffectPayload {
+    /// Clip targeted by the inspector mutation.
+    pub clip: InspectorClipRefPayload,
+    /// Effect instance to remove.
+    pub effect_id: EffectId,
+}
+
 /// Add an effect from the effect browser to a clip.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EffectsAddToClipPayload {
@@ -216,6 +227,11 @@ pub fn inspector_set_clip_transform_field_action(
 /// Build an action that toggles an effect on a selected clip.
 pub fn inspector_set_effect_enabled_action(payload: InspectorSetEffectEnabledPayload) -> Action {
     custom_inspector_action(INSPECTOR_SET_EFFECT_ENABLED, payload)
+}
+
+/// Build an action that removes an effect from a selected clip.
+pub fn inspector_remove_effect_action(payload: InspectorRemoveEffectPayload) -> Action {
+    custom_inspector_action(INSPECTOR_REMOVE_EFFECT, payload)
 }
 
 /// Build an action that adds an effect to a selected clip.

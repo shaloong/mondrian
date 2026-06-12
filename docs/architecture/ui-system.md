@@ -85,8 +85,9 @@ through `AppState` snapshot commands and `mondrian-timeline` property hosts.
 Inspector timing controls reuse timeline trim actions for clip In/Out changes
 instead of introducing a parallel editing path.
 Inspector effect rows are read from the selected clip's effect instances and
-toggle effect enabled state through `AppState::set_clip_effect_enabled`; the
-widget layer sees only checkbox values plus stable effect ids.
+toggle or remove effect instances through `AppState::set_clip_effect_enabled`
+and `AppState::remove_effect_from_clip`; the widget layer sees only button /
+checkbox values plus stable effect ids.
 Effects browser activation uses the same protocol family: when a video clip is
 selected, effect rows carry a `ui.effects` add-to-clip payload with the selected
 clip id and serialized `EffectType`, and `AppState` routes it through
@@ -318,7 +319,9 @@ Timing controls show absolute timeline frames and dispatch the same trim
 payloads as the Timeline view.
 Attached effects appear as inspector rows with enable checkboxes, using effect
 instance ids rather than list indices so reorder/remove operations can be added
-without changing the widget contract.
+without changing the widget contract. Removal buttons use the same effect id
+payload and stay in the app-layer action protocol rather than deleting from the
+widget tree directly.
 This lets focus routing, overlay popups, repaint requests, shell runtime
 behavior, and editor-state dispatch be validated in the same dock tree that
 future panels will use. Timeline migration should reuse this path after

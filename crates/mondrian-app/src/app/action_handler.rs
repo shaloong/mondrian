@@ -8,15 +8,15 @@
 
 use crate::app::timeline_editing::{find_clip_mut, set_clip_disabled};
 use crate::app::ui_actions::{
-    EffectsAddToClipPayload, InspectorClipTransformField, InspectorSetClipEnabledPayload,
-    InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+    EffectsAddToClipPayload, InspectorClipTransformField, InspectorRemoveEffectPayload,
+    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
     InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
     TimelineMoveClipPayload, TimelineSeekPayload, TimelineSelectClipPayload,
     TimelineTrimClipPayload, TimelineTrimPayloadEdge, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE,
-    INSPECTOR_NAMESPACE, INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY,
-    INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD, INSPECTOR_SET_EFFECT_ENABLED,
-    TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_SEEK, TIMELINE_SELECT_CLIP,
-    TIMELINE_TRIM_CLIP,
+    INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT, INSPECTOR_SET_CLIP_ENABLED,
+    INSPECTOR_SET_CLIP_OPACITY, INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD,
+    INSPECTOR_SET_EFFECT_ENABLED, TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_SEEK,
+    TIMELINE_SELECT_CLIP, TIMELINE_TRIM_CLIP,
 };
 use crate::app::{AppState, ClipOverlapMode, SelectedClipRef};
 use glam::Vec2;
@@ -239,6 +239,22 @@ impl AppState {
                     },
                     payload.effect_id,
                     payload.enabled,
+                )
+                .map(|_| ())
+            }
+            INSPECTOR_REMOVE_EFFECT => {
+                let payload = parse_ui_payload::<InspectorRemoveEffectPayload>(
+                    "inspector_ui_action",
+                    name,
+                    payload,
+                )?;
+                self.remove_effect_from_clip(
+                    SelectedClipRef {
+                        track_id: payload.clip.track_id,
+                        is_video_track: payload.clip.is_video_track,
+                        clip_id: payload.clip.clip_id,
+                    },
+                    payload.effect_id,
                 )
                 .map(|_| ())
             }
@@ -480,14 +496,15 @@ fn clip_exists(seq: &mondrian_timeline::sequence::Sequence, clip_id: ClipId) -> 
 mod tests {
     use super::*;
     use crate::app::ui_actions::{
-        effects_add_to_clip_action, inspector_set_clip_enabled_action,
-        inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
-        inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
-        timeline_move_clip_action, timeline_seek_action, timeline_select_clip_action,
-        timeline_trim_clip_action, EffectsAddToClipPayload, InspectorClipRefPayload,
-        InspectorClipTransformField, InspectorSetClipEnabledPayload,
-        InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
-        InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
+        effects_add_to_clip_action, inspector_remove_effect_action,
+        inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
+        inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
+        inspector_set_effect_enabled_action, timeline_move_clip_action, timeline_seek_action,
+        timeline_select_clip_action, timeline_trim_clip_action, EffectsAddToClipPayload,
+        InspectorClipRefPayload, InspectorClipTransformField, InspectorRemoveEffectPayload,
+        InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
+        InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
+        InspectorSetEffectEnabledPayload,
     };
     use mondrian_core::types::{AssetId, TimeCode};
     use mondrian_core::Color;
@@ -721,6 +738,34 @@ mod tests {
             &state.sequence.as_ref().expect("sequence").video_tracks[0].clips[0].effects[0];
         assert_eq!(effect.id, effect_id);
         assert!(!effect.is_enabled);
+        assert!(state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_inspector_ui_removes_effect_instance() {
+        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+        let remove_effect: mondrian_effects::EffectNode =
+            mondrian_effects::EffectNodeExt::with_defaults(EffectType::GaussianBlur);
+        let keep_effect: mondrian_effects::EffectNode =
+            mondrian_effects::EffectNodeExt::with_defaults(EffectType::Sharpen);
+        let remove_id = remove_effect.id;
+        let keep_id = keep_effect.id;
+        let clip = &mut state.sequence.as_mut().expect("sequence").video_tracks[0].clips[0];
+        clip.add_effect_node(remove_effect);
+        clip.add_effect_node(keep_effect);
+
+        state
+            .dispatch_action(inspector_remove_effect_action(
+                InspectorRemoveEffectPayload {
+                    clip: inspector_clip_payload(track_id, clip_id),
+                    effect_id: remove_id,
+                },
+            ))
+            .expect("dispatch remove effect");
+
+        let effects = &state.sequence.as_ref().expect("sequence").video_tracks[0].clips[0].effects;
+        assert_eq!(effects.len(), 1);
+        assert_eq!(effects[0].id, keep_id);
         assert!(state.can_undo_action());
     }
 }
