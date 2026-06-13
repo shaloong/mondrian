@@ -48,7 +48,7 @@ pub use panel_slot::{PanelSlot, SlotKind};
 pub use property_panel::{PropertyPanel, PropertyPanelOptions, PropertyRow, PropertySection};
 pub use scroll::ScrollView;
 pub use slider::Slider;
-pub use text_input::TextInput;
+pub use text_input::{TextInput, TextInputChangeAction};
 pub use timeline_view::{
     TimelineClip, TimelineClipAction, TimelineClipMove, TimelineClipMoveAction, TimelineClipRef,
     TimelineClipTrim, TimelineClipTrimAction, TimelineSeekAction, TimelineTrack, TimelineTrackKind,

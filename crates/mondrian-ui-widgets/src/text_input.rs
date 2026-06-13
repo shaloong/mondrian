@@ -15,6 +15,7 @@ use std::time::Instant;
 
 use unicode_segmentation::UnicodeSegmentation;
 
+use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
@@ -34,6 +35,9 @@ fn measure_text_width(text: &str, font_size: f32) -> f32 {
     }
     TEXT_METRICS.with_borrow_mut(|renderer| renderer.measure_text(text, font_size).0)
 }
+
+/// Adapter that maps the current input value to an editor [`Action`].
+pub type TextInputChangeAction = dyn Fn(&str) -> Action;
 
 /// TextInput Widget —— 单行文本输入框
 pub struct TextInput {
@@ -56,6 +60,7 @@ pub struct TextInput {
     scroll_x: Cell<f32>,
     /// IME composition text shown before the platform commits it.
     ime_preedit: String,
+    on_change: Option<Box<TextInputChangeAction>>,
 }
 
 impl TextInput {
@@ -74,6 +79,7 @@ impl TextInput {
             last_blink: Cell::new(Instant::now()),
             scroll_x: Cell::new(0.0),
             ime_preedit: String::new(),
+            on_change: None,
         }
     }
 
@@ -121,6 +127,12 @@ impl TextInput {
         self.text = text;
         self.clear_selection();
         self.update_scroll(DEFAULT_FONT_SIZE);
+    }
+
+    /// Dispatch an action whenever user input changes the committed text.
+    pub fn on_change(mut self, action: impl Fn(&str) -> Action + 'static) -> Self {
+        self.on_change = Some(Box::new(action));
+        self
     }
 
     pub fn clear(&mut self) {
@@ -357,6 +369,12 @@ impl TextInput {
         self.update_scroll(DEFAULT_FONT_SIZE);
     }
 
+    fn dispatch_change(&self, ctx: &mut EventContext) {
+        if let Some(factory) = &self.on_change {
+            (ctx.dispatch)(factory(&self.text));
+        }
+    }
+
     // ── Word navigation ───────────────────────────────────────────────────
 
     fn next_word_boundary(&self, from: usize) -> usize {
@@ -517,6 +535,7 @@ impl Widget for TextInput {
             UiEvent::KeyDown { key, modifiers } if self.focused => {
                 let shift = modifiers.shift;
                 let ctrl = modifiers.ctrl;
+                let before_text = self.text.clone();
 
                 let result = match key {
                     // ── Ctrl shortcuts ─────────────────────────────────
@@ -639,22 +658,33 @@ impl Widget for TextInput {
                 };
                 if result == EventResult::Handled {
                     self.refresh_ime_area(ctx);
+                    if self.text != before_text {
+                        self.dispatch_change(ctx);
+                    }
                 }
                 result
             }
             // ── Text input ─────────────────────────────────────────────
             UiEvent::TextInput(ch) if self.focused => {
+                let before_text = self.text.clone();
                 self.delete_selection();
                 self.insert_at_cursor(ch);
                 self.ime_preedit.clear();
                 self.refresh_ime_area(ctx);
+                if self.text != before_text {
+                    self.dispatch_change(ctx);
+                }
                 EventResult::Handled
             }
             UiEvent::ImeCommit(ch) if self.focused => {
+                let before_text = self.text.clone();
                 self.delete_selection();
                 self.ime_preedit.clear();
                 self.insert_at_cursor(ch);
                 self.refresh_ime_area(ctx);
+                if self.text != before_text {
+                    self.dispatch_change(ctx);
+                }
                 EventResult::Handled
             }
             UiEvent::ImePreedit(preedit) if self.focused => {
@@ -855,6 +885,13 @@ mod tests {
     fn tp(ti: &mut TextInput, ch: &str, ctx: &mut EventContext) {
         ti.event(&UiEvent::TextInput(ch.to_string()), ctx);
     }
+    fn change_action(text: &str) -> Action {
+        Action::Custom {
+            namespace: "test.text_input".into(),
+            name: format!("change:{text}"),
+            payload: Default::default(),
+        }
+    }
 
     #[derive(Debug, PartialEq)]
     enum PaintOp {
@@ -946,6 +983,63 @@ mod tests {
         assert!(!ti.can_focus());
         assert_eq!(ti.text(), "abc");
         assert!(ctx.requests.ime.is_none());
+    }
+
+    #[test]
+    fn on_change_dispatches_after_text_input() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+        let mut input = TextInput::new("ph").on_change(change_action);
+        layout(&mut input);
+
+        md(&mut input, 12.0, 12.0, &mut ctx);
+        tp(&mut input, "你", &mut ctx);
+
+        assert_eq!(input.text(), "你");
+        assert_eq!(actions.borrow().as_slice(), &[change_action("你")]);
+    }
+
+    #[test]
+    fn on_change_ignores_cursor_navigation() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+        let mut input = TextInput::new("ph").with_text("hello").on_change(change_action);
+        layout(&mut input);
+
+        md(&mut input, 12.0, 12.0, &mut ctx);
+        kd(&mut input, KeyCode::Left, &mut ctx);
+        kd(&mut input, KeyCode::Home, &mut ctx);
+
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn on_change_dispatches_for_ime_commit_not_preedit() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+        let mut input = TextInput::new("ph").on_change(change_action);
+        layout(&mut input);
+
+        md(&mut input, 12.0, 12.0, &mut ctx);
+        input.event(&UiEvent::ImePreedit("ni".into()), &mut ctx);
+        assert!(actions.borrow().is_empty());
+
+        input.event(&UiEvent::ImeCommit("你".into()), &mut ctx);
+
+        assert_eq!(input.text(), "你");
+        assert_eq!(actions.borrow().as_slice(), &[change_action("你")]);
     }
 
     #[test]

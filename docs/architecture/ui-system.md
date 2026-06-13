@@ -439,6 +439,10 @@ history. Real panels map widget values to semantic `Action`s or command objects
 at the panel/app layer. Programmatic state synchronization uses setters such as
 `set_color()` / `set_points()` and must not emit actions; only user input paths
 dispatch changes and request repaint.
+`TextInput::on_change(...)` dispatches only when committed text changes, such
+as typed text, paste/cut/delete edits, or IME commit. Cursor movement,
+selection changes, and IME preedit updates remain local so form bindings do not
+receive noisy non-mutating actions.
 Form controls should expose a common `enabled(bool)` / `disabled()` builder
 where practical. Disabled controls must not dispatch actions, request pointer
 capture, or participate in focus traversal, and should render with muted theme
