@@ -107,7 +107,12 @@ links rebuilt only among pasted entries. `Duplicate` uses the same recreation
 path but places the new group after the selected group's end without mutating
 the active clipboard.
 Inspector timing controls reuse timeline trim actions for clip In/Out changes
-instead of introducing a parallel editing path.
+instead of introducing a parallel editing path. `TrimClipStart` and
+`TrimClipEnd` accept source in/out times from inspector-style controls, convert
+them to timeline trim frames with the clip's current positive finite speed
+multiplier, then route through `AppState::trim_clips_bulk_to_frame`; locked
+track validation, linked-clip trim behavior, undo snapshots, and timeline
+modified events therefore stay centralized in the timeline command path.
 Inspector effect rows are read from the selected clip's effect instances and
 toggle or remove effect instances through `AppState::set_clip_effect_enabled`
 and `AppState::remove_effect_from_clip`; the widget layer sees only button /

@@ -23,7 +23,7 @@ use crate::app::ui_actions::{
 use crate::app::{AppClipboardKind, AppState, ClipOverlapMode, SelectedClipRef};
 use glam::Vec2;
 use mondrian_core::automation::{PropertyHost, PropertyMutation, PropertyValue};
-use mondrian_core::types::ClipId;
+use mondrian_core::types::{ClipId, TimeCode};
 use mondrian_core::{MondrianError, Result};
 use mondrian_timeline::clip::{Clip, Transform2D, TrimEdge};
 
@@ -112,6 +112,12 @@ impl AppState {
             }
             Action::MoveClipToTrack { clip_id, target_track, position } => {
                 self.move_clip_to_track_from_action(clip_id, target_track, position.frame)
+            }
+            Action::TrimClipStart { clip_id, new_source_in } => {
+                self.trim_clip_source_from_action(clip_id, TrimEdge::In, new_source_in)
+            }
+            Action::TrimClipEnd { clip_id, new_source_out } => {
+                self.trim_clip_source_from_action(clip_id, TrimEdge::Out, new_source_out)
             }
 
             // ── 效果（复用 clip-level undoable 命令）──────────────────────
@@ -218,6 +224,23 @@ impl AppState {
         let (_track_id, is_video_track, _frame) =
             self.clip_action_location("move_clip_to_track", clip_id)?;
         self.move_clip_with_snapshot(target_track_id, is_video_track, clip_id, frame.max(0))
+    }
+
+    fn trim_clip_source_from_action(
+        &mut self,
+        clip_id: ClipId,
+        edge: TrimEdge,
+        source_time: TimeCode,
+    ) -> Result<()> {
+        let target_frame = {
+            let Some(seq) = self.sequence.as_ref() else {
+                return Err(missing_sequence_error("trim_clip_source"));
+            };
+            let clip = find_clip(seq, clip_id)
+                .ok_or_else(|| missing_clip_error("trim_clip_source", clip_id))?;
+            source_trim_target_frame(clip, edge, source_time)?
+        };
+        self.trim_clips_bulk_to_frame(&[clip_id], edge, target_frame).map(|_| ())
     }
 
     fn clip_action_location(
@@ -764,6 +787,36 @@ impl AppState {
     }
 }
 
+fn source_trim_target_frame(clip: &Clip, edge: TrimEdge, source_time: TimeCode) -> Result<i64> {
+    match edge {
+        TrimEdge::In if source_time.frame >= clip.source_out.frame => {
+            return Err(MondrianError::WorkflowStepFailed {
+                step_id: "trim_clip_source".to_string(),
+                reason: "source in must be before current source out".to_string(),
+            });
+        }
+        TrimEdge::Out if source_time.frame <= clip.source_in.frame => {
+            return Err(MondrianError::WorkflowStepFailed {
+                step_id: "trim_clip_source".to_string(),
+                reason: "source out must be after current source in".to_string(),
+            });
+        }
+        _ => {}
+    }
+
+    let speed = clip.speed.evaluate_multiplier(TimeCode::new(0, clip.position.time_base));
+    if !speed.is_finite() || speed <= f64::EPSILON {
+        return Err(MondrianError::WorkflowStepFailed {
+            step_id: "trim_clip_source".to_string(),
+            reason: "source trim requires a positive finite speed multiplier".to_string(),
+        });
+    }
+
+    let source_delta = source_time.frame.saturating_sub(clip.source_in.frame);
+    let timeline_delta = (source_delta as f64 / speed).round() as i64;
+    Ok(clip.position.frame.saturating_add(timeline_delta).max(0))
+}
+
 fn parse_ui_payload<T: serde::de::DeserializeOwned>(
     step_prefix: &str,
     name: &str,
@@ -907,6 +960,64 @@ mod tests {
         let clip = &sequence.video_tracks[0].clips[0];
         assert_eq!(clip.position.frame, 16);
         assert_eq!(clip.duration.frame, 14);
+    }
+
+    #[test]
+    fn dispatch_trim_clip_start_uses_source_in_time() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
+        let tb = state.sequence.as_ref().expect("sequence").time_base();
+
+        state
+            .dispatch_action(mondrian_editor_state::Action::TrimClipStart {
+                clip_id,
+                new_source_in: TimeCode::new(5, tb),
+            })
+            .expect("trim source in");
+
+        let sequence = state.sequence.as_ref().expect("sequence");
+        let clip = &sequence.video_tracks[0].clips[0];
+        assert_eq!(clip.position.frame, 15);
+        assert_eq!(clip.duration.frame, 15);
+        assert_eq!(clip.source_in.frame, 5);
+        assert!(state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_trim_clip_end_uses_source_out_time() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
+        let tb = state.sequence.as_ref().expect("sequence").time_base();
+
+        state
+            .dispatch_action(mondrian_editor_state::Action::TrimClipEnd {
+                clip_id,
+                new_source_out: TimeCode::new(12, tb),
+            })
+            .expect("trim source out");
+
+        let sequence = state.sequence.as_ref().expect("sequence");
+        let clip = &sequence.video_tracks[0].clips[0];
+        assert_eq!(clip.position.frame, 10);
+        assert_eq!(clip.duration.frame, 12);
+        assert_eq!(clip.source_out.frame, 12);
+        assert!(state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_trim_clip_end_rejects_source_out_before_source_in() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
+        let tb = state.sequence.as_ref().expect("sequence").time_base();
+
+        let err = state
+            .dispatch_action(mondrian_editor_state::Action::TrimClipEnd {
+                clip_id,
+                new_source_out: TimeCode::new(0, tb),
+            })
+            .expect_err("invalid source out should be rejected");
+
+        assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
+        let sequence = state.sequence.as_ref().expect("sequence");
+        assert_eq!(sequence.video_tracks[0].clips[0].duration.frame, 20);
+        assert!(!state.can_undo_action());
     }
 
     #[test]
