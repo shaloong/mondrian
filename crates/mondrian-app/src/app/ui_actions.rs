@@ -5,8 +5,11 @@
 
 use mondrian_core::effect_data::EffectType;
 use mondrian_core::types::{AssetId, ClipId, EffectId, TrackId};
+use mondrian_core::ProjectSettings;
 use mondrian_editor_state::Action;
+use mondrian_timeline::SequenceSettings;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// Custom action namespace for timeline UI operations.
 pub const TIMELINE_NAMESPACE: &str = "ui.timeline";
@@ -48,9 +51,17 @@ pub const ASSETS_NAMESPACE: &str = "ui.assets";
 /// Action name for preparing an asset for timeline drag/drop.
 pub const ASSETS_PREPARE_DRAG: &str = "prepare_drag";
 
+/// Custom action namespace for project lifecycle operations supplied by shell UI.
+pub const PROJECT_NAMESPACE: &str = "ui.project";
+
+/// Action name for creating a project with explicit settings.
+pub const PROJECT_CREATE_WITH_SETTINGS: &str = "create_with_settings";
+
 /// Custom action namespace for app-shell operations resolved by native adapters.
 pub const APP_SHELL_NAMESPACE: &str = "app.shell";
 
+/// App-shell request to create a new project through a platform save dialog.
+pub const APP_SHELL_NEW_PROJECT_DIALOG: &str = "new_project_dialog";
 /// App-shell request to open a platform project file dialog.
 pub const APP_SHELL_OPEN_PROJECT_DIALOG: &str = "open_project_dialog";
 /// App-shell request to open a platform media import dialog.
@@ -205,6 +216,19 @@ pub struct AssetsPrepareDragPayload {
     pub asset_id: AssetId,
 }
 
+/// Create a project at a user-selected path with explicit initial settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectCreateWithSettingsPayload {
+    /// Target `.mdp` project container path.
+    pub project_file: PathBuf,
+    /// Initial project and sequence display name.
+    pub name: String,
+    /// Initial sequence settings.
+    pub sequence_settings: SequenceSettings,
+    /// Initial project-level settings.
+    pub project_settings: ProjectSettings,
+}
+
 /// Build an action that selects a clip in the active timeline.
 pub fn timeline_select_clip_action(payload: TimelineSelectClipPayload) -> Action {
     custom_timeline_action(TIMELINE_SELECT_CLIP, payload)
@@ -267,6 +291,16 @@ pub fn assets_prepare_drag_action(payload: AssetsPrepareDragPayload) -> Action {
     custom_assets_action(ASSETS_PREPARE_DRAG, payload)
 }
 
+/// Build an action that creates a project from shell UI.
+pub fn project_create_with_settings_action(payload: ProjectCreateWithSettingsPayload) -> Action {
+    custom_project_action(PROJECT_CREATE_WITH_SETTINGS, payload)
+}
+
+/// Build an app-shell request for creating a new project.
+pub fn app_shell_new_project_dialog_action() -> Action {
+    custom_app_shell_action(APP_SHELL_NEW_PROJECT_DIALOG)
+}
+
 /// Build an app-shell request for opening a project dialog.
 pub fn app_shell_open_project_dialog_action() -> Action {
     custom_app_shell_action(APP_SHELL_OPEN_PROJECT_DIALOG)
@@ -309,6 +343,14 @@ fn custom_effects_action<T: Serialize>(name: &'static str, payload: T) -> Action
 fn custom_assets_action<T: Serialize>(name: &'static str, payload: T) -> Action {
     Action::Custom {
         namespace: ASSETS_NAMESPACE.into(),
+        name: name.into(),
+        payload: serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
+    }
+}
+
+fn custom_project_action<T: Serialize>(name: &'static str, payload: T) -> Action {
+    Action::Custom {
+        namespace: PROJECT_NAMESPACE.into(),
         name: name.into(),
         payload: serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
     }

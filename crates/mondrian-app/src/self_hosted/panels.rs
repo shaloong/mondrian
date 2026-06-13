@@ -29,18 +29,18 @@ use mondrian_ui_widgets::{
 };
 
 use crate::app::ui_actions::{
-    app_shell_import_media_dialog_action, app_shell_open_project_dialog_action,
-    app_shell_save_project_as_dialog_action, assets_prepare_drag_action,
-    effects_add_to_clip_action, inspector_remove_effect_action, inspector_set_clip_enabled_action,
-    inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
-    inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
-    timeline_move_clip_action, timeline_seek_action, timeline_select_clip_action,
-    timeline_trim_clip_action, AssetsPrepareDragPayload, EffectsAddToClipPayload,
-    InspectorClipRefPayload, InspectorClipTransformField, InspectorRemoveEffectPayload,
-    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
-    InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
-    TimelineMoveClipPayload, TimelineSelectClipPayload, TimelineTrimClipPayload,
-    TimelineTrimPayloadEdge,
+    app_shell_import_media_dialog_action, app_shell_new_project_dialog_action,
+    app_shell_open_project_dialog_action, app_shell_save_project_as_dialog_action,
+    assets_prepare_drag_action, effects_add_to_clip_action, inspector_remove_effect_action,
+    inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
+    inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
+    inspector_set_effect_enabled_action, timeline_move_clip_action, timeline_seek_action,
+    timeline_select_clip_action, timeline_trim_clip_action, AssetsPrepareDragPayload,
+    EffectsAddToClipPayload, InspectorClipRefPayload, InspectorClipTransformField,
+    InspectorRemoveEffectPayload, InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
+    InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
+    InspectorSetEffectEnabledPayload, TimelineMoveClipPayload, TimelineSelectClipPayload,
+    TimelineTrimClipPayload, TimelineTrimPayloadEdge,
 };
 use crate::app::{AppState, SelectedClipRef};
 
@@ -219,6 +219,12 @@ impl PanelListModel {
 
         let has_sequence = state.sequence.is_some();
         let has_project_path = state.current_project_path.is_some();
+        items.push(
+            PanelListItem::new("New project...")
+                .with_subtitle("Create a project file and initialize timeline settings")
+                .with_badge("New")
+                .with_activate_action(app_shell_new_project_dialog_action()),
+        );
         items.push(
             PanelListItem::new("Open project...")
                 .with_subtitle("Choose an .mdp project file")
@@ -1442,8 +1448,8 @@ fn legacy_inspector_action(name: String) -> Action {
 mod tests {
     use super::*;
     use crate::app::ui_actions::{
-        APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_OPEN_PROJECT_DIALOG,
-        APP_SHELL_SAVE_PROJECT_AS_DIALOG,
+        APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
+        APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
     };
     use mondrian_core::automation::{PropertyHost, PropertyMutation, PropertyValue};
     use mondrian_core::types::{AssetId, TimeCode};
@@ -1550,6 +1556,10 @@ mod tests {
         let model = PanelListModel::from_project_status(&state);
 
         assert_shell_action(
+            project_item(&model, "New project...").activate_action.as_ref(),
+            APP_SHELL_NEW_PROJECT_DIALOG,
+        );
+        assert_shell_action(
             project_item(&model, "Open project...").activate_action.as_ref(),
             APP_SHELL_OPEN_PROJECT_DIALOG,
         );
@@ -1574,6 +1584,7 @@ mod tests {
         let state = AppState::new();
         let model = PanelListModel::from_project_status(&state);
 
+        assert!(!project_item(&model, "New project...").disabled);
         assert!(!project_item(&model, "Open project...").disabled);
         assert!(project_item(&model, "Import media...").disabled);
         assert!(project_item(&model, "Save project").disabled);

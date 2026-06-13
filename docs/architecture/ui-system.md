@@ -98,16 +98,19 @@ Native file dialogs belong to `mondrian-platform::PlatformService`; the
 self-hosted File menu emits an app-shell custom action, resolves that dialog at
 the window entrypoint, then dispatches `Action::ImportMedia` with concrete
 paths.
-Project open/save dialogs use the same boundary: menu widgets emit app-shell
-dialog intents, the window entrypoint resolves them into concrete
-`OpenProject(PathBuf)` / `SaveProjectAs(PathBuf)` actions, and `AppState`
-performs project lifecycle work plus status reporting. Widget code must not
-invent project paths or mutate project files directly.
+Project create/open/save dialogs use the same boundary: menu widgets emit
+app-shell dialog intents, the window entrypoint resolves them into concrete
+`ui.project.create_with_settings` / `OpenProject(PathBuf)` /
+`SaveProjectAs(PathBuf)` actions, and `AppState` performs project lifecycle
+work plus status reporting. Widget code must not invent project paths or mutate
+project files directly.
 Those app-shell dialog intents are built through `app::ui_actions` helpers so
 menus and self-hosted panels share the same stable custom-action ids.
 `self_hosted::shell::resolve_app_shell_action` is the tested boundary that
-turns those intents into concrete `OpenProject` / `ImportMedia` /
-`SaveProjectAs` actions after a native adapter supplies platform dialog results.
+turns those intents into concrete project creation, `OpenProject`,
+`ImportMedia`, and `SaveProjectAs` actions after a native adapter supplies
+platform dialog results. Project creation actions carry full
+`SequenceSettings` and `ProjectSettings` payloads before reaching `AppState`.
 `Action::SplitClipAtPlayhead` similarly routes to `AppState::split_at_playhead`,
 which bulk-splits unlocked clips under the playhead and records one undoable
 timeline snapshot only when a split actually occurs.

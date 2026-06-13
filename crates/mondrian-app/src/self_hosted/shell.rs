@@ -14,11 +14,15 @@ use mondrian_ui_widgets::menu::{Dropdown, MenuItem};
 use std::path::Path;
 
 use crate::app::ui_actions::{
-    app_shell_import_media_dialog_action, app_shell_open_project_dialog_action,
-    app_shell_save_project_as_dialog_action, APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE,
+    app_shell_import_media_dialog_action, app_shell_new_project_dialog_action,
+    app_shell_open_project_dialog_action, app_shell_save_project_as_dialog_action,
+    project_create_with_settings_action, ProjectCreateWithSettingsPayload,
+    APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
     APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
 };
 use crate::self_hosted::panels::{build_demo_dock_tree, build_dock_tree, SelfHostedPanelModels};
+use mondrian_core::ProjectSettings;
+use mondrian_timeline::SequenceSettings;
 
 /// Height reserved for the self-hosted top menu bar.
 pub const MENU_BAR_HEIGHT: f32 = 28.0;
@@ -54,6 +58,24 @@ pub fn resolve_app_shell_action(
 ) -> Option<Action> {
     match action {
         Action::Custom { namespace, name, .. }
+            if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_NEW_PROJECT_DIALOG =>
+        {
+            let path = platform.save_file_dialog(
+                "Create Mondrian Project",
+                &format!("Untitled.{PROJECT_FILE_EXTENSION}"),
+                &project_file_filters(),
+            )?;
+            let name = project_name_from_path(&path);
+            Some(project_create_with_settings_action(
+                ProjectCreateWithSettingsPayload {
+                    project_file: path,
+                    name,
+                    sequence_settings: SequenceSettings::default(),
+                    project_settings: ProjectSettings::default(),
+                },
+            ))
+        }
+        Action::Custom { namespace, name, .. }
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_OPEN_PROJECT_DIALOG =>
         {
             let paths =
@@ -86,13 +108,21 @@ pub fn resolve_app_shell_action(
     }
 }
 
+fn project_name_from_path(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.trim().is_empty())
+        .map(|stem| stem.trim().to_string())
+        .unwrap_or_else(|| "Untitled".to_string())
+}
+
 /// Default Mondrian menu structure for self-hosted shells.
 pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
     vec![
         (
             "File",
             vec![
-                MenuItem::new("New Project", Action::NewProject),
+                MenuItem::new("New Project...", app_shell_new_project_dialog_action()),
                 MenuItem::new("Open Project...", app_shell_open_project_dialog_action()),
                 MenuItem::new("Import Media...", app_shell_import_media_dialog_action()),
                 MenuItem::new("Save", Action::SaveProject),
@@ -326,8 +356,9 @@ impl Widget for SelfHostedAppRoot {
 mod tests {
     use super::*;
     use crate::app::ui_actions::{
-        app_shell_import_media_dialog_action, app_shell_open_project_dialog_action,
-        app_shell_save_project_as_dialog_action,
+        app_shell_import_media_dialog_action, app_shell_new_project_dialog_action,
+        app_shell_open_project_dialog_action, app_shell_save_project_as_dialog_action,
+        ProjectCreateWithSettingsPayload, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
     };
     use mondrian_editor_state::state::PanelKind;
     use mondrian_platform::NoopPlatformService;
@@ -488,6 +519,32 @@ mod tests {
             action,
             Some(Action::OpenProject(PathBuf::from("E:/projects/cut.mdp")))
         );
+    }
+
+    #[test]
+    fn resolve_app_shell_new_project_dialog_returns_create_project_action() {
+        let platform = FakePlatform {
+            open_paths: None,
+            save_path: Some(PathBuf::from("E:/projects/My Cut.mdp")),
+        };
+
+        let action =
+            resolve_app_shell_action(app_shell_new_project_dialog_action(), &platform, None)
+                .expect("new project action");
+
+        let Action::Custom { namespace, name, payload } = action else {
+            panic!("expected custom project action");
+        };
+        assert_eq!(namespace, PROJECT_NAMESPACE);
+        assert_eq!(name, PROJECT_CREATE_WITH_SETTINGS);
+        let payload: ProjectCreateWithSettingsPayload =
+            serde_json::from_value(payload).expect("project create payload");
+        assert_eq!(
+            payload.project_file,
+            PathBuf::from("E:/projects/My Cut.mdp")
+        );
+        assert_eq!(payload.name, "My Cut");
+        assert!(payload.sequence_settings.validate().is_ok());
     }
 
     #[test]

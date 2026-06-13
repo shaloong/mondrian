@@ -13,11 +13,12 @@ use crate::app::ui_actions::{
     AssetsPrepareDragPayload, EffectsAddToClipPayload, InspectorClipTransformField,
     InspectorRemoveEffectPayload, InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
     InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
-    InspectorSetEffectEnabledPayload, TimelineMoveClipPayload, TimelineSeekPayload,
-    TimelineSelectClipPayload, TimelineTrimClipPayload, TimelineTrimPayloadEdge, ASSETS_NAMESPACE,
-    ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE,
-    INSPECTOR_REMOVE_EFFECT, INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY,
-    INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD, INSPECTOR_SET_EFFECT_ENABLED,
+    InspectorSetEffectEnabledPayload, ProjectCreateWithSettingsPayload, TimelineMoveClipPayload,
+    TimelineSeekPayload, TimelineSelectClipPayload, TimelineTrimClipPayload,
+    TimelineTrimPayloadEdge, ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP,
+    EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT, INSPECTOR_SET_CLIP_ENABLED,
+    INSPECTOR_SET_CLIP_OPACITY, INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD,
+    INSPECTOR_SET_EFFECT_ENABLED, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
     TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_SEEK, TIMELINE_SELECT_CLIP,
     TIMELINE_TRIM_CLIP,
 };
@@ -158,6 +159,9 @@ impl AppState {
             Action::Custom { namespace, name, payload } if namespace == ASSETS_NAMESPACE => {
                 self.dispatch_assets_ui_action(&name, payload)
             }
+            Action::Custom { namespace, name, payload } if namespace == PROJECT_NAMESPACE => {
+                self.dispatch_project_ui_action(&name, payload)
+            }
 
             // ── 尚未实现的操作（Stage B-F 逐步添加）─────────────────────
             _ => {
@@ -214,6 +218,37 @@ impl AppState {
             MondrianError::WorkflowStepFailed { step_id: "save_project_as".to_string(), reason }
         })?;
         self.set_status_hint(format!("项目已另存为：{}", display_path.display()), false);
+        Ok(())
+    }
+
+    fn create_project_from_ui(&mut self, payload: ProjectCreateWithSettingsPayload) -> Result<()> {
+        if payload.project_file.as_os_str().is_empty() {
+            return Ok(());
+        }
+        let project_file = super::ensure_project_extension(payload.project_file);
+        let name = if payload.name.trim().is_empty() {
+            project_file
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .filter(|stem| !stem.trim().is_empty())
+                .map(|stem| stem.trim().to_string())
+                .unwrap_or_else(|| "Untitled".to_string())
+        } else {
+            payload.name.trim().to_string()
+        };
+
+        self.create_new_project_with_settings_at(
+            project_file.clone(),
+            &name,
+            payload.sequence_settings,
+            payload.project_settings,
+        )
+        .map_err(|err| {
+            let reason = err.to_string();
+            self.set_status_hint(format!("新建项目失败：{reason}"), true);
+            MondrianError::WorkflowStepFailed { step_id: "create_project".to_string(), reason }
+        })?;
+        self.set_status_hint(format!("项目已创建：{}", project_file.display()), false);
         Ok(())
     }
 
@@ -758,6 +793,26 @@ impl AppState {
         }
     }
 
+    fn dispatch_project_ui_action(&mut self, name: &str, payload: serde_json::Value) -> Result<()> {
+        match name {
+            PROJECT_CREATE_WITH_SETTINGS => {
+                let payload = parse_ui_payload::<ProjectCreateWithSettingsPayload>(
+                    "project_ui_action",
+                    name,
+                    payload,
+                )?;
+                self.create_project_from_ui(payload)
+            }
+            _ => {
+                tracing::debug!(
+                    target: "mondrian::action",
+                    "Unknown self-hosted project action: {name}"
+                );
+                Ok(())
+            }
+        }
+    }
+
     fn prepare_asset_drag_from_ui(&mut self, payload: AssetsPrepareDragPayload) -> Result<()> {
         let library = self.asset_library.clone().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
@@ -1057,20 +1112,23 @@ mod tests {
         assets_prepare_drag_action, effects_add_to_clip_action, inspector_remove_effect_action,
         inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
         inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
-        inspector_set_effect_enabled_action, timeline_move_clip_action, timeline_seek_action,
-        timeline_select_clip_action, timeline_trim_clip_action, AssetsPrepareDragPayload,
-        EffectsAddToClipPayload, InspectorClipRefPayload, InspectorClipTransformField,
-        InspectorRemoveEffectPayload, InspectorSetClipEnabledPayload,
-        InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
-        InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
+        inspector_set_effect_enabled_action, project_create_with_settings_action,
+        timeline_move_clip_action, timeline_seek_action, timeline_select_clip_action,
+        timeline_trim_clip_action, AssetsPrepareDragPayload, EffectsAddToClipPayload,
+        InspectorClipRefPayload, InspectorClipTransformField, InspectorRemoveEffectPayload,
+        InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
+        InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
+        InspectorSetEffectEnabledPayload, ProjectCreateWithSettingsPayload,
     };
     use mondrian_assets::AssetLibrary;
     use mondrian_core::types::{AssetId, MaskId, TimeCode};
     use mondrian_core::Color;
-    use mondrian_core::Rational;
+    use mondrian_core::{ProjectSettings, Rational, Resolution};
     use mondrian_effects::EffectType;
     use mondrian_timeline::clip::Clip;
-    use mondrian_timeline::sequence::Sequence;
+    use mondrian_timeline::sequence::{
+        PreviewRenderFormat, Sequence, SequencePreviewSettings, SequenceSettings,
+    };
 
     fn state_with_two_video_tracks() -> (
         AppState,
@@ -1371,6 +1429,52 @@ mod tests {
 
         assert_eq!(state.current_project_path.as_ref(), Some(&expected_target));
         assert!(expected_target.exists());
+        assert!(state.status_hint.as_ref().is_some_and(|(_, is_error)| !*is_error));
+
+        remove_temp_path(&root);
+    }
+
+    #[test]
+    fn dispatch_project_create_with_settings_creates_project_and_library() {
+        let mut state = AppState::new();
+        let root = unique_temp_path("create-project-with-settings");
+        let target_without_extension = root.join("full-create").join("cut");
+        let expected_target = target_without_extension.with_extension("mdp");
+        let sequence_settings = SequenceSettings {
+            resolution: Resolution { width: 3840, height: 2160 },
+            frame_rate: Rational::new(30000, 1001),
+            preview: SequencePreviewSettings {
+                format: PreviewRenderFormat::ProResProxy,
+                ..SequencePreviewSettings::default()
+            },
+            ..SequenceSettings::default()
+        };
+        let project_settings =
+            ProjectSettings { proxy_enabled: false, ..ProjectSettings::default() };
+
+        state
+            .dispatch_action(project_create_with_settings_action(
+                ProjectCreateWithSettingsPayload {
+                    project_file: target_without_extension,
+                    name: "Full Create".into(),
+                    sequence_settings: sequence_settings.clone(),
+                    project_settings: project_settings.clone(),
+                },
+            ))
+            .expect("create project");
+
+        assert_eq!(state.current_project_path.as_ref(), Some(&expected_target));
+        assert!(expected_target.exists());
+        let sequence = state.sequence.as_ref().expect("sequence");
+        assert_eq!(sequence.name, "Full Create");
+        assert_eq!(sequence.settings.resolution, sequence_settings.resolution);
+        assert_eq!(sequence.settings.frame_rate, sequence_settings.frame_rate);
+        assert_eq!(
+            sequence.settings.preview.format,
+            PreviewRenderFormat::ProResProxy
+        );
+        assert!(!state.project_settings.proxy_enabled);
+        assert!(state.asset_library.is_some());
         assert!(state.status_hint.as_ref().is_some_and(|(_, is_error)| !*is_error));
 
         remove_temp_path(&root);
