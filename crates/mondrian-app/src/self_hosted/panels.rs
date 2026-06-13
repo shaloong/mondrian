@@ -684,6 +684,21 @@ fn slot(kind: SlotKind, models: SelfHostedPanelModels) -> Box<dyn Widget> {
         ));
     }
 
+    if kind == SlotKind::Assets {
+        return Box::new(DockPanel::new(
+            kind,
+            asset_browser_tabs(),
+            move |_kind, active| {
+                let active_kind = if active == 1 {
+                    SlotKind::Effects
+                } else {
+                    SlotKind::Assets
+                };
+                panel_content_for_slot(active_kind, &models)
+            },
+        ));
+    }
+
     Box::new(DockPanel::new(
         kind,
         single_tab(kind),
@@ -696,6 +711,13 @@ fn single_tab(kind: SlotKind) -> Vec<TabInfo> {
         label: kind.display_name().to_string(),
         active: true,
     }]
+}
+
+fn asset_browser_tabs() -> Vec<TabInfo> {
+    vec![
+        TabInfo { label: "Assets".into(), active: true },
+        TabInfo { label: "Effects".into(), active: false },
+    ]
 }
 
 fn panel_content_for_slot(kind: SlotKind, models: &SelfHostedPanelModels) -> Box<dyn Widget> {
@@ -1391,6 +1413,16 @@ mod tests {
         assert!(models.viewer.enabled);
         assert!(!models.timeline.tracks.is_empty());
         assert!(!models.inspector.curve_points.is_empty());
+    }
+
+    #[test]
+    fn asset_browser_tabs_expose_effect_browser() {
+        let tabs = asset_browser_tabs();
+
+        assert_eq!(tabs.len(), 2);
+        assert_eq!(tabs[0].label, "Assets");
+        assert!(tabs[0].active);
+        assert_eq!(tabs[1].label, "Effects");
     }
 
     #[test]

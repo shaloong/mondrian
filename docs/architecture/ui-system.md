@@ -398,6 +398,8 @@ asset-library, and status-hint state instead of a colored placeholder.
 The self-hosted Assets panel maps real library rows to `ui.assets.prepare_drag`;
 `AppState` resolves the asset record and reuses the existing `begin_drag_asset`
 path so later Timeline drop handling stays shared with the egui implementation.
+The same left dock hosts the Effects browser as an `Effects` tab so effect
+insertion remains visible without changing the default split layout.
 
 Timeline migration starts with the domain-light `TimelineView` surface in
 `mondrian-ui-widgets`. It renders frame-space tracks, clips, ruler ticks,
