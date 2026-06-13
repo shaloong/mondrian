@@ -457,6 +457,9 @@ should use `PendingUiActions` rather than open-coding shell/AppState dispatch.
 The new-project dialog edits the real `SelfHostedNewProjectDraft` settings via
 typed draft-update payloads and presents validated production presets for frame
 size, frame rate, audio sample rate, proxy generation, and preview caching.
+Shell modals are routed through `self_hosted::modal::ShellModal` and should use
+theme modal tokens such as `colors.modal_scrim`, `colors.popover`, and spacing
+radii instead of per-dialog hard-coded chrome.
 Form controls should expose a common `enabled(bool)` / `disabled()` builder
 where practical. Disabled controls must not dispatch actions, request pointer
 capture, or participate in focus traversal, and should render with muted theme

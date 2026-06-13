@@ -263,6 +263,30 @@ fn preview_cache_checkbox_for(draft: &SelfHostedNewProjectDraft) -> Checkbox {
     })
 }
 
+const CARD_MIN_WIDTH: f32 = 320.0;
+const CARD_WIDTH: f32 = 520.0;
+const CARD_MIN_HEIGHT: f32 = 320.0;
+const CARD_HEIGHT: f32 = 390.0;
+const CONTENT_PADDING: f32 = 20.0;
+const FIELD_HEIGHT: f32 = 34.0;
+const DROPDOWN_HEIGHT: f32 = 28.0;
+const ROW_GAP: f32 = 12.0;
+const NAME_Y: f32 = 82.0;
+const PRESET_ROW_Y: f32 = 142.0;
+const AUDIO_ROW_Y: f32 = 202.0;
+const CHECKBOX_ROW_Y: f32 = 254.0;
+const BUTTON_WIDTH: f32 = 88.0;
+const BUTTON_HEIGHT: f32 = 32.0;
+const BUTTON_GAP: f32 = 8.0;
+const BUTTON_BOTTOM_INSET: f32 = 20.0;
+const TITLE_FONT_SIZE: f32 = 18.0;
+const LABEL_FONT_SIZE: f32 = 12.0;
+const TITLE_BASELINE_Y: f32 = 22.0;
+const DESCRIPTION_BASELINE_Y: f32 = 46.0;
+const NAME_LABEL_BASELINE_Y: f32 = 76.0;
+const PRESET_LABEL_BASELINE_Y: f32 = 136.0;
+const AUDIO_LABEL_BASELINE_Y: f32 = 196.0;
+
 pub struct NewProjectDialog {
     id: WidgetId,
     draft: SelfHostedNewProjectDraft,
@@ -334,54 +358,70 @@ impl Widget for NewProjectDialog {
     }
 
     fn measure(&self, _constraint: LayoutConstraint) -> Size {
-        Size::new(520.0, 390.0)
+        Size::new(CARD_WIDTH, CARD_HEIGHT)
     }
 
     fn layout(&mut self, bounds: Rect) {
         self.bounds = bounds;
-        let card_width = bounds.width.clamp(320.0, 520.0);
-        let card_height = bounds.height.clamp(320.0, 390.0);
+        let card_width = bounds.width.clamp(CARD_MIN_WIDTH, CARD_WIDTH);
+        let card_height = bounds.height.clamp(CARD_MIN_HEIGHT, CARD_HEIGHT);
         self.card = Rect::new(
             bounds.x + (bounds.width - card_width) * 0.5,
             bounds.y + (bounds.height - card_height) * 0.5,
             card_width,
             card_height,
         );
-        let content = self.card.inset(20.0, 20.0);
-        self.name_input
-            .layout(Rect::new(content.x, content.y + 82.0, content.width, 34.0));
-        let row_gap = 12.0;
-        let half = (content.width - row_gap) * 0.5;
-        self.resolution_dropdown
-            .layout(Rect::new(content.x, content.y + 142.0, half, 28.0));
-        self.frame_rate_dropdown.layout(Rect::new(
-            content.x + half + row_gap,
-            content.y + 142.0,
-            half,
-            28.0,
+        let content = self.card.inset(CONTENT_PADDING, CONTENT_PADDING);
+        self.name_input.layout(Rect::new(
+            content.x,
+            content.y + NAME_Y,
+            content.width,
+            FIELD_HEIGHT,
         ));
-        self.audio_sample_rate_dropdown
-            .layout(Rect::new(content.x, content.y + 202.0, half, 28.0));
-        self.proxy_checkbox.layout(Rect::new(content.x, content.y + 254.0, half, 28.0));
-        self.preview_cache_checkbox.layout(Rect::new(
-            content.x + half + row_gap,
-            content.y + 254.0,
+        let half = (content.width - ROW_GAP) * 0.5;
+        self.resolution_dropdown.layout(Rect::new(
+            content.x,
+            content.y + PRESET_ROW_Y,
             half,
-            28.0,
+            DROPDOWN_HEIGHT,
+        ));
+        self.frame_rate_dropdown.layout(Rect::new(
+            content.x + half + ROW_GAP,
+            content.y + PRESET_ROW_Y,
+            half,
+            DROPDOWN_HEIGHT,
+        ));
+        self.audio_sample_rate_dropdown.layout(Rect::new(
+            content.x,
+            content.y + AUDIO_ROW_Y,
+            half,
+            DROPDOWN_HEIGHT,
+        ));
+        self.proxy_checkbox.layout(Rect::new(
+            content.x,
+            content.y + CHECKBOX_ROW_Y,
+            half,
+            DROPDOWN_HEIGHT,
+        ));
+        self.preview_cache_checkbox.layout(Rect::new(
+            content.x + half + ROW_GAP,
+            content.y + CHECKBOX_ROW_Y,
+            half,
+            DROPDOWN_HEIGHT,
         ));
 
-        let button_y = self.card.y + self.card.height - 52.0;
+        let button_y = self.card.y + self.card.height - BUTTON_BOTTOM_INSET - BUTTON_HEIGHT;
         self.cancel_button.layout(Rect::new(
-            self.card.x + self.card.width - 204.0,
+            self.card.x + self.card.width - CONTENT_PADDING - BUTTON_WIDTH * 2.0 - BUTTON_GAP,
             button_y,
-            88.0,
-            32.0,
+            BUTTON_WIDTH,
+            BUTTON_HEIGHT,
         ));
         self.create_button.layout(Rect::new(
-            self.card.x + self.card.width - 108.0,
+            self.card.x + self.card.width - CONTENT_PADDING - BUTTON_WIDTH,
             button_y,
-            88.0,
-            32.0,
+            BUTTON_WIDTH,
+            BUTTON_HEIGHT,
         ));
     }
 
@@ -431,10 +471,14 @@ impl Widget for NewProjectDialog {
     fn paint(&self, ctx: &mut PaintContext) {
         ctx.encoder.draw_rect(
             self.bounds,
-            mondrian_core::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.38 },
-            0.0,
+            ctx.theme.colors.modal_scrim,
+            ctx.theme.spacing.radius_none,
         );
-        ctx.encoder.draw_rect(self.card, ctx.theme.colors.card, 8.0);
+        ctx.encoder.draw_rect(
+            self.card,
+            ctx.theme.colors.popover,
+            ctx.theme.spacing.radius_md,
+        );
         let top_left = Point::new(self.card.x, self.card.y);
         let top_right = Point::new(self.card.x + self.card.width, self.card.y);
         let bottom_left = Point::new(self.card.x, self.card.y + self.card.height);
@@ -447,47 +491,49 @@ impl Widget for NewProjectDialog {
         ctx.encoder.draw_line(top_left, bottom_left, 1.0, ctx.theme.colors.border);
         ctx.encoder.draw_line(top_right, bottom_right, 1.0, ctx.theme.colors.border);
 
-        let content = self.card.inset(20.0, 20.0);
+        let content = self.card.inset(CONTENT_PADDING, CONTENT_PADDING);
         ctx.encoder.draw_text(
             "New Project",
-            18.0,
-            Point::new(content.x, content.y + 22.0),
-            ctx.theme.colors.foreground,
+            TITLE_FONT_SIZE,
+            Point::new(content.x, content.y + TITLE_BASELINE_Y),
+            ctx.theme.colors.popover_foreground,
         );
         ctx.encoder.draw_text_box(
             "Create a project file and initialize the timeline with default production settings.",
-            12.0,
-            Point::new(content.x, content.y + 46.0),
+            LABEL_FONT_SIZE,
+            Point::new(content.x, content.y + DESCRIPTION_BASELINE_Y),
             content.width,
             ctx.theme.colors.muted_foreground,
         );
         ctx.encoder.draw_text(
             "Name",
-            12.0,
-            Point::new(content.x, content.y + 76.0),
+            LABEL_FONT_SIZE,
+            Point::new(content.x, content.y + NAME_LABEL_BASELINE_Y),
             ctx.theme.colors.muted_foreground,
         );
         self.name_input.paint(ctx);
-        let row_gap = 12.0;
-        let half = (content.width - row_gap) * 0.5;
+        let half = (content.width - ROW_GAP) * 0.5;
         ctx.encoder.draw_text(
             "Frame size",
-            12.0,
-            Point::new(content.x, content.y + 136.0),
+            LABEL_FONT_SIZE,
+            Point::new(content.x, content.y + PRESET_LABEL_BASELINE_Y),
             ctx.theme.colors.muted_foreground,
         );
         ctx.encoder.draw_text(
             "Frame rate",
-            12.0,
-            Point::new(content.x + half + row_gap, content.y + 136.0),
+            LABEL_FONT_SIZE,
+            Point::new(
+                content.x + half + ROW_GAP,
+                content.y + PRESET_LABEL_BASELINE_Y,
+            ),
             ctx.theme.colors.muted_foreground,
         );
         self.resolution_dropdown.paint(ctx);
         self.frame_rate_dropdown.paint(ctx);
         ctx.encoder.draw_text(
             "Audio",
-            12.0,
-            Point::new(content.x, content.y + 196.0),
+            LABEL_FONT_SIZE,
+            Point::new(content.x, content.y + AUDIO_LABEL_BASELINE_Y),
             ctx.theme.colors.muted_foreground,
         );
         self.audio_sample_rate_dropdown.paint(ctx);

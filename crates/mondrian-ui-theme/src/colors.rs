@@ -24,6 +24,8 @@ pub struct ColorTokens {
     pub popover: Color,
     /// 弹出层文字色
     pub popover_foreground: Color,
+    /// 模态弹窗背后的遮罩层
+    pub modal_scrim: Color,
 
     // ── 品牌 / 交互 (Brand & Interactive) ─────────────────────────────────
     /// 主色调（按钮、链接、选中态）
@@ -89,6 +91,7 @@ impl ColorTokens {
             card_foreground: Color::from_hex(0xEBEBF0),
             popover: Color::from_hex(0x1C1C22),
             popover_foreground: Color::from_hex(0xEBEBF0),
+            modal_scrim: Color { r: 0.0, g: 0.0, b: 0.0, a: 0.48 },
 
             primary: Color::from_hex(0x3B82F6),
             primary_foreground: Color::WHITE,
@@ -131,6 +134,7 @@ impl ColorTokens {
             card_foreground: Color::from_hex(0x0B0B0E),
             popover: Color::WHITE,
             popover_foreground: Color::from_hex(0x0B0B0E),
+            modal_scrim: Color { r: 0.0, g: 0.0, b: 0.0, a: 0.22 },
 
             primary: Color::from_hex(0x2563EB),
             primary_foreground: Color::WHITE,
