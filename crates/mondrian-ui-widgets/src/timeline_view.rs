@@ -187,6 +187,7 @@ pub struct TimelineView {
     scroll_y: f32,
     focused: bool,
     focus_visible: bool,
+    enabled: bool,
     track_height: f32,
     header_width: f32,
     ruler_height: f32,
@@ -254,6 +255,7 @@ impl TimelineView {
             scroll_y: 0.0,
             focused: false,
             focus_visible: false,
+            enabled: true,
             track_height: 50.0,
             header_width: 96.0,
             ruler_height: 30.0,
@@ -280,6 +282,34 @@ impl TimelineView {
     pub fn with_pixels_per_frame(mut self, pixels_per_frame: f32) -> Self {
         self.pixels_per_frame = pixels_per_frame.clamp(0.25, 64.0);
         self
+    }
+
+    /// Set whether the timeline accepts pointer, keyboard, wheel, and focus input.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.set_enabled(enabled);
+        self
+    }
+
+    /// Disable pointer, keyboard, wheel, and focus input.
+    pub fn disabled(self) -> Self {
+        self.enabled(false)
+    }
+
+    /// Whether the timeline accepts user input.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Set whether the timeline accepts pointer, keyboard, wheel, and focus input.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+        if !enabled {
+            self.focused = false;
+            self.focus_visible = false;
+            self.hovered_clip = None;
+            self.horizontal_scrollbar_hovered = false;
+            self.vertical_scrollbar_hovered = false;
+        }
     }
 
     /// Set a dynamic clip-selection action factory.
@@ -1092,6 +1122,27 @@ impl Widget for TimelineView {
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if !self.enabled {
+            if self.playhead_dragging
+                || self.clip_drag.is_some()
+                || self.trim_drag.is_some()
+                || self.scrollbar_drag.is_some()
+                || self.focused
+            {
+                ctx.release_pointer_capture(self.id);
+            }
+            self.focused = false;
+            self.focus_visible = false;
+            self.playhead_dragging = false;
+            self.clip_drag = None;
+            self.trim_drag = None;
+            self.scrollbar_drag = None;
+            self.hovered_clip = None;
+            self.horizontal_scrollbar_hovered = false;
+            self.vertical_scrollbar_hovered = false;
+            return EventResult::Ignored;
+        }
+
         match event {
             UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
                 if !self.bounds.contains(*position) {
@@ -1337,7 +1388,7 @@ impl Widget for TimelineView {
     }
 
     fn can_focus(&self) -> bool {
-        true
+        self.enabled
     }
 }
 
@@ -1526,6 +1577,89 @@ mod tests {
             },
             &mut ctx,
         );
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Release(view.id()))
+        );
+    }
+
+    #[test]
+    fn disabled_timeline_ignores_seek_and_focus() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut view = timeline().on_seek(|_| Action::Play).disabled();
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert!(!view.is_enabled());
+        assert!(!view.can_focus());
+        assert_eq!(
+            view.event(
+                &UiEvent::MouseDown {
+                    position: Point::new(192.0, 12.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+
+        assert_eq!(view.playhead_frame(), 12);
+        assert!(actions.borrow().is_empty());
+        assert!(ctx.requests.pointer_capture.is_none());
+    }
+
+    #[test]
+    fn disabling_while_dragging_playhead_releases_capture_on_next_event() {
+        let mut view = timeline();
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let dispatch = |_| {};
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            view.event(
+                &UiEvent::MouseDown {
+                    position: Point::new(192.0, 12.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        view.set_enabled(false);
+        assert_eq!(
+            view.event(
+                &UiEvent::MouseMove {
+                    position: Point::new(216.0, 12.0),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+
         assert_eq!(
             ctx.requests.pointer_capture,
             Some(PointerCaptureRequest::Release(view.id()))

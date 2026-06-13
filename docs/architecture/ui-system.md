@@ -403,6 +403,8 @@ data into `TimelineTrack` / `TimelineClip` view models, then translate
 selection and seek callbacks into semantic `Action`s or undoable commands at
 the app layer. This keeps the renderer-facing timeline primitive testable while
 preserving a clean path for progressively replacing the old egui timeline.
+When no timeline model is available, app panels should disable the surface so
+empty shells do not steal focus, seek, or hold pointer capture.
 
 Value widgets stay editor-state agnostic. `Button`, `Checkbox`, `Slider`,
 `TextInput`, `Dropdown`, `ColorPicker`, `ColorPickerTrigger`, and `CurveEditor`

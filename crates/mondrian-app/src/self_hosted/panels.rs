@@ -851,6 +851,7 @@ fn demo_selection(sequence: &Sequence) -> Option<SelectedClipRef> {
 fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
     let action_model = model.clone();
     TimelineView::new(model.tracks.clone())
+        .enabled(!model.tracks.is_empty())
         .with_playhead(model.playhead_frame)
         .on_clip_select({
             let action_model = action_model.clone();
@@ -1235,6 +1236,7 @@ mod tests {
 
         assert!(models.timeline.tracks.is_empty());
         assert_eq!(models.timeline.playhead_frame, 0);
+        assert!(!timeline_panel(&models.timeline).can_focus());
         assert_eq!(models.assets.items[0].title, "No project library");
         assert!(models.assets.items[0].disabled);
         assert!(!models.effects.items.is_empty());
