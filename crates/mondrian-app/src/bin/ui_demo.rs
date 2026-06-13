@@ -1105,67 +1105,6 @@ fn mouse_button(b: winit::event::MouseButton) -> MouseButton {
     }
 }
 
-fn winit_key_to_keycode(key: &winit::keyboard::Key) -> Option<KeyCode> {
-    use winit::keyboard::{Key, NamedKey};
-    match key {
-        Key::Named(named) => match named {
-            NamedKey::Backspace => Some(KeyCode::Backspace),
-            NamedKey::Delete => Some(KeyCode::Delete),
-            NamedKey::ArrowLeft => Some(KeyCode::Left),
-            NamedKey::ArrowRight => Some(KeyCode::Right),
-            NamedKey::ArrowUp => Some(KeyCode::Up),
-            NamedKey::ArrowDown => Some(KeyCode::Down),
-            NamedKey::Home => Some(KeyCode::Home),
-            NamedKey::End => Some(KeyCode::End),
-            NamedKey::Enter => Some(KeyCode::Enter),
-            NamedKey::Space => Some(KeyCode::Space),
-            NamedKey::Tab => Some(KeyCode::Tab),
-            NamedKey::Escape => None, // handled separately
-            _ => None,
-        },
-        Key::Character(ch) => match ch.as_str() {
-            "a" => Some(KeyCode::A),
-            "b" => Some(KeyCode::B),
-            "c" => Some(KeyCode::C),
-            "d" => Some(KeyCode::D),
-            "e" => Some(KeyCode::E),
-            "f" => Some(KeyCode::F),
-            "g" => Some(KeyCode::G),
-            "h" => Some(KeyCode::H),
-            "i" => Some(KeyCode::I),
-            "j" => Some(KeyCode::J),
-            "k" => Some(KeyCode::K),
-            "l" => Some(KeyCode::L),
-            "m" => Some(KeyCode::M),
-            "n" => Some(KeyCode::N),
-            "o" => Some(KeyCode::O),
-            "p" => Some(KeyCode::P),
-            "q" => Some(KeyCode::Q),
-            "r" => Some(KeyCode::R),
-            "s" => Some(KeyCode::S),
-            "t" => Some(KeyCode::T),
-            "u" => Some(KeyCode::U),
-            "v" => Some(KeyCode::V),
-            "w" => Some(KeyCode::W),
-            "x" => Some(KeyCode::X),
-            "y" => Some(KeyCode::Y),
-            "z" => Some(KeyCode::Z),
-            "0" => Some(KeyCode::Digit0),
-            "1" => Some(KeyCode::Digit1),
-            "2" => Some(KeyCode::Digit2),
-            "3" => Some(KeyCode::Digit3),
-            "4" => Some(KeyCode::Digit4),
-            "5" => Some(KeyCode::Digit5),
-            "6" => Some(KeyCode::Digit6),
-            "7" => Some(KeyCode::Digit7),
-            "8" => Some(KeyCode::Digit8),
-            "9" => Some(KeyCode::Digit9),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
 fn route_demo_window_event(
     window: &winit::window::Window,
     router: &mut EventRouter,
@@ -1240,139 +1179,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match event {
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => elwt.exit(),
 
+            // Keyboard input → dispatch KeyDown / TextInput to widget tree
             Event::WindowEvent {
-                event:
-                    WindowEvent::KeyboardInput {
-                        event:
-                            winit::event::KeyEvent {
-                                logical_key:
-                                    winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape),
-                                state: ElementState::Pressed,
-                                ..
-                            },
-                        ..
-                    },
+                event: WindowEvent::KeyboardInput { event: key_event, .. },
                 ..
             } => {
-                let result = route_demo_window_event(
+                let is_escape = matches!(
+                    key_event.logical_key,
+                    winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape)
+                );
+                let pressed = key_event.state == ElementState::Pressed;
+                let result = ui_runtime.route_keyboard_input(
                     &window,
                     &mut router,
                     &mut root,
-                    UiEvent::KeyDown { key: KeyCode::Escape, modifiers: modifiers_state },
-                    &mut ui_runtime,
+                    &key_event,
+                    &mut modifiers_state,
+                    &record_demo_action,
                 );
-                if result == EventResult::Ignored {
+                if pressed && is_escape && result == EventResult::Ignored {
                     elwt.exit();
                 }
                 window.request_redraw();
             }
 
-            // Keyboard input → dispatch KeyDown / TextInput to widget tree
-            Event::WindowEvent {
-                event:
-                    WindowEvent::KeyboardInput {
-                        event: winit::event::KeyEvent { logical_key, state, text, .. },
-                        ..
-                    },
-                ..
-            } => {
-                // Track modifier key state
-                let pressed = state == ElementState::Pressed;
-                match &logical_key {
-                    winit::keyboard::Key::Named(winit::keyboard::NamedKey::Control) => {
-                        modifiers_state.ctrl = pressed;
-                    }
-                    winit::keyboard::Key::Named(winit::keyboard::NamedKey::Alt) => {
-                        modifiers_state.alt = pressed;
-                    }
-                    winit::keyboard::Key::Named(winit::keyboard::NamedKey::Shift) => {
-                        modifiers_state.shift = pressed;
-                    }
-                    _ => {}
-                }
-
-                if let Some(kc) = winit_key_to_keycode(&logical_key) {
-                    if pressed {
-                        let _ = route_demo_window_event(
-                            &window,
-                            &mut router,
-                            &mut root,
-                            UiEvent::KeyDown { key: kc, modifiers: modifiers_state },
-                            &mut ui_runtime,
-                        );
-                    } else {
-                        let _ = route_demo_window_event(
-                            &window,
-                            &mut router,
-                            &mut root,
-                            UiEvent::KeyUp { key: kc, modifiers: modifiers_state },
-                            &mut ui_runtime,
-                        );
-                    }
-                }
-                if pressed {
-                    // Only send TextInput for printable characters when Ctrl is NOT held
-                    if !modifiers_state.ctrl {
-                        if let Some(txt) = text {
-                            if !txt.is_empty() && !txt.chars().any(|c| c.is_control()) {
-                                let _ = route_demo_window_event(
-                                    &window,
-                                    &mut router,
-                                    &mut root,
-                                    UiEvent::TextInput(txt.to_string()),
-                                    &mut ui_runtime,
-                                );
-                            }
-                        }
-                    }
-                }
-                window.request_redraw();
-            }
-
             // IME composition events
-            Event::WindowEvent {
-                event: WindowEvent::Ime(winit::event::Ime::Commit(text)),
-                ..
-            } => {
-                let _ = route_demo_window_event(
+            Event::WindowEvent { event: WindowEvent::Ime(ime), .. } => {
+                let _ = ui_runtime.route_ime_event(
                     &window,
                     &mut router,
                     &mut root,
-                    UiEvent::ImeCommit(text),
-                    &mut ui_runtime,
-                );
-                window.request_redraw();
-            }
-            Event::WindowEvent {
-                event: WindowEvent::Ime(winit::event::Ime::Preedit(text, _cursor)),
-                ..
-            } => {
-                let _ = route_demo_window_event(
-                    &window,
-                    &mut router,
-                    &mut root,
-                    UiEvent::ImePreedit(text),
-                    &mut ui_runtime,
-                );
-                window.request_redraw();
-            }
-            Event::WindowEvent {
-                event: WindowEvent::Ime(winit::event::Ime::Enabled),
-                ..
-            } => {
-                // IME enabled — no action needed, just acknowledge
-            }
-            Event::WindowEvent {
-                event: WindowEvent::Ime(winit::event::Ime::Disabled),
-                ..
-            } => {
-                // IME disabled — clear any pending preedit
-                let _ = route_demo_window_event(
-                    &window,
-                    &mut router,
-                    &mut root,
-                    UiEvent::ImePreedit(String::new()),
-                    &mut ui_runtime,
+                    ime,
+                    &record_demo_action,
                 );
                 window.request_redraw();
             }

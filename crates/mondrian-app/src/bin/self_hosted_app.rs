@@ -107,6 +107,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut last_cursor = Point::new(0.0, 0.0);
     let current_bounds = std::cell::Cell::new(bounds);
+    let mut modifiers_state = Modifiers::none();
 
     tracing::info!("UI initialized — {}x{}", size.width, size.height);
     window.request_redraw();
@@ -134,21 +135,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         match event {
-            Event::WindowEvent { event: WindowEvent::CloseRequested, .. }
-            | Event::WindowEvent {
-                event:
-                    WindowEvent::KeyboardInput {
-                        event:
-                            winit::event::KeyEvent {
-                                logical_key:
-                                    winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape),
-                                state: ElementState::Pressed,
-                                ..
-                            },
-                        ..
-                    },
+            Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => elwt.exit(),
+
+            Event::WindowEvent {
+                event: WindowEvent::KeyboardInput { event: key_event, .. },
                 ..
-            } => elwt.exit(),
+            } => {
+                let is_escape = matches!(
+                    key_event.logical_key,
+                    winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape)
+                );
+                let pressed = key_event.state == ElementState::Pressed;
+                let result = ui_runtime.route_keyboard_input(
+                    &window,
+                    &mut router,
+                    &mut root,
+                    &key_event,
+                    &mut modifiers_state,
+                    &dispatch_action,
+                );
+                refresh_root_if_dirty(&mut root, &app_state, &ui_dirty, current_bounds.get());
+                if pressed && is_escape && result == EventResult::Ignored {
+                    elwt.exit();
+                }
+                window.request_redraw();
+            }
+
+            Event::WindowEvent { event: WindowEvent::Ime(ime), .. } => {
+                let _ = ui_runtime.route_ime_event(
+                    &window,
+                    &mut router,
+                    &mut root,
+                    ime,
+                    &dispatch_action,
+                );
+                refresh_root_if_dirty(&mut root, &app_state, &ui_dirty, current_bounds.get());
+                window.request_redraw();
+            }
 
             Event::WindowEvent { event: WindowEvent::RedrawRequested, .. } => {
                 let mut encoder = DrawEncoder::new();

@@ -11,13 +11,15 @@ use mondrian_core::Color;
 use mondrian_editor_state::Action;
 use mondrian_platform::{DesktopEyedropper, DesktopPoint};
 use mondrian_ui_core::tree::WidgetTreeView;
-use mondrian_ui_core::types::{EventResult, Modifiers, Point, Rect, UiEvent};
+use mondrian_ui_core::types::{EventResult, KeyCode, Modifiers, Point, Rect, UiEvent};
 use mondrian_ui_core::widget::{CursorRequest, DrawCommandEncoder, ImeRequest, PaintContext};
 use mondrian_ui_core::Widget;
 use mondrian_ui_events::EventRouter;
 use mondrian_ui_theme::Theme;
 use mondrian_ui_tooltip::TooltipWidget;
+use winit::event::{ElementState, Ime, KeyEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
+use winit::keyboard::{Key, NamedKey};
 
 /// Winit-backed runtime state shared by custom UI app shells.
 pub struct WinitUiRuntime {
@@ -67,6 +69,79 @@ impl WinitUiRuntime {
         let result = router.route(event, &mut tree, dispatch);
         self.apply_router_requests(window, router, tooltip_was_visible);
         result
+    }
+
+    /// Route one winit keyboard event through the custom UI event model.
+    pub fn route_keyboard_input(
+        &mut self,
+        window: &winit::window::Window,
+        router: &mut EventRouter,
+        root: &mut dyn Widget,
+        event: &KeyEvent,
+        modifiers: &mut Modifiers,
+        dispatch: &dyn Fn(Action),
+    ) -> EventResult {
+        let pressed = event.state == ElementState::Pressed;
+        update_modifiers_from_key(&event.logical_key, pressed, modifiers);
+
+        let mut result = EventResult::Ignored;
+        if let Some(key) = winit_key_to_keycode(&event.logical_key) {
+            result = self.route_window_event(
+                window,
+                router,
+                root,
+                if pressed {
+                    UiEvent::KeyDown { key, modifiers: *modifiers }
+                } else {
+                    UiEvent::KeyUp { key, modifiers: *modifiers }
+                },
+                dispatch,
+            );
+        }
+
+        if pressed && !modifiers.ctrl {
+            if let Some(text) = printable_key_text(event.text.as_deref()) {
+                let text_result = self.route_window_event(
+                    window,
+                    router,
+                    root,
+                    UiEvent::TextInput(text),
+                    dispatch,
+                );
+                if text_result == EventResult::Handled {
+                    result = EventResult::Handled;
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Route one winit IME event through the custom UI event model.
+    pub fn route_ime_event(
+        &mut self,
+        window: &winit::window::Window,
+        router: &mut EventRouter,
+        root: &mut dyn Widget,
+        event: Ime,
+        dispatch: &dyn Fn(Action),
+    ) -> EventResult {
+        match event {
+            Ime::Commit(text) => {
+                self.route_window_event(window, router, root, UiEvent::ImeCommit(text), dispatch)
+            }
+            Ime::Preedit(text, _cursor) => {
+                self.route_window_event(window, router, root, UiEvent::ImePreedit(text), dispatch)
+            }
+            Ime::Disabled => self.route_window_event(
+                window,
+                router,
+                root,
+                UiEvent::ImePreedit(String::new()),
+                dispatch,
+            ),
+            Ime::Enabled => EventResult::Ignored,
+        }
     }
 
     /// Update eyedropper preview from a window-local pointer position.
@@ -234,6 +309,95 @@ impl WinitUiRuntime {
     }
 }
 
+/// Convert winit logical keys into Mondrian UI key codes.
+pub fn winit_key_to_keycode(key: &Key) -> Option<KeyCode> {
+    match key {
+        Key::Named(named) => match named {
+            NamedKey::Backspace => Some(KeyCode::Backspace),
+            NamedKey::Delete => Some(KeyCode::Delete),
+            NamedKey::ArrowLeft => Some(KeyCode::Left),
+            NamedKey::ArrowRight => Some(KeyCode::Right),
+            NamedKey::ArrowUp => Some(KeyCode::Up),
+            NamedKey::ArrowDown => Some(KeyCode::Down),
+            NamedKey::Home => Some(KeyCode::Home),
+            NamedKey::End => Some(KeyCode::End),
+            NamedKey::PageUp => Some(KeyCode::PageUp),
+            NamedKey::PageDown => Some(KeyCode::PageDown),
+            NamedKey::Enter => Some(KeyCode::Enter),
+            NamedKey::Space => Some(KeyCode::Space),
+            NamedKey::Tab => Some(KeyCode::Tab),
+            NamedKey::Escape => Some(KeyCode::Escape),
+            NamedKey::F1 => Some(KeyCode::F1),
+            NamedKey::F2 => Some(KeyCode::F2),
+            NamedKey::F3 => Some(KeyCode::F3),
+            NamedKey::F4 => Some(KeyCode::F4),
+            NamedKey::F5 => Some(KeyCode::F5),
+            NamedKey::F6 => Some(KeyCode::F6),
+            NamedKey::F7 => Some(KeyCode::F7),
+            NamedKey::F8 => Some(KeyCode::F8),
+            NamedKey::F9 => Some(KeyCode::F9),
+            NamedKey::F10 => Some(KeyCode::F10),
+            NamedKey::F11 => Some(KeyCode::F11),
+            NamedKey::F12 => Some(KeyCode::F12),
+            _ => None,
+        },
+        Key::Character(ch) => match ch.as_str().to_ascii_lowercase().as_str() {
+            "a" => Some(KeyCode::A),
+            "b" => Some(KeyCode::B),
+            "c" => Some(KeyCode::C),
+            "d" => Some(KeyCode::D),
+            "e" => Some(KeyCode::E),
+            "f" => Some(KeyCode::F),
+            "g" => Some(KeyCode::G),
+            "h" => Some(KeyCode::H),
+            "i" => Some(KeyCode::I),
+            "j" => Some(KeyCode::J),
+            "k" => Some(KeyCode::K),
+            "l" => Some(KeyCode::L),
+            "m" => Some(KeyCode::M),
+            "n" => Some(KeyCode::N),
+            "o" => Some(KeyCode::O),
+            "p" => Some(KeyCode::P),
+            "q" => Some(KeyCode::Q),
+            "r" => Some(KeyCode::R),
+            "s" => Some(KeyCode::S),
+            "t" => Some(KeyCode::T),
+            "u" => Some(KeyCode::U),
+            "v" => Some(KeyCode::V),
+            "w" => Some(KeyCode::W),
+            "x" => Some(KeyCode::X),
+            "y" => Some(KeyCode::Y),
+            "z" => Some(KeyCode::Z),
+            "0" => Some(KeyCode::Digit0),
+            "1" => Some(KeyCode::Digit1),
+            "2" => Some(KeyCode::Digit2),
+            "3" => Some(KeyCode::Digit3),
+            "4" => Some(KeyCode::Digit4),
+            "5" => Some(KeyCode::Digit5),
+            "6" => Some(KeyCode::Digit6),
+            "7" => Some(KeyCode::Digit7),
+            "8" => Some(KeyCode::Digit8),
+            "9" => Some(KeyCode::Digit9),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn update_modifiers_from_key(key: &Key, pressed: bool, modifiers: &mut Modifiers) {
+    match key {
+        Key::Named(NamedKey::Control) => modifiers.ctrl = pressed,
+        Key::Named(NamedKey::Alt) | Key::Named(NamedKey::AltGraph) => modifiers.alt = pressed,
+        Key::Named(NamedKey::Shift) => modifiers.shift = pressed,
+        _ => {}
+    }
+}
+
+fn printable_key_text(text: Option<&str>) -> Option<String> {
+    let text = text?;
+    (!text.is_empty() && !text.chars().any(char::is_control)).then(|| text.to_string())
+}
+
 /// Paint the shell-owned eyedropper magnifier.
 pub fn paint_eyedropper_overlay(
     encoder: &mut dyn DrawCommandEncoder,
@@ -294,4 +458,64 @@ fn desktop_to_window_point(window: &winit::window::Window, point: DesktopPoint) 
         (point.x - origin.x) as f32,
         (point.y - origin.y) as f32,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_named_navigation_keys() {
+        assert_eq!(
+            winit_key_to_keycode(&Key::Named(NamedKey::Escape)),
+            Some(KeyCode::Escape)
+        );
+        assert_eq!(
+            winit_key_to_keycode(&Key::Named(NamedKey::ArrowLeft)),
+            Some(KeyCode::Left)
+        );
+        assert_eq!(
+            winit_key_to_keycode(&Key::Named(NamedKey::F12)),
+            Some(KeyCode::F12)
+        );
+    }
+
+    #[test]
+    fn maps_uppercase_character_shortcuts() {
+        assert_eq!(
+            winit_key_to_keycode(&Key::Character("A".into())),
+            Some(KeyCode::A)
+        );
+        assert_eq!(
+            winit_key_to_keycode(&Key::Character("z".into())),
+            Some(KeyCode::Z)
+        );
+        assert_eq!(
+            winit_key_to_keycode(&Key::Character("5".into())),
+            Some(KeyCode::Digit5)
+        );
+    }
+
+    #[test]
+    fn printable_text_rejects_control_sequences() {
+        assert_eq!(printable_key_text(Some("你")).as_deref(), Some("你"));
+        assert!(printable_key_text(Some("\u{8}")).is_none());
+        assert!(printable_key_text(Some("")).is_none());
+        assert!(printable_key_text(None).is_none());
+    }
+
+    #[test]
+    fn modifier_tracking_updates_on_key_edges() {
+        let mut modifiers = Modifiers::none();
+
+        update_modifiers_from_key(&Key::Named(NamedKey::Control), true, &mut modifiers);
+        update_modifiers_from_key(&Key::Named(NamedKey::Shift), true, &mut modifiers);
+        assert_eq!(
+            modifiers,
+            Modifiers { ctrl: true, shift: true, ..Modifiers::none() }
+        );
+
+        update_modifiers_from_key(&Key::Named(NamedKey::Control), false, &mut modifiers);
+        assert_eq!(modifiers, Modifiers { shift: true, ..Modifiers::none() });
+    }
 }

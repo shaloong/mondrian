@@ -443,6 +443,10 @@ dispatch changes and request repaint.
 as typed text, paste/cut/delete edits, or IME commit. Cursor movement,
 selection changes, and IME preedit updates remain local so form bindings do not
 receive noisy non-mutating actions.
+Winit keyboard and IME conversion lives in the self-hosted shell runtime so
+`ui_demo` and product windows share the same `KeyDown` / `TextInput` /
+`ImePreedit` / `ImeCommit` semantics. Entry binaries should route Escape
+through the widget tree first and only treat it as a window close when ignored.
 Form controls should expose a common `enabled(bool)` / `disabled()` builder
 where practical. Disabled controls must not dispatch actions, request pointer
 capture, or participate in focus traversal, and should render with muted theme
