@@ -89,11 +89,43 @@ impl AppState {
         let Some(clipboard) = self.clip_clipboard.clone() else {
             return Ok(0);
         };
-        if clipboard.entries.is_empty() {
+        self.paste_clip_entries_at_frame(clipboard.entries, timeline_frame, "粘贴片段")
+    }
+
+    pub fn duplicate_selected_clips_after_selection(&mut self) -> mondrian_core::Result<usize> {
+        let Some(seq) = self.sequence.as_ref() else {
+            return Ok(0);
+        };
+        let selected_ids = self
+            .selection
+            .selected_clips
+            .iter()
+            .map(|selection| selection.clip_id)
+            .collect::<Vec<_>>();
+        let entries = collect_clip_clipboard_entries(seq, &selected_ids)?;
+        if entries.is_empty() {
+            return Ok(0);
+        }
+        validate_clip_clipboard_targets(seq, &entries)?;
+        let destination = entries
+            .iter()
+            .map(|entry| entry.clip.position.frame.saturating_add(entry.clip.duration.frame.max(0)))
+            .max()
+            .unwrap_or_else(|| self.current_frame().max(0));
+        self.paste_clip_entries_at_frame(entries, destination, "复制片段")
+    }
+
+    fn paste_clip_entries_at_frame(
+        &mut self,
+        entries: Vec<ClipClipboardEntry>,
+        timeline_frame: i64,
+        description: &'static str,
+    ) -> mondrian_core::Result<usize> {
+        if entries.is_empty() {
             return Ok(0);
         }
 
-        let mut pasted_selection = Vec::<SelectedClipRef>::with_capacity(clipboard.entries.len());
+        let mut pasted_selection = Vec::<SelectedClipRef>::with_capacity(entries.len());
         let (pasted_count, sequence_id, before, after) = {
             let seq = self.sequence.as_mut().ok_or_else(|| {
                 mondrian_core::MondrianError::WorkflowStepFailed {
@@ -102,16 +134,16 @@ impl AppState {
                 }
             })?;
 
-            validate_clip_clipboard_targets(seq, &clipboard.entries)?;
+            validate_clip_clipboard_targets(seq, &entries)?;
             let before = seq.clone();
             let destination = timeline_frame.max(0);
             let mut id_map = HashMap::<ClipId, ClipId>::new();
-            for entry in &clipboard.entries {
+            for entry in &entries {
                 id_map.insert(entry.original_clip_id, ClipId::new());
             }
 
             let mut focus_by_track = HashMap::<(TrackId, bool), HashSet<ClipId>>::new();
-            for entry in clipboard.entries {
+            for entry in entries {
                 let new_id = id_map
                     .get(&entry.original_clip_id)
                     .copied()
@@ -169,7 +201,7 @@ impl AppState {
         };
 
         if pasted_count > 0 {
-            self.record_sequence_snapshot_command("粘贴片段", before, after);
+            self.record_sequence_snapshot_command(description, before, after);
             self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
             self.selection.selected_clips = pasted_selection;
             self.selection.selected_mask = None;

@@ -103,8 +103,9 @@ moves.
 keyframes take precedence when the first selected clip has selected keyframes;
 otherwise `Copy` stores timeline clips, `Cut` stores then removes selected
 clips, and `Paste` recreates clips at the playhead with fresh clip ids and
-links rebuilt only among pasted entries. `Duplicate` is still unclaimed until
-its placement semantics are specified.
+links rebuilt only among pasted entries. `Duplicate` uses the same recreation
+path but places the new group after the selected group's end without mutating
+the active clipboard.
 Inspector timing controls reuse timeline trim actions for clip In/Out changes
 instead of introducing a parallel editing path.
 Inspector effect rows are read from the selected clip's effect instances and

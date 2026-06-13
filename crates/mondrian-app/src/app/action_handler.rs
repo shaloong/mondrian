@@ -102,6 +102,7 @@ impl AppState {
             Action::Copy => self.copy_from_action(),
             Action::Cut => self.cut_from_action(),
             Action::Paste => self.paste_from_action(),
+            Action::Duplicate => self.duplicate_from_action(),
 
             // ── 时间线编辑（复用已有 undoable 命令层）────────────────────
             Action::DeleteSelection => self.delete_selected_clips_from_ui(),
@@ -162,6 +163,10 @@ impl AppState {
 
     fn cut_from_action(&mut self) -> Result<()> {
         self.cut_selected_clips_to_clipboard().map(|_| ())
+    }
+
+    fn duplicate_from_action(&mut self) -> Result<()> {
+        self.duplicate_selected_clips_after_selection().map(|_| ())
     }
 
     fn paste_from_action(&mut self) -> Result<()> {
@@ -1658,6 +1663,49 @@ mod tests {
         assert_eq!(sequence.video_tracks[0].clips.len(), 1);
         assert!(!state.has_clip_clipboard());
         assert_eq!(state.active_clipboard_kind, None);
+        assert!(!state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_duplicate_action_copies_selected_clips_after_selection_end() {
+        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+        state.selection.selected_clips =
+            vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
+        state.seek(0);
+
+        state
+            .dispatch_action(mondrian_editor_state::Action::Duplicate)
+            .expect("duplicate clip");
+
+        let sequence = state.sequence.as_ref().expect("sequence");
+        let clips = &sequence.video_tracks[0].clips;
+        assert_eq!(clips.len(), 2);
+        let duplicated = clips.iter().find(|clip| clip.id != clip_id).expect("duplicate");
+        assert_eq!(duplicated.position.frame, 30);
+        assert_eq!(duplicated.duration.frame, 20);
+        assert_eq!(state.current_frame(), 30);
+        assert_eq!(
+            state.selection.selected_clips,
+            vec![SelectedClipRef {
+                track_id,
+                is_video_track: true,
+                clip_id: duplicated.id,
+            }]
+        );
+        assert!(!state.has_clip_clipboard());
+        assert!(state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_duplicate_action_noops_without_selection() {
+        let (mut state, _, _) = state_with_two_video_tracks();
+
+        state
+            .dispatch_action(mondrian_editor_state::Action::Duplicate)
+            .expect("duplicate without selection");
+
+        let sequence = state.sequence.as_ref().expect("sequence");
+        assert_eq!(sequence.video_tracks[0].clips.len(), 1);
         assert!(!state.can_undo_action());
     }
 
