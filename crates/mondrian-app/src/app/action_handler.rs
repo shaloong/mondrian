@@ -108,6 +108,11 @@ impl AppState {
                 self.move_clip_to_track_from_action(clip_id, target_track, position.frame)
             }
 
+            // ── 效果（复用 clip-level undoable 命令）──────────────────────
+            Action::RemoveEffect { clip_id, effect_id } => {
+                self.remove_effect_from_action(clip_id, effect_id)
+            }
+
             // ── 项目操作 ──────────────────────────────────────────────────
             Action::SaveProject => {
                 self.save_project().map_err(mondrian_core::MondrianError::Other)?;
@@ -233,6 +238,19 @@ impl AppState {
                 selection.is_video_track = *is_video_track;
             }
         }
+    }
+
+    fn remove_effect_from_action(
+        &mut self,
+        clip_id: ClipId,
+        effect_id: mondrian_core::types::EffectId,
+    ) -> Result<()> {
+        let (track_id, is_video_track, _) = self.clip_action_location("remove_effect", clip_id)?;
+        self.remove_effect_from_clip(
+            SelectedClipRef { track_id, is_video_track, clip_id },
+            effect_id,
+        )
+        .map(|_| ())
     }
 
     fn select_from_action(
@@ -1293,5 +1311,52 @@ mod tests {
         assert_eq!(effects.len(), 1);
         assert_eq!(effects[0].id, keep_id);
         assert!(state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_remove_effect_action_removes_effect_instance() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
+        let remove_effect: mondrian_effects::EffectNode =
+            mondrian_effects::EffectNodeExt::with_defaults(EffectType::GaussianBlur);
+        let keep_effect: mondrian_effects::EffectNode =
+            mondrian_effects::EffectNodeExt::with_defaults(EffectType::Sharpen);
+        let remove_id = remove_effect.id;
+        let keep_id = keep_effect.id;
+        let clip = &mut state.sequence.as_mut().expect("sequence").video_tracks[0].clips[0];
+        clip.add_effect_node(remove_effect);
+        clip.add_effect_node(keep_effect);
+
+        state
+            .dispatch_action(mondrian_editor_state::Action::RemoveEffect {
+                clip_id,
+                effect_id: remove_id,
+            })
+            .expect("dispatch remove effect action");
+
+        let effects = &state.sequence.as_ref().expect("sequence").video_tracks[0].clips[0].effects;
+        assert_eq!(effects.len(), 1);
+        assert_eq!(effects[0].id, keep_id);
+        assert!(state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_remove_effect_action_preserves_locked_track() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
+        let effect: mondrian_effects::EffectNode =
+            mondrian_effects::EffectNodeExt::with_defaults(EffectType::GaussianBlur);
+        let effect_id = effect.id;
+        let sequence = state.sequence.as_mut().expect("sequence");
+        sequence.video_tracks[0].clips[0].add_effect_node(effect);
+        sequence.video_tracks[0].is_locked = true;
+
+        let err = state
+            .dispatch_action(mondrian_editor_state::Action::RemoveEffect { clip_id, effect_id })
+            .expect_err("locked track should reject effect removal");
+
+        assert!(matches!(err, MondrianError::TrackLocked { .. }));
+        let effects = &state.sequence.as_ref().expect("sequence").video_tracks[0].clips[0].effects;
+        assert_eq!(effects.len(), 1);
+        assert_eq!(effects[0].id, effect_id);
+        assert!(!state.can_undo_action());
     }
 }
