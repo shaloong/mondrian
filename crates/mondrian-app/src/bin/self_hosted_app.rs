@@ -7,13 +7,15 @@
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 
+use mondrian_app::app::ui_actions::{
+    APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_OPEN_PROJECT_DIALOG,
+    APP_SHELL_SAVE_PROJECT_AS_DIALOG,
+};
 use mondrian_app::app::AppState;
 use mondrian_app::self_hosted::panels::SelfHostedPanelModels;
 use mondrian_app::self_hosted::runtime::WinitUiRuntime;
 use mondrian_app::self_hosted::shell::{
-    media_import_filters, project_file_filters, SelfHostedAppRoot, APP_SHELL_IMPORT_MEDIA_DIALOG,
-    APP_SHELL_NAMESPACE, APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
-    PROJECT_FILE_EXTENSION,
+    media_import_filters, project_file_filters, SelfHostedAppRoot, PROJECT_FILE_EXTENSION,
 };
 use mondrian_editor_state::Action;
 use mondrian_panel_console::tracing_layer::ConsoleLogLayer;

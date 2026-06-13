@@ -48,6 +48,16 @@ pub const ASSETS_NAMESPACE: &str = "ui.assets";
 /// Action name for preparing an asset for timeline drag/drop.
 pub const ASSETS_PREPARE_DRAG: &str = "prepare_drag";
 
+/// Custom action namespace for app-shell operations resolved by native adapters.
+pub const APP_SHELL_NAMESPACE: &str = "app.shell";
+
+/// App-shell request to open a platform project file dialog.
+pub const APP_SHELL_OPEN_PROJECT_DIALOG: &str = "open_project_dialog";
+/// App-shell request to open a platform media import dialog.
+pub const APP_SHELL_IMPORT_MEDIA_DIALOG: &str = "import_media_dialog";
+/// App-shell request to open a platform project save-as dialog.
+pub const APP_SHELL_SAVE_PROJECT_AS_DIALOG: &str = "save_project_as_dialog";
+
 /// Clip edge being trimmed by a timeline UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TimelineTrimPayloadEdge {
@@ -257,6 +267,21 @@ pub fn assets_prepare_drag_action(payload: AssetsPrepareDragPayload) -> Action {
     custom_assets_action(ASSETS_PREPARE_DRAG, payload)
 }
 
+/// Build an app-shell request for opening a project dialog.
+pub fn app_shell_open_project_dialog_action() -> Action {
+    custom_app_shell_action(APP_SHELL_OPEN_PROJECT_DIALOG)
+}
+
+/// Build an app-shell request for importing media files.
+pub fn app_shell_import_media_dialog_action() -> Action {
+    custom_app_shell_action(APP_SHELL_IMPORT_MEDIA_DIALOG)
+}
+
+/// Build an app-shell request for saving the current project to a chosen path.
+pub fn app_shell_save_project_as_dialog_action() -> Action {
+    custom_app_shell_action(APP_SHELL_SAVE_PROJECT_AS_DIALOG)
+}
+
 fn custom_timeline_action<T: Serialize>(name: &'static str, payload: T) -> Action {
     Action::Custom {
         namespace: TIMELINE_NAMESPACE.into(),
@@ -286,5 +311,13 @@ fn custom_assets_action<T: Serialize>(name: &'static str, payload: T) -> Action 
         namespace: ASSETS_NAMESPACE.into(),
         name: name.into(),
         payload: serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
+    }
+}
+
+fn custom_app_shell_action(name: &'static str) -> Action {
+    Action::Custom {
+        namespace: APP_SHELL_NAMESPACE.into(),
+        name: name.into(),
+        payload: serde_json::Value::Null,
     }
 }

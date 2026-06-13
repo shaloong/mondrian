@@ -103,6 +103,8 @@ dialog intents, the window entrypoint resolves them into concrete
 `OpenProject(PathBuf)` / `SaveProjectAs(PathBuf)` actions, and `AppState`
 performs project lifecycle work plus status reporting. Widget code must not
 invent project paths or mutate project files directly.
+Those app-shell dialog intents are built through `app::ui_actions` helpers so
+menus and self-hosted panels share the same stable custom-action ids.
 `Action::SplitClipAtPlayhead` similarly routes to `AppState::split_at_playhead`,
 which bulk-splits unlocked clips under the playhead and records one undoable
 timeline snapshot only when a split actually occurs.
@@ -395,6 +397,9 @@ Assets/Effects-style panels use this shared surface as the tracer bullet for
 migrating list-heavy egui panels. The self-hosted Project slot also uses
 `PanelListModel::from_project_status` to show project file, active sequence,
 asset-library, and status-hint state instead of a colored placeholder.
+The lower-left dock exposes that Project status as the first tab beside
+Console, so product-shell state is visible in the default layout without adding
+another split.
 The self-hosted Assets panel maps real library rows to `ui.assets.prepare_drag`;
 `AppState` resolves the asset record and reuses the existing `begin_drag_asset`
 path so later Timeline drop handling stays shared with the egui implementation.

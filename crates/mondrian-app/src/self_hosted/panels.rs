@@ -29,16 +29,18 @@ use mondrian_ui_widgets::{
 };
 
 use crate::app::ui_actions::{
-    assets_prepare_drag_action, effects_add_to_clip_action, inspector_remove_effect_action,
-    inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
-    inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
-    inspector_set_effect_enabled_action, timeline_move_clip_action, timeline_seek_action,
-    timeline_select_clip_action, timeline_trim_clip_action, AssetsPrepareDragPayload,
-    EffectsAddToClipPayload, InspectorClipRefPayload, InspectorClipTransformField,
-    InspectorRemoveEffectPayload, InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
-    InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
-    InspectorSetEffectEnabledPayload, TimelineMoveClipPayload, TimelineSelectClipPayload,
-    TimelineTrimClipPayload, TimelineTrimPayloadEdge,
+    app_shell_import_media_dialog_action, app_shell_open_project_dialog_action,
+    app_shell_save_project_as_dialog_action, assets_prepare_drag_action,
+    effects_add_to_clip_action, inspector_remove_effect_action, inspector_set_clip_enabled_action,
+    inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
+    inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
+    timeline_move_clip_action, timeline_seek_action, timeline_select_clip_action,
+    timeline_trim_clip_action, AssetsPrepareDragPayload, EffectsAddToClipPayload,
+    InspectorClipRefPayload, InspectorClipTransformField, InspectorRemoveEffectPayload,
+    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+    InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
+    TimelineMoveClipPayload, TimelineSelectClipPayload, TimelineTrimClipPayload,
+    TimelineTrimPayloadEdge,
 };
 use crate::app::{AppState, SelectedClipRef};
 
@@ -216,6 +218,40 @@ impl PanelListModel {
                     "Off"
                 })
                 .disabled(state.asset_library.is_none()),
+        );
+
+        let has_sequence = state.sequence.is_some();
+        let has_project_path = state.current_project_path.is_some();
+        items.push(
+            PanelListItem::new("Open project...")
+                .with_subtitle("Choose an .mdp project file")
+                .with_badge("Open")
+                .with_activate_action(app_shell_open_project_dialog_action()),
+        );
+        items.push(
+            PanelListItem::new("Import media...")
+                .with_subtitle("Add video or audio files to the project library")
+                .with_badge("Import")
+                .with_activate_action(app_shell_import_media_dialog_action())
+                .disabled(state.asset_library.is_none()),
+        );
+        items.push(
+            PanelListItem::new("Save project")
+                .with_subtitle(if has_project_path {
+                    "Write changes to the current project file"
+                } else {
+                    "Save As is required before this project has a file path"
+                })
+                .with_badge("Save")
+                .with_activate_action(Action::SaveProject)
+                .disabled(!has_sequence || !has_project_path),
+        );
+        items.push(
+            PanelListItem::new("Save project as...")
+                .with_subtitle("Choose a project file path")
+                .with_badge("As")
+                .with_activate_action(app_shell_save_project_as_dialog_action())
+                .disabled(!has_sequence),
         );
 
         if let Some((message, is_error)) = &state.status_hint {
@@ -699,6 +735,21 @@ fn slot(kind: SlotKind, models: SelfHostedPanelModels) -> Box<dyn Widget> {
         ));
     }
 
+    if kind == SlotKind::Console {
+        return Box::new(DockPanel::new(
+            kind,
+            project_console_tabs(),
+            move |_kind, active| {
+                let active_kind = if active == 0 {
+                    SlotKind::Project
+                } else {
+                    SlotKind::Console
+                };
+                panel_content_for_slot(active_kind, &models)
+            },
+        ));
+    }
+
     Box::new(DockPanel::new(
         kind,
         single_tab(kind),
@@ -717,6 +768,13 @@ fn asset_browser_tabs() -> Vec<TabInfo> {
     vec![
         TabInfo { label: "Assets".into(), active: true },
         TabInfo { label: "Effects".into(), active: false },
+    ]
+}
+
+fn project_console_tabs() -> Vec<TabInfo> {
+    vec![
+        TabInfo { label: "Project".into(), active: true },
+        TabInfo { label: "Console".into(), active: false },
     ]
 }
 
@@ -1395,6 +1453,10 @@ fn legacy_inspector_action(name: String) -> Action {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::ui_actions::{
+        APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_OPEN_PROJECT_DIALOG,
+        APP_SHELL_SAVE_PROJECT_AS_DIALOG,
+    };
     use mondrian_core::automation::{PropertyHost, PropertyMutation, PropertyValue};
     use mondrian_core::types::{AssetId, TimeCode};
     use mondrian_effects::EffectNodeExt;
@@ -1423,6 +1485,17 @@ mod tests {
         assert_eq!(tabs[0].label, "Assets");
         assert!(tabs[0].active);
         assert_eq!(tabs[1].label, "Effects");
+    }
+
+    #[test]
+    fn project_console_tabs_expose_project_status_first() {
+        let tabs = project_console_tabs();
+
+        assert_eq!(tabs.len(), 2);
+        assert_eq!(tabs[0].label, "Project");
+        assert!(tabs[0].active);
+        assert_eq!(tabs[1].label, "Console");
+        assert!(!tabs[1].active);
     }
 
     #[test]
@@ -1478,6 +1551,44 @@ mod tests {
         assert_eq!(model.items[0].badge.as_deref(), Some("Open"));
         assert!(model.items.iter().any(|item| item.title == "Demo edit"));
         assert!(model.items.iter().any(|item| item.subtitle == "Saved"));
+    }
+
+    #[test]
+    fn project_panel_commands_share_app_shell_actions() {
+        let mut state = demo_app_state();
+        state.current_project_path = Some(PathBuf::from("E:/projects/cut.mdp"));
+
+        let model = PanelListModel::from_project_status(&state);
+
+        assert_shell_action(
+            project_item(&model, "Open project...").activate_action.as_ref(),
+            APP_SHELL_OPEN_PROJECT_DIALOG,
+        );
+        assert_shell_action(
+            project_item(&model, "Import media...").activate_action.as_ref(),
+            APP_SHELL_IMPORT_MEDIA_DIALOG,
+        );
+        assert_eq!(
+            project_item(&model, "Save project").activate_action.as_ref(),
+            Some(&Action::SaveProject)
+        );
+        assert!(!project_item(&model, "Save project").disabled);
+        assert_shell_action(
+            project_item(&model, "Save project as...").activate_action.as_ref(),
+            APP_SHELL_SAVE_PROJECT_AS_DIALOG,
+        );
+        assert!(!project_item(&model, "Save project as...").disabled);
+    }
+
+    #[test]
+    fn project_panel_commands_disable_file_mutations_without_sequence() {
+        let state = AppState::new();
+        let model = PanelListModel::from_project_status(&state);
+
+        assert!(!project_item(&model, "Open project...").disabled);
+        assert!(project_item(&model, "Import media...").disabled);
+        assert!(project_item(&model, "Save project").disabled);
+        assert!(project_item(&model, "Save project as...").disabled);
     }
 
     #[test]
@@ -1702,5 +1813,20 @@ mod tests {
             .expect("system time after epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("mondrian-{prefix}-{suffix}"))
+    }
+
+    fn project_item<'a>(model: &'a PanelListModel, title: &str) -> &'a PanelListItem {
+        model.items.iter().find(|item| item.title == title).expect("project panel item")
+    }
+
+    fn assert_shell_action(action: Option<&Action>, name: &str) {
+        match action {
+            Some(Action::Custom { namespace, name: action_name, payload }) => {
+                assert_eq!(namespace, APP_SHELL_NAMESPACE);
+                assert_eq!(action_name, name);
+                assert!(payload.is_null());
+            }
+            other => panic!("expected app shell action, got {other:?}"),
+        }
     }
 }

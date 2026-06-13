@@ -12,18 +12,14 @@ use mondrian_ui_core::{EventResult, Widget};
 use mondrian_ui_widgets::dock_splitter::DockSplitter;
 use mondrian_ui_widgets::menu::{Dropdown, MenuItem};
 
+use crate::app::ui_actions::{
+    app_shell_import_media_dialog_action, app_shell_open_project_dialog_action,
+    app_shell_save_project_as_dialog_action,
+};
 use crate::self_hosted::panels::{build_demo_dock_tree, build_dock_tree, SelfHostedPanelModels};
 
 /// Height reserved for the self-hosted top menu bar.
 pub const MENU_BAR_HEIGHT: f32 = 28.0;
-/// App-shell custom action namespace for commands resolved by the native shell.
-pub const APP_SHELL_NAMESPACE: &str = "app.shell";
-/// Open a platform project file dialog and dispatch `Action::OpenProject`.
-pub const APP_SHELL_OPEN_PROJECT_DIALOG: &str = "open_project_dialog";
-/// Open a platform media file dialog and dispatch `Action::ImportMedia`.
-pub const APP_SHELL_IMPORT_MEDIA_DIALOG: &str = "import_media_dialog";
-/// Open a platform save-file dialog and dispatch `Action::SaveProjectAs`.
-pub const APP_SHELL_SAVE_PROJECT_AS_DIALOG: &str = "save_project_as_dialog";
 
 /// Default file extension for Mondrian project containers.
 pub const PROJECT_FILE_EXTENSION: &str = "mdp";
@@ -51,31 +47,10 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
             "File",
             vec![
                 MenuItem::new("New Project", Action::NewProject),
-                MenuItem::new(
-                    "Open Project...",
-                    Action::Custom {
-                        namespace: APP_SHELL_NAMESPACE.into(),
-                        name: APP_SHELL_OPEN_PROJECT_DIALOG.into(),
-                        payload: serde_json::Value::Null,
-                    },
-                ),
-                MenuItem::new(
-                    "Import Media...",
-                    Action::Custom {
-                        namespace: APP_SHELL_NAMESPACE.into(),
-                        name: APP_SHELL_IMPORT_MEDIA_DIALOG.into(),
-                        payload: serde_json::Value::Null,
-                    },
-                ),
+                MenuItem::new("Open Project...", app_shell_open_project_dialog_action()),
+                MenuItem::new("Import Media...", app_shell_import_media_dialog_action()),
                 MenuItem::new("Save", Action::SaveProject),
-                MenuItem::new(
-                    "Save As...",
-                    Action::Custom {
-                        namespace: APP_SHELL_NAMESPACE.into(),
-                        name: APP_SHELL_SAVE_PROJECT_AS_DIALOG.into(),
-                        payload: serde_json::Value::Null,
-                    },
-                ),
+                MenuItem::new("Save As...", app_shell_save_project_as_dialog_action()),
                 MenuItem::new("Quit", Action::CloseProject),
             ],
         ),
