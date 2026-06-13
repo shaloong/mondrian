@@ -9,6 +9,10 @@ use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
+use std::time::{Duration, Instant};
+
+const DOUBLE_CLICK_MAX_AGE: Duration = Duration::from_millis(500);
+const DOUBLE_CLICK_MAX_DISTANCE: f32 = 5.0;
 
 /// Dynamic action factory used when a panel-list item changes state.
 pub type PanelListAction = dyn Fn(usize, &PanelListItem) -> Action;
@@ -92,10 +96,18 @@ pub struct PanelList {
     scrollbar_dragging: bool,
     drag_start_y: f32,
     drag_start_scroll_y: f32,
+    last_click: Option<PanelListClick>,
     focused: bool,
     focus_visible: bool,
     on_select: Option<Box<PanelListAction>>,
     on_activate: Option<Box<PanelListAction>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PanelListClick {
+    index: usize,
+    position: Point,
+    time: Instant,
 }
 
 impl PanelList {
@@ -116,6 +128,7 @@ impl PanelList {
             scrollbar_dragging: false,
             drag_start_y: 0.0,
             drag_start_scroll_y: 0.0,
+            last_click: None,
             focused: false,
             focus_visible: false,
             on_select: None,
@@ -161,6 +174,7 @@ impl PanelList {
         self.items = items;
         self.selected = self.selected.filter(|idx| self.is_enabled_index(*idx));
         self.hovered = None;
+        self.last_click = None;
         self.clamp_scroll();
     }
 
@@ -335,6 +349,45 @@ impl PanelList {
         EventResult::Handled
     }
 
+    fn click_is_activation(&self, index: usize, position: Point, now: Instant) -> bool {
+        let Some(last) = self.last_click else {
+            return false;
+        };
+        if last.index != index || now.duration_since(last.time) > DOUBLE_CLICK_MAX_AGE {
+            return false;
+        }
+        let dx = position.x - last.position.x;
+        let dy = position.y - last.position.y;
+        dx * dx + dy * dy <= DOUBLE_CLICK_MAX_DISTANCE * DOUBLE_CLICK_MAX_DISTANCE
+    }
+
+    fn select_or_activate_from_input(
+        &mut self,
+        index: usize,
+        position: Point,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        if !self.is_enabled_index(index) {
+            self.last_click = None;
+            return EventResult::Handled;
+        }
+
+        let now = Instant::now();
+        let activate = self.click_is_activation(index, position, now);
+        self.last_click = Some(PanelListClick { index, position, time: now });
+
+        if self.selected != Some(index) {
+            self.selected = Some(index);
+            self.ensure_selected_visible();
+            self.dispatch_select(index, ctx);
+            ctx.request_repaint();
+        }
+        if activate {
+            self.dispatch_activate(index, ctx);
+        }
+        EventResult::Handled
+    }
+
     fn activate_selected(&self, ctx: &mut EventContext) -> EventResult {
         let Some(index) = self.selected.filter(|idx| self.is_enabled_index(*idx)) else {
             return EventResult::Ignored;
@@ -495,7 +548,7 @@ impl Widget for PanelList {
                         }
                     }
                     if let Some(index) = self.index_at(*position) {
-                        return self.select_from_input(index, ctx);
+                        return self.select_or_activate_from_input(index, *position, ctx);
                     }
                     return EventResult::Handled;
                 }
@@ -549,6 +602,7 @@ impl Widget for PanelList {
             UiEvent::FocusLost => {
                 self.focused = false;
                 self.focus_visible = false;
+                self.last_click = None;
                 return EventResult::Handled;
             }
             UiEvent::KeyDown { key: KeyCode::Down, .. } if self.focused => {
@@ -781,6 +835,38 @@ mod tests {
         assert_eq!(actions[0], custom_action("select-a"));
         assert_eq!(actions[1], custom_action("dynamic-0-A"));
         assert!(requests.repaint);
+    }
+
+    #[test]
+    fn second_click_on_same_enabled_item_dispatches_activation() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut list = PanelList::new("Effects", sample_items());
+        list.layout(Rect::new(0.0, 0.0, 240.0, 220.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        let click = UiEvent::MouseDown {
+            position: Point::new(30.0, 174.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        };
+
+        assert_eq!(list.event(&click, &mut ctx), EventResult::Handled);
+        assert_eq!(list.selected_index(), Some(2));
+        assert!(actions.borrow().is_empty());
+
+        assert_eq!(list.event(&click, &mut ctx), EventResult::Handled);
+        assert_eq!(actions.borrow().as_slice(), &[custom_action("activate-c")]);
     }
 
     #[test]
