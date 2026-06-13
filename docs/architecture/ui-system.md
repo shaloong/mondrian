@@ -82,6 +82,11 @@ protocol and calls existing undoable command/property-mutation paths. Timeline
 move/trim/seek actions resolve through timeline command methods; Inspector clip
 enabled, opacity, solid/tint color, and basic transform field actions resolve
 through `AppState` snapshot commands and `mondrian-timeline` property hosts.
+Generic selection actions update the app-level selection snapshot only:
+`Select(Clip)` resolves the active sequence track from the clip id,
+`SelectAll`/`Select(AllClips)` select all clips that AppState can currently
+represent, and `DeselectAll` clears clip, mask, and animation selection without
+entering undo history.
 The shared `Action::DeleteSelection` path deletes the current
 `AppState::selection.selected_clips` through `remove_clips_bulk`, so shortcuts,
 menus, scripts, and self-hosted widgets all reuse the same locked-track checks,

@@ -6,7 +6,7 @@
 //! 当前版本的 action_handler 以最简方式实现：只对已确定存在的方法做桥接，
 //! 其余 Action 记录日志后忽略。每个 Stage 逐步增加映射。
 
-use crate::app::timeline_editing::{find_clip_mut, set_clip_disabled};
+use crate::app::timeline_editing::{find_clip_mut, find_clip_track_lock, set_clip_disabled};
 use crate::app::ui_actions::{
     EffectsAddToClipPayload, InspectorClipTransformField, InspectorRemoveEffectPayload,
     InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
@@ -75,6 +75,17 @@ impl AppState {
                 Ok(())
             }
 
+            // ── 选择（当前 AppState 可表达 clip / mask / animation selection）──
+            Action::Select(target) => self.select_from_action(target),
+            Action::SelectAll => {
+                self.select_all_clips_from_ui();
+                Ok(())
+            }
+            Action::DeselectAll => {
+                self.clear_selection_from_ui();
+                Ok(())
+            }
+
             // ── 撤销/重做（已有方法）─────────────────────────────────────
             Action::Undo => {
                 let _ = self.undo_timeline();
@@ -114,6 +125,80 @@ impl AppState {
                 Ok(())
             }
         }
+    }
+
+    fn select_from_action(
+        &mut self,
+        target: mondrian_editor_state::action::SelectionTarget,
+    ) -> Result<()> {
+        match target {
+            mondrian_editor_state::action::SelectionTarget::Clip(clip_id) => {
+                let Some(seq) = self.sequence.as_ref() else {
+                    return Err(missing_sequence_error("select_clip"));
+                };
+                let (track_id, is_video_track, _) = find_clip_track_lock(seq, clip_id)
+                    .ok_or_else(|| missing_clip_error("select_clip", clip_id))?;
+                self.selection.selected_clips =
+                    vec![SelectedClipRef { track_id, is_video_track, clip_id }];
+                self.selection.selected_mask = None;
+                self.clear_animation_selection();
+                Ok(())
+            }
+            mondrian_editor_state::action::SelectionTarget::AllClips => {
+                self.select_all_clips_from_ui();
+                Ok(())
+            }
+            mondrian_editor_state::action::SelectionTarget::Track(track_id) => {
+                tracing::debug!(
+                    target: "mondrian::action",
+                    "Track selection is not represented in AppState yet: {track_id}"
+                );
+                Ok(())
+            }
+            mondrian_editor_state::action::SelectionTarget::AllTracks => {
+                tracing::debug!(
+                    target: "mondrian::action",
+                    "Track selection is not represented in AppState yet"
+                );
+                Ok(())
+            }
+        }
+    }
+
+    fn select_all_clips_from_ui(&mut self) {
+        let Some(seq) = self.sequence.as_ref() else {
+            self.clear_selection_from_ui();
+            return;
+        };
+
+        let selections = seq
+            .video_tracks
+            .iter()
+            .flat_map(|track| {
+                track.clips.iter().map(move |clip| SelectedClipRef {
+                    track_id: track.id,
+                    is_video_track: true,
+                    clip_id: clip.id,
+                })
+            })
+            .chain(seq.audio_tracks.iter().flat_map(|track| {
+                track.clips.iter().map(move |clip| SelectedClipRef {
+                    track_id: track.id,
+                    is_video_track: false,
+                    clip_id: clip.id,
+                })
+            }))
+            .collect::<Vec<_>>();
+
+        self.selection.selected_clips = selections;
+        self.selection.selected_mask = None;
+        self.clear_animation_selection();
+    }
+
+    fn clear_selection_from_ui(&mut self) {
+        self.selection.selected_clips.clear();
+        self.selection.selected_mask = None;
+        self.clear_animation_selection();
     }
 
     fn delete_selected_clips_from_ui(&mut self) -> Result<()> {
@@ -531,7 +616,7 @@ mod tests {
         InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
         InspectorSetEffectEnabledPayload,
     };
-    use mondrian_core::types::{AssetId, TimeCode};
+    use mondrian_core::types::{AssetId, MaskId, TimeCode};
     use mondrian_core::Color;
     use mondrian_effects::EffectType;
     use mondrian_timeline::clip::Clip;
@@ -625,6 +710,77 @@ mod tests {
         let clip = &sequence.video_tracks[0].clips[0];
         assert_eq!(clip.position.frame, 16);
         assert_eq!(clip.duration.frame, 14);
+    }
+
+    #[test]
+    fn dispatch_select_clip_resolves_selection_from_clip_id() {
+        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+        state.selection.selected_mask = Some((MaskId::new(), clip_id, track_id));
+
+        state
+            .dispatch_action(mondrian_editor_state::Action::Select(
+                mondrian_editor_state::action::SelectionTarget::Clip(clip_id),
+            ))
+            .expect("select clip");
+
+        assert_eq!(
+            state.selection.selected_clips,
+            vec![SelectedClipRef { track_id, is_video_track: true, clip_id }]
+        );
+        assert!(state.selection.selected_mask.is_none());
+        assert!(!state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_select_all_selects_video_and_audio_clips() {
+        let (mut state, video_track_id, video_clip_id) = state_with_two_video_tracks();
+        let sequence = state.sequence.as_mut().expect("sequence");
+        let audio_track_id = sequence.add_audio_track();
+        let tb = sequence.time_base();
+        let audio_clip = Clip::new(AssetId::new(), TimeCode::new(30, tb), TimeCode::new(10, tb));
+        let audio_clip_id = audio_clip.id;
+        sequence
+            .audio_track_mut(audio_track_id)
+            .expect("audio track")
+            .add_clip(audio_clip)
+            .expect("add audio");
+
+        state
+            .dispatch_action(mondrian_editor_state::Action::SelectAll)
+            .expect("select all");
+
+        assert_eq!(
+            state.selection.selected_clips,
+            vec![
+                SelectedClipRef {
+                    track_id: video_track_id,
+                    is_video_track: true,
+                    clip_id: video_clip_id,
+                },
+                SelectedClipRef {
+                    track_id: audio_track_id,
+                    is_video_track: false,
+                    clip_id: audio_clip_id,
+                },
+            ]
+        );
+        assert!(!state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_deselect_all_clears_clip_and_mask_selection() {
+        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+        state.selection.selected_clips =
+            vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
+        state.selection.selected_mask = Some((MaskId::new(), clip_id, track_id));
+
+        state
+            .dispatch_action(mondrian_editor_state::Action::DeselectAll)
+            .expect("deselect all");
+
+        assert!(state.selection.selected_clips.is_empty());
+        assert!(state.selection.selected_mask.is_none());
+        assert!(!state.can_undo_action());
     }
 
     #[test]
