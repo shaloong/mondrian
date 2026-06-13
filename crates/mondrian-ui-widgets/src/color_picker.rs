@@ -153,6 +153,7 @@ pub struct ColorPicker {
     show_swatch: bool,
     focused: bool,
     focus_visible: bool,
+    enabled: bool,
     on_change: Option<Box<ColorChangeAction>>,
 }
 
@@ -194,6 +195,7 @@ impl ColorPicker {
             show_swatch: true,
             focused: false,
             focus_visible: false,
+            enabled: true,
             on_change: None,
         };
         picker.sync_fields_from_color();
@@ -216,6 +218,39 @@ impl ColorPicker {
     pub fn on_change(mut self, action: impl Fn(Color) -> Action + 'static) -> Self {
         self.on_change = Some(Box::new(action));
         self
+    }
+
+    /// Set whether the picker accepts pointer, keyboard, IME, eyedropper, and focus input.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.set_enabled(enabled);
+        self
+    }
+
+    /// Disable pointer, keyboard, IME, eyedropper, and focus input.
+    pub fn disabled(self) -> Self {
+        self.enabled(false)
+    }
+
+    /// Whether the picker accepts user input.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Set whether the picker accepts pointer, keyboard, IME, eyedropper, and focus input.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+        for field in &mut self.fields {
+            field.set_enabled(enabled);
+        }
+        if !enabled {
+            self.focused = false;
+            self.focus_visible = false;
+            self.mode_menu_open = false;
+            self.mode_pressed = None;
+            self.mode_hovered = None;
+            self.eyedropper_hovered = false;
+            self.eyedropper_pressed = false;
+        }
     }
 
     /// Return the active editing mode.
@@ -259,6 +294,9 @@ impl ColorPicker {
 
     /// Mark the picker as waiting for an externally sampled color.
     pub fn begin_eyedropper(&mut self) {
+        if !self.enabled {
+            return;
+        }
         self.eyedropper_active = true;
         self.mode_menu_open = false;
         self.mode_pressed = None;
@@ -830,7 +868,9 @@ impl ColorPicker {
         let spacing = &ctx.theme.spacing;
         let rect = self.eyedropper_rect();
         let active = self.eyedropper_active;
-        let fill = if active {
+        let fill = if !self.enabled {
+            mix_color(tokens.popover, tokens.muted, 0.36)
+        } else if active {
             mix_color(tokens.popover, tokens.primary, 0.18)
         } else if self.eyedropper_pressed {
             mix_color(tokens.popover, tokens.foreground, 0.08)
@@ -839,7 +879,9 @@ impl ColorPicker {
         } else {
             mix_color(tokens.popover, tokens.foreground, 0.025)
         };
-        let icon = if active {
+        let icon = if !self.enabled {
+            tokens.muted_foreground
+        } else if active {
             tokens.primary
         } else {
             tokens.popover_foreground
@@ -1075,6 +1117,22 @@ impl Widget for ColorPicker {
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if !self.enabled {
+            if self.eyedropper_active
+                || self.drag_target.is_some()
+                || self.field_pointer_captured.is_some()
+            {
+                ctx.set_cursor(CursorRequest::Default);
+                ctx.set_eyedropper(false, None);
+                ctx.release_pointer_capture(self.id);
+            }
+            self.focused = false;
+            self.focus_visible = false;
+            self.mode_menu_open = false;
+            self.cancel_interaction();
+            return EventResult::Ignored;
+        }
+
         // ── Eyedropper mode: maintain capture and feed events ──────────────
         if self.eyedropper_active {
             match event {
@@ -1337,7 +1395,7 @@ impl Widget for ColorPicker {
     }
 
     fn can_focus(&self) -> bool {
-        true
+        self.enabled
     }
 }
 
@@ -1446,6 +1504,7 @@ pub struct ColorPickerTrigger {
     options: ColorPickerTriggerOptions,
     open: bool,
     pressed: bool,
+    enabled: bool,
     picker_pointer_captured: bool,
 }
 
@@ -1464,6 +1523,7 @@ impl ColorPickerTrigger {
             options,
             open: false,
             pressed: false,
+            enabled: true,
             picker_pointer_captured: false,
         }
     }
@@ -1482,6 +1542,32 @@ impl ColorPickerTrigger {
     pub fn on_change(mut self, action: impl Fn(Color) -> Action + 'static) -> Self {
         self.picker = self.picker.on_change(action);
         self
+    }
+
+    /// Set whether the trigger and embedded picker accept user input.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.set_enabled(enabled);
+        self
+    }
+
+    /// Disable the trigger and embedded picker.
+    pub fn disabled(self) -> Self {
+        self.enabled(false)
+    }
+
+    /// Whether the trigger and embedded picker accept user input.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Set whether the trigger and embedded picker accept user input.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+        self.picker.set_enabled(enabled);
+        if !enabled {
+            self.open = false;
+            self.pressed = false;
+        }
     }
 
     /// Access the embedded picker for inspector-specific configuration.
@@ -1590,6 +1676,23 @@ impl Widget for ColorPickerTrigger {
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if !self.enabled {
+            if self.open
+                || self.pressed
+                || self.picker_pointer_captured
+                || self.picker.is_eyedropper_active()
+            {
+                self.close_popup(ctx);
+                self.picker.cancel_eyedropper();
+                ctx.set_cursor(CursorRequest::Default);
+                ctx.set_eyedropper(false, None);
+                ctx.release_pointer_capture(self.id);
+            }
+            self.open = false;
+            self.pressed = false;
+            return EventResult::Ignored;
+        }
+
         let eyedropper_active = self.picker.is_eyedropper_active();
 
         if self.open {
@@ -1656,7 +1759,9 @@ impl Widget for ColorPickerTrigger {
     fn paint(&self, ctx: &mut PaintContext) {
         let tokens = &ctx.theme.colors;
         let spacing = &ctx.theme.spacing;
-        let fill = if self.open {
+        let fill = if !self.enabled {
+            mix_color(tokens.popover, tokens.muted, 0.36)
+        } else if self.open {
             mix_color(tokens.popover, tokens.primary, 0.08)
         } else if self.pressed {
             mix_color(tokens.popover, tokens.foreground, 0.06)
@@ -1675,6 +1780,13 @@ impl Widget for ColorPickerTrigger {
         );
         self.paint_trigger_checkerboard(ctx, color_rect);
         ctx.encoder.draw_rect(color_rect, self.color(), spacing.radius_sm);
+        if !self.enabled {
+            ctx.encoder.draw_rect(
+                color_rect,
+                color_with_alpha(tokens.popover, 0.36),
+                spacing.radius_sm,
+            );
+        }
     }
 
     fn paint_overlay(&self, ctx: &mut PaintContext) {
@@ -1750,6 +1862,98 @@ mod tests {
             name: format!("rgba:{r},{g},{b},{a}"),
             payload: Default::default(),
         }
+    }
+
+    #[test]
+    fn disabled_picker_ignores_eyedropper_and_focus() {
+        let mut picker = ColorPicker::new(Color::BLACK).disabled();
+        picker.layout(Rect::new(0.0, 0.0, PICKER_WIDTH, PICKER_HEIGHT));
+        let eyedropper = picker.eyedropper_rect().center();
+        let mut ctx = event_ctx();
+
+        picker.begin_eyedropper();
+        assert!(!picker.is_enabled());
+        assert!(!picker.is_eyedropper_active());
+        assert!(!picker.can_focus());
+        assert_eq!(
+            picker.event(
+                &UiEvent::MouseDown {
+                    position: eyedropper,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+
+        assert!(!picker.is_eyedropper_active());
+        assert!(ctx.requests.pointer_capture.is_none());
+    }
+
+    #[test]
+    fn disabling_active_eyedropper_cleans_platform_request_on_next_event() {
+        let mut picker = ColorPicker::new(Color::BLACK);
+        picker.layout(Rect::new(0.0, 0.0, PICKER_WIDTH, PICKER_HEIGHT));
+        picker.begin_eyedropper();
+        picker.set_enabled(false);
+        let mut ctx = event_ctx();
+
+        assert_eq!(
+            picker.event(
+                &UiEvent::MouseMove {
+                    position: picker.eyedropper_rect().center(),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+
+        assert!(!picker.is_eyedropper_active());
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Release(picker.id()))
+        );
+        assert_eq!(
+            ctx.requests.eyedropper,
+            Some(mondrian_ui_core::widget::EyedropperRequest { active: false, hotspot: None })
+        );
+    }
+
+    #[test]
+    fn disabled_trigger_does_not_open_popup() {
+        let mut trigger = ColorPickerTrigger::new(Color::BLACK).disabled();
+        trigger.layout(Rect::new(8.0, 8.0, 32.0, 32.0));
+        let center = trigger.bounds.center();
+        let mut ctx = event_ctx();
+
+        assert!(!trigger.is_enabled());
+        assert_eq!(
+            trigger.event(
+                &UiEvent::MouseDown {
+                    position: center,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+        assert_eq!(
+            trigger.event(
+                &UiEvent::MouseUp {
+                    position: center,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+
+        assert!(!trigger.is_open());
+        assert!(ctx.requests.pointer_capture.is_none());
     }
 
     #[test]

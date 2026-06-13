@@ -86,6 +86,12 @@ impl TextInput {
 
     /// Set whether the input accepts text, pointer, IME, and focus input.
     pub fn enabled(mut self, enabled: bool) -> Self {
+        self.set_enabled(enabled);
+        self
+    }
+
+    /// Set whether the input accepts text, pointer, IME, and focus input.
+    pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
         if !enabled {
             self.focused = false;
@@ -94,7 +100,6 @@ impl TextInput {
             self.ime_preedit.clear();
             self.cursor_visible.set(false);
         }
-        self
     }
 
     /// Disable the input.

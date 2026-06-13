@@ -50,6 +50,7 @@ pub struct CurveEditor {
     grid_rows: usize,
     focused: bool,
     focus_visible: bool,
+    enabled: bool,
     on_change: Option<Box<CurveChangeAction>>,
 }
 
@@ -76,6 +77,7 @@ impl CurveEditor {
             grid_rows: 3,
             focused: false,
             focus_visible: false,
+            enabled: true,
             on_change: None,
         };
         editor.set_points(points);
@@ -86,6 +88,31 @@ impl CurveEditor {
     pub fn on_change(mut self, action: impl Fn(&[CurvePoint]) -> Action + 'static) -> Self {
         self.on_change = Some(Box::new(action));
         self
+    }
+
+    /// Set whether the editor accepts pointer, keyboard, and focus input.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.set_enabled(enabled);
+        self
+    }
+
+    /// Disable pointer, keyboard, and focus input.
+    pub fn disabled(self) -> Self {
+        self.enabled(false)
+    }
+
+    /// Whether the editor accepts user input.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Set whether the editor accepts pointer, keyboard, and focus input.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+        if !enabled {
+            self.focused = false;
+            self.focus_visible = false;
+        }
     }
 
     /// Current curve points in monotonic-x order.
@@ -315,6 +342,16 @@ impl Widget for CurveEditor {
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if !self.enabled {
+            if self.dragging.is_some() || self.focused {
+                ctx.release_pointer_capture(self.id);
+            }
+            self.focused = false;
+            self.focus_visible = false;
+            self.dragging = None;
+            return EventResult::Ignored;
+        }
+
         match event {
             UiEvent::MouseDown { position, button: MouseButton::Left, .. }
                 if self.bounds.contains(*position) =>
@@ -381,7 +418,11 @@ impl Widget for CurveEditor {
         let spacing = &ctx.theme.spacing;
         let plot = self.plot_rect();
         let grid = color_with_alpha(colors.border, 0.45);
-        let curve = colors.primary;
+        let curve = if self.enabled {
+            colors.primary
+        } else {
+            colors.muted_foreground
+        };
         let point_fill = colors.popover;
 
         ctx.encoder.draw_rect(self.bounds, colors.card, spacing.radius_md);
@@ -444,11 +485,7 @@ impl Widget for CurveEditor {
             );
             ctx.encoder.draw_rect(rect, point_fill, radius);
             if selected {
-                ctx.encoder.draw_rect(
-                    rect.inset(1.5, 1.5),
-                    colors.primary,
-                    (radius - 1.5).max(0.0),
-                );
+                ctx.encoder.draw_rect(rect.inset(1.5, 1.5), curve, (radius - 1.5).max(0.0));
             }
         }
     }
@@ -458,7 +495,7 @@ impl Widget for CurveEditor {
     }
 
     fn can_focus(&self) -> bool {
-        true
+        self.enabled
     }
 }
 
@@ -775,6 +812,93 @@ mod tests {
             &[curve_action(editor.points())]
         );
         assert!(ctx.requests.repaint);
+    }
+
+    #[test]
+    fn disabled_editor_ignores_pointer_keyboard_and_focus() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut f = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut shortcut, &mut tooltip, &dispatch);
+        let mut editor = CurveEditor::with_points(vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.5, 0.5),
+            CurvePoint::new(1.0, 1.0),
+        ])
+        .on_change(curve_action)
+        .disabled();
+        editor.layout(Rect::new(0.0, 0.0, 200.0, 100.0));
+        let start = editor.to_screen(editor.points()[1]);
+
+        assert!(!editor.is_enabled());
+        assert!(!editor.can_focus());
+        assert_eq!(
+            editor.event(
+                &UiEvent::MouseDown {
+                    position: start,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+        assert_eq!(
+            editor.event(
+                &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+
+        assert_eq!(editor.points()[1], CurvePoint::new(0.5, 0.5));
+        assert!(actions.borrow().is_empty());
+        assert!(ctx.requests.pointer_capture.is_none());
+    }
+
+    #[test]
+    fn disabling_while_dragging_releases_capture_on_next_event() {
+        let mut editor = CurveEditor::with_points(vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.5, 0.5),
+            CurvePoint::new(1.0, 1.0),
+        ]);
+        editor.layout(Rect::new(0.0, 0.0, 200.0, 100.0));
+        let start = editor.to_screen(editor.points()[1]);
+        let mut ctx = event_ctx();
+
+        assert_eq!(
+            editor.event(
+                &UiEvent::MouseDown {
+                    position: start,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        editor.set_enabled(false);
+
+        assert_eq!(
+            editor.event(
+                &UiEvent::MouseMove {
+                    position: Point::new(start.x + 10.0, start.y),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(mondrian_ui_core::widget::PointerCaptureRequest::Release(
+                editor.id()
+            ))
+        );
+        assert_eq!(editor.points()[1], CurvePoint::new(0.5, 0.5));
     }
 
     #[test]

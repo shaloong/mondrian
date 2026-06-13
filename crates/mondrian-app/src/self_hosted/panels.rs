@@ -922,12 +922,13 @@ fn panel_action(name: &str) -> Action {
 }
 
 fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
-    let mut tint = ColorPickerTrigger::new(model.tint);
-    tint.picker_mut().set_area_mode(model.tint_area_mode);
-    let curve =
-        CurveEditor::with_points(model.curve_points.clone()).on_change(inspector_curve_action);
     let selected_clip = model.selected_clip;
     let has_target = selected_clip.is_some();
+    let mut tint = ColorPickerTrigger::new(model.tint).enabled(has_target);
+    tint.picker_mut().set_area_mode(model.tint_area_mode);
+    let curve = CurveEditor::with_points(model.curve_points.clone())
+        .enabled(has_target)
+        .on_change(inspector_curve_action);
     let mut panel = PropertyPanel::new("Inspector").with_subtitle("Selected clip").with_section(
         PropertySection::new("Clip Style")
             .with_row(PropertyRow::new(

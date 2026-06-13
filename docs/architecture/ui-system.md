@@ -402,13 +402,14 @@ selection and seek callbacks into semantic `Action`s or undoable commands at
 the app layer. This keeps the renderer-facing timeline primitive testable while
 preserving a clean path for progressively replacing the old egui timeline.
 
-Value widgets stay editor-state agnostic. `Slider`, `Checkbox`, `ColorPicker`,
-`ColorPickerTrigger`, and `CurveEditor` expose value-aware action adapters such
-as `on_change(...)`, but they do not know about clips, effects, keyframes, or
-undo history. Real panels map widget values to semantic `Action`s or command
-objects at the panel/app layer. Programmatic state synchronization uses setters
-such as `set_color()` / `set_points()` and must not emit actions; only user
-input paths dispatch changes and request repaint.
+Value widgets stay editor-state agnostic. `Button`, `Checkbox`, `Slider`,
+`TextInput`, `Dropdown`, `ColorPicker`, `ColorPickerTrigger`, and `CurveEditor`
+expose action adapters such as `on_click(...)`, `on_change(...)`, or
+`on_select(...)`, but they do not know about clips, effects, keyframes, or undo
+history. Real panels map widget values to semantic `Action`s or command objects
+at the panel/app layer. Programmatic state synchronization uses setters such as
+`set_color()` / `set_points()` and must not emit actions; only user input paths
+dispatch changes and request repaint.
 Form controls should expose a common `enabled(bool)` / `disabled()` builder
 where practical. Disabled controls must not dispatch actions, request pointer
 capture, or participate in focus traversal, and should render with muted theme
@@ -464,6 +465,10 @@ screen-capture or OS pointer APIs directly. Winit shells complete sampling via
 The mode selector shares the generic dropdown's token vocabulary and overlay
 behavior, but it remains an internal selector because changing color models is
 local widget state rather than an editor `Action`.
+Disabled color pickers propagate disabled state into their text inputs, close
+the mode menu, cancel pointer/eyedropper interactions, opt out of focus
+traversal, and keep painting the current color in muted chrome for inspector
+empty states.
 
 ## Curve Editing
 
