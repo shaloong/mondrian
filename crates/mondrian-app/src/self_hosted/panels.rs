@@ -29,16 +29,16 @@ use mondrian_ui_widgets::{
 };
 
 use crate::app::ui_actions::{
-    effects_add_to_clip_action, inspector_remove_effect_action, inspector_set_clip_enabled_action,
-    inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
-    inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
-    timeline_move_clip_action, timeline_seek_action, timeline_select_clip_action,
-    timeline_trim_clip_action, EffectsAddToClipPayload, InspectorClipRefPayload,
-    InspectorClipTransformField, InspectorRemoveEffectPayload, InspectorSetClipEnabledPayload,
-    InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
-    InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
-    TimelineMoveClipPayload, TimelineSelectClipPayload, TimelineTrimClipPayload,
-    TimelineTrimPayloadEdge,
+    assets_prepare_drag_action, effects_add_to_clip_action, inspector_remove_effect_action,
+    inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
+    inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
+    inspector_set_effect_enabled_action, timeline_move_clip_action, timeline_seek_action,
+    timeline_select_clip_action, timeline_trim_clip_action, AssetsPrepareDragPayload,
+    EffectsAddToClipPayload, InspectorClipRefPayload, InspectorClipTransformField,
+    InspectorRemoveEffectPayload, InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
+    InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
+    InspectorSetEffectEnabledPayload, TimelineMoveClipPayload, TimelineSelectClipPayload,
+    TimelineTrimClipPayload, TimelineTrimPayloadEdge,
 };
 use crate::app::{AppState, SelectedClipRef};
 
@@ -814,7 +814,9 @@ fn panel_item_from_asset(asset: AssetRecord) -> PanelListItem {
         .with_badge(badge)
         .with_accent(accent)
         .with_select_action(panel_action(&format!("assets.select.{}", asset.id)))
-        .with_activate_action(panel_action(&format!("assets.activate.{}", asset.id)))
+        .with_activate_action(assets_prepare_drag_action(AssetsPrepareDragPayload {
+            asset_id: asset.id,
+        }))
 }
 
 fn asset_kind_badge(kind: &AssetKind) -> &'static str {
@@ -1599,10 +1601,10 @@ mod tests {
         assert_eq!(item.badge.as_deref(), Some("CLR"));
         assert!(item.select_action.is_some());
         assert!(item.activate_action.is_some());
-        assert!(item
-            .activate_action
-            .as_ref()
-            .is_some_and(|action| format!("{action:?}").contains(&asset_id.to_string())));
+        let activate_debug = format!("{:?}", item.activate_action.as_ref().expect("activate"));
+        assert!(activate_debug.contains("ui.assets"));
+        assert!(activate_debug.contains("prepare_drag"));
+        assert!(activate_debug.contains(&asset_id.to_string()));
 
         let _ = std::fs::remove_dir_all(root);
     }

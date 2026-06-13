@@ -395,6 +395,9 @@ Assets/Effects-style panels use this shared surface as the tracer bullet for
 migrating list-heavy egui panels. The self-hosted Project slot also uses
 `PanelListModel::from_project_status` to show project file, active sequence,
 asset-library, and status-hint state instead of a colored placeholder.
+The self-hosted Assets panel maps real library rows to `ui.assets.prepare_drag`;
+`AppState` resolves the asset record and reuses the existing `begin_drag_asset`
+path so later Timeline drop handling stays shared with the egui implementation.
 
 Timeline migration starts with the domain-light `TimelineView` surface in
 `mondrian-ui-widgets`. It renders frame-space tracks, clips, ruler ticks,

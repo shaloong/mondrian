@@ -4,7 +4,7 @@
 //! to `Action::Custom` payloads before actions reach the app state layer.
 
 use mondrian_core::effect_data::EffectType;
-use mondrian_core::types::{ClipId, EffectId, TrackId};
+use mondrian_core::types::{AssetId, ClipId, EffectId, TrackId};
 use mondrian_editor_state::Action;
 use serde::{Deserialize, Serialize};
 
@@ -41,6 +41,12 @@ pub const EFFECTS_NAMESPACE: &str = "ui.effects";
 
 /// Action name for adding an effect to a selected clip.
 pub const EFFECTS_ADD_TO_CLIP: &str = "add_to_clip";
+
+/// Custom action namespace for asset-browser operations.
+pub const ASSETS_NAMESPACE: &str = "ui.assets";
+
+/// Action name for preparing an asset for timeline drag/drop.
+pub const ASSETS_PREPARE_DRAG: &str = "prepare_drag";
 
 /// Clip edge being trimmed by a timeline UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -182,6 +188,13 @@ pub struct EffectsAddToClipPayload {
     pub effect_type: EffectType,
 }
 
+/// Prepare one asset for the existing timeline drag/drop path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetsPrepareDragPayload {
+    /// Asset selected from the self-hosted asset browser.
+    pub asset_id: AssetId,
+}
+
 /// Build an action that selects a clip in the active timeline.
 pub fn timeline_select_clip_action(payload: TimelineSelectClipPayload) -> Action {
     custom_timeline_action(TIMELINE_SELECT_CLIP, payload)
@@ -239,6 +252,11 @@ pub fn effects_add_to_clip_action(payload: EffectsAddToClipPayload) -> Action {
     custom_effects_action(EFFECTS_ADD_TO_CLIP, payload)
 }
 
+/// Build an action that prepares an asset for timeline drag/drop.
+pub fn assets_prepare_drag_action(payload: AssetsPrepareDragPayload) -> Action {
+    custom_assets_action(ASSETS_PREPARE_DRAG, payload)
+}
+
 fn custom_timeline_action<T: Serialize>(name: &'static str, payload: T) -> Action {
     Action::Custom {
         namespace: TIMELINE_NAMESPACE.into(),
@@ -258,6 +276,14 @@ fn custom_inspector_action<T: Serialize>(name: &'static str, payload: T) -> Acti
 fn custom_effects_action<T: Serialize>(name: &'static str, payload: T) -> Action {
     Action::Custom {
         namespace: EFFECTS_NAMESPACE.into(),
+        name: name.into(),
+        payload: serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
+    }
+}
+
+fn custom_assets_action<T: Serialize>(name: &'static str, payload: T) -> Action {
+    Action::Custom {
+        namespace: ASSETS_NAMESPACE.into(),
         name: name.into(),
         payload: serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
     }

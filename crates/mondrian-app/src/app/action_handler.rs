@@ -10,15 +10,16 @@ use crate::app::timeline_editing::{
     find_clip, find_clip_mut, find_clip_track_lock, set_clip_disabled,
 };
 use crate::app::ui_actions::{
-    EffectsAddToClipPayload, InspectorClipTransformField, InspectorRemoveEffectPayload,
-    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
-    InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
-    TimelineMoveClipPayload, TimelineSeekPayload, TimelineSelectClipPayload,
-    TimelineTrimClipPayload, TimelineTrimPayloadEdge, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE,
-    INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT, INSPECTOR_SET_CLIP_ENABLED,
-    INSPECTOR_SET_CLIP_OPACITY, INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD,
-    INSPECTOR_SET_EFFECT_ENABLED, TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_SEEK,
-    TIMELINE_SELECT_CLIP, TIMELINE_TRIM_CLIP,
+    AssetsPrepareDragPayload, EffectsAddToClipPayload, InspectorClipTransformField,
+    InspectorRemoveEffectPayload, InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
+    InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
+    InspectorSetEffectEnabledPayload, TimelineMoveClipPayload, TimelineSeekPayload,
+    TimelineSelectClipPayload, TimelineTrimClipPayload, TimelineTrimPayloadEdge, ASSETS_NAMESPACE,
+    ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE,
+    INSPECTOR_REMOVE_EFFECT, INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY,
+    INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD, INSPECTOR_SET_EFFECT_ENABLED,
+    TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_SEEK, TIMELINE_SELECT_CLIP,
+    TIMELINE_TRIM_CLIP,
 };
 use crate::app::{AppClipboardKind, AppState, ClipOverlapMode, SelectedClipRef};
 use glam::Vec2;
@@ -29,6 +30,7 @@ use mondrian_core::types::{ClipId, TimeCode};
 use mondrian_core::{MondrianError, Result};
 use mondrian_timeline::clip::{Clip, Transform2D, TrimEdge};
 use std::path::PathBuf;
+use std::time::Duration;
 
 impl AppState {
     /// 派发 Action，修改内部状态
@@ -152,6 +154,9 @@ impl AppState {
             }
             Action::Custom { namespace, name, payload } if namespace == EFFECTS_NAMESPACE => {
                 self.dispatch_effects_ui_action(&name, payload)
+            }
+            Action::Custom { namespace, name, payload } if namespace == ASSETS_NAMESPACE => {
+                self.dispatch_assets_ui_action(&name, payload)
             }
 
             // ── 尚未实现的操作（Stage B-F 逐步添加）─────────────────────
@@ -733,6 +738,60 @@ impl AppState {
         }
     }
 
+    fn dispatch_assets_ui_action(&mut self, name: &str, payload: serde_json::Value) -> Result<()> {
+        match name {
+            ASSETS_PREPARE_DRAG => {
+                let payload = parse_ui_payload::<AssetsPrepareDragPayload>(
+                    "assets_ui_action",
+                    name,
+                    payload,
+                )?;
+                self.prepare_asset_drag_from_ui(payload)
+            }
+            _ => {
+                tracing::debug!(
+                    target: "mondrian::action",
+                    "Unknown self-hosted assets action: {name}"
+                );
+                Ok(())
+            }
+        }
+    }
+
+    fn prepare_asset_drag_from_ui(&mut self, payload: AssetsPrepareDragPayload) -> Result<()> {
+        let library = self.asset_library.clone().ok_or_else(|| {
+            let reason = "素材库未连接".to_string();
+            self.set_status_hint(format!("素材准备失败：{reason}"), true);
+            MondrianError::WorkflowStepFailed { step_id: "assets_prepare_drag".into(), reason }
+        })?;
+        let asset = library.get_asset(payload.asset_id)?.ok_or_else(|| {
+            let reason = format!("素材不存在：{}", payload.asset_id);
+            self.set_status_hint(format!("素材准备失败：{reason}"), true);
+            MondrianError::WorkflowStepFailed { step_id: "assets_prepare_drag".into(), reason }
+        })?;
+        let duration = if asset.media_info.duration > Duration::ZERO
+            && !matches!(asset.kind, AssetKind::AdjustmentLayer)
+        {
+            asset.media_info.duration
+        } else {
+            self.default_adjustment_layer_drag_duration()
+        };
+        let has_linked_audio = matches!(asset.kind, AssetKind::Video) && asset.media_info.has_audio;
+        let lane = match asset.kind {
+            AssetKind::Audio => "音频轨",
+            AssetKind::Video | AssetKind::AdjustmentLayer | AssetKind::SolidColor => "视频轨",
+        };
+        self.begin_drag_asset(
+            asset.id,
+            asset.name.clone(),
+            asset.kind,
+            duration,
+            has_linked_audio,
+        );
+        self.set_status_hint(format!("已准备拖放：{}（释放到{lane}）", asset.name), false);
+        Ok(())
+    }
+
     fn set_clip_enabled_from_ui(&mut self, clip_id: ClipId, enabled: bool) -> Result<()> {
         let Some(seq) = self.sequence.as_mut() else {
             return Err(missing_sequence_error("inspector_set_clip_enabled"));
@@ -995,15 +1054,15 @@ fn clip_exists(seq: &mondrian_timeline::sequence::Sequence, clip_id: ClipId) -> 
 mod tests {
     use super::*;
     use crate::app::ui_actions::{
-        effects_add_to_clip_action, inspector_remove_effect_action,
+        assets_prepare_drag_action, effects_add_to_clip_action, inspector_remove_effect_action,
         inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
         inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
         inspector_set_effect_enabled_action, timeline_move_clip_action, timeline_seek_action,
-        timeline_select_clip_action, timeline_trim_clip_action, EffectsAddToClipPayload,
-        InspectorClipRefPayload, InspectorClipTransformField, InspectorRemoveEffectPayload,
-        InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
-        InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
-        InspectorSetEffectEnabledPayload,
+        timeline_select_clip_action, timeline_trim_clip_action, AssetsPrepareDragPayload,
+        EffectsAddToClipPayload, InspectorClipRefPayload, InspectorClipTransformField,
+        InspectorRemoveEffectPayload, InspectorSetClipEnabledPayload,
+        InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+        InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
     };
     use mondrian_assets::AssetLibrary;
     use mondrian_core::types::{AssetId, MaskId, TimeCode};
@@ -1209,6 +1268,51 @@ mod tests {
         assert!(assets.is_empty());
 
         remove_temp_path(&library_root);
+    }
+
+    #[test]
+    fn dispatch_assets_prepare_drag_reads_library_asset() {
+        let mut state = AppState::new();
+        let library_root = unique_temp_path("assets-prepare-drag-library");
+        let library = AssetLibrary::open(library_root.clone()).expect("library");
+        let asset_id = library
+            .create_solid_color_asset(Some("Brand Solid"))
+            .expect("create solid color asset");
+        state.asset_library = Some(library);
+
+        state
+            .dispatch_action(assets_prepare_drag_action(AssetsPrepareDragPayload {
+                asset_id,
+            }))
+            .expect("prepare drag");
+
+        let dragging = state.dragging_asset().expect("dragging asset");
+        assert_eq!(dragging.asset_id, asset_id);
+        assert_eq!(dragging.name, "Brand Solid");
+        assert_eq!(dragging.kind, AssetKind::SolidColor);
+        assert!(dragging.duration > Duration::ZERO);
+        assert!(!dragging.has_linked_audio);
+        assert!(state
+            .status_hint
+            .as_ref()
+            .is_some_and(|(message, is_error)| { !*is_error && message.contains("Brand Solid") }));
+
+        remove_temp_path(&library_root);
+    }
+
+    #[test]
+    fn dispatch_assets_prepare_drag_reports_missing_library() {
+        let mut state = AppState::new();
+
+        let err = state
+            .dispatch_action(assets_prepare_drag_action(AssetsPrepareDragPayload {
+                asset_id: AssetId::new(),
+            }))
+            .expect_err("missing asset library should fail");
+
+        assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
+        assert!(state.dragging_asset().is_none());
+        assert!(state.status_hint.as_ref().is_some_and(|(_, is_error)| *is_error));
     }
 
     #[test]
