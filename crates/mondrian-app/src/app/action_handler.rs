@@ -20,7 +20,7 @@ use crate::app::ui_actions::{
     INSPECTOR_SET_EFFECT_ENABLED, TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_SEEK,
     TIMELINE_SELECT_CLIP, TIMELINE_TRIM_CLIP,
 };
-use crate::app::{AppState, ClipOverlapMode, SelectedClipRef};
+use crate::app::{AppClipboardKind, AppState, ClipOverlapMode, SelectedClipRef};
 use glam::Vec2;
 use mondrian_core::automation::{PropertyHost, PropertyMutation, PropertyValue};
 use mondrian_core::types::ClipId;
@@ -98,9 +98,10 @@ impl AppState {
                 Ok(())
             }
 
-            // ── 剪贴板（先承载已有动画关键帧剪贴板）──────────────────────
-            Action::Copy => self.copy_animation_keyframes_from_action(),
-            Action::Paste => self.paste_animation_keyframes_from_action(),
+            // ── 剪贴板（动画关键帧优先，否则使用 timeline clip clipboard）──
+            Action::Copy => self.copy_from_action(),
+            Action::Cut => self.cut_from_action(),
+            Action::Paste => self.paste_from_action(),
 
             // ── 时间线编辑（复用已有 undoable 命令层）────────────────────
             Action::DeleteSelection => self.delete_selected_clips_from_ui(),
@@ -148,11 +149,35 @@ impl AppState {
         }
     }
 
-    fn copy_animation_keyframes_from_action(&mut self) -> Result<()> {
+    fn copy_from_action(&mut self) -> Result<()> {
         let Some(selection) = self.selection.selected_clips.first().copied() else {
-            return Ok(());
+            return self.copy_selected_clips_to_clipboard().map(|_| ());
         };
-        self.copy_selected_animation_keyframes(selection).map(|_| ())
+        if self.copy_selected_animation_keyframes(selection)? {
+            Ok(())
+        } else {
+            self.copy_selected_clips_to_clipboard().map(|_| ())
+        }
+    }
+
+    fn cut_from_action(&mut self) -> Result<()> {
+        self.cut_selected_clips_to_clipboard().map(|_| ())
+    }
+
+    fn paste_from_action(&mut self) -> Result<()> {
+        match self.active_clipboard_kind {
+            Some(AppClipboardKind::AnimationKeyframes) => self
+                .paste_animation_keyframes_from_action()
+                .or_else(|_| self.paste_clip_clipboard_at_playhead().map(|_| ())),
+            Some(AppClipboardKind::Clips) => self.paste_clip_clipboard_at_playhead().map(|_| ()),
+            None => {
+                if self.has_animation_clipboard() {
+                    self.paste_animation_keyframes_from_action()
+                } else {
+                    self.paste_clip_clipboard_at_playhead().map(|_| ())
+                }
+            }
+        }
     }
 
     fn paste_animation_keyframes_from_action(&mut self) -> Result<()> {
@@ -1574,5 +1599,134 @@ mod tests {
             .dispatch_action(mondrian_editor_state::Action::Paste)
             .expect("paste without clipboard");
         assert!(!state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_copy_paste_actions_use_clip_clipboard_when_no_keyframes_selected() {
+        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+        state.selection.selected_clips =
+            vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
+        state.seek(50);
+
+        state.dispatch_action(mondrian_editor_state::Action::Copy).expect("copy clip");
+        state.dispatch_action(mondrian_editor_state::Action::Paste).expect("paste clip");
+
+        let sequence = state.sequence.as_ref().expect("sequence");
+        let clips = &sequence.video_tracks[0].clips;
+        assert_eq!(clips.len(), 2);
+        assert!(clips.iter().any(|clip| clip.id == clip_id && clip.position.frame == 10));
+        let pasted = clips.iter().find(|clip| clip.id != clip_id).expect("pasted clip");
+        assert_eq!(pasted.position.frame, 50);
+        assert_eq!(pasted.duration.frame, 20);
+        assert_eq!(state.active_clipboard_kind, Some(AppClipboardKind::Clips));
+        assert_eq!(
+            state.selection.selected_clips,
+            vec![SelectedClipRef { track_id, is_video_track: true, clip_id: pasted.id }]
+        );
+        assert!(state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_cut_action_copies_and_removes_selected_clips() {
+        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+        state.selection.selected_clips =
+            vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
+
+        state.dispatch_action(mondrian_editor_state::Action::Cut).expect("cut clip");
+
+        let sequence = state.sequence.as_ref().expect("sequence");
+        assert!(sequence.video_tracks[0].clips.is_empty());
+        assert!(state.selection.selected_clips.is_empty());
+        assert!(state.has_clip_clipboard());
+        assert_eq!(state.active_clipboard_kind, Some(AppClipboardKind::Clips));
+        assert!(state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_cut_action_preserves_locked_track_and_clipboard() {
+        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+        state.sequence.as_mut().expect("sequence").video_tracks[0].is_locked = true;
+        state.selection.selected_clips =
+            vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
+
+        let err = state
+            .dispatch_action(mondrian_editor_state::Action::Cut)
+            .expect_err("locked track should reject cut");
+
+        assert!(matches!(err, MondrianError::TrackLocked { .. }));
+        let sequence = state.sequence.as_ref().expect("sequence");
+        assert_eq!(sequence.video_tracks[0].clips.len(), 1);
+        assert!(!state.has_clip_clipboard());
+        assert_eq!(state.active_clipboard_kind, None);
+        assert!(!state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_copy_paste_clip_actions_rebuild_linked_clip_pairs() {
+        let mut state = AppState::new();
+        let mut sequence = Sequence::new("linked clipboard");
+        let tb = sequence.time_base();
+        let video_track_id = sequence.video_tracks[0].id;
+        let audio_track_id = sequence.audio_tracks[0].id;
+
+        let mut video_clip =
+            Clip::new(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(20, tb));
+        let mut audio_clip = Clip::new(
+            video_clip.asset_id,
+            TimeCode::new(10, tb),
+            TimeCode::new(20, tb),
+        );
+        let video_clip_id = video_clip.id;
+        let audio_clip_id = audio_clip.id;
+        video_clip.linked_clip = Some(audio_clip_id);
+        audio_clip.linked_clip = Some(video_clip_id);
+        sequence.video_tracks[0].add_clip(video_clip).expect("add video");
+        sequence.audio_tracks[0].add_clip(audio_clip).expect("add audio");
+        state.sequence = Some(sequence);
+        state.selection.selected_clips = vec![SelectedClipRef {
+            track_id: video_track_id,
+            is_video_track: true,
+            clip_id: video_clip_id,
+        }];
+        state.seek(40);
+
+        state
+            .dispatch_action(mondrian_editor_state::Action::Copy)
+            .expect("copy linked clip");
+        state
+            .dispatch_action(mondrian_editor_state::Action::Paste)
+            .expect("paste linked clip");
+
+        let sequence = state.sequence.as_ref().expect("sequence");
+        let pasted_video = sequence.video_tracks[0]
+            .clips
+            .iter()
+            .find(|clip| clip.id != video_clip_id)
+            .expect("pasted video");
+        let pasted_audio = sequence.audio_tracks[0]
+            .clips
+            .iter()
+            .find(|clip| clip.id != audio_clip_id)
+            .expect("pasted audio");
+        assert_eq!(pasted_video.position.frame, 40);
+        assert_eq!(pasted_audio.position.frame, 40);
+        assert_eq!(pasted_video.linked_clip, Some(pasted_audio.id));
+        assert_eq!(pasted_audio.linked_clip, Some(pasted_video.id));
+        assert_eq!(
+            state.selection.selected_clips,
+            vec![
+                SelectedClipRef {
+                    track_id: video_track_id,
+                    is_video_track: true,
+                    clip_id: pasted_video.id,
+                },
+                SelectedClipRef {
+                    track_id: audio_track_id,
+                    is_video_track: false,
+                    clip_id: pasted_audio.id,
+                },
+            ]
+        );
+        assert!(state.can_undo_action());
     }
 }

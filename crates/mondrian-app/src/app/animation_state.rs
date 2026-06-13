@@ -228,6 +228,9 @@ impl AppState {
         } else {
             Some(AnimationClipboard { entries })
         };
+        if self.has_animation_clipboard() {
+            self.active_clipboard_kind = Some(AppClipboardKind::AnimationKeyframes);
+        }
         Ok(self.has_animation_clipboard())
     }
 

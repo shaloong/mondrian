@@ -57,6 +57,7 @@ mod animation_state;
 mod audio_rendering;
 mod bootstrap;
 mod chrome;
+mod clip_clipboard;
 mod new_project;
 mod playback;
 mod preferences;
@@ -144,6 +145,31 @@ pub struct AnimationClipboardEntry {
 #[derive(Debug, Clone, Default)]
 pub struct AnimationClipboard {
     pub entries: Vec<AnimationClipboardEntry>,
+}
+
+/// Clip clipboard content used by app-level Copy/Cut/Paste actions.
+#[derive(Debug, Clone, Default)]
+pub struct ClipClipboard {
+    entries: Vec<ClipClipboardEntry>,
+}
+
+/// One copied clip plus enough context to paste it back into the active sequence.
+#[derive(Debug, Clone)]
+struct ClipClipboardEntry {
+    original_clip_id: ClipId,
+    track_id: TrackId,
+    is_video_track: bool,
+    relative_start_frame: i64,
+    clip: Clip,
+}
+
+/// Active app clipboard payload kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppClipboardKind {
+    /// Animation keyframes copied from the selected clip.
+    AnimationKeyframes,
+    /// Timeline clips copied from the active sequence.
+    Clips,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -604,6 +630,8 @@ pub struct AppState {
     // 动画选择状态（timeline / inspector / future graph 共用）
     pub animation_selection: AnimationSelectionState,
     pub animation_clipboard: Option<AnimationClipboard>,
+    pub clip_clipboard: Option<ClipClipboard>,
+    pub active_clipboard_kind: Option<AppClipboardKind>,
 
     // 代理策略
     pub auto_proxy_enabled: bool,
@@ -686,6 +714,8 @@ impl AppState {
             status_hint: None,
             animation_selection: AnimationSelectionState::default(),
             animation_clipboard: None,
+            clip_clipboard: None,
+            active_clipboard_kind: None,
             auto_proxy_enabled: false,
             proxy_mode_assets: HashSet::new(),
             audio_sample_rate,
