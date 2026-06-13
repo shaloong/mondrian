@@ -82,6 +82,10 @@ protocol and calls existing undoable command/property-mutation paths. Timeline
 move/trim/seek actions resolve through timeline command methods; Inspector clip
 enabled, opacity, solid/tint color, and basic transform field actions resolve
 through `AppState` snapshot commands and `mondrian-timeline` property hosts.
+The shared `Action::DeleteSelection` path deletes the current
+`AppState::selection.selected_clips` through `remove_clips_bulk`, so shortcuts,
+menus, scripts, and self-hosted widgets all reuse the same locked-track checks,
+linked clip cleanup, undo snapshot, and timeline modified event behavior.
 Inspector timing controls reuse timeline trim actions for clip In/Out changes
 instead of introducing a parallel editing path.
 Inspector effect rows are read from the selected clip's effect instances and

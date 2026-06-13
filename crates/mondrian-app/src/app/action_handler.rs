@@ -85,6 +85,9 @@ impl AppState {
                 Ok(())
             }
 
+            // ── 时间线编辑（复用已有 undoable 命令层）────────────────────
+            Action::DeleteSelection => self.delete_selected_clips_from_ui(),
+
             // ── 项目操作 ──────────────────────────────────────────────────
             Action::SaveProject => {
                 self.save_project().map_err(mondrian_core::MondrianError::Other)?;
@@ -111,6 +114,28 @@ impl AppState {
                 Ok(())
             }
         }
+    }
+
+    fn delete_selected_clips_from_ui(&mut self) -> Result<()> {
+        let selections = self
+            .selection
+            .selected_clips
+            .iter()
+            .map(|selection| {
+                (
+                    selection.track_id,
+                    selection.is_video_track,
+                    selection.clip_id,
+                )
+            })
+            .collect::<Vec<_>>();
+        if selections.is_empty() {
+            return Ok(());
+        }
+
+        self.remove_clips_bulk(&selections, false)?;
+        self.selection.selected_clips.clear();
+        Ok(())
     }
 
     pub fn can_undo_action(&self) -> bool {
@@ -600,6 +625,84 @@ mod tests {
         let clip = &sequence.video_tracks[0].clips[0];
         assert_eq!(clip.position.frame, 16);
         assert_eq!(clip.duration.frame, 14);
+    }
+
+    #[test]
+    fn dispatch_delete_selection_removes_selected_clip() {
+        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+        state.selection.selected_clips =
+            vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
+
+        state
+            .dispatch_action(mondrian_editor_state::Action::DeleteSelection)
+            .expect("delete selection");
+
+        let sequence = state.sequence.as_ref().expect("sequence");
+        assert!(sequence.video_tracks[0].clips.is_empty());
+        assert!(state.selection.selected_clips.is_empty());
+        assert!(state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_delete_selection_preserves_locked_track() {
+        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+        state.sequence.as_mut().expect("sequence").video_tracks[0].is_locked = true;
+        state.selection.selected_clips =
+            vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
+
+        let err = state
+            .dispatch_action(mondrian_editor_state::Action::DeleteSelection)
+            .expect_err("locked track should reject delete");
+
+        assert!(matches!(err, MondrianError::TrackLocked { .. }));
+        let sequence = state.sequence.as_ref().expect("sequence");
+        assert_eq!(sequence.video_tracks[0].clips.len(), 1);
+        assert_eq!(
+            state.selection.selected_clips,
+            vec![SelectedClipRef { track_id, is_video_track: true, clip_id }]
+        );
+        assert!(!state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_delete_selection_removes_linked_audio_clip() {
+        let mut state = AppState::new();
+        let mut sequence = Sequence::new("linked edit");
+        let audio_track_id = sequence.add_audio_track();
+        let tb = sequence.time_base();
+        let video_track_id = sequence.video_tracks[0].id;
+
+        let mut video_clip =
+            Clip::new(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(20, tb));
+        let mut audio_clip =
+            Clip::new(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(20, tb));
+        let video_clip_id = video_clip.id;
+        let audio_clip_id = audio_clip.id;
+        video_clip.linked_clip = Some(audio_clip_id);
+        audio_clip.linked_clip = Some(video_clip_id);
+
+        sequence.video_tracks[0].add_clip(video_clip).expect("add video");
+        sequence
+            .audio_track_mut(audio_track_id)
+            .expect("audio track")
+            .add_clip(audio_clip)
+            .expect("add audio");
+        state.sequence = Some(sequence);
+        state.selection.selected_clips = vec![SelectedClipRef {
+            track_id: video_track_id,
+            is_video_track: true,
+            clip_id: video_clip_id,
+        }];
+
+        state
+            .dispatch_action(mondrian_editor_state::Action::DeleteSelection)
+            .expect("delete linked selection");
+
+        let sequence = state.sequence.as_ref().expect("sequence");
+        assert!(sequence.video_tracks[0].clips.is_empty());
+        assert!(sequence.audio_tracks[0].clips.is_empty());
+        assert!(state.selection.selected_clips.is_empty());
+        assert!(state.can_undo_action());
     }
 
     #[test]
