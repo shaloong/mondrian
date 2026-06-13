@@ -22,10 +22,13 @@ use crate::app::ui_actions::{
 };
 use crate::app::{AppClipboardKind, AppState, ClipOverlapMode, SelectedClipRef};
 use glam::Vec2;
+use mondrian_assets::AssetKind;
 use mondrian_core::automation::{PropertyHost, PropertyMutation, PropertyValue};
+use mondrian_core::events::AppEvent;
 use mondrian_core::types::{ClipId, TimeCode};
 use mondrian_core::{MondrianError, Result};
 use mondrian_timeline::clip::{Clip, Transform2D, TrimEdge};
+use std::path::PathBuf;
 
 impl AppState {
     /// 派发 Action，修改内部状态
@@ -137,6 +140,7 @@ impl AppState {
                 self.close_project();
                 Ok(())
             }
+            Action::ImportMedia(paths) => self.import_media_from_action(paths),
 
             Action::Custom { namespace, name, payload } if namespace == TIMELINE_NAMESPACE => {
                 self.dispatch_timeline_ui_action(&name, payload)
@@ -169,6 +173,72 @@ impl AppState {
 
     fn cut_from_action(&mut self) -> Result<()> {
         self.cut_selected_clips_to_clipboard().map(|_| ())
+    }
+
+    fn import_media_from_action(&mut self, paths: Vec<PathBuf>) -> Result<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+
+        let library = self.asset_library.clone().ok_or_else(|| {
+            let reason = "素材库未连接".to_string();
+            self.set_status_hint(format!("导入失败：{reason}"), true);
+            MondrianError::WorkflowStepFailed { step_id: "import_media".to_string(), reason }
+        })?;
+
+        self.clear_status_hint();
+        let mut imported_count = 0usize;
+        let mut proxy_count = 0usize;
+        let mut failures = Vec::new();
+
+        for path in paths {
+            match library.import_media_file(&path) {
+                Ok(asset_id) => {
+                    imported_count += 1;
+                    let mut proxy_started = false;
+                    if self.auto_proxy_enabled {
+                        if let Ok(Some(asset)) = library.get_asset(asset_id) {
+                            if matches!(asset.kind, AssetKind::Video) {
+                                self.set_asset_proxy_mode(asset_id, true);
+                                spawn_proxy_generation(asset_id, asset.path);
+                                proxy_started = true;
+                            } else {
+                                self.set_asset_proxy_mode(asset_id, false);
+                            }
+                        }
+                    } else {
+                        self.set_asset_proxy_mode(asset_id, false);
+                    }
+                    if proxy_started {
+                        proxy_count += 1;
+                    }
+                    self.event_bus.publish(AppEvent::AssetImported { asset_id });
+                }
+                Err(err) => failures.push(format!("{}: {err}", path.display())),
+            }
+        }
+
+        if imported_count > 0 {
+            let mut message = format!("已导入 {imported_count} 个媒体文件");
+            if proxy_count > 0 {
+                message.push_str(&format!("，{proxy_count} 个后台生成代理"));
+            }
+            if !failures.is_empty() {
+                message.push_str(&format!("，{} 个失败", failures.len()));
+                tracing::warn!(
+                    target: "mondrian::action",
+                    "media import completed with failures: {}",
+                    failures.join("; ")
+                );
+            }
+            self.set_status_hint(message, !failures.is_empty());
+            let _ = self.save_project_file();
+            return Ok(());
+        }
+
+        let reason = failures.first().cloned().unwrap_or_else(|| "未导入任何媒体文件".to_string());
+        self.set_status_hint(format!("导入失败：{reason}"), true);
+        Err(MondrianError::WorkflowStepFailed { step_id: "import_media".to_string(), reason })
     }
 
     fn duplicate_from_action(&mut self) -> Result<()> {
@@ -817,6 +887,38 @@ fn source_trim_target_frame(clip: &Clip, edge: TrimEdge, source_time: TimeCode) 
     Ok(clip.position.frame.saturating_add(timeline_delta).max(0))
 }
 
+fn spawn_proxy_generation(asset_id: mondrian_core::types::AssetId, source_path: PathBuf) {
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build();
+        if let Ok(rt) = runtime {
+            let generator =
+                mondrian_media::ProxyGenerator::new(mondrian_media::ProxyConfig::default());
+            let (progress_tx, _progress_rx) = tokio::sync::mpsc::channel(8);
+            let _ = rt.block_on(generator.generate(asset_id, source_path, progress_tx));
+        }
+    });
+}
+
+#[cfg(test)]
+fn unique_temp_path(label: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "mondrian-{label}-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ))
+}
+
+#[cfg(test)]
+fn remove_temp_path(path: &std::path::Path) {
+    if path.is_dir() {
+        let _ = std::fs::remove_dir_all(path);
+    } else {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 fn parse_ui_payload<T: serde::de::DeserializeOwned>(
     step_prefix: &str,
     name: &str,
@@ -866,6 +968,7 @@ mod tests {
         InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
         InspectorSetEffectEnabledPayload,
     };
+    use mondrian_assets::AssetLibrary;
     use mondrian_core::types::{AssetId, MaskId, TimeCode};
     use mondrian_core::Color;
     use mondrian_effects::EffectType;
@@ -1018,6 +1121,56 @@ mod tests {
         let sequence = state.sequence.as_ref().expect("sequence");
         assert_eq!(sequence.video_tracks[0].clips[0].duration.frame, 20);
         assert!(!state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_import_media_with_empty_paths_is_noop_without_library() {
+        let mut state = AppState::new();
+
+        state
+            .dispatch_action(mondrian_editor_state::Action::ImportMedia(Vec::new()))
+            .expect("empty import should be ignored");
+
+        assert!(state.status_hint.is_none());
+    }
+
+    #[test]
+    fn dispatch_import_media_reports_missing_asset_library() {
+        let mut state = AppState::new();
+        let err = state
+            .dispatch_action(mondrian_editor_state::Action::ImportMedia(vec![
+                PathBuf::from("missing.mov"),
+            ]))
+            .expect_err("missing asset library should fail");
+
+        assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
+        assert!(state.status_hint.as_ref().is_some_and(|(_, is_error)| *is_error));
+    }
+
+    #[test]
+    fn dispatch_import_media_rejects_invalid_path_without_adding_assets() {
+        let mut state = AppState::new();
+        let library_root = unique_temp_path("import-media-library");
+        state.asset_library = Some(AssetLibrary::open(library_root.clone()).expect("library"));
+        let missing_path = library_root.join("missing.mov");
+
+        let err = state
+            .dispatch_action(mondrian_editor_state::Action::ImportMedia(vec![
+                missing_path,
+            ]))
+            .expect_err("invalid media path should fail");
+
+        assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
+        assert!(state.status_hint.as_ref().is_some_and(|(_, is_error)| *is_error));
+        let assets = state
+            .asset_library
+            .as_ref()
+            .expect("library")
+            .list_assets()
+            .expect("list assets");
+        assert!(assets.is_empty());
+
+        remove_temp_path(&library_root);
     }
 
     #[test]

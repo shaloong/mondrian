@@ -91,6 +91,12 @@ The shared `Action::DeleteSelection` path deletes the current
 `AppState::selection.selected_clips` through `remove_clips_bulk`, so shortcuts,
 menus, scripts, and self-hosted widgets all reuse the same locked-track checks,
 linked clip cleanup, undo snapshot, and timeline modified event behavior.
+`Action::ImportMedia` is the shared boundary for platform file pickers, menus,
+scripts, and future self-hosted asset browser commands. The app layer batches
+the supplied paths through `AssetLibrary::import_media_file`, publishes
+`AssetImported`, updates proxy-mode state when auto proxy is enabled, saves the
+project opportunistically, and reports partial or complete failures through the
+status hint instead of letting widget code own import side effects.
 `Action::SplitClipAtPlayhead` similarly routes to `AppState::split_at_playhead`,
 which bulk-splits unlocked clips under the playhead and records one undoable
 timeline snapshot only when a split actually occurs.
