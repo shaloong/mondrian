@@ -167,15 +167,13 @@ impl PanelListModel {
             items.push(
                 PanelListItem::new(name)
                     .with_subtitle(path.display().to_string())
-                    .with_badge("Open")
-                    .with_select_action(panel_action("project.select.current")),
+                    .with_badge("Open"),
             );
         } else if state.sequence.is_some() {
             items.push(
                 PanelListItem::new("Unsaved project")
                     .with_subtitle("Save the current edit to create a project file")
-                    .with_badge("Draft")
-                    .with_select_action(panel_action("project.select.unsaved")),
+                    .with_badge("Draft"),
             );
         } else {
             items.push(
@@ -193,8 +191,7 @@ impl PanelListModel {
             items.push(
                 PanelListItem::new(sequence.name.clone())
                     .with_subtitle(format!("{track_count} tracks, {duration} frames"))
-                    .with_badge(format!("{}x{}", resolution.width, resolution.height))
-                    .with_select_action(panel_action("project.select.sequence")),
+                    .with_badge(format!("{}x{}", resolution.width, resolution.height)),
             );
         } else {
             items.push(
@@ -326,11 +323,7 @@ impl PanelListModel {
                     let category = effect_type.category_path().join(" / ");
                     let mut item = PanelListItem::new(name)
                         .with_subtitle(category)
-                        .with_badge(effect_badge(&effect_type))
-                        .with_select_action(panel_action(&format!(
-                            "effects.select.{}",
-                            effect_type.key()
-                        )));
+                        .with_badge(effect_badge(&effect_type));
                     if let Some(selection) = effect_target {
                         item = item.with_activate_action(effects_add_to_clip_action(
                             EffectsAddToClipPayload {
@@ -839,11 +832,7 @@ fn timeline_clip_from_sequence_clip(
         clip.duration.frame.max(1),
     )
     .selected(selected)
-    .disabled(clip.is_disabled)
-    .with_select_action(panel_action(&format!(
-        "timeline.select.{}.{}",
-        track.id, clip.id
-    )));
+    .disabled(clip.is_disabled);
     if let Some(color) = timeline_clip_color(clip, is_video_track) {
         view = view.with_color(color);
     }
@@ -893,7 +882,6 @@ fn panel_item_from_asset(asset: AssetRecord) -> PanelListItem {
         .with_subtitle(subtitle)
         .with_badge(badge)
         .with_accent(accent)
-        .with_select_action(panel_action(&format!("assets.select.{}", asset.id)))
         .with_activate_action(assets_prepare_drag_action(AssetsPrepareDragPayload {
             asset_id: asset.id,
         }))
@@ -1549,6 +1537,7 @@ mod tests {
         assert_eq!(model.title, "Project");
         assert_eq!(model.items[0].title, "cut.mdp");
         assert_eq!(model.items[0].badge.as_deref(), Some("Open"));
+        assert!(model.items[0].select_action.is_none());
         assert!(model.items.iter().any(|item| item.title == "Demo edit"));
         assert!(model.items.iter().any(|item| item.subtitle == "Saved"));
     }
@@ -1652,6 +1641,7 @@ mod tests {
         assert_eq!(model.tracks[0].clips[0].start_frame, 10);
         assert_eq!(model.tracks[0].clips[0].duration_frames, 20);
         assert!(model.tracks[0].clips[0].selected);
+        assert!(model.tracks[0].clips[0].select_action.is_none());
 
         let first_audio = sequence.video_tracks.len();
         assert_eq!(
@@ -1742,7 +1732,7 @@ mod tests {
         let item = &models.assets.items[0];
         assert_eq!(item.title, "Brand Purple");
         assert_eq!(item.badge.as_deref(), Some("CLR"));
-        assert!(item.select_action.is_some());
+        assert!(item.select_action.is_none());
         assert!(item.activate_action.is_some());
         let activate_debug = format!("{:?}", item.activate_action.as_ref().expect("activate"));
         assert!(activate_debug.contains("ui.assets"));
@@ -1757,7 +1747,7 @@ mod tests {
         let model = PanelListModel::from_effect_registry(None);
 
         assert!(model.activate_prefix.is_none());
-        assert!(model.items.iter().any(|item| item.select_action.is_some()));
+        assert!(model.items.iter().all(|item| item.select_action.is_none()));
         assert!(model.items.iter().all(|item| item.activate_action.is_none()));
     }
 

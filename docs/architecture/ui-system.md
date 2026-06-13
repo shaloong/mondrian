@@ -397,6 +397,9 @@ Assets/Effects-style panels use this shared surface as the tracer bullet for
 migrating list-heavy egui panels. The self-hosted Project slot also uses
 `PanelListModel::from_project_status` to show project file, active sequence,
 asset-library, and status-hint state instead of a colored placeholder.
+Real product panels keep single-click row selection local to the widget unless
+the app has a stable domain selection to update; file commands, asset drags,
+and effect insertion are emitted only through activation actions.
 The lower-left dock exposes that Project status as the first tab beside
 Console, so product-shell state is visible in the default layout without adding
 another split.
