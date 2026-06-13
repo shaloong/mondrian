@@ -217,6 +217,7 @@ pub struct Dropdown {
     label: String,
     items: Vec<MenuItem>,
     bounds: Rect,
+    enabled: bool,
     open: bool,
     hovered_index: Option<usize>,
     pressed_index: Option<usize>,
@@ -235,6 +236,7 @@ impl Dropdown {
             label: label.into(),
             items,
             bounds: Rect::ZERO,
+            enabled: true,
             open: false,
             hovered_index: None,
             pressed_index: None,
@@ -245,6 +247,30 @@ impl Dropdown {
             focused: false,
             focus_visible: false,
         }
+    }
+
+    /// Set whether the dropdown accepts input and participates in focus.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        if !enabled {
+            self.open = false;
+            self.hovered_index = None;
+            self.pressed_index = None;
+            self.suppress_next_release = false;
+            self.focused = false;
+            self.focus_visible = false;
+        }
+        self
+    }
+
+    /// Disable the dropdown.
+    pub fn disabled(self) -> Self {
+        self.enabled(false)
+    }
+
+    /// Whether the dropdown is enabled.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
     }
 
     /// Limit how many rows are visible before the open menu scrolls.
@@ -447,6 +473,14 @@ impl Widget for Dropdown {
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if !self.enabled {
+            if self.open {
+                self.close(ctx);
+            }
+            self.focused = false;
+            self.focus_visible = false;
+            return EventResult::Ignored;
+        }
         if self.open {
             match event {
                 UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
@@ -554,7 +588,21 @@ impl Widget for Dropdown {
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
-        paint_menu_trigger(ctx, self.trigger_rect(), &self.label, self.open);
+        if self.enabled {
+            paint_menu_trigger(ctx, self.trigger_rect(), &self.label, self.open);
+        } else {
+            let rect = self.trigger_rect();
+            let tokens = &ctx.theme.colors;
+            ctx.encoder.draw_rect(rect, tokens.muted, ctx.theme.spacing.radius_sm);
+            if !self.label.is_empty() {
+                ctx.encoder.draw_text(
+                    &self.label,
+                    ctx.theme.typography.body.font_size,
+                    Point::new(rect.x + 8.0, rect.y + 5.0),
+                    tokens.muted_foreground,
+                );
+            }
+        }
         if self.focus_visible && !self.open {
             let mut ring = ctx.theme.colors.ring;
             ring.a = 0.38;
@@ -568,6 +616,9 @@ impl Widget for Dropdown {
     }
 
     fn hit_test(&self, point: Point) -> bool {
+        if !self.enabled {
+            return self.bounds.contains(point);
+        }
         if self.open {
             return true;
         }
@@ -578,7 +629,7 @@ impl Widget for Dropdown {
     }
 
     fn can_focus(&self) -> bool {
-        true
+        self.enabled
     }
 }
 
@@ -671,6 +722,40 @@ mod tests {
             &mut ctx,
         );
         assert!(d.open);
+    }
+
+    #[test]
+    fn disabled_dropdown_ignores_click_and_focus() {
+        let mut d = Dropdown::new(
+            "File",
+            vec![MenuItem::new("Open", Action::OpenProject("".into()))],
+        )
+        .disabled();
+        d.layout(Rect::new(0.0, 0.0, 120.0, 28.0));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let cell = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch_fn);
+
+        let result = d.event(
+            &UiEvent::MouseDown {
+                position: Point::new(60.0, 14.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Ignored);
+        assert!(!d.open);
+        assert!(!d.can_focus());
+        assert!(ctx.requests.pointer_capture.is_none());
+        assert!(cell.into_inner().is_empty());
     }
 
     #[test]

@@ -41,6 +41,7 @@ pub struct TextInput {
     text: String,
     placeholder: String,
     bounds: Rect,
+    enabled: bool,
     /// Cursor position as grapheme cluster index.
     cursor: usize,
     focused: bool,
@@ -64,6 +65,7 @@ impl TextInput {
             text: String::new(),
             placeholder: placeholder.into(),
             bounds: Rect::ZERO,
+            enabled: true,
             cursor: 0,
             focused: false,
             selection_start: None,
@@ -80,6 +82,29 @@ impl TextInput {
         self.cursor = self.grapheme_count(&t);
         self.text = t;
         self
+    }
+
+    /// Set whether the input accepts text, pointer, IME, and focus input.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        if !enabled {
+            self.focused = false;
+            self.mouse_down = false;
+            self.selection_start = None;
+            self.ime_preedit.clear();
+            self.cursor_visible.set(false);
+        }
+        self
+    }
+
+    /// Disable the input.
+    pub fn disabled(self) -> Self {
+        self.enabled(false)
+    }
+
+    /// Whether the input is enabled.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
     }
 
     pub fn text(&self) -> &str {
@@ -400,6 +425,17 @@ impl Widget for TextInput {
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if !self.enabled {
+            if self.focused || self.mouse_down || !self.ime_preedit.is_empty() {
+                ctx.release_pointer_capture(self.id);
+                ctx.set_ime_enabled(false, None);
+            }
+            self.focused = false;
+            self.mouse_down = false;
+            self.clear_selection();
+            self.ime_preedit.clear();
+            return EventResult::Ignored;
+        }
         match event {
             // ── Mouse ──────────────────────────────────────────────────
             UiEvent::MouseDown { position, button: MouseButton::Left, modifiers } => {
@@ -631,12 +667,18 @@ impl Widget for TextInput {
         let spacing = &ctx.theme.spacing;
         let font_size = ctx.theme.typography.body.font_size;
 
-        let bg = if self.focused {
+        let bg = if !self.enabled {
+            tokens.muted
+        } else if self.focused {
             tokens.popover
         } else {
             tokens.card
         };
-        let border = tokens.border_for_state(self.focused);
+        let border = if self.enabled {
+            tokens.border_for_state(self.focused)
+        } else {
+            tokens.border
+        };
         let border_inset = 1.0;
         ctx.encoder.draw_rect(
             self.bounds.inset(-border_inset, -border_inset),
@@ -654,13 +696,15 @@ impl Widget for TextInput {
         let text_y = self.text_y(font_size);
 
         // Selection highlight
-        if let Some((byte_start, byte_end)) = self.selection_byte_range() {
-            let sel_x = text_x + measure_text_width(&self.text[..byte_start], font_size);
-            let sel_w = measure_text_width(&self.text[byte_start..byte_end], font_size);
-            let sel_h = font_size * 1.3;
-            let sel_y = self.bounds.y + (self.bounds.height - sel_h).max(0.0) * 0.5;
-            ctx.encoder
-                .draw_rect(Rect::new(sel_x, sel_y, sel_w, sel_h), tokens.primary, 0.0);
+        if self.enabled {
+            if let Some((byte_start, byte_end)) = self.selection_byte_range() {
+                let sel_x = text_x + measure_text_width(&self.text[..byte_start], font_size);
+                let sel_w = measure_text_width(&self.text[byte_start..byte_end], font_size);
+                let sel_h = font_size * 1.3;
+                let sel_y = self.bounds.y + (self.bounds.height - sel_h).max(0.0) * 0.5;
+                ctx.encoder
+                    .draw_rect(Rect::new(sel_x, sel_y, sel_w, sel_h), tokens.primary, 0.0);
+            }
         }
 
         if !self.text.is_empty() {
@@ -668,7 +712,11 @@ impl Widget for TextInput {
                 &self.text,
                 font_size,
                 Point::new(text_x, text_y),
-                tokens.foreground,
+                if self.enabled {
+                    tokens.foreground
+                } else {
+                    tokens.muted_foreground
+                },
             );
         } else if !self.focused {
             ctx.encoder.draw_text(
@@ -679,7 +727,7 @@ impl Widget for TextInput {
             );
         }
 
-        if self.focused && !self.ime_preedit.is_empty() {
+        if self.enabled && self.focused && !self.ime_preedit.is_empty() {
             let prefix_byte = self.grapheme_byte_idx(self.cursor);
             let preedit_x = text_x + measure_text_width(&self.text[..prefix_byte], font_size);
             ctx.encoder.draw_text(
@@ -699,7 +747,7 @@ impl Widget for TextInput {
         }
 
         // Blinking cursor. Draw last so it remains visible over text/preedit.
-        if self.focused {
+        if self.enabled && self.focused {
             let now = Instant::now();
             let elapsed = now.duration_since(self.last_blink.get());
             if elapsed.as_millis() >= 500 {
@@ -725,7 +773,7 @@ impl Widget for TextInput {
     }
 
     fn can_focus(&self) -> bool {
-        true
+        self.enabled
     }
 }
 
@@ -868,6 +916,31 @@ mod tests {
         assert_eq!(ti.cursor, 0);
         assert!(!ti.has_selection());
         assert!(!ti.focused);
+    }
+
+    #[test]
+    fn disabled_input_ignores_mouse_and_does_not_enable_ime() {
+        let mut ti = TextInput::new("ph").with_text("abc").disabled();
+        layout(&mut ti);
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
+
+        let result = ti.event(
+            &UiEvent::MouseDown {
+                position: Point::new(20.0, 12.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Ignored);
+        assert!(!ti.focused);
+        assert!(!ti.can_focus());
+        assert_eq!(ti.text(), "abc");
+        assert!(ctx.requests.ime.is_none());
     }
 
     #[test]
