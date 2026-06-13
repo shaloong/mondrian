@@ -313,6 +313,14 @@ pub trait Widget {
         None
     }
 
+    /// Mutable downcast support. Defaults to `None`.
+    ///
+    /// Stateful containers can override this to migrate child state when a
+    /// model refresh rebuilds part of the widget tree.
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        None
+    }
+
     /// Whether this widget can receive keyboard focus (Tab/Shift+Tab traversal).
     ///
     /// Defaults to `false`. Interactive widgets (Button, Checkbox, Slider,

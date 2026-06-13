@@ -29,6 +29,16 @@ pub struct DockSplitter {
     grab_zone: f32,
 }
 
+/// Serializable-enough splitter layout snapshot used while rebuilding docks.
+///
+/// It intentionally stores only splitter chrome state, not child widget data.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DockSplitterLayout {
+    direction: SplitDirection,
+    ratio: f32,
+    children: Vec<DockSplitterLayout>,
+}
+
 impl DockSplitter {
     pub fn new(
         direction: SplitDirection,
@@ -54,10 +64,57 @@ impl DockSplitter {
         self.handle_hovered
     }
 
+    /// Current first-child ratio, clamped to the splitter's usable range.
+    pub fn ratio(&self) -> f32 {
+        self.ratio
+    }
+
     /// 设置交互热区宽度（默认 6.0）
     pub fn with_grab_zone(mut self, width: f32) -> Self {
         self.grab_zone = width.max(2.0);
         self
+    }
+
+    /// Capture this splitter and all nested splitter ratios.
+    pub fn layout_snapshot(&self) -> DockSplitterLayout {
+        DockSplitterLayout {
+            direction: self.direction,
+            ratio: self.ratio,
+            children: self
+                .children
+                .iter()
+                .filter_map(|child| {
+                    child
+                        .as_ref()
+                        .as_any()
+                        .and_then(|any| any.downcast_ref::<DockSplitter>())
+                        .map(DockSplitter::layout_snapshot)
+                })
+                .collect(),
+        }
+    }
+
+    /// Restore splitter ratios from a previous snapshot.
+    ///
+    /// Direction mismatches are ignored at that node, but compatible nested
+    /// splitter snapshots are still applied by child order.
+    pub fn restore_layout(&mut self, snapshot: &DockSplitterLayout) {
+        if self.direction == snapshot.direction {
+            self.ratio = snapshot.ratio.clamp(0.1, 0.9);
+        }
+
+        let mut snapshot_index = 0usize;
+        for child in &mut self.children {
+            let Some(splitter) =
+                child.as_mut().as_any_mut().and_then(|any| any.downcast_mut::<DockSplitter>())
+            else {
+                continue;
+            };
+            if let Some(child_snapshot) = snapshot.children.get(snapshot_index) {
+                splitter.restore_layout(child_snapshot);
+            }
+            snapshot_index += 1;
+        }
     }
 
     /// 收集自身及所有嵌套 DockSplitter 的热区位置和方向
@@ -327,6 +384,10 @@ impl Widget for DockSplitter {
     fn as_any(&self) -> Option<&dyn std::any::Any> {
         Some(self)
     }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
 }
 
 #[cfg(test)]
@@ -527,5 +588,69 @@ mod tests {
         let rect = encoder.rects.last().copied().expect("splitter should draw handle");
         assert_eq!(rect.x, 0.0);
         assert_eq!(rect.width, 200.0);
+    }
+
+    #[test]
+    fn layout_snapshot_restores_nested_splitter_ratios() {
+        let left = DockSplitter::new(
+            SplitDirection::Vertical,
+            0.6,
+            Box::new(EmptyWidget::new()),
+            Box::new(EmptyWidget::new()),
+        );
+        let right = DockSplitter::new(
+            SplitDirection::Vertical,
+            0.65,
+            Box::new(EmptyWidget::new()),
+            Box::new(EmptyWidget::new()),
+        );
+        let mut splitter = DockSplitter::new(
+            SplitDirection::Horizontal,
+            0.28,
+            Box::new(left),
+            Box::new(right),
+        );
+        let snapshot = DockSplitterLayout {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.42,
+            children: vec![
+                DockSplitterLayout {
+                    direction: SplitDirection::Vertical,
+                    ratio: 0.33,
+                    children: Vec::new(),
+                },
+                DockSplitterLayout {
+                    direction: SplitDirection::Vertical,
+                    ratio: 0.77,
+                    children: Vec::new(),
+                },
+            ],
+        };
+
+        splitter.restore_layout(&snapshot);
+        let restored = splitter.layout_snapshot();
+
+        assert!((restored.ratio - 0.42).abs() < f32::EPSILON);
+        assert!((restored.children[0].ratio - 0.33).abs() < f32::EPSILON);
+        assert!((restored.children[1].ratio - 0.77).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn restore_layout_ignores_mismatched_root_direction() {
+        let mut splitter = DockSplitter::new(
+            SplitDirection::Horizontal,
+            0.28,
+            Box::new(EmptyWidget::new()),
+            Box::new(EmptyWidget::new()),
+        );
+        let snapshot = DockSplitterLayout {
+            direction: SplitDirection::Vertical,
+            ratio: 0.8,
+            children: Vec::new(),
+        };
+
+        splitter.restore_layout(&snapshot);
+
+        assert!((splitter.ratio() - 0.28).abs() < f32::EPSILON);
     }
 }

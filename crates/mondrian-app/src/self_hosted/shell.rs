@@ -176,10 +176,20 @@ impl SelfHostedAppRoot {
         &self.dock
     }
 
+    /// Access the inner dock splitter for shell-owned layout state migration.
+    pub fn dock_mut(&mut self) -> &mut DockSplitter {
+        &mut self.dock
+    }
+
     /// Replace panel contents from a fresh model snapshot while preserving the
     /// root widget id and menu state.
     pub fn set_models(&mut self, models: SelfHostedPanelModels) {
+        let layout = self.dock.layout_snapshot();
         self.dock = build_dock_tree(models);
+        self.dock.restore_layout(&layout);
+        if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
+            self.layout(self.bounds);
+        }
     }
 }
 
@@ -244,7 +254,81 @@ impl Widget for SelfHostedAppRoot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mondrian_editor_state::state::PanelKind;
+    use mondrian_platform::NoopPlatformService;
     use mondrian_ui_core::Widget;
+    use mondrian_ui_core::{
+        EventContext, EventRequests, FocusManager, ShortcutBinding, ShortcutManager, ShortcutScope,
+        TooltipManager, TooltipState,
+    };
+
+    struct DummyFocus;
+
+    impl FocusManager for DummyFocus {
+        fn focused_widget(&self) -> Option<WidgetId> {
+            None
+        }
+
+        fn focused_panel(&self) -> Option<PanelKind> {
+            None
+        }
+
+        fn request_focus(&mut self, _widget: WidgetId, _panel: PanelKind) {}
+
+        fn release_focus(&mut self, _widget: WidgetId) {}
+
+        fn focus_next(&mut self) {}
+
+        fn focus_prev(&mut self) {}
+
+        fn clear_focus(&mut self) {}
+    }
+
+    struct DummyShortcut;
+
+    impl ShortcutManager for DummyShortcut {
+        fn register(&mut self, _scope: ShortcutScope, _binding: ShortcutBinding, _action: Action) {}
+
+        fn unregister(&mut self, _scope: ShortcutScope, _binding: &ShortcutBinding) {}
+
+        fn resolve(&self, _key: KeyCode, _modifiers: Modifiers) -> Option<Action> {
+            None
+        }
+
+        fn clear_scope(&mut self, _scope: ShortcutScope) {}
+
+        fn clear_all(&mut self) {}
+    }
+
+    struct DummyTooltip;
+
+    impl TooltipManager for DummyTooltip {
+        fn show(&mut self, _text: String, _position: Point) {}
+
+        fn hide(&mut self) {}
+
+        fn current(&self) -> Option<&TooltipState> {
+            None
+        }
+
+        fn update(&mut self, _delta_ms: u64) {}
+    }
+
+    fn event_ctx<'a>(
+        focus: &'a mut DummyFocus,
+        shortcut: &'a mut DummyShortcut,
+        tooltip: &'a mut DummyTooltip,
+        requests: &'a mut EventRequests,
+    ) -> EventContext<'a> {
+        EventContext {
+            focus,
+            shortcut,
+            tooltip,
+            dispatch: &|_| {},
+            platform: &NoopPlatformService,
+            requests,
+        }
+    }
 
     #[test]
     fn default_menu_bar_exposes_primary_menu_groups() {
@@ -265,5 +349,59 @@ mod tests {
         assert_eq!(zones[0].0.y, MENU_BAR_HEIGHT);
         assert_eq!(zones[0].0.height, 720.0 - MENU_BAR_HEIGHT);
         assert_eq!(root.child_count(), 2);
+    }
+
+    #[test]
+    fn set_models_preserves_user_splitter_ratio() {
+        let mut root = SelfHostedAppRoot::demo();
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        let grab = root.dock().collect_grab_zones()[0].0.center();
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+
+        {
+            let mut ctx = event_ctx(&mut focus, &mut shortcut, &mut tooltip, &mut requests);
+            assert_eq!(
+                root.dock_mut().event(
+                    &UiEvent::MouseDown {
+                        position: grab,
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::none(),
+                    },
+                    &mut ctx,
+                ),
+                EventResult::Handled
+            );
+            assert_eq!(
+                root.dock_mut().event(
+                    &UiEvent::MouseMove {
+                        position: Point::new(620.0, grab.y),
+                        modifiers: Modifiers::none(),
+                    },
+                    &mut ctx,
+                ),
+                EventResult::Handled
+            );
+            assert_eq!(
+                root.dock_mut().event(
+                    &UiEvent::MouseUp {
+                        position: Point::new(620.0, grab.y),
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::none(),
+                    },
+                    &mut ctx,
+                ),
+                EventResult::Handled
+            );
+        }
+
+        let dragged_ratio = root.dock().ratio();
+        assert!(dragged_ratio > 0.4);
+
+        root.set_models(SelfHostedPanelModels::demo());
+
+        assert!((root.dock().ratio() - dragged_ratio).abs() < f32::EPSILON);
     }
 }

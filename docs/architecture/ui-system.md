@@ -369,6 +369,11 @@ This lets focus routing, overlay popups, repaint requests, shell runtime
 behavior, and editor-state dispatch be validated in the same dock tree that
 future panels will use. Timeline migration should reuse this path after
 scrollbars, overlays, and property controls are stable.
+When a self-hosted shell refreshes panel models from `AppState`, it may rebuild
+panel content widgets, but it must preserve dock chrome state. `DockSplitter`
+therefore exposes a layout snapshot containing splitter direction/ratio data
+only, and `SelfHostedAppRoot::set_models` restores that snapshot before
+relayout so app data changes do not reset user-resized panels.
 
 Browser-style panels should use `PanelList` / `PanelListItem` instead of
 ad-hoc colored placeholders or one-off row painting. `PanelList` owns local
