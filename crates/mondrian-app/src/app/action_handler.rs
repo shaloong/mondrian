@@ -98,6 +98,7 @@ impl AppState {
 
             // ── 时间线编辑（复用已有 undoable 命令层）────────────────────
             Action::DeleteSelection => self.delete_selected_clips_from_ui(),
+            Action::SplitClipAtPlayhead => self.split_at_playhead().map(|_| ()),
 
             // ── 项目操作 ──────────────────────────────────────────────────
             Action::SaveProject => {
@@ -859,6 +860,40 @@ mod tests {
         assert!(sequence.audio_tracks[0].clips.is_empty());
         assert!(state.selection.selected_clips.is_empty());
         assert!(state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_split_clip_at_playhead_splits_intersecting_clip() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
+        state.seek(20);
+
+        state
+            .dispatch_action(mondrian_editor_state::Action::SplitClipAtPlayhead)
+            .expect("split at playhead");
+
+        let sequence = state.sequence.as_ref().expect("sequence");
+        let clips = &sequence.video_tracks[0].clips;
+        assert_eq!(clips.len(), 2);
+        assert_eq!(clips[0].id, clip_id);
+        assert_eq!(clips[0].position.frame, 10);
+        assert_eq!(clips[0].duration.frame, 10);
+        assert_eq!(clips[1].position.frame, 20);
+        assert_eq!(clips[1].duration.frame, 10);
+        assert!(state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_split_clip_at_playhead_ignores_clip_boundary() {
+        let (mut state, _, _) = state_with_two_video_tracks();
+        state.seek(10);
+
+        state
+            .dispatch_action(mondrian_editor_state::Action::SplitClipAtPlayhead)
+            .expect("split at clip boundary");
+
+        let sequence = state.sequence.as_ref().expect("sequence");
+        assert_eq!(sequence.video_tracks[0].clips.len(), 1);
+        assert!(!state.can_undo_action());
     }
 
     #[test]

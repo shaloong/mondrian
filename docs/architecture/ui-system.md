@@ -91,6 +91,9 @@ The shared `Action::DeleteSelection` path deletes the current
 `AppState::selection.selected_clips` through `remove_clips_bulk`, so shortcuts,
 menus, scripts, and self-hosted widgets all reuse the same locked-track checks,
 linked clip cleanup, undo snapshot, and timeline modified event behavior.
+`Action::SplitClipAtPlayhead` similarly routes to `AppState::split_at_playhead`,
+which bulk-splits unlocked clips under the playhead and records one undoable
+timeline snapshot only when a split actually occurs.
 Inspector timing controls reuse timeline trim actions for clip In/Out changes
 instead of introducing a parallel editing path.
 Inspector effect rows are read from the selected clip's effect instances and
