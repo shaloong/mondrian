@@ -447,6 +447,11 @@ Winit keyboard and IME conversion lives in the self-hosted shell runtime so
 `ui_demo` and product windows share the same `KeyDown` / `TextInput` /
 `ImePreedit` / `ImeCommit` semantics. Entry binaries should route Escape
 through the widget tree first and only treat it as a window close when ignored.
+Self-hosted entry binaries should collect widget-dispatched actions during
+event routing, then drain them after the root borrow ends. Shell-local actions
+such as the new-project dialog mutate `SelfHostedAppRoot`; only confirmed
+project creation emits the editor-facing `ui.project.create_with_settings`
+action consumed by `AppState`.
 Form controls should expose a common `enabled(bool)` / `disabled()` builder
 where practical. Disabled controls must not dispatch actions, request pointer
 capture, or participate in focus traversal, and should render with muted theme

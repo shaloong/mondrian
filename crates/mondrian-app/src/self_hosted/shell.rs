@@ -14,15 +14,19 @@ use mondrian_ui_widgets::menu::{Dropdown, MenuItem};
 use std::path::Path;
 
 use crate::app::ui_actions::{
+    app_shell_cancel_new_project_dialog_action, app_shell_confirm_new_project_dialog_action,
     app_shell_import_media_dialog_action, app_shell_new_project_dialog_action,
-    app_shell_open_project_dialog_action, app_shell_save_project_as_dialog_action,
-    project_create_with_settings_action, ProjectCreateWithSettingsPayload,
-    APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
+    app_shell_new_project_name_changed_action, app_shell_open_project_dialog_action,
+    app_shell_save_project_as_dialog_action, project_create_with_settings_action,
+    ProjectCreateWithSettingsPayload, APP_SHELL_CANCEL_NEW_PROJECT_DIALOG,
+    APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE,
+    APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_NEW_PROJECT_NAME_CHANGED,
     APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
 };
 use crate::self_hosted::panels::{build_demo_dock_tree, build_dock_tree, SelfHostedPanelModels};
 use mondrian_core::ProjectSettings;
 use mondrian_timeline::SequenceSettings;
+use mondrian_ui_widgets::{Button, TextInput};
 
 /// Height reserved for the self-hosted top menu bar.
 pub const MENU_BAR_HEIGHT: f32 = 28.0;
@@ -162,6 +166,24 @@ fn project_name_from_path(path: &Path) -> String {
         .unwrap_or_else(|| "Untitled".to_string())
 }
 
+fn default_project_file_name(name: &str) -> String {
+    let stem: String = name
+        .trim()
+        .chars()
+        .map(|ch| match ch {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            ch if ch.is_control() => '_',
+            ch => ch,
+        })
+        .collect();
+    let stem = stem.trim_matches(['.', ' ']).trim();
+    if stem.is_empty() {
+        format!("Untitled.{PROJECT_FILE_EXTENSION}")
+    } else {
+        format!("{stem}.{PROJECT_FILE_EXTENSION}")
+    }
+}
+
 /// Default Mondrian menu structure for self-hosted shells.
 pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
     vec![
@@ -289,11 +311,186 @@ impl Widget for MenuBar {
     }
 }
 
+struct NewProjectDialog {
+    id: WidgetId,
+    draft: SelfHostedNewProjectDraft,
+    bounds: Rect,
+    card: Rect,
+    name_input: TextInput,
+    cancel_button: Button,
+    create_button: Button,
+}
+
+impl NewProjectDialog {
+    fn new(draft: SelfHostedNewProjectDraft) -> Self {
+        let name_input = TextInput::new("Project name")
+            .with_text(&draft.name)
+            .on_change(app_shell_new_project_name_changed_action);
+        Self {
+            id: WidgetId::new(),
+            draft,
+            bounds: Rect::ZERO,
+            card: Rect::ZERO,
+            name_input,
+            cancel_button: Button::new("Cancel")
+                .on_click(app_shell_cancel_new_project_dialog_action()),
+            create_button: Button::new("Create...")
+                .on_click(app_shell_confirm_new_project_dialog_action()),
+        }
+    }
+
+    fn set_name(&mut self, name: String) {
+        self.draft.name = name;
+    }
+
+    fn draft(&self) -> &SelfHostedNewProjectDraft {
+        &self.draft
+    }
+}
+
+impl Widget for NewProjectDialog {
+    fn id(&self) -> WidgetId {
+        self.id
+    }
+
+    fn measure(&self, _constraint: LayoutConstraint) -> Size {
+        Size::new(420.0, 220.0)
+    }
+
+    fn layout(&mut self, bounds: Rect) {
+        self.bounds = bounds;
+        let card_width = bounds.width.clamp(280.0, 420.0);
+        let card_height = 220.0;
+        self.card = Rect::new(
+            bounds.x + (bounds.width - card_width) * 0.5,
+            bounds.y + (bounds.height - card_height) * 0.5,
+            card_width,
+            card_height,
+        );
+        let content = self.card.inset(20.0, 20.0);
+        self.name_input
+            .layout(Rect::new(content.x, content.y + 82.0, content.width, 34.0));
+
+        let button_y = self.card.y + self.card.height - 52.0;
+        self.cancel_button.layout(Rect::new(
+            self.card.x + self.card.width - 204.0,
+            button_y,
+            88.0,
+            32.0,
+        ));
+        self.create_button.layout(Rect::new(
+            self.card.x + self.card.width - 108.0,
+            button_y,
+            88.0,
+            32.0,
+        ));
+    }
+
+    fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        match event {
+            UiEvent::KeyDown { key: KeyCode::Escape, .. } => {
+                (ctx.dispatch)(app_shell_cancel_new_project_dialog_action());
+                return EventResult::Handled;
+            }
+            UiEvent::KeyDown { key: KeyCode::Enter, .. } => {
+                (ctx.dispatch)(app_shell_confirm_new_project_dialog_action());
+                return EventResult::Handled;
+            }
+            UiEvent::MouseDown { position, .. } if !self.card.contains(*position) => {
+                return EventResult::Handled;
+            }
+            _ => {}
+        }
+
+        if self.create_button.event(event, ctx) == EventResult::Handled {
+            return EventResult::Handled;
+        }
+        if self.cancel_button.event(event, ctx) == EventResult::Handled {
+            return EventResult::Handled;
+        }
+        if self.name_input.event(event, ctx) == EventResult::Handled {
+            return EventResult::Handled;
+        }
+        EventResult::Ignored
+    }
+
+    fn paint(&self, ctx: &mut PaintContext) {
+        ctx.encoder.draw_rect(
+            self.bounds,
+            mondrian_core::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.38 },
+            0.0,
+        );
+        ctx.encoder.draw_rect(self.card, ctx.theme.colors.card, 8.0);
+        let top_left = Point::new(self.card.x, self.card.y);
+        let top_right = Point::new(self.card.x + self.card.width, self.card.y);
+        let bottom_left = Point::new(self.card.x, self.card.y + self.card.height);
+        let bottom_right = Point::new(
+            self.card.x + self.card.width,
+            self.card.y + self.card.height,
+        );
+        ctx.encoder.draw_line(top_left, top_right, 1.0, ctx.theme.colors.border);
+        ctx.encoder.draw_line(bottom_left, bottom_right, 1.0, ctx.theme.colors.border);
+        ctx.encoder.draw_line(top_left, bottom_left, 1.0, ctx.theme.colors.border);
+        ctx.encoder.draw_line(top_right, bottom_right, 1.0, ctx.theme.colors.border);
+
+        let content = self.card.inset(20.0, 20.0);
+        ctx.encoder.draw_text(
+            "New Project",
+            18.0,
+            Point::new(content.x, content.y + 22.0),
+            ctx.theme.colors.foreground,
+        );
+        ctx.encoder.draw_text_box(
+            "Create a project file and initialize the timeline with default production settings.",
+            12.0,
+            Point::new(content.x, content.y + 46.0),
+            content.width,
+            ctx.theme.colors.muted_foreground,
+        );
+        ctx.encoder.draw_text(
+            "Name",
+            12.0,
+            Point::new(content.x, content.y + 76.0),
+            ctx.theme.colors.muted_foreground,
+        );
+        self.name_input.paint(ctx);
+        self.cancel_button.paint(ctx);
+        self.create_button.paint(ctx);
+    }
+
+    fn hit_test(&self, point: Point) -> bool {
+        self.bounds.contains(point)
+    }
+
+    fn child_count(&self) -> usize {
+        3
+    }
+
+    fn child(&self, index: usize) -> Option<&dyn Widget> {
+        match index {
+            0 => Some(&self.name_input),
+            1 => Some(&self.cancel_button),
+            2 => Some(&self.create_button),
+            _ => None,
+        }
+    }
+
+    fn child_mut(&mut self, index: usize) -> Option<&mut dyn Widget> {
+        match index {
+            0 => Some(&mut self.name_input),
+            1 => Some(&mut self.cancel_button),
+            2 => Some(&mut self.create_button),
+            _ => None,
+        }
+    }
+}
+
 /// Root widget for the self-hosted editor window.
 pub struct SelfHostedAppRoot {
     id: WidgetId,
     menu_bar: MenuBar,
     dock: DockSplitter,
+    new_project_dialog: Option<NewProjectDialog>,
     bounds: Rect,
 }
 
@@ -314,6 +511,7 @@ impl SelfHostedAppRoot {
             id: WidgetId::new(),
             menu_bar,
             dock,
+            new_project_dialog: None,
             bounds: Rect::ZERO,
         }
     }
@@ -338,6 +536,69 @@ impl SelfHostedAppRoot {
             self.layout(self.bounds);
         }
     }
+
+    /// Apply a shell-local action and return an editor action when one should
+    /// continue to [`AppState`](crate::app::AppState).
+    pub fn handle_shell_action(
+        &mut self,
+        action: Action,
+        platform: &dyn PlatformService,
+        current_project_path: Option<&Path>,
+    ) -> Option<Action> {
+        match action {
+            Action::Custom { namespace, name, .. }
+                if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_NEW_PROJECT_DIALOG =>
+            {
+                self.new_project_dialog =
+                    Some(NewProjectDialog::new(SelfHostedNewProjectDraft::default()));
+                if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
+                    self.layout(self.bounds);
+                }
+                None
+            }
+            Action::Custom { namespace, name, payload }
+                if namespace == APP_SHELL_NAMESPACE
+                    && name == APP_SHELL_NEW_PROJECT_NAME_CHANGED =>
+            {
+                if let Some(dialog) = &mut self.new_project_dialog {
+                    if let Ok(name) = serde_json::from_value::<String>(payload) {
+                        dialog.set_name(name);
+                    }
+                }
+                None
+            }
+            Action::Custom { namespace, name, .. }
+                if namespace == APP_SHELL_NAMESPACE
+                    && name == APP_SHELL_CANCEL_NEW_PROJECT_DIALOG =>
+            {
+                self.new_project_dialog = None;
+                None
+            }
+            Action::Custom { namespace, name, .. }
+                if namespace == APP_SHELL_NAMESPACE
+                    && name == APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG =>
+            {
+                let draft = self
+                    .new_project_dialog
+                    .as_ref()
+                    .map(|dialog| dialog.draft().clone())
+                    .unwrap_or_default();
+                if draft.validate().is_err() {
+                    return None;
+                }
+                let path = platform.save_file_dialog(
+                    "Create Mondrian Project",
+                    &default_project_file_name(&draft.name),
+                    &project_file_filters(),
+                )?;
+                self.new_project_dialog = None;
+                Some(project_create_with_settings_action(
+                    draft.into_payload(path),
+                ))
+            }
+            action => resolve_app_shell_action(action, platform, current_project_path),
+        }
+    }
 }
 
 impl Widget for SelfHostedAppRoot {
@@ -359,9 +620,26 @@ impl Widget for SelfHostedAppRoot {
             bounds.width,
             (bounds.height - MENU_BAR_HEIGHT).max(0.0),
         ));
+        if let Some(dialog) = &mut self.new_project_dialog {
+            dialog.layout(bounds);
+        }
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if let Some(dialog) = &mut self.new_project_dialog {
+            if dialog.event(event, ctx) == EventResult::Handled {
+                return EventResult::Handled;
+            }
+            if matches!(
+                event,
+                UiEvent::MouseDown { .. }
+                    | UiEvent::MouseUp { .. }
+                    | UiEvent::MouseMove { .. }
+                    | UiEvent::MouseWheel { .. }
+            ) {
+                return EventResult::Handled;
+            }
+        }
         if self.menu_bar.event(event, ctx) == EventResult::Handled {
             return EventResult::Handled;
         }
@@ -371,6 +649,9 @@ impl Widget for SelfHostedAppRoot {
     fn paint(&self, ctx: &mut PaintContext) {
         self.menu_bar.paint(ctx);
         self.dock.paint(ctx);
+        if let Some(dialog) = &self.new_project_dialog {
+            dialog.paint(ctx);
+        }
     }
 
     fn hit_test(&self, point: Point) -> bool {
@@ -378,13 +659,14 @@ impl Widget for SelfHostedAppRoot {
     }
 
     fn child_count(&self) -> usize {
-        2
+        2 + usize::from(self.new_project_dialog.is_some())
     }
 
     fn child(&self, index: usize) -> Option<&dyn Widget> {
         match index {
             0 => Some(&self.menu_bar),
             1 => Some(&self.dock),
+            2 => self.new_project_dialog.as_ref().map(|dialog| dialog as &dyn Widget),
             _ => None,
         }
     }
@@ -393,6 +675,7 @@ impl Widget for SelfHostedAppRoot {
         match index {
             0 => Some(&mut self.menu_bar),
             1 => Some(&mut self.dock),
+            2 => self.new_project_dialog.as_mut().map(|dialog| dialog as &mut dyn Widget),
             _ => None,
         }
     }
@@ -402,9 +685,11 @@ impl Widget for SelfHostedAppRoot {
 mod tests {
     use super::*;
     use crate::app::ui_actions::{
+        app_shell_cancel_new_project_dialog_action, app_shell_confirm_new_project_dialog_action,
         app_shell_import_media_dialog_action, app_shell_new_project_dialog_action,
-        app_shell_open_project_dialog_action, app_shell_save_project_as_dialog_action,
-        ProjectCreateWithSettingsPayload, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
+        app_shell_new_project_name_changed_action, app_shell_open_project_dialog_action,
+        app_shell_save_project_as_dialog_action, ProjectCreateWithSettingsPayload,
+        PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
     };
     use mondrian_core::{Rational, Resolution};
     use mondrian_editor_state::state::PanelKind;
@@ -625,6 +910,72 @@ mod tests {
         );
         assert_eq!(payload.name, "My Cut");
         assert!(payload.sequence_settings.validate().is_ok());
+    }
+
+    #[test]
+    fn app_root_handles_new_project_dialog_draft_and_confirm() {
+        let platform = FakePlatform {
+            open_paths: None,
+            save_path: Some(PathBuf::from("E:/projects/Rough Cut.mdp")),
+        };
+        let mut root = SelfHostedAppRoot::demo();
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+
+        assert_eq!(
+            root.handle_shell_action(app_shell_new_project_dialog_action(), &platform, None),
+            None
+        );
+        assert!(root.new_project_dialog.is_some());
+        assert_eq!(root.child_count(), 3);
+
+        assert_eq!(
+            root.handle_shell_action(
+                app_shell_new_project_name_changed_action("Rough Cut"),
+                &platform,
+                None
+            ),
+            None
+        );
+
+        let action = root
+            .handle_shell_action(
+                app_shell_confirm_new_project_dialog_action(),
+                &platform,
+                None,
+            )
+            .expect("confirm action");
+
+        assert!(root.new_project_dialog.is_none());
+        let Action::Custom { namespace, name, payload } = action else {
+            panic!("expected project create action");
+        };
+        assert_eq!(namespace, PROJECT_NAMESPACE);
+        assert_eq!(name, PROJECT_CREATE_WITH_SETTINGS);
+        let payload: ProjectCreateWithSettingsPayload =
+            serde_json::from_value(payload).expect("project create payload");
+        assert_eq!(payload.name, "Rough Cut");
+        assert_eq!(
+            payload.project_file,
+            PathBuf::from("E:/projects/Rough Cut.mdp")
+        );
+    }
+
+    #[test]
+    fn app_root_cancels_new_project_dialog_without_editor_action() {
+        let platform = FakePlatform::default();
+        let mut root = SelfHostedAppRoot::demo();
+
+        root.handle_shell_action(app_shell_new_project_dialog_action(), &platform, None);
+
+        assert_eq!(
+            root.handle_shell_action(
+                app_shell_cancel_new_project_dialog_action(),
+                &platform,
+                None
+            ),
+            None
+        );
+        assert!(root.new_project_dialog.is_none());
     }
 
     #[test]

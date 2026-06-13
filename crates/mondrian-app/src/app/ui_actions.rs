@@ -62,6 +62,12 @@ pub const APP_SHELL_NAMESPACE: &str = "app.shell";
 
 /// App-shell request to create a new project through a platform save dialog.
 pub const APP_SHELL_NEW_PROJECT_DIALOG: &str = "new_project_dialog";
+/// App-shell request to update the self-hosted new-project draft name.
+pub const APP_SHELL_NEW_PROJECT_NAME_CHANGED: &str = "new_project_name_changed";
+/// App-shell request to confirm the self-hosted new-project dialog.
+pub const APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG: &str = "confirm_new_project_dialog";
+/// App-shell request to cancel the self-hosted new-project dialog.
+pub const APP_SHELL_CANCEL_NEW_PROJECT_DIALOG: &str = "cancel_new_project_dialog";
 /// App-shell request to open a platform project file dialog.
 pub const APP_SHELL_OPEN_PROJECT_DIALOG: &str = "open_project_dialog";
 /// App-shell request to open a platform media import dialog.
@@ -301,6 +307,21 @@ pub fn app_shell_new_project_dialog_action() -> Action {
     custom_app_shell_action(APP_SHELL_NEW_PROJECT_DIALOG)
 }
 
+/// Build an app-shell request for changing the new-project draft name.
+pub fn app_shell_new_project_name_changed_action(name: &str) -> Action {
+    custom_app_shell_action_with_payload(APP_SHELL_NEW_PROJECT_NAME_CHANGED, name)
+}
+
+/// Build an app-shell request for confirming the new-project dialog.
+pub fn app_shell_confirm_new_project_dialog_action() -> Action {
+    custom_app_shell_action(APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG)
+}
+
+/// Build an app-shell request for canceling the new-project dialog.
+pub fn app_shell_cancel_new_project_dialog_action() -> Action {
+    custom_app_shell_action(APP_SHELL_CANCEL_NEW_PROJECT_DIALOG)
+}
+
 /// Build an app-shell request for opening a project dialog.
 pub fn app_shell_open_project_dialog_action() -> Action {
     custom_app_shell_action(APP_SHELL_OPEN_PROJECT_DIALOG)
@@ -361,5 +382,13 @@ fn custom_app_shell_action(name: &'static str) -> Action {
         namespace: APP_SHELL_NAMESPACE.into(),
         name: name.into(),
         payload: serde_json::Value::Null,
+    }
+}
+
+fn custom_app_shell_action_with_payload<T: Serialize>(name: &'static str, payload: T) -> Action {
+    Action::Custom {
+        namespace: APP_SHELL_NAMESPACE.into(),
+        name: name.into(),
+        payload: serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
     }
 }
