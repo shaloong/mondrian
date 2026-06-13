@@ -21,6 +21,7 @@ pub struct Button {
     label: String,
     bounds: Rect,
     state: ButtonState,
+    enabled: bool,
     pub on_click: Option<Action>,
     focus_visible: bool,
 }
@@ -32,6 +33,7 @@ impl Button {
             label: label.into(),
             bounds: Rect::ZERO,
             state: ButtonState::Normal,
+            enabled: true,
             on_click: None,
             focus_visible: false,
         }
@@ -40,6 +42,26 @@ impl Button {
     pub fn on_click(mut self, action: Action) -> Self {
         self.on_click = Some(action);
         self
+    }
+
+    /// Set whether the button accepts user input and participates in focus.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        if !enabled {
+            self.state = ButtonState::Normal;
+            self.focus_visible = false;
+        }
+        self
+    }
+
+    /// Disable the button.
+    pub fn disabled(self) -> Self {
+        self.enabled(false)
+    }
+
+    /// Whether the button is enabled.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
     }
 
     pub fn state(&self) -> ButtonState {
@@ -69,6 +91,11 @@ impl Widget for Button {
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if !self.enabled {
+            self.state = ButtonState::Normal;
+            self.focus_visible = false;
+            return EventResult::Ignored;
+        }
         match event {
             UiEvent::MouseDown { position, button: MouseButton::Left, .. }
                 if self.bounds.contains(*position) =>
@@ -128,10 +155,14 @@ impl Widget for Button {
         let spacing = &ctx.theme.spacing;
         let font_size = ctx.theme.typography.button.font_size;
 
-        let bg = match self.state {
-            ButtonState::Normal => tokens.card,
-            ButtonState::Hovered => tokens.accent,
-            ButtonState::Pressed => tokens.muted,
+        let bg = if !self.enabled {
+            tokens.muted
+        } else {
+            match self.state {
+                ButtonState::Normal => tokens.card,
+                ButtonState::Hovered => tokens.accent,
+                ButtonState::Pressed => tokens.muted,
+            }
         };
 
         ctx.encoder.draw_rect(self.bounds, bg, spacing.radius_md);
@@ -148,7 +179,11 @@ impl Widget for Button {
                 &self.label,
                 font_size,
                 Point::new(tx, ty),
-                tokens.foreground,
+                if self.enabled {
+                    tokens.foreground
+                } else {
+                    tokens.muted_foreground
+                },
             );
         }
     }
@@ -158,7 +193,7 @@ impl Widget for Button {
     }
 
     fn can_focus(&self) -> bool {
-        true
+        self.enabled
     }
 }
 
@@ -274,6 +309,34 @@ mod tests {
         let actions = cell.into_inner();
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0], Action::Play);
+    }
+
+    #[test]
+    fn disabled_button_ignores_mouse_and_focus() {
+        let mut b = Button::new("OK").on_click(Action::Play).disabled();
+        b.layout(Rect::new(0.0, 0.0, 100.0, 30.0));
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let cell = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
+        let mut ctx = event_ctx_with_capture(&mut f, &mut s, &mut t, &dispatch_fn);
+
+        let result = b.event(
+            &UiEvent::MouseDown {
+                position: Point::new(50.0, 15.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(b.state(), ButtonState::Normal);
+        assert!(!b.can_focus());
+        assert!(cell.into_inner().is_empty());
     }
 
     #[test]

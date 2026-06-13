@@ -17,6 +17,7 @@ pub struct Slider {
     min: f32,
     max: f32,
     bounds: Rect,
+    enabled: bool,
     dragging: bool,
     focused: bool,
     focus_visible: bool,
@@ -34,6 +35,7 @@ impl Slider {
             min,
             max,
             bounds: Rect::ZERO,
+            enabled: true,
             dragging: false,
             focused: false,
             focus_visible: false,
@@ -52,6 +54,27 @@ impl Slider {
     pub fn on_change(mut self, action: impl Fn(f32) -> Action + 'static) -> Self {
         self.on_change = Some(Box::new(action));
         self
+    }
+
+    /// Set whether the slider accepts user input and participates in focus.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        if !enabled {
+            self.dragging = false;
+            self.focused = false;
+            self.focus_visible = false;
+        }
+        self
+    }
+
+    /// Disable the slider.
+    pub fn disabled(self) -> Self {
+        self.enabled(false)
+    }
+
+    /// Whether the slider is enabled.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
     }
 
     fn range(&self) -> f32 {
@@ -153,6 +176,15 @@ impl Widget for Slider {
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if !self.enabled {
+            if self.dragging {
+                ctx.release_pointer_capture(self.id);
+            }
+            self.dragging = false;
+            self.focused = false;
+            self.focus_visible = false;
+            return EventResult::Ignored;
+        }
         match event {
             UiEvent::MouseDown { position, button: MouseButton::Left, .. }
                 if self.bounds.contains(*position) =>
@@ -219,14 +251,24 @@ impl Widget for Slider {
 
         // Track background
         let track = self.track_rect();
-        ctx.encoder.draw_rect(track, tokens.accent, spacing.radius_full);
+        let track_color = if self.enabled {
+            tokens.accent
+        } else {
+            tokens.muted
+        };
+        let fill_color = if self.enabled {
+            tokens.primary
+        } else {
+            tokens.muted_foreground
+        };
+        ctx.encoder.draw_rect(track, track_color, spacing.radius_full);
 
         // Filled track
         let ratio = self.ratio();
         let fill_w = track.width * ratio;
         if fill_w > 0.0 {
             let track_fill = Rect::new(track.x, track.y, fill_w, track.height);
-            ctx.encoder.draw_rect(track_fill, tokens.primary, spacing.radius_full);
+            ctx.encoder.draw_rect(track_fill, fill_color, spacing.radius_full);
         }
 
         let thumb_rect = self.thumb_rect();
@@ -241,7 +283,7 @@ impl Widget for Slider {
             );
             ctx.encoder.draw_rect(halo, ring, halo.height * 0.5);
         }
-        ctx.encoder.draw_rect(thumb_rect, tokens.primary, thumb_rect.height * 0.5);
+        ctx.encoder.draw_rect(thumb_rect, fill_color, thumb_rect.height * 0.5);
     }
 
     fn hit_test(&self, point: Point) -> bool {
@@ -249,7 +291,7 @@ impl Widget for Slider {
     }
 
     fn can_focus(&self) -> bool {
-        true
+        self.enabled
     }
 }
 
@@ -383,6 +425,33 @@ mod tests {
 
         assert_eq!(actions.borrow().as_slice(), &[value_action(50.0)]);
         assert!(ctx.requests.repaint);
+    }
+
+    #[test]
+    fn disabled_slider_ignores_mouse_and_focus() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut f = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut shortcut, &mut tooltip, &dispatch);
+        let mut slider = Slider::new(0.0, 0.0, 100.0).on_change(value_action).disabled();
+        slider.layout(Rect::new(0.0, 0.0, 200.0, 20.0));
+
+        let result = slider.event(
+            &UiEvent::MouseDown {
+                position: Point::new(100.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(slider.value(), 0.0);
+        assert!(!slider.can_focus());
+        assert!(actions.borrow().is_empty());
+        assert!(!ctx.requests.repaint);
     }
 
     #[test]

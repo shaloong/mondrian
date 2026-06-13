@@ -409,6 +409,10 @@ undo history. Real panels map widget values to semantic `Action`s or command
 objects at the panel/app layer. Programmatic state synchronization uses setters
 such as `set_color()` / `set_points()` and must not emit actions; only user
 input paths dispatch changes and request repaint.
+Form controls should expose a common `enabled(bool)` / `disabled()` builder
+where practical. Disabled controls must not dispatch actions, request pointer
+capture, or participate in focus traversal, and should render with muted theme
+tokens rather than panel-local color constants.
 
 `mondrian-ui-widgets` keeps extreme interaction and visual-command stability in
 normal Rust tests. The component stress suite drives edge-size layouts, long

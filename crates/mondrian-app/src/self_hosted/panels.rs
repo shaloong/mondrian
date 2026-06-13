@@ -927,21 +927,23 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
     let curve =
         CurveEditor::with_points(model.curve_points.clone()).on_change(inspector_curve_action);
     let selected_clip = model.selected_clip;
+    let has_target = selected_clip.is_some();
     let mut panel = PropertyPanel::new("Inspector").with_subtitle("Selected clip").with_section(
         PropertySection::new("Clip Style")
             .with_row(PropertyRow::new(
                 "Enabled",
                 Box::new(
                     Checkbox::new("启用效果", model.enabled)
+                        .enabled(has_target)
                         .on_change(move |value| inspector_bool_action(selected_clip, value)),
                 ),
             ))
             .with_row(PropertyRow::new(
                 "Opacity",
                 Box::new(
-                    Slider::new(model.opacity, 0.0, 100.0).on_change(move |value| {
-                        inspector_value_action(selected_clip, "opacity", value)
-                    }),
+                    Slider::new(model.opacity, 0.0, 100.0).enabled(has_target).on_change(
+                        move |value| inspector_value_action(selected_clip, "opacity", value),
+                    ),
                 ),
             ))
             .with_row(PropertyRow::new(
@@ -955,49 +957,57 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
             .with_row(PropertyRow::new(
                 "Position X",
                 Box::new(
-                    Slider::new(model.position_x, -4096.0, 4096.0).on_change(move |value| {
-                        inspector_transform_action(
-                            selected_clip,
-                            InspectorClipTransformField::PositionX,
-                            value,
-                        )
-                    }),
+                    Slider::new(model.position_x, -4096.0, 4096.0).enabled(has_target).on_change(
+                        move |value| {
+                            inspector_transform_action(
+                                selected_clip,
+                                InspectorClipTransformField::PositionX,
+                                value,
+                            )
+                        },
+                    ),
                 ),
             ))
             .with_row(PropertyRow::new(
                 "Position Y",
                 Box::new(
-                    Slider::new(model.position_y, -4096.0, 4096.0).on_change(move |value| {
-                        inspector_transform_action(
-                            selected_clip,
-                            InspectorClipTransformField::PositionY,
-                            value,
-                        )
-                    }),
+                    Slider::new(model.position_y, -4096.0, 4096.0).enabled(has_target).on_change(
+                        move |value| {
+                            inspector_transform_action(
+                                selected_clip,
+                                InspectorClipTransformField::PositionY,
+                                value,
+                            )
+                        },
+                    ),
                 ),
             ))
             .with_row(PropertyRow::new(
                 "Scale",
                 Box::new(
-                    Slider::new(model.scale_percent, 0.0, 400.0).on_change(move |value| {
-                        inspector_transform_action(
-                            selected_clip,
-                            InspectorClipTransformField::ScalePercent,
-                            value,
-                        )
-                    }),
+                    Slider::new(model.scale_percent, 0.0, 400.0).enabled(has_target).on_change(
+                        move |value| {
+                            inspector_transform_action(
+                                selected_clip,
+                                InspectorClipTransformField::ScalePercent,
+                                value,
+                            )
+                        },
+                    ),
                 ),
             ))
             .with_row(PropertyRow::new(
                 "Rotation",
                 Box::new(
-                    Slider::new(model.rotation_degrees, -180.0, 180.0).on_change(move |value| {
-                        inspector_transform_action(
-                            selected_clip,
-                            InspectorClipTransformField::RotationDegrees,
-                            value,
-                        )
-                    }),
+                    Slider::new(model.rotation_degrees, -180.0, 180.0)
+                        .enabled(has_target)
+                        .on_change(move |value| {
+                            inspector_transform_action(
+                                selected_clip,
+                                InspectorClipTransformField::RotationDegrees,
+                                value,
+                            )
+                        }),
                 ),
             )),
     );
@@ -1006,18 +1016,30 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
         PropertySection::new("Timing")
             .with_row(PropertyRow::new(
                 "In",
-                Box::new(Slider::new(model.in_frame, 0.0, model.max_frame).on_change(
-                    move |value| {
-                        inspector_timing_action(selected_clip, TimelineTrimPayloadEdge::In, value)
-                    },
-                )),
+                Box::new(
+                    Slider::new(model.in_frame, 0.0, model.max_frame)
+                        .enabled(has_target)
+                        .on_change(move |value| {
+                            inspector_timing_action(
+                                selected_clip,
+                                TimelineTrimPayloadEdge::In,
+                                value,
+                            )
+                        }),
+                ),
             ))
             .with_row(PropertyRow::new(
                 "Out",
                 Box::new(
-                    Slider::new(model.out_frame, 0.0, model.max_frame).on_change(move |value| {
-                        inspector_timing_action(selected_clip, TimelineTrimPayloadEdge::Out, value)
-                    }),
+                    Slider::new(model.out_frame, 0.0, model.max_frame)
+                        .enabled(has_target)
+                        .on_change(move |value| {
+                            inspector_timing_action(
+                                selected_clip,
+                                TimelineTrimPayloadEdge::Out,
+                                value,
+                            )
+                        }),
                 ),
             )),
     );

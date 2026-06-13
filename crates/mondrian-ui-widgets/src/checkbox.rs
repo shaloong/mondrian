@@ -16,6 +16,7 @@ pub struct Checkbox {
     label: String,
     checked: bool,
     bounds: Rect,
+    enabled: bool,
     hovered: bool,
     pressed: bool,
     pub on_toggle: Option<Action>,
@@ -30,6 +31,7 @@ impl Checkbox {
             label: label.into(),
             checked,
             bounds: Rect::ZERO,
+            enabled: true,
             hovered: false,
             pressed: false,
             on_toggle: None,
@@ -47,6 +49,26 @@ impl Checkbox {
     pub fn on_change(mut self, action: impl Fn(bool) -> Action + 'static) -> Self {
         self.on_change = Some(Box::new(action));
         self
+    }
+
+    /// Set whether the checkbox accepts user input and participates in focus.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        if !enabled {
+            self.hovered = false;
+            self.pressed = false;
+        }
+        self
+    }
+
+    /// Disable the checkbox.
+    pub fn disabled(self) -> Self {
+        self.enabled(false)
+    }
+
+    /// Whether the checkbox is enabled.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
     }
 
     /// Return whether the checkbox is checked.
@@ -87,6 +109,11 @@ impl Widget for Checkbox {
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if !self.enabled {
+            self.hovered = false;
+            self.pressed = false;
+            return EventResult::Ignored;
+        }
         match event {
             UiEvent::MouseDown { position, button: MouseButton::Left, .. }
                 if self.bounds.contains(*position) =>
@@ -143,7 +170,9 @@ impl Widget for Checkbox {
         );
 
         // Fill color
-        let fill = if self.checked {
+        let fill = if !self.enabled {
+            tokens.muted
+        } else if self.checked {
             tokens.primary
         } else if self.hovered {
             tokens.accent
@@ -152,7 +181,9 @@ impl Widget for Checkbox {
         };
 
         // Border color
-        let border_color = if self.checked || self.hovered {
+        let border_color = if !self.enabled {
+            tokens.border
+        } else if self.checked || self.hovered {
             tokens.primary
         } else {
             tokens.border
@@ -169,7 +200,12 @@ impl Widget for Checkbox {
         // Check mark — one filled shape, not two independent stroked lines.
         if self.checked {
             let vertices = checkmark_triangles(box_rect);
-            ctx.encoder.draw_triangles(&vertices, tokens.primary_foreground);
+            let check_color = if self.enabled {
+                tokens.primary_foreground
+            } else {
+                tokens.muted_foreground
+            };
+            ctx.encoder.draw_triangles(&vertices, check_color);
         }
 
         // Label text
@@ -181,7 +217,11 @@ impl Widget for Checkbox {
                 &self.label,
                 font_size,
                 Point::new(tx, ty),
-                tokens.foreground,
+                if self.enabled {
+                    tokens.foreground
+                } else {
+                    tokens.muted_foreground
+                },
             );
         }
     }
@@ -191,7 +231,7 @@ impl Widget for Checkbox {
     }
 
     fn can_focus(&self) -> bool {
-        true
+        self.enabled
     }
 }
 
@@ -378,6 +418,35 @@ mod tests {
         let mut cb = Checkbox::new("Opt", false);
         cb.set_checked(true);
         assert!(cb.is_checked());
+    }
+
+    #[test]
+    fn disabled_checkbox_ignores_mouse_and_focus() {
+        let mut cb = Checkbox::new("Opt", false).on_toggle(Action::TogglePlay).disabled();
+        cb.layout(Rect::new(0.0, 0.0, 100.0, 22.0));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let cell = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch_fn);
+
+        let result = cb.event(
+            &UiEvent::MouseDown {
+                position: Point::new(50.0, 11.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Ignored);
+        assert!(!cb.is_checked());
+        assert!(!cb.can_focus());
+        assert!(cell.into_inner().is_empty());
     }
 
     #[test]
