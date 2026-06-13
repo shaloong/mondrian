@@ -433,6 +433,17 @@ coordinate code. `FlexContainer` is only a widget adapter over the pure
 the layout crate while panels get normal widget-tree behavior: event routing,
 overlay forwarding, hit testing, and child traversal.
 
+## Viewer Surface
+
+The self-hosted Viewer panel uses the domain-light `ViewerSurface` widget
+instead of a colored placeholder. App code maps `AppState` / `Sequence` into a
+small `ViewerPanelModel` containing title, playback status, current frame,
+duration, and source resolution. The widget owns preview chrome, source
+aspect-ratio fitting, metadata labels, and safe-area guide drawing only; GPU
+preview texture ownership remains a future renderer/runtime integration point.
+Empty app state maps to a disabled viewer model so the product shell can show
+clear no-signal chrome without pretending a preview texture exists.
+
 ## Color Input
 
 Color parsing and conversion live in `mondrian-core`, not in the widget layer.

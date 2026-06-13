@@ -25,7 +25,7 @@ use mondrian_ui_widgets::{
     Button, Checkbox, ColorPickerAreaMode, ColorPickerTrigger, CurveEditor, CurvePoint, DockPanel,
     FlexChild, FlexContainer, PanelList, PanelListItem, PropertyPanel, PropertyRow,
     PropertySection, ScrollView, Slider, TimelineClip, TimelineClipMove, TimelineClipRef,
-    TimelineClipTrim, TimelineTrack, TimelineTrimEdge, TimelineView,
+    TimelineClipTrim, TimelineTrack, TimelineTrimEdge, TimelineView, ViewerSurface,
 };
 
 use crate::app::ui_actions::{
@@ -48,6 +48,7 @@ pub struct SelfHostedPanelModels {
     pub assets: PanelListModel,
     pub effects: PanelListModel,
     pub console: PanelListModel,
+    pub viewer: ViewerPanelModel,
     pub timeline: TimelinePanelModel,
     pub inspector: InspectorPanelModel,
 }
@@ -64,6 +65,7 @@ impl SelfHostedPanelModels {
                 state.selection.selected_clips.first().copied(),
             ),
             console: PanelListModel::from_app_status(state),
+            viewer: ViewerPanelModel::from_app_state(state),
             timeline: state
                 .sequence
                 .as_ref()
@@ -85,6 +87,7 @@ impl SelfHostedPanelModels {
                 state.selection.selected_clips.first().copied(),
             ),
             console: demo_console_model(),
+            viewer: ViewerPanelModel::from_app_state(state),
             timeline: state
                 .sequence
                 .as_ref()
@@ -260,6 +263,66 @@ impl PanelListModel {
         );
 
         PanelListModel::new("Console", items).with_subtitle("Runtime messages")
+    }
+}
+
+/// Viewer panel data independent from preview texture plumbing.
+#[derive(Debug, Clone)]
+pub struct ViewerPanelModel {
+    pub title: String,
+    pub status: String,
+    pub resolution_label: String,
+    pub frame_label: String,
+    pub duration_label: String,
+    pub width: u32,
+    pub height: u32,
+    pub playing: bool,
+    pub enabled: bool,
+}
+
+impl ViewerPanelModel {
+    /// Snapshot viewer chrome data from app state.
+    pub fn from_app_state(state: &AppState) -> Self {
+        let Some(sequence) = state.sequence.as_ref() else {
+            return Self::empty();
+        };
+        let resolution = sequence.settings.resolution;
+        let current_frame = state.current_frame().max(0);
+        let duration_frame = sequence.total_duration().frame.max(0);
+        let fps = sequence.settings.frame_rate.to_f64();
+        Self {
+            title: sequence.name.clone(),
+            status: if state.is_playing() {
+                "Playing".into()
+            } else {
+                "Ready".into()
+            },
+            resolution_label: format!(
+                "{}x{} @ {:.2} fps",
+                resolution.width, resolution.height, fps
+            ),
+            frame_label: format!("F{current_frame}"),
+            duration_label: format!("{duration_frame} frames"),
+            width: resolution.width,
+            height: resolution.height,
+            playing: state.is_playing(),
+            enabled: true,
+        }
+    }
+
+    /// Empty viewer shown before a sequence is open.
+    pub fn empty() -> Self {
+        Self {
+            title: "Viewer".into(),
+            status: "No sequence".into(),
+            resolution_label: "No signal".into(),
+            frame_label: "F0".into(),
+            duration_label: String::new(),
+            width: 16,
+            height: 9,
+            playing: false,
+            enabled: false,
+        }
     }
 }
 
@@ -556,11 +619,21 @@ fn panel_content_for_slot(kind: SlotKind, models: &SelfHostedPanelModels) -> Box
         SlotKind::Assets => Box::new(panel_list(&models.assets)),
         SlotKind::Effects => Box::new(panel_list(&models.effects)),
         SlotKind::Console => Box::new(panel_list(&models.console)),
-        SlotKind::Viewer => Box::new(ColoredBox::new(Color::from_hex(0x1A1A2E), 1.0, 1.0)),
+        SlotKind::Viewer => Box::new(viewer_panel(&models.viewer)),
         SlotKind::Timeline => Box::new(timeline_panel(&models.timeline)),
         SlotKind::Project => Box::new(ColoredBox::new(Color::from_hex(0x1E3A2A), 1.0, 1.0)),
         _ => Box::new(ColoredBox::new(Color::from_hex(0x1A1A1A), 1.0, 1.0)),
     }
+}
+
+fn viewer_panel(model: &ViewerPanelModel) -> ViewerSurface {
+    ViewerSurface::new(model.title.clone(), model.width, model.height)
+        .with_status(model.status.clone())
+        .with_resolution_label(model.resolution_label.clone())
+        .with_frame_label(model.frame_label.clone())
+        .with_duration_label(model.duration_label.clone())
+        .playing(model.playing)
+        .enabled(model.enabled)
 }
 
 fn timeline_track_from_sequence_track(
@@ -1225,6 +1298,8 @@ mod tests {
         assert!(!models.assets.items.is_empty());
         assert!(!models.effects.items.is_empty());
         assert!(!models.console.items.is_empty());
+        assert_eq!(models.viewer.title, "Demo edit");
+        assert!(models.viewer.enabled);
         assert!(!models.timeline.tracks.is_empty());
         assert!(!models.inspector.curve_points.is_empty());
     }
@@ -1242,6 +1317,9 @@ mod tests {
         assert!(!models.effects.items.is_empty());
         assert_eq!(models.console.title, "Console");
         assert!(!models.console.items.is_empty());
+        assert_eq!(models.viewer.title, "Viewer");
+        assert!(!models.viewer.enabled);
+        assert_eq!(models.viewer.resolution_label, "No signal");
         assert_eq!(models.inspector.selected_clip, None);
         assert_eq!(models.inspector.opacity, 100.0);
         assert!(models.inspector.effects.is_empty());
@@ -1373,6 +1451,9 @@ mod tests {
 
         let models = SelfHostedPanelModels::from_app_state(&state);
 
+        assert_eq!(models.viewer.title, "edit");
+        assert_eq!(models.viewer.frame_label, "F7");
+        assert!(models.viewer.resolution_label.contains("1920x1080"));
         assert_eq!(models.timeline.playhead_frame, 7);
         assert!(models.timeline.tracks[0].clips[0].selected);
         assert!(models.timeline.tracks[0].clips[0].disabled);

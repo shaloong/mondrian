@@ -21,6 +21,7 @@ pub mod scroll;
 pub mod slider;
 pub mod text_input;
 pub mod timeline_view;
+pub mod viewer_surface;
 
 #[cfg(test)]
 mod component_extreme_tests;
@@ -53,3 +54,4 @@ pub use timeline_view::{
     TimelineClipTrim, TimelineClipTrimAction, TimelineSeekAction, TimelineTrack, TimelineTrackKind,
     TimelineTrimEdge, TimelineView,
 };
+pub use viewer_surface::ViewerSurface;
