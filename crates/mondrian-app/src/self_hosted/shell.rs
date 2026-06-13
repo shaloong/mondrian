@@ -22,8 +22,9 @@ use crate::app::ui_actions::{
     APP_SHELL_NEW_PROJECT_DRAFT_CHANGED, APP_SHELL_OPEN_PROJECT_DIALOG,
     APP_SHELL_SAVE_PROJECT_AS_DIALOG,
 };
+use crate::self_hosted::modal::ShellModal;
 use crate::self_hosted::new_project_dialog::{
-    default_project_file_name, NewProjectDialog, SelfHostedNewProjectDraft,
+    default_project_file_name, SelfHostedNewProjectDraft,
 };
 use crate::self_hosted::panels::{build_demo_dock_tree, build_dock_tree, SelfHostedPanelModels};
 
@@ -238,7 +239,7 @@ pub struct SelfHostedAppRoot {
     id: WidgetId,
     menu_bar: MenuBar,
     dock: DockSplitter,
-    new_project_dialog: Option<NewProjectDialog>,
+    modal: Option<ShellModal>,
     bounds: Rect,
 }
 
@@ -259,7 +260,7 @@ impl SelfHostedAppRoot {
             id: WidgetId::new(),
             menu_bar,
             dock,
-            new_project_dialog: None,
+            modal: None,
             bounds: Rect::ZERO,
         }
     }
@@ -297,8 +298,7 @@ impl SelfHostedAppRoot {
             Action::Custom { namespace, name, .. }
                 if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_NEW_PROJECT_DIALOG =>
             {
-                self.new_project_dialog =
-                    Some(NewProjectDialog::new(SelfHostedNewProjectDraft::default()));
+                self.modal = Some(ShellModal::new_project(SelfHostedNewProjectDraft::default()));
                 if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
                     self.layout(self.bounds);
                 }
@@ -308,7 +308,7 @@ impl SelfHostedAppRoot {
                 if namespace == APP_SHELL_NAMESPACE
                     && name == APP_SHELL_NEW_PROJECT_DRAFT_CHANGED =>
             {
-                if let Some(dialog) = &mut self.new_project_dialog {
+                if let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_new_project_mut) {
                     if let Ok(update) =
                         serde_json::from_value::<NewProjectDraftUpdatePayload>(payload)
                     {
@@ -321,7 +321,7 @@ impl SelfHostedAppRoot {
                 if namespace == APP_SHELL_NAMESPACE
                     && name == APP_SHELL_CANCEL_NEW_PROJECT_DIALOG =>
             {
-                self.new_project_dialog = None;
+                self.modal = None;
                 None
             }
             Action::Custom { namespace, name, .. }
@@ -329,8 +329,9 @@ impl SelfHostedAppRoot {
                     && name == APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG =>
             {
                 let draft = self
-                    .new_project_dialog
+                    .modal
                     .as_ref()
+                    .and_then(ShellModal::as_new_project)
                     .map(|dialog| dialog.draft().clone())
                     .unwrap_or_default();
                 if draft.validate().is_err() {
@@ -341,7 +342,7 @@ impl SelfHostedAppRoot {
                     &default_project_file_name(&draft.name),
                     &project_file_filters(),
                 )?;
-                self.new_project_dialog = None;
+                self.modal = None;
                 Some(project_create_with_settings_action(
                     draft.into_payload(path),
                 ))
@@ -370,14 +371,14 @@ impl Widget for SelfHostedAppRoot {
             bounds.width,
             (bounds.height - MENU_BAR_HEIGHT).max(0.0),
         ));
-        if let Some(dialog) = &mut self.new_project_dialog {
-            dialog.layout(bounds);
+        if let Some(modal) = &mut self.modal {
+            modal.layout(bounds);
         }
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
-        if let Some(dialog) = &mut self.new_project_dialog {
-            if dialog.event(event, ctx) == EventResult::Handled {
+        if let Some(modal) = &mut self.modal {
+            if modal.event(event, ctx) == EventResult::Handled {
                 return EventResult::Handled;
             }
             if matches!(
@@ -399,8 +400,8 @@ impl Widget for SelfHostedAppRoot {
     fn paint(&self, ctx: &mut PaintContext) {
         self.menu_bar.paint(ctx);
         self.dock.paint(ctx);
-        if let Some(dialog) = &self.new_project_dialog {
-            dialog.paint(ctx);
+        if let Some(modal) = &self.modal {
+            modal.paint(ctx);
         }
     }
 
@@ -409,14 +410,14 @@ impl Widget for SelfHostedAppRoot {
     }
 
     fn child_count(&self) -> usize {
-        2 + usize::from(self.new_project_dialog.is_some())
+        2 + usize::from(self.modal.is_some())
     }
 
     fn child(&self, index: usize) -> Option<&dyn Widget> {
         match index {
             0 => Some(&self.menu_bar),
             1 => Some(&self.dock),
-            2 => self.new_project_dialog.as_ref().map(|dialog| dialog as &dyn Widget),
+            2 => self.modal.as_ref().map(|modal| modal as &dyn Widget),
             _ => None,
         }
     }
@@ -425,7 +426,7 @@ impl Widget for SelfHostedAppRoot {
         match index {
             0 => Some(&mut self.menu_bar),
             1 => Some(&mut self.dock),
-            2 => self.new_project_dialog.as_mut().map(|dialog| dialog as &mut dyn Widget),
+            2 => self.modal.as_mut().map(|modal| modal as &mut dyn Widget),
             _ => None,
         }
     }
@@ -675,7 +676,7 @@ mod tests {
             root.handle_shell_action(app_shell_new_project_dialog_action(), &platform, None),
             None
         );
-        assert!(root.new_project_dialog.is_some());
+        assert!(root.modal.as_ref().and_then(ShellModal::as_new_project).is_some());
         assert_eq!(root.child_count(), 3);
 
         assert_eq!(
@@ -697,7 +698,7 @@ mod tests {
             )
             .expect("confirm action");
 
-        assert!(root.new_project_dialog.is_none());
+        assert!(root.modal.is_none());
         let Action::Custom { namespace, name, payload } = action else {
             panic!("expected project create action");
         };
@@ -792,7 +793,7 @@ mod tests {
             ),
             None
         );
-        assert!(root.new_project_dialog.is_none());
+        assert!(root.modal.is_none());
     }
 
     #[test]
