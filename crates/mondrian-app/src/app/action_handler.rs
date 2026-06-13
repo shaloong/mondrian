@@ -6,7 +6,9 @@
 //! 当前版本的 action_handler 以最简方式实现：只对已确定存在的方法做桥接，
 //! 其余 Action 记录日志后忽略。每个 Stage 逐步增加映射。
 
-use crate::app::timeline_editing::{find_clip_mut, find_clip_track_lock, set_clip_disabled};
+use crate::app::timeline_editing::{
+    find_clip, find_clip_mut, find_clip_track_lock, set_clip_disabled,
+};
 use crate::app::ui_actions::{
     EffectsAddToClipPayload, InspectorClipTransformField, InspectorRemoveEffectPayload,
     InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
@@ -99,6 +101,12 @@ impl AppState {
             // ── 时间线编辑（复用已有 undoable 命令层）────────────────────
             Action::DeleteSelection => self.delete_selected_clips_from_ui(),
             Action::SplitClipAtPlayhead => self.split_at_playhead().map(|_| ()),
+            Action::NudgeClip { clip_id, delta_frames } => {
+                self.nudge_clip_from_action(clip_id, delta_frames)
+            }
+            Action::MoveClipToTrack { clip_id, target_track, position } => {
+                self.move_clip_to_track_from_action(clip_id, target_track, position.frame)
+            }
 
             // ── 项目操作 ──────────────────────────────────────────────────
             Action::SaveProject => {
@@ -124,6 +132,105 @@ impl AppState {
             _ => {
                 tracing::debug!(target: "mondrian::action", "Action not yet implemented: {:?}", action);
                 Ok(())
+            }
+        }
+    }
+
+    fn nudge_clip_from_action(&mut self, clip_id: ClipId, delta_frames: i64) -> Result<()> {
+        if delta_frames == 0 {
+            return Ok(());
+        }
+        let (track_id, is_video_track, frame) = self.clip_action_location("nudge_clip", clip_id)?;
+        self.move_clip_with_snapshot(
+            track_id,
+            is_video_track,
+            clip_id,
+            frame.saturating_add(delta_frames).max(0),
+        )
+    }
+
+    fn move_clip_to_track_from_action(
+        &mut self,
+        clip_id: ClipId,
+        target_track_id: mondrian_core::types::TrackId,
+        frame: i64,
+    ) -> Result<()> {
+        let (_track_id, is_video_track, _frame) =
+            self.clip_action_location("move_clip_to_track", clip_id)?;
+        self.move_clip_with_snapshot(target_track_id, is_video_track, clip_id, frame.max(0))
+    }
+
+    fn clip_action_location(
+        &self,
+        step_id: &'static str,
+        clip_id: ClipId,
+    ) -> Result<(mondrian_core::types::TrackId, bool, i64)> {
+        let Some(seq) = self.sequence.as_ref() else {
+            return Err(missing_sequence_error(step_id));
+        };
+        let (track_id, is_video_track, _) = find_clip_track_lock(seq, clip_id)
+            .ok_or_else(|| missing_clip_error(step_id, clip_id))?;
+        let frame = find_clip(seq, clip_id)
+            .ok_or_else(|| missing_clip_error(step_id, clip_id))?
+            .position
+            .frame;
+        Ok((track_id, is_video_track, frame))
+    }
+
+    fn move_clip_with_snapshot(
+        &mut self,
+        target_track_id: mondrian_core::types::TrackId,
+        is_video_track: bool,
+        clip_id: ClipId,
+        frame: i64,
+    ) -> Result<()> {
+        let Some(seq) = self.sequence.as_ref() else {
+            return Err(missing_sequence_error("move_clip"));
+        };
+        let (current_track_id, current_is_video_track, current_frame) =
+            self.clip_action_location("move_clip", clip_id)?;
+        if current_track_id == target_track_id
+            && current_is_video_track == is_video_track
+            && current_frame == frame
+        {
+            return Ok(());
+        }
+
+        let linked_clip_id = find_clip(seq, clip_id).and_then(|clip| clip.linked_clip);
+        let before = seq.clone();
+        self.move_clip_to_track_with_mode(
+            target_track_id,
+            is_video_track,
+            clip_id,
+            frame,
+            ClipOverlapMode::Overwrite,
+        )?;
+        if let Some(linked_clip_id) = linked_clip_id {
+            self.refresh_selected_clip_locations(&[clip_id, linked_clip_id]);
+        } else {
+            self.refresh_selected_clip_locations(&[clip_id]);
+        }
+        self.record_timeline_edit_snapshot("移动片段", before);
+        Ok(())
+    }
+
+    fn refresh_selected_clip_locations(&mut self, clip_ids: &[ClipId]) {
+        let Some(seq) = self.sequence.as_ref() else {
+            return;
+        };
+        let updates = clip_ids
+            .iter()
+            .filter_map(|clip_id| {
+                find_clip_track_lock(seq, *clip_id)
+                    .map(|(track_id, is_video_track, _)| (*clip_id, track_id, is_video_track))
+            })
+            .collect::<Vec<_>>();
+        for selection in &mut self.selection.selected_clips {
+            if let Some((_, track_id, is_video_track)) =
+                updates.iter().find(|(clip_id, _, _)| *clip_id == selection.clip_id)
+            {
+                selection.track_id = *track_id;
+                selection.is_video_track = *is_video_track;
             }
         }
     }
@@ -894,6 +1001,131 @@ mod tests {
         let sequence = state.sequence.as_ref().expect("sequence");
         assert_eq!(sequence.video_tracks[0].clips.len(), 1);
         assert!(!state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_nudge_clip_moves_with_undo_snapshot() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
+
+        state
+            .dispatch_action(mondrian_editor_state::Action::NudgeClip { clip_id, delta_frames: 5 })
+            .expect("nudge clip");
+
+        let sequence = state.sequence.as_ref().expect("sequence");
+        assert_eq!(sequence.video_tracks[0].clips[0].position.frame, 15);
+        assert!(state.can_undo_action());
+
+        assert!(state.undo_timeline().expect("undo nudge"));
+        let sequence = state.sequence.as_ref().expect("sequence");
+        assert_eq!(sequence.video_tracks[0].clips[0].position.frame, 10);
+    }
+
+    #[test]
+    fn dispatch_nudge_clip_zero_delta_does_not_enter_undo_history() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
+
+        state
+            .dispatch_action(mondrian_editor_state::Action::NudgeClip { clip_id, delta_frames: 0 })
+            .expect("nudge clip");
+
+        let sequence = state.sequence.as_ref().expect("sequence");
+        assert_eq!(sequence.video_tracks[0].clips[0].position.frame, 10);
+        assert!(!state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_move_clip_to_track_updates_selection_location() {
+        let (mut state, source_track_id, clip_id) = state_with_two_video_tracks();
+        let target_track_id = state.sequence.as_ref().expect("sequence").video_tracks[1].id;
+        let tb = state.sequence.as_ref().expect("sequence").time_base();
+        state.selection.selected_clips = vec![SelectedClipRef {
+            track_id: source_track_id,
+            is_video_track: true,
+            clip_id,
+        }];
+
+        state
+            .dispatch_action(mondrian_editor_state::Action::MoveClipToTrack {
+                clip_id,
+                target_track: target_track_id,
+                position: TimeCode::new(42, tb),
+            })
+            .expect("move clip to track");
+
+        let sequence = state.sequence.as_ref().expect("sequence");
+        assert!(sequence.video_tracks[0].clips.is_empty());
+        assert_eq!(sequence.video_tracks[1].clips[0].id, clip_id);
+        assert_eq!(sequence.video_tracks[1].clips[0].position.frame, 42);
+        assert_eq!(
+            state.selection.selected_clips,
+            vec![SelectedClipRef {
+                track_id: target_track_id,
+                is_video_track: true,
+                clip_id,
+            }]
+        );
+        assert!(state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_move_clip_to_track_refreshes_linked_selection_location() {
+        let (mut state, source_video_track_id, video_clip_id) = state_with_two_video_tracks();
+        let sequence = state.sequence.as_mut().expect("sequence");
+        let target_video_track_id = sequence.video_tracks[1].id;
+        let source_audio_track_id = sequence.audio_tracks[0].id;
+        sequence.add_audio_track();
+        let tb = sequence.time_base();
+
+        let audio_clip = Clip::new(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(20, tb));
+        let audio_clip_id = audio_clip.id;
+        sequence.audio_tracks[0].add_clip(audio_clip).expect("add audio");
+        sequence.video_tracks[0].clips[0].linked_clip = Some(audio_clip_id);
+        sequence.audio_tracks[0].clips[0].linked_clip = Some(video_clip_id);
+        state.selection.selected_clips = vec![
+            SelectedClipRef {
+                track_id: source_video_track_id,
+                is_video_track: true,
+                clip_id: video_clip_id,
+            },
+            SelectedClipRef {
+                track_id: source_audio_track_id,
+                is_video_track: false,
+                clip_id: audio_clip_id,
+            },
+        ];
+
+        state
+            .dispatch_action(mondrian_editor_state::Action::MoveClipToTrack {
+                clip_id: video_clip_id,
+                target_track: target_video_track_id,
+                position: TimeCode::new(24, tb),
+            })
+            .expect("move linked clip to track");
+
+        let sequence = state.sequence.as_ref().expect("sequence");
+        assert!(!sequence.audio_tracks[0].clips.iter().any(|clip| clip.id == audio_clip_id));
+        let target_audio_track_id = sequence
+            .audio_tracks
+            .iter()
+            .find(|track| track.clips.iter().any(|clip| clip.id == audio_clip_id))
+            .map(|track| track.id)
+            .expect("linked audio should move to an audio track");
+        assert_eq!(
+            state.selection.selected_clips,
+            vec![
+                SelectedClipRef {
+                    track_id: target_video_track_id,
+                    is_video_track: true,
+                    clip_id: video_clip_id,
+                },
+                SelectedClipRef {
+                    track_id: target_audio_track_id,
+                    is_video_track: false,
+                    clip_id: audio_clip_id,
+                },
+            ]
+        );
+        assert!(state.can_undo_action());
     }
 
     #[test]

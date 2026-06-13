@@ -94,6 +94,11 @@ linked clip cleanup, undo snapshot, and timeline modified event behavior.
 `Action::SplitClipAtPlayhead` similarly routes to `AppState::split_at_playhead`,
 which bulk-splits unlocked clips under the playhead and records one undoable
 timeline snapshot only when a split actually occurs.
+`NudgeClip` and `MoveClipToTrack` wrap the lower-level timeline move mutation at
+the action boundary: the wrapper resolves clip location from the active
+sequence, ignores true no-ops, records the undo snapshot, publishes timeline
+modification, and refreshes the selected clip's track reference after cross-track
+moves.
 Inspector timing controls reuse timeline trim actions for clip In/Out changes
 instead of introducing a parallel editing path.
 Inspector effect rows are read from the selected clip's effect instances and
