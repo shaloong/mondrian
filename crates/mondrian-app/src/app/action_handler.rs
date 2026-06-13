@@ -98,6 +98,10 @@ impl AppState {
                 Ok(())
             }
 
+            // ── 剪贴板（先承载已有动画关键帧剪贴板）──────────────────────
+            Action::Copy => self.copy_animation_keyframes_from_action(),
+            Action::Paste => self.paste_animation_keyframes_from_action(),
+
             // ── 时间线编辑（复用已有 undoable 命令层）────────────────────
             Action::DeleteSelection => self.delete_selected_clips_from_ui(),
             Action::SplitClipAtPlayhead => self.split_at_playhead().map(|_| ()),
@@ -142,6 +146,24 @@ impl AppState {
                 Ok(())
             }
         }
+    }
+
+    fn copy_animation_keyframes_from_action(&mut self) -> Result<()> {
+        let Some(selection) = self.selection.selected_clips.first().copied() else {
+            return Ok(());
+        };
+        self.copy_selected_animation_keyframes(selection).map(|_| ())
+    }
+
+    fn paste_animation_keyframes_from_action(&mut self) -> Result<()> {
+        let Some(selection) = self.selection.selected_clips.first().copied() else {
+            return Ok(());
+        };
+        let destination_time = self
+            .current_time_code()
+            .map(mondrian_core::automation::timecode_to_ticks)
+            .unwrap_or(0);
+        self.paste_animation_keyframes(selection, destination_time).map(|_| ())
     }
 
     fn nudge_clip_from_action(&mut self, clip_id: ClipId, delta_frames: i64) -> Result<()> {
@@ -1484,6 +1506,73 @@ mod tests {
             effects.iter().map(|effect| effect.id).collect::<Vec<_>>(),
             vec![first_id, second_id]
         );
+        assert!(!state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_copy_paste_actions_use_animation_keyframe_clipboard() {
+        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+        let selection = SelectedClipRef { track_id, is_video_track: true, clip_id };
+        state.selection.selected_clips = vec![selection];
+        let tb = state.sequence.as_ref().expect("sequence").time_base();
+        let source_time = mondrian_core::automation::timecode_to_ticks(TimeCode::new(4, tb));
+        let destination_time = mondrian_core::automation::timecode_to_ticks(TimeCode::new(18, tb));
+        state
+            .mutate_clip_property(
+                selection,
+                PropertyMutation::SetKeyframe {
+                    path: Transform2D::OPACITY_PATH.to_string(),
+                    keyframe: mondrian_core::automation::Keyframe::linear(
+                        source_time,
+                        PropertyValue::Float(0.25),
+                    ),
+                },
+                "seed opacity keyframe",
+            )
+            .expect("seed keyframe");
+        state.set_animation_keyframe_selection(vec![crate::app::AnimationKeyframeSelection {
+            clip_id,
+            path: Transform2D::OPACITY_PATH.to_string(),
+            time: source_time,
+        }]);
+        state.seek(18);
+
+        state
+            .dispatch_action(mondrian_editor_state::Action::Copy)
+            .expect("copy keyframe");
+        state
+            .dispatch_action(mondrian_editor_state::Action::Paste)
+            .expect("paste keyframe");
+
+        let property = state
+            .clip_snapshot(selection)
+            .and_then(|clip| clip.property_bag().ok())
+            .and_then(|bag| bag.property(Transform2D::OPACITY_PATH).cloned())
+            .expect("opacity property");
+        let pasted = property.keyframe_at(destination_time).expect("pasted keyframe");
+        assert_eq!(pasted.value, PropertyValue::Float(0.25));
+        assert!(state.has_animation_clipboard());
+        assert!(state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_clipboard_actions_noop_without_selection_or_clipboard() {
+        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+
+        state
+            .dispatch_action(mondrian_editor_state::Action::Copy)
+            .expect("copy without selection");
+        state
+            .dispatch_action(mondrian_editor_state::Action::Paste)
+            .expect("paste without selection");
+        assert!(!state.has_animation_clipboard());
+        assert!(!state.can_undo_action());
+
+        state.selection.selected_clips =
+            vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
+        state
+            .dispatch_action(mondrian_editor_state::Action::Paste)
+            .expect("paste without clipboard");
         assert!(!state.can_undo_action());
     }
 }

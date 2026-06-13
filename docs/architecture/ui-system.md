@@ -99,6 +99,10 @@ the action boundary: the wrapper resolves clip location from the active
 sequence, ignores true no-ops, records the undo snapshot, publishes timeline
 modification, and refreshes the selected clip's track reference after cross-track
 moves.
+`Copy` and `Paste` currently route only to the existing animation-keyframe
+clipboard for the first selected clip. They no-op when no selected clip or
+animation clipboard is present; clip-level copy/cut/duplicate should get a
+separate app-level clipboard model before those actions are claimed.
 Inspector timing controls reuse timeline trim actions for clip In/Out changes
 instead of introducing a parallel editing path.
 Inspector effect rows are read from the selected clip's effect instances and
