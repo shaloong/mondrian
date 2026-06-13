@@ -16,17 +16,18 @@ use std::path::Path;
 use crate::app::ui_actions::{
     app_shell_cancel_new_project_dialog_action, app_shell_confirm_new_project_dialog_action,
     app_shell_import_media_dialog_action, app_shell_new_project_dialog_action,
-    app_shell_new_project_name_changed_action, app_shell_open_project_dialog_action,
+    app_shell_new_project_draft_changed_action, app_shell_open_project_dialog_action,
     app_shell_save_project_as_dialog_action, project_create_with_settings_action,
-    ProjectCreateWithSettingsPayload, APP_SHELL_CANCEL_NEW_PROJECT_DIALOG,
-    APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE,
-    APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_NEW_PROJECT_NAME_CHANGED,
-    APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
+    NewProjectDraftUpdatePayload, ProjectCreateWithSettingsPayload,
+    APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG,
+    APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
+    APP_SHELL_NEW_PROJECT_DRAFT_CHANGED, APP_SHELL_OPEN_PROJECT_DIALOG,
+    APP_SHELL_SAVE_PROJECT_AS_DIALOG,
 };
 use crate::self_hosted::panels::{build_demo_dock_tree, build_dock_tree, SelfHostedPanelModels};
-use mondrian_core::ProjectSettings;
+use mondrian_core::{ProjectSettings, Rational, Resolution};
 use mondrian_timeline::SequenceSettings;
-use mondrian_ui_widgets::{Button, TextInput};
+use mondrian_ui_widgets::{Button, Checkbox, TextInput};
 
 /// Height reserved for the self-hosted top menu bar.
 pub const MENU_BAR_HEIGHT: f32 = 28.0;
@@ -70,6 +71,43 @@ impl SelfHostedNewProjectDraft {
         self.sequence_settings.validate()
     }
 
+    /// Apply one shell-local form update to the real creation settings.
+    pub fn apply_update(&mut self, update: NewProjectDraftUpdatePayload) {
+        match update {
+            NewProjectDraftUpdatePayload::Name(name) => {
+                self.name = name;
+            }
+            NewProjectDraftUpdatePayload::Resolution(resolution) => {
+                self.sequence_settings.resolution = resolution;
+            }
+            NewProjectDraftUpdatePayload::FrameRate(frame_rate) => {
+                if Rational::SEQUENCE_FRAME_RATES.contains(&frame_rate) {
+                    self.sequence_settings.frame_rate = frame_rate;
+                }
+            }
+            NewProjectDraftUpdatePayload::AudioSampleRate(sample_rate) => {
+                if SequenceSettings::AUDIO_SAMPLE_RATES.contains(&sample_rate) {
+                    self.sequence_settings.audio_sample_rate = sample_rate;
+                }
+            }
+            NewProjectDraftUpdatePayload::ProxyEnabled(enabled) => {
+                self.project_settings.proxy_enabled = enabled;
+            }
+            NewProjectDraftUpdatePayload::PreviewCacheEnabled(enabled) => {
+                self.sequence_settings.preview.cache_enabled = enabled;
+            }
+        }
+    }
+
+    fn display_name(&self) -> String {
+        let name = self.name.trim();
+        if name.is_empty() {
+            "Untitled".into()
+        } else {
+            name.into()
+        }
+    }
+
     /// Convert the current form state into the action payload consumed by
     /// `AppState`.
     pub fn into_payload(
@@ -78,7 +116,7 @@ impl SelfHostedNewProjectDraft {
     ) -> ProjectCreateWithSettingsPayload {
         ProjectCreateWithSettingsPayload {
             project_file: project_file.into(),
-            name: self.name,
+            name: self.display_name(),
             sequence_settings: self.sequence_settings,
             project_settings: self.project_settings,
         }
@@ -182,6 +220,89 @@ fn default_project_file_name(name: &str) -> String {
     } else {
         format!("{stem}.{PROJECT_FILE_EXTENSION}")
     }
+}
+
+const RESOLUTION_PRESETS: [(&str, Resolution); 4] = [
+    ("HD 720p", Resolution::HD),
+    ("Full HD 1080p", Resolution::FHD),
+    ("UHD 4K", Resolution::UHD4K),
+    ("DCI 4K", Resolution::DCI4K),
+];
+
+const FRAME_RATE_PRESETS: [(&str, Rational); 7] = [
+    ("23.976 fps", Rational::FPS_23976),
+    ("24 fps", Rational::FPS_24),
+    ("25 fps", Rational::FPS_25),
+    ("29.97 fps", Rational::FPS_2997),
+    ("30 fps", Rational::FPS_30),
+    ("50 fps", Rational::FPS_50),
+    ("59.94 fps", Rational::FPS_5994),
+];
+
+const AUDIO_SAMPLE_RATE_PRESETS: [(&str, u32); 3] =
+    [("44.1 kHz", 44_100), ("48 kHz", 48_000), ("96 kHz", 96_000)];
+
+fn resolution_label(resolution: Resolution) -> String {
+    RESOLUTION_PRESETS
+        .iter()
+        .find_map(|(label, preset)| (*preset == resolution).then_some((*label).to_string()))
+        .unwrap_or_else(|| resolution.to_string())
+}
+
+fn frame_rate_label(frame_rate: Rational) -> String {
+    FRAME_RATE_PRESETS
+        .iter()
+        .find_map(|(label, preset)| (*preset == frame_rate).then_some((*label).to_string()))
+        .unwrap_or_else(|| format!("{frame_rate} fps"))
+}
+
+fn audio_sample_rate_label(sample_rate: u32) -> String {
+    AUDIO_SAMPLE_RATE_PRESETS
+        .iter()
+        .find_map(|(label, preset)| (*preset == sample_rate).then_some((*label).to_string()))
+        .unwrap_or_else(|| format!("{} Hz", sample_rate))
+}
+
+fn new_project_resolution_items() -> Vec<MenuItem> {
+    RESOLUTION_PRESETS
+        .into_iter()
+        .map(|(label, resolution)| {
+            MenuItem::new(
+                label,
+                app_shell_new_project_draft_changed_action(
+                    NewProjectDraftUpdatePayload::Resolution(resolution),
+                ),
+            )
+        })
+        .collect()
+}
+
+fn new_project_frame_rate_items() -> Vec<MenuItem> {
+    FRAME_RATE_PRESETS
+        .into_iter()
+        .map(|(label, frame_rate)| {
+            MenuItem::new(
+                label,
+                app_shell_new_project_draft_changed_action(
+                    NewProjectDraftUpdatePayload::FrameRate(frame_rate),
+                ),
+            )
+        })
+        .collect()
+}
+
+fn new_project_audio_sample_rate_items() -> Vec<MenuItem> {
+    AUDIO_SAMPLE_RATE_PRESETS
+        .into_iter()
+        .map(|(label, sample_rate)| {
+            MenuItem::new(
+                label,
+                app_shell_new_project_draft_changed_action(
+                    NewProjectDraftUpdatePayload::AudioSampleRate(sample_rate),
+                ),
+            )
+        })
+        .collect()
 }
 
 /// Default Mondrian menu structure for self-hosted shells.
@@ -311,27 +432,88 @@ impl Widget for MenuBar {
     }
 }
 
+fn resolution_dropdown_for(draft: &SelfHostedNewProjectDraft) -> Dropdown {
+    Dropdown::new(
+        resolution_label(draft.sequence_settings.resolution),
+        new_project_resolution_items(),
+    )
+    .with_max_visible_items(4)
+}
+
+fn frame_rate_dropdown_for(draft: &SelfHostedNewProjectDraft) -> Dropdown {
+    Dropdown::new(
+        frame_rate_label(draft.sequence_settings.frame_rate),
+        new_project_frame_rate_items(),
+    )
+    .with_max_visible_items(7)
+}
+
+fn audio_sample_rate_dropdown_for(draft: &SelfHostedNewProjectDraft) -> Dropdown {
+    Dropdown::new(
+        audio_sample_rate_label(draft.sequence_settings.audio_sample_rate),
+        new_project_audio_sample_rate_items(),
+    )
+    .with_max_visible_items(3)
+}
+
+fn proxy_checkbox_for(draft: &SelfHostedNewProjectDraft) -> Checkbox {
+    Checkbox::new("Create proxies", draft.project_settings.proxy_enabled).on_change(|enabled| {
+        app_shell_new_project_draft_changed_action(NewProjectDraftUpdatePayload::ProxyEnabled(
+            enabled,
+        ))
+    })
+}
+
+fn preview_cache_checkbox_for(draft: &SelfHostedNewProjectDraft) -> Checkbox {
+    Checkbox::new(
+        "Preview cache",
+        draft.sequence_settings.preview.cache_enabled,
+    )
+    .on_change(|enabled| {
+        app_shell_new_project_draft_changed_action(
+            NewProjectDraftUpdatePayload::PreviewCacheEnabled(enabled),
+        )
+    })
+}
+
 struct NewProjectDialog {
     id: WidgetId,
     draft: SelfHostedNewProjectDraft,
     bounds: Rect,
     card: Rect,
     name_input: TextInput,
+    resolution_dropdown: Dropdown,
+    frame_rate_dropdown: Dropdown,
+    audio_sample_rate_dropdown: Dropdown,
+    proxy_checkbox: Checkbox,
+    preview_cache_checkbox: Checkbox,
     cancel_button: Button,
     create_button: Button,
 }
 
 impl NewProjectDialog {
     fn new(draft: SelfHostedNewProjectDraft) -> Self {
-        let name_input = TextInput::new("Project name")
-            .with_text(&draft.name)
-            .on_change(app_shell_new_project_name_changed_action);
+        let name_input = TextInput::new("Project name").with_text(&draft.name).on_change(|name| {
+            app_shell_new_project_draft_changed_action(NewProjectDraftUpdatePayload::Name(
+                name.into(),
+            ))
+        });
+        let resolution_dropdown = resolution_dropdown_for(&draft);
+        let frame_rate_dropdown = frame_rate_dropdown_for(&draft);
+        let audio_sample_rate_dropdown = audio_sample_rate_dropdown_for(&draft);
+        let proxy_checkbox = proxy_checkbox_for(&draft);
+        let preview_cache_checkbox = preview_cache_checkbox_for(&draft);
         Self {
             id: WidgetId::new(),
             draft,
             bounds: Rect::ZERO,
             card: Rect::ZERO,
             name_input,
+            resolution_dropdown,
+            frame_rate_dropdown,
+            audio_sample_rate_dropdown,
+            proxy_checkbox,
+            preview_cache_checkbox,
             cancel_button: Button::new("Cancel")
                 .on_click(app_shell_cancel_new_project_dialog_action()),
             create_button: Button::new("Create...")
@@ -339,8 +521,19 @@ impl NewProjectDialog {
         }
     }
 
-    fn set_name(&mut self, name: String) {
-        self.draft.name = name;
+    fn apply_update(&mut self, update: NewProjectDraftUpdatePayload) {
+        let rebuild_controls = !matches!(update, NewProjectDraftUpdatePayload::Name(_));
+        self.draft.apply_update(update);
+        if rebuild_controls {
+            self.resolution_dropdown = resolution_dropdown_for(&self.draft);
+            self.frame_rate_dropdown = frame_rate_dropdown_for(&self.draft);
+            self.audio_sample_rate_dropdown = audio_sample_rate_dropdown_for(&self.draft);
+            self.proxy_checkbox = proxy_checkbox_for(&self.draft);
+            self.preview_cache_checkbox = preview_cache_checkbox_for(&self.draft);
+            if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
+                self.layout(self.bounds);
+            }
+        }
     }
 
     fn draft(&self) -> &SelfHostedNewProjectDraft {
@@ -354,13 +547,13 @@ impl Widget for NewProjectDialog {
     }
 
     fn measure(&self, _constraint: LayoutConstraint) -> Size {
-        Size::new(420.0, 220.0)
+        Size::new(520.0, 390.0)
     }
 
     fn layout(&mut self, bounds: Rect) {
         self.bounds = bounds;
-        let card_width = bounds.width.clamp(280.0, 420.0);
-        let card_height = 220.0;
+        let card_width = bounds.width.clamp(320.0, 520.0);
+        let card_height = bounds.height.clamp(320.0, 390.0);
         self.card = Rect::new(
             bounds.x + (bounds.width - card_width) * 0.5,
             bounds.y + (bounds.height - card_height) * 0.5,
@@ -370,6 +563,25 @@ impl Widget for NewProjectDialog {
         let content = self.card.inset(20.0, 20.0);
         self.name_input
             .layout(Rect::new(content.x, content.y + 82.0, content.width, 34.0));
+        let row_gap = 12.0;
+        let half = (content.width - row_gap) * 0.5;
+        self.resolution_dropdown
+            .layout(Rect::new(content.x, content.y + 142.0, half, 28.0));
+        self.frame_rate_dropdown.layout(Rect::new(
+            content.x + half + row_gap,
+            content.y + 142.0,
+            half,
+            28.0,
+        ));
+        self.audio_sample_rate_dropdown
+            .layout(Rect::new(content.x, content.y + 202.0, half, 28.0));
+        self.proxy_checkbox.layout(Rect::new(content.x, content.y + 254.0, half, 28.0));
+        self.preview_cache_checkbox.layout(Rect::new(
+            content.x + half + row_gap,
+            content.y + 254.0,
+            half,
+            28.0,
+        ));
 
         let button_y = self.card.y + self.card.height - 52.0;
         self.cancel_button.layout(Rect::new(
@@ -409,6 +621,21 @@ impl Widget for NewProjectDialog {
             return EventResult::Handled;
         }
         if self.name_input.event(event, ctx) == EventResult::Handled {
+            return EventResult::Handled;
+        }
+        if self.resolution_dropdown.event(event, ctx) == EventResult::Handled {
+            return EventResult::Handled;
+        }
+        if self.frame_rate_dropdown.event(event, ctx) == EventResult::Handled {
+            return EventResult::Handled;
+        }
+        if self.audio_sample_rate_dropdown.event(event, ctx) == EventResult::Handled {
+            return EventResult::Handled;
+        }
+        if self.proxy_checkbox.event(event, ctx) == EventResult::Handled {
+            return EventResult::Handled;
+        }
+        if self.preview_cache_checkbox.event(event, ctx) == EventResult::Handled {
             return EventResult::Handled;
         }
         EventResult::Ignored
@@ -454,6 +681,31 @@ impl Widget for NewProjectDialog {
             ctx.theme.colors.muted_foreground,
         );
         self.name_input.paint(ctx);
+        let row_gap = 12.0;
+        let half = (content.width - row_gap) * 0.5;
+        ctx.encoder.draw_text(
+            "Frame size",
+            12.0,
+            Point::new(content.x, content.y + 136.0),
+            ctx.theme.colors.muted_foreground,
+        );
+        ctx.encoder.draw_text(
+            "Frame rate",
+            12.0,
+            Point::new(content.x + half + row_gap, content.y + 136.0),
+            ctx.theme.colors.muted_foreground,
+        );
+        self.resolution_dropdown.paint(ctx);
+        self.frame_rate_dropdown.paint(ctx);
+        ctx.encoder.draw_text(
+            "Audio",
+            12.0,
+            Point::new(content.x, content.y + 196.0),
+            ctx.theme.colors.muted_foreground,
+        );
+        self.audio_sample_rate_dropdown.paint(ctx);
+        self.proxy_checkbox.paint(ctx);
+        self.preview_cache_checkbox.paint(ctx);
         self.cancel_button.paint(ctx);
         self.create_button.paint(ctx);
     }
@@ -463,14 +715,19 @@ impl Widget for NewProjectDialog {
     }
 
     fn child_count(&self) -> usize {
-        3
+        8
     }
 
     fn child(&self, index: usize) -> Option<&dyn Widget> {
         match index {
             0 => Some(&self.name_input),
-            1 => Some(&self.cancel_button),
-            2 => Some(&self.create_button),
+            1 => Some(&self.resolution_dropdown),
+            2 => Some(&self.frame_rate_dropdown),
+            3 => Some(&self.audio_sample_rate_dropdown),
+            4 => Some(&self.proxy_checkbox),
+            5 => Some(&self.preview_cache_checkbox),
+            6 => Some(&self.cancel_button),
+            7 => Some(&self.create_button),
             _ => None,
         }
     }
@@ -478,8 +735,13 @@ impl Widget for NewProjectDialog {
     fn child_mut(&mut self, index: usize) -> Option<&mut dyn Widget> {
         match index {
             0 => Some(&mut self.name_input),
-            1 => Some(&mut self.cancel_button),
-            2 => Some(&mut self.create_button),
+            1 => Some(&mut self.resolution_dropdown),
+            2 => Some(&mut self.frame_rate_dropdown),
+            3 => Some(&mut self.audio_sample_rate_dropdown),
+            4 => Some(&mut self.proxy_checkbox),
+            5 => Some(&mut self.preview_cache_checkbox),
+            6 => Some(&mut self.cancel_button),
+            7 => Some(&mut self.create_button),
             _ => None,
         }
     }
@@ -558,11 +820,13 @@ impl SelfHostedAppRoot {
             }
             Action::Custom { namespace, name, payload }
                 if namespace == APP_SHELL_NAMESPACE
-                    && name == APP_SHELL_NEW_PROJECT_NAME_CHANGED =>
+                    && name == APP_SHELL_NEW_PROJECT_DRAFT_CHANGED =>
             {
                 if let Some(dialog) = &mut self.new_project_dialog {
-                    if let Ok(name) = serde_json::from_value::<String>(payload) {
-                        dialog.set_name(name);
+                    if let Ok(update) =
+                        serde_json::from_value::<NewProjectDraftUpdatePayload>(payload)
+                    {
+                        dialog.apply_update(update);
                     }
                 }
                 None
@@ -687,9 +951,9 @@ mod tests {
     use crate::app::ui_actions::{
         app_shell_cancel_new_project_dialog_action, app_shell_confirm_new_project_dialog_action,
         app_shell_import_media_dialog_action, app_shell_new_project_dialog_action,
-        app_shell_new_project_name_changed_action, app_shell_open_project_dialog_action,
-        app_shell_save_project_as_dialog_action, ProjectCreateWithSettingsPayload,
-        PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
+        app_shell_new_project_draft_changed_action, app_shell_open_project_dialog_action,
+        app_shell_save_project_as_dialog_action, NewProjectDraftUpdatePayload,
+        ProjectCreateWithSettingsPayload, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
     };
     use mondrian_core::{Rational, Resolution};
     use mondrian_editor_state::state::PanelKind;
@@ -930,7 +1194,9 @@ mod tests {
 
         assert_eq!(
             root.handle_shell_action(
-                app_shell_new_project_name_changed_action("Rough Cut"),
+                app_shell_new_project_draft_changed_action(NewProjectDraftUpdatePayload::Name(
+                    "Rough Cut".into(),
+                )),
                 &platform,
                 None
             ),
@@ -958,6 +1224,71 @@ mod tests {
             payload.project_file,
             PathBuf::from("E:/projects/Rough Cut.mdp")
         );
+    }
+
+    #[test]
+    fn app_root_applies_new_project_setting_updates_to_payload() {
+        let platform = FakePlatform {
+            open_paths: None,
+            save_path: Some(PathBuf::from("E:/projects/UHD.mdp")),
+        };
+        let mut root = SelfHostedAppRoot::demo();
+
+        root.handle_shell_action(app_shell_new_project_dialog_action(), &platform, None);
+        root.handle_shell_action(
+            app_shell_new_project_draft_changed_action(NewProjectDraftUpdatePayload::Resolution(
+                Resolution::UHD4K,
+            )),
+            &platform,
+            None,
+        );
+        root.handle_shell_action(
+            app_shell_new_project_draft_changed_action(NewProjectDraftUpdatePayload::FrameRate(
+                Rational::FPS_23976,
+            )),
+            &platform,
+            None,
+        );
+        root.handle_shell_action(
+            app_shell_new_project_draft_changed_action(
+                NewProjectDraftUpdatePayload::AudioSampleRate(96_000),
+            ),
+            &platform,
+            None,
+        );
+        root.handle_shell_action(
+            app_shell_new_project_draft_changed_action(NewProjectDraftUpdatePayload::ProxyEnabled(
+                false,
+            )),
+            &platform,
+            None,
+        );
+        root.handle_shell_action(
+            app_shell_new_project_draft_changed_action(
+                NewProjectDraftUpdatePayload::PreviewCacheEnabled(false),
+            ),
+            &platform,
+            None,
+        );
+
+        let action = root
+            .handle_shell_action(
+                app_shell_confirm_new_project_dialog_action(),
+                &platform,
+                None,
+            )
+            .expect("confirm action");
+        let Action::Custom { payload, .. } = action else {
+            panic!("expected project create action");
+        };
+        let payload: ProjectCreateWithSettingsPayload =
+            serde_json::from_value(payload).expect("project create payload");
+
+        assert_eq!(payload.sequence_settings.resolution, Resolution::UHD4K);
+        assert_eq!(payload.sequence_settings.frame_rate, Rational::FPS_23976);
+        assert_eq!(payload.sequence_settings.audio_sample_rate, 96_000);
+        assert!(!payload.project_settings.proxy_enabled);
+        assert!(!payload.sequence_settings.preview.cache_enabled);
     }
 
     #[test]

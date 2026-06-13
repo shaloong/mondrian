@@ -5,7 +5,7 @@
 
 use mondrian_core::effect_data::EffectType;
 use mondrian_core::types::{AssetId, ClipId, EffectId, TrackId};
-use mondrian_core::ProjectSettings;
+use mondrian_core::{ProjectSettings, Rational, Resolution};
 use mondrian_editor_state::Action;
 use mondrian_timeline::SequenceSettings;
 use serde::{Deserialize, Serialize};
@@ -62,8 +62,8 @@ pub const APP_SHELL_NAMESPACE: &str = "app.shell";
 
 /// App-shell request to create a new project through a platform save dialog.
 pub const APP_SHELL_NEW_PROJECT_DIALOG: &str = "new_project_dialog";
-/// App-shell request to update the self-hosted new-project draft name.
-pub const APP_SHELL_NEW_PROJECT_NAME_CHANGED: &str = "new_project_name_changed";
+/// App-shell request to update one self-hosted new-project draft setting.
+pub const APP_SHELL_NEW_PROJECT_DRAFT_CHANGED: &str = "new_project_draft_changed";
 /// App-shell request to confirm the self-hosted new-project dialog.
 pub const APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG: &str = "confirm_new_project_dialog";
 /// App-shell request to cancel the self-hosted new-project dialog.
@@ -235,6 +235,23 @@ pub struct ProjectCreateWithSettingsPayload {
     pub project_settings: ProjectSettings,
 }
 
+/// One mutation to the shell-local new-project draft.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum NewProjectDraftUpdatePayload {
+    /// Project and initial sequence display name.
+    Name(String),
+    /// Initial sequence frame size.
+    Resolution(Resolution),
+    /// Initial sequence frame rate.
+    FrameRate(Rational),
+    /// Initial sequence audio sample rate in Hz.
+    AudioSampleRate(u32),
+    /// Whether project proxy generation is enabled.
+    ProxyEnabled(bool),
+    /// Whether preview rendering cache is enabled.
+    PreviewCacheEnabled(bool),
+}
+
 /// Build an action that selects a clip in the active timeline.
 pub fn timeline_select_clip_action(payload: TimelineSelectClipPayload) -> Action {
     custom_timeline_action(TIMELINE_SELECT_CLIP, payload)
@@ -307,9 +324,9 @@ pub fn app_shell_new_project_dialog_action() -> Action {
     custom_app_shell_action(APP_SHELL_NEW_PROJECT_DIALOG)
 }
 
-/// Build an app-shell request for changing the new-project draft name.
-pub fn app_shell_new_project_name_changed_action(name: &str) -> Action {
-    custom_app_shell_action_with_payload(APP_SHELL_NEW_PROJECT_NAME_CHANGED, name)
+/// Build an app-shell request for changing one new-project draft setting.
+pub fn app_shell_new_project_draft_changed_action(payload: NewProjectDraftUpdatePayload) -> Action {
+    custom_app_shell_action_with_payload(APP_SHELL_NEW_PROJECT_DRAFT_CHANGED, payload)
 }
 
 /// Build an app-shell request for confirming the new-project dialog.
