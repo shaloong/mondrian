@@ -406,13 +406,13 @@ pub struct InspectorEffectModel {
 impl InspectorPanelModel {
     pub fn from_app_state(state: &AppState) -> Self {
         let Some(sequence) = state.sequence.as_ref() else {
-            return Self::demo();
+            return Self::empty();
         };
         let Some(selection) = state.selection.selected_clips.first() else {
-            return Self::demo();
+            return Self::empty();
         };
         let Some(clip) = clip_for_selection(sequence, selection) else {
-            return Self::demo();
+            return Self::empty();
         };
 
         let time = state.current_time_code().unwrap_or(sequence.playhead);
@@ -445,6 +445,25 @@ impl InspectorPanelModel {
                     enabled: effect.is_enabled,
                 })
                 .collect(),
+        }
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            selected_clip: None,
+            enabled: false,
+            opacity: 100.0,
+            tint: Color::from_rgba8(128, 128, 128, 255),
+            position_x: 0.0,
+            position_y: 0.0,
+            scale_percent: 100.0,
+            rotation_degrees: 0.0,
+            in_frame: 0.0,
+            out_frame: 1.0,
+            max_frame: 1.0,
+            tint_area_mode: ColorPickerAreaMode::Wheel,
+            curve_points: vec![CurvePoint::new(0.0, 0.0), CurvePoint::new(1.0, 1.0)],
+            effects: Vec::new(),
         }
     }
 
@@ -1198,6 +1217,9 @@ mod tests {
         assert!(!models.effects.items.is_empty());
         assert_eq!(models.console.title, "Console");
         assert!(!models.console.items.is_empty());
+        assert_eq!(models.inspector.selected_clip, None);
+        assert_eq!(models.inspector.opacity, 100.0);
+        assert!(models.inspector.effects.is_empty());
     }
 
     #[test]

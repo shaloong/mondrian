@@ -8,7 +8,7 @@ use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 
 use mondrian_app::app::AppState;
-use mondrian_app::self_hosted::panels::{demo_app_state, SelfHostedPanelModels};
+use mondrian_app::self_hosted::panels::SelfHostedPanelModels;
 use mondrian_app::self_hosted::runtime::WinitUiRuntime;
 use mondrian_app::self_hosted::shell::{
     media_import_filters, project_file_filters, SelfHostedAppRoot, APP_SHELL_IMPORT_MEDIA_DIALOG,
@@ -49,9 +49,7 @@ fn refresh_root_if_dirty(
     if !ui_dirty.replace(false) {
         return;
     }
-    root.set_models(SelfHostedPanelModels::demo_from_app_state(
-        &app_state.borrow(),
-    ));
+    root.set_models(SelfHostedPanelModels::from_app_state(&app_state.borrow()));
     TreeWalker::layout(root, bounds);
 }
 
@@ -98,10 +96,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ui_renderer = UiRenderer::new(&device, config.format);
     let mut text_renderer = TextRenderer::new();
 
-    let app_state = RefCell::new(demo_app_state());
-    let mut root = SelfHostedAppRoot::from_models(SelfHostedPanelModels::demo_from_app_state(
-        &app_state.borrow(),
-    ));
+    let app_state = RefCell::new(AppState::new());
+    let mut root =
+        SelfHostedAppRoot::from_models(SelfHostedPanelModels::from_app_state(&app_state.borrow()));
     let bounds = Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
     TreeWalker::layout(&mut root, bounds);
     let mut router = EventRouter::with_platform_and_tooltip(

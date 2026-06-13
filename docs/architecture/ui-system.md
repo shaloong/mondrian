@@ -58,16 +58,13 @@ reads the current `AppState`, asset library, effect registry, selection state,
 and timeline sequence into generic widget models. Timeline adapters start at
 `TimelinePanelModel::from_sequence`, which maps `mondrian-timeline::Sequence`
 plus app-layer selection DTOs into widget view models and stable-id-backed
-actions. During the migration, the `self_hosted_app` developer binary uses
-`SelfHostedAppRoot::demo()` as the integration shell. When the self-hosted UI
-becomes the product shell, the official `mondrian` entrypoint should call into
-this module with real panel models instead of moving logic back into `src/bin`.
-The developer shell keeps demo panels visible for component testing, but its
-action sink already dispatches through `AppState::dispatch_action` so menu and
-timeline UI actions exercise the same app boundary as the future product shell.
-Its timeline fixture is backed by a synthetic `AppState` sequence, so clip
-selection, movement, trimming, and seeking carry stable ids and can refresh the
-dock from a new model snapshot after dispatch.
+actions. During the migration, the `self_hosted_app` developer binary is the
+product-shell tracer: it starts from a real empty `AppState`, builds
+`SelfHostedPanelModels::from_app_state`, and refreshes from that same boundary
+after dispatched actions. Component fixtures remain in `ui_demo` and explicit
+`SelfHostedPanelModels::demo()` tests only. When the self-hosted UI becomes the
+official `mondrian` entrypoint, it should keep calling into this module with
+real panel models instead of moving logic back into `src/bin`.
 
 Selection DTOs that describe editor state, such as `SelectedClipRef`, live in
 `mondrian-app::app` rather than legacy UI modules. Legacy egui panels and
