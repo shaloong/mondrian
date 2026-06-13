@@ -112,6 +112,9 @@ impl AppState {
             Action::RemoveEffect { clip_id, effect_id } => {
                 self.remove_effect_from_action(clip_id, effect_id)
             }
+            Action::ReorderEffects { clip_id, from, to } => {
+                self.reorder_effects_from_action(clip_id, from, to)
+            }
 
             // ── 项目操作 ──────────────────────────────────────────────────
             Action::SaveProject => {
@@ -249,6 +252,22 @@ impl AppState {
         self.remove_effect_from_clip(
             SelectedClipRef { track_id, is_video_track, clip_id },
             effect_id,
+        )
+        .map(|_| ())
+    }
+
+    fn reorder_effects_from_action(
+        &mut self,
+        clip_id: ClipId,
+        from: usize,
+        to: usize,
+    ) -> Result<()> {
+        let (track_id, is_video_track, _) =
+            self.clip_action_location("reorder_effects", clip_id)?;
+        self.reorder_effects_for_clip(
+            SelectedClipRef { track_id, is_video_track, clip_id },
+            from,
+            to,
         )
         .map(|_| ())
     }
@@ -1357,6 +1376,114 @@ mod tests {
         let effects = &state.sequence.as_ref().expect("sequence").video_tracks[0].clips[0].effects;
         assert_eq!(effects.len(), 1);
         assert_eq!(effects[0].id, effect_id);
+        assert!(!state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_reorder_effects_action_reorders_with_undo_snapshot() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
+        let first: mondrian_effects::EffectNode =
+            mondrian_effects::EffectNodeExt::with_defaults(EffectType::GaussianBlur);
+        let second: mondrian_effects::EffectNode =
+            mondrian_effects::EffectNodeExt::with_defaults(EffectType::Sharpen);
+        let third: mondrian_effects::EffectNode =
+            mondrian_effects::EffectNodeExt::with_defaults(EffectType::BasicCorrection);
+        let first_id = first.id;
+        let second_id = second.id;
+        let third_id = third.id;
+        let clip = &mut state.sequence.as_mut().expect("sequence").video_tracks[0].clips[0];
+        clip.add_effect_node(first);
+        clip.add_effect_node(second);
+        clip.add_effect_node(third);
+
+        state
+            .dispatch_action(mondrian_editor_state::Action::ReorderEffects {
+                clip_id,
+                from: 0,
+                to: usize::MAX,
+            })
+            .expect("dispatch reorder effects");
+
+        let effects = &state.sequence.as_ref().expect("sequence").video_tracks[0].clips[0].effects;
+        assert_eq!(
+            effects.iter().map(|effect| effect.id).collect::<Vec<_>>(),
+            vec![second_id, third_id, first_id]
+        );
+        assert!(state.can_undo_action());
+
+        assert!(state.undo_timeline().expect("undo reorder effects"));
+        let effects = &state.sequence.as_ref().expect("sequence").video_tracks[0].clips[0].effects;
+        assert_eq!(
+            effects.iter().map(|effect| effect.id).collect::<Vec<_>>(),
+            vec![first_id, second_id, third_id]
+        );
+    }
+
+    #[test]
+    fn dispatch_reorder_effects_action_noop_does_not_enter_undo_history() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
+        let effect: mondrian_effects::EffectNode =
+            mondrian_effects::EffectNodeExt::with_defaults(EffectType::GaussianBlur);
+        state.sequence.as_mut().expect("sequence").video_tracks[0].clips[0].add_effect_node(effect);
+
+        state
+            .dispatch_action(mondrian_editor_state::Action::ReorderEffects {
+                clip_id,
+                from: 0,
+                to: 0,
+            })
+            .expect("dispatch reorder noop");
+
+        assert!(!state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_reorder_effects_action_rejects_out_of_range_source_index() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
+        let effect: mondrian_effects::EffectNode =
+            mondrian_effects::EffectNodeExt::with_defaults(EffectType::GaussianBlur);
+        state.sequence.as_mut().expect("sequence").video_tracks[0].clips[0].add_effect_node(effect);
+
+        let err = state
+            .dispatch_action(mondrian_editor_state::Action::ReorderEffects {
+                clip_id,
+                from: 1,
+                to: 0,
+            })
+            .expect_err("out-of-range source index should reject reorder");
+
+        assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
+        assert!(!state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_reorder_effects_action_preserves_locked_track() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
+        let first: mondrian_effects::EffectNode =
+            mondrian_effects::EffectNodeExt::with_defaults(EffectType::GaussianBlur);
+        let second: mondrian_effects::EffectNode =
+            mondrian_effects::EffectNodeExt::with_defaults(EffectType::Sharpen);
+        let first_id = first.id;
+        let second_id = second.id;
+        let sequence = state.sequence.as_mut().expect("sequence");
+        sequence.video_tracks[0].clips[0].add_effect_node(first);
+        sequence.video_tracks[0].clips[0].add_effect_node(second);
+        sequence.video_tracks[0].is_locked = true;
+
+        let err = state
+            .dispatch_action(mondrian_editor_state::Action::ReorderEffects {
+                clip_id,
+                from: 0,
+                to: 1,
+            })
+            .expect_err("locked track should reject effect reorder");
+
+        assert!(matches!(err, MondrianError::TrackLocked { .. }));
+        let effects = &state.sequence.as_ref().expect("sequence").video_tracks[0].clips[0].effects;
+        assert_eq!(
+            effects.iter().map(|effect| effect.id).collect::<Vec<_>>(),
+            vec![first_id, second_id]
+        );
         assert!(!state.can_undo_action());
     }
 }

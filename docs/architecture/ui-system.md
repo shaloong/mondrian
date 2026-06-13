@@ -109,6 +109,10 @@ The generic `Action::RemoveEffect` resolves the clip id into the active sequence
 selection reference and reuses the same remove-effect command, so inspector
 buttons, shortcuts, scripts, and macros share locked-track validation and undo
 behavior.
+`Action::ReorderEffects` follows the same boundary and calls
+`AppState::reorder_effects_for_clip`, which clamps the target slot, rejects an
+invalid source index, and records one undoable sequence snapshot only when order
+actually changes.
 Effects browser activation uses the same protocol family: when a video clip is
 selected, effect rows carry a `ui.effects` add-to-clip payload with the selected
 clip id and serialized `EffectType`, and `AppState` routes it through
