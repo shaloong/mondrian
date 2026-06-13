@@ -7,19 +7,13 @@
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 
-use mondrian_app::app::ui_actions::{
-    APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_OPEN_PROJECT_DIALOG,
-    APP_SHELL_SAVE_PROJECT_AS_DIALOG,
-};
 use mondrian_app::app::AppState;
 use mondrian_app::self_hosted::panels::SelfHostedPanelModels;
 use mondrian_app::self_hosted::runtime::WinitUiRuntime;
-use mondrian_app::self_hosted::shell::{
-    media_import_filters, project_file_filters, SelfHostedAppRoot, PROJECT_FILE_EXTENSION,
-};
+use mondrian_app::self_hosted::shell::{resolve_app_shell_action, SelfHostedAppRoot};
 use mondrian_editor_state::Action;
 use mondrian_panel_console::tracing_layer::ConsoleLogLayer;
-use mondrian_platform::{PlatformService, SystemPlatformService};
+use mondrian_platform::SystemPlatformService;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::{TreeWalker, Widget};
 use mondrian_ui_events::EventRouter;
@@ -123,60 +117,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         use winit::event_loop::ControlFlow;
         elwt.set_control_flow(ControlFlow::Wait);
         let dispatch_action = |action: Action| {
-            let action = match action {
-                Action::Custom { namespace, name, .. }
-                    if namespace == APP_SHELL_NAMESPACE
-                        && name == APP_SHELL_OPEN_PROJECT_DIALOG =>
-                {
-                    let platform = SystemPlatformService;
-                    let Some(paths) =
-                        platform.open_file_dialog("Open Mondrian Project", &project_file_filters())
-                    else {
-                        return;
-                    };
-                    let Some(path) = paths.into_iter().next() else {
-                        return;
-                    };
-                    Action::OpenProject(path)
-                }
-                Action::Custom { namespace, name, .. }
-                    if namespace == APP_SHELL_NAMESPACE
-                        && name == APP_SHELL_IMPORT_MEDIA_DIALOG =>
-                {
-                    let platform = SystemPlatformService;
-                    let Some(paths) =
-                        platform.open_file_dialog("Import Media", &media_import_filters())
-                    else {
-                        return;
-                    };
-                    if paths.is_empty() {
-                        return;
-                    }
-                    Action::ImportMedia(paths)
-                }
-                Action::Custom { namespace, name, .. }
-                    if namespace == APP_SHELL_NAMESPACE
-                        && name == APP_SHELL_SAVE_PROJECT_AS_DIALOG =>
-                {
-                    let platform = SystemPlatformService;
-                    let default_name = app_state
-                        .borrow()
-                        .current_project_path
-                        .as_ref()
-                        .and_then(|path| {
-                            path.file_name().and_then(|name| name.to_str()).map(str::to_string)
-                        })
-                        .unwrap_or_else(|| format!("untitled.{PROJECT_FILE_EXTENSION}"));
-                    let Some(path) = platform.save_file_dialog(
-                        "Save Mondrian Project As",
-                        &default_name,
-                        &project_file_filters(),
-                    ) else {
-                        return;
-                    };
-                    Action::SaveProjectAs(path)
-                }
-                action => action,
+            let current_project_path = app_state.borrow().current_project_path.clone();
+            let Some(action) = resolve_app_shell_action(
+                action,
+                &SystemPlatformService,
+                current_project_path.as_deref(),
+            ) else {
+                return;
             };
             tracing::debug!(?action, "custom UI action");
             if let Err(err) = app_state.borrow_mut().dispatch_action(action) {

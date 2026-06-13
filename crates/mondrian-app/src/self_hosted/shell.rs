@@ -5,16 +5,18 @@
 
 use mondrian_editor_state::state::PanelKind;
 use mondrian_editor_state::Action;
-use mondrian_platform::FileFilter;
+use mondrian_platform::{FileFilter, PlatformService};
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, Widget};
 use mondrian_ui_widgets::dock_splitter::DockSplitter;
 use mondrian_ui_widgets::menu::{Dropdown, MenuItem};
+use std::path::Path;
 
 use crate::app::ui_actions::{
     app_shell_import_media_dialog_action, app_shell_open_project_dialog_action,
-    app_shell_save_project_as_dialog_action,
+    app_shell_save_project_as_dialog_action, APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE,
+    APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
 };
 use crate::self_hosted::panels::{build_demo_dock_tree, build_dock_tree, SelfHostedPanelModels};
 
@@ -38,6 +40,50 @@ pub fn media_import_filters() -> Vec<FileFilter> {
         FileFilter::new("Video", vec!["mp4", "mov", "mkv", "webm", "avi"]),
         FileFilter::new("Audio", vec!["mp3", "wav", "aac", "flac", "m4a"]),
     ]
+}
+
+/// Resolve a self-hosted app-shell action into a concrete editor action.
+///
+/// Native file dialogs stay behind [`PlatformService`]. Widgets and menus emit
+/// stable app-shell requests, while the window entrypoint injects platform
+/// capabilities and dispatches only concrete editor actions.
+pub fn resolve_app_shell_action(
+    action: Action,
+    platform: &dyn PlatformService,
+    current_project_path: Option<&Path>,
+) -> Option<Action> {
+    match action {
+        Action::Custom { namespace, name, .. }
+            if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_OPEN_PROJECT_DIALOG =>
+        {
+            let paths =
+                platform.open_file_dialog("Open Mondrian Project", &project_file_filters())?;
+            paths.into_iter().next().map(Action::OpenProject)
+        }
+        Action::Custom { namespace, name, .. }
+            if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_IMPORT_MEDIA_DIALOG =>
+        {
+            let paths = platform.open_file_dialog("Import Media", &media_import_filters())?;
+            (!paths.is_empty()).then_some(Action::ImportMedia(paths))
+        }
+        Action::Custom { namespace, name, .. }
+            if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_SAVE_PROJECT_AS_DIALOG =>
+        {
+            let default_name = current_project_path
+                .and_then(|path| path.file_name())
+                .and_then(|name| name.to_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("untitled.{PROJECT_FILE_EXTENSION}"));
+            platform
+                .save_file_dialog(
+                    "Save Mondrian Project As",
+                    &default_name,
+                    &project_file_filters(),
+                )
+                .map(Action::SaveProjectAs)
+        }
+        action => Some(action),
+    }
 }
 
 /// Default Mondrian menu structure for self-hosted shells.
@@ -279,6 +325,10 @@ impl Widget for SelfHostedAppRoot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::ui_actions::{
+        app_shell_import_media_dialog_action, app_shell_open_project_dialog_action,
+        app_shell_save_project_as_dialog_action,
+    };
     use mondrian_editor_state::state::PanelKind;
     use mondrian_platform::NoopPlatformService;
     use mondrian_ui_core::Widget;
@@ -286,6 +336,44 @@ mod tests {
         EventContext, EventRequests, FocusManager, ShortcutBinding, ShortcutManager, ShortcutScope,
         TooltipManager, TooltipState,
     };
+    use std::path::{Path, PathBuf};
+
+    #[derive(Debug, Default)]
+    struct FakePlatform {
+        open_paths: Option<Vec<PathBuf>>,
+        save_path: Option<PathBuf>,
+    }
+
+    impl PlatformService for FakePlatform {
+        fn clipboard_copy(&self, _text: &str) {}
+
+        fn clipboard_paste(&self) -> Option<String> {
+            None
+        }
+
+        fn open_file_dialog(&self, _title: &str, _filters: &[FileFilter]) -> Option<Vec<PathBuf>> {
+            self.open_paths.clone()
+        }
+
+        fn save_file_dialog(
+            &self,
+            _title: &str,
+            _default_name: &str,
+            _filters: &[FileFilter],
+        ) -> Option<PathBuf> {
+            self.save_path.clone()
+        }
+
+        fn open_folder_dialog(&self, _title: &str) -> Option<PathBuf> {
+            None
+        }
+
+        fn open_url(&self, _url: &str) {}
+
+        fn reveal_in_file_manager(&self, _path: &Path) {}
+
+        fn send_notification(&self, _title: &str, _body: &str) {}
+    }
 
     struct DummyFocus;
 
@@ -384,6 +472,74 @@ mod tests {
             .extensions
             .iter()
             .any(|extension| extension == PROJECT_FILE_EXTENSION));
+    }
+
+    #[test]
+    fn resolve_app_shell_open_project_dialog_returns_open_action() {
+        let platform = FakePlatform {
+            open_paths: Some(vec![PathBuf::from("E:/projects/cut.mdp")]),
+            save_path: None,
+        };
+
+        let action =
+            resolve_app_shell_action(app_shell_open_project_dialog_action(), &platform, None);
+
+        assert_eq!(
+            action,
+            Some(Action::OpenProject(PathBuf::from("E:/projects/cut.mdp")))
+        );
+    }
+
+    #[test]
+    fn resolve_app_shell_import_dialog_returns_import_action() {
+        let paths = vec![
+            PathBuf::from("E:/media/a.mov"),
+            PathBuf::from("E:/media/b.wav"),
+        ];
+        let platform = FakePlatform { open_paths: Some(paths.clone()), save_path: None };
+
+        let action =
+            resolve_app_shell_action(app_shell_import_media_dialog_action(), &platform, None);
+
+        assert_eq!(action, Some(Action::ImportMedia(paths)));
+    }
+
+    #[test]
+    fn resolve_app_shell_save_as_dialog_returns_save_action() {
+        let platform = FakePlatform {
+            open_paths: None,
+            save_path: Some(PathBuf::from("E:/projects/out.mdp")),
+        };
+
+        let action = resolve_app_shell_action(
+            app_shell_save_project_as_dialog_action(),
+            &platform,
+            Some(Path::new("E:/projects/current.mdp")),
+        );
+
+        assert_eq!(
+            action,
+            Some(Action::SaveProjectAs(PathBuf::from("E:/projects/out.mdp")))
+        );
+    }
+
+    #[test]
+    fn resolve_app_shell_dialog_cancel_returns_none() {
+        let platform = FakePlatform::default();
+
+        let action =
+            resolve_app_shell_action(app_shell_open_project_dialog_action(), &platform, None);
+
+        assert_eq!(action, None);
+    }
+
+    #[test]
+    fn resolve_app_shell_non_dialog_action_passes_through() {
+        let platform = FakePlatform::default();
+
+        let action = resolve_app_shell_action(Action::SaveProject, &platform, None);
+
+        assert_eq!(action, Some(Action::SaveProject));
     }
 
     #[test]
