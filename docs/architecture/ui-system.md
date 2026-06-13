@@ -101,6 +101,11 @@ Native file dialogs belong to `mondrian-platform::PlatformService`; the
 self-hosted File menu emits an app-shell custom action, resolves that dialog at
 the window entrypoint, then dispatches `Action::ImportMedia` with concrete
 paths.
+Project open/save dialogs use the same boundary: menu widgets emit app-shell
+dialog intents, the window entrypoint resolves them into concrete
+`OpenProject(PathBuf)` / `SaveProjectAs(PathBuf)` actions, and `AppState`
+performs project lifecycle work plus status reporting. Widget code must not
+invent project paths or mutate project files directly.
 `Action::SplitClipAtPlayhead` similarly routes to `AppState::split_at_playhead`,
 which bulk-splits unlocked clips under the playhead and records one undoable
 timeline snapshot only when a split actually occurs.

@@ -132,10 +132,12 @@ impl AppState {
             }
 
             // ── 项目操作 ──────────────────────────────────────────────────
+            Action::OpenProject(path) => self.open_project_from_action(path),
             Action::SaveProject => {
                 self.save_project().map_err(mondrian_core::MondrianError::Other)?;
                 Ok(())
             }
+            Action::SaveProjectAs(path) => self.save_project_as_from_action(path),
             Action::CloseProject => {
                 self.close_project();
                 Ok(())
@@ -173,6 +175,41 @@ impl AppState {
 
     fn cut_from_action(&mut self) -> Result<()> {
         self.cut_selected_clips_to_clipboard().map(|_| ())
+    }
+
+    fn open_project_from_action(&mut self, path: PathBuf) -> Result<()> {
+        if path.as_os_str().is_empty() {
+            return Ok(());
+        }
+        self.open_project_file(path).map_err(|err| {
+            let reason = err.to_string();
+            self.set_status_hint(format!("打开项目失败：{reason}"), true);
+            MondrianError::WorkflowStepFailed { step_id: "open_project".to_string(), reason }
+        })?;
+        self.set_status_hint("项目已打开", false);
+        Ok(())
+    }
+
+    fn save_project_as_from_action(&mut self, path: PathBuf) -> Result<()> {
+        if path.as_os_str().is_empty() {
+            return Ok(());
+        }
+        if !self.has_open_project() {
+            let reason = "当前无可另存项目".to_string();
+            self.set_status_hint(reason.clone(), true);
+            return Err(MondrianError::WorkflowStepFailed {
+                step_id: "save_project_as".to_string(),
+                reason,
+            });
+        }
+        let display_path = super::ensure_project_extension(path.clone());
+        self.save_project_file_as(path).map_err(|err| {
+            let reason = err.to_string();
+            self.set_status_hint(format!("另存为失败：{reason}"), true);
+            MondrianError::WorkflowStepFailed { step_id: "save_project_as".to_string(), reason }
+        })?;
+        self.set_status_hint(format!("项目已另存为：{}", display_path.display()), false);
+        Ok(())
     }
 
     fn import_media_from_action(&mut self, paths: Vec<PathBuf>) -> Result<()> {
@@ -971,6 +1008,7 @@ mod tests {
     use mondrian_assets::AssetLibrary;
     use mondrian_core::types::{AssetId, MaskId, TimeCode};
     use mondrian_core::Color;
+    use mondrian_core::Rational;
     use mondrian_effects::EffectType;
     use mondrian_timeline::clip::Clip;
     use mondrian_timeline::sequence::Sequence;
@@ -1171,6 +1209,67 @@ mod tests {
         assert!(assets.is_empty());
 
         remove_temp_path(&library_root);
+    }
+
+    #[test]
+    fn dispatch_open_project_with_empty_path_is_noop() {
+        let mut state = AppState::new();
+
+        state
+            .dispatch_action(mondrian_editor_state::Action::OpenProject(PathBuf::new()))
+            .expect("empty open path should be ignored");
+
+        assert!(state.status_hint.is_none());
+    }
+
+    #[test]
+    fn dispatch_open_project_reports_missing_file() {
+        let mut state = AppState::new();
+        let missing = unique_temp_path("missing-project").join("missing.mdp");
+
+        let err = state
+            .dispatch_action(mondrian_editor_state::Action::OpenProject(missing))
+            .expect_err("missing project should fail");
+
+        assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
+        assert!(state.status_hint.as_ref().is_some_and(|(_, is_error)| *is_error));
+    }
+
+    #[test]
+    fn dispatch_save_project_as_requires_open_project() {
+        let mut state = AppState::new();
+        let target = unique_temp_path("save-as-no-project").join("copy.mdp");
+
+        let err = state
+            .dispatch_action(mondrian_editor_state::Action::SaveProjectAs(target))
+            .expect_err("save as without project should fail");
+
+        assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
+        assert!(state.status_hint.as_ref().is_some_and(|(_, is_error)| *is_error));
+    }
+
+    #[test]
+    fn dispatch_save_project_as_writes_copy_and_adds_project_extension() {
+        let mut state = AppState::new();
+        let root = unique_temp_path("save-as-project");
+        let source = root.join("source.mdp");
+        state
+            .create_new_project_at(source.clone(), "source", 1920, 1080, Rational::new(24, 1))
+            .expect("create source project");
+        let target_without_extension = root.join("copies").join("copy");
+        let expected_target = target_without_extension.with_extension("mdp");
+
+        state
+            .dispatch_action(mondrian_editor_state::Action::SaveProjectAs(
+                target_without_extension,
+            ))
+            .expect("save project as");
+
+        assert_eq!(state.current_project_path.as_ref(), Some(&expected_target));
+        assert!(expected_target.exists());
+        assert!(state.status_hint.as_ref().is_some_and(|(_, is_error)| !*is_error));
+
+        remove_temp_path(&root);
     }
 
     #[test]

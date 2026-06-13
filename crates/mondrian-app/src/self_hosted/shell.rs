@@ -18,8 +18,23 @@ use crate::self_hosted::panels::{build_demo_dock_tree, build_dock_tree, SelfHost
 pub const MENU_BAR_HEIGHT: f32 = 28.0;
 /// App-shell custom action namespace for commands resolved by the native shell.
 pub const APP_SHELL_NAMESPACE: &str = "app.shell";
+/// Open a platform project file dialog and dispatch `Action::OpenProject`.
+pub const APP_SHELL_OPEN_PROJECT_DIALOG: &str = "open_project_dialog";
 /// Open a platform media file dialog and dispatch `Action::ImportMedia`.
 pub const APP_SHELL_IMPORT_MEDIA_DIALOG: &str = "import_media_dialog";
+/// Open a platform save-file dialog and dispatch `Action::SaveProjectAs`.
+pub const APP_SHELL_SAVE_PROJECT_AS_DIALOG: &str = "save_project_as_dialog";
+
+/// Default file extension for Mondrian project containers.
+pub const PROJECT_FILE_EXTENSION: &str = "mdp";
+
+/// File dialog filters for project file commands.
+pub fn project_file_filters() -> Vec<FileFilter> {
+    vec![FileFilter::new(
+        "Mondrian Project",
+        vec![PROJECT_FILE_EXTENSION],
+    )]
+}
 
 /// File dialog filters for media import commands.
 pub fn media_import_filters() -> Vec<FileFilter> {
@@ -36,7 +51,14 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
             "File",
             vec![
                 MenuItem::new("New Project", Action::NewProject),
-                MenuItem::new("Open Project...", Action::OpenProject("".into())),
+                MenuItem::new(
+                    "Open Project...",
+                    Action::Custom {
+                        namespace: APP_SHELL_NAMESPACE.into(),
+                        name: APP_SHELL_OPEN_PROJECT_DIALOG.into(),
+                        payload: serde_json::Value::Null,
+                    },
+                ),
                 MenuItem::new(
                     "Import Media...",
                     Action::Custom {
@@ -46,7 +68,14 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
                     },
                 ),
                 MenuItem::new("Save", Action::SaveProject),
-                MenuItem::new("Save As...", Action::SaveProjectAs("".into())),
+                MenuItem::new(
+                    "Save As...",
+                    Action::Custom {
+                        namespace: APP_SHELL_NAMESPACE.into(),
+                        name: APP_SHELL_SAVE_PROJECT_AS_DIALOG.into(),
+                        payload: serde_json::Value::Null,
+                    },
+                ),
                 MenuItem::new("Quit", Action::CloseProject),
             ],
         ),
@@ -368,6 +397,18 @@ mod tests {
         assert!(filters.iter().any(
             |filter| filter.name == "Audio" && filter.extensions.iter().any(|ext| ext == "wav")
         ));
+    }
+
+    #[test]
+    fn project_file_filters_cover_mondrian_project_extension() {
+        let filters = project_file_filters();
+
+        assert_eq!(filters.len(), 1);
+        assert_eq!(filters[0].name, "Mondrian Project");
+        assert!(filters[0]
+            .extensions
+            .iter()
+            .any(|extension| extension == PROJECT_FILE_EXTENSION));
     }
 
     #[test]

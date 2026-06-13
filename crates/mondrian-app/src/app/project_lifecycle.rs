@@ -322,6 +322,17 @@ impl AppState {
         self.open_project_archive(project_file.clone(), project_file.as_path())
     }
 
+    pub fn save_project_file_as(&mut self, target_file: PathBuf) -> anyhow::Result<()> {
+        let target_file = super::ensure_project_extension(target_file);
+        let previous = self.current_project_path.clone();
+        self.current_project_path = Some(target_file.clone());
+        if let Err(err) = self.save_project_file() {
+            self.current_project_path = previous;
+            return Err(err);
+        }
+        Ok(())
+    }
+
     pub fn save_project_file(&self) -> anyhow::Result<()> {
         let Some(data) = self.current_project_data() else {
             return Ok(());

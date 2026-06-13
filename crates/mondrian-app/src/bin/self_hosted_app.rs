@@ -11,7 +11,9 @@ use mondrian_app::app::AppState;
 use mondrian_app::self_hosted::panels::{demo_app_state, SelfHostedPanelModels};
 use mondrian_app::self_hosted::runtime::WinitUiRuntime;
 use mondrian_app::self_hosted::shell::{
-    media_import_filters, SelfHostedAppRoot, APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE,
+    media_import_filters, project_file_filters, SelfHostedAppRoot, APP_SHELL_IMPORT_MEDIA_DIALOG,
+    APP_SHELL_NAMESPACE, APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
+    PROJECT_FILE_EXTENSION,
 };
 use mondrian_editor_state::Action;
 use mondrian_panel_console::tracing_layer::ConsoleLogLayer;
@@ -125,6 +127,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let action = match action {
                 Action::Custom { namespace, name, .. }
                     if namespace == APP_SHELL_NAMESPACE
+                        && name == APP_SHELL_OPEN_PROJECT_DIALOG =>
+                {
+                    let platform = SystemPlatformService;
+                    let Some(paths) =
+                        platform.open_file_dialog("Open Mondrian Project", &project_file_filters())
+                    else {
+                        return;
+                    };
+                    let Some(path) = paths.into_iter().next() else {
+                        return;
+                    };
+                    Action::OpenProject(path)
+                }
+                Action::Custom { namespace, name, .. }
+                    if namespace == APP_SHELL_NAMESPACE
                         && name == APP_SHELL_IMPORT_MEDIA_DIALOG =>
                 {
                     let platform = SystemPlatformService;
@@ -137,6 +154,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         return;
                     }
                     Action::ImportMedia(paths)
+                }
+                Action::Custom { namespace, name, .. }
+                    if namespace == APP_SHELL_NAMESPACE
+                        && name == APP_SHELL_SAVE_PROJECT_AS_DIALOG =>
+                {
+                    let platform = SystemPlatformService;
+                    let default_name = app_state
+                        .borrow()
+                        .current_project_path
+                        .as_ref()
+                        .and_then(|path| {
+                            path.file_name().and_then(|name| name.to_str()).map(str::to_string)
+                        })
+                        .unwrap_or_else(|| format!("untitled.{PROJECT_FILE_EXTENSION}"));
+                    let Some(path) = platform.save_file_dialog(
+                        "Save Mondrian Project As",
+                        &default_name,
+                        &project_file_filters(),
+                    ) else {
+                        return;
+                    };
+                    Action::SaveProjectAs(path)
                 }
                 action => action,
             };
