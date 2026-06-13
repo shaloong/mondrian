@@ -45,6 +45,7 @@ use crate::app::{AppState, SelectedClipRef};
 /// Complete set of view models needed by the self-hosted panel shell.
 #[derive(Debug, Clone)]
 pub struct SelfHostedPanelModels {
+    pub project: PanelListModel,
     pub assets: PanelListModel,
     pub effects: PanelListModel,
     pub console: PanelListModel,
@@ -60,6 +61,7 @@ impl SelfHostedPanelModels {
     /// emit actions, while domain mutations stay in `AppState` handlers.
     pub fn from_app_state(state: &AppState) -> Self {
         Self {
+            project: PanelListModel::from_project_status(state),
             assets: PanelListModel::from_asset_library(state.asset_library.as_deref()),
             effects: PanelListModel::from_effect_registry(
                 state.selection.selected_clips.first().copied(),
@@ -82,6 +84,7 @@ impl SelfHostedPanelModels {
     /// inspector state from an `AppState` snapshot.
     pub fn demo_from_app_state(state: &AppState) -> Self {
         Self {
+            project: PanelListModel::from_project_status(state),
             assets: demo_asset_model(),
             effects: PanelListModel::from_effect_registry(
                 state.selection.selected_clips.first().copied(),
@@ -152,6 +155,87 @@ impl PanelListModel {
     pub fn with_activate_prefix(mut self, prefix: impl Into<String>) -> Self {
         self.activate_prefix = Some(prefix.into());
         self
+    }
+
+    /// Build the project status panel for the product shell.
+    pub fn from_project_status(state: &AppState) -> Self {
+        let mut items = Vec::new();
+        if let Some(path) = &state.current_project_path {
+            let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("Project");
+            items.push(
+                PanelListItem::new(name)
+                    .with_subtitle(path.display().to_string())
+                    .with_badge("Open")
+                    .with_select_action(panel_action("project.select.current")),
+            );
+        } else if state.sequence.is_some() {
+            items.push(
+                PanelListItem::new("Unsaved project")
+                    .with_subtitle("Save the current edit to create a project file")
+                    .with_badge("Draft")
+                    .with_select_action(panel_action("project.select.unsaved")),
+            );
+        } else {
+            items.push(
+                PanelListItem::new("No project")
+                    .with_subtitle("Open or create a project to start editing")
+                    .with_badge("Idle")
+                    .disabled(true),
+            );
+        }
+
+        if let Some(sequence) = &state.sequence {
+            let track_count = sequence.video_tracks.len() + sequence.audio_tracks.len();
+            let duration = sequence.total_duration().frame.max(0);
+            let resolution = sequence.settings.resolution;
+            items.push(
+                PanelListItem::new(sequence.name.clone())
+                    .with_subtitle(format!("{track_count} tracks, {duration} frames"))
+                    .with_badge(format!("{}x{}", resolution.width, resolution.height))
+                    .with_select_action(panel_action("project.select.sequence")),
+            );
+        } else {
+            items.push(
+                PanelListItem::new("No sequence")
+                    .with_subtitle("Project timeline is not loaded")
+                    .with_badge("SEQ")
+                    .disabled(true),
+            );
+        }
+
+        items.push(
+            PanelListItem::new("Asset library")
+                .with_subtitle(if state.asset_library.is_some() {
+                    "SQLite library connected"
+                } else {
+                    "Asset library disconnected"
+                })
+                .with_badge(if state.asset_library.is_some() {
+                    "DB"
+                } else {
+                    "Off"
+                })
+                .disabled(state.asset_library.is_none()),
+        );
+
+        if let Some((message, is_error)) = &state.status_hint {
+            let mut item = PanelListItem::new(if *is_error { "Error" } else { "Status" })
+                .with_subtitle(message.clone())
+                .with_badge(if *is_error { "!" } else { "OK" });
+            if *is_error {
+                item = item.with_accent(Color::from_hex(0xB91C1C));
+            }
+            items.push(item);
+        } else {
+            items.push(
+                PanelListItem::new("Status")
+                    .with_subtitle("Ready")
+                    .with_badge("OK")
+                    .disabled(true),
+            );
+        }
+
+        PanelListModel::new("Project", items).with_subtitle("Project state")
     }
 
     /// Build the project asset list. Database read failures are represented as
@@ -621,7 +705,7 @@ fn panel_content_for_slot(kind: SlotKind, models: &SelfHostedPanelModels) -> Box
         SlotKind::Console => Box::new(panel_list(&models.console)),
         SlotKind::Viewer => Box::new(viewer_panel(&models.viewer)),
         SlotKind::Timeline => Box::new(timeline_panel(&models.timeline)),
-        SlotKind::Project => Box::new(ColoredBox::new(Color::from_hex(0x1E3A2A), 1.0, 1.0)),
+        SlotKind::Project => Box::new(panel_list(&models.project)),
         _ => Box::new(ColoredBox::new(Color::from_hex(0x1A1A1A), 1.0, 1.0)),
     }
 }
@@ -1290,11 +1374,14 @@ mod tests {
     use mondrian_core::automation::{PropertyHost, PropertyMutation, PropertyValue};
     use mondrian_core::types::{AssetId, TimeCode};
     use mondrian_effects::EffectNodeExt;
+    use std::path::PathBuf;
 
     #[test]
     fn demo_panel_models_cover_primary_editor_surfaces() {
         let models = SelfHostedPanelModels::demo();
 
+        assert_eq!(models.project.title, "Project");
+        assert!(models.project.items.iter().any(|item| item.title == "Unsaved project"));
         assert!(!models.assets.items.is_empty());
         assert!(!models.effects.items.is_empty());
         assert!(!models.console.items.is_empty());
@@ -1312,6 +1399,8 @@ mod tests {
         assert!(models.timeline.tracks.is_empty());
         assert_eq!(models.timeline.playhead_frame, 0);
         assert!(!timeline_panel(&models.timeline).can_focus());
+        assert_eq!(models.project.items[0].title, "No project");
+        assert!(models.project.items[0].disabled);
         assert_eq!(models.assets.items[0].title, "No project library");
         assert!(models.assets.items[0].disabled);
         assert!(!models.effects.items.is_empty());
@@ -1340,6 +1429,21 @@ mod tests {
 
         assert!(model.playhead_frame >= 0);
         assert!(model.playhead_frame <= max_end);
+    }
+
+    #[test]
+    fn project_panel_model_reads_project_path_sequence_and_status() {
+        let mut state = demo_app_state();
+        state.current_project_path = Some(PathBuf::from("E:/projects/cut.mdp"));
+        state.set_status_hint("Saved", false);
+
+        let model = PanelListModel::from_project_status(&state);
+
+        assert_eq!(model.title, "Project");
+        assert_eq!(model.items[0].title, "cut.mdp");
+        assert_eq!(model.items[0].badge.as_deref(), Some("Open"));
+        assert!(model.items.iter().any(|item| item.title == "Demo edit"));
+        assert!(model.items.iter().any(|item| item.subtitle == "Saved"));
     }
 
     #[test]

@@ -392,7 +392,9 @@ self-hosted Effects panel builds rows from the shared effect registry and, when
 a video clip is selected, activates rows through undoable
 `AppState::add_effect_to_clip` commands. The `self_hosted_app` and `ui_demo`
 Assets/Effects-style panels use this shared surface as the tracer bullet for
-migrating list-heavy egui panels.
+migrating list-heavy egui panels. The self-hosted Project slot also uses
+`PanelListModel::from_project_status` to show project file, active sequence,
+asset-library, and status-hint state instead of a colored placeholder.
 
 Timeline migration starts with the domain-light `TimelineView` surface in
 `mondrian-ui-widgets`. It renders frame-space tracks, clips, ruler ticks,
