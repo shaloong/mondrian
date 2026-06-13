@@ -443,6 +443,9 @@ aspect-ratio fitting, metadata labels, and safe-area guide drawing only; GPU
 preview texture ownership remains a future renderer/runtime integration point.
 Empty app state maps to a disabled viewer model so the product shell can show
 clear no-signal chrome without pretending a preview texture exists.
+`ui_demo` should use the same `ViewerSurface` for the Viewer panel and keep
+separate text diagnostics in the Text tab, so visual QA exercises production
+viewer chrome instead of a demo-only widget.
 
 ## Color Input
 

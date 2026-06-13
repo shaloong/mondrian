@@ -43,7 +43,9 @@ use mondrian_ui_widgets::property_panel::{PropertyPanel, PropertyRow, PropertySe
 use mondrian_ui_widgets::scroll::ScrollView;
 use mondrian_ui_widgets::slider::Slider;
 use mondrian_ui_widgets::text_input::TextInput;
-use mondrian_ui_widgets::{TimelineClip, TimelineClipRef, TimelineTrack, TimelineView};
+use mondrian_ui_widgets::{
+    TimelineClip, TimelineClipRef, TimelineTrack, TimelineView, ViewerSurface,
+};
 
 fn demo_action(name: &str) -> Action {
     Action::Custom {
@@ -578,21 +580,21 @@ impl Widget for GalleryWidget {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Viewer diagnostic widget (text rendering test)
+// Text diagnostic widget
 // ═══════════════════════════════════════════════════════════════════════════
 
-struct ViewerWidget {
+struct TextDiagnosticWidget {
     id: WidgetId,
     bounds: Rect,
 }
 
-impl ViewerWidget {
+impl TextDiagnosticWidget {
     fn new() -> Self {
         Self { id: WidgetId::new(), bounds: Rect::ZERO }
     }
 }
 
-impl Widget for ViewerWidget {
+impl Widget for TextDiagnosticWidget {
     fn id(&self) -> WidgetId {
         self.id
     }
@@ -684,10 +686,10 @@ fn tab_infos(kind: SlotKind) -> Vec<TabInfo> {
 
 fn slot_content_for_tab(kind: SlotKind, tab_index: usize) -> Box<dyn Widget> {
     match kind {
-        SlotKind::Viewer => Box::new(ViewerWidget::new()),
+        SlotKind::Viewer => Box::new(demo_viewer_surface()),
         SlotKind::Console => match tab_index {
             0 => Box::new(GalleryWidget::new()),
-            1 => Box::new(ViewerWidget::new()),
+            1 => Box::new(TextDiagnosticWidget::new()),
             _ => Box::new(ShapePanelWidget::new()),
         },
         SlotKind::Assets => match tab_index {
@@ -705,6 +707,14 @@ fn slot_content_for_tab(kind: SlotKind, tab_index: usize) -> Box<dyn Widget> {
         },
         _ => Box::new(ColoredBox::new(Color::from_hex(0x1A1A1A), 1.0, 1.0)),
     }
+}
+
+fn demo_viewer_surface() -> ViewerSurface {
+    ViewerSurface::new("Demo edit", 3840, 2160)
+        .with_status("Ready")
+        .with_resolution_label("3840x2160 @ 29.97 fps")
+        .with_frame_label("F68")
+        .with_duration_label("224 frames")
 }
 
 fn demo_asset_panel() -> PanelList {
