@@ -4,6 +4,7 @@
 //! the Mondrian application layer. Binaries should stay thin and call into this
 //! module instead of accumulating panel or runtime wiring.
 
+pub mod action_pump;
 pub mod modal;
 pub mod new_project_dialog;
 pub mod panels;

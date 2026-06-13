@@ -452,6 +452,8 @@ event routing, then drain them after the root borrow ends. Shell-local actions
 such as the new-project dialog mutate `SelfHostedAppRoot`; only confirmed
 project creation emits the editor-facing `ui.project.create_with_settings`
 action consumed by `AppState`.
+The queue and drain loop live in `self_hosted::action_pump`; entry binaries
+should use `PendingUiActions` rather than open-coding shell/AppState dispatch.
 The new-project dialog edits the real `SelfHostedNewProjectDraft` settings via
 typed draft-update payloads and presents validated production presets for frame
 size, frame rate, audio sample rate, proxy generation, and preview caching.

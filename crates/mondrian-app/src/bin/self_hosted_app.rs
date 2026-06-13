@@ -8,10 +8,10 @@ use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 
 use mondrian_app::app::AppState;
+use mondrian_app::self_hosted::action_pump::{drain_pending_actions, PendingUiActions};
 use mondrian_app::self_hosted::panels::SelfHostedPanelModels;
 use mondrian_app::self_hosted::runtime::WinitUiRuntime;
 use mondrian_app::self_hosted::shell::SelfHostedAppRoot;
-use mondrian_editor_state::Action;
 use mondrian_panel_console::tracing_layer::ConsoleLogLayer;
 use mondrian_platform::SystemPlatformService;
 use mondrian_ui_core::types::*;
@@ -33,59 +33,6 @@ fn mouse_button(b: winit::event::MouseButton) -> MouseButton {
         winit::event::MouseButton::Right => MouseButton::Right,
         winit::event::MouseButton::Middle => MouseButton::Middle,
         _ => MouseButton::Left,
-    }
-}
-
-fn refresh_root_if_dirty(
-    root: &mut SelfHostedAppRoot,
-    app_state: &RefCell<AppState>,
-    ui_dirty: &Cell<bool>,
-    bounds: Rect,
-) {
-    if !ui_dirty.replace(false) {
-        return;
-    }
-    root.set_models(SelfHostedPanelModels::from_app_state(&app_state.borrow()));
-    TreeWalker::layout(root, bounds);
-}
-
-fn drain_pending_actions(
-    pending_actions: &RefCell<Vec<Action>>,
-    root: &mut SelfHostedAppRoot,
-    app_state: &RefCell<AppState>,
-    ui_dirty: &Cell<bool>,
-    bounds: Rect,
-) {
-    let actions = std::mem::take(&mut *pending_actions.borrow_mut());
-    if actions.is_empty() {
-        refresh_root_if_dirty(root, app_state, ui_dirty, bounds);
-        return;
-    }
-
-    let mut needs_layout = false;
-    for action in actions {
-        let current_project_path = app_state.borrow().current_project_path.clone();
-        let Some(action) = root.handle_shell_action(
-            action,
-            &SystemPlatformService,
-            current_project_path.as_deref(),
-        ) else {
-            needs_layout = true;
-            continue;
-        };
-
-        tracing::debug!(?action, "custom UI action");
-        if let Err(err) = app_state.borrow_mut().dispatch_action(action) {
-            tracing::warn!("custom UI action failed: {err}");
-        } else {
-            ui_dirty.set(true);
-        }
-        needs_layout = true;
-    }
-
-    refresh_root_if_dirty(root, app_state, ui_dirty, bounds);
-    if needs_layout {
-        TreeWalker::layout(root, bounds);
     }
 }
 
@@ -148,7 +95,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_cursor = Point::new(0.0, 0.0);
     let current_bounds = std::cell::Cell::new(bounds);
     let mut modifiers_state = Modifiers::none();
-    let pending_actions = RefCell::new(Vec::new());
+    let pending_actions = PendingUiActions::default();
+    let platform = SystemPlatformService;
 
     tracing::info!("UI initialized — {}x{}", size.width, size.height);
     window.request_redraw();
@@ -158,7 +106,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         use winit::event::{Event, WindowEvent};
         use winit::event_loop::ControlFlow;
         elwt.set_control_flow(ControlFlow::Wait);
-        let dispatch_action = |action: Action| pending_actions.borrow_mut().push(action);
+        let dispatch_action = |action| pending_actions.push(action);
 
         match event {
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => elwt.exit(),
@@ -186,6 +134,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &app_state,
                     &ui_dirty,
                     current_bounds.get(),
+                    &platform,
                 );
                 if pressed && is_escape && result == EventResult::Ignored {
                     elwt.exit();
@@ -207,6 +156,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &app_state,
                     &ui_dirty,
                     current_bounds.get(),
+                    &platform,
                 );
                 window.request_redraw();
             }
@@ -286,6 +236,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &app_state,
                     &ui_dirty,
                     current_bounds.get(),
+                    &platform,
                 );
                 let zones = root.dock().collect_grab_zones();
                 let dir = zones.iter().find(|(z, _)| z.contains(last_cursor)).map(|(_, d)| *d);
@@ -332,6 +283,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &app_state,
                         &ui_dirty,
                         current_bounds.get(),
+                        &platform,
                     );
                 } else {
                     let _ = ui_runtime.route_window_event(
@@ -347,6 +299,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &app_state,
                         &ui_dirty,
                         current_bounds.get(),
+                        &platform,
                     );
                 }
                 window.request_redraw();
@@ -374,6 +327,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &app_state,
                     &ui_dirty,
                     current_bounds.get(),
+                    &platform,
                 );
                 window.request_redraw();
             }
@@ -394,6 +348,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &app_state,
                         &ui_dirty,
                         current_bounds.get(),
+                        &platform,
                     );
                     window.request_redraw();
                     elwt.set_control_flow(ControlFlow::Poll);
