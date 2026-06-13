@@ -30,6 +30,57 @@ pub const MENU_BAR_HEIGHT: f32 = 28.0;
 /// Default file extension for Mondrian project containers.
 pub const PROJECT_FILE_EXTENSION: &str = "mdp";
 
+/// Self-hosted new-project form state.
+///
+/// The draft deliberately carries the same settings structs consumed by
+/// `AppState` so future form widgets edit the eventual creation payload instead
+/// of a parallel DTO that can drift from project lifecycle semantics.
+#[derive(Debug, Clone)]
+pub struct SelfHostedNewProjectDraft {
+    pub name: String,
+    pub sequence_settings: SequenceSettings,
+    pub project_settings: ProjectSettings,
+}
+
+impl Default for SelfHostedNewProjectDraft {
+    fn default() -> Self {
+        Self {
+            name: "Untitled".into(),
+            sequence_settings: SequenceSettings::default(),
+            project_settings: ProjectSettings::default(),
+        }
+    }
+}
+
+impl SelfHostedNewProjectDraft {
+    /// Build a draft using the file stem as the initial project name.
+    pub fn from_project_path(path: &Path) -> Self {
+        Self {
+            name: project_name_from_path(path),
+            ..Self::default()
+        }
+    }
+
+    /// Validate the draft before turning it into a creation payload.
+    pub fn validate(&self) -> mondrian_core::Result<()> {
+        self.sequence_settings.validate()
+    }
+
+    /// Convert the current form state into the action payload consumed by
+    /// `AppState`.
+    pub fn into_payload(
+        self,
+        project_file: impl Into<std::path::PathBuf>,
+    ) -> ProjectCreateWithSettingsPayload {
+        ProjectCreateWithSettingsPayload {
+            project_file: project_file.into(),
+            name: self.name,
+            sequence_settings: self.sequence_settings,
+            project_settings: self.project_settings,
+        }
+    }
+}
+
 /// File dialog filters for project file commands.
 pub fn project_file_filters() -> Vec<FileFilter> {
     vec![FileFilter::new(
@@ -65,14 +116,9 @@ pub fn resolve_app_shell_action(
                 &format!("Untitled.{PROJECT_FILE_EXTENSION}"),
                 &project_file_filters(),
             )?;
-            let name = project_name_from_path(&path);
+            let draft = SelfHostedNewProjectDraft::from_project_path(&path);
             Some(project_create_with_settings_action(
-                ProjectCreateWithSettingsPayload {
-                    project_file: path,
-                    name,
-                    sequence_settings: SequenceSettings::default(),
-                    project_settings: ProjectSettings::default(),
-                },
+                draft.into_payload(path),
             ))
         }
         Action::Custom { namespace, name, .. }
@@ -360,8 +406,10 @@ mod tests {
         app_shell_open_project_dialog_action, app_shell_save_project_as_dialog_action,
         ProjectCreateWithSettingsPayload, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
     };
+    use mondrian_core::{Rational, Resolution};
     use mondrian_editor_state::state::PanelKind;
     use mondrian_platform::NoopPlatformService;
+    use mondrian_timeline::sequence::PreviewRenderFormat;
     use mondrian_ui_core::Widget;
     use mondrian_ui_core::{
         EventContext, EventRequests, FocusManager, ShortcutBinding, ShortcutManager, ShortcutScope,
@@ -503,6 +551,38 @@ mod tests {
             .extensions
             .iter()
             .any(|extension| extension == PROJECT_FILE_EXTENSION));
+    }
+
+    #[test]
+    fn new_project_draft_uses_path_stem_and_preserves_settings_payload() {
+        let path = PathBuf::from("E:/projects/Trailer Cut.mdp");
+        let mut draft = SelfHostedNewProjectDraft::from_project_path(&path);
+        draft.sequence_settings.resolution = Resolution { width: 4096, height: 2160 };
+        draft.sequence_settings.frame_rate = Rational::FPS_24;
+        draft.sequence_settings.preview.format = PreviewRenderFormat::DnxHrLb;
+        draft.project_settings.proxy_enabled = false;
+
+        let payload = draft.into_payload(path.clone());
+
+        assert_eq!(payload.project_file, path);
+        assert_eq!(payload.name, "Trailer Cut");
+        assert_eq!(payload.sequence_settings.resolution.width, 4096);
+        assert_eq!(payload.sequence_settings.frame_rate, Rational::FPS_24);
+        assert_eq!(
+            payload.sequence_settings.preview.format,
+            PreviewRenderFormat::DnxHrLb
+        );
+        assert!(!payload.project_settings.proxy_enabled);
+    }
+
+    #[test]
+    fn new_project_draft_validates_sequence_settings() {
+        let mut draft = SelfHostedNewProjectDraft::default();
+
+        assert!(draft.validate().is_ok());
+
+        draft.sequence_settings.resolution.width = 1;
+        assert!(draft.validate().is_err());
     }
 
     #[test]

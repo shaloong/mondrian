@@ -111,6 +111,10 @@ turns those intents into concrete project creation, `OpenProject`,
 `ImportMedia`, and `SaveProjectAs` actions after a native adapter supplies
 platform dialog results. Project creation actions carry full
 `SequenceSettings` and `ProjectSettings` payloads before reaching `AppState`.
+The self-hosted new-project flow stages editable form state in
+`SelfHostedNewProjectDraft`, which owns the same settings structs used by
+project creation so the eventual custom form cannot drift from lifecycle
+semantics.
 `Action::SplitClipAtPlayhead` similarly routes to `AppState::split_at_playhead`,
 which bulk-splits unlocked clips under the playhead and records one undoable
 timeline snapshot only when a split actually occurs.
