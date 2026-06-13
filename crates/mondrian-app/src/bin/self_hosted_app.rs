@@ -10,10 +10,12 @@ use std::sync::Arc;
 use mondrian_app::app::AppState;
 use mondrian_app::self_hosted::panels::{demo_app_state, SelfHostedPanelModels};
 use mondrian_app::self_hosted::runtime::WinitUiRuntime;
-use mondrian_app::self_hosted::shell::SelfHostedAppRoot;
+use mondrian_app::self_hosted::shell::{
+    media_import_filters, SelfHostedAppRoot, APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE,
+};
 use mondrian_editor_state::Action;
 use mondrian_panel_console::tracing_layer::ConsoleLogLayer;
-use mondrian_platform::SystemPlatformService;
+use mondrian_platform::{PlatformService, SystemPlatformService};
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::{TreeWalker, Widget};
 use mondrian_ui_events::EventRouter;
@@ -120,6 +122,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         use winit::event_loop::ControlFlow;
         elwt.set_control_flow(ControlFlow::Wait);
         let dispatch_action = |action: Action| {
+            let action = match action {
+                Action::Custom { namespace, name, .. }
+                    if namespace == APP_SHELL_NAMESPACE
+                        && name == APP_SHELL_IMPORT_MEDIA_DIALOG =>
+                {
+                    let platform = SystemPlatformService;
+                    let Some(paths) =
+                        platform.open_file_dialog("Import Media", &media_import_filters())
+                    else {
+                        return;
+                    };
+                    if paths.is_empty() {
+                        return;
+                    }
+                    Action::ImportMedia(paths)
+                }
+                action => action,
+            };
             tracing::debug!(?action, "custom UI action");
             if let Err(err) = app_state.borrow_mut().dispatch_action(action) {
                 tracing::warn!("custom UI action failed: {err}");

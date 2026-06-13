@@ -128,21 +128,21 @@ impl PlatformService for SystemPlatformService {
         arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()).ok()
     }
 
-    fn open_file_dialog(&self, _title: &str, _filters: &[FileFilter]) -> Option<Vec<PathBuf>> {
-        None
+    fn open_file_dialog(&self, title: &str, filters: &[FileFilter]) -> Option<Vec<PathBuf>> {
+        configured_file_dialog(title, filters).pick_files()
     }
 
     fn save_file_dialog(
         &self,
-        _title: &str,
-        _default_name: &str,
-        _filters: &[FileFilter],
+        title: &str,
+        default_name: &str,
+        filters: &[FileFilter],
     ) -> Option<PathBuf> {
-        None
+        configured_file_dialog(title, filters).set_file_name(default_name).save_file()
     }
 
-    fn open_folder_dialog(&self, _title: &str) -> Option<PathBuf> {
-        None
+    fn open_folder_dialog(&self, title: &str) -> Option<PathBuf> {
+        rfd::FileDialog::new().set_title(title).pick_folder()
     }
 
     fn open_url(&self, _url: &str) {}
@@ -150,6 +150,18 @@ impl PlatformService for SystemPlatformService {
     fn reveal_in_file_manager(&self, _path: &Path) {}
 
     fn send_notification(&self, _title: &str, _body: &str) {}
+}
+
+fn configured_file_dialog(title: &str, filters: &[FileFilter]) -> rfd::FileDialog {
+    let mut dialog = rfd::FileDialog::new().set_title(title);
+    for filter in filters {
+        if filter.extensions.is_empty() {
+            continue;
+        }
+        let extensions = filter.extensions.iter().map(String::as_str).collect::<Vec<_>>();
+        dialog = dialog.add_filter(&filter.name, &extensions);
+    }
+    dialog
 }
 
 /// Desktop-space pixel coordinate.

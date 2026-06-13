@@ -5,6 +5,7 @@
 
 use mondrian_editor_state::state::PanelKind;
 use mondrian_editor_state::Action;
+use mondrian_platform::FileFilter;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, Widget};
@@ -15,6 +16,18 @@ use crate::self_hosted::panels::{build_demo_dock_tree, build_dock_tree, SelfHost
 
 /// Height reserved for the self-hosted top menu bar.
 pub const MENU_BAR_HEIGHT: f32 = 28.0;
+/// App-shell custom action namespace for commands resolved by the native shell.
+pub const APP_SHELL_NAMESPACE: &str = "app.shell";
+/// Open a platform media file dialog and dispatch `Action::ImportMedia`.
+pub const APP_SHELL_IMPORT_MEDIA_DIALOG: &str = "import_media_dialog";
+
+/// File dialog filters for media import commands.
+pub fn media_import_filters() -> Vec<FileFilter> {
+    vec![
+        FileFilter::new("Video", vec!["mp4", "mov", "mkv", "webm", "avi"]),
+        FileFilter::new("Audio", vec!["mp3", "wav", "aac", "flac", "m4a"]),
+    ]
+}
 
 /// Default Mondrian menu structure for self-hosted shells.
 pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
@@ -24,6 +37,14 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
             vec![
                 MenuItem::new("New Project", Action::NewProject),
                 MenuItem::new("Open Project...", Action::OpenProject("".into())),
+                MenuItem::new(
+                    "Import Media...",
+                    Action::Custom {
+                        namespace: APP_SHELL_NAMESPACE.into(),
+                        name: APP_SHELL_IMPORT_MEDIA_DIALOG.into(),
+                        payload: serde_json::Value::Null,
+                    },
+                ),
                 MenuItem::new("Save", Action::SaveProject),
                 MenuItem::new("Save As...", Action::SaveProjectAs("".into())),
                 MenuItem::new("Quit", Action::CloseProject),
@@ -335,6 +356,18 @@ mod tests {
         let menu = MenuBar::default();
 
         assert_eq!(menu.child_count(), 4);
+    }
+
+    #[test]
+    fn media_import_filters_cover_video_and_audio_extensions() {
+        let filters = media_import_filters();
+
+        assert!(filters.iter().any(
+            |filter| filter.name == "Video" && filter.extensions.iter().any(|ext| ext == "mp4")
+        ));
+        assert!(filters.iter().any(
+            |filter| filter.name == "Audio" && filter.extensions.iter().any(|ext| ext == "wav")
+        ));
     }
 
     #[test]

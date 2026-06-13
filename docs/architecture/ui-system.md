@@ -97,6 +97,10 @@ the supplied paths through `AssetLibrary::import_media_file`, publishes
 `AssetImported`, updates proxy-mode state when auto proxy is enabled, saves the
 project opportunistically, and reports partial or complete failures through the
 status hint instead of letting widget code own import side effects.
+Native file dialogs belong to `mondrian-platform::PlatformService`; the
+self-hosted File menu emits an app-shell custom action, resolves that dialog at
+the window entrypoint, then dispatches `Action::ImportMedia` with concrete
+paths.
 `Action::SplitClipAtPlayhead` similarly routes to `AppState::split_at_playhead`,
 which bulk-splits unlocked clips under the playhead and records one undoable
 timeline snapshot only when a split actually occurs.
