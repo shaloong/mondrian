@@ -2398,6 +2398,76 @@ mod tests {
     }
 
     #[test]
+    fn keyboard_shift_nudge_uses_larger_step() {
+        let mut normal = ColorPicker::new(Color::from_hsv(HsvColor {
+            h: 120.0,
+            s: 0.5,
+            v: 0.5,
+            a: 1.0,
+        }));
+        let mut shifted = ColorPicker::new(normal.color());
+        normal.keyboard_target = ColorDragTarget::ColorArea;
+        shifted.keyboard_target = ColorDragTarget::ColorArea;
+        let mut normal_ctx = event_ctx();
+        let mut shifted_ctx = event_ctx();
+
+        normal.event(
+            &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
+            &mut normal_ctx,
+        );
+        shifted.event(
+            &UiEvent::KeyDown {
+                key: KeyCode::Right,
+                modifiers: Modifiers { shift: true, ..Modifiers::none() },
+            },
+            &mut shifted_ctx,
+        );
+
+        assert!(shifted.color().to_hsv().s - normal.color().to_hsv().s > 0.03);
+    }
+
+    #[test]
+    fn keyboard_nudge_clamps_alpha() {
+        let mut picker = ColorPicker::new(Color::from_rgba8(10, 20, 30, 252));
+        picker.keyboard_target = ColorDragTarget::Alpha;
+        let mut ctx = event_ctx();
+
+        picker.event(
+            &UiEvent::KeyDown {
+                key: KeyCode::Right,
+                modifiers: Modifiers { shift: true, ..Modifiers::none() },
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(picker.color().to_rgba8()[3], 255);
+        assert_eq!(picker.fields[0].text(), "#0A141EFF");
+    }
+
+    #[test]
+    fn keyboard_nudge_wraps_hue() {
+        let mut picker = ColorPicker::new(Color::from_hsv(HsvColor {
+            h: 358.0,
+            s: 0.5,
+            v: 0.5,
+            a: 1.0,
+        }));
+        picker.hue = 358.0;
+        picker.keyboard_target = ColorDragTarget::Hue;
+        let mut ctx = event_ctx();
+
+        picker.event(
+            &UiEvent::KeyDown {
+                key: KeyCode::Right,
+                modifiers: Modifiers { shift: true, ..Modifiers::none() },
+            },
+            &mut ctx,
+        );
+
+        assert!(picker.hue < 20.0);
+    }
+
+    #[test]
     fn eyedropper_sample_updates_color_and_clears_active_state() {
         let mut picker = ColorPicker::new(Color::BLACK);
 
