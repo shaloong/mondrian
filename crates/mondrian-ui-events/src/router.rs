@@ -188,7 +188,7 @@ impl EventRouter {
         tree: &mut dyn WidgetTree,
         dispatch: &dyn Fn(Action),
     ) -> EventResult {
-        self.prune_stale_widget_state(tree);
+        self.prune_stale_widget_state(tree, dispatch);
         match &event {
             UiEvent::MouseMove { position, .. } => {
                 let target = if let Some(captured) = self.captured {
@@ -388,7 +388,7 @@ impl EventRouter {
         }
     }
 
-    fn prune_stale_widget_state(&mut self, tree: &dyn WidgetTree) {
+    fn prune_stale_widget_state(&mut self, tree: &mut dyn WidgetTree, dispatch: &dyn Fn(Action)) {
         if self.captured.is_some_and(|id| tree.get(id).is_none()) {
             self.captured = None;
         }
@@ -396,9 +396,17 @@ impl EventRouter {
             self.hovered = None;
         }
         if let Some(focused) = self.focus_mgr.focused_widget() {
-            if tree.get(focused).is_none() {
-                self.focus_mgr.release_focus(focused);
-                self.last_ime_request = Some(ImeRequest { enabled: false, cursor_area: None });
+            match tree.get(focused) {
+                Some(widget) if widget.can_focus() => {}
+                Some(_) => {
+                    self.send_focus_lost(tree, focused, dispatch);
+                    self.focus_mgr.release_focus(focused);
+                    self.last_ime_request = Some(ImeRequest { enabled: false, cursor_area: None });
+                }
+                None => {
+                    self.focus_mgr.release_focus(focused);
+                    self.last_ime_request = Some(ImeRequest { enabled: false, cursor_area: None });
+                }
             }
         }
         self.focused = self.focus_mgr.focused_widget();
@@ -534,7 +542,7 @@ mod tests {
     use mondrian_ui_core::types::{LayoutConstraint, MouseButton, Rect, Size};
     use mondrian_ui_core::widget::PaintContext;
     use mondrian_ui_core::Widget;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
     use std::rc::Rc;
 
@@ -571,11 +579,25 @@ mod tests {
         id: WidgetId,
         bounds: Rect,
         log: Rc<RefCell<Vec<String>>>,
+        focusable: Rc<Cell<bool>>,
     }
 
     impl RecordingWidget {
         fn new(bounds: Rect, log: Rc<RefCell<Vec<String>>>) -> Self {
-            Self { id: WidgetId::new(), bounds, log }
+            Self {
+                id: WidgetId::new(),
+                bounds,
+                log,
+                focusable: Rc::new(Cell::new(true)),
+            }
+        }
+
+        fn with_focusable_flag(
+            bounds: Rect,
+            log: Rc<RefCell<Vec<String>>>,
+            focusable: Rc<Cell<bool>>,
+        ) -> Self {
+            Self { id: WidgetId::new(), bounds, log, focusable }
         }
     }
 
@@ -632,7 +654,7 @@ mod tests {
         }
 
         fn can_focus(&self) -> bool {
-            true
+            self.focusable.get()
         }
     }
 
@@ -898,6 +920,54 @@ mod tests {
         assert_eq!(router.focused(), None);
         assert_eq!(router.focus_manager().focused_widget(), None);
         let ime = router.take_ime_request().expect("stale focused widget should disable IME");
+        assert!(!ime.enabled);
+        assert_eq!(ime.cursor_area, None);
+    }
+
+    #[test]
+    fn router_releases_focus_when_focused_widget_becomes_unfocusable() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let focusable = Rc::new(Cell::new(true));
+        let widget = RecordingWidget::with_focusable_flag(
+            Rect::new(0.0, 0.0, 100.0, 30.0),
+            Rc::clone(&log),
+            Rc::clone(&focusable),
+        );
+        let root = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(root);
+
+        router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.focused(), Some(root));
+        let _ = router.take_ime_request();
+        log.borrow_mut().clear();
+
+        focusable.set(false);
+
+        let result = router.route(
+            UiEvent::KeyDown {
+                key: KeyCode::Enter,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(router.focused(), None);
+        assert_eq!(router.focus_manager().focused_widget(), None);
+        assert_eq!(log.borrow().as_slice(), ["focus-lost"]);
+        let ime = router
+            .take_ime_request()
+            .expect("unfocusable focused widget should disable IME");
         assert!(!ime.enabled);
         assert_eq!(ime.cursor_area, None);
     }

@@ -225,6 +225,9 @@ in the current `WidgetTree`, which keeps rebuilt panels from inheriting stale
 capture/focus state after popovers close, drags finish, or panel contents
 refresh. If the stale widget owned focus, the router also emits an IME disable
 request because the removed widget can no longer receive `FocusLost`.
+If the focused widget still exists but no longer returns `can_focus()`, the
+router sends `FocusLost`, releases focus, and disables IME before routing the
+next event.
 
 ## Focused Text Input
 
