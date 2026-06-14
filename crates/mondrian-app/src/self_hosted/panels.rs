@@ -1493,7 +1493,8 @@ mod tests {
     use super::*;
     use crate::app::ui_actions::{
         APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
-        APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_SAVE_PROJECT_AS_DIALOG, INSPECTOR_NAMESPACE,
+        APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_SAVE_PROJECT_AS_DIALOG, ASSETS_NAMESPACE,
+        ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE,
         INSPECTOR_SET_CLIP_CURVE,
     };
     use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
@@ -1946,11 +1947,15 @@ mod tests {
         assert_eq!(item.title, "Brand Purple");
         assert_eq!(item.badge.as_deref(), Some("CLR"));
         assert!(item.select_action.is_none());
-        assert!(item.activate_action.is_some());
-        let activate_debug = format!("{:?}", item.activate_action.as_ref().expect("activate"));
-        assert!(activate_debug.contains("ui.assets"));
-        assert!(activate_debug.contains("prepare_drag"));
-        assert!(activate_debug.contains(&asset_id.to_string()));
+        let action = item.activate_action.as_ref().expect("activate action");
+        let Action::Custom { namespace, name, payload } = action else {
+            panic!("expected asset custom action, got {action:?}");
+        };
+        assert_eq!(namespace, ASSETS_NAMESPACE);
+        assert_eq!(name, ASSETS_PREPARE_DRAG);
+        let payload: AssetsPrepareDragPayload =
+            serde_json::from_value(payload.clone()).expect("asset drag payload");
+        assert_eq!(payload.asset_id, asset_id);
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1982,10 +1987,16 @@ mod tests {
             .iter()
             .find_map(|item| item.activate_action.as_ref())
             .expect("effect activate action");
-        let debug = format!("{action:?}");
-        assert!(debug.contains("ui.effects"));
-        assert!(debug.contains("add_to_clip"));
-        assert!(debug.contains(&clip_id.to_string()));
+        let Action::Custom { namespace, name, payload } = action else {
+            panic!("expected effect custom action, got {action:?}");
+        };
+        assert_eq!(namespace, EFFECTS_NAMESPACE);
+        assert_eq!(name, EFFECTS_ADD_TO_CLIP);
+        let payload: EffectsAddToClipPayload =
+            serde_json::from_value(payload.clone()).expect("effect add payload");
+        assert_eq!(payload.clip.clip_id, clip_id);
+        assert_eq!(payload.clip.track_id, track_id);
+        assert!(payload.clip.is_video_track);
     }
 
     #[test]
@@ -1998,11 +2009,13 @@ mod tests {
         );
         assert!(model.items.iter().all(|item| item.activate_action.is_none()));
         assert!(model.items.iter().all(|item| item.select_action.is_some()));
-        let debug = format!(
-            "{:?}",
-            model.items[0].select_action.as_ref().expect("select")
-        );
-        assert!(debug.contains("ui.demo_panel"));
+        let action = model.items[0].select_action.as_ref().expect("select");
+        let Action::Custom { namespace, name, payload } = action else {
+            panic!("expected demo custom action, got {action:?}");
+        };
+        assert_eq!(namespace, "ui.demo_panel");
+        assert_eq!(name, "assets.select.footage");
+        assert!(payload.is_null());
     }
 
     #[test]
