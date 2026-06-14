@@ -55,7 +55,8 @@ state bridge: it keeps the root widget, current `AppState`, dirty refresh flag,
 and queued-action draining together so window entrypoints do not duplicate
 root/AppState refresh plumbing. The boundary type is `SelfHostedPanelModels`: real `AppState` /
 `EditorState` adapters should produce this model, while
-`SelfHostedPanelModels::demo()` is only a developer fixture.
+`SelfHostedPanelModels::demo()` is test-only fixture code and must not be part
+of product entrypoints.
 `SelfHostedPanelModels::from_app_state` is the app-side snapshot boundary: it
 reads the current `AppState`, asset library, effect registry, selection state,
 and timeline sequence into generic widget models. Timeline adapters start at

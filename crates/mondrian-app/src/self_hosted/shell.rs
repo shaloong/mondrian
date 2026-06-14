@@ -27,7 +27,9 @@ use crate::self_hosted::modal::ShellModal;
 use crate::self_hosted::new_project_dialog::{
     default_project_file_name, SelfHostedNewProjectDraft,
 };
-use crate::self_hosted::panels::{build_demo_dock_tree, build_dock_tree, SelfHostedPanelModels};
+#[cfg(test)]
+use crate::self_hosted::panels::build_demo_dock_tree;
+use crate::self_hosted::panels::{build_dock_tree, SelfHostedPanelModels};
 
 /// Height reserved for the self-hosted top menu bar.
 pub const MENU_BAR_HEIGHT: f32 = 28.0;
@@ -255,7 +257,8 @@ impl SelfHostedAppRoot {
         Self::new(MenuBar::default(), build_dock_tree(models))
     }
 
-    /// Build a root widget using developer demo fixtures.
+    /// Build a root widget using test-only demo fixtures.
+    #[cfg(test)]
     pub fn demo() -> Self {
         Self::new(MenuBar::default(), build_demo_dock_tree())
     }

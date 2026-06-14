@@ -8,7 +8,9 @@
 use mondrian_assets::{AssetKind, AssetLibrary, AssetRecord};
 use mondrian_core::automation::timecode_to_ticks;
 use mondrian_core::effect_data::EffectType;
-use mondrian_core::types::{AssetId, ClipId, EffectId, SequenceId, TimeCode, TrackId};
+#[cfg(test)]
+use mondrian_core::types::{AssetId, SequenceId};
+use mondrian_core::types::{ClipId, EffectId, TimeCode, TrackId};
 use mondrian_core::Color;
 use mondrian_editor_state::Action;
 use mondrian_effects::{effect_display_name, effect_library_types};
@@ -84,6 +86,7 @@ impl SelfHostedPanelModels {
 
     /// Demo fixtures that keep rich browser panels while sourcing timeline and
     /// inspector state from an `AppState` snapshot.
+    #[cfg(test)]
     pub fn demo_from_app_state(state: &AppState) -> Self {
         Self {
             project: PanelListModel::from_project_status(state),
@@ -103,18 +106,20 @@ impl SelfHostedPanelModels {
         }
     }
 
-    /// Demo fixtures used by developer binaries before the real editor state is
-    /// wired into the self-hosted shell.
+    /// Demo fixtures used by tests before the real editor state is wired into
+    /// the self-hosted shell.
+    #[cfg(test)]
     pub fn demo() -> Self {
         let state = demo_app_state();
         Self::demo_from_app_state(&state)
     }
 }
 
-/// Build a synthetic app state for self-hosted developer shells.
+/// Build a synthetic app state for self-hosted tests.
 ///
 /// The generated timeline is intentionally real domain data so timeline widget
 /// actions carry stable ids and can be dispatched through `AppState`.
+#[cfg(test)]
 pub fn demo_app_state() -> AppState {
     let mut state = AppState::new();
     let mut sequence = demo_sequence();
@@ -651,6 +656,7 @@ impl InspectorPanelModel {
         }
     }
 
+    #[cfg(test)]
     pub fn demo() -> Self {
         Self {
             selected_clip: None,
@@ -705,6 +711,7 @@ pub fn build_dock_tree(models: SelfHostedPanelModels) -> DockSplitter {
 }
 
 /// Build a dock tree using built-in demo panel fixtures.
+#[cfg(test)]
 pub fn build_demo_dock_tree() -> DockSplitter {
     build_dock_tree(SelfHostedPanelModels::demo())
 }
@@ -1005,6 +1012,7 @@ fn panel_list(model: &PanelListModel) -> PanelList {
     list
 }
 
+#[cfg(test)]
 fn demo_asset_model() -> PanelListModel {
     PanelListModel::new(
         "Assets",
@@ -1031,6 +1039,7 @@ fn demo_asset_model() -> PanelListModel {
     .with_demo_activate_prefix("assets.activate")
 }
 
+#[cfg(test)]
 fn demo_console_model() -> PanelListModel {
     PanelListModel::new(
         "Console",
@@ -1043,12 +1052,14 @@ fn demo_console_model() -> PanelListModel {
     .with_subtitle("Runtime messages")
 }
 
+#[cfg(test)]
 fn demo_timeline_model() -> TimelinePanelModel {
     let sequence = demo_sequence();
     let selected = demo_selection(&sequence).into_iter().collect::<Vec<_>>();
     TimelinePanelModel::from_sequence(&sequence, &selected).with_playhead_frame(76)
 }
 
+#[cfg(test)]
 fn demo_sequence() -> Sequence {
     let mut sequence = Sequence::new("Demo edit");
     while sequence.video_tracks.len() < 3 {
@@ -1132,6 +1143,7 @@ fn demo_sequence() -> Sequence {
     sequence
 }
 
+#[cfg(test)]
 fn demo_selection(sequence: &Sequence) -> Option<SelectedClipRef> {
     sequence.video_tracks.get(1).and_then(|track| {
         track.clips.get(1).map(|clip| SelectedClipRef {
