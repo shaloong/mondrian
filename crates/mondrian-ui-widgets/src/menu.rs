@@ -7,6 +7,7 @@ use mondrian_editor_state::Action;
 use mondrian_ui_core::types::{estimate_text_width, *};
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
+use mondrian_ui_theme::spacing::ShadowToken;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct MenuRowPaint {
@@ -169,12 +170,26 @@ fn paint_menu_arrow(ctx: &mut PaintContext, rect: Rect) {
 }
 
 fn paint_menu_shadow(ctx: &mut PaintContext, bounds: Rect, radius: f32) {
-    let shadow = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.14 };
+    let shadow = &ctx.theme.spacing.shadow_md;
     ctx.encoder.draw_rect(
-        Rect::new(bounds.x, bounds.y + 3.0, bounds.width, bounds.height),
-        shadow,
+        Rect::new(
+            bounds.x + shadow.offset_x - shadow.spread,
+            bounds.y + shadow.offset_y - shadow.spread,
+            bounds.width + shadow.spread * 2.0,
+            bounds.height + shadow.spread * 2.0,
+        ),
+        shadow_color(shadow),
         radius,
     );
+}
+
+fn shadow_color(shadow: &ShadowToken) -> Color {
+    Color {
+        r: shadow.color[0],
+        g: shadow.color[1],
+        b: shadow.color[2],
+        a: shadow.color[3],
+    }
 }
 
 fn mix_color(a: Color, b: Color, t: f32) -> Color {
@@ -700,6 +715,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingEncoder {
         rects: Vec<Rect>,
+        rect_colors: Vec<Color>,
         clips: Vec<Rect>,
         clip_pops: usize,
         lines: usize,
@@ -716,8 +732,9 @@ mod tests {
             self.clip_pops += 1;
         }
 
-        fn draw_rect(&mut self, bounds: Rect, _color: mondrian_core::Color, _corner_radius: f32) {
+        fn draw_rect(&mut self, bounds: Rect, color: mondrian_core::Color, _corner_radius: f32) {
             self.rects.push(bounds);
+            self.rect_colors.push(color);
         }
 
         fn draw_line(
@@ -1270,6 +1287,29 @@ mod tests {
             encoder.rects.len() > 1,
             "open dropdown should draw menu chrome during overlay paint"
         );
+    }
+
+    #[test]
+    fn menu_popup_shadow_uses_theme_shadow_token() {
+        let theme = mondrian_ui_theme::ThemePreset::Dark.build();
+        let clip_rect = Rect::new(0.0, 0.0, 200.0, 120.0);
+        let mut encoder = RecordingEncoder::default();
+        let popup = Rect::new(20.0, 30.0, 120.0, 64.0);
+
+        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        paint_menu_popup_chrome(&mut ctx, popup);
+
+        let shadow = &theme.spacing.shadow_md;
+        assert_eq!(
+            encoder.rects[0],
+            Rect::new(
+                popup.x + shadow.offset_x - shadow.spread,
+                popup.y + shadow.offset_y - shadow.spread,
+                popup.width + shadow.spread * 2.0,
+                popup.height + shadow.spread * 2.0,
+            )
+        );
+        assert_eq!(encoder.rect_colors[0], shadow_color(shadow));
     }
 
     #[test]
