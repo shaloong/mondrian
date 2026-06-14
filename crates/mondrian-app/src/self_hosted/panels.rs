@@ -999,7 +999,7 @@ fn panel_list(model: &PanelListModel) -> PanelList {
         .with_subtitle(model.subtitle.clone());
     if let Some(prefix) = model.demo_activate_prefix.clone() {
         list = list.on_activate(move |index, item| {
-            panel_action(&format!("{prefix}.{index}.{}", item.title))
+            demo_panel_action(&format!("{prefix}.{index}.{}", item.title))
         });
     }
     list
@@ -1012,19 +1012,19 @@ fn demo_asset_model() -> PanelListModel {
             PanelListItem::new("Footage")
                 .with_subtitle("Imported camera clips")
                 .with_badge("12")
-                .with_select_action(panel_action("assets.select.footage")),
+                .with_select_action(demo_panel_action("assets.select.footage")),
             PanelListItem::new("Audio")
                 .with_subtitle("Music, voiceover, and ambience")
                 .with_badge("5")
-                .with_select_action(panel_action("assets.select.audio")),
+                .with_select_action(demo_panel_action("assets.select.audio")),
             PanelListItem::new("Images")
                 .with_subtitle("Still frames and references")
                 .with_badge("8")
-                .with_select_action(panel_action("assets.select.images")),
+                .with_select_action(demo_panel_action("assets.select.images")),
             PanelListItem::new("Sequences")
                 .with_subtitle("Nested edits and reusable timelines")
                 .with_badge("2")
-                .with_select_action(panel_action("assets.select.sequences")),
+                .with_select_action(demo_panel_action("assets.select.sequences")),
         ],
     )
     .with_subtitle("Project library")
@@ -1177,9 +1177,9 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
         .on_seek(timeline_seek_action)
 }
 
-fn panel_action(name: &str) -> Action {
+fn demo_panel_action(name: &str) -> Action {
     Action::Custom {
-        namespace: "ui.panel".into(),
+        namespace: "ui.demo_panel".into(),
         name: name.into(),
         payload: serde_json::Value::Null,
     }
@@ -1981,6 +1981,11 @@ mod tests {
         );
         assert!(model.items.iter().all(|item| item.activate_action.is_none()));
         assert!(model.items.iter().all(|item| item.select_action.is_some()));
+        let debug = format!(
+            "{:?}",
+            model.items[0].select_action.as_ref().expect("select")
+        );
+        assert!(debug.contains("ui.demo_panel"));
     }
 
     #[test]
