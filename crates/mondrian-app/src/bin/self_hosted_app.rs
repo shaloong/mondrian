@@ -194,10 +194,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &window,
                     &mut router,
                     host.root_mut(),
-                    UiEvent::MouseMove {
-                        position: last_cursor,
-                        modifiers: Modifiers::none(),
-                    },
+                    UiEvent::MouseMove { position: last_cursor, modifiers: modifiers_state },
                     &dispatch_action,
                 );
                 host.drain_pending_actions(&pending_actions, current_bounds.get(), &platform);
@@ -223,12 +220,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ElementState::Pressed => UiEvent::MouseDown {
                         position: last_cursor,
                         button: winit_mouse_button_to_ui_button(button),
-                        modifiers: Modifiers::none(),
+                        modifiers: modifiers_state,
                     },
                     ElementState::Released => UiEvent::MouseUp {
                         position: last_cursor,
                         button: winit_mouse_button_to_ui_button(button),
-                        modifiers: Modifiers::none(),
+                        modifiers: modifiers_state,
                     },
                 };
                 let is_press = matches!(evt, UiEvent::MouseDown { button: MouseButton::Left, .. });
@@ -262,7 +259,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     UiEvent::MouseWheel {
                         delta: winit_scroll_delta_to_ui_delta(delta),
                         position: last_cursor,
-                        modifiers: Modifiers::none(),
+                        modifiers: modifiers_state,
                     },
                     &dispatch_action,
                 );

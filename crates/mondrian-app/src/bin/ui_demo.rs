@@ -1275,10 +1275,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &window,
                     &mut router,
                     &mut root,
-                    UiEvent::MouseMove {
-                        position: last_cursor,
-                        modifiers: Modifiers::none(),
-                    },
+                    UiEvent::MouseMove { position: last_cursor, modifiers: modifiers_state },
                     &mut ui_runtime,
                 );
                 let grab_zones = root.collect_grab_zones();
@@ -1317,12 +1314,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ElementState::Pressed => UiEvent::MouseDown {
                         position: last_cursor,
                         button: winit_mouse_button_to_ui_button(button),
-                        modifiers: Modifiers::none(),
+                        modifiers: modifiers_state,
                     },
                     ElementState::Released => UiEvent::MouseUp {
                         position: last_cursor,
                         button: winit_mouse_button_to_ui_button(button),
-                        modifiers: Modifiers::none(),
+                        modifiers: modifiers_state,
                     },
                 };
                 let is_press =
@@ -1356,7 +1353,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     UiEvent::MouseWheel {
                         delta: winit_scroll_delta_to_ui_delta(delta),
                         position: last_cursor,
-                        modifiers: Modifiers::none(),
+                        modifiers: modifiers_state,
                     },
                     &mut ui_runtime,
                 );

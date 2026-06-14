@@ -507,6 +507,9 @@ Winit keyboard and IME conversion lives in the self-hosted shell runtime so
 `ui_demo` and product windows share the same `KeyDown` / `TextInput` /
 `ImePreedit` / `ImeCommit` semantics. Entry binaries should route Escape
 through the widget tree first and only treat it as a window close when ignored.
+Pointer and wheel events must carry the current modifier state tracked by the
+entrypoint, so timeline zoom, alternate drag modes, and shifted scrolling do not
+lose keyboard context.
 Self-hosted entry binaries should collect widget-dispatched actions during
 event routing, then drain them after the root borrow ends. Shell-local actions
 such as the new-project dialog mutate `SelfHostedAppRoot`; only confirmed
