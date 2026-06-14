@@ -570,7 +570,7 @@ pub struct InspectorPanelModel {
     pub max_frame: f32,
     /// Preferred color-picker area style for this inspector instance.
     pub tint_area_mode: ColorPickerAreaMode,
-    /// Curve-editor fixture points until animation curves are fully mapped.
+    /// Opacity animation curve points normalized over the selected clip span.
     pub curve_points: Vec<CurvePoint>,
     /// Effects currently attached to the selected clip.
     pub effects: Vec<InspectorEffectModel>,
@@ -619,7 +619,7 @@ impl InspectorPanelModel {
             out_frame: clip.end_position().frame as f32,
             max_frame: sequence.total_duration().frame.max(1) as f32,
             tint_area_mode: ColorPickerAreaMode::Wheel,
-            curve_points: vec![CurvePoint::new(0.0, 0.0), CurvePoint::new(1.0, 1.0)],
+            curve_points: opacity_curve_points_for_clip(clip, time),
             effects: clip
                 .effects
                 .iter()
@@ -880,6 +880,35 @@ fn clip_rotation_degrees(clip: &Clip, time: TimeCode) -> f32 {
         .evaluate(Transform2D::ROTATION_PATH, timecode_to_ticks(time))
         .and_then(|value| value.as_f32())
         .unwrap_or(0.0)
+}
+
+fn opacity_curve_points_for_clip(clip: &Clip, time: TimeCode) -> Vec<CurvePoint> {
+    let bag = clip.transform.to_property_bag();
+    let Some(opacity) = bag.property(Transform2D::OPACITY_PATH) else {
+        return default_opacity_curve(clip.transform.evaluate_opacity(time));
+    };
+    let start_tick = timecode_to_ticks(clip.position);
+    let end_tick = timecode_to_ticks(clip.end_position());
+    let duration_ticks = (end_tick - start_tick).max(1);
+    let mut points = opacity
+        .keyframe_times()
+        .into_iter()
+        .filter_map(|keyframe_time| {
+            let keyframe = opacity.keyframe_at(keyframe_time)?;
+            let y = keyframe.value.as_f32()?.clamp(0.0, 1.0);
+            let x = ((keyframe_time - start_tick) as f32 / duration_ticks as f32).clamp(0.0, 1.0);
+            Some(CurvePoint::new(x, y))
+        })
+        .collect::<Vec<_>>();
+    if points.len() < 2 {
+        points = default_opacity_curve(clip.transform.evaluate_opacity(time));
+    }
+    points
+}
+
+fn default_opacity_curve(opacity: f32) -> Vec<CurvePoint> {
+    let opacity = opacity.clamp(0.0, 1.0);
+    vec![CurvePoint::new(0.0, opacity), CurvePoint::new(1.0, opacity)]
 }
 
 fn panel_item_from_asset(asset: AssetRecord) -> PanelListItem {
@@ -1460,7 +1489,7 @@ mod tests {
         APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_SAVE_PROJECT_AS_DIALOG, INSPECTOR_NAMESPACE,
         INSPECTOR_SET_CLIP_CURVE,
     };
-    use mondrian_core::automation::{PropertyHost, PropertyMutation, PropertyValue};
+    use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
     use mondrian_core::types::{AssetId, TimeCode};
     use mondrian_effects::EffectNodeExt;
     use std::path::PathBuf;
@@ -1718,6 +1747,10 @@ mod tests {
         assert!(models.timeline.tracks[0].clips[0].disabled);
         assert!(!models.inspector.enabled);
         assert_eq!(models.inspector.opacity, 100.0);
+        assert_eq!(
+            models.inspector.curve_points,
+            vec![CurvePoint::new(0.0, 1.0), CurvePoint::new(1.0, 1.0)]
+        );
         assert_eq!(models.inspector.tint.to_rgba8(), color.to_rgba8());
         assert_eq!(models.inspector.position_x, 192.0);
         assert_eq!(models.inspector.position_y, 108.0);
@@ -1733,6 +1766,60 @@ mod tests {
             effect_display_name(&EffectType::GaussianBlur)
         );
         assert!(!models.inspector.effects[0].enabled);
+    }
+
+    #[test]
+    fn app_state_models_read_opacity_keyframes_as_curve_points() {
+        let mut state = AppState::new();
+        let mut sequence = Sequence::new("edit");
+        let tb = sequence.time_base();
+        let mut clip = Clip::new(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(20, tb));
+        let clip_id = clip.id;
+        let track_id = sequence.video_tracks[0].id;
+
+        clip.apply_property_mutation(PropertyMutation::SetKeyframe {
+            path: Transform2D::OPACITY_PATH.to_string(),
+            keyframe: Keyframe::linear(
+                timecode_to_ticks(TimeCode::new(10, tb)),
+                PropertyValue::Float(0.0),
+            ),
+        })
+        .expect("set start opacity");
+        clip.apply_property_mutation(PropertyMutation::SetKeyframe {
+            path: Transform2D::OPACITY_PATH.to_string(),
+            keyframe: Keyframe::linear(
+                timecode_to_ticks(TimeCode::new(20, tb)),
+                PropertyValue::Float(0.5),
+            ),
+        })
+        .expect("set mid opacity");
+        clip.apply_property_mutation(PropertyMutation::SetKeyframe {
+            path: Transform2D::OPACITY_PATH.to_string(),
+            keyframe: Keyframe::linear(
+                timecode_to_ticks(TimeCode::new(30, tb)),
+                PropertyValue::Float(1.0),
+            ),
+        })
+        .expect("set end opacity");
+
+        sequence.video_tracks[0].add_clip(clip).expect("add clip");
+        state.sequence = Some(sequence);
+        state.selection.selected_clips.push(SelectedClipRef {
+            track_id,
+            is_video_track: true,
+            clip_id,
+        });
+
+        let models = SelfHostedPanelModels::from_app_state(&state);
+
+        assert_eq!(
+            models.inspector.curve_points,
+            vec![
+                CurvePoint::new(0.0, 0.0),
+                CurvePoint::new(0.5, 0.5),
+                CurvePoint::new(1.0, 1.0),
+            ]
+        );
     }
 
     #[test]

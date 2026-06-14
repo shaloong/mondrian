@@ -443,6 +443,8 @@ Self-hosted Inspector actions should use typed payloads for clip mutations.
 The curve editor currently emits `ui.inspector.set_clip_curve` with normalized
 points; AppState maps them to opacity keyframes over the selected clip's
 timeline span so curve edits participate in undo/redo and render evaluation.
+Inspector panel models derive the displayed curve from those opacity keyframes,
+falling back to a flat curve at the evaluated opacity when no animation exists.
 `TextInput::on_change(...)` dispatches only when committed text changes, such
 as typed text, paste/cut/delete edits, or IME commit. Cursor movement,
 selection changes, and IME preedit updates remain local so form bindings do not
