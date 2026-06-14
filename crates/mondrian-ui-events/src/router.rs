@@ -255,6 +255,10 @@ impl EventRouter {
                     } else {
                         TreeWalker::focus_next(tree, traversal_origin)
                     };
+                    if next == current {
+                        self.focused = self.focus_mgr.focused_widget();
+                        return EventResult::Handled;
+                    }
                     // Blur current
                     if let Some(current_id) = current {
                         self.send_focus_lost(tree, current_id, dispatch);
@@ -626,6 +630,10 @@ mod tests {
         fn hit_test(&self, point: Point) -> bool {
             self.bounds.contains(point)
         }
+
+        fn can_focus(&self) -> bool {
+            true
+        }
     }
 
     struct TestTree {
@@ -892,6 +900,51 @@ mod tests {
         let ime = router.take_ime_request().expect("stale focused widget should disable IME");
         assert!(!ime.enabled);
         assert_eq!(ime.cursor_area, None);
+    }
+
+    #[test]
+    fn router_tab_to_same_single_focusable_keeps_focus_stable() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let root = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(root);
+
+        router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        router.route(
+            UiEvent::MouseUp {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.focused(), Some(root));
+        let _ = router.take_ime_request();
+        log.borrow_mut().clear();
+
+        let result = router.route(
+            UiEvent::KeyDown {
+                key: KeyCode::Tab,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(router.focused(), Some(root));
+        assert!(log.borrow().is_empty());
+        assert!(router.take_ime_request().is_none());
     }
 
     #[test]

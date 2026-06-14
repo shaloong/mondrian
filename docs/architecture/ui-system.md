@@ -232,6 +232,9 @@ Keyboard, text, and IME events route to `FocusManager::focused_widget()`.
 `TextInput` requests focus on click, enables IME while focused, stores preedit
 composition text, and inserts committed IME text through the same grapheme-aware
 editing path as normal text input.
+Focus traversal treats a cycle back to the same widget as a no-op: the router
+handles Tab but does not emit `FocusLost`/`FocusGained`, avoiding selection and
+IME flicker when only one focusable control is present.
 
 Single-line text input maintains a horizontal viewport owned by the widget. The
 cursor is scrolled into view after layout, editing, navigation, or selection
