@@ -13,6 +13,6 @@ pub mod panel;
 pub mod registry;
 pub mod workspace;
 
-pub use panel::{Panel, PanelKind};
+pub use panel::{Panel, PanelBuildContext, PanelInitContext, PanelKind};
 pub use registry::PanelRegistry;
 pub use workspace::{DockNode, FloatingWindow, SplitDirection, TabContent, WorkspaceLayout};

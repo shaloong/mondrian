@@ -6,10 +6,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::panel::{Panel, PanelContext, PanelKind};
+use crate::panel::{Panel, PanelInitContext, PanelKind};
 
 /// Panel 工厂函数类型
-type PanelFactory = Arc<dyn Fn(PanelContext) -> Box<dyn Panel> + Send + Sync>;
+type PanelFactory = Arc<dyn Fn(PanelInitContext) -> Box<dyn Panel> + Send + Sync>;
 
 /// 面板注册表 —— 按 PanelKind 注册工厂函数
 ///
@@ -39,7 +39,7 @@ impl PanelRegistry {
     /// 创建指定类型的 Panel 实例
     ///
     /// 如果该类型未注册，返回 `None`。
-    pub fn create(&self, kind: PanelKind, context: PanelContext) -> Option<Box<dyn Panel>> {
+    pub fn create(&self, kind: PanelKind, context: PanelInitContext) -> Option<Box<dyn Panel>> {
         self.factories.get(&kind).map(|factory| factory(context))
     }
 
@@ -50,7 +50,7 @@ impl PanelRegistry {
 
     /// 已注册的所有 Panel 类型
     pub fn registered_kinds(&self) -> Vec<PanelKind> {
-        self.factories.keys().copied().collect()
+        PanelKind::ALL.into_iter().filter(|kind| self.is_registered(*kind)).collect()
     }
 }
 
@@ -78,14 +78,17 @@ mod tests {
             "Test".into()
         }
 
-        fn build_widget_tree(&mut self) -> Box<dyn mondrian_ui_core::Widget> {
+        fn build_widget_tree(
+            &mut self,
+            _context: &crate::panel::PanelBuildContext<'_>,
+        ) -> Box<dyn mondrian_ui_core::Widget> {
             Box::new(mondrian_ui_core::widgets::Spacer::new(10.0, 10.0))
         }
     }
 
-    fn test_context() -> PanelContext {
+    fn test_context() -> PanelInitContext {
         use mondrian_core::events::EventBus;
-        PanelContext { event_bus: EventBus::new() }
+        PanelInitContext { event_bus: EventBus::new() }
     }
 
     #[test]
@@ -158,6 +161,28 @@ mod tests {
         assert_eq!(kinds.len(), 2);
         assert!(kinds.contains(&PanelKind::Viewer));
         assert!(kinds.contains(&PanelKind::Timeline));
+    }
+
+    #[test]
+    fn registry_registered_kinds_follow_canonical_panel_order() {
+        let mut registry = PanelRegistry::new();
+        registry.register(
+            PanelKind::Console,
+            Arc::new(|_ctx| Box::new(TestPanel { kind: PanelKind::Console })),
+        );
+        registry.register(
+            PanelKind::Assets,
+            Arc::new(|_ctx| Box::new(TestPanel { kind: PanelKind::Assets })),
+        );
+        registry.register(
+            PanelKind::Viewer,
+            Arc::new(|_ctx| Box::new(TestPanel { kind: PanelKind::Viewer })),
+        );
+
+        assert_eq!(
+            registry.registered_kinds(),
+            vec![PanelKind::Viewer, PanelKind::Assets, PanelKind::Console]
+        );
     }
 
     #[test]

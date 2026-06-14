@@ -4,9 +4,10 @@
 
 use std::collections::VecDeque;
 use std::fmt::Write as FmtWrite;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use chrono::Local;
+use parking_lot::Mutex;
 use tracing::Level;
 use tracing_subscriber::Layer;
 
@@ -66,7 +67,7 @@ where
             message,
         };
 
-        let mut buf = self.buffer.lock().unwrap();
+        let mut buf = self.buffer.lock();
         if buf.len() >= self.max_lines {
             buf.pop_front();
         }
@@ -98,14 +99,14 @@ mod tests {
     #[test]
     fn log_layer_creates_buffer() {
         let (_layer, buffer) = ConsoleLogLayer::new(100);
-        assert!(buffer.lock().unwrap().is_empty());
+        assert!(buffer.lock().is_empty());
     }
 
     #[test]
     fn log_layer_buffer_is_shared() {
         let (_layer, buffer) = ConsoleLogLayer::new(50);
         {
-            let mut buf = buffer.lock().unwrap();
+            let mut buf = buffer.lock();
             buf.push_back(LogEntry {
                 timestamp: "12:00:00".into(),
                 level: Level::INFO,
@@ -113,14 +114,14 @@ mod tests {
                 message: "hello".into(),
             });
         }
-        assert_eq!(buffer.lock().unwrap().len(), 1);
+        assert_eq!(buffer.lock().len(), 1);
     }
 
     #[test]
     fn log_layer_evicts_oldest_when_full() {
         let (_layer, buffer) = ConsoleLogLayer::new(3);
         {
-            let mut buf = buffer.lock().unwrap();
+            let mut buf = buffer.lock();
             for i in 1..=4 {
                 if buf.len() >= 3 {
                     buf.pop_front();
@@ -133,7 +134,7 @@ mod tests {
                 });
             }
         }
-        let buf = buffer.lock().unwrap();
+        let buf = buffer.lock();
         assert_eq!(buf.len(), 3);
         assert_eq!(buf[0].message, "msg2");
         assert_eq!(buf[2].message, "msg4");

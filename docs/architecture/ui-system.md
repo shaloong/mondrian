@@ -66,6 +66,15 @@ after dispatched actions. Component fixtures remain in `ui_demo` and explicit
 official `mondrian` entrypoint, it should keep calling into this module with
 real panel models instead of moving logic back into `src/bin`.
 
+`mondrian-editor-ui` owns the long-lived editor panel contract. Panel instances
+are created with `PanelInitContext`, which is limited to stable services such as
+the shared `EventBus`. Widget-tree rebuilds receive `PanelBuildContext`, which
+contains the current read-only `EditorState` snapshot plus a semantic
+`Action` dispatch sink. Panels must not retain mutable app state or bypass that
+dispatch path; app-specific adapters may map richer `AppState` data into
+panel/view models before constructing widgets, but the reusable panel boundary
+stays `EditorState` + `Action`.
+
 Selection DTOs that describe editor state, such as `SelectedClipRef`, live in
 `mondrian-app::app` rather than legacy UI modules. Legacy egui panels and
 self-hosted adapters may both depend on these app-layer DTOs, but app/domain

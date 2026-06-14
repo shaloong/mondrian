@@ -4,7 +4,7 @@
 
 use mondrian_core::events::AppEvent;
 use mondrian_core::Color;
-use mondrian_editor_ui::panel::{Panel, PanelKind};
+use mondrian_editor_ui::panel::{Panel, PanelBuildContext, PanelKind};
 use mondrian_ui_core::Widget;
 use mondrian_ui_widgets::label::Label;
 use mondrian_ui_widgets::scroll::ScrollView;
@@ -36,9 +36,9 @@ impl Panel for ConsolePanel {
         "控制台".into()
     }
 
-    fn build_widget_tree(&mut self) -> Box<dyn Widget> {
+    fn build_widget_tree(&mut self, _context: &PanelBuildContext<'_>) -> Box<dyn Widget> {
         let entries: Vec<LogEntry> = {
-            let buf = self.buffer.lock().unwrap();
+            let buf = self.buffer.lock();
             buf.iter().rev().take(100).rev().cloned().collect()
         };
 
@@ -198,7 +198,9 @@ mod tests {
     fn console_panel_builds_widget_tree() {
         let (_layer, buffer) = ConsoleLogLayer::new(10);
         let mut panel = ConsolePanel::new(buffer, 10);
-        let _widget = panel.build_widget_tree();
+        let state = mondrian_editor_state::EditorState::new();
+        let context = PanelBuildContext { state: &state, dispatch: &|_| {} };
+        let _widget = panel.build_widget_tree(&context);
     }
 
     #[test]

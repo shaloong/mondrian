@@ -6,15 +6,39 @@
 use std::borrow::Cow;
 
 use mondrian_core::events::AppEvent;
+use mondrian_editor_state::{Action, EditorState};
 use mondrian_ui_core::Widget;
 
 // PanelKind is defined in mondrian-editor-state as the canonical source
 pub use mondrian_editor_state::state::PanelKind;
 
-/// 面板上下文（构建 Panel 时传入的服务依赖）
-pub struct PanelContext {
-    /// 事件总线（用于发送/接收 AppEvent）
+/// Panel creation-time services.
+///
+/// These dependencies are long-lived and safe for a panel instance to retain.
+/// Per-frame editor data and action dispatch are provided separately through
+/// [`PanelBuildContext`] so panels do not store stale state snapshots.
+#[derive(Clone)]
+pub struct PanelInitContext {
+    /// Event bus for cross-panel notifications.
     pub event_bus: std::sync::Arc<mondrian_core::events::EventBus>,
+}
+
+/// Panel widget-tree build context.
+///
+/// Panels read the current [`EditorState`] snapshot and convert user intent into
+/// semantic [`Action`] values. They must not mutate editor state directly.
+pub struct PanelBuildContext<'a> {
+    /// Current editor state snapshot for read-only panel adapters.
+    pub state: &'a EditorState,
+    /// Semantic editor action sink owned by the host application.
+    pub dispatch: &'a dyn Fn(Action),
+}
+
+impl PanelBuildContext<'_> {
+    /// Dispatch one semantic editor action from a panel adapter.
+    pub fn dispatch(&self, action: Action) {
+        (self.dispatch)(action);
+    }
 }
 
 /// 所有面板的统一接口
@@ -32,8 +56,11 @@ pub trait Panel: Send + Sync {
     /// 面板标题（显示在 Tab 标签上）
     fn title(&self) -> Cow<'static, str>;
 
-    /// 构建 Widget 树。工作区布局变化时调用。
-    fn build_widget_tree(&mut self) -> Box<dyn Widget>;
+    /// Build the panel's widget tree from the current editor snapshot.
+    ///
+    /// This is called when the workspace layout changes or when the host
+    /// rebuilds panel content after state updates.
+    fn build_widget_tree(&mut self, context: &PanelBuildContext<'_>) -> Box<dyn Widget>;
 
     /// 接收来自 EventBus 的事件通知
     fn on_event(&mut self, event: &AppEvent) {
@@ -54,6 +81,8 @@ pub trait Panel: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mondrian_editor_state::Action;
+    use std::cell::RefCell;
     use std::collections::HashSet;
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -94,8 +123,7 @@ mod tests {
             Cow::Borrowed(self.title)
         }
 
-        fn build_widget_tree(&mut self) -> Box<dyn Widget> {
-            // Return a simple spacer as placeholder
+        fn build_widget_tree(&mut self, _context: &PanelBuildContext<'_>) -> Box<dyn Widget> {
             use mondrian_ui_core::widgets::Spacer;
             Box::new(Spacer::new(100.0, 100.0))
         }
@@ -170,7 +198,9 @@ mod tests {
     #[test]
     fn panel_build_widget_tree_returns_widget() {
         let mut panel = MockPanel::new(PanelKind::Console, "Console");
-        let widget = panel.build_widget_tree();
+        let state = EditorState::new();
+        let context = PanelBuildContext { state: &state, dispatch: &|_| {} };
+        let widget = panel.build_widget_tree(&context);
         assert!(widget.children().is_empty());
     }
 
@@ -204,7 +234,27 @@ mod tests {
     fn panel_is_object_safe() {
         let mut panel: Box<dyn Panel> = Box::new(MockPanel::new(PanelKind::Console, "C"));
         assert_eq!(panel.kind(), PanelKind::Console);
-        let _widget = panel.build_widget_tree();
+        let state = EditorState::new();
+        let context = PanelBuildContext { state: &state, dispatch: &|_| {} };
+        let _widget = panel.build_widget_tree(&context);
+    }
+
+    #[test]
+    fn panel_build_context_exposes_state_snapshot_and_dispatch_sink() {
+        let state = EditorState::new();
+        let dispatched = RefCell::new(Vec::new());
+        let context = PanelBuildContext {
+            state: &state,
+            dispatch: &|action| dispatched.borrow_mut().push(action),
+        };
+
+        assert!(!context.state.has_open_project());
+        context.dispatch(Action::FocusPanel(PanelKind::Timeline));
+
+        assert_eq!(
+            dispatched.into_inner(),
+            vec![Action::FocusPanel(PanelKind::Timeline)]
+        );
     }
 
     #[test]
