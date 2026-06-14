@@ -223,7 +223,8 @@ The router treats widget ids as frame-local routing handles. Before routing a
 new event it drops hovered, focused, or captured ids that are no longer present
 in the current `WidgetTree`, which keeps rebuilt panels from inheriting stale
 capture/focus state after popovers close, drags finish, or panel contents
-refresh.
+refresh. If the stale widget owned focus, the router also emits an IME disable
+request because the removed widget can no longer receive `FocusLost`.
 
 ## Focused Text Input
 

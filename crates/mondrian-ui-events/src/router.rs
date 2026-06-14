@@ -394,6 +394,7 @@ impl EventRouter {
         if let Some(focused) = self.focus_mgr.focused_widget() {
             if tree.get(focused).is_none() {
                 self.focus_mgr.release_focus(focused);
+                self.last_ime_request = Some(ImeRequest { enabled: false, cursor_area: None });
             }
         }
         self.focused = self.focus_mgr.focused_widget();
@@ -856,6 +857,41 @@ mod tests {
         assert_eq!(result, EventResult::Ignored);
         assert_eq!(router.focused(), None);
         assert_eq!(router.focus_manager().focused_widget(), None);
+    }
+
+    #[test]
+    fn router_disables_ime_when_focused_widget_disappears() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let root = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(root);
+
+        let result = router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(router.focused(), Some(root));
+        let ime = router.take_ime_request().expect("focused text input should enable IME");
+        assert!(ime.enabled);
+        assert!(ime.cursor_area.is_some());
+
+        tree.nodes.remove(&root);
+
+        let result = router.route(UiEvent::ImeCommit("ignored".into()), &mut tree, &|_| {});
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(router.focused(), None);
+        assert_eq!(router.focus_manager().focused_widget(), None);
+        let ime = router.take_ime_request().expect("stale focused widget should disable IME");
+        assert!(!ime.enabled);
+        assert_eq!(ime.cursor_area, None);
     }
 
     #[test]
