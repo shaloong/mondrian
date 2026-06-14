@@ -26,18 +26,41 @@ const MENU_SCROLLBAR_SPACE: f32 = 8.0;
 pub(crate) fn paint_menu_trigger(ctx: &mut PaintContext, rect: Rect, label: &str, open: bool) {
     let tokens = &ctx.theme.colors;
     let spacing = &ctx.theme.spacing;
-    let font_size = ctx.theme.typography.body.font_size;
     let fill = if open { tokens.primary } else { tokens.card };
     ctx.encoder.draw_rect(rect, fill, spacing.radius_sm);
-    if !label.is_empty() {
-        ctx.encoder.draw_text(
-            label,
-            font_size,
-            Point::new(rect.x + 8.0, rect.y + 5.0),
-            tokens.foreground,
-        );
-    }
+    paint_menu_trigger_label(ctx, rect, label, tokens.foreground, true);
     paint_menu_arrow(ctx, rect);
+}
+
+pub(crate) fn paint_menu_trigger_label(
+    ctx: &mut PaintContext,
+    rect: Rect,
+    label: &str,
+    color: Color,
+    reserve_arrow: bool,
+) {
+    if label.is_empty() {
+        return;
+    }
+    let reserved_right = if reserve_arrow { MENU_ARROW_SPACE } else { 0.0 };
+    let text_width = rect.width - MENU_TRIGGER_PADDING_X * 2.0 - reserved_right;
+    if text_width <= 0.0 {
+        return;
+    }
+    let clip = Rect::new(
+        rect.x + MENU_TRIGGER_PADDING_X,
+        rect.y,
+        text_width,
+        rect.height,
+    );
+    ctx.encoder.push_clip(clip);
+    ctx.encoder.draw_text(
+        label,
+        ctx.theme.typography.body.font_size,
+        Point::new(rect.x + MENU_TRIGGER_PADDING_X, rect.y + 5.0),
+        color,
+    );
+    ctx.encoder.pop_clip();
 }
 
 pub(crate) fn paint_menu_popup_chrome(ctx: &mut PaintContext, rect: Rect) {
@@ -634,14 +657,7 @@ impl Widget for Dropdown {
             let rect = self.trigger_rect();
             let tokens = &ctx.theme.colors;
             ctx.encoder.draw_rect(rect, tokens.muted, ctx.theme.spacing.radius_sm);
-            if !self.label.is_empty() {
-                ctx.encoder.draw_text(
-                    &self.label,
-                    ctx.theme.typography.body.font_size,
-                    Point::new(rect.x + 8.0, rect.y + 5.0),
-                    tokens.muted_foreground,
-                );
-            }
+            paint_menu_trigger_label(ctx, rect, &self.label, tokens.muted_foreground, false);
         }
         if self.focus_visible && !self.open {
             let mut ring = ctx.theme.colors.ring;
@@ -684,15 +700,21 @@ mod tests {
     #[derive(Default)]
     struct RecordingEncoder {
         rects: Vec<Rect>,
+        clips: Vec<Rect>,
+        clip_pops: usize,
         lines: usize,
         texts: Vec<String>,
         triangles: usize,
     }
 
     impl DrawCommandEncoder for RecordingEncoder {
-        fn push_clip(&mut self, _bounds: Rect) {}
+        fn push_clip(&mut self, bounds: Rect) {
+            self.clips.push(bounds);
+        }
 
-        fn pop_clip(&mut self) {}
+        fn pop_clip(&mut self) {
+            self.clip_pops += 1;
+        }
 
         fn draw_rect(&mut self, bounds: Rect, _color: mondrian_core::Color, _corner_radius: f32) {
             self.rects.push(bounds);
@@ -1140,6 +1162,53 @@ mod tests {
 
         assert_eq!(open, closed);
         assert_eq!(open, Size::new(120.0, 28.0));
+    }
+
+    #[test]
+    fn dropdown_trigger_clips_long_label_before_arrow() {
+        let mut d = Dropdown::new(
+            "Very long trigger label that must not cover the arrow",
+            vec![MenuItem::new("Open", Action::CloseProject)],
+        );
+        d.layout(Rect::new(0.0, 0.0, 80.0, 28.0));
+        let theme = mondrian_ui_theme::ThemePreset::Dark.build();
+        let clip_rect = Rect::new(0.0, 0.0, 120.0, 80.0);
+        let mut encoder = RecordingEncoder::default();
+
+        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        d.paint(&mut ctx);
+
+        assert_eq!(
+            encoder.texts,
+            vec!["Very long trigger label that must not cover the arrow"]
+        );
+        assert_eq!(encoder.triangles, 1);
+        assert_eq!(encoder.clips, vec![Rect::new(8.0, 0.0, 40.0, 28.0)]);
+        assert_eq!(encoder.clip_pops, 1);
+    }
+
+    #[test]
+    fn disabled_dropdown_trigger_clips_long_label_inside_control() {
+        let mut d = Dropdown::new(
+            "Disabled trigger label that should stay clipped",
+            vec![MenuItem::new("Open", Action::CloseProject)],
+        )
+        .disabled();
+        d.layout(Rect::new(0.0, 0.0, 80.0, 28.0));
+        let theme = mondrian_ui_theme::ThemePreset::Dark.build();
+        let clip_rect = Rect::new(0.0, 0.0, 120.0, 80.0);
+        let mut encoder = RecordingEncoder::default();
+
+        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        d.paint(&mut ctx);
+
+        assert_eq!(
+            encoder.texts,
+            vec!["Disabled trigger label that should stay clipped"]
+        );
+        assert_eq!(encoder.triangles, 0);
+        assert_eq!(encoder.clips, vec![Rect::new(8.0, 0.0, 64.0, 28.0)]);
+        assert_eq!(encoder.clip_pops, 1);
     }
 
     #[test]
