@@ -7,6 +7,12 @@ use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
+use crate::text_metrics::measure_single_line;
+
+const CHECKBOX_BOX_SIZE: f32 = 16.0;
+const CHECKBOX_LABEL_X: f32 = 20.0;
+const CHECKBOX_HEIGHT: f32 = 22.0;
+
 /// Adapter that maps the current checkbox state to an editor [`Action`].
 pub type CheckboxChangeAction = dyn Fn(bool) -> Action;
 
@@ -99,8 +105,8 @@ impl Widget for Checkbox {
     }
 
     fn measure(&self, constraint: LayoutConstraint) -> Size {
-        let char_count = self.label.chars().count() as f32;
-        let preferred = Size::new(16.0 + 8.0 + 12.0 * char_count, 22.0);
+        let (label_width, _) = measure_single_line(&self.label, 14.0);
+        let preferred = Size::new(CHECKBOX_LABEL_X + label_width, CHECKBOX_HEIGHT);
         constraint.constrain(preferred)
     }
 
@@ -161,12 +167,11 @@ impl Widget for Checkbox {
         let tokens = &ctx.theme.colors;
         let spacing = &ctx.theme.spacing;
 
-        let box_size = 16.0;
         let box_rect = Rect::new(
             (self.bounds.x + 2.0).round(),
-            (self.bounds.y + (self.bounds.height - box_size) * 0.5).round(),
-            box_size,
-            box_size,
+            (self.bounds.y + (self.bounds.height - CHECKBOX_BOX_SIZE) * 0.5).round(),
+            CHECKBOX_BOX_SIZE,
+            CHECKBOX_BOX_SIZE,
         );
 
         // Fill color
@@ -211,8 +216,15 @@ impl Widget for Checkbox {
         // Label text
         if !self.label.is_empty() {
             let font_size = ctx.theme.typography.body.font_size;
-            let tx = self.bounds.x + 20.0;
+            let text_clip = Rect::new(
+                self.bounds.x + CHECKBOX_LABEL_X,
+                self.bounds.y,
+                (self.bounds.width - CHECKBOX_LABEL_X).max(0.0),
+                self.bounds.height,
+            );
+            let tx = text_clip.x;
             let ty = self.bounds.y + (self.bounds.height - font_size * 1.3).max(0.0) * 0.5;
+            ctx.encoder.push_clip(text_clip);
             ctx.encoder.draw_text(
                 &self.label,
                 font_size,
@@ -223,6 +235,7 @@ impl Widget for Checkbox {
                     tokens.muted_foreground
                 },
             );
+            ctx.encoder.pop_clip();
         }
     }
 
@@ -258,12 +271,19 @@ mod tests {
     struct RecordingEncoder {
         lines: Vec<(Point, Point, f32)>,
         triangles: Vec<Point>,
+        clips: Vec<Rect>,
+        clip_pops: usize,
+        texts: Vec<String>,
     }
 
     impl DrawCommandEncoder for RecordingEncoder {
-        fn push_clip(&mut self, _bounds: Rect) {}
+        fn push_clip(&mut self, bounds: Rect) {
+            self.clips.push(bounds);
+        }
 
-        fn pop_clip(&mut self) {}
+        fn pop_clip(&mut self) {
+            self.clip_pops += 1;
+        }
 
         fn draw_rect(&mut self, _bounds: Rect, _color: mondrian_core::Color, _corner_radius: f32) {}
 
@@ -283,11 +303,12 @@ mod tests {
 
         fn draw_text(
             &mut self,
-            _text: &str,
+            text: &str,
             _font_size: f32,
             _position: Point,
             _color: mondrian_core::Color,
         ) {
+            self.texts.push(text.into());
         }
 
         fn push_translate(&mut self, _offset: glam::Vec2) {}
@@ -471,6 +492,25 @@ mod tests {
             assert!((2.0..=18.0).contains(&point.x));
             assert!((3.0..=19.0).contains(&point.y));
         }
+    }
+
+    #[test]
+    fn checkbox_paint_clips_long_label_to_remaining_bounds() {
+        let mut cb = Checkbox::new("A very long checkbox label", false);
+        cb.layout(Rect::new(10.0, 20.0, 80.0, 22.0));
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 200.0, 100.0),
+        };
+
+        cb.paint(&mut ctx);
+
+        assert_eq!(encoder.texts, vec!["A very long checkbox label"]);
+        assert_eq!(encoder.clips, vec![Rect::new(30.0, 20.0, 60.0, 22.0)]);
+        assert_eq!(encoder.clip_pops, 1);
     }
 
     #[test]

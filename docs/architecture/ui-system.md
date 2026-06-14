@@ -625,6 +625,9 @@ effective content width, taking the parent layout constraint and any explicit
 maximum width together. This keeps property rows, panel headers, and compact
 tool surfaces from letting long labels spill into adjacent controls even when
 the parent layout constrains them below their natural text width.
+Compact label-like controls such as buttons, checkboxes, list rows, and dock
+tabs also clip their text lane locally so a long caption cannot bleed into the
+next control before a parent-level clip catches it.
 
 ## Curve Editing
 

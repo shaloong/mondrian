@@ -11,6 +11,8 @@ use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use crate::paint::paint_focus_ring;
 use crate::scroll::ScrollView;
 
+const LIST_ROW_TEXT_PADDING_X: f32 = 8.0;
+
 /// 列表项
 #[derive(Debug, Clone)]
 pub struct ListItem {
@@ -324,12 +326,20 @@ impl Widget for ListRow {
         };
         ctx.encoder.draw_rect(self.bounds, fill, spacing.radius_sm);
         if !self.label.is_empty() {
+            let text_clip = Rect::new(
+                self.bounds.x + LIST_ROW_TEXT_PADDING_X,
+                self.bounds.y,
+                (self.bounds.width - LIST_ROW_TEXT_PADDING_X * 2.0).max(0.0),
+                self.bounds.height,
+            );
+            ctx.encoder.push_clip(text_clip);
             ctx.encoder.draw_text(
                 &self.label,
                 font_size,
-                Point::new(self.bounds.x + 8.0, self.bounds.y + 5.0),
+                Point::new(text_clip.x, self.bounds.y + 5.0),
                 tokens.foreground,
             );
+            ctx.encoder.pop_clip();
         }
     }
 
@@ -343,6 +353,50 @@ mod tests {
     use super::*;
 
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use mondrian_ui_core::widget::DrawCommandEncoder;
+    use mondrian_ui_theme::ThemePreset;
+
+    #[derive(Default)]
+    struct PaintRecorder {
+        clips: Vec<Rect>,
+        clip_pops: usize,
+        texts: Vec<String>,
+    }
+
+    impl DrawCommandEncoder for PaintRecorder {
+        fn push_clip(&mut self, bounds: Rect) {
+            self.clips.push(bounds);
+        }
+
+        fn pop_clip(&mut self) {
+            self.clip_pops += 1;
+        }
+
+        fn draw_rect(&mut self, _bounds: Rect, _color: mondrian_core::Color, _corner_radius: f32) {}
+
+        fn draw_line(
+            &mut self,
+            _start: Point,
+            _end: Point,
+            _width: f32,
+            _color: mondrian_core::Color,
+        ) {
+        }
+
+        fn draw_text(
+            &mut self,
+            text: &str,
+            _font_size: f32,
+            _position: Point,
+            _color: mondrian_core::Color,
+        ) {
+            self.texts.push(text.into());
+        }
+
+        fn push_translate(&mut self, _offset: glam::Vec2) {}
+
+        fn pop_transform(&mut self) {}
+    }
 
     fn event_ctx<'a>(
         f: &'a mut DummyFocus,
@@ -428,5 +482,31 @@ mod tests {
         assert_eq!(down, EventResult::Ignored);
         assert_eq!(enter, EventResult::Ignored);
         assert_eq!(list.selected_index(), None);
+    }
+
+    #[test]
+    fn list_row_paint_clips_long_label_to_row_bounds() {
+        let mut row = ListRow {
+            id: WidgetId::new(),
+            label: "A very long list row label".into(),
+            selected: false,
+            hovered: false,
+            bounds: Rect::ZERO,
+            row_height: 28.0,
+        };
+        row.layout(Rect::new(10.0, 20.0, 80.0, 28.0));
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = PaintRecorder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 200.0, 100.0),
+        };
+
+        row.paint(&mut ctx);
+
+        assert_eq!(encoder.texts, vec!["A very long list row label"]);
+        assert_eq!(encoder.clips, vec![Rect::new(18.0, 20.0, 64.0, 28.0)]);
+        assert_eq!(encoder.clip_pops, 1);
     }
 }
