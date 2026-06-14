@@ -70,9 +70,7 @@ impl AppState {
 
         let removed = self.remove_clips_bulk(&selections, false)?;
         if removed > 0 {
-            self.selection.selected_clips.clear();
-            self.selection.selected_mask = None;
-            self.clear_animation_selection();
+            self.clear_selection();
         }
         Ok(removed)
     }
@@ -203,9 +201,7 @@ impl AppState {
         if pasted_count > 0 {
             self.record_sequence_snapshot_command(description, before, after);
             self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
-            self.selection.selected_clips = pasted_selection;
-            self.selection.selected_mask = None;
-            self.clear_animation_selection();
+            self.replace_clip_selection(pasted_selection);
             self.seek(timeline_frame.max(0));
             let _ = self.save_project_file();
         }

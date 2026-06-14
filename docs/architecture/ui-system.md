@@ -383,7 +383,9 @@ current track from `AppState`; track ids in widget snapshots are context only
 because they can be stale after moves, undo/redo, or refresh lag.
 Clip, mask, and animation keyframe selection state is owned by
 `mondrian-app::app::selection`; action handlers should call its AppState
-methods instead of directly clearing individual selection fields.
+methods instead of directly clearing individual selection fields. Clipboard,
+duplicate, paste, and timeline mutation paths should also replace or clear clip
+selection through that module so nested selection scopes stay consistent.
 Attached effects appear as inspector rows with enable checkboxes, using effect
 instance ids rather than list indices so reorder/remove operations can be added
 without changing the widget contract. Removal buttons use the same effect id

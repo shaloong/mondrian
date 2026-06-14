@@ -38,9 +38,7 @@ impl AppState {
             .sequence
             .as_ref()
             .and_then(|sequence| resolve_clip_selection(sequence, clip_id))?;
-        self.selection.selected_clips = vec![selection];
-        self.selection.selected_mask = None;
-        self.clear_animation_selection();
+        self.replace_clip_selection(vec![selection]);
         Some(selection)
     }
 
@@ -52,6 +50,11 @@ impl AppState {
         };
 
         let selections = all_clip_selections(sequence);
+        self.replace_clip_selection(selections);
+    }
+
+    /// Replace the selected clip set and clear narrower selection scopes.
+    pub fn replace_clip_selection(&mut self, selections: Vec<SelectedClipRef>) {
         self.selection.selected_clips = selections;
         self.selection.selected_mask = None;
         self.clear_animation_selection();

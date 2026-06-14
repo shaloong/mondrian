@@ -2313,6 +2313,11 @@ mod tests {
         let (mut state, track_id, clip_id) = state_with_two_video_tracks();
         state.selection.selected_clips =
             vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
+        state.selection.selected_mask = Some((MaskId::new(), clip_id, track_id));
+        state.animation_selection.active_property = Some(crate::app::AnimationPropertySelection {
+            clip_id,
+            path: Transform2D::OPACITY_PATH.to_string(),
+        });
         state.seek(50);
 
         state.dispatch_action(mondrian_editor_state::Action::Copy).expect("copy clip");
@@ -2330,6 +2335,8 @@ mod tests {
             state.selection.selected_clips,
             vec![SelectedClipRef { track_id, is_video_track: true, clip_id: pasted.id }]
         );
+        assert!(state.selection.selected_mask.is_none());
+        assert!(state.animation_selection.active_property.is_none());
         assert!(state.can_undo_action());
     }
 
@@ -2338,12 +2345,19 @@ mod tests {
         let (mut state, track_id, clip_id) = state_with_two_video_tracks();
         state.selection.selected_clips =
             vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
+        state.selection.selected_mask = Some((MaskId::new(), clip_id, track_id));
+        state.animation_selection.active_property = Some(crate::app::AnimationPropertySelection {
+            clip_id,
+            path: Transform2D::OPACITY_PATH.to_string(),
+        });
 
         state.dispatch_action(mondrian_editor_state::Action::Cut).expect("cut clip");
 
         let sequence = state.sequence.as_ref().expect("sequence");
         assert!(sequence.video_tracks[0].clips.is_empty());
         assert!(state.selection.selected_clips.is_empty());
+        assert!(state.selection.selected_mask.is_none());
+        assert!(state.animation_selection.active_property.is_none());
         assert!(state.has_clip_clipboard());
         assert_eq!(state.active_clipboard_kind, Some(AppClipboardKind::Clips));
         assert!(state.can_undo_action());
@@ -2373,6 +2387,11 @@ mod tests {
         let (mut state, track_id, clip_id) = state_with_two_video_tracks();
         state.selection.selected_clips =
             vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
+        state.selection.selected_mask = Some((MaskId::new(), clip_id, track_id));
+        state.animation_selection.active_property = Some(crate::app::AnimationPropertySelection {
+            clip_id,
+            path: Transform2D::OPACITY_PATH.to_string(),
+        });
         state.seek(0);
 
         state
@@ -2394,6 +2413,8 @@ mod tests {
                 clip_id: duplicated.id,
             }]
         );
+        assert!(state.selection.selected_mask.is_none());
+        assert!(state.animation_selection.active_property.is_none());
         assert!(!state.has_clip_clipboard());
         assert!(state.can_undo_action());
     }
