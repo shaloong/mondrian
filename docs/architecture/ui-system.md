@@ -388,6 +388,8 @@ duplicate, paste, and timeline mutation paths should also replace or clear clip
 selection through that module so nested selection scopes stay consistent.
 Panel model adapters should read primary and multi-clip selection through the
 same AppState selection queries instead of depending on `SelectionState` fields.
+Timeline mutations that move clips should refresh selected clip track metadata
+through the selection module; clip id remains the durable identity.
 Attached effects appear as inspector rows with enable checkboxes, using effect
 instance ids rather than list indices so reorder/remove operations can be added
 without changing the widget contract. Removal buttons use the same effect id

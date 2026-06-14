@@ -1301,8 +1301,8 @@ impl eframe::App for MondrianApp {
                 );
             });
         // Sync canvas selection to timeline.
-        if let Some(sel) = self.state.selection.selected_clips.first() {
-            self.timeline_panel.apply_canvas_selection(Some(*sel));
+        if let Some(selection) = self.state.primary_selected_clip() {
+            self.timeline_panel.apply_canvas_selection(Some(selection));
         }
         if ui_diag_enabled() {
             log_ui_stage_slow("viewer_panel", viewer_started_at.elapsed());

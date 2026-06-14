@@ -70,6 +70,30 @@ impl AppState {
         self.selection.selected_mask = None;
         self.clear_animation_selection();
     }
+
+    /// Refresh selected clip track metadata after timeline mutations.
+    ///
+    /// Selection identity is the clip id. Track ids and clip kind are cached so
+    /// UI and command code can target the active sequence quickly, but clip
+    /// moves can make those cached fields stale.
+    pub fn refresh_selected_clip_locations(&mut self, clip_ids: &[ClipId]) {
+        let Some(sequence) = self.sequence.as_ref() else {
+            return;
+        };
+        let updates = clip_ids
+            .iter()
+            .filter_map(|clip_id| resolve_clip_selection(sequence, *clip_id))
+            .collect::<Vec<_>>();
+
+        for selection in &mut self.selection.selected_clips {
+            if let Some(updated) =
+                updates.iter().find(|updated| updated.clip_id == selection.clip_id)
+            {
+                selection.track_id = updated.track_id;
+                selection.is_video_track = updated.is_video_track;
+            }
+        }
+    }
 }
 
 /// Return all clip selections in video-track then audio-track order.

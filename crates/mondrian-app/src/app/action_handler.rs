@@ -178,7 +178,7 @@ impl AppState {
     }
 
     fn copy_from_action(&mut self) -> Result<()> {
-        let Some(selection) = self.selection.selected_clips.first().copied() else {
+        let Some(selection) = self.primary_selected_clip() else {
             return self.copy_selected_clips_to_clipboard().map(|_| ());
         };
         if self.copy_selected_animation_keyframes(selection)? {
@@ -345,7 +345,7 @@ impl AppState {
     }
 
     fn paste_animation_keyframes_from_action(&mut self) -> Result<()> {
-        let Some(selection) = self.selection.selected_clips.first().copied() else {
+        let Some(selection) = self.primary_selected_clip() else {
             return Ok(());
         };
         let destination_time = self
@@ -448,27 +448,6 @@ impl AppState {
         }
         self.record_timeline_edit_snapshot("移动片段", before);
         Ok(())
-    }
-
-    fn refresh_selected_clip_locations(&mut self, clip_ids: &[ClipId]) {
-        let Some(seq) = self.sequence.as_ref() else {
-            return;
-        };
-        let updates = clip_ids
-            .iter()
-            .filter_map(|clip_id| {
-                find_clip_track_lock(seq, *clip_id)
-                    .map(|(track_id, is_video_track, _)| (*clip_id, track_id, is_video_track))
-            })
-            .collect::<Vec<_>>();
-        for selection in &mut self.selection.selected_clips {
-            if let Some((_, track_id, is_video_track)) =
-                updates.iter().find(|(clip_id, _, _)| *clip_id == selection.clip_id)
-            {
-                selection.track_id = *track_id;
-                selection.is_video_track = *is_video_track;
-            }
-        }
     }
 
     fn remove_effect_from_action(
