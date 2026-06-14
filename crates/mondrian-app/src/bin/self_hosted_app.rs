@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use mondrian_app::app::AppState;
-use mondrian_app::self_hosted::action_pump::PendingUiActions;
+use mondrian_app::self_hosted::action_queue::PendingUiActions;
 use mondrian_app::self_hosted::host::SelfHostedUiHost;
 use mondrian_app::self_hosted::runtime::WinitUiRuntime;
 use mondrian_panel_console::tracing_layer::ConsoleLogLayer;

@@ -11,7 +11,7 @@ use mondrian_ui_core::types::Rect;
 use mondrian_ui_core::TreeWalker;
 
 use crate::app::AppState;
-use crate::self_hosted::action_pump::PendingUiActions;
+use crate::self_hosted::action_queue::PendingUiActions;
 use crate::self_hosted::shell::SelfHostedAppRoot;
 
 /// Product-facing self-hosted UI session state.
