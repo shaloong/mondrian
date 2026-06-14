@@ -78,6 +78,8 @@ pub const APP_SHELL_IMPORT_MEDIA_DIALOG: &str = "import_media_dialog";
 pub const APP_SHELL_SAVE_PROJECT_AS_DIALOG: &str = "save_project_as_dialog";
 /// App-shell request to show product about information.
 pub const APP_SHELL_ABOUT: &str = "about";
+/// App-shell request to close the current shell-local modal.
+pub const APP_SHELL_CLOSE_MODAL: &str = "close_modal";
 
 /// Clip edge being trimmed by a timeline UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -384,6 +386,11 @@ pub fn app_shell_save_project_as_dialog_action() -> Action {
 /// Build an app-shell request for showing product about information.
 pub fn app_shell_about_action() -> Action {
     custom_app_shell_action(APP_SHELL_ABOUT)
+}
+
+/// Build an app-shell request for closing the current shell-local modal.
+pub fn app_shell_close_modal_action() -> Action {
+    custom_app_shell_action(APP_SHELL_CLOSE_MODAL)
 }
 
 fn custom_timeline_action<T: Serialize>(name: &'static str, payload: T) -> Action {

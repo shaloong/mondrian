@@ -119,8 +119,8 @@ work plus status reporting. Widget code must not invent project paths or mutate
 project files directly.
 Those app-shell dialog intents are built through `app::ui_actions` helpers so
 menus and self-hosted panels share the same stable custom-action ids. Shell
-local actions, such as About, use the same helper boundary even when they do
-not resolve to editor-state actions.
+local actions, such as About and close-modal, use the same helper boundary
+even when they do not resolve to editor-state actions.
 `self_hosted::shell::resolve_app_shell_action` is the tested boundary that
 turns those intents into concrete project creation, `OpenProject`,
 `ImportMedia`, and `SaveProjectAs` actions after a native adapter supplies
@@ -521,7 +521,9 @@ typed draft-update payloads and presents validated production presets for frame
 size, frame rate, audio sample rate, proxy generation, and preview caching.
 Shell modals are routed through `self_hosted::modal::ShellModal` and should use
 theme modal tokens such as `colors.modal_scrim`, `colors.popover`, and spacing
-radii instead of per-dialog hard-coded chrome.
+radii instead of per-dialog hard-coded chrome. Each concrete modal lives in its
+own module, such as `new_project_dialog` or `about_dialog`, while
+`SelfHostedAppRoot` only opens, closes, lays out, and routes the active modal.
 Modal card geometry and chrome should be centralized through
 `mondrian-ui-widgets::DialogSurface`; app dialogs should keep only local content
 layout and event semantics.

@@ -18,8 +18,8 @@ use crate::app::ui_actions::{
     app_shell_new_project_dialog_action, app_shell_open_project_dialog_action,
     app_shell_save_project_as_dialog_action, project_create_with_settings_action,
     NewProjectDraftUpdatePayload, APP_SHELL_ABOUT, APP_SHELL_CANCEL_NEW_PROJECT_DIALOG,
-    APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE,
-    APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_NEW_PROJECT_DRAFT_CHANGED,
+    APP_SHELL_CLOSE_MODAL, APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_IMPORT_MEDIA_DIALOG,
+    APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_NEW_PROJECT_DRAFT_CHANGED,
     APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
 };
 use crate::app::AppState;
@@ -357,6 +357,16 @@ impl SelfHostedAppRoot {
             Action::Custom { namespace, name, .. }
                 if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_ABOUT =>
             {
+                self.modal = Some(ShellModal::about());
+                if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
+                    self.layout(self.bounds);
+                }
+                None
+            }
+            Action::Custom { namespace, name, .. }
+                if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_CLOSE_MODAL =>
+            {
+                self.modal = None;
                 None
             }
             action => resolve_app_shell_action(action, platform, current_project_path),
@@ -449,11 +459,11 @@ mod tests {
     use super::*;
     use crate::app::ui_actions::{
         app_shell_about_action, app_shell_cancel_new_project_dialog_action,
-        app_shell_confirm_new_project_dialog_action, app_shell_import_media_dialog_action,
-        app_shell_new_project_dialog_action, app_shell_new_project_draft_changed_action,
-        app_shell_open_project_dialog_action, app_shell_save_project_as_dialog_action,
-        NewProjectDraftUpdatePayload, ProjectCreateWithSettingsPayload,
-        PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
+        app_shell_close_modal_action, app_shell_confirm_new_project_dialog_action,
+        app_shell_import_media_dialog_action, app_shell_new_project_dialog_action,
+        app_shell_new_project_draft_changed_action, app_shell_open_project_dialog_action,
+        app_shell_save_project_as_dialog_action, NewProjectDraftUpdatePayload,
+        ProjectCreateWithSettingsPayload, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
     };
     use mondrian_core::{Rational, Resolution};
     use mondrian_editor_state::state::PanelKind;
@@ -874,11 +884,26 @@ mod tests {
     }
 
     #[test]
-    fn app_root_handles_about_action_as_shell_local() {
+    fn app_root_handles_about_action_as_shell_modal() {
+        let platform = FakePlatform::default();
+        let mut root = SelfHostedAppRoot::demo();
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+
+        let action = root.handle_shell_action(app_shell_about_action(), &platform, None);
+
+        assert_eq!(action, None);
+        assert!(root.modal.as_ref().and_then(ShellModal::as_about).is_some());
+        assert_eq!(root.child_count(), 3);
+    }
+
+    #[test]
+    fn app_root_closes_shell_modal_without_editor_action() {
         let platform = FakePlatform::default();
         let mut root = SelfHostedAppRoot::demo();
 
-        let action = root.handle_shell_action(app_shell_about_action(), &platform, None);
+        root.handle_shell_action(app_shell_about_action(), &platform, None);
+
+        let action = root.handle_shell_action(app_shell_close_modal_action(), &platform, None);
 
         assert_eq!(action, None);
         assert!(root.modal.is_none());
