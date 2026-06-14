@@ -466,6 +466,8 @@ layout and event semantics.
 Dialog and form copy should use reusable `mondrian-ui-widgets::Label`
 instances for semantic color, padding, and wrapping rather than direct
 per-dialog `draw_text` calls.
+Inspector/property-panel titles, section headers, and row labels follow the
+same rule through `PropertyPanel`'s internal `Label` instances.
 Form controls should expose a common `enabled(bool)` / `disabled()` builder
 where practical. Disabled controls must not dispatch actions, request pointer
 capture, or participate in focus traversal, and should render with muted theme

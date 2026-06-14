@@ -7,6 +7,8 @@ use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
+use crate::Label;
+
 /// Layout options for [`PropertyPanel`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PropertyPanelOptions {
@@ -36,7 +38,7 @@ impl Default for PropertyPanelOptions {
 
 /// One labeled control row in a [`PropertySection`].
 pub struct PropertyRow {
-    label: String,
+    label: Label,
     control: Box<dyn Widget>,
     height: Option<f32>,
     bounds: Rect,
@@ -47,7 +49,7 @@ impl PropertyRow {
     /// Create a property row from a label and an owned control widget.
     pub fn new(label: impl Into<String>, control: Box<dyn Widget>) -> Self {
         Self {
-            label: label.into(),
+            label: Label::new(label.into()).muted().with_font_size(12.0).with_padding(0.0, 0.0),
             control,
             height: None,
             bounds: Rect::ZERO,
@@ -63,7 +65,7 @@ impl PropertyRow {
 
     /// Row label.
     pub fn label(&self) -> &str {
-        &self.label
+        self.label.text()
     }
 
     /// Current laid out row bounds.
@@ -78,7 +80,7 @@ impl PropertyRow {
 
 /// A titled group of property rows.
 pub struct PropertySection {
-    title: String,
+    title: Label,
     rows: Vec<PropertyRow>,
     bounds: Rect,
     header_position: Point,
@@ -88,7 +90,7 @@ impl PropertySection {
     /// Create an empty property section.
     pub fn new(title: impl Into<String>) -> Self {
         Self {
-            title: title.into(),
+            title: Label::new(title.into()).muted().with_font_size(11.0).with_padding(0.0, 0.0),
             rows: Vec::new(),
             bounds: Rect::ZERO,
             header_position: Point::ZERO,
@@ -108,7 +110,7 @@ impl PropertySection {
 
     /// Section title.
     pub fn title(&self) -> &str {
-        &self.title
+        self.title.text()
     }
 
     /// Number of rows in this section.
@@ -120,13 +122,11 @@ impl PropertySection {
 /// Inspector-style property panel with labeled rows.
 pub struct PropertyPanel {
     id: WidgetId,
-    title: String,
-    subtitle: Option<String>,
+    title: Label,
+    subtitle: Option<Label>,
     sections: Vec<PropertySection>,
     options: PropertyPanelOptions,
     bounds: Rect,
-    title_position: Point,
-    subtitle_position: Point,
 }
 
 impl PropertyPanel {
@@ -139,19 +139,18 @@ impl PropertyPanel {
     pub fn with_options(title: impl Into<String>, options: PropertyPanelOptions) -> Self {
         Self {
             id: WidgetId::new(),
-            title: title.into(),
+            title: Label::new(title.into()).with_font_size(13.0).with_padding(0.0, 0.0),
             subtitle: None,
             sections: Vec::new(),
             options,
             bounds: Rect::ZERO,
-            title_position: Point::ZERO,
-            subtitle_position: Point::ZERO,
         }
     }
 
     /// Set the optional subtitle.
     pub fn with_subtitle(mut self, subtitle: impl Into<String>) -> Self {
-        self.subtitle = Some(subtitle.into());
+        self.subtitle =
+            Some(Label::new(subtitle.into()).muted().with_font_size(11.0).with_padding(0.0, 0.0));
         self
     }
 
@@ -219,7 +218,7 @@ impl Widget for PropertyPanel {
             .map(|row| row.height(self.options.row_height))
             .sum();
         let section_headers =
-            self.sections.iter().filter(|section| !section.title.is_empty()).count();
+            self.sections.iter().filter(|section| !section.title().is_empty()).count();
         let section_gaps = self.sections.len().saturating_sub(1);
         let preferred = Size::new(
             280.0,
@@ -238,13 +237,17 @@ impl Widget for PropertyPanel {
         let control_x = content.x + self.options.label_width + self.options.control_gap;
         let control_width = (content.x + content.width - control_x).max(1.0);
 
-        self.title_position = Point::new(content.x, content.y + 16.0);
-        self.subtitle_position = Point::new(content.x, content.y + 34.0);
         let mut y = content.y + self.header_height();
 
         for section in &mut self.sections {
-            if !section.title.is_empty() {
+            if !section.title().is_empty() {
                 section.header_position = Point::new(content.x, y + 16.0);
+                section.title.layout(Rect::new(
+                    content.x,
+                    section.header_position.y,
+                    content.width,
+                    16.0,
+                ));
                 y += 24.0;
             }
 
@@ -258,6 +261,12 @@ impl Widget for PropertyPanel {
                     y + row_h * 0.5 + 4.0
                 };
                 row.label_position = Point::new(content.x, label_y);
+                row.label.layout(Rect::new(
+                    content.x,
+                    row.label_position.y,
+                    self.options.label_width,
+                    16.0,
+                ));
                 let measured = row.control.measure(LayoutConstraint::loose(0.0, 0.0));
                 let control_h = measured.height.min(row_h).max(1.0);
                 row.control.layout(Rect::new(
@@ -276,6 +285,10 @@ impl Widget for PropertyPanel {
             );
             y += self.options.section_gap;
         }
+        self.title.layout(Rect::new(content.x, content.y + 16.0, content.width, 18.0));
+        if let Some(subtitle) = &mut self.subtitle {
+            subtitle.layout(Rect::new(content.x, content.y + 34.0, content.width, 16.0));
+        }
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
@@ -293,35 +306,20 @@ impl Widget for PropertyPanel {
         let colors = &ctx.theme.colors;
         let spacing = &ctx.theme.spacing;
         ctx.encoder.draw_rect(self.bounds, colors.card, 0.0);
-        ctx.encoder.draw_text(&self.title, 13.0, self.title_position, colors.foreground);
+        self.title.paint(ctx);
         if let Some(subtitle) = &self.subtitle {
-            ctx.encoder.draw_text(
-                subtitle,
-                11.0,
-                self.subtitle_position,
-                colors.muted_foreground,
-            );
+            subtitle.paint(ctx);
         }
 
         for section in &self.sections {
             if section.bounds.height > 0.0 {
                 ctx.encoder.draw_rect(section.bounds, colors.popover, spacing.radius_md);
             }
-            if !section.title.is_empty() {
-                ctx.encoder.draw_text(
-                    &section.title,
-                    11.0,
-                    section.header_position,
-                    colors.muted_foreground,
-                );
+            if !section.title().is_empty() {
+                section.title.paint(ctx);
             }
             for row in &section.rows {
-                ctx.encoder.draw_text(
-                    &row.label,
-                    12.0,
-                    row.label_position,
-                    colors.muted_foreground,
-                );
+                row.label.paint(ctx);
                 row.control.paint(ctx);
             }
         }
