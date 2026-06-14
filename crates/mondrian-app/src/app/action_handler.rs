@@ -504,16 +504,7 @@ impl AppState {
     ) -> Result<()> {
         match target {
             mondrian_editor_state::action::SelectionTarget::Clip(clip_id) => {
-                let Some(seq) = self.sequence.as_ref() else {
-                    return Err(missing_sequence_error("select_clip"));
-                };
-                let (track_id, is_video_track, _) = find_clip_track_lock(seq, clip_id)
-                    .ok_or_else(|| missing_clip_error("select_clip", clip_id))?;
-                self.selection.selected_clips =
-                    vec![SelectedClipRef { track_id, is_video_track, clip_id }];
-                self.selection.selected_mask = None;
-                self.clear_animation_selection();
-                Ok(())
+                self.select_clip_for_action("select_clip", clip_id)
             }
             mondrian_editor_state::action::SelectionTarget::AllClips => {
                 self.select_all_clips_from_ui();
@@ -534,6 +525,15 @@ impl AppState {
                 Ok(())
             }
         }
+    }
+
+    fn select_clip_for_action(&mut self, step_id: &'static str, clip_id: ClipId) -> Result<()> {
+        if self.sequence.is_none() {
+            return Err(missing_sequence_error(step_id));
+        }
+        self.select_clip_by_id(clip_id)
+            .map(|_| ())
+            .ok_or_else(|| missing_clip_error(step_id, clip_id))
     }
 
     fn select_all_clips_from_ui(&mut self) {
@@ -614,12 +614,7 @@ impl AppState {
                     name,
                     payload,
                 )?;
-                self.selection.selected_clips = vec![SelectedClipRef {
-                    track_id: payload.track_id,
-                    is_video_track: payload.is_video_track,
-                    clip_id: payload.clip_id,
-                }];
-                Ok(())
+                self.select_clip_for_action("timeline_select_clip", payload.clip_id)
             }
             TIMELINE_MOVE_CLIP => {
                 let payload = parse_ui_payload::<TimelineMoveClipPayload>(
@@ -1236,6 +1231,40 @@ mod tests {
             state.selection.selected_clips,
             vec![SelectedClipRef { track_id, is_video_track: true, clip_id }]
         );
+    }
+
+    #[test]
+    fn dispatch_timeline_ui_selects_clip_by_authoritative_clip_id() {
+        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+        let stale_track_id = state.sequence.as_ref().expect("sequence").video_tracks[1].id;
+        state.selection.selected_mask = Some((MaskId::new(), clip_id, track_id));
+        state.animation_selection.active_property = Some(crate::app::AnimationPropertySelection {
+            clip_id,
+            path: Transform2D::OPACITY_PATH.to_string(),
+        });
+        state.animation_selection.selected_keyframes.insert(
+            crate::app::AnimationKeyframeSelection {
+                clip_id,
+                path: Transform2D::OPACITY_PATH.to_string(),
+                time: 12,
+            },
+        );
+
+        state
+            .dispatch_action(timeline_select_clip_action(TimelineSelectClipPayload {
+                track_id: stale_track_id,
+                is_video_track: false,
+                clip_id,
+            }))
+            .expect("dispatch select");
+
+        assert_eq!(
+            state.selection.selected_clips,
+            vec![SelectedClipRef { track_id, is_video_track: true, clip_id }]
+        );
+        assert!(state.selection.selected_mask.is_none());
+        assert!(state.animation_selection.active_property.is_none());
+        assert!(state.animation_selection.selected_keyframes.is_empty());
     }
 
     #[test]

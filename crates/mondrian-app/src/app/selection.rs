@@ -1,4 +1,6 @@
+use super::AppState;
 use mondrian_core::types::{ClipId, TrackId};
+use mondrian_timeline::sequence::Sequence;
 
 /// UI-agnostic reference to a selected clip in the active sequence.
 ///
@@ -10,4 +12,41 @@ pub struct SelectedClipRef {
     pub track_id: TrackId,
     pub is_video_track: bool,
     pub clip_id: ClipId,
+}
+
+impl AppState {
+    /// Select a clip by stable id in the active sequence.
+    ///
+    /// Clip ids are the authoritative selection input. Track ids stored in UI
+    /// snapshots can be stale after moves, undo/redo, or model refresh lag, so
+    /// selection resolves the current track from the sequence before mutating
+    /// app state. Selecting a clip clears narrower mask and animation
+    /// selections, matching desktop editor expectations.
+    pub fn select_clip_by_id(&mut self, clip_id: ClipId) -> Option<SelectedClipRef> {
+        let selection = self
+            .sequence
+            .as_ref()
+            .and_then(|sequence| resolve_clip_selection(sequence, clip_id))?;
+        self.selection.selected_clips = vec![selection];
+        self.selection.selected_mask = None;
+        self.clear_animation_selection();
+        Some(selection)
+    }
+}
+
+/// Resolve a clip id to its current track-backed selection reference.
+pub fn resolve_clip_selection(sequence: &Sequence, clip_id: ClipId) -> Option<SelectedClipRef> {
+    for track in &sequence.video_tracks {
+        if track.clips.iter().any(|clip| clip.id == clip_id) {
+            return Some(SelectedClipRef { track_id: track.id, is_video_track: true, clip_id });
+        }
+    }
+
+    for track in &sequence.audio_tracks {
+        if track.clips.iter().any(|clip| clip.id == clip_id) {
+            return Some(SelectedClipRef { track_id: track.id, is_video_track: false, clip_id });
+        }
+    }
+
+    None
 }

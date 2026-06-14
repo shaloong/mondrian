@@ -378,6 +378,9 @@ pixels, uniform scale in percent units, and rotation in degrees; the app action
 handler converts those UI values back into `Transform2D` property mutations.
 Timing controls show absolute timeline frames and dispatch the same trim
 payloads as the Timeline view.
+Timeline selection actions treat the clip id as authoritative and resolve the
+current track from `AppState`; track ids in widget snapshots are context only
+because they can be stale after moves, undo/redo, or refresh lag.
 Attached effects appear as inspector rows with enable checkboxes, using effect
 instance ids rather than list indices so reorder/remove operations can be added
 without changing the widget contract. Removal buttons use the same effect id
