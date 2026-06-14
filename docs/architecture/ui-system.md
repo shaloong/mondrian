@@ -524,6 +524,9 @@ theme modal tokens such as `colors.modal_scrim`, `colors.popover`, and spacing
 radii instead of per-dialog hard-coded chrome. Each concrete modal lives in its
 own module, such as `new_project_dialog` or `about_dialog`, while
 `SelfHostedAppRoot` only opens, closes, lays out, and routes the active modal.
+When a modal is active, the root must treat it as a top-layer input boundary:
+events ignored by the modal are still handled by the root and must not fall
+through to menu, dock, panel, or shortcut behavior behind the scrim.
 Modal card geometry and chrome should be centralized through
 `mondrian-ui-widgets::DialogSurface`; app dialogs should keep only local content
 layout and event semantics.

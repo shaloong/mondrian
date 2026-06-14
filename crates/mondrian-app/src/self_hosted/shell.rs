@@ -403,15 +403,7 @@ impl Widget for SelfHostedAppRoot {
             if modal.event(event, ctx) == EventResult::Handled {
                 return EventResult::Handled;
             }
-            if matches!(
-                event,
-                UiEvent::MouseDown { .. }
-                    | UiEvent::MouseUp { .. }
-                    | UiEvent::MouseMove { .. }
-                    | UiEvent::MouseWheel { .. }
-            ) {
-                return EventResult::Handled;
-            }
+            return EventResult::Handled;
         }
         if self.menu_bar.event(event, ctx) == EventResult::Handled {
             return EventResult::Handled;
@@ -907,6 +899,26 @@ mod tests {
 
         assert_eq!(action, None);
         assert!(root.modal.is_none());
+    }
+
+    #[test]
+    fn app_root_modal_blocks_unhandled_keyboard_events() {
+        let platform = FakePlatform::default();
+        let mut root = SelfHostedAppRoot::demo();
+        root.handle_shell_action(app_shell_about_action(), &platform, None);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(&mut focus, &mut shortcut, &mut tooltip, &mut requests);
+
+        let result = root.event(
+            &UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert!(root.modal.as_ref().and_then(ShellModal::as_about).is_some());
     }
 
     #[test]
