@@ -557,6 +557,10 @@ own module, such as `new_project_dialog` or `about_dialog`, while
 When a modal is active, the root must treat it as a top-layer input boundary:
 events ignored by the modal are still handled by the root and must not fall
 through to menu, dock, panel, or shortcut behavior behind the scrim.
+The root exposes children in bottom-to-top z-order for routing and overlay
+painting: dock content, menu bar, then the active modal. Normal painting may
+still draw the menu before dock content when layout keeps dock content below the
+menu bar, but tree child order must match interaction z-order.
 Modal card geometry and chrome should be centralized through
 `mondrian-ui-widgets::DialogSurface`; app dialogs should keep only local content
 layout and event semantics.

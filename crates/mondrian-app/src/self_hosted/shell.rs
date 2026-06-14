@@ -429,8 +429,8 @@ impl Widget for SelfHostedAppRoot {
 
     fn child(&self, index: usize) -> Option<&dyn Widget> {
         match index {
-            0 => Some(&self.menu_bar),
-            1 => Some(&self.dock),
+            0 => Some(&self.dock),
+            1 => Some(&self.menu_bar),
             2 => self.modal.as_ref().map(|modal| modal as &dyn Widget),
             _ => None,
         }
@@ -438,8 +438,8 @@ impl Widget for SelfHostedAppRoot {
 
     fn child_mut(&mut self, index: usize) -> Option<&mut dyn Widget> {
         match index {
-            0 => Some(&mut self.menu_bar),
-            1 => Some(&mut self.dock),
+            0 => Some(&mut self.dock),
+            1 => Some(&mut self.menu_bar),
             2 => self.modal.as_mut().map(|modal| modal as &mut dyn Widget),
             _ => None,
         }
@@ -927,6 +927,25 @@ mod tests {
         assert_eq!(zones[0].0.y, MENU_BAR_HEIGHT);
         assert_eq!(zones[0].0.height, 720.0 - MENU_BAR_HEIGHT);
         assert_eq!(root.child_count(), 2);
+    }
+
+    #[test]
+    fn app_root_child_order_matches_bottom_to_top_z_order() {
+        let mut root = SelfHostedAppRoot::demo();
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+
+        assert_eq!(root.child(0).map(Widget::id), Some(root.dock.id()));
+        assert_eq!(root.child(1).map(Widget::id), Some(root.menu_bar.id()));
+
+        let platform = FakePlatform::default();
+        let action = root.handle_shell_action(app_shell_about_action(), &platform, None);
+
+        assert_eq!(action, None);
+        assert_eq!(root.child_count(), 3);
+        assert_eq!(
+            root.child(2).map(Widget::id),
+            root.modal.as_ref().map(Widget::id)
+        );
     }
 
     #[test]
