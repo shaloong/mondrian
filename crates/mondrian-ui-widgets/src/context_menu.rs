@@ -2,7 +2,7 @@
 //!
 //! 在指定位置弹出菜单项列表。点击选项或外部区域关闭。
 
-use mondrian_ui_core::types::*;
+use mondrian_ui_core::types::{estimate_text_width, *};
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
@@ -23,6 +23,10 @@ pub struct ContextMenu {
     visible: bool,
     hovered: Option<usize>,
 }
+
+const CONTEXT_MENU_ESTIMATED_FONT_SIZE: f32 = 13.0;
+const CONTEXT_MENU_PADDING_X: f32 = 8.0;
+const CONTEXT_MENU_ROW_PADDING_X: f32 = 16.0;
 
 impl ContextMenu {
     pub fn new(anchor: Point, items: Vec<MenuItem>) -> Self {
@@ -46,18 +50,28 @@ impl ContextMenu {
         Rect::new(
             self.anchor.x,
             self.anchor.y,
-            self.min_width + 8.0,
+            self.menu_width() + CONTEXT_MENU_PADDING_X,
             8.0 + self.items.len() as f32 * self.item_height,
         )
     }
 
     fn item_rect(&self, idx: usize) -> Rect {
         Rect::new(
-            self.anchor.x + 4.0,
+            self.anchor.x + CONTEXT_MENU_PADDING_X * 0.5,
             self.anchor.y + 4.0 + idx as f32 * self.item_height,
-            self.min_width,
+            self.menu_width(),
             self.item_height,
         )
+    }
+
+    fn menu_width(&self) -> f32 {
+        let longest_item = self
+            .items
+            .iter()
+            .filter(|item| !item.is_separator())
+            .map(|item| estimate_text_width(&item.label, CONTEXT_MENU_ESTIMATED_FONT_SIZE))
+            .fold(0.0, f32::max);
+        self.min_width.max(longest_item + CONTEXT_MENU_ROW_PADDING_X * 2.0)
     }
 
     fn item_at(&self, position: Point) -> Option<usize> {
@@ -114,7 +128,7 @@ impl Widget for ContextMenu {
     fn measure(&self, _c: LayoutConstraint) -> Size {
         if self.visible {
             let h = 8.0 + self.items.len() as f32 * self.item_height;
-            Size::new(self.min_width + 8.0, h)
+            Size::new(self.menu_width() + CONTEXT_MENU_PADDING_X, h)
         } else {
             Size::ZERO
         }
@@ -464,6 +478,31 @@ mod tests {
         let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
         menu.paint_overlay(&mut ctx);
         assert!(encoder.rect_count > 0);
+    }
+
+    #[test]
+    fn context_menu_measurement_expands_for_long_items() {
+        let short = ContextMenu::new(
+            Point::new(100.0, 100.0),
+            vec![MenuItem::new("Copy", Action::Copy)],
+        );
+        let long = ContextMenu::new(
+            Point::new(100.0, 100.0),
+            vec![MenuItem::new(
+                "Copy linked audio and video selection",
+                Action::Copy,
+            )],
+        );
+
+        assert_eq!(short.measure(LayoutConstraint::LOOSE).width, 148.0);
+        assert!(
+            long.measure(LayoutConstraint::LOOSE).width
+                > short.measure(LayoutConstraint::LOOSE).width
+        );
+        assert_eq!(
+            long.bounds_rect().width,
+            long.measure(LayoutConstraint::LOOSE).width
+        );
     }
 
     #[test]

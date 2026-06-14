@@ -282,9 +282,12 @@ rows, separators, active indicators, and scrollbars are painted through shared
 menu helpers so action-backed dropdowns, context menus, and internal selectors
 keep the same visual language. Disabled menu items consume pointer input
 without dispatching actions or closing the overlay; outside clicks close open
-menus. Tooltip requests preserve their delay timer when the same tooltip is
-reported repeatedly during hover, and tooltip painting clamps to the current
-clip rect.
+menus. Closed dropdown measurement is based on the trigger label only so long
+popup choices do not widen compact inspector rows; the popup itself expands to
+the longest row label. Context menus use the same estimated text-width fallback
+to avoid clipping long commands while staying independent from renderer state.
+Tooltip requests preserve their delay timer when the same tooltip is reported
+repeatedly during hover, and tooltip painting clamps to the current clip rect.
 
 Overlay-capable widgets paint their normal trigger chrome in `paint()` and
 their floating chrome in `paint_overlay()`. `TreeWalker::paint()` runs the

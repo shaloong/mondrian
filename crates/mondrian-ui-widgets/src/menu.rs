@@ -4,7 +4,7 @@
 
 use mondrian_core::Color;
 use mondrian_editor_state::Action;
-use mondrian_ui_core::types::*;
+use mondrian_ui_core::types::{estimate_text_width, *};
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
@@ -14,6 +14,14 @@ pub(crate) struct MenuRowPaint {
     pub active: bool,
     pub hovered: bool,
 }
+
+const MENU_ESTIMATED_FONT_SIZE: f32 = 13.0;
+const MENU_MIN_WIDTH: f32 = 120.0;
+const MENU_TRIGGER_HEIGHT: f32 = 28.0;
+const MENU_TRIGGER_PADDING_X: f32 = 8.0;
+const MENU_ARROW_SPACE: f32 = 24.0;
+const MENU_ROW_PADDING_X: f32 = 16.0;
+const MENU_SCROLLBAR_SPACE: f32 = 8.0;
 
 pub(crate) fn paint_menu_trigger(ctx: &mut PaintContext, rect: Rect, label: &str, open: bool) {
     let tokens = &ctx.theme.colors;
@@ -281,11 +289,38 @@ impl Dropdown {
     }
 
     fn trigger_rect(&self) -> Rect {
-        Rect::new(self.bounds.x, self.bounds.y, self.bounds.width, 28.0)
+        Rect::new(
+            self.bounds.x,
+            self.bounds.y,
+            self.bounds.width,
+            MENU_TRIGGER_HEIGHT,
+        )
+    }
+
+    fn preferred_trigger_width(&self) -> f32 {
+        let label_width = estimate_text_width(&self.label, MENU_ESTIMATED_FONT_SIZE);
+        MENU_MIN_WIDTH.max(label_width + MENU_TRIGGER_PADDING_X * 2.0 + MENU_ARROW_SPACE)
+    }
+
+    fn preferred_menu_width(&self) -> f32 {
+        let longest_item = self
+            .items
+            .iter()
+            .filter(|item| !item.is_separator())
+            .map(|item| estimate_text_width(&item.label, MENU_ESTIMATED_FONT_SIZE))
+            .fold(0.0, f32::max);
+        let scrollbar = if self.items.len() > self.max_visible_items {
+            MENU_SCROLLBAR_SPACE
+        } else {
+            0.0
+        };
+        self.preferred_trigger_width()
+            .max(MENU_MIN_WIDTH)
+            .max(longest_item + MENU_ROW_PADDING_X * 2.0 + scrollbar)
     }
 
     fn menu_width(&self) -> f32 {
-        self.bounds.width.max(120.0)
+        self.bounds.width.max(self.preferred_menu_width())
     }
 
     fn visible_item_count(&self) -> usize {
@@ -311,7 +346,7 @@ impl Dropdown {
     fn menu_rect(&self) -> Rect {
         Rect::new(
             self.bounds.x,
-            self.bounds.y + 28.0,
+            self.bounds.y + MENU_TRIGGER_HEIGHT,
             self.menu_width(),
             self.visible_content_height() + 4.0,
         )
@@ -320,7 +355,8 @@ impl Dropdown {
     fn item_rect(&self, index: usize) -> Rect {
         Rect::new(
             self.bounds.x + 2.0,
-            self.bounds.y + 30.0 + index as f32 * self.item_height - self.scroll_offset,
+            self.bounds.y + MENU_TRIGGER_HEIGHT + 2.0 + index as f32 * self.item_height
+                - self.scroll_offset,
             self.menu_width() - 4.0,
             self.item_height,
         )
@@ -330,7 +366,8 @@ impl Dropdown {
         if !self.menu_rect().contains(position) {
             return None;
         }
-        let relative_y = position.y - (self.bounds.y + 30.0) + self.scroll_offset;
+        let relative_y =
+            position.y - (self.bounds.y + MENU_TRIGGER_HEIGHT + 2.0) + self.scroll_offset;
         if relative_y < 0.0 {
             return None;
         }
@@ -463,8 +500,11 @@ impl Widget for Dropdown {
         self.id
     }
 
-    fn measure(&self, _constraint: LayoutConstraint) -> Size {
-        Size::new(120.0, 28.0)
+    fn measure(&self, constraint: LayoutConstraint) -> Size {
+        constraint.constrain(Size::new(
+            self.preferred_trigger_width(),
+            MENU_TRIGGER_HEIGHT,
+        ))
     }
 
     fn layout(&mut self, bounds: Rect) {
@@ -1100,6 +1140,37 @@ mod tests {
 
         assert_eq!(open, closed);
         assert_eq!(open, Size::new(120.0, 28.0));
+    }
+
+    #[test]
+    fn dropdown_measures_trigger_label_without_using_popup_items() {
+        let mut d = Dropdown::new(
+            "Mode",
+            vec![MenuItem::new(
+                "A very long menu option that should widen the popup",
+                Action::CloseProject,
+            )],
+        );
+
+        assert_eq!(d.measure(LayoutConstraint::LOOSE), Size::new(120.0, 28.0));
+
+        d.layout(Rect::new(0.0, 0.0, 120.0, 28.0));
+        d.open = true;
+
+        assert!(d.menu_rect().width > 300.0);
+    }
+
+    #[test]
+    fn dropdown_long_trigger_label_expands_closed_measurement() {
+        let d = Dropdown::new(
+            "Very long color mode selector",
+            vec![MenuItem::new("HEX", Action::CloseProject)],
+        );
+
+        let measured = d.measure(LayoutConstraint::LOOSE);
+
+        assert!(measured.width > 180.0);
+        assert_eq!(measured.height, 28.0);
     }
 
     #[test]
