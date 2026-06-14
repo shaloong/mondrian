@@ -1743,6 +1743,10 @@ mod tests {
                 clip_id
             })
         );
+        assert!(
+            models.effects.items.iter().any(|item| item.activate_action.is_some()),
+            "video clip selection should keep Effects rows actionable"
+        );
     }
 
     #[test]

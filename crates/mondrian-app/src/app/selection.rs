@@ -18,7 +18,9 @@ impl AppState {
     /// The primary selected clip, used by single-target panels such as the
     /// Inspector and Effects browser.
     pub fn primary_selected_clip(&self) -> Option<SelectedClipRef> {
-        self.selection.selected_clips.first().copied()
+        let selection = self.selection.selected_clips.first().copied()?;
+        let sequence = self.sequence.as_ref()?;
+        resolve_clip_selection(sequence, selection.clip_id)
     }
 
     /// All selected clips in app selection order.
