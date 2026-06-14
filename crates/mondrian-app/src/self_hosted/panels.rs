@@ -139,6 +139,7 @@ pub struct PanelListModel {
     pub title: String,
     pub subtitle: String,
     pub items: Vec<PanelListItem>,
+    #[cfg(test)]
     pub demo_activate_prefix: Option<String>,
 }
 
@@ -148,6 +149,7 @@ impl PanelListModel {
             title: title.into(),
             subtitle: String::new(),
             items,
+            #[cfg(test)]
             demo_activate_prefix: None,
         }
     }
@@ -161,6 +163,7 @@ impl PanelListModel {
     ///
     /// Product panel models should assign stable explicit actions to each item
     /// instead of deriving commands from list labels.
+    #[cfg(test)]
     pub fn with_demo_activate_prefix(mut self, prefix: impl Into<String>) -> Self {
         self.demo_activate_prefix = Some(prefix.into());
         self
@@ -1002,10 +1005,11 @@ fn clip_for_selection<'a>(
 }
 
 fn panel_list(model: &PanelListModel) -> PanelList {
-    let mut list = PanelList::new(model.title.clone(), model.items.clone())
+    let list = PanelList::new(model.title.clone(), model.items.clone())
         .with_subtitle(model.subtitle.clone());
+    #[cfg(test)]
     if let Some(prefix) = model.demo_activate_prefix.clone() {
-        list = list.on_activate(move |index, item| {
+        return list.on_activate(move |index, item| {
             demo_panel_action(&format!("{prefix}.{index}.{}", item.title))
         });
     }
@@ -1189,6 +1193,7 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
         .on_seek(timeline_seek_action)
 }
 
+#[cfg(test)]
 fn demo_panel_action(name: &str) -> Action {
     Action::Custom {
         namespace: "ui.demo_panel".into(),

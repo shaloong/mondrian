@@ -450,12 +450,12 @@ asset-library, and status-hint state instead of a colored placeholder.
 Real product panels keep single-click row selection local to the widget unless
 the app has a stable domain selection to update; file commands, asset drags,
 and effect insertion are emitted only through activation actions.
-`PanelListModel::demo_activate_prefix` is reserved for developer fixtures that
-need synthetic commands; product panel models must attach explicit stable
-actions to rows instead of deriving commands from titles or indices. Synthetic
-demo rows use the `ui.demo_panel` action namespace so they cannot be confused
-with the app-layer `ui.assets`, `ui.effects`, `ui.timeline`, or `ui.inspector`
-protocols.
+`PanelListModel::demo_activate_prefix` is compiled only for tests and exists
+for synthetic fixture commands; product panel models must attach explicit
+stable actions to rows instead of deriving commands from titles or indices.
+Synthetic demo rows use the `ui.demo_panel` action namespace so they cannot be
+confused with the app-layer `ui.assets`, `ui.effects`, `ui.timeline`, or
+`ui.inspector` protocols.
 The lower-left dock exposes that Project status as the first tab beside
 Console, so product-shell state is visible in the default layout without adding
 another split.
