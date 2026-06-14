@@ -92,11 +92,11 @@ impl AppState {
             // ── 选择（当前 AppState 可表达 clip / mask / animation selection）──
             Action::Select(target) => self.select_from_action(target),
             Action::SelectAll => {
-                self.select_all_clips_from_ui();
+                self.select_all_clips();
                 Ok(())
             }
             Action::DeselectAll => {
-                self.clear_selection_from_ui();
+                self.clear_selection();
                 Ok(())
             }
 
@@ -509,7 +509,7 @@ impl AppState {
                 self.select_clip_for_action("select_clip", clip_id)
             }
             mondrian_editor_state::action::SelectionTarget::AllClips => {
-                self.select_all_clips_from_ui();
+                self.select_all_clips();
                 Ok(())
             }
             mondrian_editor_state::action::SelectionTarget::Track(track_id) => {
@@ -538,42 +538,6 @@ impl AppState {
             .ok_or_else(|| missing_clip_error(step_id, clip_id))
     }
 
-    fn select_all_clips_from_ui(&mut self) {
-        let Some(seq) = self.sequence.as_ref() else {
-            self.clear_selection_from_ui();
-            return;
-        };
-
-        let selections = seq
-            .video_tracks
-            .iter()
-            .flat_map(|track| {
-                track.clips.iter().map(move |clip| SelectedClipRef {
-                    track_id: track.id,
-                    is_video_track: true,
-                    clip_id: clip.id,
-                })
-            })
-            .chain(seq.audio_tracks.iter().flat_map(|track| {
-                track.clips.iter().map(move |clip| SelectedClipRef {
-                    track_id: track.id,
-                    is_video_track: false,
-                    clip_id: clip.id,
-                })
-            }))
-            .collect::<Vec<_>>();
-
-        self.selection.selected_clips = selections;
-        self.selection.selected_mask = None;
-        self.clear_animation_selection();
-    }
-
-    fn clear_selection_from_ui(&mut self) {
-        self.selection.selected_clips.clear();
-        self.selection.selected_mask = None;
-        self.clear_animation_selection();
-    }
-
     fn delete_selected_clips_from_ui(&mut self) -> Result<()> {
         let selections = self
             .selection
@@ -592,7 +556,7 @@ impl AppState {
         }
 
         self.remove_clips_bulk(&selections, false)?;
-        self.selection.selected_clips.clear();
+        self.clear_selection();
         Ok(())
     }
 
@@ -1626,6 +1590,11 @@ mod tests {
             .expect("audio track")
             .add_clip(audio_clip)
             .expect("add audio");
+        state.selection.selected_mask = Some((MaskId::new(), video_clip_id, video_track_id));
+        state.animation_selection.active_property = Some(crate::app::AnimationPropertySelection {
+            clip_id: video_clip_id,
+            path: Transform2D::OPACITY_PATH.to_string(),
+        });
 
         state
             .dispatch_action(mondrian_editor_state::Action::SelectAll)
@@ -1646,15 +1615,28 @@ mod tests {
                 },
             ]
         );
+        assert!(state.selection.selected_mask.is_none());
+        assert!(state.animation_selection.active_property.is_none());
         assert!(!state.can_undo_action());
     }
 
     #[test]
-    fn dispatch_deselect_all_clears_clip_and_mask_selection() {
+    fn dispatch_deselect_all_clears_app_selection_scopes() {
         let (mut state, track_id, clip_id) = state_with_two_video_tracks();
         state.selection.selected_clips =
             vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
         state.selection.selected_mask = Some((MaskId::new(), clip_id, track_id));
+        state.animation_selection.active_property = Some(crate::app::AnimationPropertySelection {
+            clip_id,
+            path: Transform2D::OPACITY_PATH.to_string(),
+        });
+        state.animation_selection.selected_keyframes.insert(
+            crate::app::AnimationKeyframeSelection {
+                clip_id,
+                path: Transform2D::OPACITY_PATH.to_string(),
+                time: 10,
+            },
+        );
 
         state
             .dispatch_action(mondrian_editor_state::Action::DeselectAll)
@@ -1662,6 +1644,8 @@ mod tests {
 
         assert!(state.selection.selected_clips.is_empty());
         assert!(state.selection.selected_mask.is_none());
+        assert!(state.animation_selection.active_property.is_none());
+        assert!(state.animation_selection.selected_keyframes.is_empty());
         assert!(!state.can_undo_action());
     }
 
@@ -1670,6 +1654,11 @@ mod tests {
         let (mut state, track_id, clip_id) = state_with_two_video_tracks();
         state.selection.selected_clips =
             vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
+        state.selection.selected_mask = Some((MaskId::new(), clip_id, track_id));
+        state.animation_selection.active_property = Some(crate::app::AnimationPropertySelection {
+            clip_id,
+            path: Transform2D::OPACITY_PATH.to_string(),
+        });
 
         state
             .dispatch_action(mondrian_editor_state::Action::DeleteSelection)
@@ -1678,6 +1667,8 @@ mod tests {
         let sequence = state.sequence.as_ref().expect("sequence");
         assert!(sequence.video_tracks[0].clips.is_empty());
         assert!(state.selection.selected_clips.is_empty());
+        assert!(state.selection.selected_mask.is_none());
+        assert!(state.animation_selection.active_property.is_none());
         assert!(state.can_undo_action());
     }
 

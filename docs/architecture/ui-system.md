@@ -381,6 +381,9 @@ payloads as the Timeline view.
 Timeline selection actions treat the clip id as authoritative and resolve the
 current track from `AppState`; track ids in widget snapshots are context only
 because they can be stale after moves, undo/redo, or refresh lag.
+Clip, mask, and animation keyframe selection state is owned by
+`mondrian-app::app::selection`; action handlers should call its AppState
+methods instead of directly clearing individual selection fields.
 Attached effects appear as inspector rows with enable checkboxes, using effect
 instance ids rather than list indices so reorder/remove operations can be added
 without changing the widget contract. Removal buttons use the same effect id

@@ -15,6 +15,17 @@ pub struct SelectedClipRef {
 }
 
 impl AppState {
+    /// Clear all app-level selections.
+    ///
+    /// Clip, mask, and animation selections represent nested targeting scopes.
+    /// Clearing selection resets all of them together so subsequent commands do
+    /// not accidentally target stale sub-selection state.
+    pub fn clear_selection(&mut self) {
+        self.selection.selected_clips.clear();
+        self.selection.selected_mask = None;
+        self.clear_animation_selection();
+    }
+
     /// Select a clip by stable id in the active sequence.
     ///
     /// Clip ids are the authoritative selection input. Track ids stored in UI
@@ -32,6 +43,41 @@ impl AppState {
         self.clear_animation_selection();
         Some(selection)
     }
+
+    /// Select every clip in the active sequence in visible track order.
+    pub fn select_all_clips(&mut self) {
+        let Some(sequence) = self.sequence.as_ref() else {
+            self.clear_selection();
+            return;
+        };
+
+        let selections = all_clip_selections(sequence);
+        self.selection.selected_clips = selections;
+        self.selection.selected_mask = None;
+        self.clear_animation_selection();
+    }
+}
+
+/// Return all clip selections in video-track then audio-track order.
+pub fn all_clip_selections(sequence: &Sequence) -> Vec<SelectedClipRef> {
+    sequence
+        .video_tracks
+        .iter()
+        .flat_map(|track| {
+            track.clips.iter().map(move |clip| SelectedClipRef {
+                track_id: track.id,
+                is_video_track: true,
+                clip_id: clip.id,
+            })
+        })
+        .chain(sequence.audio_tracks.iter().flat_map(|track| {
+            track.clips.iter().map(move |clip| SelectedClipRef {
+                track_id: track.id,
+                is_video_track: false,
+                clip_id: clip.id,
+            })
+        }))
+        .collect()
 }
 
 /// Resolve a clip id to its current track-backed selection reference.
