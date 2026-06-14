@@ -84,10 +84,10 @@ Generic selection actions update the app-level selection snapshot only:
 `SelectAll`/`Select(AllClips)` select all clips that AppState can currently
 represent, and `DeselectAll` clears clip, mask, and animation selection without
 entering undo history.
-The shared `Action::DeleteSelection` path deletes the current
-`AppState::selection.selected_clips` through `remove_clips_bulk`, so shortcuts,
-menus, scripts, and self-hosted widgets all reuse the same locked-track checks,
-linked clip cleanup, undo snapshot, and timeline modified event behavior.
+The shared `Action::DeleteSelection` path deletes clips selected through the
+AppState selection module and `remove_clips_bulk`, so shortcuts, menus,
+scripts, and self-hosted widgets all reuse the same locked-track checks, linked
+clip cleanup, undo snapshot, and timeline modified event behavior.
 `Action::ImportMedia` is the shared boundary for platform file pickers, menus,
 scripts, and future self-hosted asset browser commands. The app layer batches
 the supplied paths through `AssetLibrary::import_media_file`, publishes
@@ -426,6 +426,9 @@ asset-library, and status-hint state instead of a colored placeholder.
 Real product panels keep single-click row selection local to the widget unless
 the app has a stable domain selection to update; file commands, asset drags,
 and effect insertion are emitted only through activation actions.
+`PanelListModel::demo_activate_prefix` is reserved for developer fixtures that
+need synthetic commands; product panel models must attach explicit stable
+actions to rows instead of deriving commands from titles or indices.
 The lower-left dock exposes that Project status as the first tab beside
 Console, so product-shell state is visible in the default layout without adding
 another split.

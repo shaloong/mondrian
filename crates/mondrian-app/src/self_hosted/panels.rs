@@ -134,7 +134,7 @@ pub struct PanelListModel {
     pub title: String,
     pub subtitle: String,
     pub items: Vec<PanelListItem>,
-    pub activate_prefix: Option<String>,
+    pub demo_activate_prefix: Option<String>,
 }
 
 impl PanelListModel {
@@ -143,7 +143,7 @@ impl PanelListModel {
             title: title.into(),
             subtitle: String::new(),
             items,
-            activate_prefix: None,
+            demo_activate_prefix: None,
         }
     }
 
@@ -152,8 +152,12 @@ impl PanelListModel {
         self
     }
 
-    pub fn with_activate_prefix(mut self, prefix: impl Into<String>) -> Self {
-        self.activate_prefix = Some(prefix.into());
+    /// Attach a synthetic activation prefix for developer fixtures.
+    ///
+    /// Product panel models should assign stable explicit actions to each item
+    /// instead of deriving commands from list labels.
+    pub fn with_demo_activate_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.demo_activate_prefix = Some(prefix.into());
         self
     }
 
@@ -993,7 +997,7 @@ fn clip_for_selection<'a>(
 fn panel_list(model: &PanelListModel) -> PanelList {
     let mut list = PanelList::new(model.title.clone(), model.items.clone())
         .with_subtitle(model.subtitle.clone());
-    if let Some(prefix) = model.activate_prefix.clone() {
+    if let Some(prefix) = model.demo_activate_prefix.clone() {
         list = list.on_activate(move |index, item| {
             panel_action(&format!("{prefix}.{index}.{}", item.title))
         });
@@ -1024,7 +1028,7 @@ fn demo_asset_model() -> PanelListModel {
         ],
     )
     .with_subtitle("Project library")
-    .with_activate_prefix("assets.activate")
+    .with_demo_activate_prefix("assets.activate")
 }
 
 fn demo_console_model() -> PanelListModel {
@@ -1920,7 +1924,7 @@ mod tests {
         let models = SelfHostedPanelModels::from_app_state(&state);
 
         assert_eq!(models.assets.items.len(), 1);
-        assert!(models.assets.activate_prefix.is_none());
+        assert!(models.assets.demo_activate_prefix.is_none());
         let item = &models.assets.items[0];
         assert_eq!(item.title, "Brand Purple");
         assert_eq!(item.badge.as_deref(), Some("CLR"));
@@ -1938,7 +1942,7 @@ mod tests {
     fn effect_panel_model_uses_stable_item_actions_without_dynamic_prefix() {
         let model = PanelListModel::from_effect_registry(None);
 
-        assert!(model.activate_prefix.is_none());
+        assert!(model.demo_activate_prefix.is_none());
         assert!(model.items.iter().all(|item| item.select_action.is_none()));
         assert!(model.items.iter().all(|item| item.activate_action.is_none()));
     }
@@ -1955,7 +1959,7 @@ mod tests {
 
         let model = PanelListModel::from_effect_registry(Some(selection));
 
-        assert!(model.activate_prefix.is_none());
+        assert!(model.demo_activate_prefix.is_none());
         let action = model
             .items
             .iter()
@@ -1965,6 +1969,18 @@ mod tests {
         assert!(debug.contains("ui.effects"));
         assert!(debug.contains("add_to_clip"));
         assert!(debug.contains(&clip_id.to_string()));
+    }
+
+    #[test]
+    fn demo_asset_model_is_the_only_dynamic_activation_fixture() {
+        let model = demo_asset_model();
+
+        assert_eq!(
+            model.demo_activate_prefix.as_deref(),
+            Some("assets.activate")
+        );
+        assert!(model.items.iter().all(|item| item.activate_action.is_none()));
+        assert!(model.items.iter().all(|item| item.select_action.is_some()));
     }
 
     #[test]
