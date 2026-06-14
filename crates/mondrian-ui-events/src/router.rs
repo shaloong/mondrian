@@ -188,6 +188,7 @@ impl EventRouter {
         tree: &mut dyn WidgetTree,
         dispatch: &dyn Fn(Action),
     ) -> EventResult {
+        self.prune_stale_widget_state(tree);
         match &event {
             UiEvent::MouseMove { position, .. } => {
                 let target = if let Some(captured) = self.captured {
@@ -381,6 +382,21 @@ impl EventRouter {
             };
             child = parent;
         }
+    }
+
+    fn prune_stale_widget_state(&mut self, tree: &dyn WidgetTree) {
+        if self.captured.is_some_and(|id| tree.get(id).is_none()) {
+            self.captured = None;
+        }
+        if self.hovered.is_some_and(|id| tree.get(id).is_none()) {
+            self.hovered = None;
+        }
+        if let Some(focused) = self.focus_mgr.focused_widget() {
+            if tree.get(focused).is_none() {
+                self.focus_mgr.release_focus(focused);
+            }
+        }
+        self.focused = self.focus_mgr.focused_widget();
     }
 
     fn send_focus_lost(
@@ -786,6 +802,60 @@ mod tests {
             &|_| {},
         );
         assert_eq!(router.captured(), None);
+    }
+
+    #[test]
+    fn router_clears_stale_capture_when_widget_tree_rebuilds() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let root = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(root);
+
+        router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.captured(), Some(root));
+
+        tree.nodes.remove(&root);
+
+        let result = router.route(
+            UiEvent::MouseMove {
+                position: Point::new(500.0, 500.0),
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(router.captured(), None);
+    }
+
+    #[test]
+    fn router_clears_stale_focus_when_widget_tree_rebuilds() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let root = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(root);
+
+        router.focus_manager_mut().request_focus(root, PanelKind::Console);
+        assert_eq!(router.focus_manager().focused_widget(), Some(root));
+
+        tree.nodes.remove(&root);
+
+        let result = router.route(UiEvent::ImeCommit("ignored".into()), &mut tree, &|_| {});
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(router.focused(), None);
+        assert_eq!(router.focus_manager().focused_widget(), None);
     }
 
     #[test]

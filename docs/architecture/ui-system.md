@@ -218,6 +218,12 @@ This hook is for parent-owned state synchronization, such as rebuilding tab
 content after a tab bar changes active index. It must not redispatch the event
 to children.
 
+The router treats widget ids as frame-local routing handles. Before routing a
+new event it drops hovered, focused, or captured ids that are no longer present
+in the current `WidgetTree`, which keeps rebuilt panels from inheriting stale
+capture/focus state after popovers close, drags finish, or panel contents
+refresh.
+
 ## Focused Text Input
 
 Keyboard, text, and IME events route to `FocusManager::focused_widget()`.
