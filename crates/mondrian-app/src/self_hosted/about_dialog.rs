@@ -181,3 +181,126 @@ impl Widget for AboutDialog {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    use mondrian_editor_state::Action;
+    use mondrian_ui_core::widget::EventRequests;
+
+    use crate::app::ui_actions::{APP_SHELL_CLOSE_MODAL, APP_SHELL_NAMESPACE};
+    use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+
+    fn assert_close_modal_action(action: &Action) {
+        match action {
+            Action::Custom { namespace, name, payload } => {
+                assert_eq!(namespace, APP_SHELL_NAMESPACE);
+                assert_eq!(name, APP_SHELL_CLOSE_MODAL);
+                assert!(payload.is_null());
+            }
+            other => panic!("expected close-modal app-shell action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn about_dialog_layout_exposes_children_inside_centered_card() {
+        let mut dialog = AboutDialog::new();
+
+        dialog.layout(Rect::new(0.0, 0.0, 1000.0, 700.0));
+
+        assert_eq!(dialog.child_count(), 5);
+        assert_eq!(
+            dialog.measure(LayoutConstraint::LOOSE),
+            Size::new(CARD_WIDTH, CARD_HEIGHT)
+        );
+        assert_eq!(
+            dialog.card,
+            Rect::new(
+                (1000.0 - CARD_WIDTH) * 0.5,
+                (700.0 - CARD_HEIGHT) * 0.5,
+                CARD_WIDTH,
+                CARD_HEIGHT,
+            )
+        );
+    }
+
+    #[test]
+    fn about_dialog_keyboard_shortcuts_dispatch_close_modal() {
+        for key in [KeyCode::Escape, KeyCode::Enter] {
+            let mut dialog = AboutDialog::new();
+            let actions = RefCell::new(Vec::new());
+            let mut focus = DummyFocus;
+            let mut shortcut = DummyShortcut;
+            let mut tooltip = DummyTooltip;
+            let mut requests = EventRequests::default();
+            let dispatch = |action| actions.borrow_mut().push(action);
+            let mut ctx = event_ctx(
+                &mut focus,
+                &mut shortcut,
+                &mut tooltip,
+                &mut requests,
+                &dispatch,
+            );
+
+            let result = dialog.event(
+                &UiEvent::KeyDown { key, modifiers: Modifiers::none() },
+                &mut ctx,
+            );
+
+            assert_eq!(result, EventResult::Handled);
+            assert_eq!(actions.borrow().len(), 1);
+            assert_close_modal_action(&actions.borrow()[0]);
+        }
+    }
+
+    #[test]
+    fn about_dialog_done_button_dispatches_close_modal() {
+        let mut dialog = AboutDialog::new();
+        dialog.layout(Rect::new(0.0, 0.0, 1000.0, 700.0));
+        let button_center = Point::new(
+            dialog.card.x + dialog.card.width - CONTENT_PADDING - BUTTON_WIDTH * 0.5,
+            dialog.card.y + dialog.card.height - BUTTON_BOTTOM_INSET - BUTTON_HEIGHT * 0.5,
+        );
+        let actions = RefCell::new(Vec::new());
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            dialog.event(
+                &UiEvent::MouseDown {
+                    position: button_center,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            dialog.event(
+                &UiEvent::MouseUp {
+                    position: button_center,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(actions.borrow().len(), 1);
+        assert_close_modal_action(&actions.borrow()[0]);
+    }
+}

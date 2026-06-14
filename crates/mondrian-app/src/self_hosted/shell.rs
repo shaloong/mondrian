@@ -457,15 +457,11 @@ mod tests {
         app_shell_save_project_as_dialog_action, NewProjectDraftUpdatePayload,
         ProjectCreateWithSettingsPayload, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
     };
+    use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::{Rational, Resolution};
-    use mondrian_editor_state::state::PanelKind;
-    use mondrian_platform::NoopPlatformService;
     use mondrian_timeline::sequence::PreviewRenderFormat;
+    use mondrian_ui_core::EventRequests;
     use mondrian_ui_core::Widget;
-    use mondrian_ui_core::{
-        EventContext, EventRequests, FocusManager, ShortcutBinding, ShortcutManager, ShortcutScope,
-        TooltipManager, TooltipState,
-    };
     use std::path::{Path, PathBuf};
 
     #[derive(Debug, Default)]
@@ -505,81 +501,20 @@ mod tests {
         fn send_notification(&self, _title: &str, _body: &str) {}
     }
 
-    struct DummyFocus;
-
-    impl FocusManager for DummyFocus {
-        fn focused_widget(&self) -> Option<WidgetId> {
-            None
-        }
-
-        fn focused_panel(&self) -> Option<PanelKind> {
-            None
-        }
-
-        fn request_focus(&mut self, _widget: WidgetId, _panel: PanelKind) {}
-
-        fn release_focus(&mut self, _widget: WidgetId) {}
-
-        fn focus_next(&mut self) {}
-
-        fn focus_prev(&mut self) {}
-
-        fn clear_focus(&mut self) {}
-    }
-
-    struct DummyShortcut;
-
-    impl ShortcutManager for DummyShortcut {
-        fn register(&mut self, _scope: ShortcutScope, _binding: ShortcutBinding, _action: Action) {}
-
-        fn unregister(&mut self, _scope: ShortcutScope, _binding: &ShortcutBinding) {}
-
-        fn resolve(&self, _key: KeyCode, _modifiers: Modifiers) -> Option<Action> {
-            None
-        }
-
-        fn clear_scope(&mut self, _scope: ShortcutScope) {}
-
-        fn clear_all(&mut self) {}
-    }
-
-    struct DummyTooltip;
-
-    impl TooltipManager for DummyTooltip {
-        fn show(&mut self, _text: String, _position: Point) {}
-
-        fn hide(&mut self) {}
-
-        fn current(&self) -> Option<&TooltipState> {
-            None
-        }
-
-        fn update(&mut self, _delta_ms: u64) {}
-    }
-
-    fn event_ctx<'a>(
-        focus: &'a mut DummyFocus,
-        shortcut: &'a mut DummyShortcut,
-        tooltip: &'a mut DummyTooltip,
-        requests: &'a mut EventRequests,
-    ) -> EventContext<'a> {
-        EventContext {
-            focus,
-            shortcut,
-            tooltip,
-            dispatch: &|_| {},
-            platform: &NoopPlatformService,
-            requests,
-        }
-    }
-
     fn drag_root_splitter_to(root: &mut SelfHostedAppRoot, x: f32) {
         let grab = root.dock().collect_grab_zones()[0].0.center();
         let mut focus = DummyFocus;
         let mut shortcut = DummyShortcut;
         let mut tooltip = DummyTooltip;
         let mut requests = EventRequests::default();
-        let mut ctx = event_ctx(&mut focus, &mut shortcut, &mut tooltip, &mut requests);
+        let dispatch = |_| {};
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
 
         assert_eq!(
             root.dock_mut().event(
@@ -910,7 +845,14 @@ mod tests {
         let mut shortcut = DummyShortcut;
         let mut tooltip = DummyTooltip;
         let mut requests = EventRequests::default();
-        let mut ctx = event_ctx(&mut focus, &mut shortcut, &mut tooltip, &mut requests);
+        let dispatch = |_| {};
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
 
         let result = root.event(
             &UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
