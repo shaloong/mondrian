@@ -890,20 +890,34 @@ fn opacity_curve_points_for_clip(clip: &Clip, time: TimeCode) -> Vec<CurvePoint>
     let start_tick = timecode_to_ticks(clip.position);
     let end_tick = timecode_to_ticks(clip.end_position());
     let duration_ticks = (end_tick - start_tick).max(1);
-    let mut points = opacity
-        .keyframe_times()
-        .into_iter()
-        .filter_map(|keyframe_time| {
+
+    let mut points = vec![CurvePoint::new(
+        0.0,
+        clip.transform.evaluate_opacity(clip.position),
+    )];
+    points.extend(
+        opacity.keyframe_times().into_iter().filter_map(|keyframe_time| {
+            if keyframe_time <= start_tick || keyframe_time >= end_tick {
+                return None;
+            }
             let keyframe = opacity.keyframe_at(keyframe_time)?;
             let y = keyframe.value.as_f32()?.clamp(0.0, 1.0);
             let x = ((keyframe_time - start_tick) as f32 / duration_ticks as f32).clamp(0.0, 1.0);
             Some(CurvePoint::new(x, y))
-        })
-        .collect::<Vec<_>>();
+        }),
+    );
+    points.push(CurvePoint::new(
+        1.0,
+        clip.transform.evaluate_opacity(clip.end_position()),
+    ));
+    points.sort_by(|a, b| a.x.total_cmp(&b.x));
+    points.dedup_by(|a, b| (a.x - b.x).abs() < f32::EPSILON);
+
     if points.len() < 2 {
-        points = default_opacity_curve(clip.transform.evaluate_opacity(time));
+        default_opacity_curve(clip.transform.evaluate_opacity(time))
+    } else {
+        points
     }
-    points
 }
 
 fn default_opacity_curve(opacity: f32) -> Vec<CurvePoint> {
@@ -1818,6 +1832,44 @@ mod tests {
                 CurvePoint::new(0.0, 0.0),
                 CurvePoint::new(0.5, 0.5),
                 CurvePoint::new(1.0, 1.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn app_state_models_synthesize_opacity_curve_endpoints_from_evaluated_values() {
+        let mut state = AppState::new();
+        let mut sequence = Sequence::new("edit");
+        let tb = sequence.time_base();
+        let mut clip = Clip::new(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(20, tb));
+        let clip_id = clip.id;
+        let track_id = sequence.video_tracks[0].id;
+
+        clip.apply_property_mutation(PropertyMutation::SetKeyframe {
+            path: Transform2D::OPACITY_PATH.to_string(),
+            keyframe: Keyframe::linear(
+                timecode_to_ticks(TimeCode::new(20, tb)),
+                PropertyValue::Float(0.5),
+            ),
+        })
+        .expect("set midpoint opacity");
+
+        sequence.video_tracks[0].add_clip(clip).expect("add clip");
+        state.sequence = Some(sequence);
+        state.selection.selected_clips.push(SelectedClipRef {
+            track_id,
+            is_video_track: true,
+            clip_id,
+        });
+
+        let models = SelfHostedPanelModels::from_app_state(&state);
+
+        assert_eq!(
+            models.inspector.curve_points,
+            vec![
+                CurvePoint::new(0.0, 0.5),
+                CurvePoint::new(0.5, 0.5),
+                CurvePoint::new(1.0, 0.5),
             ]
         );
     }

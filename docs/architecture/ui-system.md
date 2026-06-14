@@ -445,6 +445,9 @@ points; AppState maps them to opacity keyframes over the selected clip's
 timeline span so curve edits participate in undo/redo and render evaluation.
 Inspector panel models derive the displayed curve from those opacity keyframes,
 falling back to a flat curve at the evaluated opacity when no animation exists.
+When existing keyframes do not land on clip boundaries, the panel model
+synthesizes endpoint samples from evaluated opacity and keeps interior
+keyframes at their normalized positions.
 `TextInput::on_change(...)` dispatches only when committed text changes, such
 as typed text, paste/cut/delete edits, or IME commit. Cursor movement,
 selection changes, and IME preedit updates remain local so form bindings do not
