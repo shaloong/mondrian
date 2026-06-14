@@ -8,6 +8,8 @@ use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
+use crate::text_metrics::{measure_single_line, measure_text_box};
+
 /// Semantic color source for a [`Label`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LabelColor {
@@ -124,7 +126,6 @@ impl Widget for Label {
     fn measure(&self, constraint: LayoutConstraint) -> Size {
         let horizontal_padding = self.padding.x * 2.0;
         let vertical_padding = self.padding.y * 2.0;
-        let natural_text_width = estimate_text_width(&self.text, self.font_size);
         let constrained_text_width = if constraint.max.width.is_finite() {
             (constraint.max.width - horizontal_padding).max(1.0)
         } else {
@@ -135,18 +136,17 @@ impl Widget for Label {
             .unwrap_or(constrained_text_width)
             .min(constrained_text_width)
             .max(1.0);
-        let measured_text_width = if self.wrap {
-            natural_text_width.min(content_width)
+        let (measured_text_width, measured_text_height) = if self.wrap {
+            measure_text_box(&self.text, self.font_size, content_width)
         } else {
-            natural_text_width
+            measure_single_line(&self.text, self.font_size)
         };
-        let line_count = if self.wrap && natural_text_width > content_width {
-            (natural_text_width / content_width).ceil().max(1.0)
-        } else {
-            1.0
-        };
-        let height = self.font_size * 1.4 * line_count + vertical_padding;
-        constraint.constrain(Size::new(measured_text_width + horizontal_padding, height))
+        let fallback_height = self.font_size * 1.4;
+        let height = measured_text_height.max(fallback_height) + vertical_padding;
+        constraint.constrain(Size::new(
+            measured_text_width.min(content_width) + horizontal_padding,
+            height,
+        ))
     }
 
     fn layout(&mut self, bounds: Rect) {
@@ -172,8 +172,8 @@ impl Widget for Label {
             let color = self.resolved_color(ctx);
             ctx.encoder.push_clip(content);
             if self.wrap {
-                let max_width =
-                    self.max_width.unwrap_or((self.bounds.width - self.padding.x * 2.0).max(1.0));
+                let content_width = (self.bounds.width - self.padding.x * 2.0).max(1.0);
+                let max_width = self.max_width.unwrap_or(content_width).min(content_width);
                 ctx.encoder
                     .draw_text_box(&self.text, self.font_size, position, max_width, color);
             } else {
@@ -373,7 +373,43 @@ mod tests {
 
         let measured = label.measure(LayoutConstraint::LOOSE);
 
-        assert_eq!(measured.width, 34.0);
+        assert!(measured.width <= 34.0);
+        assert!(measured.width > 4.0);
         assert!(measured.height > 16.0);
+    }
+
+    #[test]
+    fn wrapped_label_paints_with_actual_content_width_when_narrower_than_max_width() {
+        let theme = ThemePreset::Dark.build();
+        let mut label = Label::new("A longer supporting sentence")
+            .with_padding(2.0, 0.0)
+            .with_max_width(120.0);
+        label.layout(Rect::new(10.0, 20.0, 64.0, 40.0));
+
+        let commands = paint_label(&label, &theme);
+
+        assert_eq!(
+            commands,
+            vec![TextCommand::TextBox {
+                text: "A longer supporting sentence".into(),
+                font_size: 14.0,
+                position: Point::new(12.0, 20.0),
+                max_width: 60.0,
+                color: theme.colors.foreground,
+            }]
+        );
+    }
+
+    #[test]
+    fn cjk_wrapped_label_measure_uses_exact_text_layout() {
+        let label = Label::new("很长的中文标签需要换行")
+            .with_font_size(13.0)
+            .with_padding(2.0, 1.0)
+            .with_max_width(42.0);
+
+        let measured = label.measure(LayoutConstraint::LOOSE);
+
+        assert!(measured.width <= 46.0);
+        assert!(measured.height > 13.0 * 1.3 + 2.0);
     }
 }

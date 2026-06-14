@@ -4,11 +4,12 @@
 
 use mondrian_core::Color;
 use mondrian_editor_state::Action;
-use mondrian_ui_core::types::{estimate_text_width, *};
+use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
 use crate::paint::{mix_color, paint_focus_ring, paint_shadow};
+use crate::text_metrics::measure_single_line;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct MenuRowPaint {
@@ -17,7 +18,7 @@ pub(crate) struct MenuRowPaint {
     pub hovered: bool,
 }
 
-const MENU_ESTIMATED_FONT_SIZE: f32 = 13.0;
+const MENU_MEASURE_FONT_SIZE: f32 = 13.0;
 const MENU_MIN_WIDTH: f32 = 120.0;
 const MENU_TRIGGER_HEIGHT: f32 = 28.0;
 const MENU_TRIGGER_PADDING_X: f32 = 8.0;
@@ -304,7 +305,7 @@ impl Dropdown {
     }
 
     fn preferred_trigger_width(&self) -> f32 {
-        let label_width = estimate_text_width(&self.label, MENU_ESTIMATED_FONT_SIZE);
+        let (label_width, _) = measure_single_line(&self.label, MENU_MEASURE_FONT_SIZE);
         MENU_MIN_WIDTH.max(label_width + MENU_TRIGGER_PADDING_X * 2.0 + MENU_ARROW_SPACE)
     }
 
@@ -313,7 +314,7 @@ impl Dropdown {
             .items
             .iter()
             .filter(|item| !item.is_separator())
-            .map(|item| estimate_text_width(&item.label, MENU_ESTIMATED_FONT_SIZE))
+            .map(|item| measure_single_line(&item.label, MENU_MEASURE_FONT_SIZE).0)
             .fold(0.0, f32::max);
         let scrollbar = if self.items.len() > self.max_visible_items {
             MENU_SCROLLBAR_SPACE

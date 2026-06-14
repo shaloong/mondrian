@@ -2,13 +2,14 @@
 //!
 //! 在指定位置弹出菜单项列表。点击选项或外部区域关闭。
 
-use mondrian_ui_core::types::{estimate_text_width, *};
+use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
 use crate::menu::{
     paint_menu_popup_chrome, paint_menu_row, paint_menu_separator, MenuItem, MenuRowPaint,
 };
+use crate::text_metrics::measure_single_line;
 
 /// 右键弹出菜单
 ///
@@ -24,7 +25,7 @@ pub struct ContextMenu {
     hovered: Option<usize>,
 }
 
-const CONTEXT_MENU_ESTIMATED_FONT_SIZE: f32 = 13.0;
+const CONTEXT_MENU_MEASURE_FONT_SIZE: f32 = 13.0;
 const CONTEXT_MENU_PADDING_X: f32 = 8.0;
 const CONTEXT_MENU_ROW_PADDING_X: f32 = 16.0;
 
@@ -69,7 +70,7 @@ impl ContextMenu {
             .items
             .iter()
             .filter(|item| !item.is_separator())
-            .map(|item| estimate_text_width(&item.label, CONTEXT_MENU_ESTIMATED_FONT_SIZE))
+            .map(|item| measure_single_line(&item.label, CONTEXT_MENU_MEASURE_FONT_SIZE).0)
             .fold(0.0, f32::max);
         self.min_width.max(longest_item + CONTEXT_MENU_ROW_PADDING_X * 2.0)
     }

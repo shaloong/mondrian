@@ -23,6 +23,7 @@ pub mod property_panel;
 pub mod scroll;
 pub mod slider;
 pub mod text_input;
+mod text_metrics;
 pub mod timeline_view;
 pub mod viewer_surface;
 

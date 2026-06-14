@@ -8,6 +8,10 @@ use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
 use crate::paint::paint_focus_ring;
+use crate::text_metrics::{centered_text_x, measure_single_line};
+
+const BUTTON_PADDING_X: f32 = 12.0;
+const BUTTON_HEIGHT: f32 = 28.0;
 
 /// 按钮状态
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,8 +87,8 @@ impl Widget for Button {
     }
 
     fn measure(&self, constraint: LayoutConstraint) -> Size {
-        let char_count = self.label.chars().count() as f32;
-        let preferred = Size::new(12.0 * char_count + 24.0, 28.0);
+        let (label_width, _) = measure_single_line(&self.label, 14.0);
+        let preferred = Size::new(label_width + BUTTON_PADDING_X * 2.0, BUTTON_HEIGHT);
         constraint.constrain(preferred)
     }
 
@@ -172,8 +176,10 @@ impl Widget for Button {
             paint_focus_ring(ctx, self.bounds, spacing.radius_md);
         }
         if !self.label.is_empty() {
-            let tx = mondrian_ui_core::types::center_text_x(self.bounds, &self.label, font_size);
+            let text_clip = self.bounds.inset(BUTTON_PADDING_X, 0.0);
+            let tx = centered_text_x(text_clip.x, text_clip.width, &self.label, font_size);
             let ty = self.bounds.y + (self.bounds.height - font_size * 1.3).max(0.0) * 0.5;
+            ctx.encoder.push_clip(text_clip);
             ctx.encoder.draw_text(
                 &self.label,
                 font_size,
@@ -184,6 +190,7 @@ impl Widget for Button {
                     tokens.muted_foreground
                 },
             );
+            ctx.encoder.pop_clip();
         }
     }
 
@@ -200,7 +207,51 @@ impl Widget for Button {
 mod tests {
     use super::*;
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use mondrian_ui_core::widget::DrawCommandEncoder;
+    use mondrian_ui_theme::ThemePreset;
     use std::cell::RefCell;
+
+    #[derive(Default)]
+    struct PaintRecorder {
+        clips: Vec<Rect>,
+        clip_pops: usize,
+        texts: Vec<String>,
+    }
+
+    impl DrawCommandEncoder for PaintRecorder {
+        fn push_clip(&mut self, bounds: Rect) {
+            self.clips.push(bounds);
+        }
+
+        fn pop_clip(&mut self) {
+            self.clip_pops += 1;
+        }
+
+        fn draw_rect(&mut self, _bounds: Rect, _color: mondrian_core::Color, _corner_radius: f32) {}
+
+        fn draw_line(
+            &mut self,
+            _start: Point,
+            _end: Point,
+            _width: f32,
+            _color: mondrian_core::Color,
+        ) {
+        }
+
+        fn draw_text(
+            &mut self,
+            text: &str,
+            _font_size: f32,
+            _position: Point,
+            _color: mondrian_core::Color,
+        ) {
+            self.texts.push(text.into());
+        }
+
+        fn push_translate(&mut self, _offset: glam::Vec2) {}
+
+        fn pop_transform(&mut self) {}
+    }
 
     fn event_ctx_with_capture<'a>(
         focus: &'a mut DummyFocus,
@@ -223,6 +274,25 @@ mod tests {
         let s = b.measure(LayoutConstraint::LOOSE);
         assert!(s.width > 0.0);
         assert!(s.height > 0.0);
+    }
+
+    #[test]
+    fn button_paint_clips_long_label_to_inner_text_area() {
+        let mut b = Button::new("A very long button label");
+        b.layout(Rect::new(10.0, 20.0, 80.0, 28.0));
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = PaintRecorder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 200.0, 100.0),
+        };
+
+        b.paint(&mut ctx);
+
+        assert_eq!(encoder.texts, vec!["A very long button label"]);
+        assert_eq!(encoder.clips, vec![Rect::new(22.0, 20.0, 56.0, 28.0)]);
+        assert_eq!(encoder.clip_pops, 1);
     }
 
     #[test]

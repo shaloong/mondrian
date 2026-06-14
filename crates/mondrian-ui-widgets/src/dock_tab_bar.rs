@@ -6,6 +6,8 @@ use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
+use crate::text_metrics::centered_text_x;
+
 /// 单个 Tab 的信息
 #[derive(Debug, Clone)]
 pub struct TabInfo {
@@ -134,10 +136,12 @@ impl Widget for DockTabBar {
 
             if !tab.label.is_empty() {
                 let font_size = ctx.theme.typography.tab_label.font_size;
-                let tx = mondrian_ui_core::types::center_text_x(inset, &tab.label, font_size);
+                let tx = centered_text_x(inset.x, inset.width, &tab.label, font_size);
                 let ty = inset.y + (inset.height - font_size * 1.3).max(0.0) * 0.5;
                 let pos = mondrian_ui_core::types::snap_point(Point::new(tx, ty));
+                ctx.encoder.push_clip(inset);
                 ctx.encoder.draw_text(&tab.label, font_size, pos, tokens.foreground);
+                ctx.encoder.pop_clip();
             }
 
             if is_active {
@@ -169,6 +173,50 @@ impl Widget for DockTabBar {
 mod tests {
     use super::*;
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use mondrian_ui_core::widget::DrawCommandEncoder;
+    use mondrian_ui_theme::ThemePreset;
+
+    #[derive(Default)]
+    struct PaintRecorder {
+        clips: Vec<Rect>,
+        clip_pops: usize,
+        texts: Vec<String>,
+    }
+
+    impl DrawCommandEncoder for PaintRecorder {
+        fn push_clip(&mut self, bounds: Rect) {
+            self.clips.push(bounds);
+        }
+
+        fn pop_clip(&mut self) {
+            self.clip_pops += 1;
+        }
+
+        fn draw_rect(&mut self, _bounds: Rect, _color: mondrian_core::Color, _corner_radius: f32) {}
+
+        fn draw_line(
+            &mut self,
+            _start: Point,
+            _end: Point,
+            _width: f32,
+            _color: mondrian_core::Color,
+        ) {
+        }
+
+        fn draw_text(
+            &mut self,
+            text: &str,
+            _font_size: f32,
+            _position: Point,
+            _color: mondrian_core::Color,
+        ) {
+            self.texts.push(text.into());
+        }
+
+        fn push_translate(&mut self, _offset: glam::Vec2) {}
+
+        fn pop_transform(&mut self) {}
+    }
 
     fn make_tabs(active: usize) -> Vec<TabInfo> {
         vec![
@@ -302,5 +350,39 @@ mod tests {
         assert_eq!(bar.active_index(), 0);
         let rects = bar.tab_rects();
         assert_eq!(rects.len(), 0); // empty tabs → empty rects
+    }
+
+    #[test]
+    fn tab_bar_paint_clips_each_tab_label() {
+        let mut bar = DockTabBar::new(vec![
+            TabInfo {
+                label: "A very long tab label".into(),
+                active: true,
+            },
+            TabInfo { label: "Second".into(), active: false },
+        ]);
+        bar.layout(Rect::new(0.0, 0.0, 160.0, 26.0));
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = PaintRecorder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 200.0, 80.0),
+        };
+
+        bar.paint(&mut ctx);
+
+        assert_eq!(
+            encoder.texts,
+            vec!["A very long tab label".to_string(), "Second".to_string()]
+        );
+        assert_eq!(
+            encoder.clips,
+            vec![
+                Rect::new(2.0, 2.0, 76.0, 22.0),
+                Rect::new(82.0, 2.0, 76.0, 22.0)
+            ]
+        );
+        assert_eq!(encoder.clip_pops, 2);
     }
 }

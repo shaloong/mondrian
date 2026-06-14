@@ -299,8 +299,10 @@ keep the same visual language. Disabled menu items consume pointer input
 without dispatching actions or closing the overlay; outside clicks close open
 menus. Closed dropdown measurement is based on the trigger label only so long
 popup choices do not widen compact inspector rows; the popup itself expands to
-the longest row label. Context menus use the same estimated text-width fallback
-to avoid clipping long commands while staying independent from renderer state.
+the longest row label. Dropdowns and context menus measure row labels through
+the widgets crate's shared `mondrian-ui-text` measurer, so CJK, long Latin
+labels, and platform font metrics use the same layout facts as final glyph
+rendering instead of approximate character-width math.
 Popup elevation goes through the widget crate's shared paint helper and theme
 shadow tokens rather than per-widget hardcoded black alpha values, so dark/light
 themes can tune perceived depth centrally. Common color composition helpers
@@ -618,9 +620,11 @@ traversal, and keep painting the current color in muted chrome for inspector
 empty states.
 
 Labels are passive display widgets, but they still clip text to their padded
-content bounds during paint. This keeps property rows, panel headers, and
-compact tool surfaces from letting long labels spill into adjacent controls even
-when the parent layout constrains them below their natural text width.
+content bounds during paint. Wrapped labels measure and paint against the same
+effective content width, taking the parent layout constraint and any explicit
+maximum width together. This keeps property rows, panel headers, and compact
+tool surfaces from letting long labels spill into adjacent controls even when
+the parent layout constrains them below their natural text width.
 
 ## Curve Editing
 
@@ -636,14 +640,18 @@ effects, or undo history.
 
 Widgets emit draw commands only. Checkbox checkmarks are filled triangle-list
 commands, not font glyphs or paired line strokes, so they are stable across
-operating systems and font stacks. Wrapped text is represented as a constrained
-text box draw command and resolved by `mondrian-ui-text`, not manually wrapped
-inside individual widgets. Tooltip widgets draw border, fill, and text commands
-in that order. Standard focus-visible outer rings use the shared widget paint
-helper so their alpha, outset, and corner-radius expansion stay consistent
-across buttons, dropdowns, pickers, lists, and other controls. Controls with
-different geometry, such as slider thumb halos or inset timeline focus borders,
-may keep local painting while preserving the same theme token vocabulary.
+operating systems and font stacks. Widgets that need text dimensions use the
+widgets crate's shared `mondrian-ui-text` measurement helper; the approximate
+`mondrian-ui-core::estimate_text_width` helper is only a low-level fallback for
+code that cannot depend on the text crate. Wrapped text is represented as a
+constrained text box draw command and resolved by `mondrian-ui-text`, not
+manually wrapped inside individual widgets. Tooltip widgets draw border, fill,
+and text commands in that order. Standard focus-visible outer rings use the
+shared widget paint helper so their alpha, outset, and corner-radius expansion
+stay consistent across buttons, dropdowns, pickers, lists, and other controls.
+Controls with different geometry, such as slider thumb halos or inset timeline
+focus borders, may keep local painting while preserving the same theme token
+vocabulary.
 
 `DrawEncoder` snaps axis-aligned UI geometry to whole pixels at command
 recording time: rectangle bounds, line endpoints, clip bounds, image bounds,
