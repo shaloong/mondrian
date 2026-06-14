@@ -460,6 +460,9 @@ size, frame rate, audio sample rate, proxy generation, and preview caching.
 Shell modals are routed through `self_hosted::modal::ShellModal` and should use
 theme modal tokens such as `colors.modal_scrim`, `colors.popover`, and spacing
 radii instead of per-dialog hard-coded chrome.
+Dialog and form copy should use reusable `mondrian-ui-widgets::Label`
+instances for semantic color, padding, and wrapping rather than direct
+per-dialog `draw_text` calls.
 Form controls should expose a common `enabled(bool)` / `disabled()` builder
 where practical. Disabled controls must not dispatch actions, request pointer
 capture, or participate in focus traversal, and should render with muted theme

@@ -12,7 +12,7 @@ use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, Widget};
 use mondrian_ui_widgets::menu::{Dropdown, MenuItem};
-use mondrian_ui_widgets::{Button, Checkbox, TextInput};
+use mondrian_ui_widgets::{Button, Checkbox, Label, TextInput};
 
 use crate::app::ui_actions::{
     app_shell_cancel_new_project_dialog_action, app_shell_confirm_new_project_dialog_action,
@@ -292,6 +292,12 @@ pub struct NewProjectDialog {
     draft: SelfHostedNewProjectDraft,
     bounds: Rect,
     card: Rect,
+    title_label: Label,
+    description_label: Label,
+    name_label: Label,
+    frame_size_label: Label,
+    frame_rate_label_widget: Label,
+    audio_label: Label,
     name_input: TextInput,
     resolution_dropdown: Dropdown,
     frame_rate_dropdown: Dropdown,
@@ -304,6 +310,33 @@ pub struct NewProjectDialog {
 
 impl NewProjectDialog {
     pub fn new(draft: SelfHostedNewProjectDraft) -> Self {
+        let title_label = Label::new("New Project")
+            .popover_foreground()
+            .with_font_size(TITLE_FONT_SIZE)
+            .with_padding(0.0, 0.0);
+        let description_label = Label::new(
+            "Create a project file and initialize the timeline with default production settings.",
+        )
+        .muted()
+        .with_font_size(LABEL_FONT_SIZE)
+        .with_padding(0.0, 0.0)
+        .wrapped();
+        let name_label = Label::new("Name")
+            .muted()
+            .with_font_size(LABEL_FONT_SIZE)
+            .with_padding(0.0, 0.0);
+        let frame_size_label = Label::new("Frame size")
+            .muted()
+            .with_font_size(LABEL_FONT_SIZE)
+            .with_padding(0.0, 0.0);
+        let frame_rate_label_widget = Label::new("Frame rate")
+            .muted()
+            .with_font_size(LABEL_FONT_SIZE)
+            .with_padding(0.0, 0.0);
+        let audio_label = Label::new("Audio")
+            .muted()
+            .with_font_size(LABEL_FONT_SIZE)
+            .with_padding(0.0, 0.0);
         let name_input = TextInput::new("Project name").with_text(&draft.name).on_change(|name| {
             app_shell_new_project_draft_changed_action(NewProjectDraftUpdatePayload::Name(
                 name.into(),
@@ -319,6 +352,12 @@ impl NewProjectDialog {
             draft,
             bounds: Rect::ZERO,
             card: Rect::ZERO,
+            title_label,
+            description_label,
+            name_label,
+            frame_size_label,
+            frame_rate_label_widget,
+            audio_label,
             name_input,
             resolution_dropdown,
             frame_rate_dropdown,
@@ -372,6 +411,24 @@ impl Widget for NewProjectDialog {
             card_height,
         );
         let content = self.card.inset(CONTENT_PADDING, CONTENT_PADDING);
+        self.title_label.layout(Rect::new(
+            content.x,
+            content.y + TITLE_BASELINE_Y,
+            content.width,
+            LABEL_FONT_SIZE * 2.0,
+        ));
+        self.description_label.layout(Rect::new(
+            content.x,
+            content.y + DESCRIPTION_BASELINE_Y,
+            content.width,
+            LABEL_FONT_SIZE * 3.0,
+        ));
+        self.name_label.layout(Rect::new(
+            content.x,
+            content.y + NAME_LABEL_BASELINE_Y,
+            content.width,
+            LABEL_FONT_SIZE * 1.5,
+        ));
         self.name_input.layout(Rect::new(
             content.x,
             content.y + NAME_Y,
@@ -379,6 +436,18 @@ impl Widget for NewProjectDialog {
             FIELD_HEIGHT,
         ));
         let half = (content.width - ROW_GAP) * 0.5;
+        self.frame_size_label.layout(Rect::new(
+            content.x,
+            content.y + PRESET_LABEL_BASELINE_Y,
+            half,
+            LABEL_FONT_SIZE * 1.5,
+        ));
+        self.frame_rate_label_widget.layout(Rect::new(
+            content.x + half + ROW_GAP,
+            content.y + PRESET_LABEL_BASELINE_Y,
+            half,
+            LABEL_FONT_SIZE * 1.5,
+        ));
         self.resolution_dropdown.layout(Rect::new(
             content.x,
             content.y + PRESET_ROW_Y,
@@ -396,6 +465,12 @@ impl Widget for NewProjectDialog {
             content.y + AUDIO_ROW_Y,
             half,
             DROPDOWN_HEIGHT,
+        ));
+        self.audio_label.layout(Rect::new(
+            content.x,
+            content.y + AUDIO_LABEL_BASELINE_Y,
+            half,
+            LABEL_FONT_SIZE * 1.5,
         ));
         self.proxy_checkbox.layout(Rect::new(
             content.x,
@@ -491,51 +566,15 @@ impl Widget for NewProjectDialog {
         ctx.encoder.draw_line(top_left, bottom_left, 1.0, ctx.theme.colors.border);
         ctx.encoder.draw_line(top_right, bottom_right, 1.0, ctx.theme.colors.border);
 
-        let content = self.card.inset(CONTENT_PADDING, CONTENT_PADDING);
-        ctx.encoder.draw_text(
-            "New Project",
-            TITLE_FONT_SIZE,
-            Point::new(content.x, content.y + TITLE_BASELINE_Y),
-            ctx.theme.colors.popover_foreground,
-        );
-        ctx.encoder.draw_text_box(
-            "Create a project file and initialize the timeline with default production settings.",
-            LABEL_FONT_SIZE,
-            Point::new(content.x, content.y + DESCRIPTION_BASELINE_Y),
-            content.width,
-            ctx.theme.colors.muted_foreground,
-        );
-        ctx.encoder.draw_text(
-            "Name",
-            LABEL_FONT_SIZE,
-            Point::new(content.x, content.y + NAME_LABEL_BASELINE_Y),
-            ctx.theme.colors.muted_foreground,
-        );
+        self.title_label.paint(ctx);
+        self.description_label.paint(ctx);
+        self.name_label.paint(ctx);
         self.name_input.paint(ctx);
-        let half = (content.width - ROW_GAP) * 0.5;
-        ctx.encoder.draw_text(
-            "Frame size",
-            LABEL_FONT_SIZE,
-            Point::new(content.x, content.y + PRESET_LABEL_BASELINE_Y),
-            ctx.theme.colors.muted_foreground,
-        );
-        ctx.encoder.draw_text(
-            "Frame rate",
-            LABEL_FONT_SIZE,
-            Point::new(
-                content.x + half + ROW_GAP,
-                content.y + PRESET_LABEL_BASELINE_Y,
-            ),
-            ctx.theme.colors.muted_foreground,
-        );
+        self.frame_size_label.paint(ctx);
+        self.frame_rate_label_widget.paint(ctx);
         self.resolution_dropdown.paint(ctx);
         self.frame_rate_dropdown.paint(ctx);
-        ctx.encoder.draw_text(
-            "Audio",
-            LABEL_FONT_SIZE,
-            Point::new(content.x, content.y + AUDIO_LABEL_BASELINE_Y),
-            ctx.theme.colors.muted_foreground,
-        );
+        self.audio_label.paint(ctx);
         self.audio_sample_rate_dropdown.paint(ctx);
         self.proxy_checkbox.paint(ctx);
         self.preview_cache_checkbox.paint(ctx);
@@ -548,33 +587,45 @@ impl Widget for NewProjectDialog {
     }
 
     fn child_count(&self) -> usize {
-        8
+        14
     }
 
     fn child(&self, index: usize) -> Option<&dyn Widget> {
         match index {
-            0 => Some(&self.name_input),
-            1 => Some(&self.resolution_dropdown),
-            2 => Some(&self.frame_rate_dropdown),
-            3 => Some(&self.audio_sample_rate_dropdown),
-            4 => Some(&self.proxy_checkbox),
-            5 => Some(&self.preview_cache_checkbox),
-            6 => Some(&self.cancel_button),
-            7 => Some(&self.create_button),
+            0 => Some(&self.title_label),
+            1 => Some(&self.description_label),
+            2 => Some(&self.name_label),
+            3 => Some(&self.frame_size_label),
+            4 => Some(&self.frame_rate_label_widget),
+            5 => Some(&self.audio_label),
+            6 => Some(&self.name_input),
+            7 => Some(&self.resolution_dropdown),
+            8 => Some(&self.frame_rate_dropdown),
+            9 => Some(&self.audio_sample_rate_dropdown),
+            10 => Some(&self.proxy_checkbox),
+            11 => Some(&self.preview_cache_checkbox),
+            12 => Some(&self.cancel_button),
+            13 => Some(&self.create_button),
             _ => None,
         }
     }
 
     fn child_mut(&mut self, index: usize) -> Option<&mut dyn Widget> {
         match index {
-            0 => Some(&mut self.name_input),
-            1 => Some(&mut self.resolution_dropdown),
-            2 => Some(&mut self.frame_rate_dropdown),
-            3 => Some(&mut self.audio_sample_rate_dropdown),
-            4 => Some(&mut self.proxy_checkbox),
-            5 => Some(&mut self.preview_cache_checkbox),
-            6 => Some(&mut self.cancel_button),
-            7 => Some(&mut self.create_button),
+            0 => Some(&mut self.title_label),
+            1 => Some(&mut self.description_label),
+            2 => Some(&mut self.name_label),
+            3 => Some(&mut self.frame_size_label),
+            4 => Some(&mut self.frame_rate_label_widget),
+            5 => Some(&mut self.audio_label),
+            6 => Some(&mut self.name_input),
+            7 => Some(&mut self.resolution_dropdown),
+            8 => Some(&mut self.frame_rate_dropdown),
+            9 => Some(&mut self.audio_sample_rate_dropdown),
+            10 => Some(&mut self.proxy_checkbox),
+            11 => Some(&mut self.preview_cache_checkbox),
+            12 => Some(&mut self.cancel_button),
+            13 => Some(&mut self.create_button),
             _ => None,
         }
     }
