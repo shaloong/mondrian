@@ -118,7 +118,9 @@ app-shell dialog intents, the window entrypoint resolves them into concrete
 work plus status reporting. Widget code must not invent project paths or mutate
 project files directly.
 Those app-shell dialog intents are built through `app::ui_actions` helpers so
-menus and self-hosted panels share the same stable custom-action ids.
+menus and self-hosted panels share the same stable custom-action ids. Shell
+local actions, such as About, use the same helper boundary even when they do
+not resolve to editor-state actions.
 `self_hosted::shell::resolve_app_shell_action` is the tested boundary that
 turns those intents into concrete project creation, `OpenProject`,
 `ImportMedia`, and `SaveProjectAs` actions after a native adapter supplies

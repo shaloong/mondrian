@@ -76,6 +76,8 @@ pub const APP_SHELL_OPEN_PROJECT_DIALOG: &str = "open_project_dialog";
 pub const APP_SHELL_IMPORT_MEDIA_DIALOG: &str = "import_media_dialog";
 /// App-shell request to open a platform project save-as dialog.
 pub const APP_SHELL_SAVE_PROJECT_AS_DIALOG: &str = "save_project_as_dialog";
+/// App-shell request to show product about information.
+pub const APP_SHELL_ABOUT: &str = "about";
 
 /// Clip edge being trimmed by a timeline UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -377,6 +379,11 @@ pub fn app_shell_import_media_dialog_action() -> Action {
 /// Build an app-shell request for saving the current project to a chosen path.
 pub fn app_shell_save_project_as_dialog_action() -> Action {
     custom_app_shell_action(APP_SHELL_SAVE_PROJECT_AS_DIALOG)
+}
+
+/// Build an app-shell request for showing product about information.
+pub fn app_shell_about_action() -> Action {
+    custom_app_shell_action(APP_SHELL_ABOUT)
 }
 
 fn custom_timeline_action<T: Serialize>(name: &'static str, payload: T) -> Action {

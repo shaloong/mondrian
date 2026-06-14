@@ -14,13 +14,13 @@ use mondrian_ui_widgets::menu::{Dropdown, MenuItem};
 use std::path::Path;
 
 use crate::app::ui_actions::{
-    app_shell_import_media_dialog_action, app_shell_new_project_dialog_action,
-    app_shell_open_project_dialog_action, app_shell_save_project_as_dialog_action,
-    project_create_with_settings_action, NewProjectDraftUpdatePayload,
-    APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG,
-    APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
-    APP_SHELL_NEW_PROJECT_DRAFT_CHANGED, APP_SHELL_OPEN_PROJECT_DIALOG,
-    APP_SHELL_SAVE_PROJECT_AS_DIALOG,
+    app_shell_about_action, app_shell_import_media_dialog_action,
+    app_shell_new_project_dialog_action, app_shell_open_project_dialog_action,
+    app_shell_save_project_as_dialog_action, project_create_with_settings_action,
+    NewProjectDraftUpdatePayload, APP_SHELL_ABOUT, APP_SHELL_CANCEL_NEW_PROJECT_DIALOG,
+    APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE,
+    APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_NEW_PROJECT_DRAFT_CHANGED,
+    APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
 };
 use crate::app::AppState;
 use crate::self_hosted::modal::ShellModal;
@@ -147,14 +147,7 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
         ),
         (
             "Help",
-            vec![MenuItem::new(
-                "About Mondrian",
-                Action::Custom {
-                    namespace: "app".into(),
-                    name: "about".into(),
-                    payload: serde_json::Value::Null,
-                },
-            )],
+            vec![MenuItem::new("About Mondrian", app_shell_about_action())],
         ),
     ]
 }
@@ -361,6 +354,11 @@ impl SelfHostedAppRoot {
                     draft.into_payload(path),
                 ))
             }
+            Action::Custom { namespace, name, .. }
+                if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_ABOUT =>
+            {
+                None
+            }
             action => resolve_app_shell_action(action, platform, current_project_path),
         }
     }
@@ -450,11 +448,12 @@ impl Widget for SelfHostedAppRoot {
 mod tests {
     use super::*;
     use crate::app::ui_actions::{
-        app_shell_cancel_new_project_dialog_action, app_shell_confirm_new_project_dialog_action,
-        app_shell_import_media_dialog_action, app_shell_new_project_dialog_action,
-        app_shell_new_project_draft_changed_action, app_shell_open_project_dialog_action,
-        app_shell_save_project_as_dialog_action, NewProjectDraftUpdatePayload,
-        ProjectCreateWithSettingsPayload, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
+        app_shell_about_action, app_shell_cancel_new_project_dialog_action,
+        app_shell_confirm_new_project_dialog_action, app_shell_import_media_dialog_action,
+        app_shell_new_project_dialog_action, app_shell_new_project_draft_changed_action,
+        app_shell_open_project_dialog_action, app_shell_save_project_as_dialog_action,
+        NewProjectDraftUpdatePayload, ProjectCreateWithSettingsPayload,
+        PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
     };
     use mondrian_core::{Rational, Resolution};
     use mondrian_editor_state::state::PanelKind;
@@ -619,6 +618,28 @@ mod tests {
         let menu = MenuBar::default();
 
         assert_eq!(menu.child_count(), 4);
+    }
+
+    #[test]
+    fn default_menu_items_use_stable_app_shell_about_action() {
+        let menu_items = default_menu_items();
+        let help_items = menu_items
+            .iter()
+            .find_map(|(label, items)| (*label == "Help").then_some(items))
+            .expect("help menu");
+        let about = help_items
+            .iter()
+            .find(|item| item.label == "About Mondrian")
+            .expect("about item");
+
+        match &about.action {
+            Action::Custom { namespace, name, payload } => {
+                assert_eq!(namespace, APP_SHELL_NAMESPACE);
+                assert_eq!(name, APP_SHELL_ABOUT);
+                assert!(payload.is_null());
+            }
+            other => panic!("expected app-shell about action, got {other:?}"),
+        }
     }
 
     #[test]
@@ -849,6 +870,17 @@ mod tests {
             ),
             None
         );
+        assert!(root.modal.is_none());
+    }
+
+    #[test]
+    fn app_root_handles_about_action_as_shell_local() {
+        let platform = FakePlatform::default();
+        let mut root = SelfHostedAppRoot::demo();
+
+        let action = root.handle_shell_action(app_shell_about_action(), &platform, None);
+
+        assert_eq!(action, None);
         assert!(root.modal.is_none());
     }
 
