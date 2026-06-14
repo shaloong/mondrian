@@ -9,7 +9,6 @@ use std::sync::Arc;
 
 use mondrian_app::app::AppState;
 use mondrian_app::self_hosted::action_pump::{drain_pending_actions, PendingUiActions};
-use mondrian_app::self_hosted::panels::SelfHostedPanelModels;
 use mondrian_app::self_hosted::runtime::WinitUiRuntime;
 use mondrian_app::self_hosted::shell::SelfHostedAppRoot;
 use mondrian_panel_console::tracing_layer::ConsoleLogLayer;
@@ -80,8 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut text_renderer = TextRenderer::new();
 
     let app_state = RefCell::new(AppState::new());
-    let mut root =
-        SelfHostedAppRoot::from_models(SelfHostedPanelModels::from_app_state(&app_state.borrow()));
+    let mut root = SelfHostedAppRoot::from_app_state(&app_state.borrow());
     let bounds = Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
     TreeWalker::layout(&mut root, bounds);
     let mut router = EventRouter::with_platform_and_tooltip(

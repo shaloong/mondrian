@@ -22,6 +22,7 @@ use crate::app::ui_actions::{
     APP_SHELL_NEW_PROJECT_DRAFT_CHANGED, APP_SHELL_OPEN_PROJECT_DIALOG,
     APP_SHELL_SAVE_PROJECT_AS_DIALOG,
 };
+use crate::app::AppState;
 use crate::self_hosted::modal::ShellModal;
 use crate::self_hosted::new_project_dialog::{
     default_project_file_name, SelfHostedNewProjectDraft,
@@ -244,6 +245,11 @@ pub struct SelfHostedAppRoot {
 }
 
 impl SelfHostedAppRoot {
+    /// Build a root widget from the current application state snapshot.
+    pub fn from_app_state(state: &AppState) -> Self {
+        Self::from_models(SelfHostedPanelModels::from_app_state(state))
+    }
+
     /// Build a root widget from app-facing panel models.
     pub fn from_models(models: SelfHostedPanelModels) -> Self {
         Self::new(MenuBar::default(), build_dock_tree(models))
@@ -284,6 +290,11 @@ impl SelfHostedAppRoot {
         if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
             self.layout(self.bounds);
         }
+    }
+
+    /// Refresh panel contents from the current application state snapshot.
+    pub fn refresh_from_app_state(&mut self, state: &AppState) {
+        self.set_models(SelfHostedPanelModels::from_app_state(state));
     }
 
     /// Apply a shell-local action and return an editor action when one should
@@ -556,6 +567,48 @@ mod tests {
             platform: &NoopPlatformService,
             requests,
         }
+    }
+
+    fn drag_root_splitter_to(root: &mut SelfHostedAppRoot, x: f32) {
+        let grab = root.dock().collect_grab_zones()[0].0.center();
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(&mut focus, &mut shortcut, &mut tooltip, &mut requests);
+
+        assert_eq!(
+            root.dock_mut().event(
+                &UiEvent::MouseDown {
+                    position: grab,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            root.dock_mut().event(
+                &UiEvent::MouseMove {
+                    position: Point::new(x, grab.y),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            root.dock_mut().event(
+                &UiEvent::MouseUp {
+                    position: Point::new(x, grab.y),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
     }
 
     #[test]
@@ -863,55 +916,39 @@ mod tests {
     }
 
     #[test]
+    fn app_root_builds_from_app_state_snapshot() {
+        let state = AppState::new();
+        let mut root = SelfHostedAppRoot::from_app_state(&state);
+
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+
+        assert_eq!(root.menu_bar.bounds, Rect::new(0.0, 0.0, 1280.0, 28.0));
+        assert!(!root.dock().collect_grab_zones().is_empty());
+    }
+
+    #[test]
     fn set_models_preserves_user_splitter_ratio() {
         let mut root = SelfHostedAppRoot::demo();
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
-        let grab = root.dock().collect_grab_zones()[0].0.center();
-        let mut focus = DummyFocus;
-        let mut shortcut = DummyShortcut;
-        let mut tooltip = DummyTooltip;
-        let mut requests = EventRequests::default();
-
-        {
-            let mut ctx = event_ctx(&mut focus, &mut shortcut, &mut tooltip, &mut requests);
-            assert_eq!(
-                root.dock_mut().event(
-                    &UiEvent::MouseDown {
-                        position: grab,
-                        button: MouseButton::Left,
-                        modifiers: Modifiers::none(),
-                    },
-                    &mut ctx,
-                ),
-                EventResult::Handled
-            );
-            assert_eq!(
-                root.dock_mut().event(
-                    &UiEvent::MouseMove {
-                        position: Point::new(620.0, grab.y),
-                        modifiers: Modifiers::none(),
-                    },
-                    &mut ctx,
-                ),
-                EventResult::Handled
-            );
-            assert_eq!(
-                root.dock_mut().event(
-                    &UiEvent::MouseUp {
-                        position: Point::new(620.0, grab.y),
-                        button: MouseButton::Left,
-                        modifiers: Modifiers::none(),
-                    },
-                    &mut ctx,
-                ),
-                EventResult::Handled
-            );
-        }
+        drag_root_splitter_to(&mut root, 620.0);
 
         let dragged_ratio = root.dock().ratio();
         assert!(dragged_ratio > 0.4);
 
         root.set_models(SelfHostedPanelModels::demo());
+
+        assert!((root.dock().ratio() - dragged_ratio).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn refresh_from_app_state_preserves_user_splitter_ratio() {
+        let state = AppState::new();
+        let mut root = SelfHostedAppRoot::from_app_state(&state);
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        drag_root_splitter_to(&mut root, 620.0);
+        let dragged_ratio = root.dock().ratio();
+
+        root.refresh_from_app_state(&state);
 
         assert!((root.dock().ratio() - dragged_ratio).abs() < f32::EPSILON);
     }

@@ -13,7 +13,6 @@ use mondrian_ui_core::types::Rect;
 use mondrian_ui_core::TreeWalker;
 
 use crate::app::AppState;
-use crate::self_hosted::panels::SelfHostedPanelModels;
 use crate::self_hosted::shell::SelfHostedAppRoot;
 
 /// FIFO queue for widget-dispatched UI actions.
@@ -43,7 +42,7 @@ pub fn refresh_root_if_dirty(
     if !ui_dirty.replace(false) {
         return;
     }
-    root.set_models(SelfHostedPanelModels::from_app_state(&app_state.borrow()));
+    root.refresh_from_app_state(&app_state.borrow());
     TreeWalker::layout(root, bounds);
 }
 
