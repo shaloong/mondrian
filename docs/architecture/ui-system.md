@@ -441,8 +441,8 @@ at the panel/app layer. Programmatic state synchronization uses setters such as
 dispatch changes and request repaint.
 Self-hosted Inspector actions should use typed payloads for clip mutations.
 The curve editor currently emits `ui.inspector.set_clip_curve` with normalized
-points; AppState validates the clip and records a status hint until the final
-animation-curve storage model is connected.
+points; AppState maps them to opacity keyframes over the selected clip's
+timeline span so curve edits participate in undo/redo and render evaluation.
 `TextInput::on_change(...)` dispatches only when committed text changes, such
 as typed text, paste/cut/delete edits, or IME commit. Cursor movement,
 selection changes, and IME preedit updates remain local so form bindings do not

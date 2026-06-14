@@ -26,11 +26,14 @@ use crate::app::ui_actions::{
 use crate::app::{AppClipboardKind, AppState, ClipOverlapMode, SelectedClipRef};
 use glam::Vec2;
 use mondrian_assets::AssetKind;
-use mondrian_core::automation::{PropertyHost, PropertyMutation, PropertyValue};
+use mondrian_core::automation::{
+    timecode_to_ticks, Keyframe, PropertyHost, PropertyMutation, PropertyValue,
+};
 use mondrian_core::events::AppEvent;
 use mondrian_core::types::{ClipId, TimeCode};
 use mondrian_core::{MondrianError, Result};
 use mondrian_timeline::clip::{Clip, Transform2D, TrimEdge};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -1029,22 +1032,43 @@ impl AppState {
                 reason: "curve points must be finite".to_string(),
             });
         }
-        let Some(seq) = self.sequence.as_ref() else {
+        let Some(seq) = self.sequence.as_mut() else {
             return Err(missing_sequence_error("inspector_set_clip_curve"));
         };
-        if !clip_exists(seq, payload.clip.clip_id) {
-            return Err(missing_clip_error(
-                "inspector_set_clip_curve",
-                payload.clip.clip_id,
-            ));
+        let before = seq.clone();
+        {
+            let clip = find_clip_mut(seq, payload.clip.clip_id).ok_or_else(|| {
+                missing_clip_error("inspector_set_clip_curve", payload.clip.clip_id)
+            })?;
+            let start_tick = timecode_to_ticks(clip.position);
+            let end_tick = timecode_to_ticks(clip.end_position());
+            let duration_ticks = (end_tick - start_tick).max(1);
+            let mut keyframes = BTreeMap::new();
+            for point in payload.points {
+                let x = point.x.clamp(0.0, 1.0);
+                let y = point.y.clamp(0.0, 1.0);
+                let time = start_tick + (duration_ticks as f32 * x).round() as i64;
+                keyframes.insert(time, y);
+            }
+            if keyframes.len() < 2 {
+                return Err(MondrianError::WorkflowStepFailed {
+                    step_id: "inspector_set_clip_curve".to_string(),
+                    reason: "curve requires at least two unique keyframe times".to_string(),
+                });
+            }
+
+            clip.apply_property_mutation(PropertyMutation::ClearAnimation {
+                path: Transform2D::OPACITY_PATH.to_string(),
+                time: start_tick,
+            })?;
+            for (time, value) in keyframes {
+                clip.apply_property_mutation(PropertyMutation::SetKeyframe {
+                    path: Transform2D::OPACITY_PATH.to_string(),
+                    keyframe: Keyframe::linear(time, PropertyValue::Float(value)),
+                })?;
+            }
         }
-        self.set_status_hint(
-            format!(
-                "曲线编辑已接收：{} 个点（动画曲线落点待接入）",
-                payload.points.len()
-            ),
-            false,
-        );
+        self.record_timeline_edit_snapshot("调整片段不透明度曲线", before);
         Ok(())
     }
 }
@@ -1928,7 +1952,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_inspector_ui_accepts_typed_curve_payload_without_fake_undo() {
+    fn dispatch_inspector_ui_maps_curve_payload_to_opacity_keyframes() {
         let (mut state, track_id, clip_id) = state_with_two_video_tracks();
 
         state
@@ -1937,17 +1961,20 @@ mod tests {
                     clip: inspector_clip_payload(track_id, clip_id),
                     points: vec![
                         InspectorCurvePointPayload { x: 0.0, y: 0.0 },
-                        InspectorCurvePointPayload { x: 0.45, y: 0.72 },
+                        InspectorCurvePointPayload { x: 0.5, y: 0.72 },
                         InspectorCurvePointPayload { x: 1.0, y: 1.0 },
                     ],
                 },
             ))
             .expect("dispatch curve");
 
-        assert!(!state.can_undo_action());
-        let (message, is_error) = state.status_hint.as_ref().expect("status hint");
-        assert!(!*is_error);
-        assert!(message.contains("3 个点"));
+        let sequence = state.sequence.as_ref().expect("sequence");
+        let clip = &sequence.video_tracks[0].clips[0];
+        let tb = sequence.time_base();
+        assert!((clip.transform.evaluate_opacity(TimeCode::new(10, tb)) - 0.0).abs() < 1.0e-6);
+        assert!((clip.transform.evaluate_opacity(TimeCode::new(20, tb)) - 0.72).abs() < 1.0e-6);
+        assert!((clip.transform.evaluate_opacity(TimeCode::new(30, tb)) - 1.0).abs() < 1.0e-6);
+        assert!(state.can_undo_action());
     }
 
     #[test]
