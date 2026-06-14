@@ -566,8 +566,9 @@ these primitives for UI gradients instead of tessellating many sampled
 rectangles or adding UI-local shaders. The `ColorPicker` uses gradient
 rectangles for its HSV area overlays, hue ramp, and alpha ramp. It uses a
 masked colored triangle fan for the optional hue/saturation wheel.
-Checkerboards are low-count deterministic colored-triangle geometry and use
-the same rounded mask path when they sit inside rounded swatches. A compact
+Checkerboards are low-count deterministic colored-triangle geometry provided by
+the shared widget paint helpers, and use the same rounded mask path when they
+sit inside rounded swatches. A compact
 `ColorPickerTrigger` wraps the full picker for inspector rows and toolbar use:
 the trigger paints the current color above a checkerboard and opens the full
 picker in the overlay pass. Trigger-owned popups may hide the picker's internal

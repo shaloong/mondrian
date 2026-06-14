@@ -14,7 +14,7 @@ use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
 use crate::form_layout::{FormLayout, FormRowOptions, FormRowRects};
 use crate::menu::{paint_menu_popup_chrome, paint_menu_row, paint_menu_trigger, MenuRowPaint};
-use crate::paint::{color_with_alpha, mix_color, paint_shadow, soft_border};
+use crate::paint::{color_with_alpha, mix_color, paint_checkerboard, paint_shadow, soft_border};
 use crate::text_input::TextInput;
 
 const MODES: [ColorPickerMode; 5] = [
@@ -876,7 +876,7 @@ impl ColorPicker {
             tokens.popover,
             spacing.radius_lg - 1.0,
         );
-        self.paint_checkerboard(ctx, swatch, 5.0, spacing.radius_md);
+        paint_checkerboard(ctx, swatch, 5.0, spacing.radius_md);
         ctx.encoder.draw_rect(swatch, self.color, spacing.radius_md);
     }
 
@@ -926,31 +926,6 @@ impl ColorPicker {
         );
         ctx.encoder
             .draw_rect(Rect::new(rect.x + 7.0, rect.y + 21.0, 4.0, 2.0), icon, 1.0);
-    }
-
-    fn paint_checkerboard(&self, ctx: &mut PaintContext, rect: Rect, cell_size: f32, radius: f32) {
-        let checker = 7.0;
-        let light = Color { r: 0.75, g: 0.75, b: 0.78, a: 1.0 };
-        let dark = Color { r: 0.48, g: 0.48, b: 0.52, a: 1.0 };
-        let checker = cell_size.max(1.0).min(checker);
-        let cols = (rect.width / checker).ceil() as i32;
-        let rows = (rect.height / checker).ceil() as i32;
-        let mut vertices = Vec::with_capacity((cols * rows).max(0) as usize * 6);
-        for row in 0..rows {
-            for col in 0..cols {
-                let x = rect.x + col as f32 * checker;
-                let y = rect.y + row as f32 * checker;
-                let cell = Rect::new(
-                    x,
-                    y,
-                    (rect.x + rect.width - x).min(checker),
-                    (rect.y + rect.height - y).min(checker),
-                );
-                let color = if (row + col) % 2 == 0 { light } else { dark };
-                push_rect_triangles(&mut vertices, cell, color);
-            }
-        }
-        ctx.encoder.draw_colored_triangles_in_rect(&vertices, rect, radius);
     }
 
     fn paint_color_area(&self, ctx: &mut PaintContext) {
@@ -1070,7 +1045,7 @@ impl ColorPicker {
         let tokens = &ctx.theme.colors;
         let bar = self.alpha_bar_rect();
         ctx.encoder.draw_rect(bar.inset(-1.0, -1.0), soft_border(tokens.border), 7.0);
-        self.paint_checkerboard(ctx, bar, 6.0, 7.0);
+        paint_checkerboard(ctx, bar, 6.0, 7.0);
 
         let mut transparent = self.color;
         transparent.a = 0.0;
@@ -1446,21 +1421,6 @@ fn format_number(value: f32) -> String {
     }
 }
 
-fn push_rect_triangles(vertices: &mut Vec<(Point, Color)>, rect: Rect, color: Color) {
-    let p0 = Point::new(rect.x, rect.y);
-    let p1 = Point::new(rect.x + rect.width, rect.y);
-    let p2 = Point::new(rect.x, rect.y + rect.height);
-    let p3 = Point::new(rect.x + rect.width, rect.y + rect.height);
-    vertices.extend_from_slice(&[
-        (p0, color),
-        (p1, color),
-        (p2, color),
-        (p2, color),
-        (p1, color),
-        (p3, color),
-    ]);
-}
-
 /// Configuration for [`ColorPickerTrigger`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ColorPickerTriggerOptions {
@@ -1621,30 +1581,6 @@ impl ColorPickerTrigger {
             ctx.release_pointer_capture(self.id);
         }
     }
-
-    fn paint_trigger_checkerboard(&self, ctx: &mut PaintContext, rect: Rect) {
-        let light = Color { r: 0.75, g: 0.75, b: 0.78, a: 1.0 };
-        let dark = Color { r: 0.48, g: 0.48, b: 0.52, a: 1.0 };
-        let cell_size = 6.0;
-        let cols = (rect.width / cell_size).ceil() as i32;
-        let rows = (rect.height / cell_size).ceil() as i32;
-        let mut vertices = Vec::with_capacity((cols * rows).max(0) as usize * 6);
-        for row in 0..rows {
-            for col in 0..cols {
-                let x = rect.x + col as f32 * cell_size;
-                let y = rect.y + row as f32 * cell_size;
-                let cell = Rect::new(
-                    x,
-                    y,
-                    (rect.x + rect.width - x).min(cell_size),
-                    (rect.y + rect.height - y).min(cell_size),
-                );
-                let color = if (row + col) % 2 == 0 { light } else { dark };
-                push_rect_triangles(&mut vertices, cell, color);
-            }
-        }
-        ctx.encoder.draw_colored_triangles_in_rect(&vertices, rect, 7.0);
-    }
 }
 
 impl Widget for ColorPickerTrigger {
@@ -1767,7 +1703,7 @@ impl Widget for ColorPickerTrigger {
             soft_border(tokens.border),
             spacing.radius_sm,
         );
-        self.paint_trigger_checkerboard(ctx, color_rect);
+        paint_checkerboard(ctx, color_rect, 6.0, 7.0);
         ctx.encoder.draw_rect(color_rect, self.color(), spacing.radius_sm);
         if !self.enabled {
             ctx.encoder.draw_rect(
