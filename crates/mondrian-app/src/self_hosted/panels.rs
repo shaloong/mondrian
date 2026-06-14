@@ -32,15 +32,17 @@ use crate::app::ui_actions::{
     app_shell_import_media_dialog_action, app_shell_new_project_dialog_action,
     app_shell_open_project_dialog_action, app_shell_save_project_as_dialog_action,
     assets_prepare_drag_action, effects_add_to_clip_action, inspector_remove_effect_action,
-    inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
-    inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
-    inspector_set_effect_enabled_action, timeline_move_clip_action, timeline_seek_action,
-    timeline_select_clip_action, timeline_trim_clip_action, AssetsPrepareDragPayload,
-    EffectsAddToClipPayload, InspectorClipRefPayload, InspectorClipTransformField,
-    InspectorRemoveEffectPayload, InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
-    InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
-    InspectorSetEffectEnabledPayload, TimelineMoveClipPayload, TimelineSelectClipPayload,
-    TimelineTrimClipPayload, TimelineTrimPayloadEdge,
+    inspector_set_clip_curve_action, inspector_set_clip_enabled_action,
+    inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
+    inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
+    timeline_move_clip_action, timeline_seek_action, timeline_select_clip_action,
+    timeline_trim_clip_action, AssetsPrepareDragPayload, EffectsAddToClipPayload,
+    InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
+    InspectorRemoveEffectPayload, InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
+    InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+    InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
+    TimelineMoveClipPayload, TimelineSelectClipPayload, TimelineTrimClipPayload,
+    TimelineTrimPayloadEdge,
 };
 use crate::app::{AppState, SelectedClipRef};
 
@@ -1162,7 +1164,7 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
     tint.picker_mut().set_area_mode(model.tint_area_mode);
     let curve = CurveEditor::with_points(model.curve_points.clone())
         .enabled(has_target)
-        .on_change(inspector_curve_action);
+        .on_change(move |points| inspector_curve_action(selected_clip, points));
     let mut panel = PropertyPanel::new("Inspector").with_subtitle("Selected clip").with_section(
         PropertySection::new("Clip Style")
             .with_row(PropertyRow::new(
@@ -1416,16 +1418,22 @@ fn inspector_remove_effect_row_action(
     legacy_inspector_action(format!("effect.{effect_id}.remove"))
 }
 
-fn inspector_curve_action(points: &[CurvePoint]) -> Action {
-    let mut name = String::from("curve");
-    for point in points {
-        name.push_str(&format!(":{:.3},{:.3}", point.x, point.y));
+fn inspector_curve_action(selection: Option<SelectedClipRef>, points: &[CurvePoint]) -> Action {
+    if let Some(selection) = selection {
+        let points = points
+            .iter()
+            .filter(|point| point.x.is_finite() && point.y.is_finite())
+            .map(|point| InspectorCurvePointPayload {
+                x: point.x.clamp(0.0, 1.0),
+                y: point.y.clamp(0.0, 1.0),
+            })
+            .collect();
+        return inspector_set_clip_curve_action(InspectorSetClipCurvePayload {
+            clip: inspector_clip_payload(selection),
+            points,
+        });
     }
-    Action::Custom {
-        namespace: "ui.inspector".into(),
-        name,
-        payload: serde_json::Value::Null,
-    }
+    legacy_inspector_action("curve:no-selection".into())
 }
 
 fn inspector_clip_payload(selection: SelectedClipRef) -> InspectorClipRefPayload {
@@ -1449,7 +1457,8 @@ mod tests {
     use super::*;
     use crate::app::ui_actions::{
         APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
-        APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
+        APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_SAVE_PROJECT_AS_DIALOG, INSPECTOR_NAMESPACE,
+        INSPECTOR_SET_CLIP_CURVE,
     };
     use mondrian_core::automation::{PropertyHost, PropertyMutation, PropertyValue};
     use mondrian_core::types::{AssetId, TimeCode};
@@ -1806,6 +1815,41 @@ mod tests {
             model.tracks[0].clips[0].color.map(|c| c.to_rgba8()),
             Some(color.to_rgba8())
         );
+    }
+
+    #[test]
+    fn inspector_curve_action_uses_typed_payload_for_selected_clip() {
+        let selection = SelectedClipRef {
+            track_id: TrackId::new(),
+            is_video_track: true,
+            clip_id: ClipId::new(),
+        };
+        let action = inspector_curve_action(
+            Some(selection),
+            &[
+                CurvePoint::new(-0.2, 0.25),
+                CurvePoint::new(0.5, f32::NAN),
+                CurvePoint::new(1.2, 0.75),
+            ],
+        );
+
+        match action {
+            Action::Custom { namespace, name, payload } => {
+                assert_eq!(namespace, INSPECTOR_NAMESPACE);
+                assert_eq!(name, INSPECTOR_SET_CLIP_CURVE);
+                let payload: InspectorSetClipCurvePayload =
+                    serde_json::from_value(payload).expect("curve payload");
+                assert_eq!(payload.clip.clip_id, selection.clip_id);
+                assert_eq!(
+                    payload.points,
+                    vec![
+                        InspectorCurvePointPayload { x: 0.0, y: 0.25 },
+                        InspectorCurvePointPayload { x: 1.0, y: 0.75 },
+                    ]
+                );
+            }
+            other => panic!("expected inspector curve action, got {other:?}"),
+        }
     }
 
     fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {

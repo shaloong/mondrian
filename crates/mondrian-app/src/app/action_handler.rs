@@ -11,12 +11,13 @@ use crate::app::timeline_editing::{
 };
 use crate::app::ui_actions::{
     AssetsPrepareDragPayload, EffectsAddToClipPayload, InspectorClipTransformField,
-    InspectorRemoveEffectPayload, InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
-    InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
-    InspectorSetEffectEnabledPayload, ProjectCreateWithSettingsPayload, TimelineMoveClipPayload,
-    TimelineSeekPayload, TimelineSelectClipPayload, TimelineTrimClipPayload,
-    TimelineTrimPayloadEdge, ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP,
-    EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT, INSPECTOR_SET_CLIP_ENABLED,
+    InspectorRemoveEffectPayload, InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
+    InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+    InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
+    ProjectCreateWithSettingsPayload, TimelineMoveClipPayload, TimelineSeekPayload,
+    TimelineSelectClipPayload, TimelineTrimClipPayload, TimelineTrimPayloadEdge, ASSETS_NAMESPACE,
+    ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE,
+    INSPECTOR_REMOVE_EFFECT, INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_CLIP_ENABLED,
     INSPECTOR_SET_CLIP_OPACITY, INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD,
     INSPECTOR_SET_EFFECT_ENABLED, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
     TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_SEEK, TIMELINE_SELECT_CLIP,
@@ -702,6 +703,14 @@ impl AppState {
                     payload.value,
                 )
             }
+            INSPECTOR_SET_CLIP_CURVE => {
+                let payload = parse_ui_payload::<InspectorSetClipCurvePayload>(
+                    "inspector_ui_action",
+                    name,
+                    payload,
+                )?;
+                self.set_clip_curve_from_ui(payload)
+            }
             INSPECTOR_SET_EFFECT_ENABLED => {
                 let payload = parse_ui_payload::<InspectorSetEffectEnabledPayload>(
                     "inspector_ui_action",
@@ -1006,6 +1015,38 @@ impl AppState {
         }
         Ok(())
     }
+
+    fn set_clip_curve_from_ui(&mut self, payload: InspectorSetClipCurvePayload) -> Result<()> {
+        if payload.points.len() < 2 {
+            return Err(MondrianError::WorkflowStepFailed {
+                step_id: "inspector_set_clip_curve".to_string(),
+                reason: "curve requires at least two points".to_string(),
+            });
+        }
+        if payload.points.iter().any(|point| !point.x.is_finite() || !point.y.is_finite()) {
+            return Err(MondrianError::WorkflowStepFailed {
+                step_id: "inspector_set_clip_curve".to_string(),
+                reason: "curve points must be finite".to_string(),
+            });
+        }
+        let Some(seq) = self.sequence.as_ref() else {
+            return Err(missing_sequence_error("inspector_set_clip_curve"));
+        };
+        if !clip_exists(seq, payload.clip.clip_id) {
+            return Err(missing_clip_error(
+                "inspector_set_clip_curve",
+                payload.clip.clip_id,
+            ));
+        }
+        self.set_status_hint(
+            format!(
+                "曲线编辑已接收：{} 个点（动画曲线落点待接入）",
+                payload.points.len()
+            ),
+            false,
+        );
+        Ok(())
+    }
 }
 
 fn source_trim_target_frame(clip: &Clip, edge: TrimEdge, source_time: TimeCode) -> Result<i64> {
@@ -1110,12 +1151,13 @@ mod tests {
     use super::*;
     use crate::app::ui_actions::{
         assets_prepare_drag_action, effects_add_to_clip_action, inspector_remove_effect_action,
-        inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
-        inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
-        inspector_set_effect_enabled_action, project_create_with_settings_action,
-        timeline_move_clip_action, timeline_seek_action, timeline_select_clip_action,
-        timeline_trim_clip_action, AssetsPrepareDragPayload, EffectsAddToClipPayload,
-        InspectorClipRefPayload, InspectorClipTransformField, InspectorRemoveEffectPayload,
+        inspector_set_clip_curve_action, inspector_set_clip_enabled_action,
+        inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
+        inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
+        project_create_with_settings_action, timeline_move_clip_action, timeline_seek_action,
+        timeline_select_clip_action, timeline_trim_clip_action, AssetsPrepareDragPayload,
+        EffectsAddToClipPayload, InspectorClipRefPayload, InspectorClipTransformField,
+        InspectorCurvePointPayload, InspectorRemoveEffectPayload, InspectorSetClipCurvePayload,
         InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
         InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
         InspectorSetEffectEnabledPayload, ProjectCreateWithSettingsPayload,
@@ -1883,6 +1925,29 @@ mod tests {
             .expect("rotation value");
         assert!((rotation + 12.5).abs() < f32::EPSILON);
         assert!(state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_inspector_ui_accepts_typed_curve_payload_without_fake_undo() {
+        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+
+        state
+            .dispatch_action(inspector_set_clip_curve_action(
+                InspectorSetClipCurvePayload {
+                    clip: inspector_clip_payload(track_id, clip_id),
+                    points: vec![
+                        InspectorCurvePointPayload { x: 0.0, y: 0.0 },
+                        InspectorCurvePointPayload { x: 0.45, y: 0.72 },
+                        InspectorCurvePointPayload { x: 1.0, y: 1.0 },
+                    ],
+                },
+            ))
+            .expect("dispatch curve");
+
+        assert!(!state.can_undo_action());
+        let (message, is_error) = state.status_hint.as_ref().expect("status hint");
+        assert!(!*is_error);
+        assert!(message.contains("3 个点"));
     }
 
     #[test]
