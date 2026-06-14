@@ -81,6 +81,11 @@ impl ViewerSurface {
         self
     }
 
+    /// Mark the surface as unavailable.
+    pub fn disabled(self) -> Self {
+        self.enabled(false)
+    }
+
     /// Whether the surface represents an available preview target.
     pub fn is_enabled(&self) -> bool {
         self.enabled
@@ -368,5 +373,12 @@ mod tests {
         assert!(encoder.texts.iter().any(|text| text.contains("F42")));
         assert!(encoder.lines >= 8);
         assert!(encoder.rects.len() >= 4);
+    }
+
+    #[test]
+    fn disabled_builder_marks_surface_unavailable() {
+        let viewer = ViewerSurface::new("Offline", 1920, 1080).disabled();
+
+        assert!(!viewer.is_enabled());
     }
 }
