@@ -193,7 +193,6 @@ mod tests {
         preferred: Size,
         bounds: Rect,
         handled: Rc<Cell<bool>>,
-        overlay_hit: bool,
     }
 
     impl ProbeWidget {
@@ -203,13 +202,7 @@ mod tests {
                 preferred,
                 bounds: Rect::ZERO,
                 handled,
-                overlay_hit: false,
             }
-        }
-
-        fn with_overlay_hit(mut self) -> Self {
-            self.overlay_hit = true;
-            self
         }
     }
 
@@ -240,7 +233,7 @@ mod tests {
         }
 
         fn hit_test(&self, point: Point) -> bool {
-            self.bounds.contains(point) || self.overlay_hit
+            self.bounds.contains(point)
         }
     }
 
@@ -342,16 +335,6 @@ mod tests {
 
         assert!(!first.get());
         assert!(second.get());
-    }
-
-    #[test]
-    fn flex_container_hit_test_includes_child_overlay() {
-        let handled = Rc::new(Cell::new(false));
-        let container = FlexContainer::column(vec![FlexChild::fixed(Box::new(
-            ProbeWidget::new(Size::new(20.0, 10.0), handled).with_overlay_hit(),
-        ))]);
-
-        assert!(container.hit_test(Point::new(900.0, 900.0)));
     }
 
     #[test]

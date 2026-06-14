@@ -74,7 +74,6 @@ impl Widget for PanelSlot {
 
     fn hit_test(&self, point: Point) -> bool {
         self.bounds.contains(point)
-            || self.content.as_ref().is_some_and(|content| content.hit_test(point))
     }
 
     fn children(&self) -> &[Box<dyn Widget>] {
@@ -104,16 +103,14 @@ mod tests {
     struct OverlayProbe {
         id: WidgetId,
         bounds: Rect,
-        overlay_hit: bool,
         overlay_painted: Rc<Cell<bool>>,
     }
 
     impl OverlayProbe {
-        fn new(overlay_hit: bool, overlay_painted: Rc<Cell<bool>>) -> Self {
+        fn new(overlay_painted: Rc<Cell<bool>>) -> Self {
             Self {
                 id: WidgetId::new(),
                 bounds: Rect::ZERO,
-                overlay_hit,
                 overlay_painted,
             }
         }
@@ -143,7 +140,7 @@ mod tests {
         }
 
         fn hit_test(&self, point: Point) -> bool {
-            self.bounds.contains(point) || self.overlay_hit
+            self.bounds.contains(point)
         }
     }
 
@@ -167,23 +164,11 @@ mod tests {
     }
 
     #[test]
-    fn panel_slot_hit_test_includes_content_overlay() {
-        let overlay_painted = Rc::new(Cell::new(false));
-        let mut slot = PanelSlot::new(
-            PanelKind::Inspector,
-            Box::new(OverlayProbe::new(true, overlay_painted)),
-        );
-        slot.layout(Rect::new(0.0, 0.0, 100.0, 100.0));
-
-        assert!(slot.hit_test(Point::new(500.0, 500.0)));
-    }
-
-    #[test]
     fn panel_slot_paint_overlay_forwards_to_content() {
         let overlay_painted = Rc::new(Cell::new(false));
         let slot = PanelSlot::new(
             PanelKind::Inspector,
-            Box::new(OverlayProbe::new(false, Rc::clone(&overlay_painted))),
+            Box::new(OverlayProbe::new(Rc::clone(&overlay_painted))),
         );
         let mut encoder = NoopEncoder;
         let theme = ThemePreset::Dark.build();

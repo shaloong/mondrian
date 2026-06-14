@@ -108,6 +108,12 @@ impl ScrollView {
             .is_some_and(|child| child.hit_test(self.point_to_child(point)))
     }
 
+    fn child_overlay_hit_test(&self, point: Point) -> bool {
+        self.child
+            .as_ref()
+            .is_some_and(|child| child.overlay_hit_test(self.point_to_child(point)))
+    }
+
     fn vertical_scrollbar_track_rect(&self) -> Rect {
         Rect::new(
             self.bounds.x + self.bounds.width - self.scrollbar_width + 2.0,
@@ -246,7 +252,7 @@ impl Widget for ScrollView {
             }
             UiEvent::MouseWheel { delta, position, .. } => {
                 if !self.bounds.contains(*position) {
-                    if self.child_hit_test(*position) {
+                    if self.child_hit_test(*position) || self.child_overlay_hit_test(*position) {
                         let mut offset_event = event.clone();
                         self.translate_event_to_child(&mut offset_event);
                         if let Some(ref mut child) = self.child {
@@ -324,8 +330,12 @@ impl Widget for ScrollView {
         }
     }
 
+    fn overlay_hit_test(&self, point: Point) -> bool {
+        self.child_overlay_hit_test(point)
+    }
+
     fn hit_test(&self, point: Point) -> bool {
-        self.bounds.contains(point) || self.child_hit_test(point)
+        self.bounds.contains(point)
     }
 
     fn children(&self) -> &[Box<dyn Widget>] {
@@ -440,9 +450,13 @@ mod tests {
             *self.overlay_painted.borrow_mut() = true;
         }
 
-        fn hit_test(&self, point: Point) -> bool {
+        fn overlay_hit_test(&self, point: Point) -> bool {
             *self.last_hit.borrow_mut() = Some(point);
             true
+        }
+
+        fn hit_test(&self, _point: Point) -> bool {
+            false
         }
     }
 
@@ -645,7 +659,7 @@ mod tests {
     }
 
     #[test]
-    fn scroll_view_hit_test_translates_overlay_points_to_child_space() {
+    fn scroll_view_overlay_hit_test_translates_overlay_points_to_child_space() {
         let last_hit = Rc::new(RefCell::new(None));
         let last_wheel = Rc::new(RefCell::new(None));
         let overlay_painted = Rc::new(RefCell::new(false));
@@ -659,7 +673,8 @@ mod tests {
         sv.layout(Rect::new(10.0, 20.0, 100.0, 100.0));
         sv.scroll_to_bottom();
 
-        assert!(sv.hit_test(Point::new(250.0, 300.0)));
+        assert!(!sv.hit_test(Point::new(250.0, 300.0)));
+        assert!(sv.overlay_hit_test(Point::new(250.0, 300.0)));
         assert_eq!(*last_hit.borrow(), Some(Point::new(240.0, 580.0)));
     }
 

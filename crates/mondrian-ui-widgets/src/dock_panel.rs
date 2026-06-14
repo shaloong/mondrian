@@ -121,7 +121,7 @@ impl Widget for DockPanel {
     }
 
     fn hit_test(&self, point: Point) -> bool {
-        self.bounds.contains(point) || self.content.hit_test(point)
+        self.bounds.contains(point)
     }
 
     fn child_count(&self) -> usize {
@@ -159,21 +159,15 @@ mod tests {
     struct ProbeContent {
         id: WidgetId,
         bounds: Rect,
-        overlay_hit: bool,
         overlay_painted: Rc<Cell<bool>>,
         laid_out: Rc<Cell<bool>>,
     }
 
     impl ProbeContent {
-        fn new(
-            overlay_hit: bool,
-            overlay_painted: Rc<Cell<bool>>,
-            laid_out: Rc<Cell<bool>>,
-        ) -> Self {
+        fn new(overlay_painted: Rc<Cell<bool>>, laid_out: Rc<Cell<bool>>) -> Self {
             Self {
                 id: WidgetId::new(),
                 bounds: Rect::ZERO,
-                overlay_hit,
                 overlay_painted,
                 laid_out,
             }
@@ -205,7 +199,7 @@ mod tests {
         }
 
         fn hit_test(&self, point: Point) -> bool {
-            self.bounds.contains(point) || self.overlay_hit
+            self.bounds.contains(point)
         }
     }
 
@@ -245,7 +239,6 @@ mod tests {
             move |_kind, _active| {
                 build_count.set(build_count.get() + 1);
                 Box::new(ProbeContent::new(
-                    false,
                     Rc::new(Cell::new(false)),
                     Rc::clone(&laid_out),
                 ))
@@ -275,27 +268,12 @@ mod tests {
     }
 
     #[test]
-    fn dock_panel_hit_test_includes_content_overlay() {
-        let mut panel = DockPanel::new(PanelKind::Inspector, tabs(), |_kind, _active| {
-            Box::new(ProbeContent::new(
-                true,
-                Rc::new(Cell::new(false)),
-                Rc::new(Cell::new(false)),
-            ))
-        });
-        panel.layout(Rect::new(0.0, 0.0, 200.0, 120.0));
-
-        assert!(panel.hit_test(Point::new(900.0, 900.0)));
-    }
-
-    #[test]
     fn dock_panel_paint_overlay_forwards_to_content() {
         let overlay_painted = Rc::new(Cell::new(false));
         let panel = DockPanel::new(PanelKind::Inspector, tabs(), {
             let overlay_painted = Rc::clone(&overlay_painted);
             move |_kind, _active| {
                 Box::new(ProbeContent::new(
-                    false,
                     Rc::clone(&overlay_painted),
                     Rc::new(Cell::new(false)),
                 ))

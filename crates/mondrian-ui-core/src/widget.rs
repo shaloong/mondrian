@@ -259,14 +259,23 @@ pub trait Widget {
     ///
     /// Popover、dropdown、context menu、tooltip 等不应被后绘制的普通
     /// 内容压住的 UI chrome 应在这里绘制。需要外部点击关闭的顶层弹层
-    /// 在打开时应让 `hit_test()` 覆盖整个窗口，再在 `event()` 内区分
-    /// 内部/外部命中并关闭或处理事件。
+    /// 在打开时应让 `overlay_hit_test()` 覆盖窗口，再在 `event()` 内
+    /// 区分内部/外部命中并关闭或处理事件。
     fn paint_overlay(&self, ctx: &mut PaintContext) {
         for index in 0..self.child_count() {
             if let Some(child) = self.child(index) {
                 child.paint_overlay(ctx);
             }
         }
+    }
+
+    /// 判断点是否命中此 Widget 拥有的顶层覆盖物。
+    ///
+    /// 这个命中层和 `paint_overlay()` 对齐，优先于普通内容命中。打开的
+    /// dropdown、context menu、popover、取色器弹窗等需要覆盖 sibling
+    /// panel 普通内容的组件应重写此方法。默认返回 `false`。
+    fn overlay_hit_test(&self, _point: Point) -> bool {
+        false
     }
 
     /// 判断点是否命中此 Widget（用于 HitTest）

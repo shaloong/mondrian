@@ -217,8 +217,12 @@ impl Widget for ContextMenu {
         }
     }
 
-    fn hit_test(&self, _p: Point) -> bool {
+    fn overlay_hit_test(&self, _point: Point) -> bool {
         self.visible
+    }
+
+    fn hit_test(&self, point: Point) -> bool {
+        self.visible && self.bounds_rect().contains(point)
     }
 }
 

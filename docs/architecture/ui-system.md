@@ -375,10 +375,12 @@ own line-breaking logic.
 
 Dropdowns, popovers, context menus, tooltips, and shell affordances paint in
 the overlay pass after normal widget content. A widget with an open top-layer
-popup that needs outside-click dismissal must make `hit_test()` catch the
-window while open, then decide in `event()` whether the pointer is inside the
-trigger, inside the popup, or outside. Dragging popup internals should use
-pointer capture so move/up events remain routed to the owning widget.
+popup that needs outside-click dismissal must expose that boundary through
+`overlay_hit_test()`, not by widening its normal `hit_test()` bounds. The event
+router resolves overlay hits before normal content hits, so a popup painted over
+a sibling panel also receives pointer and wheel events over that sibling.
+Dragging popup internals should use pointer capture so move/up events remain
+routed to the owning widget.
 
 ## Scroll Views
 

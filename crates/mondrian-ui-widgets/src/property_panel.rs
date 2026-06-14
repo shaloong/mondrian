@@ -371,22 +371,11 @@ mod tests {
         id: WidgetId,
         bounds: Rect,
         handled: Rc<Cell<bool>>,
-        overlay_hit: bool,
     }
 
     impl ProbeWidget {
         fn new(handled: Rc<Cell<bool>>) -> Self {
-            Self {
-                id: WidgetId::new(),
-                bounds: Rect::ZERO,
-                handled,
-                overlay_hit: false,
-            }
-        }
-
-        fn with_overlay_hit(mut self) -> Self {
-            self.overlay_hit = true;
-            self
+            Self { id: WidgetId::new(), bounds: Rect::ZERO, handled }
         }
     }
 
@@ -415,7 +404,7 @@ mod tests {
         fn paint(&self, _ctx: &mut PaintContext) {}
 
         fn hit_test(&self, point: Point) -> bool {
-            self.bounds.contains(point) || self.overlay_hit
+            self.bounds.contains(point)
         }
     }
 
@@ -515,19 +504,6 @@ mod tests {
 
         assert_eq!(result, EventResult::Handled);
         assert!(handled.get());
-    }
-
-    #[test]
-    fn property_panel_hit_test_includes_open_child_overlay() {
-        let handled = Rc::new(Cell::new(false));
-        let panel = PropertyPanel::new("Inspector").with_section(
-            PropertySection::new("Clip").with_row(PropertyRow::new(
-                "Tint",
-                Box::new(ProbeWidget::new(handled).with_overlay_hit()),
-            )),
-        );
-
-        assert!(panel.hit_test(Point::new(900.0, 900.0)));
     }
 
     #[test]

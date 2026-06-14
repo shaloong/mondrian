@@ -652,17 +652,12 @@ impl Widget for Dropdown {
         self.paint_open_menu(ctx);
     }
 
+    fn overlay_hit_test(&self, _point: Point) -> bool {
+        self.enabled && self.open
+    }
+
     fn hit_test(&self, point: Point) -> bool {
-        if !self.enabled {
-            return self.bounds.contains(point);
-        }
-        if self.open {
-            return true;
-        }
-        if self.bounds.contains(point) {
-            return true;
-        }
-        false
+        self.bounds.contains(point)
     }
 
     fn can_focus(&self) -> bool {
@@ -1118,16 +1113,18 @@ mod tests {
     }
 
     #[test]
-    fn dropdown_hit_test_catches_outside_clicks_while_open() {
+    fn dropdown_overlay_hit_test_catches_outside_clicks_while_open() {
         let mut d = Dropdown::new(
             "File",
             vec![MenuItem::new("Open", Action::OpenProject("".into()))],
         );
         d.layout(Rect::new(0.0, 0.0, 120.0, 28.0));
         assert!(!d.hit_test(Point::new(300.0, 300.0)));
+        assert!(!d.overlay_hit_test(Point::new(300.0, 300.0)));
 
         d.open = true;
-        assert!(d.hit_test(Point::new(300.0, 300.0)));
+        assert!(!d.hit_test(Point::new(300.0, 300.0)));
+        assert!(d.overlay_hit_test(Point::new(300.0, 300.0)));
     }
 
     #[test]

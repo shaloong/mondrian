@@ -1380,9 +1380,12 @@ impl Widget for ColorPicker {
         }
     }
 
+    fn overlay_hit_test(&self, _point: Point) -> bool {
+        self.enabled && self.mode_menu_open
+    }
+
     fn hit_test(&self, point: Point) -> bool {
         self.bounds.contains(point)
-            || (self.mode_menu_open && self.mode_menu_rect().contains(point))
     }
 
     fn can_focus(&self) -> bool {
@@ -1720,10 +1723,11 @@ impl Widget for ColorPickerTrigger {
         }
     }
 
+    fn overlay_hit_test(&self, _point: Point) -> bool {
+        self.enabled && (self.open || self.picker.is_eyedropper_active())
+    }
+
     fn hit_test(&self, point: Point) -> bool {
-        if self.open || self.picker.is_eyedropper_active() {
-            return true;
-        }
         self.bounds.contains(point)
     }
 }
@@ -2623,7 +2627,8 @@ mod tests {
         );
 
         assert!(trigger.is_open());
-        assert!(trigger.hit_test(outside));
+        assert!(!trigger.hit_test(outside));
+        assert!(trigger.overlay_hit_test(outside));
 
         trigger.event(
             &UiEvent::MouseDown {
