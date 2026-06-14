@@ -13,7 +13,7 @@ use std::cell::Cell;
 use std::cell::RefCell;
 use std::sync::Arc;
 
-use mondrian_app::self_hosted::runtime::WinitUiRuntime;
+use mondrian_app::self_hosted::runtime::{winit_scroll_delta_to_ui_delta, WinitUiRuntime};
 use mondrian_core::Color;
 use mondrian_editor_state::Action;
 use mondrian_ui_core::tooltip::TooltipState;
@@ -1356,16 +1356,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             Event::WindowEvent { event: WindowEvent::MouseWheel { delta, .. }, .. } => {
-                let scroll_delta = match delta {
-                    winit::event::MouseScrollDelta::LineDelta(_, y) => -y * 20.0,
-                    winit::event::MouseScrollDelta::PixelDelta(pos) => -(pos.y as f32),
-                };
                 let _ = route_demo_window_event(
                     &window,
                     &mut router,
                     &mut root,
                     UiEvent::MouseWheel {
-                        delta: scroll_delta,
+                        delta: winit_scroll_delta_to_ui_delta(delta),
                         position: last_cursor,
                         modifiers: Modifiers::none(),
                     },

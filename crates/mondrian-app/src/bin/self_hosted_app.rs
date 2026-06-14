@@ -9,7 +9,7 @@ use std::sync::Arc;
 use mondrian_app::app::AppState;
 use mondrian_app::self_hosted::action_queue::PendingUiActions;
 use mondrian_app::self_hosted::host::SelfHostedUiHost;
-use mondrian_app::self_hosted::runtime::WinitUiRuntime;
+use mondrian_app::self_hosted::runtime::{winit_scroll_delta_to_ui_delta, WinitUiRuntime};
 use mondrian_panel_console::tracing_layer::ConsoleLogLayer;
 use mondrian_platform::SystemPlatformService;
 use mondrian_ui_core::types::*;
@@ -266,16 +266,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             Event::WindowEvent { event: WindowEvent::MouseWheel { delta, .. }, .. } => {
-                let dy = match delta {
-                    winit::event::MouseScrollDelta::LineDelta(_, y) => -y * 20.0,
-                    winit::event::MouseScrollDelta::PixelDelta(pos) => -(pos.y as f32),
-                };
                 let _ = ui_runtime.route_window_event(
                     &window,
                     &mut router,
                     host.root_mut(),
                     UiEvent::MouseWheel {
-                        delta: dy,
+                        delta: winit_scroll_delta_to_ui_delta(delta),
                         position: last_cursor,
                         modifiers: Modifiers::none(),
                     },

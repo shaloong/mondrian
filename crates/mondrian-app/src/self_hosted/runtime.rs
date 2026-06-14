@@ -17,7 +17,7 @@ use mondrian_ui_core::Widget;
 use mondrian_ui_events::EventRouter;
 use mondrian_ui_theme::Theme;
 use mondrian_ui_tooltip::TooltipWidget;
-use winit::event::{ElementState, Ime, KeyEvent};
+use winit::event::{ElementState, Ime, KeyEvent, MouseScrollDelta};
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::keyboard::{Key, NamedKey};
 
@@ -384,6 +384,18 @@ pub fn winit_key_to_keycode(key: &Key) -> Option<KeyCode> {
     }
 }
 
+/// Convert a winit scroll delta into Mondrian's UI scroll-space delta.
+///
+/// Positive returned values move scroll offsets downward/rightward. Winit
+/// reports positive line or pixel deltas for wheel-up gestures on common PC
+/// input devices, so the sign is inverted once at the shell boundary.
+pub fn winit_scroll_delta_to_ui_delta(delta: MouseScrollDelta) -> f32 {
+    match delta {
+        MouseScrollDelta::LineDelta(_, y) => -y * 20.0,
+        MouseScrollDelta::PixelDelta(position) => -(position.y as f32),
+    }
+}
+
 fn update_modifiers_from_key(key: &Key, pressed: bool, modifiers: &mut Modifiers) {
     match key {
         Key::Named(NamedKey::Control) => modifiers.ctrl = pressed,
@@ -517,5 +529,23 @@ mod tests {
 
         update_modifiers_from_key(&Key::Named(NamedKey::Control), false, &mut modifiers);
         assert_eq!(modifiers, Modifiers { shift: true, ..Modifiers::none() });
+    }
+
+    #[test]
+    fn scroll_delta_conversion_uses_pc_scroll_direction() {
+        assert_eq!(
+            winit_scroll_delta_to_ui_delta(MouseScrollDelta::LineDelta(0.0, 1.0)),
+            -20.0
+        );
+        assert_eq!(
+            winit_scroll_delta_to_ui_delta(MouseScrollDelta::LineDelta(0.0, -2.0)),
+            40.0
+        );
+        assert_eq!(
+            winit_scroll_delta_to_ui_delta(MouseScrollDelta::PixelDelta(
+                winit::dpi::PhysicalPosition::new(0.0, 12.5)
+            )),
+            -12.5
+        );
     }
 }
