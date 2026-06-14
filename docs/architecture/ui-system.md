@@ -286,8 +286,9 @@ menus. Closed dropdown measurement is based on the trigger label only so long
 popup choices do not widen compact inspector rows; the popup itself expands to
 the longest row label. Context menus use the same estimated text-width fallback
 to avoid clipping long commands while staying independent from renderer state.
-Popup elevation comes from theme shadow tokens rather than per-widget hardcoded
-black alpha values, so dark/light themes can tune perceived depth centrally.
+Popup elevation goes through the widget crate's shared paint helper and theme
+shadow tokens rather than per-widget hardcoded black alpha values, so dark/light
+themes can tune perceived depth centrally.
 Dropdown trigger labels are clipped to the trigger text lane, reserving the
 arrow area when enabled, so constrained form rows do not let long labels paint
 over affordances or neighboring controls.

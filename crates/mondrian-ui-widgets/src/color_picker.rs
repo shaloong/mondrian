@@ -14,6 +14,7 @@ use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
 use crate::form_layout::{FormLayout, FormRowOptions, FormRowRects};
 use crate::menu::{paint_menu_popup_chrome, paint_menu_row, paint_menu_trigger, MenuRowPaint};
+use crate::paint::paint_shadow;
 use crate::text_input::TextInput;
 
 const MODES: [ColorPickerMode; 5] = [
@@ -1464,15 +1465,6 @@ fn soft_border(color: Color) -> Color {
     color_with_alpha(color, 0.72)
 }
 
-fn paint_shadow(ctx: &mut PaintContext, bounds: Rect, radius: f32) {
-    let shadow = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.14 };
-    ctx.encoder.draw_rect(
-        Rect::new(bounds.x, bounds.y + 3.0, bounds.width, bounds.height),
-        shadow,
-        radius,
-    );
-}
-
 fn push_rect_triangles(vertices: &mut Vec<(Point, Color)>, rect: Rect, color: Color) {
     let p0 = Point::new(rect.x, rect.y);
     let p1 = Point::new(rect.x + rect.width, rect.y);
@@ -1823,6 +1815,7 @@ impl Widget for ColorPickerTrigger {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::paint::{shadow_color, shadow_rect};
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_ui_core::widget::DrawCommandEncoder;
     use mondrian_ui_theme::ThemePreset;
@@ -1831,6 +1824,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingEncoder {
         rects: Vec<Rect>,
+        rect_colors: Vec<Color>,
         gradient_rects: Vec<Rect>,
         colored_triangle_vertices: usize,
         texts: Vec<String>,
@@ -1841,8 +1835,9 @@ mod tests {
 
         fn pop_clip(&mut self) {}
 
-        fn draw_rect(&mut self, bounds: Rect, _color: Color, _corner_radius: f32) {
+        fn draw_rect(&mut self, bounds: Rect, color: Color, _corner_radius: f32) {
             self.rects.push(bounds);
+            self.rect_colors.push(color);
         }
 
         fn draw_gradient_rect(&mut self, bounds: Rect, _colors: [Color; 4], _corner_radius: f32) {
@@ -2718,6 +2713,26 @@ mod tests {
         assert!(encoder.texts.iter().any(|text| text == "RGB"));
         assert!(encoder.texts.iter().any(|text| text == "R"));
         assert!(encoder.texts.iter().any(|text| text == "A"));
+    }
+
+    #[test]
+    fn paint_uses_theme_shadow_token_for_picker_chrome() {
+        let mut picker = ColorPicker::new(Color::from_rgba8(51, 102, 153, 255));
+        let bounds = Rect::new(12.0, 18.0, 280.0, 302.0);
+        picker.layout(bounds);
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 400.0, 400.0),
+        };
+
+        picker.paint(&mut ctx);
+
+        let shadow = &theme.spacing.shadow_md;
+        assert_eq!(encoder.rects[0], shadow_rect(bounds, shadow));
+        assert_eq!(encoder.rect_colors[0], shadow_color(shadow));
     }
 
     #[test]

@@ -16,6 +16,7 @@ pub mod form_layout;
 pub mod label;
 pub mod list;
 pub mod menu;
+mod paint;
 pub mod panel_list;
 pub mod panel_slot;
 pub mod property_panel;
