@@ -1133,63 +1133,32 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
         .with_playhead(model.playhead_frame)
         .on_clip_select({
             let action_model = action_model.clone();
-            move |clip_ref, clip| {
+            move |clip_ref, _clip| {
                 action_model
                     .clip_identity(clip_ref)
                     .map(timeline_select_clip_action)
-                    .unwrap_or_else(|| {
-                        timeline_clip_action("timeline.select", clip_ref, &clip.label)
-                    })
+                    .unwrap_or(Action::NoOp)
             }
         })
         .on_clip_move({
             let action_model = action_model.clone();
-            move |movement, clip| {
+            move |movement, _clip| {
                 action_model
                     .move_payload(movement)
                     .map(timeline_move_clip_action)
-                    .unwrap_or_else(|| {
-                        panel_action(&format!(
-                            "timeline.move.{}.{}.track{}->track{}.{}->{}.{}",
-                            movement.clip_ref.track_index,
-                            movement.clip_ref.clip_index,
-                            movement.clip_ref.track_index,
-                            movement.new_track_index,
-                            movement.old_start_frame,
-                            movement.new_start_frame,
-                            clip.label
-                        ))
-                    })
+                    .unwrap_or(Action::NoOp)
             }
         })
         .on_clip_trim({
             let action_model = action_model.clone();
-            move |trim, clip| {
-                action_model.trim_payload(trim).map(timeline_trim_clip_action).unwrap_or_else(
-                    || {
-                        panel_action(&format!(
-                            "timeline.trim.{}.{}.{:?}.{}+{}->{}+{}.{}",
-                            trim.clip_ref.track_index,
-                            trim.clip_ref.clip_index,
-                            trim.edge,
-                            trim.old_start_frame,
-                            trim.old_duration_frames,
-                            trim.new_start_frame,
-                            trim.new_duration_frames,
-                            clip.label
-                        ))
-                    },
-                )
+            move |trim, _clip| {
+                action_model
+                    .trim_payload(trim)
+                    .map(timeline_trim_clip_action)
+                    .unwrap_or_else(|| Action::NoOp)
             }
         })
         .on_seek(timeline_seek_action)
-}
-
-fn timeline_clip_action(prefix: &str, clip_ref: TimelineClipRef, label: &str) -> Action {
-    panel_action(&format!(
-        "{prefix}.{}.{}.{}",
-        clip_ref.track_index, clip_ref.clip_index, label
-    ))
 }
 
 fn panel_action(name: &str) -> Action {
@@ -1653,6 +1622,32 @@ mod tests {
         assert_eq!(movement.clip_id, identity.clip_id);
         assert_eq!(movement.frame, 120);
         assert_eq!(movement.target_track_id, model.track_refs[2].track_id);
+    }
+
+    #[test]
+    fn timeline_model_rejects_stale_clip_refs() {
+        let model = demo_timeline_model();
+        let stale_ref = TimelineClipRef { track_index: usize::MAX, clip_index: 0 };
+
+        assert!(model.clip_identity(stale_ref).is_none());
+        assert!(model
+            .move_payload(TimelineClipMove {
+                clip_ref: stale_ref,
+                old_start_frame: 0,
+                new_start_frame: 12,
+                new_track_index: 0,
+            })
+            .is_none());
+        assert!(model
+            .trim_payload(TimelineClipTrim {
+                clip_ref: stale_ref,
+                edge: TimelineTrimEdge::In,
+                old_start_frame: 0,
+                old_duration_frames: 24,
+                new_start_frame: 4,
+                new_duration_frames: 20,
+            })
+            .is_none());
     }
 
     #[test]
