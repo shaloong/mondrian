@@ -404,7 +404,9 @@ pub fn winit_mouse_button_to_ui_button(button: WinitMouseButton) -> MouseButton 
         WinitMouseButton::Left => MouseButton::Left,
         WinitMouseButton::Right => MouseButton::Right,
         WinitMouseButton::Middle => MouseButton::Middle,
-        _ => MouseButton::Left,
+        WinitMouseButton::Back => MouseButton::Back,
+        WinitMouseButton::Forward => MouseButton::Forward,
+        WinitMouseButton::Other(code) => MouseButton::Other(code),
     }
 }
 
@@ -597,8 +599,16 @@ mod tests {
             MouseButton::Middle
         );
         assert_eq!(
+            winit_mouse_button_to_ui_button(WinitMouseButton::Back),
+            MouseButton::Back
+        );
+        assert_eq!(
+            winit_mouse_button_to_ui_button(WinitMouseButton::Forward),
+            MouseButton::Forward
+        );
+        assert_eq!(
             winit_mouse_button_to_ui_button(WinitMouseButton::Other(7)),
-            MouseButton::Left
+            MouseButton::Other(7)
         );
     }
 

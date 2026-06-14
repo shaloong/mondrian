@@ -520,6 +520,10 @@ Pointer and wheel events, including runtime-synthesized pointer events such as
 eyedropper polling, must carry the current modifier state tracked by the
 entrypoint so timeline zoom, alternate drag modes, and shifted scrolling do not
 lose keyboard context.
+Winit mouse buttons are converted losslessly at the shell boundary for the
+buttons the UI model understands: left, right, middle, back, forward, and
+opaque `Other(u16)`. Unknown buttons must not be downgraded to left click,
+otherwise side buttons can accidentally activate destructive controls.
 Shell cursor selection is also centralized in the runtime. Entrypoints provide
 the current eyedropper, splitter, and focused-text state; the runtime resolves
 priority as eyedropper sampling, splitter resize affordance, focused text

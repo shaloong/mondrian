@@ -219,6 +219,7 @@ pub enum MouseButton {
     Middle,
     Back,
     Forward,
+    Other(u16),
 }
 
 /// 修饰键
