@@ -7,6 +7,7 @@ pub mod checkbox;
 pub mod color_picker;
 pub mod context_menu;
 pub mod curve_editor;
+pub mod dialog_surface;
 pub mod dock_panel;
 pub mod dock_splitter;
 pub mod dock_tab_bar;
@@ -36,6 +37,7 @@ pub use color_picker::{
 };
 pub use context_menu::ContextMenu;
 pub use curve_editor::{CurveEditor, CurvePoint};
+pub use dialog_surface::DialogSurface;
 pub use dock_panel::DockPanel;
 pub use dock_splitter::DockSplitter;
 pub use dock_tab_bar::{DockTabBar, TabInfo};

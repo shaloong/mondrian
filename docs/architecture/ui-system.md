@@ -460,6 +460,9 @@ size, frame rate, audio sample rate, proxy generation, and preview caching.
 Shell modals are routed through `self_hosted::modal::ShellModal` and should use
 theme modal tokens such as `colors.modal_scrim`, `colors.popover`, and spacing
 radii instead of per-dialog hard-coded chrome.
+Modal card geometry and chrome should be centralized through
+`mondrian-ui-widgets::DialogSurface`; app dialogs should keep only local content
+layout and event semantics.
 Dialog and form copy should use reusable `mondrian-ui-widgets::Label`
 instances for semantic color, padding, and wrapping rather than direct
 per-dialog `draw_text` calls.

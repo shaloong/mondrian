@@ -12,7 +12,7 @@ use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, Widget};
 use mondrian_ui_widgets::menu::{Dropdown, MenuItem};
-use mondrian_ui_widgets::{Button, Checkbox, Label, TextInput};
+use mondrian_ui_widgets::{Button, Checkbox, DialogSurface, Label, TextInput};
 
 use crate::app::ui_actions::{
     app_shell_cancel_new_project_dialog_action, app_shell_confirm_new_project_dialog_action,
@@ -290,6 +290,7 @@ const AUDIO_LABEL_BASELINE_Y: f32 = 196.0;
 pub struct NewProjectDialog {
     id: WidgetId,
     draft: SelfHostedNewProjectDraft,
+    surface: DialogSurface,
     bounds: Rect,
     card: Rect,
     title_label: Label,
@@ -350,6 +351,11 @@ impl NewProjectDialog {
         Self {
             id: WidgetId::new(),
             draft,
+            surface: DialogSurface::new(
+                Size::new(CARD_MIN_WIDTH, CARD_MIN_HEIGHT),
+                Size::new(CARD_WIDTH, CARD_HEIGHT),
+            )
+            .with_content_padding(CONTENT_PADDING),
             bounds: Rect::ZERO,
             card: Rect::ZERO,
             title_label,
@@ -397,20 +403,13 @@ impl Widget for NewProjectDialog {
     }
 
     fn measure(&self, _constraint: LayoutConstraint) -> Size {
-        Size::new(CARD_WIDTH, CARD_HEIGHT)
+        self.surface.preferred_size()
     }
 
     fn layout(&mut self, bounds: Rect) {
         self.bounds = bounds;
-        let card_width = bounds.width.clamp(CARD_MIN_WIDTH, CARD_WIDTH);
-        let card_height = bounds.height.clamp(CARD_MIN_HEIGHT, CARD_HEIGHT);
-        self.card = Rect::new(
-            bounds.x + (bounds.width - card_width) * 0.5,
-            bounds.y + (bounds.height - card_height) * 0.5,
-            card_width,
-            card_height,
-        );
-        let content = self.card.inset(CONTENT_PADDING, CONTENT_PADDING);
+        self.card = self.surface.card_rect(bounds);
+        let content = self.surface.content_rect(self.card);
         self.title_label.layout(Rect::new(
             content.x,
             content.y + TITLE_BASELINE_Y,
@@ -510,7 +509,9 @@ impl Widget for NewProjectDialog {
                 (ctx.dispatch)(app_shell_confirm_new_project_dialog_action());
                 return EventResult::Handled;
             }
-            UiEvent::MouseDown { position, .. } if !self.card.contains(*position) => {
+            UiEvent::MouseDown { position, .. }
+                if self.surface.is_outside_card(self.card, *position) =>
+            {
                 return EventResult::Handled;
             }
             _ => {}
@@ -544,27 +545,7 @@ impl Widget for NewProjectDialog {
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
-        ctx.encoder.draw_rect(
-            self.bounds,
-            ctx.theme.colors.modal_scrim,
-            ctx.theme.spacing.radius_none,
-        );
-        ctx.encoder.draw_rect(
-            self.card,
-            ctx.theme.colors.popover,
-            ctx.theme.spacing.radius_md,
-        );
-        let top_left = Point::new(self.card.x, self.card.y);
-        let top_right = Point::new(self.card.x + self.card.width, self.card.y);
-        let bottom_left = Point::new(self.card.x, self.card.y + self.card.height);
-        let bottom_right = Point::new(
-            self.card.x + self.card.width,
-            self.card.y + self.card.height,
-        );
-        ctx.encoder.draw_line(top_left, top_right, 1.0, ctx.theme.colors.border);
-        ctx.encoder.draw_line(bottom_left, bottom_right, 1.0, ctx.theme.colors.border);
-        ctx.encoder.draw_line(top_left, bottom_left, 1.0, ctx.theme.colors.border);
-        ctx.encoder.draw_line(top_right, bottom_right, 1.0, ctx.theme.colors.border);
+        self.surface.paint(self.bounds, self.card, ctx);
 
         self.title_label.paint(ctx);
         self.description_label.paint(ctx);
