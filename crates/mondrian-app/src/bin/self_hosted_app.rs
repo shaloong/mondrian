@@ -275,6 +275,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &mut router,
                         host.root_mut(),
                         &mut last_cursor,
+                        modifiers_state,
                         &dispatch_action,
                     );
                     host.drain_pending_actions(&pending_actions, current_bounds.get(), &platform);

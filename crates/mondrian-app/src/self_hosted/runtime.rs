@@ -188,6 +188,7 @@ impl WinitUiRuntime {
         router: &mut EventRouter,
         root: &mut dyn Widget,
         last_cursor: &mut Point,
+        modifiers: Modifiers,
         dispatch: &dyn Fn(Action),
     ) {
         if !self.eyedropper.is_active() {
@@ -201,10 +202,7 @@ impl WinitUiRuntime {
                     window,
                     router,
                     root,
-                    UiEvent::MouseMove {
-                        position: *last_cursor,
-                        modifiers: Modifiers::none(),
-                    },
+                    UiEvent::MouseMove { position: *last_cursor, modifiers },
                     dispatch,
                 );
             }

@@ -1368,6 +1368,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &mut router,
                         &mut root,
                         &mut last_cursor,
+                        modifiers_state,
                         &record_demo_action,
                     );
                     window.request_redraw();
