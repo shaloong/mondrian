@@ -13,7 +13,9 @@ use std::cell::Cell;
 use std::cell::RefCell;
 use std::sync::Arc;
 
-use mondrian_app::self_hosted::runtime::{winit_scroll_delta_to_ui_delta, WinitUiRuntime};
+use mondrian_app::self_hosted::runtime::{
+    winit_mouse_button_to_ui_button, winit_scroll_delta_to_ui_delta, WinitUiRuntime,
+};
 use mondrian_core::Color;
 use mondrian_editor_state::Action;
 use mondrian_ui_core::tooltip::TooltipState;
@@ -1096,15 +1098,6 @@ fn build_dock_tree() -> DockSplitter {
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
-fn mouse_button(b: winit::event::MouseButton) -> MouseButton {
-    match b {
-        winit::event::MouseButton::Left => MouseButton::Left,
-        winit::event::MouseButton::Right => MouseButton::Right,
-        winit::event::MouseButton::Middle => MouseButton::Middle,
-        _ => MouseButton::Left,
-    }
-}
-
 fn route_demo_window_event(
     window: &winit::window::Window,
     router: &mut EventRouter,
@@ -1323,12 +1316,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let event = match state {
                     ElementState::Pressed => UiEvent::MouseDown {
                         position: last_cursor,
-                        button: mouse_button(button),
+                        button: winit_mouse_button_to_ui_button(button),
                         modifiers: Modifiers::none(),
                     },
                     ElementState::Released => UiEvent::MouseUp {
                         position: last_cursor,
-                        button: mouse_button(button),
+                        button: winit_mouse_button_to_ui_button(button),
                         modifiers: Modifiers::none(),
                     },
                 };

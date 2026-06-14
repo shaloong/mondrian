@@ -11,13 +11,15 @@ use mondrian_core::Color;
 use mondrian_editor_state::Action;
 use mondrian_platform::{DesktopEyedropper, DesktopPoint};
 use mondrian_ui_core::tree::WidgetTreeView;
-use mondrian_ui_core::types::{EventResult, KeyCode, Modifiers, Point, Rect, UiEvent};
+use mondrian_ui_core::types::{EventResult, KeyCode, Modifiers, MouseButton, Point, Rect, UiEvent};
 use mondrian_ui_core::widget::{CursorRequest, DrawCommandEncoder, ImeRequest, PaintContext};
 use mondrian_ui_core::Widget;
 use mondrian_ui_events::EventRouter;
 use mondrian_ui_theme::Theme;
 use mondrian_ui_tooltip::TooltipWidget;
-use winit::event::{ElementState, Ime, KeyEvent, MouseScrollDelta};
+use winit::event::{
+    ElementState, Ime, KeyEvent, MouseButton as WinitMouseButton, MouseScrollDelta,
+};
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::keyboard::{Key, NamedKey};
 
@@ -396,6 +398,16 @@ pub fn winit_scroll_delta_to_ui_delta(delta: MouseScrollDelta) -> f32 {
     }
 }
 
+/// Convert a winit mouse button into Mondrian's UI mouse button model.
+pub fn winit_mouse_button_to_ui_button(button: WinitMouseButton) -> MouseButton {
+    match button {
+        WinitMouseButton::Left => MouseButton::Left,
+        WinitMouseButton::Right => MouseButton::Right,
+        WinitMouseButton::Middle => MouseButton::Middle,
+        _ => MouseButton::Left,
+    }
+}
+
 fn update_modifiers_from_key(key: &Key, pressed: bool, modifiers: &mut Modifiers) {
     match key {
         Key::Named(NamedKey::Control) => modifiers.ctrl = pressed,
@@ -546,6 +558,26 @@ mod tests {
                 winit::dpi::PhysicalPosition::new(0.0, 12.5)
             )),
             -12.5
+        );
+    }
+
+    #[test]
+    fn maps_winit_mouse_buttons() {
+        assert_eq!(
+            winit_mouse_button_to_ui_button(WinitMouseButton::Left),
+            MouseButton::Left
+        );
+        assert_eq!(
+            winit_mouse_button_to_ui_button(WinitMouseButton::Right),
+            MouseButton::Right
+        );
+        assert_eq!(
+            winit_mouse_button_to_ui_button(WinitMouseButton::Middle),
+            MouseButton::Middle
+        );
+        assert_eq!(
+            winit_mouse_button_to_ui_button(WinitMouseButton::Other(7)),
+            MouseButton::Left
         );
     }
 }

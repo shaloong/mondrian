@@ -9,7 +9,9 @@ use std::sync::Arc;
 use mondrian_app::app::AppState;
 use mondrian_app::self_hosted::action_queue::PendingUiActions;
 use mondrian_app::self_hosted::host::SelfHostedUiHost;
-use mondrian_app::self_hosted::runtime::{winit_scroll_delta_to_ui_delta, WinitUiRuntime};
+use mondrian_app::self_hosted::runtime::{
+    winit_mouse_button_to_ui_button, winit_scroll_delta_to_ui_delta, WinitUiRuntime,
+};
 use mondrian_panel_console::tracing_layer::ConsoleLogLayer;
 use mondrian_platform::SystemPlatformService;
 use mondrian_ui_core::types::*;
@@ -20,19 +22,6 @@ use mondrian_ui_renderer::UiRenderer;
 use mondrian_ui_text::{resolve_text_commands, TextRenderer};
 use mondrian_ui_tooltip::TooltipManagerImpl;
 use tracing_subscriber::prelude::*;
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Helpers
-// ═══════════════════════════════════════════════════════════════════════════
-
-fn mouse_button(b: winit::event::MouseButton) -> MouseButton {
-    match b {
-        winit::event::MouseButton::Left => MouseButton::Left,
-        winit::event::MouseButton::Right => MouseButton::Right,
-        winit::event::MouseButton::Middle => MouseButton::Middle,
-        _ => MouseButton::Left,
-    }
-}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Main
@@ -233,12 +222,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let evt = match state {
                     ElementState::Pressed => UiEvent::MouseDown {
                         position: last_cursor,
-                        button: mouse_button(button),
+                        button: winit_mouse_button_to_ui_button(button),
                         modifiers: Modifiers::none(),
                     },
                     ElementState::Released => UiEvent::MouseUp {
                         position: last_cursor,
-                        button: mouse_button(button),
+                        button: winit_mouse_button_to_ui_button(button),
                         modifiers: Modifiers::none(),
                     },
                 };
