@@ -585,6 +585,11 @@ the mode menu, cancel pointer/eyedropper interactions, opt out of focus
 traversal, and keep painting the current color in muted chrome for inspector
 empty states.
 
+Labels are passive display widgets, but they still clip text to their padded
+content bounds during paint. This keeps property rows, panel headers, and
+compact tool surfaces from letting long labels spill into adjacent controls even
+when the parent layout constrains them below their natural text width.
+
 ## Curve Editing
 
 Curve editing starts as a domain-independent widget primitive in

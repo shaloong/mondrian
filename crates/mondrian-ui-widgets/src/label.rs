@@ -159,11 +159,18 @@ impl Widget for Label {
 
     fn paint(&self, ctx: &mut PaintContext) {
         if !self.text.is_empty() {
+            let content = Rect::new(
+                self.bounds.x + self.padding.x,
+                self.bounds.y + self.padding.y,
+                (self.bounds.width - self.padding.x * 2.0).max(1.0),
+                (self.bounds.height - self.padding.y * 2.0).max(1.0),
+            );
             let position = Point::new(
                 self.bounds.x + self.padding.x,
                 self.bounds.y + self.padding.y,
             );
             let color = self.resolved_color(ctx);
+            ctx.encoder.push_clip(content);
             if self.wrap {
                 let max_width =
                     self.max_width.unwrap_or((self.bounds.width - self.padding.x * 2.0).max(1.0));
@@ -172,6 +179,7 @@ impl Widget for Label {
             } else {
                 ctx.encoder.draw_text(&self.text, self.font_size, position, color);
             }
+            ctx.encoder.pop_clip();
         }
     }
 
@@ -206,12 +214,18 @@ mod tests {
     #[derive(Default)]
     struct Recorder {
         commands: Vec<TextCommand>,
+        clips: Vec<Rect>,
+        clip_pops: usize,
     }
 
     impl DrawCommandEncoder for Recorder {
-        fn push_clip(&mut self, _bounds: Rect) {}
+        fn push_clip(&mut self, bounds: Rect) {
+            self.clips.push(bounds);
+        }
 
-        fn pop_clip(&mut self) {}
+        fn pop_clip(&mut self) {
+            self.clip_pops += 1;
+        }
 
         fn draw_rect(&mut self, _bounds: Rect, _color: Color, _corner_radius: f32) {}
 
@@ -253,6 +267,17 @@ mod tests {
         };
         label.paint(&mut ctx);
         recorder.commands
+    }
+
+    fn paint_label_recording(label: &Label, theme: &mondrian_ui_theme::Theme) -> Recorder {
+        let mut recorder = Recorder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut recorder,
+            theme,
+            clip_rect: Rect::new(0.0, 0.0, 200.0, 100.0),
+        };
+        label.paint(&mut ctx);
+        recorder
     }
 
     #[test]
@@ -316,6 +341,27 @@ mod tests {
                 color: theme.colors.muted_foreground,
             }]
         );
+    }
+
+    #[test]
+    fn label_paint_clips_text_to_content_bounds() {
+        let theme = ThemePreset::Dark.build();
+        let mut label = Label::new("A very long label that cannot fit").with_padding(3.0, 2.0);
+        label.layout(Rect::new(10.0, 20.0, 40.0, 18.0));
+
+        let recorder = paint_label_recording(&label, &theme);
+
+        assert_eq!(
+            recorder.commands,
+            vec![TextCommand::Text {
+                text: "A very long label that cannot fit".into(),
+                font_size: 14.0,
+                position: Point::new(13.0, 22.0),
+                color: theme.colors.foreground,
+            }]
+        );
+        assert_eq!(recorder.clips, vec![Rect::new(13.0, 22.0, 34.0, 14.0)]);
+        assert_eq!(recorder.clip_pops, 1);
     }
 
     #[test]
