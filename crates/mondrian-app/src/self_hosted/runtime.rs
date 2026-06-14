@@ -11,7 +11,9 @@ use mondrian_core::Color;
 use mondrian_editor_state::Action;
 use mondrian_platform::{DesktopEyedropper, DesktopPoint};
 use mondrian_ui_core::tree::WidgetTreeView;
-use mondrian_ui_core::types::{EventResult, KeyCode, Modifiers, MouseButton, Point, Rect, UiEvent};
+use mondrian_ui_core::types::{
+    EventResult, KeyCode, Modifiers, MouseButton, Point, Rect, SplitDirection, UiEvent,
+};
 use mondrian_ui_core::widget::{CursorRequest, DrawCommandEncoder, ImeRequest, PaintContext};
 use mondrian_ui_core::Widget;
 use mondrian_ui_events::EventRouter;
@@ -406,6 +408,27 @@ pub fn winit_mouse_button_to_ui_button(button: WinitMouseButton) -> MouseButton 
     }
 }
 
+/// Choose the shell cursor icon from transient UI state.
+///
+/// Priority is global sampling first, splitter resize affordances second,
+/// then focused text editing. The bins provide state; the runtime owns the
+/// precedence so demo and app shells do not drift.
+pub fn winit_cursor_icon_for_ui_state(
+    eyedropper_active: bool,
+    splitter_direction: Option<SplitDirection>,
+    focused_text: bool,
+) -> winit::window::CursorIcon {
+    if eyedropper_active {
+        return winit::window::CursorIcon::Crosshair;
+    }
+    match splitter_direction {
+        Some(SplitDirection::Horizontal) => winit::window::CursorIcon::ColResize,
+        Some(SplitDirection::Vertical) => winit::window::CursorIcon::RowResize,
+        None if focused_text => winit::window::CursorIcon::Text,
+        None => winit::window::CursorIcon::Default,
+    }
+}
+
 fn update_modifiers_from_key(key: &Key, pressed: bool, modifiers: &mut Modifiers) {
     match key {
         Key::Named(NamedKey::Control) => modifiers.ctrl = pressed,
@@ -576,6 +599,30 @@ mod tests {
         assert_eq!(
             winit_mouse_button_to_ui_button(WinitMouseButton::Other(7)),
             MouseButton::Left
+        );
+    }
+
+    #[test]
+    fn cursor_icon_priority_matches_shell_contract() {
+        assert_eq!(
+            winit_cursor_icon_for_ui_state(true, Some(SplitDirection::Horizontal), true),
+            winit::window::CursorIcon::Crosshair
+        );
+        assert_eq!(
+            winit_cursor_icon_for_ui_state(false, Some(SplitDirection::Horizontal), true),
+            winit::window::CursorIcon::ColResize
+        );
+        assert_eq!(
+            winit_cursor_icon_for_ui_state(false, Some(SplitDirection::Vertical), true),
+            winit::window::CursorIcon::RowResize
+        );
+        assert_eq!(
+            winit_cursor_icon_for_ui_state(false, None, true),
+            winit::window::CursorIcon::Text
+        );
+        assert_eq!(
+            winit_cursor_icon_for_ui_state(false, None, false),
+            winit::window::CursorIcon::Default
         );
     }
 }

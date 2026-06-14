@@ -10,7 +10,8 @@ use mondrian_app::app::AppState;
 use mondrian_app::self_hosted::action_queue::PendingUiActions;
 use mondrian_app::self_hosted::host::SelfHostedUiHost;
 use mondrian_app::self_hosted::runtime::{
-    winit_mouse_button_to_ui_button, winit_scroll_delta_to_ui_delta, WinitUiRuntime,
+    winit_cursor_icon_for_ui_state, winit_mouse_button_to_ui_button,
+    winit_scroll_delta_to_ui_delta, WinitUiRuntime,
 };
 use mondrian_panel_console::tracing_layer::ConsoleLogLayer;
 use mondrian_platform::SystemPlatformService;
@@ -200,15 +201,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 host.drain_pending_actions(&pending_actions, current_bounds.get(), &platform);
                 let zones = host.root().dock().collect_grab_zones();
                 let dir = zones.iter().find(|(z, _)| z.contains(last_cursor)).map(|(_, d)| *d);
-                if ui_runtime.is_eyedropper_active() {
-                    window.set_cursor_icon(winit::window::CursorIcon::Crosshair);
-                } else {
-                    window.set_cursor_icon(match dir {
-                        Some(SplitDirection::Horizontal) => winit::window::CursorIcon::ColResize,
-                        Some(SplitDirection::Vertical) => winit::window::CursorIcon::RowResize,
-                        None => winit::window::CursorIcon::Default,
-                    });
-                }
+                window.set_cursor_icon(winit_cursor_icon_for_ui_state(
+                    ui_runtime.is_eyedropper_active(),
+                    dir,
+                    false,
+                ));
                 window.request_redraw();
             }
 

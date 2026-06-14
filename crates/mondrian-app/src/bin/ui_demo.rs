@@ -14,7 +14,8 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 use mondrian_app::self_hosted::runtime::{
-    winit_mouse_button_to_ui_button, winit_scroll_delta_to_ui_delta, WinitUiRuntime,
+    winit_cursor_icon_for_ui_state, winit_mouse_button_to_ui_button,
+    winit_scroll_delta_to_ui_delta, WinitUiRuntime,
 };
 use mondrian_core::Color;
 use mondrian_editor_state::Action;
@@ -1281,28 +1282,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let grab_zones = root.collect_grab_zones();
                 let direction =
                     grab_zones.iter().find(|(z, _)| z.contains(last_cursor)).map(|(_, d)| *d);
-                if ui_runtime.is_eyedropper_active() {
-                    window.set_cursor_icon(winit::window::CursorIcon::Crosshair);
-                } else {
-                    match direction {
-                        Some(SplitDirection::Horizontal) => {
-                            window.set_cursor_icon(winit::window::CursorIcon::ColResize);
-                        }
-                        Some(SplitDirection::Vertical) => {
-                            window.set_cursor_icon(winit::window::CursorIcon::RowResize);
-                        }
-                        None => {
-                            let is_text = TEXT_INPUT_BOUNDS
-                                .with(|b| b.get().is_some_and(|r| r.contains(last_cursor)))
-                                && TEXT_INPUT_ID.with(|id| id.get()) == router.focused();
-                            if is_text {
-                                window.set_cursor_icon(winit::window::CursorIcon::Text);
-                            } else {
-                                window.set_cursor_icon(winit::window::CursorIcon::Default);
-                            }
-                        }
-                    }
-                }
+                let is_text = TEXT_INPUT_BOUNDS
+                    .with(|b| b.get().is_some_and(|r| r.contains(last_cursor)))
+                    && TEXT_INPUT_ID.with(|id| id.get()) == router.focused();
+                window.set_cursor_icon(winit_cursor_icon_for_ui_state(
+                    ui_runtime.is_eyedropper_active(),
+                    direction,
+                    is_text,
+                ));
                 window.request_redraw();
             }
 

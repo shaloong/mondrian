@@ -28,7 +28,8 @@ for clipboard operations instead of calling platform APIs directly.
 best-effort global pointer polling for color picking. `mondrian-app` centralizes
 the winit adapter in `self_hosted::runtime`: it drains router side-effect requests,
 translates between window-local and desktop coordinates, paints the shell-owned
-eyedropper overlay, and feeds sampled colors back into the widget tree.
+eyedropper overlay, resolves shell cursor priority, and feeds sampled colors
+back into the widget tree.
 
 ## Application Entrypoints and App Modules
 
@@ -519,6 +520,10 @@ Pointer and wheel events, including runtime-synthesized pointer events such as
 eyedropper polling, must carry the current modifier state tracked by the
 entrypoint so timeline zoom, alternate drag modes, and shifted scrolling do not
 lose keyboard context.
+Shell cursor selection is also centralized in the runtime. Entrypoints provide
+the current eyedropper, splitter, and focused-text state; the runtime resolves
+priority as eyedropper sampling, splitter resize affordance, focused text
+editing, then default cursor.
 Self-hosted entry binaries should collect widget-dispatched actions during
 event routing, then drain them after the root borrow ends. Shell-local actions
 such as the new-project dialog mutate `SelfHostedAppRoot`; only confirmed
