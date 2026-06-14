@@ -5,6 +5,7 @@
 //! module instead of accumulating panel or runtime wiring.
 
 pub mod action_pump;
+pub mod host;
 pub mod modal;
 pub mod new_project_dialog;
 pub mod panels;

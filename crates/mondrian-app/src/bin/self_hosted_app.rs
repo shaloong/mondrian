@@ -4,13 +4,12 @@
 //! 使用自研 UI 框架（winit + wgpu + Dock + Widget）的应用入口。
 //! 运行: cargo run --bin self_hosted_app
 
-use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 
 use mondrian_app::app::AppState;
-use mondrian_app::self_hosted::action_pump::{drain_pending_actions, PendingUiActions};
+use mondrian_app::self_hosted::action_pump::PendingUiActions;
+use mondrian_app::self_hosted::host::SelfHostedUiHost;
 use mondrian_app::self_hosted::runtime::WinitUiRuntime;
-use mondrian_app::self_hosted::shell::SelfHostedAppRoot;
 use mondrian_panel_console::tracing_layer::ConsoleLogLayer;
 use mondrian_platform::SystemPlatformService;
 use mondrian_ui_core::types::*;
@@ -78,17 +77,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ui_renderer = UiRenderer::new(&device, config.format);
     let mut text_renderer = TextRenderer::new();
 
-    let app_state = RefCell::new(AppState::new());
-    let mut root = SelfHostedAppRoot::from_app_state(&app_state.borrow());
+    let mut host = SelfHostedUiHost::new(AppState::new());
     let bounds = Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
-    TreeWalker::layout(&mut root, bounds);
+    TreeWalker::layout(host.root_mut(), bounds);
     let mut router = EventRouter::with_platform_and_tooltip(
-        root.id(),
+        host.root().id(),
         Box::new(SystemPlatformService),
         Box::new(TooltipManagerImpl::new(450)),
     );
     let mut ui_runtime = WinitUiRuntime::new();
-    let ui_dirty = Cell::new(false);
 
     let mut last_cursor = Point::new(0.0, 0.0);
     let current_bounds = std::cell::Cell::new(bounds);
@@ -121,19 +118,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let result = ui_runtime.route_keyboard_input(
                     &window,
                     &mut router,
-                    &mut root,
+                    host.root_mut(),
                     &key_event,
                     &mut modifiers_state,
                     &dispatch_action,
                 );
-                drain_pending_actions(
-                    &pending_actions,
-                    &mut root,
-                    &app_state,
-                    &ui_dirty,
-                    current_bounds.get(),
-                    &platform,
-                );
+                host.drain_pending_actions(&pending_actions, current_bounds.get(), &platform);
                 if pressed && is_escape && result == EventResult::Ignored {
                     elwt.exit();
                 }
@@ -144,18 +134,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let _ = ui_runtime.route_ime_event(
                     &window,
                     &mut router,
-                    &mut root,
+                    host.root_mut(),
                     ime,
                     &dispatch_action,
                 );
-                drain_pending_actions(
-                    &pending_actions,
-                    &mut root,
-                    &app_state,
-                    &ui_dirty,
-                    current_bounds.get(),
-                    &platform,
-                );
+                host.drain_pending_actions(&pending_actions, current_bounds.get(), &platform);
                 window.request_redraw();
             }
 
@@ -164,7 +147,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let theme = mondrian_ui_theme::current_theme();
                 let b = current_bounds.get();
                 encoder.draw_rect(b, theme.colors.background, 0.0);
-                TreeWalker::paint(&root, &mut encoder, &theme);
+                TreeWalker::paint(host.root(), &mut encoder, &theme);
                 ui_runtime.paint_shell_overlays(&mut encoder, &theme, b, last_cursor, &router);
                 let commands = resolve_text_commands(encoder.finish(), &mut text_renderer);
                 // Upload any newly rasterized glyphs to GPU atlas
@@ -208,7 +191,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     surface.configure(&device, &config);
                     let b = Rect::new(0.0, 0.0, new_size.width as f32, new_size.height as f32);
                     current_bounds.set(b);
-                    TreeWalker::layout(&mut root, b);
+                    TreeWalker::layout(host.root_mut(), b);
                     window.request_redraw();
                 }
             }
@@ -221,22 +204,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let _ = ui_runtime.route_window_event(
                     &window,
                     &mut router,
-                    &mut root,
+                    host.root_mut(),
                     UiEvent::MouseMove {
                         position: last_cursor,
                         modifiers: Modifiers::none(),
                     },
                     &dispatch_action,
                 );
-                drain_pending_actions(
-                    &pending_actions,
-                    &mut root,
-                    &app_state,
-                    &ui_dirty,
-                    current_bounds.get(),
-                    &platform,
-                );
-                let zones = root.dock().collect_grab_zones();
+                host.drain_pending_actions(&pending_actions, current_bounds.get(), &platform);
+                let zones = host.root().dock().collect_grab_zones();
                 let dir = zones.iter().find(|(z, _)| z.contains(last_cursor)).map(|(_, d)| *d);
                 if ui_runtime.is_eyedropper_active() {
                     window.set_cursor_icon(winit::window::CursorIcon::Crosshair);
@@ -271,34 +247,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ui_runtime.finish_eyedropper_at_window_point(
                         &window,
                         &mut router,
-                        &mut root,
+                        host.root_mut(),
                         last_cursor,
                         &dispatch_action,
                     );
-                    drain_pending_actions(
-                        &pending_actions,
-                        &mut root,
-                        &app_state,
-                        &ui_dirty,
-                        current_bounds.get(),
-                        &platform,
-                    );
+                    host.drain_pending_actions(&pending_actions, current_bounds.get(), &platform);
                 } else {
                     let _ = ui_runtime.route_window_event(
                         &window,
                         &mut router,
-                        &mut root,
+                        host.root_mut(),
                         evt,
                         &dispatch_action,
                     );
-                    drain_pending_actions(
-                        &pending_actions,
-                        &mut root,
-                        &app_state,
-                        &ui_dirty,
-                        current_bounds.get(),
-                        &platform,
-                    );
+                    host.drain_pending_actions(&pending_actions, current_bounds.get(), &platform);
                 }
                 window.request_redraw();
             }
@@ -311,7 +273,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let _ = ui_runtime.route_window_event(
                     &window,
                     &mut router,
-                    &mut root,
+                    host.root_mut(),
                     UiEvent::MouseWheel {
                         delta: dy,
                         position: last_cursor,
@@ -319,14 +281,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     },
                     &dispatch_action,
                 );
-                drain_pending_actions(
-                    &pending_actions,
-                    &mut root,
-                    &app_state,
-                    &ui_dirty,
-                    current_bounds.get(),
-                    &platform,
-                );
+                host.drain_pending_actions(&pending_actions, current_bounds.get(), &platform);
                 window.request_redraw();
             }
 
@@ -336,18 +291,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ui_runtime.poll_eyedropper(
                         &window,
                         &mut router,
-                        &mut root,
+                        host.root_mut(),
                         &mut last_cursor,
                         &dispatch_action,
                     );
-                    drain_pending_actions(
-                        &pending_actions,
-                        &mut root,
-                        &app_state,
-                        &ui_dirty,
-                        current_bounds.get(),
-                        &platform,
-                    );
+                    host.drain_pending_actions(&pending_actions, current_bounds.get(), &platform);
                     window.request_redraw();
                     elwt.set_control_flow(ControlFlow::Poll);
                 }

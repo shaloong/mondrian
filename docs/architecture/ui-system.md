@@ -50,7 +50,10 @@ application for reusable widgets. `self_hosted::shell` owns reusable root-widget
 composition such as the menu bar plus dock tree; developer binaries should use
 `SelfHostedAppRoot` rather than defining shell widgets inline. `self_hosted::panels`
 owns panel adapters that map application-facing concepts into generic widget
-view models. The boundary type is `SelfHostedPanelModels`: real `AppState` /
+view models. `self_hosted::host::SelfHostedUiHost` owns the reusable product
+state bridge: it keeps the root widget, current `AppState`, dirty refresh flag,
+and queued-action draining together so window entrypoints do not duplicate
+root/AppState refresh plumbing. The boundary type is `SelfHostedPanelModels`: real `AppState` /
 `EditorState` adapters should produce this model, while
 `SelfHostedPanelModels::demo()` is only a developer fixture.
 `SelfHostedPanelModels::from_app_state` is the app-side snapshot boundary: it
