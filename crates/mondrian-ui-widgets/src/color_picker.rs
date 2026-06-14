@@ -12,6 +12,7 @@ use mondrian_ui_core::widget::{
 };
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
+use crate::form_layout::{FormLayout, FormRowOptions, FormRowRects};
 use crate::menu::{paint_menu_popup_chrome, paint_menu_row, paint_menu_trigger, MenuRowPaint};
 use crate::text_input::TextInput;
 
@@ -514,10 +515,9 @@ impl ColorPicker {
         }
     }
 
-    fn field_rect(&self, index: usize) -> Rect {
+    fn field_column_rect(&self, index: usize) -> Rect {
         let col_gap = 6.0;
         let columns = self.field_column_count().max(1);
-        let label_w = self.field_label_width(index);
         let col = index % columns;
         let row = index / columns;
         let total_gap = col_gap * (columns.saturating_sub(1)) as f32;
@@ -525,12 +525,28 @@ impl ColorPicker {
         let col_w = total_w / columns as f32;
         let x = self.bounds.x + 10.0 + col as f32 * (col_w + col_gap);
         let y = self.fields_top() + row as f32 * (ROW_HEIGHT + ROW_GAP);
-        Rect::new(x + label_w, y, (col_w - label_w).max(1.0), ROW_HEIGHT)
+        Rect::new(x, y, col_w, ROW_HEIGHT)
+    }
+
+    fn field_row_rects(&self, index: usize) -> FormRowRects {
+        let column = self.field_column_rect(index);
+        let layout = FormLayout::new(FormRowOptions {
+            label_width: self.field_label_width(index),
+            control_gap: 0.0,
+            label_height: 14.0,
+            compact_label_y_offset: -7.0,
+            ..FormRowOptions::default()
+        });
+        layout.row_rects(column, column.y, ROW_HEIGHT, ROW_HEIGHT, ROW_HEIGHT)
+    }
+
+    fn field_rect(&self, index: usize) -> Rect {
+        self.field_row_rects(index).control
     }
 
     fn field_label_pos(&self, index: usize) -> Point {
-        let field = self.field_rect(index);
-        Point::new(field.x - self.field_label_width(index) + 2.0, field.y + 7.0)
+        let label = self.field_row_rects(index).label;
+        Point::new(label.x + 2.0, label.y)
     }
 
     fn field_text(&self, field: ColorField) -> String {

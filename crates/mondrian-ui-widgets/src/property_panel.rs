@@ -7,7 +7,7 @@ use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
-use crate::Label;
+use crate::{FormLayout, FormRowOptions, Label};
 
 /// Layout options for [`PropertyPanel`].
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -32,6 +32,16 @@ impl Default for PropertyPanelOptions {
             row_height: 34.0,
             control_gap: 8.0,
             section_gap: 10.0,
+        }
+    }
+}
+
+impl PropertyPanelOptions {
+    fn form_row_options(&self) -> FormRowOptions {
+        FormRowOptions {
+            label_width: self.label_width,
+            control_gap: self.control_gap,
+            ..FormRowOptions::default()
         }
     }
 }
@@ -234,8 +244,7 @@ impl Widget for PropertyPanel {
     fn layout(&mut self, bounds: Rect) {
         self.bounds = bounds;
         let content = self.content_rect();
-        let control_x = content.x + self.options.label_width + self.options.control_gap;
-        let control_width = (content.x + content.width - control_x).max(1.0);
+        let form_layout = FormLayout::new(self.options.form_row_options());
 
         let mut y = content.y + self.header_height();
 
@@ -254,27 +263,18 @@ impl Widget for PropertyPanel {
             let section_top = y;
             for row in &mut section.rows {
                 let row_h = row.height(self.options.row_height);
-                row.bounds = Rect::new(content.x, y, content.width, row_h);
-                let label_y = if row_h > self.options.row_height * 1.5 {
-                    y + 20.0
-                } else {
-                    y + row_h * 0.5 + 4.0
-                };
-                row.label_position = Point::new(content.x, label_y);
-                row.label.layout(Rect::new(
-                    content.x,
-                    row.label_position.y,
-                    self.options.label_width,
-                    16.0,
-                ));
                 let measured = row.control.measure(LayoutConstraint::loose(0.0, 0.0));
-                let control_h = measured.height.min(row_h).max(1.0);
-                row.control.layout(Rect::new(
-                    control_x,
-                    y + (row_h - control_h) * 0.5,
-                    control_width,
-                    control_h,
-                ));
+                let rects = form_layout.row_rects(
+                    content,
+                    y,
+                    row_h,
+                    self.options.row_height,
+                    measured.height,
+                );
+                row.bounds = rects.row;
+                row.label_position = rects.label.min();
+                row.label.layout(rects.label);
+                row.control.layout(rects.control);
                 y += row_h;
             }
             section.bounds = Rect::new(

@@ -468,6 +468,9 @@ instances for semantic color, padding, and wrapping rather than direct
 per-dialog `draw_text` calls.
 Inspector/property-panel titles, section headers, and row labels follow the
 same rule through `PropertyPanel`'s internal `Label` instances.
+Reusable labeled-field geometry should flow through
+`mondrian-ui-widgets::FormLayout` / `FormRowOptions` instead of each component
+recalculating label and control rectangles independently.
 Form controls should expose a common `enabled(bool)` / `disabled()` builder
 where practical. Disabled controls must not dispatch actions, request pointer
 capture, or participate in focus traversal, and should render with muted theme
