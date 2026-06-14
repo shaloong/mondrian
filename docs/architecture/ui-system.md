@@ -386,6 +386,8 @@ Clip, mask, and animation keyframe selection state is owned by
 methods instead of directly clearing individual selection fields. Clipboard,
 duplicate, paste, and timeline mutation paths should also replace or clear clip
 selection through that module so nested selection scopes stay consistent.
+Panel model adapters should read primary and multi-clip selection through the
+same AppState selection queries instead of depending on `SelectionState` fields.
 Attached effects appear as inspector rows with enable checkboxes, using effect
 instance ids rather than list indices so reorder/remove operations can be added
 without changing the widget contract. Removal buttons use the same effect id

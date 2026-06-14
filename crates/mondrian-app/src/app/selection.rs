@@ -15,6 +15,17 @@ pub struct SelectedClipRef {
 }
 
 impl AppState {
+    /// The primary selected clip, used by single-target panels such as the
+    /// Inspector and Effects browser.
+    pub fn primary_selected_clip(&self) -> Option<SelectedClipRef> {
+        self.selection.selected_clips.first().copied()
+    }
+
+    /// All selected clips in app selection order.
+    pub fn selected_clips(&self) -> &[SelectedClipRef] {
+        &self.selection.selected_clips
+    }
+
     /// Clear all app-level selections.
     ///
     /// Clip, mask, and animation selections represent nested targeting scopes.

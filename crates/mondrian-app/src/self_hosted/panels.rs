@@ -67,16 +67,14 @@ impl SelfHostedPanelModels {
         Self {
             project: PanelListModel::from_project_status(state),
             assets: PanelListModel::from_asset_library(state.asset_library.as_deref()),
-            effects: PanelListModel::from_effect_registry(
-                state.selection.selected_clips.first().copied(),
-            ),
+            effects: PanelListModel::from_effect_registry(state.primary_selected_clip()),
             console: PanelListModel::from_app_status(state),
             viewer: ViewerPanelModel::from_app_state(state),
             timeline: state
                 .sequence
                 .as_ref()
                 .map(|sequence| {
-                    TimelinePanelModel::from_sequence(sequence, &state.selection.selected_clips)
+                    TimelinePanelModel::from_sequence(sequence, state.selected_clips())
                         .with_playhead_frame(state.current_frame())
                 })
                 .unwrap_or_default(),
@@ -90,16 +88,14 @@ impl SelfHostedPanelModels {
         Self {
             project: PanelListModel::from_project_status(state),
             assets: demo_asset_model(),
-            effects: PanelListModel::from_effect_registry(
-                state.selection.selected_clips.first().copied(),
-            ),
+            effects: PanelListModel::from_effect_registry(state.primary_selected_clip()),
             console: demo_console_model(),
             viewer: ViewerPanelModel::from_app_state(state),
             timeline: state
                 .sequence
                 .as_ref()
                 .map(|sequence| {
-                    TimelinePanelModel::from_sequence(sequence, &state.selection.selected_clips)
+                    TimelinePanelModel::from_sequence(sequence, state.selected_clips())
                         .with_playhead_frame(state.current_frame())
                 })
                 .unwrap_or_else(demo_timeline_model),
@@ -125,7 +121,7 @@ pub fn demo_app_state() -> AppState {
     sequence.playhead = TimeCode::new(76, sequence.time_base());
 
     if let Some(selection) = demo_selection(&sequence) {
-        state.selection.selected_clips = vec![selection];
+        state.replace_clip_selection(vec![selection]);
     }
     state.sequence = Some(sequence);
     state.seek(76);
@@ -592,10 +588,10 @@ impl InspectorPanelModel {
         let Some(sequence) = state.sequence.as_ref() else {
             return Self::empty();
         };
-        let Some(selection) = state.selection.selected_clips.first() else {
+        let Some(selection) = state.primary_selected_clip() else {
             return Self::empty();
         };
-        let Some(clip) = clip_for_selection(sequence, selection) else {
+        let Some(clip) = clip_for_selection(sequence, &selection) else {
             return Self::empty();
         };
 
@@ -604,7 +600,7 @@ impl InspectorPanelModel {
         let position = clip.transform.get_position(time);
         let scale = clip.transform.get_scale(time);
         Self {
-            selected_clip: Some(*selection),
+            selected_clip: Some(selection),
             enabled: !clip.is_disabled,
             opacity,
             tint: clip
