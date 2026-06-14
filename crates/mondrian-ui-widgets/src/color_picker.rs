@@ -14,7 +14,9 @@ use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
 use crate::form_layout::{FormLayout, FormRowOptions, FormRowRects};
 use crate::menu::{paint_menu_popup_chrome, paint_menu_row, paint_menu_trigger, MenuRowPaint};
-use crate::paint::{color_with_alpha, mix_color, paint_checkerboard, paint_shadow, soft_border};
+use crate::paint::{
+    color_with_alpha, mix_color, paint_checkerboard, paint_focus_ring, paint_shadow, soft_border,
+};
 use crate::text_input::TextInput;
 
 const MODES: [ColorPickerMode; 5] = [
@@ -1327,10 +1329,7 @@ impl Widget for ColorPicker {
 
         self.paint_panel_chrome(ctx);
         if self.focus_visible {
-            let mut ring = tokens.ring;
-            ring.a = 0.38;
-            let rect = self.bounds.inset(-2.0, -2.0);
-            ctx.encoder.draw_rect(rect, ring, ctx.theme.spacing.radius_md + 2.0);
+            paint_focus_ring(ctx, self.bounds, ctx.theme.spacing.radius_md);
         }
         if self.show_swatch {
             self.paint_swatch(ctx);

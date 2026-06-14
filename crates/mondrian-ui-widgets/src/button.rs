@@ -7,6 +7,8 @@ use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
+use crate::paint::paint_focus_ring;
+
 /// 按钮状态
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ButtonState {
@@ -167,10 +169,7 @@ impl Widget for Button {
 
         ctx.encoder.draw_rect(self.bounds, bg, spacing.radius_md);
         if self.focus_visible {
-            let mut ring = tokens.ring;
-            ring.a = 0.38;
-            let rect = self.bounds.inset(-2.0, -2.0);
-            ctx.encoder.draw_rect(rect, ring, spacing.radius_md + 2.0);
+            paint_focus_ring(ctx, self.bounds, spacing.radius_md);
         }
         if !self.label.is_empty() {
             let tx = mondrian_ui_core::types::center_text_x(self.bounds, &self.label, font_size);

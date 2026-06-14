@@ -613,7 +613,11 @@ commands, not font glyphs or paired line strokes, so they are stable across
 operating systems and font stacks. Wrapped text is represented as a constrained
 text box draw command and resolved by `mondrian-ui-text`, not manually wrapped
 inside individual widgets. Tooltip widgets draw border, fill, and text commands
-in that order.
+in that order. Standard focus-visible outer rings use the shared widget paint
+helper so their alpha, outset, and corner-radius expansion stay consistent
+across buttons, dropdowns, pickers, lists, and other controls. Controls with
+different geometry, such as slider thumb halos or inset timeline focus borders,
+may keep local painting while preserving the same theme token vocabulary.
 
 `DrawEncoder` snaps axis-aligned UI geometry to whole pixels at command
 recording time: rectangle bounds, line endpoints, clip bounds, image bounds,

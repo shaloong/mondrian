@@ -8,6 +8,7 @@ use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
+use crate::paint::paint_focus_ring;
 use crate::scroll::ScrollView;
 
 /// 列表项
@@ -177,10 +178,7 @@ impl Widget for List {
         self.scroll.paint(ctx);
         ctx.encoder.pop_clip();
         if self.focus_visible {
-            let mut ring = ctx.theme.colors.ring;
-            ring.a = 0.38;
-            let rect = self.bounds.inset(-2.0, -2.0);
-            ctx.encoder.draw_rect(rect, ring, ctx.theme.spacing.radius_sm + 2.0);
+            paint_focus_ring(ctx, self.bounds, ctx.theme.spacing.radius_sm);
         }
     }
 

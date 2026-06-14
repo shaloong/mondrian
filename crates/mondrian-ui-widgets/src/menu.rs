@@ -8,7 +8,7 @@ use mondrian_ui_core::types::{estimate_text_width, *};
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
-use crate::paint::{mix_color, paint_shadow};
+use crate::paint::{mix_color, paint_focus_ring, paint_shadow};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct MenuRowPaint {
@@ -643,10 +643,7 @@ impl Widget for Dropdown {
             paint_menu_trigger_label(ctx, rect, &self.label, tokens.muted_foreground, false);
         }
         if self.focus_visible && !self.open {
-            let mut ring = ctx.theme.colors.ring;
-            ring.a = 0.38;
-            let rect = self.trigger_rect().inset(-2.0, -2.0);
-            ctx.encoder.draw_rect(rect, ring, ctx.theme.spacing.radius_sm + 2.0);
+            paint_focus_ring(ctx, self.trigger_rect(), ctx.theme.spacing.radius_sm);
         }
     }
 

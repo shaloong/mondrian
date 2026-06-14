@@ -6,10 +6,21 @@ use mondrian_ui_core::widget::PaintContext;
 use mondrian_ui_theme::spacing::ShadowToken;
 
 const CHECKERBOARD_MAX_CELL: f32 = 7.0;
+const FOCUS_RING_INSET: f32 = -2.0;
+const FOCUS_RING_RADIUS_OUTSET: f32 = 2.0;
+const FOCUS_RING_ALPHA: f32 = 0.38;
 
 pub(crate) fn paint_shadow(ctx: &mut PaintContext, bounds: Rect, radius: f32) {
     let shadow = &ctx.theme.spacing.shadow_md;
     ctx.encoder.draw_rect(shadow_rect(bounds, shadow), shadow_color(shadow), radius);
+}
+
+pub(crate) fn paint_focus_ring(ctx: &mut PaintContext, bounds: Rect, radius: f32) {
+    ctx.encoder.draw_rect(
+        focus_ring_rect(bounds),
+        focus_ring_color(ctx.theme.colors.ring),
+        focus_ring_radius(radius),
+    );
 }
 
 pub(crate) fn paint_checkerboard(ctx: &mut PaintContext, rect: Rect, cell_size: f32, radius: f32) {
@@ -82,6 +93,18 @@ pub(crate) fn shadow_color(shadow: &ShadowToken) -> Color {
         b: shadow.color[2],
         a: shadow.color[3],
     }
+}
+
+pub(crate) fn focus_ring_rect(bounds: Rect) -> Rect {
+    bounds.inset(FOCUS_RING_INSET, FOCUS_RING_INSET)
+}
+
+pub(crate) fn focus_ring_radius(radius: f32) -> f32 {
+    radius + FOCUS_RING_RADIUS_OUTSET
+}
+
+pub(crate) fn focus_ring_color(color: Color) -> Color {
+    Color { a: FOCUS_RING_ALPHA, ..color }
 }
 
 fn checkerboard_cell_size(cell_size: f32) -> f32 {
@@ -180,6 +203,25 @@ mod tests {
         assert_eq!(
             shadow_color(&shadow),
             Color { r: 0.1, g: 0.2, b: 0.3, a: 0.4 }
+        );
+    }
+
+    #[test]
+    fn focus_ring_geometry_expands_bounds_and_radius() {
+        assert_eq!(
+            focus_ring_rect(Rect::new(10.0, 12.0, 20.0, 8.0)),
+            Rect::new(8.0, 10.0, 24.0, 12.0)
+        );
+        assert_eq!(focus_ring_radius(4.0), 6.0);
+    }
+
+    #[test]
+    fn focus_ring_color_uses_shared_alpha_without_changing_rgb() {
+        let color = Color { r: 0.2, g: 0.4, b: 0.8, a: 0.7 };
+
+        assert_eq!(
+            focus_ring_color(color),
+            Color { r: 0.2, g: 0.4, b: 0.8, a: 0.38 }
         );
     }
 

@@ -9,7 +9,7 @@ use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
-use crate::paint::color_with_alpha;
+use crate::paint::{color_with_alpha, paint_focus_ring};
 
 const DEFAULT_WIDTH: f32 = 220.0;
 const DEFAULT_HEIGHT: f32 = 104.0;
@@ -434,10 +434,7 @@ impl Widget for CurveEditor {
         );
 
         if self.focus_visible {
-            let mut ring = colors.ring;
-            ring.a = 0.38;
-            let rect = self.bounds.inset(-2.0, -2.0);
-            ctx.encoder.draw_rect(rect, ring, spacing.radius_md + 2.0);
+            paint_focus_ring(ctx, self.bounds, spacing.radius_md);
         }
 
         for col in 0..=self.grid_columns {
