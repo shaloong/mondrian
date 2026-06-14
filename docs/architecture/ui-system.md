@@ -442,6 +442,9 @@ history. Real panels map widget values to semantic `Action`s or command objects
 at the panel/app layer. Programmatic state synchronization uses setters such as
 `set_color()` / `set_points()` and must not emit actions; only user input paths
 dispatch changes and request repaint.
+Adapters that cannot target editor state should return `Action::NoOp` rather
+than inventing legacy custom action names; `AppState` dispatch treats NoOp as a
+first-class empty action without logging it as an unimplemented command.
 Self-hosted Inspector actions should use typed payloads for clip mutations.
 The curve editor currently emits `ui.inspector.set_clip_curve` with normalized
 points; AppState maps them to opacity keyframes over the selected clip's

@@ -1374,7 +1374,7 @@ fn inspector_value_action(
             });
         }
     }
-    legacy_inspector_action(format!("{name}:{value:.3}"))
+    Action::NoOp
 }
 
 fn inspector_bool_action(selection: Option<SelectedClipRef>, value: bool) -> Action {
@@ -1384,7 +1384,7 @@ fn inspector_bool_action(selection: Option<SelectedClipRef>, value: bool) -> Act
             enabled: value,
         });
     }
-    legacy_inspector_action(format!("enabled:{value}"))
+    Action::NoOp
 }
 
 fn inspector_color_action(selection: Option<SelectedClipRef>, color: Color) -> Action {
@@ -1394,8 +1394,7 @@ fn inspector_color_action(selection: Option<SelectedClipRef>, color: Color) -> A
             color,
         });
     }
-    let [r, g, b, a] = color.to_rgba8();
-    legacy_inspector_action(format!("tint:{r},{g},{b},{a}"))
+    Action::NoOp
 }
 
 fn inspector_transform_action(
@@ -1410,7 +1409,7 @@ fn inspector_transform_action(
             value,
         });
     }
-    legacy_inspector_action(format!("transform.{field:?}:{value:.3}"))
+    Action::NoOp
 }
 
 fn inspector_timing_action(
@@ -1430,7 +1429,7 @@ fn inspector_timing_action(
             frame: frame.max(0),
         });
     }
-    legacy_inspector_action(format!("timing.{edge:?}:{frame}"))
+    Action::NoOp
 }
 
 fn inspector_effect_enabled_action(
@@ -1445,7 +1444,7 @@ fn inspector_effect_enabled_action(
             enabled,
         });
     }
-    legacy_inspector_action(format!("effect.{effect_id}.enabled:{enabled}"))
+    Action::NoOp
 }
 
 fn inspector_remove_effect_row_action(
@@ -1458,7 +1457,7 @@ fn inspector_remove_effect_row_action(
             effect_id,
         });
     }
-    legacy_inspector_action(format!("effect.{effect_id}.remove"))
+    Action::NoOp
 }
 
 fn inspector_curve_action(selection: Option<SelectedClipRef>, points: &[CurvePoint]) -> Action {
@@ -1476,7 +1475,7 @@ fn inspector_curve_action(selection: Option<SelectedClipRef>, points: &[CurvePoi
             points,
         });
     }
-    legacy_inspector_action("curve:no-selection".into())
+    Action::NoOp
 }
 
 fn inspector_clip_payload(selection: SelectedClipRef) -> InspectorClipRefPayload {
@@ -1484,14 +1483,6 @@ fn inspector_clip_payload(selection: SelectedClipRef) -> InspectorClipRefPayload
         track_id: selection.track_id,
         is_video_track: selection.is_video_track,
         clip_id: selection.clip_id,
-    }
-}
-
-fn legacy_inspector_action(name: String) -> Action {
-    Action::Custom {
-        namespace: "ui.inspector".into(),
-        name,
-        payload: serde_json::Value::Null,
     }
 }
 
@@ -1989,6 +1980,36 @@ mod tests {
             }
             other => panic!("expected inspector curve action, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn inspector_actions_without_selection_are_noops() {
+        assert_eq!(inspector_value_action(None, "opacity", 42.0), Action::NoOp);
+        assert_eq!(inspector_bool_action(None, true), Action::NoOp);
+        assert_eq!(
+            inspector_color_action(None, Color::from_rgba8(1, 2, 3, 4)),
+            Action::NoOp
+        );
+        assert_eq!(
+            inspector_transform_action(None, InspectorClipTransformField::PositionX, 12.0),
+            Action::NoOp
+        );
+        assert_eq!(
+            inspector_timing_action(None, TimelineTrimPayloadEdge::In, 10.0),
+            Action::NoOp
+        );
+        assert_eq!(
+            inspector_effect_enabled_action(None, EffectId::new(), false),
+            Action::NoOp
+        );
+        assert_eq!(
+            inspector_remove_effect_row_action(None, EffectId::new()),
+            Action::NoOp
+        );
+        assert_eq!(
+            inspector_curve_action(None, &[CurvePoint::new(0.0, 1.0)]),
+            Action::NoOp
+        );
     }
 
     fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {

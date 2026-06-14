@@ -41,6 +41,12 @@ pub enum EffectTarget {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Action {
     // ═══════════════════════════════════════════════════════════════════
+    // 调度控制
+    // ═══════════════════════════════════════════════════════════════════
+    /// Explicitly represent an input path that should not mutate editor state.
+    NoOp,
+
+    // ═══════════════════════════════════════════════════════════════════
     // 项目
     // ═══════════════════════════════════════════════════════════════════
     NewProject,
@@ -191,6 +197,11 @@ mod tests {
     #[test]
     fn round_trip_new_project() {
         assert_eq!(round_trip(&Action::NewProject), Action::NewProject);
+    }
+
+    #[test]
+    fn round_trip_no_op() {
+        assert_eq!(round_trip(&Action::NoOp), Action::NoOp);
     }
 
     #[test]
@@ -454,6 +465,12 @@ mod tests {
     fn json_format_new_project() {
         let json = serde_json::to_string(&Action::NewProject).unwrap();
         assert_eq!(json, "\"NewProject\"");
+    }
+
+    #[test]
+    fn json_format_no_op() {
+        let json = serde_json::to_string(&Action::NoOp).unwrap();
+        assert_eq!(json, "\"NoOp\"");
     }
 
     #[test]

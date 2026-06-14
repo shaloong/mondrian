@@ -46,6 +46,8 @@ impl AppState {
         use mondrian_editor_state::Action;
 
         match action {
+            Action::NoOp => Ok(()),
+
             // ── 播放控制（已有方法）───────────────────────────────────────
             Action::Play => {
                 self.play();
@@ -1213,6 +1215,23 @@ mod tests {
         clip_id: mondrian_core::types::ClipId,
     ) -> InspectorClipRefPayload {
         InspectorClipRefPayload { track_id, is_video_track: true, clip_id }
+    }
+
+    #[test]
+    fn dispatch_noop_does_not_mutate_editor_state() {
+        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+        state.selection.selected_clips =
+            vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
+
+        state
+            .dispatch_action(mondrian_editor_state::Action::NoOp)
+            .expect("dispatch noop");
+
+        assert_eq!(
+            state.selection.selected_clips,
+            vec![SelectedClipRef { track_id, is_video_track: true, clip_id }]
+        );
+        assert!(!state.can_undo_action());
     }
 
     #[test]
