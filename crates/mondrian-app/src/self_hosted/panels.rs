@@ -591,7 +591,7 @@ impl InspectorPanelModel {
         let Some(selection) = state.primary_selected_clip() else {
             return Self::empty();
         };
-        let Some(clip) = clip_for_selection(sequence, &selection) else {
+        let Some((resolved_selection, clip)) = clip_for_selection(sequence, &selection) else {
             return Self::empty();
         };
 
@@ -600,12 +600,12 @@ impl InspectorPanelModel {
         let position = clip.transform.get_position(time);
         let scale = clip.transform.get_scale(time);
         Self {
-            selected_clip: Some(selection),
+            selected_clip: Some(resolved_selection),
             enabled: !clip.is_disabled,
             opacity,
             tint: clip
                 .solid_color
-                .or_else(|| timeline_clip_color(clip, selection.is_video_track))
+                .or_else(|| timeline_clip_color(clip, resolved_selection.is_video_track))
                 .unwrap_or_else(|| Color::from_hex(0x84B4FF)),
             position_x: position.x,
             position_y: position.y,
@@ -807,7 +807,7 @@ fn timeline_track_from_sequence_track(
     let clips = track
         .clips
         .iter()
-        .map(|clip| timeline_clip_from_sequence_clip(track, is_video_track, clip, selected_clips))
+        .map(|clip| timeline_clip_from_sequence_clip(is_video_track, clip, selected_clips))
         .collect();
 
     let track = if is_video_track {
@@ -819,16 +819,11 @@ fn timeline_track_from_sequence_track(
 }
 
 fn timeline_clip_from_sequence_clip(
-    track: &Track,
     is_video_track: bool,
     clip: &Clip,
     selected_clips: &[SelectedClipRef],
 ) -> TimelineClip {
-    let selected = selected_clips.iter().any(|selection| {
-        selection.track_id == track.id
-            && selection.clip_id == clip.id
-            && selection.is_video_track == is_video_track
-    });
+    let selected = selected_clips.iter().any(|selection| selection.clip_id == clip.id);
     let label = clip.label.clone().unwrap_or_else(|| default_clip_label(clip));
     let mut view = TimelineClip::new(
         label,
@@ -962,16 +957,37 @@ fn effect_badge(effect_type: &EffectType) -> &'static str {
     }
 }
 
-fn clip_for_selection<'a>(sequence: &'a Sequence, selection: &SelectedClipRef) -> Option<&'a Clip> {
-    let tracks = if selection.is_video_track {
-        &sequence.video_tracks
-    } else {
-        &sequence.audio_tracks
-    };
-    tracks
-        .iter()
-        .find(|track| track.id == selection.track_id)
-        .and_then(|track| track.clips.iter().find(|clip| clip.id == selection.clip_id))
+fn clip_for_selection<'a>(
+    sequence: &'a Sequence,
+    selection: &SelectedClipRef,
+) -> Option<(SelectedClipRef, &'a Clip)> {
+    for track in &sequence.video_tracks {
+        if let Some(clip) = track.clips.iter().find(|clip| clip.id == selection.clip_id) {
+            return Some((
+                SelectedClipRef {
+                    track_id: track.id,
+                    is_video_track: true,
+                    clip_id: clip.id,
+                },
+                clip,
+            ));
+        }
+    }
+
+    for track in &sequence.audio_tracks {
+        if let Some(clip) = track.clips.iter().find(|clip| clip.id == selection.clip_id) {
+            return Some((
+                SelectedClipRef {
+                    track_id: track.id,
+                    is_video_track: false,
+                    clip_id: clip.id,
+                },
+                clip,
+            ));
+        }
+    }
+
+    None
 }
 
 fn panel_list(model: &PanelListModel) -> PanelList {
@@ -1696,6 +1712,37 @@ mod tests {
         assert!(model.tracks[first_audio].muted);
         assert!(model.tracks[first_audio].locked);
         assert!(model.tracks[first_audio].clips[0].disabled);
+    }
+
+    #[test]
+    fn app_state_models_resolve_stale_selected_clip_metadata_by_clip_id() {
+        let mut state = AppState::new();
+        let mut sequence = Sequence::new("edit");
+        sequence.add_video_track();
+        let tb = sequence.time_base();
+        let actual_track_id = sequence.video_tracks[0].id;
+        let stale_track_id = sequence.video_tracks[1].id;
+        let clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(24, tb));
+        let clip_id = clip.id;
+        sequence.video_tracks[0].add_clip(clip).expect("add clip");
+        state.sequence = Some(sequence);
+        state.selection.selected_clips = vec![SelectedClipRef {
+            track_id: stale_track_id,
+            is_video_track: false,
+            clip_id,
+        }];
+
+        let models = SelfHostedPanelModels::from_app_state(&state);
+
+        assert!(models.timeline.tracks[0].clips[0].selected);
+        assert_eq!(
+            models.inspector.selected_clip,
+            Some(SelectedClipRef {
+                track_id: actual_track_id,
+                is_video_track: true,
+                clip_id
+            })
+        );
     }
 
     #[test]

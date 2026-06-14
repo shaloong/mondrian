@@ -390,6 +390,8 @@ Panel model adapters should read primary and multi-clip selection through the
 same AppState selection queries instead of depending on `SelectionState` fields.
 Timeline mutations that move clips should refresh selected clip track metadata
 through the selection module; clip id remains the durable identity.
+Panel models should also resolve selected clips by clip id when reading a
+Sequence so stale cached track metadata does not make selection disappear.
 Attached effects appear as inspector rows with enable checkboxes, using effect
 instance ids rather than list indices so reorder/remove operations can be added
 without changing the widget contract. Removal buttons use the same effect id
