@@ -10,6 +10,25 @@ pub(crate) fn paint_shadow(ctx: &mut PaintContext, bounds: Rect, radius: f32) {
     ctx.encoder.draw_rect(shadow_rect(bounds, shadow), shadow_color(shadow), radius);
 }
 
+pub(crate) fn color_with_alpha(mut color: Color, alpha: f32) -> Color {
+    color.a = (color.a * alpha).clamp(0.0, 1.0);
+    color
+}
+
+pub(crate) fn mix_color(a: Color, b: Color, t: f32) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    Color {
+        r: a.r + (b.r - a.r) * t,
+        g: a.g + (b.g - a.g) * t,
+        b: a.b + (b.b - a.b) * t,
+        a: a.a + (b.a - a.a) * t,
+    }
+}
+
+pub(crate) fn soft_border(color: Color) -> Color {
+    color_with_alpha(color, 0.72)
+}
+
 pub(crate) fn shadow_rect(bounds: Rect, shadow: &ShadowToken) -> Rect {
     Rect::new(
         bounds.x + shadow.offset_x - shadow.spread,
@@ -61,6 +80,35 @@ mod tests {
         assert_eq!(
             shadow_color(&shadow),
             Color { r: 0.1, g: 0.2, b: 0.3, a: 0.4 }
+        );
+    }
+
+    #[test]
+    fn color_with_alpha_multiplies_existing_alpha() {
+        let color = Color { r: 0.1, g: 0.2, b: 0.3, a: 0.5 };
+
+        assert_eq!(
+            color_with_alpha(color, 0.4),
+            Color { r: 0.1, g: 0.2, b: 0.3, a: 0.2 }
+        );
+    }
+
+    #[test]
+    fn mix_color_clamps_ratio() {
+        let a = Color { r: 0.0, g: 0.2, b: 0.4, a: 0.6 };
+        let b = Color { r: 1.0, g: 0.8, b: 0.6, a: 0.4 };
+
+        assert_eq!(mix_color(a, b, -1.0), a);
+        assert_eq!(mix_color(a, b, 2.0), b);
+    }
+
+    #[test]
+    fn soft_border_preserves_rgb_and_reduces_alpha() {
+        let color = Color { r: 0.2, g: 0.4, b: 0.6, a: 0.5 };
+
+        assert_eq!(
+            soft_border(color),
+            Color { r: 0.2, g: 0.4, b: 0.6, a: 0.36 }
         );
     }
 }

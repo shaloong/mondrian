@@ -9,6 +9,8 @@ use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
+use crate::paint::{color_with_alpha, mix_color, soft_border};
+
 const DEFAULT_WIDTH: f32 = 480.0;
 const DEFAULT_HEIGHT: f32 = 270.0;
 
@@ -276,25 +278,6 @@ fn draw_rect_outline(ctx: &mut PaintContext, rect: Rect, color: Color) {
         1.0,
         color,
     );
-}
-
-fn mix_color(a: Color, b: Color, t: f32) -> Color {
-    let t = t.clamp(0.0, 1.0);
-    Color {
-        r: a.r + (b.r - a.r) * t,
-        g: a.g + (b.g - a.g) * t,
-        b: a.b + (b.b - a.b) * t,
-        a: a.a + (b.a - a.a) * t,
-    }
-}
-
-fn soft_border(color: Color) -> Color {
-    color_with_alpha(color, 0.72)
-}
-
-fn color_with_alpha(mut color: Color, alpha: f32) -> Color {
-    color.a = (color.a * alpha).clamp(0.0, 1.0);
-    color
 }
 
 #[cfg(test)]

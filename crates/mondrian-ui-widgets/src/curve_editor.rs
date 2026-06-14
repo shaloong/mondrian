@@ -4,11 +4,12 @@
 //! Domain layers map keyframes, effect curves, or tone curves into this compact
 //! representation and commit mutations outside the widget.
 
-use mondrian_core::Color;
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
+
+use crate::paint::color_with_alpha;
 
 const DEFAULT_WIDTH: f32 = 220.0;
 const DEFAULT_HEIGHT: f32 = 104.0;
@@ -499,15 +500,11 @@ impl Widget for CurveEditor {
     }
 }
 
-fn color_with_alpha(mut color: Color, alpha: f32) -> Color {
-    color.a = (color.a * alpha).clamp(0.0, 1.0);
-    color
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use mondrian_core::Color;
     use mondrian_ui_core::widget::DrawCommandEncoder;
     use mondrian_ui_theme::ThemePreset;
     use std::cell::RefCell;

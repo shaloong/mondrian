@@ -8,7 +8,7 @@ use mondrian_ui_core::types::{estimate_text_width, *};
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
-use crate::paint::paint_shadow;
+use crate::paint::{mix_color, paint_shadow};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct MenuRowPaint {
@@ -168,16 +168,6 @@ fn paint_menu_arrow(ctx: &mut PaintContext, rect: Rect) {
         ],
         tokens.foreground,
     );
-}
-
-fn mix_color(a: Color, b: Color, t: f32) -> Color {
-    let t = t.clamp(0.0, 1.0);
-    Color {
-        r: a.r + (b.r - a.r) * t,
-        g: a.g + (b.g - a.g) * t,
-        b: a.b + (b.b - a.b) * t,
-        a: a.a + (b.a - a.a) * t,
-    }
 }
 
 /// Menu row behavior.
