@@ -12,8 +12,8 @@ use crate::self_hosted::action_queue::PendingUiActions;
 use crate::self_hosted::host::{SelfHostedShellCommands, SelfHostedUiHost};
 use crate::self_hosted::rendering::SelfHostedFrameRenderer;
 use crate::self_hosted::runtime::{
-    winit_cursor_icon_for_ui_state, winit_mouse_button_to_ui_button,
-    winit_scroll_delta_to_ui_delta, WinitUiRuntime,
+    winit_cursor_icon_for_ui_state, winit_modifiers_to_ui_modifiers,
+    winit_mouse_button_to_ui_button, winit_scroll_delta_to_ui_delta, WinitUiRuntime,
 };
 use crate::self_hosted::shortcuts::register_default_shortcuts;
 use mondrian_panel_console::tracing_layer::ConsoleLogLayer;
@@ -97,6 +97,12 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
 
         match event {
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => elwt.exit(),
+
+            Event::WindowEvent {
+                event: WindowEvent::ModifiersChanged(modifiers), ..
+            } => {
+                modifiers_state = winit_modifiers_to_ui_modifiers(modifiers);
+            }
 
             Event::WindowEvent {
                 event: WindowEvent::KeyboardInput { event: key_event, .. },

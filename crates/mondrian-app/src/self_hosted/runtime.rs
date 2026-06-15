@@ -410,6 +410,17 @@ pub fn winit_mouse_button_to_ui_button(button: WinitMouseButton) -> MouseButton 
     }
 }
 
+/// Convert winit's authoritative modifier snapshot into Mondrian UI modifiers.
+pub fn winit_modifiers_to_ui_modifiers(modifiers: winit::event::Modifiers) -> Modifiers {
+    let state = modifiers.state();
+    Modifiers {
+        ctrl: state.control_key(),
+        alt: state.alt_key(),
+        shift: state.shift_key(),
+        meta: state.super_key(),
+    }
+}
+
 /// Choose the shell cursor icon from transient UI state.
 ///
 /// Priority is global sampling first, splitter resize affordances second,
@@ -564,6 +575,27 @@ mod tests {
 
         update_modifiers_from_key(&Key::Named(NamedKey::Control), false, &mut modifiers);
         assert_eq!(modifiers, Modifiers { shift: true, ..Modifiers::none() });
+    }
+
+    #[test]
+    fn modifier_snapshot_conversion_uses_winit_state() {
+        let modifiers = winit::keyboard::ModifiersState::CONTROL
+            | winit::keyboard::ModifiersState::SHIFT
+            | winit::keyboard::ModifiersState::SUPER;
+
+        assert_eq!(
+            winit_modifiers_to_ui_modifiers(modifiers.into()),
+            Modifiers {
+                ctrl: true,
+                shift: true,
+                meta: true,
+                ..Modifiers::none()
+            }
+        );
+        assert_eq!(
+            winit_modifiers_to_ui_modifiers(winit::keyboard::ModifiersState::ALT.into()),
+            Modifiers { alt: true, ..Modifiers::none() }
+        );
     }
 
     #[test]

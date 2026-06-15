@@ -654,6 +654,9 @@ Winit keyboard and IME conversion lives in the self-hosted shell runtime so
 `ui_demo` and product windows share the same `KeyDown` / `TextInput` /
 `ImePreedit` / `ImeCommit` semantics. Entry binaries should route Escape
 through the widget tree first and only treat it as a window close when ignored.
+Entrypoints must also consume `WindowEvent::ModifiersChanged` through
+`winit_modifiers_to_ui_modifiers`; key-edge tracking is only a fallback for the
+current keyboard event and must not be the sole source of modifier state.
 Pointer and wheel events, including runtime-synthesized pointer events such as
 eyedropper polling, must carry the current modifier state tracked by the
 entrypoint so timeline zoom, alternate drag modes, and shifted scrolling do not
