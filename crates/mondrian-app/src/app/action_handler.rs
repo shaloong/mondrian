@@ -16,14 +16,15 @@ use crate::app::ui_actions::{
     InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
     InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
     ProjectCreateWithSettingsPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
-    TimelineMoveClipPayload, TimelineSeekPayload, TimelineSelectClipPayload,
-    TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipPayload,
-    TimelineTrimPayloadEdge, ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP,
-    EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT, INSPECTOR_SET_CLIP_CURVE,
-    INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY, INSPECTOR_SET_CLIP_TINT,
-    INSPECTOR_SET_CLIP_TRANSFORM_FIELD, INSPECTOR_SET_EFFECT_ENABLED, PROJECT_CREATE_WITH_SETTINGS,
-    PROJECT_NAMESPACE, TIMELINE_ADD_TRACK, TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_SEEK,
-    TIMELINE_SELECT_CLIP, TIMELINE_SET_TRACK_CONTROL, TIMELINE_TRIM_CLIP,
+    TimelineMoveClipPayload, TimelineMoveTrackPayload, TimelineSeekPayload,
+    TimelineSelectClipPayload, TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind,
+    TimelineTrimClipPayload, TimelineTrimPayloadEdge, ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG,
+    EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT,
+    INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY,
+    INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD, INSPECTOR_SET_EFFECT_ENABLED,
+    PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE, TIMELINE_ADD_TRACK, TIMELINE_MOVE_CLIP,
+    TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_SEEK, TIMELINE_SELECT_CLIP,
+    TIMELINE_SET_TRACK_CONTROL, TIMELINE_TRIM_CLIP,
 };
 use crate::app::{AppClipboardKind, AppState, ClipOverlapMode, SelectedClipRef};
 use glam::Vec2;
@@ -660,6 +661,18 @@ impl AppState {
                     reason: err.to_string(),
                 })
             }
+            TIMELINE_MOVE_TRACK => {
+                let payload = parse_ui_payload::<TimelineMoveTrackPayload>(
+                    "timeline_ui_action",
+                    name,
+                    payload,
+                )?;
+                self.move_track(
+                    payload.track_id,
+                    payload.is_video_track,
+                    payload.target_index,
+                )
+            }
             _ => Err(unknown_ui_action_error("timeline_ui_action", name)),
         }
     }
@@ -1180,14 +1193,15 @@ mod tests {
         inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
         inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
         project_create_with_settings_action, timeline_add_track_action, timeline_move_clip_action,
-        timeline_seek_action, timeline_select_clip_action, timeline_set_track_control_action,
-        timeline_trim_clip_action, AssetsPrepareDragPayload, EffectsAddToClipPayload,
-        InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
-        InspectorRemoveEffectPayload, InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
-        InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
-        InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
-        ProjectCreateWithSettingsPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
-        TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind,
+        timeline_move_track_action, timeline_seek_action, timeline_select_clip_action,
+        timeline_set_track_control_action, timeline_trim_clip_action, AssetsPrepareDragPayload,
+        EffectsAddToClipPayload, InspectorClipRefPayload, InspectorClipTransformField,
+        InspectorCurvePointPayload, InspectorRemoveEffectPayload, InspectorSetClipCurvePayload,
+        InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
+        InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
+        InspectorSetEffectEnabledPayload, ProjectCreateWithSettingsPayload, TimelineAddTrackKind,
+        TimelineAddTrackPayload, TimelineMoveTrackPayload, TimelineSetTrackControlPayload,
+        TimelineTrackControlPayloadKind,
     };
     use mondrian_assets::AssetLibrary;
     use mondrian_core::types::{AssetId, MaskId, TimeCode, TrackId};
@@ -1375,6 +1389,25 @@ mod tests {
         assert!(!state.sequence.as_ref().expect("sequence").video_tracks[0].is_locked);
         assert!(!state.sequence.as_ref().expect("sequence").video_tracks[0].is_visible);
         assert!(state.sequence.as_ref().expect("sequence").audio_tracks[0].is_muted);
+    }
+
+    #[test]
+    fn dispatch_timeline_ui_moves_track_to_target_index() {
+        let (mut state, first_track_id, _) = state_with_two_video_tracks();
+        let second_track_id = state.sequence.as_ref().expect("sequence").video_tracks[1].id;
+
+        state
+            .dispatch_action(timeline_move_track_action(TimelineMoveTrackPayload {
+                track_id: second_track_id,
+                is_video_track: true,
+                target_index: 0,
+            }))
+            .expect("move track");
+
+        let sequence = state.sequence.as_ref().expect("sequence");
+        assert_eq!(sequence.video_tracks[0].id, second_track_id);
+        assert_eq!(sequence.video_tracks[1].id, first_track_id);
+        assert!(state.can_undo_action());
     }
 
     #[test]

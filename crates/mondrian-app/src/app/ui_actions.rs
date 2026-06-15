@@ -26,6 +26,8 @@ pub const TIMELINE_SEEK: &str = "seek";
 pub const TIMELINE_SET_TRACK_CONTROL: &str = "set_track_control";
 /// Action name for adding a video or audio timeline track.
 pub const TIMELINE_ADD_TRACK: &str = "add_track";
+/// Action name for reordering one timeline track.
+pub const TIMELINE_MOVE_TRACK: &str = "move_track";
 
 /// Custom action namespace for inspector UI operations.
 pub const INSPECTOR_NAMESPACE: &str = "ui.inspector";
@@ -172,6 +174,17 @@ pub enum TimelineAddTrackKind {
 pub struct TimelineAddTrackPayload {
     /// Track category to add.
     pub kind: TimelineAddTrackKind,
+}
+
+/// Move a track within its video or audio track list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineMoveTrackPayload {
+    /// Track being moved.
+    pub track_id: TrackId,
+    /// Whether `track_id` is a video track rather than an audio track.
+    pub is_video_track: bool,
+    /// Target index within the matching video/audio track list.
+    pub target_index: usize,
 }
 
 /// Application-level identity for an inspector-selected clip.
@@ -348,6 +361,11 @@ pub fn timeline_set_track_control_action(payload: TimelineSetTrackControlPayload
 /// Build an action that adds a timeline track.
 pub fn timeline_add_track_action(payload: TimelineAddTrackPayload) -> Action {
     custom_timeline_action(TIMELINE_ADD_TRACK, payload)
+}
+
+/// Build an action that moves a timeline track.
+pub fn timeline_move_track_action(payload: TimelineMoveTrackPayload) -> Action {
+    custom_timeline_action(TIMELINE_MOVE_TRACK, payload)
 }
 
 /// Build an action that toggles a clip enabled state from an inspector panel.

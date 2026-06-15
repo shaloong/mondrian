@@ -451,6 +451,11 @@ domain-light control kind for visibility, mute, or lock, while the app adapter
 turns the current snapshot into a stable `ui.timeline.set_track_control`
 payload. `AppState` then calls the undoable `set_track_visible`,
 `set_track_muted`, or `set_track_locked` command path.
+Track header reordering emits a view-index `TimelineTrackMove` proposal only.
+The app adapter rejects cross-kind moves, resolves the source `TrackId`, converts
+the target view index into a video/audio-local target index, and dispatches
+`ui.timeline.move_track` so `AppState::move_track` remains the only mutation
+path for track order.
 Timeline corner controls for adding video/audio tracks emit only a
 `TimelineTrackKind`; the app adapter translates that into
 `ui.timeline.add_track`, and `AppState` routes it through the existing undoable

@@ -20,6 +20,9 @@ pub type TimelineClipAction = dyn Fn(TimelineClipRef, &TimelineClip) -> Action;
 /// Action factory for track selection.
 pub type TimelineTrackAction = dyn Fn(TimelineTrackRef, &TimelineTrack) -> Action;
 
+/// Action factory for track reorder commits.
+pub type TimelineTrackMoveAction = dyn Fn(TimelineTrackMove, &TimelineTrack) -> Action;
+
 /// Action factory for track header control commits.
 pub type TimelineTrackControlAction =
     dyn Fn(TimelineTrackControl, TimelineTrackRef, &TimelineTrack) -> Action;
@@ -66,6 +69,14 @@ pub struct TimelineClipMove {
     pub clip_ref: TimelineClipRef,
     pub old_start_frame: i64,
     pub new_start_frame: i64,
+    pub new_track_index: usize,
+}
+
+/// Domain-light track reorder proposal emitted when a header drag commits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimelineTrackMove {
+    pub track_ref: TimelineTrackRef,
+    pub old_track_index: usize,
     pub new_track_index: usize,
 }
 
@@ -263,6 +274,7 @@ pub struct TimelineView {
     header_width: f32,
     ruler_height: f32,
     playhead_dragging: bool,
+    track_drag: Option<TimelineTrackDrag>,
     clip_drag: Option<TimelineClipDrag>,
     trim_drag: Option<TimelineTrimDrag>,
     scrollbar_drag: Option<TimelineScrollbarDrag>,
@@ -270,6 +282,7 @@ pub struct TimelineView {
     vertical_scrollbar_hovered: bool,
     on_clip_select: Option<Box<TimelineClipAction>>,
     on_track_select: Option<Box<TimelineTrackAction>>,
+    on_track_move: Option<Box<TimelineTrackMoveAction>>,
     on_track_control: Option<Box<TimelineTrackControlAction>>,
     on_track_add: Option<Box<TimelineTrackAddAction>>,
     on_edit_command: Option<Box<TimelineEditCommandAction>>,
@@ -284,6 +297,13 @@ struct TimelineClipDrag {
     old_start_frame: i64,
     pointer_offset_frames: i64,
     current_start_frame: i64,
+    current_track_index: usize,
+    moved: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TimelineTrackDrag {
+    track_ref: TimelineTrackRef,
     current_track_index: usize,
     moved: bool,
 }
@@ -340,6 +360,7 @@ impl TimelineView {
             header_width: 96.0,
             ruler_height: 30.0,
             playhead_dragging: false,
+            track_drag: None,
             clip_drag: None,
             trim_drag: None,
             scrollbar_drag: None,
@@ -347,6 +368,7 @@ impl TimelineView {
             vertical_scrollbar_hovered: false,
             on_clip_select: None,
             on_track_select: None,
+            on_track_move: None,
             on_track_control: None,
             on_track_add: None,
             on_edit_command: None,
@@ -407,6 +429,7 @@ impl TimelineView {
             self.hovered_track_control = None;
             self.hovered_track_add = None;
             self.selected_track = None;
+            self.track_drag = None;
             self.horizontal_scrollbar_hovered = false;
             self.vertical_scrollbar_hovered = false;
         }
@@ -427,6 +450,15 @@ impl TimelineView {
         action: impl Fn(TimelineTrackRef, &TimelineTrack) -> Action + 'static,
     ) -> Self {
         self.on_track_select = Some(Box::new(action));
+        self
+    }
+
+    /// Set a dynamic track-reorder action factory.
+    pub fn on_track_move(
+        mut self,
+        action: impl Fn(TimelineTrackMove, &TimelineTrack) -> Action + 'static,
+    ) -> Self {
+        self.on_track_move = Some(Box::new(action));
         self
     }
 
@@ -677,7 +709,11 @@ impl TimelineView {
         if !self.body_rect.contains(point) {
             return None;
         }
-        let index = ((point.y - self.body_rect.y + self.scroll_y) / self.track_height).floor();
+        self.track_index_from_y(point.y)
+    }
+
+    fn track_index_from_y(&self, y: f32) -> Option<usize> {
+        let index = ((y - self.body_rect.y + self.scroll_y) / self.track_height).floor();
         (index >= 0.0)
             .then_some(index as usize)
             .filter(|index| *index < self.tracks.len())
@@ -848,6 +884,24 @@ impl TimelineView {
         }
     }
 
+    fn compatible_track_move_target(
+        &self,
+        source_track_index: usize,
+        target_track_index: usize,
+    ) -> usize {
+        let Some(source) = self.tracks.get(source_track_index) else {
+            return source_track_index;
+        };
+        let Some(target) = self.tracks.get(target_track_index) else {
+            return source_track_index;
+        };
+        if source.kind == target.kind {
+            target_track_index
+        } else {
+            source_track_index
+        }
+    }
+
     fn select_clip_from_input(
         &mut self,
         clip_ref: TimelineClipRef,
@@ -911,6 +965,63 @@ impl TimelineView {
         }
         ctx.request_repaint();
         EventResult::Handled
+    }
+
+    fn start_track_drag(&mut self, track_ref: TimelineTrackRef) {
+        if self.track(track_ref).is_none() {
+            return;
+        }
+        self.track_drag = Some(TimelineTrackDrag {
+            track_ref,
+            current_track_index: track_ref.track_index,
+            moved: false,
+        });
+    }
+
+    fn drag_track_to(&mut self, position: Point, ctx: &mut EventContext) -> bool {
+        let Some(mut drag) = self.track_drag else {
+            return false;
+        };
+        if self.track(drag.track_ref).is_none() {
+            self.track_drag = None;
+            return false;
+        }
+        let Some(target_index) = self.track_index_from_y(position.y) else {
+            return true;
+        };
+        let target_index =
+            self.compatible_track_move_target(drag.track_ref.track_index, target_index);
+        if drag.current_track_index == target_index {
+            return true;
+        }
+        drag.current_track_index = target_index;
+        drag.moved = true;
+        self.track_drag = Some(drag);
+        ctx.request_repaint();
+        true
+    }
+
+    fn finish_track_drag(&mut self, ctx: &mut EventContext) -> bool {
+        let Some(drag) = self.track_drag.take() else {
+            return false;
+        };
+        if !drag.moved || drag.current_track_index == drag.track_ref.track_index {
+            ctx.request_repaint();
+            return true;
+        }
+        let Some(track) = self.track(drag.track_ref) else {
+            return true;
+        };
+        let movement = TimelineTrackMove {
+            track_ref: drag.track_ref,
+            old_track_index: drag.track_ref.track_index,
+            new_track_index: drag.current_track_index,
+        };
+        if let Some(factory) = &self.on_track_move {
+            (ctx.dispatch)(factory(movement, track));
+        }
+        ctx.request_repaint();
+        true
     }
 
     fn start_clip_drag(&mut self, clip_ref: TimelineClipRef, position: Point) {
@@ -1338,6 +1449,11 @@ impl TimelineView {
             };
             ctx.encoder.draw_rect(row, row_fill, 0.0);
             self.paint_in_out_row_region(ctx, row);
+            if self.track_drag.is_some_and(|drag| drag.current_track_index == track_index) {
+                let mut target = colors.ring;
+                target.a = 0.10;
+                ctx.encoder.draw_rect(row, target, 0.0);
+            }
             ctx.encoder.draw_line(
                 Point::new(self.bounds.x, y + self.track_height),
                 Point::new(self.bounds.x + self.bounds.width, y + self.track_height),
@@ -1393,6 +1509,37 @@ impl TimelineView {
                 }
             }
         }
+
+        self.paint_track_drag_indicator(ctx);
+    }
+
+    fn paint_track_drag_indicator(&self, ctx: &mut PaintContext) {
+        let Some(drag) = self.track_drag else {
+            return;
+        };
+        let Some(target) = self.tracks.get(drag.current_track_index) else {
+            return;
+        };
+        if !self
+            .tracks
+            .get(drag.track_ref.track_index)
+            .is_some_and(|source| source.kind == target.kind)
+        {
+            return;
+        }
+        let colors = &ctx.theme.colors;
+        let mut color = colors.ring;
+        color.a = 0.80;
+        let y = self.track_y(drag.current_track_index).round();
+        if y < self.body_rect.y || y > self.body_rect.y + self.body_rect.height {
+            return;
+        }
+        ctx.encoder.draw_line(
+            Point::new(self.bounds.x, y),
+            Point::new(self.bounds.x + self.bounds.width, y),
+            2.0,
+            color,
+        );
     }
 
     fn in_out_visible_range(&self) -> Option<(f32, f32)> {
@@ -1788,6 +1935,7 @@ impl Widget for TimelineView {
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
         if !self.enabled {
             if self.playhead_dragging
+                || self.track_drag.is_some()
                 || self.clip_drag.is_some()
                 || self.trim_drag.is_some()
                 || self.scrollbar_drag.is_some()
@@ -1798,6 +1946,7 @@ impl Widget for TimelineView {
             self.focused = false;
             self.focus_visible = false;
             self.playhead_dragging = false;
+            self.track_drag = None;
             self.clip_drag = None;
             self.trim_drag = None;
             self.scrollbar_drag = None;
@@ -1889,7 +2038,10 @@ impl Widget for TimelineView {
                     return self.activate_track_control_from_input(track_ref, control, ctx);
                 }
                 if let Some(track_ref) = self.track_header_at(*position) {
-                    return self.select_track_from_input(track_ref, ctx);
+                    let result = self.select_track_from_input(track_ref, ctx);
+                    self.start_track_drag(track_ref);
+                    ctx.request_pointer_capture(self.id);
+                    return result;
                 }
                 if let Some(clip_ref) = self.hit_clip(*position) {
                     let result = self.select_clip_from_input(clip_ref, ctx);
@@ -1911,6 +2063,10 @@ impl Widget for TimelineView {
             UiEvent::MouseMove { position, .. } => {
                 if self.playhead_dragging {
                     self.seek_from_input(self.x_to_frame(position.x), ctx);
+                    return EventResult::Handled;
+                }
+                if self.track_drag.is_some() {
+                    self.drag_track_to(*position, ctx);
                     return EventResult::Handled;
                 }
                 if self.clip_drag.is_some() {
@@ -1964,6 +2120,11 @@ impl Widget for TimelineView {
                 ctx.request_repaint();
                 return EventResult::Handled;
             }
+            UiEvent::MouseUp { button: MouseButton::Left, .. } if self.track_drag.is_some() => {
+                self.finish_track_drag(ctx);
+                ctx.release_pointer_capture(self.id);
+                return EventResult::Handled;
+            }
             UiEvent::MouseUp { button: MouseButton::Left, .. } if self.clip_drag.is_some() => {
                 self.finish_clip_drag(ctx);
                 ctx.release_pointer_capture(self.id);
@@ -1989,6 +2150,7 @@ impl Widget for TimelineView {
                 self.focused = false;
                 self.focus_visible = false;
                 self.playhead_dragging = false;
+                self.track_drag = None;
                 self.clip_drag = None;
                 self.trim_drag = None;
                 self.scrollbar_drag = None;
@@ -2257,6 +2419,121 @@ mod tests {
             )]
         );
         assert!(ctx.requests.repaint);
+    }
+
+    #[test]
+    fn dragging_track_header_commits_same_kind_reorder() {
+        let actions = RefCell::new(Vec::new());
+        let moves = Rc::new(RefCell::new(Vec::new()));
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let move_log = Rc::clone(&moves);
+        let mut view = TimelineView::new(vec![
+            TimelineTrack::video("V1", vec![]),
+            TimelineTrack::video("V2", vec![]),
+            TimelineTrack::audio("A1", vec![]),
+        ])
+        .on_track_move(move |movement, _track| {
+            move_log.borrow_mut().push(movement);
+            Action::Duplicate
+        });
+        view.layout(Rect::new(0.0, 0.0, 520.0, 220.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        view.event(
+            &UiEvent::MouseDown {
+                position: Point::new(12.0, 105.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        view.event(
+            &UiEvent::MouseMove {
+                position: Point::new(12.0, 55.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        let result = view.event(
+            &UiEvent::MouseUp {
+                position: Point::new(12.0, 55.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(
+            moves.borrow().as_slice(),
+            &[TimelineTrackMove {
+                track_ref: TimelineTrackRef { track_index: 1 },
+                old_track_index: 1,
+                new_track_index: 0,
+            }]
+        );
+        assert_eq!(actions.borrow().as_slice(), &[Action::Duplicate]);
+    }
+
+    #[test]
+    fn dragging_track_header_to_other_kind_does_not_commit_reorder() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut view = TimelineView::new(vec![
+            TimelineTrack::video("V1", vec![]),
+            TimelineTrack::audio("A1", vec![]),
+        ])
+        .on_track_move(|_, _| Action::Duplicate);
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        view.event(
+            &UiEvent::MouseDown {
+                position: Point::new(12.0, 55.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        view.event(
+            &UiEvent::MouseMove {
+                position: Point::new(12.0, 105.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        view.event(
+            &UiEvent::MouseUp {
+                position: Point::new(12.0, 105.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert!(actions.borrow().is_empty());
     }
 
     #[test]
