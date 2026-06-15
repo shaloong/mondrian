@@ -9,11 +9,12 @@ use mondrian_assets::{AssetKind, AssetLibrary, AssetRecord};
 use mondrian_core::automation::timecode_to_ticks;
 use mondrian_core::effect_data::EffectType;
 #[cfg(test)]
-use mondrian_core::types::{AssetId, SequenceId};
-use mondrian_core::types::{ClipId, EffectId, TimeCode, TrackId};
+use mondrian_core::types::AssetId;
+use mondrian_core::types::{ClipId, EffectId, SequenceId, TimeCode, TrackId};
 use mondrian_core::Color;
 use mondrian_editor_state::Action;
 use mondrian_effects::{effect_display_name, effect_library_types};
+use mondrian_export::preset::{ExportPreset, TimelineExportRange, VideoCodecConfig};
 use mondrian_timeline::clip::{Clip, Transform2D};
 use mondrian_timeline::sequence::Sequence;
 use mondrian_timeline::track::Track;
@@ -25,23 +26,26 @@ use mondrian_ui_widgets::dock_tab_bar::TabInfo;
 use mondrian_ui_widgets::panel_slot::SlotKind;
 use mondrian_ui_widgets::{
     Button, Checkbox, ColorPickerAreaMode, ColorPickerTrigger, CurveEditor, CurvePoint, DockPanel,
-    FlexChild, FlexContainer, PanelList, PanelListItem, PropertyPanel, PropertyRow,
-    PropertySection, ScrollView, Slider, TimelineAssetDrop, TimelineClip, TimelineClipMove,
-    TimelineClipRef, TimelineClipTrim, TimelineEditCommand, TimelineTrack, TimelineTrackControl,
-    TimelineTrackMove, TimelineTrackRef, TimelineTrimEdge, TimelineView, ViewerSurface,
+    Dropdown, FlexChild, FlexContainer, Label, MenuItem, PanelList, PanelListItem, PropertyPanel,
+    PropertyRow, PropertySection, ScrollView, Slider, TextInput, TimelineAssetDrop, TimelineClip,
+    TimelineClipMove, TimelineClipRef, TimelineClipTrim, TimelineEditCommand, TimelineTrack,
+    TimelineTrackControl, TimelineTrackMove, TimelineTrackRef, TimelineTrimEdge, TimelineView,
+    ViewerSurface,
 };
 
+use crate::app::exporting::{builtin_export_presets, export_preset_extension};
 use crate::app::ui_actions::{
     app_shell_import_media_dialog_action, app_shell_new_project_dialog_action,
     app_shell_open_project_dialog_action, app_shell_save_project_as_dialog_action,
-    assets_prepare_drag_action, effects_add_to_clip_action, inspector_remove_effect_action,
-    inspector_set_clip_curve_action, inspector_set_clip_enabled_action,
-    inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
-    inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
-    timeline_add_track_action, timeline_drop_asset_action, timeline_move_clip_action,
-    timeline_move_track_action, timeline_seek_action, timeline_select_clip_action,
-    timeline_set_track_control_action, timeline_trim_clip_action, AssetsPrepareDragPayload,
-    EffectsAddToClipPayload, InspectorClipRefPayload, InspectorClipTransformField,
+    assets_prepare_drag_action, effects_add_to_clip_action, export_enqueue_action,
+    export_set_draft_action, inspector_remove_effect_action, inspector_set_clip_curve_action,
+    inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
+    inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
+    inspector_set_effect_enabled_action, timeline_add_track_action, timeline_drop_asset_action,
+    timeline_move_clip_action, timeline_move_track_action, timeline_seek_action,
+    timeline_select_clip_action, timeline_set_track_control_action, timeline_trim_clip_action,
+    AssetsPrepareDragPayload, EffectsAddToClipPayload, ExportDraftUpdatePayload,
+    ExportEnqueuePayload, InspectorClipRefPayload, InspectorClipTransformField,
     InspectorCurvePointPayload, InspectorRemoveEffectPayload, InspectorSetClipCurvePayload,
     InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
     InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload, TimelineAddTrackKind,
@@ -61,6 +65,7 @@ pub struct SelfHostedPanelModels {
     pub viewer: ViewerPanelModel,
     pub timeline: TimelinePanelModel,
     pub inspector: InspectorPanelModel,
+    pub export: ExportPanelModel,
 }
 
 impl SelfHostedPanelModels {
@@ -88,6 +93,7 @@ impl SelfHostedPanelModels {
                 })
                 .unwrap_or_default(),
             inspector: InspectorPanelModel::from_app_state(state),
+            export: ExportPanelModel::from_app_state(state),
         }
     }
 
@@ -114,6 +120,7 @@ impl SelfHostedPanelModels {
                 })
                 .unwrap_or_else(demo_timeline_model),
             inspector: InspectorPanelModel::from_app_state(state),
+            export: ExportPanelModel::from_app_state(state),
         }
     }
 
@@ -775,6 +782,101 @@ impl InspectorPanelModel {
     }
 }
 
+/// Export panel data independent from a concrete widget tree.
+#[derive(Debug, Clone)]
+pub struct ExportPanelModel {
+    pub queue_count: usize,
+    pub presets: Vec<ExportPresetOptionModel>,
+    pub selected_preset_idx: usize,
+    pub sequences: Vec<ExportSequenceOptionModel>,
+    pub selected_sequence_id: Option<SequenceId>,
+    pub range: TimelineExportRange,
+    pub output_path: String,
+    pub status: Option<(String, bool)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExportPresetOptionModel {
+    pub label: String,
+    pub preset: ExportPreset,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportSequenceOptionModel {
+    pub id: SequenceId,
+    pub name: String,
+    pub video_clips: usize,
+    pub audio_clips: usize,
+}
+
+impl ExportPanelModel {
+    pub fn from_app_state(state: &AppState) -> Self {
+        let presets = builtin_export_presets()
+            .into_iter()
+            .map(|option| ExportPresetOptionModel { label: option.label, preset: option.preset })
+            .collect::<Vec<_>>();
+        let max_preset = presets.len().saturating_sub(1);
+        let selected_preset_idx = state.export_draft.selected_preset_idx.min(max_preset);
+        let sequences = state
+            .export_sequences_snapshot()
+            .into_iter()
+            .map(|sequence| ExportSequenceOptionModel {
+                id: sequence.id,
+                name: sequence.name,
+                video_clips: sequence.video_tracks.iter().map(|track| track.clips.len()).sum(),
+                audio_clips: sequence.audio_tracks.iter().map(|track| track.clips.len()).sum(),
+            })
+            .collect::<Vec<_>>();
+        let selected_sequence_id = state
+            .export_draft
+            .selected_sequence_id
+            .filter(|id| sequences.iter().any(|sequence| sequence.id == *id))
+            .or(state.active_sequence_id)
+            .or(state.default_sequence_id)
+            .filter(|id| sequences.iter().any(|sequence| sequence.id == *id))
+            .or_else(|| sequences.first().map(|sequence| sequence.id));
+
+        Self {
+            queue_count: state.render_queue.list_jobs().len(),
+            presets,
+            selected_preset_idx,
+            sequences,
+            selected_sequence_id,
+            range: state.export_draft.range,
+            output_path: state.export_draft.output_path.clone(),
+            status: state.status_hint.clone(),
+        }
+    }
+
+    fn selected_preset(&self) -> Option<&ExportPreset> {
+        self.presets
+            .get(self.selected_preset_idx)
+            .or_else(|| self.presets.first())
+            .map(|option| &option.preset)
+    }
+
+    fn can_enqueue(&self) -> bool {
+        self.selected_preset().is_some()
+            && self.selected_sequence_id.is_some()
+            && !self.output_path.trim().is_empty()
+    }
+
+    fn enqueue_payload(&self) -> Option<ExportEnqueuePayload> {
+        Some(ExportEnqueuePayload {
+            preset: self.selected_preset()?.clone(),
+            sequence_id: self.selected_sequence_id,
+            range: self.range,
+            output_path: self.output_path.trim().into(),
+        })
+    }
+
+    fn selected_sequence(&self) -> Option<&ExportSequenceOptionModel> {
+        self.selected_sequence_id
+            .and_then(|id| self.sequences.iter().find(|sequence| sequence.id == id))
+            .or_else(|| self.sequences.first())
+    }
+}
+
 /// Build the default self-hosted dock tree from explicit panel models.
 pub fn build_dock_tree(models: SelfHostedPanelModels) -> DockSplitter {
     let left = DockSplitter::new(
@@ -841,10 +943,10 @@ fn slot(kind: SlotKind, models: SelfHostedPanelModels) -> Box<dyn Widget> {
             kind,
             project_console_tabs(),
             move |_kind, active| {
-                let active_kind = if active == 0 {
-                    SlotKind::Project
-                } else {
-                    SlotKind::Console
+                let active_kind = match active {
+                    0 => SlotKind::Project,
+                    1 => SlotKind::Console,
+                    _ => SlotKind::Export,
                 };
                 panel_content_for_slot(active_kind, &models)
             },
@@ -876,6 +978,7 @@ fn project_console_tabs() -> Vec<TabInfo> {
     vec![
         TabInfo { label: "Project".into(), active: true },
         TabInfo { label: "Console".into(), active: false },
+        TabInfo { label: "Export".into(), active: false },
     ]
 }
 
@@ -887,12 +990,13 @@ fn panel_content_for_slot(kind: SlotKind, models: &SelfHostedPanelModels) -> Box
         SlotKind::Viewer => Box::new(viewer_panel(&models.viewer)),
         SlotKind::Timeline => Box::new(timeline_panel(&models.timeline)),
         SlotKind::Project => Box::new(panel_list(&models.project)),
+        SlotKind::Export => Box::new(ScrollView::new(Some(Box::new(export_panel(
+            &models.export,
+        ))))),
         SlotKind::Inspector => Box::new(ScrollView::new(Some(Box::new(inspector_panel(
             &models.inspector,
         ))))),
-        SlotKind::NodeGraph | SlotKind::Export => {
-            Box::new(panel_list(&PanelListModel::unsupported_panel(kind)))
-        }
+        SlotKind::NodeGraph => Box::new(panel_list(&PanelListModel::unsupported_panel(kind))),
     }
 }
 
@@ -1348,6 +1452,167 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
         .on_seek(timeline_seek_action)
 }
 
+fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
+    let preset_label = model
+        .presets
+        .get(model.selected_preset_idx)
+        .or_else(|| model.presets.first())
+        .map(|option| option.label.clone())
+        .unwrap_or_else(|| "No presets".to_owned());
+    let preset_items = model
+        .presets
+        .iter()
+        .enumerate()
+        .map(|(index, option)| {
+            MenuItem::new(
+                option.label.clone(),
+                export_set_draft_action(ExportDraftUpdatePayload::PresetIndex(index)),
+            )
+        })
+        .collect::<Vec<_>>();
+    let preset_dropdown = Dropdown::new(preset_label, preset_items).with_max_visible_items(6);
+
+    let selected_sequence = model.selected_sequence();
+    let sequence_label = selected_sequence
+        .map(|sequence| sequence.name.clone())
+        .unwrap_or_else(|| "No sequence".to_owned());
+    let sequence_items = model
+        .sequences
+        .iter()
+        .map(|sequence| {
+            MenuItem::new(
+                sequence.name.clone(),
+                export_set_draft_action(ExportDraftUpdatePayload::Sequence(Some(sequence.id))),
+            )
+        })
+        .collect::<Vec<_>>();
+    let sequence_dropdown =
+        Dropdown::new(sequence_label, sequence_items).enabled(!model.sequences.is_empty());
+
+    let range_dropdown = Dropdown::new(
+        export_range_label(model.range),
+        vec![
+            MenuItem::new(
+                export_range_label(TimelineExportRange::SequenceInOut),
+                export_set_draft_action(ExportDraftUpdatePayload::Range(
+                    TimelineExportRange::SequenceInOut,
+                )),
+            ),
+            MenuItem::new(
+                export_range_label(TimelineExportRange::EntireSequence),
+                export_set_draft_action(ExportDraftUpdatePayload::Range(
+                    TimelineExportRange::EntireSequence,
+                )),
+            ),
+        ],
+    );
+
+    let output_input = TextInput::new("Output path")
+        .with_text(model.output_path.clone())
+        .on_change(|text| {
+            export_set_draft_action(ExportDraftUpdatePayload::OutputPath(text.to_owned()))
+        });
+    let enqueue_action = model.enqueue_payload().map(export_enqueue_action).unwrap_or(Action::NoOp);
+    let enqueue_button = Button::new("Add to queue")
+        .enabled(model.can_enqueue())
+        .on_click(enqueue_action);
+
+    let selected_preset = model.selected_preset();
+    let sequence_summary = selected_sequence
+        .map(|sequence| {
+            format!(
+                "Timeline render (V{} / A{})",
+                sequence.video_clips, sequence.audio_clips
+            )
+        })
+        .unwrap_or_else(|| "No exportable sequence".to_owned());
+    let status_text = model
+        .status
+        .as_ref()
+        .map(|(message, is_error)| {
+            if *is_error {
+                format!("Error: {message}")
+            } else {
+                message.clone()
+            }
+        })
+        .unwrap_or_else(|| "Ready".to_owned());
+
+    PropertyPanel::new("Export")
+        .with_subtitle(format!("{} queued job(s)", model.queue_count))
+        .with_section(
+            PropertySection::new("Preset")
+                .with_row(PropertyRow::new("Preset", Box::new(preset_dropdown)))
+                .with_row(
+                    PropertyRow::new(
+                        "Details",
+                        Box::new(
+                            Label::new(export_preset_summary(selected_preset)).muted().wrapped(),
+                        ),
+                    )
+                    .with_height(54.0),
+                ),
+        )
+        .with_section(
+            PropertySection::new("Input")
+                .with_row(PropertyRow::new("Sequence", Box::new(sequence_dropdown)))
+                .with_row(PropertyRow::new(
+                    "Summary",
+                    Box::new(Label::new(sequence_summary).muted()),
+                ))
+                .with_row(PropertyRow::new("Range", Box::new(range_dropdown))),
+        )
+        .with_section(
+            PropertySection::new("Output")
+                .with_row(PropertyRow::new("Path", Box::new(output_input)))
+                .with_row(PropertyRow::new(
+                    "Status",
+                    Box::new(Label::new(status_text).muted()),
+                ))
+                .with_row(PropertyRow::new("", Box::new(enqueue_button))),
+        )
+}
+
+fn export_preset_summary(preset: Option<&ExportPreset>) -> String {
+    let Some(preset) = preset else {
+        return "No preset available".to_owned();
+    };
+    let resolution = preset
+        .resolution
+        .as_ref()
+        .map(|resolution| format!("{}x{}", resolution.width, resolution.height))
+        .unwrap_or_else(|| "Follow sequence".to_owned());
+    let (codec, bitrate) = match &preset.video {
+        VideoCodecConfig::H264 { bitrate_kbps, .. } => (
+            "H.264",
+            bitrate_kbps
+                .map(|value| format!("{value} kbps"))
+                .unwrap_or_else(|| "Auto".to_owned()),
+        ),
+        VideoCodecConfig::H265 { bitrate_kbps, .. } => (
+            "H.265",
+            bitrate_kbps
+                .map(|value| format!("{value} kbps"))
+                .unwrap_or_else(|| "Auto".to_owned()),
+        ),
+        VideoCodecConfig::Av1 { .. } => ("AV1", "Auto".to_owned()),
+        VideoCodecConfig::ProRes { .. } => ("ProRes", "N/A".to_owned()),
+        VideoCodecConfig::Gif { .. } => ("GIF", "N/A".to_owned()),
+    };
+    format!(
+        "{resolution} / {codec} / {bitrate} / .{}",
+        export_preset_extension(preset)
+    )
+}
+
+fn export_range_label(range: TimelineExportRange) -> &'static str {
+    match range {
+        TimelineExportRange::SequenceInOut => "Sequence In/Out",
+        TimelineExportRange::EntireSequence => "Entire sequence",
+        TimelineExportRange::WorkArea { .. } => "Work area",
+    }
+}
+
 #[cfg(test)]
 fn demo_panel_action(name: &str) -> Action {
     Action::Custom {
@@ -1760,11 +2025,13 @@ mod tests {
     fn project_console_tabs_expose_project_status_first() {
         let tabs = project_console_tabs();
 
-        assert_eq!(tabs.len(), 2);
+        assert_eq!(tabs.len(), 3);
         assert_eq!(tabs[0].label, "Project");
         assert!(tabs[0].active);
         assert_eq!(tabs[1].label, "Console");
         assert!(!tabs[1].active);
+        assert_eq!(tabs[2].label, "Export");
+        assert!(!tabs[2].active);
     }
 
     #[test]
@@ -1788,6 +2055,38 @@ mod tests {
         assert_eq!(models.inspector.selected_clip, None);
         assert_eq!(models.inspector.opacity, 100.0);
         assert!(models.inspector.effects.is_empty());
+        assert!(models.export.sequences.is_empty());
+        assert!(!models.export.can_enqueue());
+    }
+
+    #[test]
+    fn export_panel_model_reads_app_export_draft() {
+        let mut state = AppState::new();
+        let sequence = Sequence::new("Deliverable");
+        let sequence_id = sequence.id;
+        state.sequence = Some(sequence);
+        state.set_export_draft_preset_index(1);
+        state.set_export_draft_sequence_id(Some(sequence_id));
+        state.set_export_draft_range(TimelineExportRange::EntireSequence);
+        state.set_export_draft_output_path("E:/renders/deliverable.mp4");
+        state.set_status_hint("Ready to export", false);
+
+        let model = ExportPanelModel::from_app_state(&state);
+
+        assert_eq!(model.selected_preset_idx, 1);
+        assert_eq!(model.selected_sequence_id, Some(sequence_id));
+        assert_eq!(model.range, TimelineExportRange::EntireSequence);
+        assert_eq!(model.output_path, "E:/renders/deliverable.mp4");
+        assert_eq!(model.sequences.len(), 1);
+        assert_eq!(model.sequences[0].name, "Deliverable");
+        assert!(model.can_enqueue());
+        let payload = model.enqueue_payload().expect("enqueue payload");
+        assert_eq!(payload.sequence_id, Some(sequence_id));
+        assert_eq!(payload.range, TimelineExportRange::EntireSequence);
+        assert_eq!(
+            payload.output_path,
+            std::path::PathBuf::from("E:/renders/deliverable.mp4")
+        );
     }
 
     #[test]

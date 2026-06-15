@@ -32,6 +32,8 @@ RenderQueue（异步后台任务）
 `AppState` 负责解析目标序列、递归收集嵌套序列素材、过滤 synthetic adjustment
 asset、检查离线素材、构造 `TimelineExportInput`，最后将 `RenderJob` 放入
 `RenderQueue`。面板代码不应复制这些业务规则。
+同一模块也提供共享内置预设列表和 `TimelineExportDraft`，避免 egui 与自研
+UI 在预设命名、默认选择、草稿状态持久化上分叉。
 
 ---
 

@@ -3,7 +3,7 @@
 use super::*;
 use mondrian_core::{MondrianError, Result};
 use mondrian_export::preset::{
-    ExportConfig, ExportInput, ExportPreset, TimelineExportInput, TimelineExportRange,
+    Container, ExportConfig, ExportInput, ExportPreset, TimelineExportInput, TimelineExportRange,
 };
 use mondrian_export::queue::RenderJob;
 
@@ -20,7 +20,89 @@ pub struct TimelineExportRequest {
     pub output_path: PathBuf,
 }
 
+/// UI-stable draft state for timeline export panels.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimelineExportDraft {
+    /// Selected preset index into [`builtin_export_presets`].
+    pub selected_preset_idx: usize,
+    /// Selected sequence; `None` means use the active/default sequence.
+    pub selected_sequence_id: Option<SequenceId>,
+    /// Timeline range to render.
+    pub range: TimelineExportRange,
+    /// User-entered output file path.
+    pub output_path: String,
+}
+
+impl Default for TimelineExportDraft {
+    fn default() -> Self {
+        Self {
+            selected_preset_idx: 0,
+            selected_sequence_id: None,
+            range: TimelineExportRange::SequenceInOut,
+            output_path: String::new(),
+        }
+    }
+}
+
+/// One named export preset shown by UI frontends.
+#[derive(Debug, Clone)]
+pub struct ExportPresetOption {
+    pub label: String,
+    pub preset: ExportPreset,
+}
+
+/// Built-in export presets shared by legacy egui and self-hosted UI panels.
+pub fn builtin_export_presets() -> Vec<ExportPresetOption> {
+    vec![
+        ExportPresetOption {
+            label: "YouTube 1080p H.264".to_owned(),
+            preset: ExportPreset::youtube_1080p(),
+        },
+        ExportPresetOption {
+            label: "TikTok 竖屏 9:16".to_owned(),
+            preset: ExportPreset::tiktok_vertical(),
+        },
+        ExportPresetOption {
+            label: "代理文件 720p".to_owned(),
+            preset: ExportPreset::proxy_720p(),
+        },
+    ]
+}
+
+/// File extension implied by an export preset container.
+pub fn export_preset_extension(preset: &ExportPreset) -> &'static str {
+    match preset.container {
+        Container::Mp4 => "mp4",
+        Container::Mov => "mov",
+        Container::Mkv => "mkv",
+        Container::Gif => "gif",
+        Container::Mxf => "mxf",
+        Container::Webm => "webm",
+    }
+}
+
 impl AppState {
+    /// Update the export draft preset, clamped to available built-in presets.
+    pub fn set_export_draft_preset_index(&mut self, index: usize) {
+        let max_index = builtin_export_presets().len().saturating_sub(1);
+        self.export_draft.selected_preset_idx = index.min(max_index);
+    }
+
+    /// Update the export draft sequence.
+    pub fn set_export_draft_sequence_id(&mut self, sequence_id: Option<SequenceId>) {
+        self.export_draft.selected_sequence_id = sequence_id;
+    }
+
+    /// Update the export draft timeline range.
+    pub fn set_export_draft_range(&mut self, range: TimelineExportRange) {
+        self.export_draft.range = range;
+    }
+
+    /// Update the export draft output path.
+    pub fn set_export_draft_output_path(&mut self, output_path: impl Into<String>) {
+        self.export_draft.output_path = output_path.into();
+    }
+
     /// Build and enqueue a render job from a timeline export request.
     pub fn enqueue_timeline_export(&mut self, request: TimelineExportRequest) -> Result<()> {
         if request.output_path.as_os_str().is_empty() {

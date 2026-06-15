@@ -67,6 +67,8 @@ pub const EXPORT_NAMESPACE: &str = "ui.export";
 
 /// Action name for enqueueing a timeline export job.
 pub const EXPORT_ENQUEUE: &str = "enqueue";
+/// Action name for updating the self-hosted export draft.
+pub const EXPORT_SET_DRAFT: &str = "set_draft";
 
 /// Custom action namespace for project lifecycle operations supplied by shell UI.
 pub const PROJECT_NAMESPACE: &str = "ui.project";
@@ -338,6 +340,19 @@ pub struct ExportEnqueuePayload {
     pub output_path: PathBuf,
 }
 
+/// Update one field of the self-hosted export draft.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ExportDraftUpdatePayload {
+    /// Select a built-in preset by index.
+    PresetIndex(usize),
+    /// Select the sequence to export.
+    Sequence(Option<SequenceId>),
+    /// Select the timeline range to render.
+    Range(TimelineExportRange),
+    /// Replace the output path text.
+    OutputPath(String),
+}
+
 /// Create a project at a user-selected path with explicit initial settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectCreateWithSettingsPayload {
@@ -458,6 +473,11 @@ pub fn assets_prepare_drag_action(payload: AssetsPrepareDragPayload) -> Action {
 /// Build an action that enqueues a timeline export.
 pub fn export_enqueue_action(payload: ExportEnqueuePayload) -> Action {
     custom_export_action(EXPORT_ENQUEUE, payload)
+}
+
+/// Build an action that updates one export draft field.
+pub fn export_set_draft_action(payload: ExportDraftUpdatePayload) -> Action {
+    custom_export_action(EXPORT_SET_DRAFT, payload)
 }
 
 /// Build an action that creates a project from shell UI.

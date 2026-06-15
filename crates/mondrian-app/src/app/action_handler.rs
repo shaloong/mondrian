@@ -12,21 +12,22 @@ use crate::app::timeline_editing::{
     find_clip, find_clip_mut, find_clip_track_lock, set_clip_disabled,
 };
 use crate::app::ui_actions::{
-    AssetsPrepareDragPayload, EffectsAddToClipPayload, ExportEnqueuePayload,
-    InspectorClipTransformField, InspectorRemoveEffectPayload, InspectorSetClipCurvePayload,
-    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
-    InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
-    ProjectCreateWithSettingsPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
-    TimelineDropAssetPayload, TimelineMoveClipPayload, TimelineMoveTrackPayload,
-    TimelineSeekPayload, TimelineSelectClipPayload, TimelineSetTrackControlPayload,
-    TimelineTrackControlPayloadKind, TimelineTrimClipPayload, TimelineTrimPayloadEdge,
-    ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, EXPORT_ENQUEUE,
-    EXPORT_NAMESPACE, INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT, INSPECTOR_SET_CLIP_CURVE,
-    INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY, INSPECTOR_SET_CLIP_TINT,
-    INSPECTOR_SET_CLIP_TRANSFORM_FIELD, INSPECTOR_SET_EFFECT_ENABLED, PROJECT_CREATE_WITH_SETTINGS,
-    PROJECT_NAMESPACE, TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET, TIMELINE_MOVE_CLIP,
-    TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_SEEK, TIMELINE_SELECT_CLIP,
-    TIMELINE_SET_TRACK_CONTROL, TIMELINE_TRIM_CLIP,
+    AssetsPrepareDragPayload, EffectsAddToClipPayload, ExportDraftUpdatePayload,
+    ExportEnqueuePayload, InspectorClipTransformField, InspectorRemoveEffectPayload,
+    InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
+    InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
+    InspectorSetEffectEnabledPayload, ProjectCreateWithSettingsPayload, TimelineAddTrackKind,
+    TimelineAddTrackPayload, TimelineDropAssetPayload, TimelineMoveClipPayload,
+    TimelineMoveTrackPayload, TimelineSeekPayload, TimelineSelectClipPayload,
+    TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipPayload,
+    TimelineTrimPayloadEdge, ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP,
+    EFFECTS_NAMESPACE, EXPORT_ENQUEUE, EXPORT_NAMESPACE, EXPORT_SET_DRAFT, INSPECTOR_NAMESPACE,
+    INSPECTOR_REMOVE_EFFECT, INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_CLIP_ENABLED,
+    INSPECTOR_SET_CLIP_OPACITY, INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD,
+    INSPECTOR_SET_EFFECT_ENABLED, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
+    TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET, TIMELINE_MOVE_CLIP, TIMELINE_MOVE_TRACK,
+    TIMELINE_NAMESPACE, TIMELINE_SEEK, TIMELINE_SELECT_CLIP, TIMELINE_SET_TRACK_CONTROL,
+    TIMELINE_TRIM_CLIP,
 };
 use crate::app::{AppClipboardKind, AppState, ClipOverlapMode, SelectedClipRef};
 use glam::Vec2;
@@ -815,6 +816,26 @@ impl AppState {
 
     fn dispatch_export_ui_action(&mut self, name: &str, payload: serde_json::Value) -> Result<()> {
         match name {
+            EXPORT_SET_DRAFT => {
+                let payload = parse_ui_payload::<ExportDraftUpdatePayload>(
+                    "export_ui_action",
+                    name,
+                    payload,
+                )?;
+                match payload {
+                    ExportDraftUpdatePayload::PresetIndex(index) => {
+                        self.set_export_draft_preset_index(index)
+                    }
+                    ExportDraftUpdatePayload::Sequence(sequence_id) => {
+                        self.set_export_draft_sequence_id(sequence_id)
+                    }
+                    ExportDraftUpdatePayload::Range(range) => self.set_export_draft_range(range),
+                    ExportDraftUpdatePayload::OutputPath(output_path) => {
+                        self.set_export_draft_output_path(output_path)
+                    }
+                }
+                Ok(())
+            }
             EXPORT_ENQUEUE => {
                 let payload =
                     parse_ui_payload::<ExportEnqueuePayload>("export_ui_action", name, payload)?;
@@ -1246,16 +1267,16 @@ mod tests {
     use super::*;
     use crate::app::ui_actions::{
         assets_prepare_drag_action, effects_add_to_clip_action, export_enqueue_action,
-        inspector_remove_effect_action, inspector_set_clip_curve_action,
+        export_set_draft_action, inspector_remove_effect_action, inspector_set_clip_curve_action,
         inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
         inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
         inspector_set_effect_enabled_action, project_create_with_settings_action,
         timeline_add_track_action, timeline_drop_asset_action, timeline_move_clip_action,
         timeline_move_track_action, timeline_seek_action, timeline_select_clip_action,
         timeline_set_track_control_action, timeline_trim_clip_action, AssetsPrepareDragPayload,
-        EffectsAddToClipPayload, ExportEnqueuePayload, InspectorClipRefPayload,
-        InspectorClipTransformField, InspectorCurvePointPayload, InspectorRemoveEffectPayload,
-        InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
+        EffectsAddToClipPayload, ExportDraftUpdatePayload, ExportEnqueuePayload,
+        InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
+        InspectorRemoveEffectPayload, InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
         InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
         InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
         ProjectCreateWithSettingsPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
@@ -1359,6 +1380,41 @@ mod tests {
         assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
         assert!(state.render_queue.list_jobs().is_empty());
         assert!(state.status_hint.as_ref().is_some_and(|(_, is_error)| *is_error));
+    }
+
+    #[test]
+    fn dispatch_export_ui_updates_draft_fields() {
+        let mut state = AppState::new();
+        let sequence_id = mondrian_core::types::SequenceId::new();
+
+        state
+            .dispatch_action(export_set_draft_action(
+                ExportDraftUpdatePayload::PresetIndex(usize::MAX),
+            ))
+            .expect("set preset");
+        state
+            .dispatch_action(export_set_draft_action(ExportDraftUpdatePayload::Sequence(
+                Some(sequence_id),
+            )))
+            .expect("set sequence");
+        state
+            .dispatch_action(export_set_draft_action(ExportDraftUpdatePayload::Range(
+                mondrian_export::preset::TimelineExportRange::EntireSequence,
+            )))
+            .expect("set range");
+        state
+            .dispatch_action(export_set_draft_action(
+                ExportDraftUpdatePayload::OutputPath("E:/renders/out.mp4".to_owned()),
+            ))
+            .expect("set output path");
+
+        assert_eq!(state.export_draft.selected_preset_idx, 2);
+        assert_eq!(state.export_draft.selected_sequence_id, Some(sequence_id));
+        assert_eq!(
+            state.export_draft.range,
+            mondrian_export::preset::TimelineExportRange::EntireSequence
+        );
+        assert_eq!(state.export_draft.output_path, "E:/renders/out.mp4");
     }
 
     #[test]

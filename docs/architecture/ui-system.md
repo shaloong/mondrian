@@ -129,6 +129,9 @@ timeline range, and output path, then dispatch `ui.export.enqueue`; `AppState`
 owns timeline export request validation, recursive asset path collection,
 offline-asset checks, and `RenderJob` creation through
 `app::exporting::TimelineExportRequest`.
+Self-hosted export forms persist their editable draft in `AppState::export_draft`
+through `ui.export.set_draft`, so widget-tree refreshes and dock layout changes
+do not reset selected preset, selected sequence, range, or output path.
 Those app-shell dialog intents are built through `app::ui_actions` helpers so
 menus and self-hosted panels share the same stable custom-action ids. Shell
 local actions, such as About and close-modal, use the same helper boundary

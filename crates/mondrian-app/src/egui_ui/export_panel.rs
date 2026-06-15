@@ -1,4 +1,7 @@
-use crate::app::{exporting::TimelineExportRequest, AppState};
+use crate::app::{
+    exporting::{builtin_export_presets, export_preset_extension, TimelineExportRequest},
+    AppState,
+};
 use crate::egui_ui::theme::{self, palette, tokens, typography};
 use egui::Ui;
 use mondrian_core::types::SequenceId;
@@ -23,8 +26,8 @@ impl ExportPanel {
     pub fn show(&mut self, ui: &mut Ui, state: &mut AppState) {
         egui::ScrollArea::vertical().id_salt("export_panel_scroll").show(ui, |ui| {
             ui.vertical(|ui| {
-                let presets = builtin_presets();
-                let preset = &presets[self.selected_preset_idx].1;
+                let presets = builtin_export_presets();
+                let preset = &presets[self.selected_preset_idx].preset;
                 let pending = state.render_queue.list_jobs().len();
                 let combo_id = ui.make_persistent_id("export_preset");
                 let combo_open = egui::Popup::is_id_open(ui.ctx(), combo_id)
@@ -41,7 +44,7 @@ impl ExportPanel {
                 theme::with_minimal_dropdown(ui, combo_open, |ui| {
                     egui::ComboBox::from_id_salt("export_preset")
                         .selected_text(
-                            egui::RichText::new(&presets[self.selected_preset_idx].0).color(
+                            egui::RichText::new(&presets[self.selected_preset_idx].label).color(
                                 if combo_open {
                                     palette::text_primary()
                                 } else {
@@ -50,12 +53,12 @@ impl ExportPanel {
                             ),
                         )
                         .show_ui(ui, |ui| {
-                            for (i, (name, _)) in presets.iter().enumerate() {
+                            for (i, option) in presets.iter().enumerate() {
                                 theme::checkmark_selectable_value(
                                     ui,
                                     &mut self.selected_preset_idx,
                                     i,
-                                    name,
+                                    &option.label,
                                 );
                             }
                         });
@@ -272,28 +275,5 @@ fn export_range_label(range: TimelineExportRange) -> &'static str {
 }
 
 fn default_output_filename(preset: &ExportPreset) -> String {
-    let ext = match preset.container {
-        mondrian_export::preset::Container::Mp4 => "mp4",
-        mondrian_export::preset::Container::Mov => "mov",
-        mondrian_export::preset::Container::Mkv => "mkv",
-        mondrian_export::preset::Container::Gif => "gif",
-        mondrian_export::preset::Container::Mxf => "mxf",
-        mondrian_export::preset::Container::Webm => "webm",
-    };
-    format!("mondrian-export.{}", ext)
-}
-
-/// 内置预设列表（名称 + ExportPreset）
-fn builtin_presets() -> Vec<(String, ExportPreset)> {
-    vec![
-        (
-            "YouTube 1080p H.264".to_owned(),
-            ExportPreset::youtube_1080p(),
-        ),
-        (
-            "TikTok 竖屏 9:16".to_owned(),
-            ExportPreset::tiktok_vertical(),
-        ),
-        ("代理文件 720p".to_owned(), ExportPreset::proxy_720p()),
-    ]
+    format!("mondrian-export.{}", export_preset_extension(preset))
 }

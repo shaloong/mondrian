@@ -69,6 +69,7 @@ mod timeline_editing;
 pub mod ui_actions;
 
 use audio_rendering::*;
+use exporting::TimelineExportDraft;
 pub use selection::{SelectedClipRef, SelectedTrackRef};
 use timeline_editing::*;
 
@@ -626,6 +627,8 @@ pub struct AppState {
 
     // 渲染导出队列
     pub render_queue: Arc<RenderQueue>,
+    /// UI-stable timeline export draft shared by self-hosted export panels.
+    pub export_draft: TimelineExportDraft,
 
     // 底部状态栏提示（message, is_error）
     pub status_hint: Option<(String, bool)>,
@@ -714,6 +717,7 @@ impl AppState {
             dragging_asset: None,
             selection: SelectionState::default(),
             render_queue: RenderQueue::new(),
+            export_draft: TimelineExportDraft::default(),
             status_hint: None,
             animation_selection: AnimationSelectionState::default(),
             animation_clipboard: None,
