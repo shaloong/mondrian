@@ -19,6 +19,7 @@ use crate::app::ui_actions::{
     app_shell_new_project_draft_changed_action, NewProjectDraftUpdatePayload,
     ProjectCreateWithSettingsPayload,
 };
+use crate::self_hosted::icons::AppIcon;
 use crate::self_hosted::shell::PROJECT_FILE_EXTENSION;
 
 /// Self-hosted new-project form state.
@@ -372,7 +373,9 @@ impl NewProjectDialog {
             preview_cache_checkbox,
             cancel_button: Button::new("Cancel")
                 .on_click(app_shell_cancel_new_project_dialog_action()),
-            create_button: Button::new("Create...")
+            create_button: AppIcon::PlusFilled
+                .text_button("Create...")
+                .expect("bundled PlusFilled icon asset should parse")
                 .on_click(app_shell_confirm_new_project_dialog_action()),
         }
     }

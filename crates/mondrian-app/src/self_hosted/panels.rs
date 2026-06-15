@@ -26,7 +26,7 @@ use mondrian_ui_widgets::dock_splitter::DockSplitter;
 use mondrian_ui_widgets::dock_tab_bar::TabInfo;
 use mondrian_ui_widgets::panel_slot::SlotKind;
 use mondrian_ui_widgets::{
-    Button, Checkbox, ColorPickerAreaMode, ColorPickerTrigger, CurveEditor, CurvePoint, DockPanel,
+    Checkbox, ColorPickerAreaMode, ColorPickerTrigger, CurveEditor, CurvePoint, DockPanel,
     Dropdown, FlexChild, FlexContainer, Label, MenuItem, NodeGraphEdge, NodeGraphNode,
     NodeGraphView, PanelList, PanelListItem, PropertyPanel, PropertyRow, PropertySection,
     ScrollView, Slider, TextInput, TimelineAssetDrop, TimelineClip, TimelineClipMove,
@@ -1707,12 +1707,15 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
 
     let selected_preset = model.selected_preset();
     let output_extension = selected_preset.map(export_preset_extension).unwrap_or("mp4").to_owned();
-    let output_browse = Button::new("Browse...").on_click(app_shell_export_output_dialog_action(
-        ExportOutputDialogPayload {
-            default_file_name: export_default_file_name(selected_preset),
-            extension: output_extension,
-        },
-    ));
+    let output_browse = AppIcon::Folder
+        .text_button("Browse...")
+        .expect("bundled Folder icon asset should parse")
+        .on_click(app_shell_export_output_dialog_action(
+            ExportOutputDialogPayload {
+                default_file_name: export_default_file_name(selected_preset),
+                extension: output_extension,
+            },
+        ));
     let output_input = TextInput::new("Output path")
         .with_text(model.output_path.clone())
         .on_change(|text| {
@@ -1724,7 +1727,9 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
     ])
     .with_gap(8.0);
     let enqueue_action = model.enqueue_payload().map(export_enqueue_action).unwrap_or(Action::NoOp);
-    let enqueue_button = Button::new("Add to queue")
+    let enqueue_button = AppIcon::Export
+        .text_button("Add to queue")
+        .expect("bundled Export icon asset should parse")
         .enabled(model.can_enqueue())
         .on_click(enqueue_action);
 
