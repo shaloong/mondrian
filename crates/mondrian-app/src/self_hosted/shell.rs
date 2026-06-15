@@ -171,6 +171,27 @@ impl MenuBar {
         let menus = items.into_iter().map(|(label, items)| Dropdown::new(label, items)).collect();
         Self { id: WidgetId::new(), menus, bounds: Rect::ZERO }
     }
+
+    fn open_menu_index(&self) -> Option<usize> {
+        self.menus.iter().position(Dropdown::is_open)
+    }
+
+    fn trigger_index_at(&self, position: Point) -> Option<usize> {
+        self.menus.iter().position(|menu| menu.trigger_contains(position))
+    }
+
+    fn close_other_menus(&mut self, target: usize, ctx: &mut EventContext) {
+        for (index, menu) in self.menus.iter_mut().enumerate() {
+            if index != target {
+                menu.close_menu(ctx);
+            }
+        }
+    }
+
+    fn switch_open_menu_to(&mut self, target: usize, ctx: &mut EventContext) {
+        self.close_other_menus(target, ctx);
+        self.menus[target].open_menu(ctx);
+    }
 }
 
 impl Widget for MenuBar {
@@ -192,16 +213,23 @@ impl Widget for MenuBar {
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
-        if let UiEvent::MouseDown { position, button: MouseButton::Left, .. } = event {
-            let open_menu = self.menus.iter().position(Dropdown::is_open);
-            let target_menu = self.menus.iter().position(|menu| menu.trigger_contains(*position));
-            if let (Some(open), Some(target)) = (open_menu, target_menu) {
+        if let UiEvent::MouseMove { position, .. } = event {
+            if let (Some(open), Some(target)) =
+                (self.open_menu_index(), self.trigger_index_at(*position))
+            {
                 if open != target {
-                    for (index, menu) in self.menus.iter_mut().enumerate() {
-                        if index != target {
-                            menu.close_menu(ctx);
-                        }
-                    }
+                    self.switch_open_menu_to(target, ctx);
+                    return EventResult::Handled;
+                }
+            }
+        }
+
+        if let UiEvent::MouseDown { position, button: MouseButton::Left, .. } = event {
+            if let (Some(open), Some(target)) =
+                (self.open_menu_index(), self.trigger_index_at(*position))
+            {
+                if open != target {
+                    self.close_other_menus(target, ctx);
                     return self.menus[target].event(event, ctx);
                 }
             }
@@ -567,6 +595,41 @@ mod tests {
         );
     }
 
+    fn menu_mouse_down(
+        menu: &mut MenuBar,
+        ctx: &mut EventContext<'_>,
+        position: Point,
+    ) -> EventResult {
+        menu.event(
+            &UiEvent::MouseDown {
+                position,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            ctx,
+        )
+    }
+
+    fn menu_mouse_up(
+        menu: &mut MenuBar,
+        ctx: &mut EventContext<'_>,
+        position: Point,
+    ) -> EventResult {
+        menu.event(
+            &UiEvent::MouseUp {
+                position,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            ctx,
+        )
+    }
+
+    fn click_menu(menu: &mut MenuBar, ctx: &mut EventContext<'_>, position: Point) {
+        menu_mouse_down(menu, ctx, position);
+        menu_mouse_up(menu, ctx, position);
+    }
+
     #[test]
     fn default_menu_bar_exposes_primary_menu_groups() {
         let menu = MenuBar::default();
@@ -595,55 +658,9 @@ mod tests {
             &dispatch,
         );
 
-        menu.event(
-            &UiEvent::MouseDown {
-                position: Point::new(10.0, 10.0),
-                button: MouseButton::Left,
-                modifiers: Modifiers::none(),
-            },
-            &mut ctx,
-        );
-        menu.event(
-            &UiEvent::MouseUp {
-                position: Point::new(10.0, 10.0),
-                button: MouseButton::Left,
-                modifiers: Modifiers::none(),
-            },
-            &mut ctx,
-        );
-
-        menu.event(
-            &UiEvent::MouseDown {
-                position: Point::new(310.0, 10.0),
-                button: MouseButton::Left,
-                modifiers: Modifiers::none(),
-            },
-            &mut ctx,
-        );
-        menu.event(
-            &UiEvent::MouseUp {
-                position: Point::new(310.0, 10.0),
-                button: MouseButton::Left,
-                modifiers: Modifiers::none(),
-            },
-            &mut ctx,
-        );
-        menu.event(
-            &UiEvent::MouseDown {
-                position: Point::new(310.0, 42.0),
-                button: MouseButton::Left,
-                modifiers: Modifiers::none(),
-            },
-            &mut ctx,
-        );
-        menu.event(
-            &UiEvent::MouseUp {
-                position: Point::new(310.0, 42.0),
-                button: MouseButton::Left,
-                modifiers: Modifiers::none(),
-            },
-            &mut ctx,
-        );
+        click_menu(&mut menu, &mut ctx, Point::new(10.0, 10.0));
+        click_menu(&mut menu, &mut ctx, Point::new(310.0, 10.0));
+        click_menu(&mut menu, &mut ctx, Point::new(310.0, 42.0));
 
         assert_eq!(dispatched.borrow().len(), 1);
         let action = dispatched.borrow()[0].clone();
@@ -653,6 +670,52 @@ mod tests {
                 assert_eq!(name, APP_SHELL_ABOUT);
             }
             other => panic!("expected about action after menu switch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn menu_bar_switches_open_menu_on_trigger_hover() {
+        let mut menu = MenuBar::default();
+        menu.layout(Rect::new(0.0, 0.0, 500.0, MENU_BAR_HEIGHT));
+        let dispatched = Rc::new(RefCell::new(Vec::new()));
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let dispatch = {
+            let dispatched = Rc::clone(&dispatched);
+            move |action| dispatched.borrow_mut().push(action)
+        };
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        click_menu(&mut menu, &mut ctx, Point::new(10.0, 10.0));
+
+        assert_eq!(
+            menu.event(
+                &UiEvent::MouseMove {
+                    position: Point::new(310.0, 10.0),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        click_menu(&mut menu, &mut ctx, Point::new(310.0, 42.0));
+
+        assert_eq!(dispatched.borrow().len(), 1);
+        let action = dispatched.borrow()[0].clone();
+        match &action {
+            Action::Custom { namespace, name, .. } => {
+                assert_eq!(namespace, APP_SHELL_NAMESPACE);
+                assert_eq!(name, APP_SHELL_ABOUT);
+            }
+            other => panic!("expected about action after hover menu switch, got {other:?}"),
         }
     }
 

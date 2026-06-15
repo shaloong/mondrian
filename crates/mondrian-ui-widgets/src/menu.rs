@@ -305,6 +305,15 @@ impl Dropdown {
         }
     }
 
+    /// Open the popup menu from parent-level coordination.
+    ///
+    /// This is intentionally different from trigger-click opening: a parent
+    /// menu bar may open a sibling menu on hover, and that should not suppress
+    /// the next pointer release because it belongs to a fresh item click.
+    pub fn open_menu(&mut self, ctx: &mut EventContext) {
+        self.open_with_release_suppression(ctx, false);
+    }
+
     /// Limit how many rows are visible before the open menu scrolls.
     pub fn with_max_visible_items(mut self, max_visible_items: usize) -> Self {
         self.max_visible_items = max_visible_items.max(1);
@@ -458,10 +467,18 @@ impl Dropdown {
     }
 
     fn open(&mut self, ctx: &mut EventContext) {
+        self.open_with_release_suppression(ctx, true);
+    }
+
+    fn open_with_release_suppression(
+        &mut self,
+        ctx: &mut EventContext,
+        suppress_next_release: bool,
+    ) {
         self.open = true;
         self.hovered_index = self.first_activatable_index();
         self.pressed_index = None;
-        self.suppress_next_release = true;
+        self.suppress_next_release = suppress_next_release;
         self.clamp_scroll_offset();
         self.ensure_hover_visible();
         ctx.request_pointer_capture(self.id);
@@ -798,8 +815,9 @@ mod tests {
         let mut t = DummyTooltip;
         let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
 
-        d.open(&mut ctx);
+        d.open_menu(&mut ctx);
         assert!(d.is_open());
+        assert!(!d.suppress_next_release);
         d.close_menu(&mut ctx);
         assert!(!d.is_open());
     }

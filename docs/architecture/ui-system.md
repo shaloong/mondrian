@@ -350,8 +350,10 @@ rows while skipping separators and disabled rows, Enter/Space activates the
 highlighted row, and Escape closes the popup. Internal selectors such as the
 ColorPicker mode menu follow the same keys but commit local widget state instead
 of dispatching editor actions.
-Menu bars coordinate sibling dropdowns: when one menu is open, clicking another
-menu trigger closes the old popup and opens the new one on the same mouse down.
+Menu bars coordinate sibling dropdowns: when one menu is open, clicking or
+hovering another menu trigger closes the old popup and opens the new one.
+Trigger-click opens suppress the matching release; parent-coordinated hover
+opens must not, because the next release belongs to a fresh menu-item click.
 
 Keyboard activation for focused controls follows desktop conventions: Button
 handles Enter/Space as an activation gesture, and Checkbox handles Enter/Space
