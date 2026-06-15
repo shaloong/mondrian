@@ -192,6 +192,21 @@ impl Widget for MenuBar {
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if let UiEvent::MouseDown { position, button: MouseButton::Left, .. } = event {
+            let open_menu = self.menus.iter().position(Dropdown::is_open);
+            let target_menu = self.menus.iter().position(|menu| menu.trigger_contains(*position));
+            if let (Some(open), Some(target)) = (open_menu, target_menu) {
+                if open != target {
+                    for (index, menu) in self.menus.iter_mut().enumerate() {
+                        if index != target {
+                            menu.close_menu(ctx);
+                        }
+                    }
+                    return self.menus[target].event(event, ctx);
+                }
+            }
+        }
+
         for menu in &mut self.menus {
             if menu.event(event, ctx) == EventResult::Handled {
                 return EventResult::Handled;
@@ -462,7 +477,9 @@ mod tests {
     use mondrian_timeline::sequence::PreviewRenderFormat;
     use mondrian_ui_core::EventRequests;
     use mondrian_ui_core::Widget;
+    use std::cell::RefCell;
     use std::path::{Path, PathBuf};
+    use std::rc::Rc;
 
     #[derive(Debug, Default)]
     struct FakePlatform {
@@ -555,6 +572,88 @@ mod tests {
         let menu = MenuBar::default();
 
         assert_eq!(menu.child_count(), 4);
+    }
+
+    #[test]
+    fn menu_bar_switches_open_menu_on_trigger_click() {
+        let mut menu = MenuBar::default();
+        menu.layout(Rect::new(0.0, 0.0, 500.0, MENU_BAR_HEIGHT));
+        let dispatched = Rc::new(RefCell::new(Vec::new()));
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let dispatch = {
+            let dispatched = Rc::clone(&dispatched);
+            move |action| dispatched.borrow_mut().push(action)
+        };
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        menu.event(
+            &UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        menu.event(
+            &UiEvent::MouseUp {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        menu.event(
+            &UiEvent::MouseDown {
+                position: Point::new(310.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        menu.event(
+            &UiEvent::MouseUp {
+                position: Point::new(310.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        menu.event(
+            &UiEvent::MouseDown {
+                position: Point::new(310.0, 42.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        menu.event(
+            &UiEvent::MouseUp {
+                position: Point::new(310.0, 42.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(dispatched.borrow().len(), 1);
+        let action = dispatched.borrow()[0].clone();
+        match &action {
+            Action::Custom { namespace, name, .. } => {
+                assert_eq!(namespace, APP_SHELL_NAMESPACE);
+                assert_eq!(name, APP_SHELL_ABOUT);
+            }
+            other => panic!("expected about action after menu switch, got {other:?}"),
+        }
     }
 
     #[test]

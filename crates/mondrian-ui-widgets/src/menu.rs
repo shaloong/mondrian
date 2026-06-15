@@ -288,6 +288,23 @@ impl Dropdown {
         self.enabled
     }
 
+    /// Whether the popup menu is currently open.
+    pub fn is_open(&self) -> bool {
+        self.open
+    }
+
+    /// Whether a point is inside the closed trigger chrome.
+    pub fn trigger_contains(&self, point: Point) -> bool {
+        self.trigger_rect().contains(point)
+    }
+
+    /// Close the popup menu if it is open.
+    pub fn close_menu(&mut self, ctx: &mut EventContext) {
+        if self.open {
+            self.close(ctx);
+        }
+    }
+
     /// Limit how many rows are visible before the open menu scrolls.
     pub fn with_max_visible_items(mut self, max_visible_items: usize) -> Self {
         self.max_visible_items = max_visible_items.max(1);
@@ -763,6 +780,28 @@ mod tests {
             &mut ctx,
         );
         assert!(d.open);
+    }
+
+    #[test]
+    fn dropdown_exposes_trigger_and_open_state_for_menu_bar_coordination() {
+        let mut d = Dropdown::new(
+            "File",
+            vec![MenuItem::new("Open", Action::OpenProject("".into()))],
+        );
+        d.layout(Rect::new(20.0, 10.0, 120.0, 28.0));
+        assert!(!d.is_open());
+        assert!(d.trigger_contains(Point::new(30.0, 20.0)));
+        assert!(!d.trigger_contains(Point::new(30.0, 48.0)));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
+
+        d.open(&mut ctx);
+        assert!(d.is_open());
+        d.close_menu(&mut ctx);
+        assert!(!d.is_open());
     }
 
     #[test]
