@@ -618,6 +618,9 @@ clear no-signal chrome without pretending a preview texture exists.
 `ui_demo` should use the same `ViewerSurface` for the Viewer panel and keep
 separate text diagnostics in the Text tab, so visual QA exercises production
 viewer chrome instead of a demo-only widget.
+Demo-only missing panel content should use disabled `PanelList` empty states,
+not anonymous colored rectangles, so visual QA can tell whether a surface is
+intentionally absent or accidentally blank.
 
 ## Color Input
 

@@ -4,7 +4,6 @@
 //! 运行: cargo run --bin ui_demo
 //!
 //! 包含的 Widget 类型：
-//!   Core: ColoredBox
 //!   Interactive: Button, Checkbox, TextInput, Slider, List, Dropdown, ContextMenu,
 //!     Tooltip, ColorPicker, CurveEditor, TimelineView
 //!   Layout: DockSplitter, DockPanel, DockTabBar, PanelSlot, ScrollView, PropertyPanel
@@ -22,7 +21,6 @@ use mondrian_editor_state::Action;
 use mondrian_ui_core::tooltip::TooltipState;
 use mondrian_ui_core::types::{self as ui_types, *};
 use mondrian_ui_core::widget::{EventContext, PaintContext};
-use mondrian_ui_core::widgets::ColoredBox;
 use mondrian_ui_core::{EventResult, TreeWalker, Widget};
 use mondrian_ui_events::EventRouter;
 use mondrian_ui_renderer::command::DrawEncoder;
@@ -38,6 +36,7 @@ use mondrian_ui_widgets::curve_editor::{CurveEditor, CurvePoint};
 use mondrian_ui_widgets::dock_panel::DockPanel;
 use mondrian_ui_widgets::dock_splitter::DockSplitter;
 use mondrian_ui_widgets::dock_tab_bar::TabInfo;
+use mondrian_ui_widgets::label::Label;
 use mondrian_ui_widgets::list::{List, ListItem};
 use mondrian_ui_widgets::menu::{Dropdown, MenuItem};
 use mondrian_ui_widgets::panel_list::{PanelList, PanelListItem};
@@ -135,7 +134,14 @@ impl GalleryWidget {
             ListItem::new("列表项 7"),
         ];
 
-        let scroll_content = ColoredBox::new(Color::from_hex(0x2A2A4A), 180.0, 500.0);
+        let scroll_content = Label::new(
+            "ScrollView 内容区域：这段长文本用于检查裁剪、滚轮滚动、滚动条拖动以及子控件坐标转换。\
+            \n\n继续滚动可以看到更多文字，确保内容不会溢出面板，也不会破坏 clip/transform 栈。\
+            \n\nA deliberately long Latin sentence lives here as well, so mixed CJK and Latin layout can be checked inside the same scroll surface.",
+        )
+        .wrapped()
+        .with_max_width(160.0)
+        .with_padding(10.0, 10.0);
 
         let initial_color = Color::from_hex(0x336699);
 
@@ -708,8 +714,22 @@ fn slot_content_for_tab(kind: SlotKind, tab_index: usize) -> Box<dyn Widget> {
             1 => Box::new(demo_audio_panel()),
             _ => Box::new(demo_effect_panel()),
         },
-        _ => Box::new(ColoredBox::new(Color::from_hex(0x1A1A1A), 1.0, 1.0)),
+        _ => Box::new(demo_unsupported_panel(kind)),
     }
+}
+
+fn demo_unsupported_panel(kind: SlotKind) -> PanelList {
+    PanelList::new(
+        kind.display_name(),
+        vec![PanelListItem::new("Demo panel not configured")
+            .with_subtitle(format!(
+                "{} has no dedicated ui_demo tab content yet",
+                kind.display_name()
+            ))
+            .with_badge("Pending")
+            .disabled(true)],
+    )
+    .with_subtitle("UI demo coverage")
 }
 
 fn demo_viewer_surface() -> ViewerSurface {
