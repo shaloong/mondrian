@@ -100,11 +100,14 @@ represent, `Select(AllTracks)` selects visible timeline tracks, and
 `DeselectAll` clears track, clip, mask, and animation selection without entering
 undo history.
 The shared `Action::DeleteSelection` path deletes clips or tracks selected
-through the AppState selection module. Clip deletes use `remove_clips_bulk`;
-track deletes use one prevalidated bulk track mutation, so shortcuts, menus,
-scripts, and self-hosted widgets all share one action boundary. Clip deletion
-keeps the existing locked-track checks and linked-clip cleanup; both clip and
-track deletion produce undo snapshots and timeline modified events.
+through the AppState selection module. `Action::RippleDeleteSelection` is a
+separate timeline-editing action that uses the same clip deletion path with
+ripple enabled; track deletion remains a normal bulk track mutation. Clip
+deletes use `remove_clips_bulk`; track deletes use one prevalidated bulk track
+mutation, so shortcuts, menus, scripts, and self-hosted widgets all share one
+action boundary. Clip deletion keeps the existing locked-track checks and
+linked-clip cleanup; both clip and track deletion produce undo snapshots and
+timeline modified events.
 `Action::ImportMedia` is the shared boundary for platform file pickers, menus,
 scripts, and future self-hosted asset browser commands. The app layer batches
 the supplied paths through `AssetLibrary::import_media_file`, publishes
@@ -454,9 +457,9 @@ Timeline corner controls for adding video/audio tracks emit only a
 track creation commands.
 Timeline-focused keyboard editing follows the same rule: `TimelineView` emits
 domain-light `TimelineEditCommand`s, and the app adapter maps them onto shared
-editor actions such as `Action::DeleteSelection`. Modified variants, such as
-future ripple delete, should get explicit semantic commands instead of reusing
-plain delete.
+editor actions such as `Action::DeleteSelection` and
+`Action::RippleDeleteSelection`. Modified variants should get explicit
+semantic commands instead of reusing plain delete.
 Timeline structure mutations that can invalidate ids, such as removing tracks,
 must call the app selection pruning helper after the sequence mutation succeeds.
 That pruning removes stale selected tracks, clips, masks, and animation

@@ -119,7 +119,8 @@ impl AppState {
             Action::Duplicate => self.duplicate_from_action(),
 
             // ── 时间线编辑（复用已有 undoable 命令层）────────────────────
-            Action::DeleteSelection => self.delete_selection_from_ui(),
+            Action::DeleteSelection => self.delete_selection_from_ui(false),
+            Action::RippleDeleteSelection => self.delete_selection_from_ui(true),
             Action::SplitClipAtPlayhead => self.split_at_playhead().map(|_| ()),
             Action::NudgeClip { clip_id, delta_frames } => {
                 self.nudge_clip_from_action(clip_id, delta_frames)
@@ -513,7 +514,7 @@ impl AppState {
             .ok_or_else(|| missing_clip_error(step_id, clip_id))
     }
 
-    fn delete_selection_from_ui(&mut self) -> Result<()> {
+    fn delete_selection_from_ui(&mut self, ripple: bool) -> Result<()> {
         let selections = self
             .selection
             .selected_clips
@@ -527,7 +528,7 @@ impl AppState {
             })
             .collect::<Vec<_>>();
         if !selections.is_empty() {
-            self.remove_clips_bulk(&selections, false)?;
+            self.remove_clips_bulk(&selections, ripple)?;
             self.clear_selection();
             return Ok(());
         }
@@ -1909,6 +1910,36 @@ mod tests {
         assert!(state.selection.selected_clips.is_empty());
         assert!(state.selection.selected_mask.is_none());
         assert!(state.animation_selection.active_property.is_none());
+        assert!(state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_ripple_delete_selection_closes_gap_after_selected_clip() {
+        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+        let tb = state.sequence.as_ref().expect("sequence").time_base();
+        let trailing = Clip::new(AssetId::new(), TimeCode::new(40, tb), TimeCode::new(12, tb));
+        let trailing_id = trailing.id;
+        state
+            .sequence
+            .as_mut()
+            .expect("sequence")
+            .video_track_mut(track_id)
+            .expect("track")
+            .add_clip(trailing)
+            .expect("add trailing clip");
+        state.selection.selected_clips =
+            vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
+
+        state
+            .dispatch_action(mondrian_editor_state::Action::RippleDeleteSelection)
+            .expect("ripple delete selection");
+
+        let sequence = state.sequence.as_ref().expect("sequence");
+        let track = sequence.video_tracks.iter().find(|track| track.id == track_id).expect("track");
+        assert_eq!(track.clips.len(), 1);
+        assert_eq!(track.clips[0].id, trailing_id);
+        assert_eq!(track.clips[0].position.frame, 20);
+        assert!(state.selection.selected_clips.is_empty());
         assert!(state.can_undo_action());
     }
 

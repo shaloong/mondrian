@@ -64,6 +64,7 @@ pub enum Action {
     // 时间线编辑
     // ═══════════════════════════════════════════════════════════════════
     DeleteSelection,
+    RippleDeleteSelection,
     SplitClipAtPlayhead,
     NudgeClip {
         clip_id: ClipId,
@@ -243,6 +244,14 @@ mod tests {
         assert_eq!(
             round_trip(&Action::DeleteSelection),
             Action::DeleteSelection
+        );
+    }
+
+    #[test]
+    fn round_trip_ripple_delete_selection() {
+        assert_eq!(
+            round_trip(&Action::RippleDeleteSelection),
+            Action::RippleDeleteSelection
         );
     }
 

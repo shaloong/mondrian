@@ -99,6 +99,8 @@ pub enum TimelineTrackKind {
 pub enum TimelineEditCommand {
     /// Delete the current timeline selection.
     DeleteSelection,
+    /// Ripple-delete the current timeline clip selection.
+    RippleDeleteSelection,
 }
 
 /// Clip view model rendered by [`TimelineView`].
@@ -1068,11 +1070,14 @@ impl TimelineView {
         modifiers: Modifiers,
         ctx: &mut EventContext,
     ) -> bool {
-        if modifiers.ctrl || modifiers.alt || modifiers.shift || modifiers.meta {
+        if modifiers.ctrl || modifiers.alt || modifiers.meta {
             return false;
         }
-        let command = match key {
-            KeyCode::Delete | KeyCode::Backspace => TimelineEditCommand::DeleteSelection,
+        let command = match (key, modifiers.shift) {
+            (KeyCode::Delete | KeyCode::Backspace, false) => TimelineEditCommand::DeleteSelection,
+            (KeyCode::Delete | KeyCode::Backspace, true) => {
+                TimelineEditCommand::RippleDeleteSelection
+            }
             _ => return false,
         };
         let Some(factory) = &self.on_edit_command else {
@@ -3174,10 +3179,18 @@ mod tests {
     }
 
     #[test]
-    fn shifted_delete_is_reserved_for_explicit_ripple_delete() {
+    fn shifted_delete_dispatches_ripple_delete_command() {
         let actions = RefCell::new(Vec::new());
+        let commands = Rc::new(RefCell::new(Vec::new()));
         let dispatch = |action| actions.borrow_mut().push(action);
-        let mut view = timeline().on_edit_command(|_| Action::DeleteSelection);
+        let command_log = Rc::clone(&commands);
+        let mut view = timeline().on_edit_command(move |command| {
+            command_log.borrow_mut().push(command);
+            match command {
+                TimelineEditCommand::DeleteSelection => Action::DeleteSelection,
+                TimelineEditCommand::RippleDeleteSelection => Action::RippleDeleteSelection,
+            }
+        });
         view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
 
         let mut focus = DummyFocus;
@@ -3201,8 +3214,15 @@ mod tests {
             &mut ctx,
         );
 
-        assert_eq!(result, EventResult::Ignored);
-        assert!(actions.borrow().is_empty());
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(
+            commands.borrow().as_slice(),
+            &[TimelineEditCommand::RippleDeleteSelection]
+        );
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[Action::RippleDeleteSelection]
+        );
     }
 
     #[test]
