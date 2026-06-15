@@ -753,7 +753,7 @@ mod tests {
     fn router_focus_manager_accessible() {
         let mut router = EventRouter::new(WidgetId::new());
         let id = WidgetId::new();
-        router.focus_manager_mut().request_focus(id, PanelKind::Viewer);
+        router.focus_manager_mut().set_focused_widget(Some(id), Some(PanelKind::Viewer));
         assert_eq!(router.focus_manager().focused_widget(), Some(id));
     }
 
@@ -815,7 +815,7 @@ mod tests {
         fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
             match event {
                 UiEvent::MouseDown { .. } => {
-                    ctx.focus.request_focus(self.id, PanelKind::Console);
+                    ctx.focus.request_focus(self.id);
                     ctx.request_pointer_capture(self.id);
                     ctx.set_ime_enabled(true, Some(Rect::new(1.0, 2.0, 3.0, 4.0)));
                     self.log.borrow_mut().push("down".into());
@@ -1102,7 +1102,9 @@ mod tests {
         tree.nodes.clear();
         tree.nodes.insert(root, Box::new(widget));
         let mut router = EventRouter::new(root);
-        router.focus_manager_mut().request_focus(root, PanelKind::Console);
+        router
+            .focus_manager_mut()
+            .set_focused_widget(Some(root), Some(PanelKind::Console));
         router.shortcut_manager_mut().register_global(
             mondrian_ui_core::shortcut::ShortcutBinding::ctrl(KeyCode::S),
             Action::SaveProject,
@@ -1369,7 +1371,9 @@ mod tests {
         let mut tree = TestTree::single(widget);
         let mut router = EventRouter::new(root);
 
-        router.focus_manager_mut().request_focus(root, PanelKind::Console);
+        router
+            .focus_manager_mut()
+            .set_focused_widget(Some(root), Some(PanelKind::Console));
         assert_eq!(router.focus_manager().focused_widget(), Some(root));
 
         tree.nodes.remove(&root);

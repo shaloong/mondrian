@@ -35,9 +35,9 @@ impl FocusManager for FocusManagerImpl {
         self.panel
     }
 
-    fn request_focus(&mut self, widget: WidgetId, panel: PanelKind) {
+    fn request_focus(&mut self, widget: WidgetId) {
         self.widget = Some(widget);
-        self.panel = Some(panel);
+        self.panel = None;
     }
 
     fn release_focus(&mut self, widget: WidgetId) {
@@ -74,10 +74,19 @@ mod tests {
     }
 
     #[test]
-    fn request_focus_sets_both() {
+    fn request_focus_sets_widget_without_panel_context() {
         let mut fm = FocusManagerImpl::new();
         let id = WidgetId::new();
-        fm.request_focus(id, PanelKind::Viewer);
+        fm.request_focus(id);
+        assert_eq!(fm.focused_widget(), Some(id));
+        assert_eq!(fm.focused_panel(), None);
+    }
+
+    #[test]
+    fn set_focused_widget_sets_widget_and_panel() {
+        let mut fm = FocusManagerImpl::new();
+        let id = WidgetId::new();
+        fm.set_focused_widget(Some(id), Some(PanelKind::Viewer));
         assert_eq!(fm.focused_widget(), Some(id));
         assert_eq!(fm.focused_panel(), Some(PanelKind::Viewer));
     }
@@ -86,7 +95,7 @@ mod tests {
     fn release_focus_clears_if_matching() {
         let mut fm = FocusManagerImpl::new();
         let id = WidgetId::new();
-        fm.request_focus(id, PanelKind::Timeline);
+        fm.set_focused_widget(Some(id), Some(PanelKind::Timeline));
         fm.release_focus(id);
         assert_eq!(fm.focused_widget(), None);
     }
@@ -96,7 +105,7 @@ mod tests {
         let mut fm = FocusManagerImpl::new();
         let id1 = WidgetId::new();
         let id2 = WidgetId::new();
-        fm.request_focus(id1, PanelKind::Console);
+        fm.set_focused_widget(Some(id1), Some(PanelKind::Console));
         fm.release_focus(id2); // different widget
         assert_eq!(fm.focused_widget(), Some(id1));
     }
@@ -104,7 +113,7 @@ mod tests {
     #[test]
     fn clear_focus_removes_all() {
         let mut fm = FocusManagerImpl::new();
-        fm.request_focus(WidgetId::new(), PanelKind::Assets);
+        fm.set_focused_widget(Some(WidgetId::new()), Some(PanelKind::Assets));
         fm.clear_focus();
         assert_eq!(fm.focused_widget(), None);
         assert_eq!(fm.focused_panel(), None);

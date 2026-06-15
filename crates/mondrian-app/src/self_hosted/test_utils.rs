@@ -21,7 +21,7 @@ impl FocusManager for DummyFocus {
         None
     }
 
-    fn request_focus(&mut self, _widget: WidgetId, _panel: PanelKind) {}
+    fn request_focus(&mut self, _widget: WidgetId) {}
 
     fn release_focus(&mut self, _widget: WidgetId) {}
 

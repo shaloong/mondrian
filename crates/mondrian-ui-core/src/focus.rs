@@ -19,8 +19,11 @@ pub trait FocusManager {
     /// 当前聚焦的 Panel
     fn focused_panel(&self) -> Option<PanelKind>;
 
-    /// 请求焦点
-    fn request_focus(&mut self, widget: WidgetId, panel: PanelKind);
+    /// Request focus for a widget.
+    ///
+    /// Panel ownership is derived by the event router from the widget tree, not
+    /// supplied by leaf controls.
+    fn request_focus(&mut self, widget: WidgetId);
 
     /// 释放焦点
     fn release_focus(&mut self, widget: WidgetId);
