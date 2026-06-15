@@ -452,6 +452,11 @@ Timeline corner controls for adding video/audio tracks emit only a
 `TimelineTrackKind`; the app adapter translates that into
 `ui.timeline.add_track`, and `AppState` routes it through the existing undoable
 track creation commands.
+Timeline-focused keyboard editing follows the same rule: `TimelineView` emits
+domain-light `TimelineEditCommand`s, and the app adapter maps them onto shared
+editor actions such as `Action::DeleteSelection`. Modified variants, such as
+future ripple delete, should get explicit semantic commands instead of reusing
+plain delete.
 Timeline structure mutations that can invalidate ids, such as removing tracks,
 must call the app selection pruning helper after the sequence mutation succeeds.
 That pruning removes stale selected tracks, clips, masks, and animation

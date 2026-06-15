@@ -26,8 +26,8 @@ use mondrian_ui_widgets::{
     Button, Checkbox, ColorPickerAreaMode, ColorPickerTrigger, CurveEditor, CurvePoint, DockPanel,
     FlexChild, FlexContainer, PanelList, PanelListItem, PropertyPanel, PropertyRow,
     PropertySection, ScrollView, Slider, TimelineClip, TimelineClipMove, TimelineClipRef,
-    TimelineClipTrim, TimelineTrack, TimelineTrackControl, TimelineTrackRef, TimelineTrimEdge,
-    TimelineView, ViewerSurface,
+    TimelineClipTrim, TimelineEditCommand, TimelineTrack, TimelineTrackControl, TimelineTrackRef,
+    TimelineTrimEdge, TimelineView, ViewerSurface,
 };
 
 use crate::app::ui_actions::{
@@ -1265,6 +1265,9 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
             };
             timeline_add_track_action(TimelineAddTrackPayload { kind })
         })
+        .on_edit_command(|command| match command {
+            TimelineEditCommand::DeleteSelection => Action::DeleteSelection,
+        })
         .on_clip_move({
             let action_model = action_model.clone();
             move |movement, _clip| {
@@ -1595,7 +1598,7 @@ mod tests {
     use mondrian_core::types::{AssetId, TimeCode};
     use mondrian_effects::EffectNodeExt;
     use mondrian_ui_core::types::{
-        EventResult, LayoutConstraint, Modifiers, MouseButton, Point, Size,
+        EventResult, KeyCode, LayoutConstraint, Modifiers, MouseButton, Point, Size,
     };
     use mondrian_ui_core::widget::EventRequests;
     use mondrian_ui_core::UiEvent;
@@ -1953,6 +1956,39 @@ mod tests {
         let payload: TimelineAddTrackPayload =
             serde_json::from_value(payload.clone()).expect("add track payload");
         assert_eq!(payload.kind, TimelineAddTrackKind::Video);
+    }
+
+    #[test]
+    fn timeline_panel_delete_key_emits_shared_delete_selection_action() {
+        let model = demo_timeline_model();
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut panel = timeline_panel(&model);
+        panel.layout(mondrian_ui_core::types::Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        panel.event(&UiEvent::FocusGained, &mut ctx);
+        let result = panel.event(
+            &UiEvent::KeyDown {
+                key: KeyCode::Backspace,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(actions.borrow().as_slice(), &[Action::DeleteSelection]);
     }
 
     #[test]

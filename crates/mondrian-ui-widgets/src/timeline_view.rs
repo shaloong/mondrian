@@ -27,6 +27,9 @@ pub type TimelineTrackControlAction =
 /// Action factory for adding a track from the timeline corner controls.
 pub type TimelineTrackAddAction = dyn Fn(TimelineTrackKind) -> Action;
 
+/// Action factory for timeline-scoped editing commands.
+pub type TimelineEditCommandAction = dyn Fn(TimelineEditCommand) -> Action;
+
 /// Action factory for playhead seeking.
 pub type TimelineSeekAction = dyn Fn(i64) -> Action;
 
@@ -89,6 +92,13 @@ pub struct TimelineClipTrim {
 pub enum TimelineTrackKind {
     Video,
     Audio,
+}
+
+/// Domain-light edit command emitted by timeline-focused keyboard input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineEditCommand {
+    /// Delete the current timeline selection.
+    DeleteSelection,
 }
 
 /// Clip view model rendered by [`TimelineView`].
@@ -252,6 +262,7 @@ pub struct TimelineView {
     on_track_select: Option<Box<TimelineTrackAction>>,
     on_track_control: Option<Box<TimelineTrackControlAction>>,
     on_track_add: Option<Box<TimelineTrackAddAction>>,
+    on_edit_command: Option<Box<TimelineEditCommandAction>>,
     on_seek: Option<Box<TimelineSeekAction>>,
     on_clip_move: Option<Box<TimelineClipMoveAction>>,
     on_clip_trim: Option<Box<TimelineClipTrimAction>>,
@@ -326,6 +337,7 @@ impl TimelineView {
             on_track_select: None,
             on_track_control: None,
             on_track_add: None,
+            on_edit_command: None,
             on_seek: None,
             on_clip_move: None,
             on_clip_trim: None,
@@ -411,6 +423,15 @@ impl TimelineView {
     /// Set a dynamic add-track action factory for the timeline corner buttons.
     pub fn on_track_add(mut self, action: impl Fn(TimelineTrackKind) -> Action + 'static) -> Self {
         self.on_track_add = Some(Box::new(action));
+        self
+    }
+
+    /// Set a dynamic edit-command action factory.
+    pub fn on_edit_command(
+        mut self,
+        action: impl Fn(TimelineEditCommand) -> Action + 'static,
+    ) -> Self {
+        self.on_edit_command = Some(Box::new(action));
         self
     }
 
@@ -1038,6 +1059,27 @@ impl TimelineView {
             _ => return false,
         };
         self.seek_from_input(target, ctx);
+        true
+    }
+
+    fn keyboard_edit_command(
+        &mut self,
+        key: KeyCode,
+        modifiers: Modifiers,
+        ctx: &mut EventContext,
+    ) -> bool {
+        if modifiers.ctrl || modifiers.alt || modifiers.shift || modifiers.meta {
+            return false;
+        }
+        let command = match key {
+            KeyCode::Delete | KeyCode::Backspace => TimelineEditCommand::DeleteSelection,
+            _ => return false,
+        };
+        let Some(factory) = &self.on_edit_command else {
+            return false;
+        };
+        (ctx.dispatch)(factory(command));
+        ctx.request_repaint();
         true
     }
 
@@ -1846,6 +1888,9 @@ impl Widget for TimelineView {
                 return EventResult::Handled;
             }
             UiEvent::KeyDown { key, modifiers } if self.focused => {
+                if self.keyboard_edit_command(*key, *modifiers, ctx) {
+                    return EventResult::Handled;
+                }
                 if self.keyboard_seek(*key, *modifiers, ctx) {
                     return EventResult::Handled;
                 }
@@ -1925,6 +1970,7 @@ mod tests {
     use super::*;
 
     use std::cell::RefCell;
+    use std::rc::Rc;
 
     use mondrian_platform::NoopPlatformService;
     use mondrian_ui_core::widget::{DrawCommandEncoder, EventRequests, PointerCaptureRequest};
@@ -3086,6 +3132,76 @@ mod tests {
 
         assert_eq!(result, EventResult::Ignored);
         assert_eq!(view.playhead_frame(), 12);
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn focused_delete_dispatches_timeline_edit_command() {
+        let actions = RefCell::new(Vec::new());
+        let commands = Rc::new(RefCell::new(Vec::new()));
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let command_log = Rc::clone(&commands);
+        let mut view = timeline().on_edit_command(move |command| {
+            command_log.borrow_mut().push(command);
+            Action::DeleteSelection
+        });
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        view.event(&UiEvent::FocusGained, &mut ctx);
+        let result = view.event(
+            &UiEvent::KeyDown { key: KeyCode::Delete, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(
+            commands.borrow().as_slice(),
+            &[TimelineEditCommand::DeleteSelection]
+        );
+        assert_eq!(actions.borrow().as_slice(), &[Action::DeleteSelection]);
+    }
+
+    #[test]
+    fn shifted_delete_is_reserved_for_explicit_ripple_delete() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut view = timeline().on_edit_command(|_| Action::DeleteSelection);
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        view.event(&UiEvent::FocusGained, &mut ctx);
+        let result = view.event(
+            &UiEvent::KeyDown {
+                key: KeyCode::Delete,
+                modifiers: Modifiers::shift(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Ignored);
         assert!(actions.borrow().is_empty());
     }
 
