@@ -54,7 +54,9 @@ owns panel adapters that map application-facing concepts into generic widget
 view models. `self_hosted::host::SelfHostedUiHost` owns the reusable product
 state bridge: it keeps the root widget, current `AppState`, dirty refresh flag,
 and queued-action draining together so window entrypoints do not duplicate
-root/AppState refresh plumbing. The boundary type is `SelfHostedPanelModels`: real `AppState` /
+root/AppState refresh plumbing. `self_hosted::window` owns the reusable
+winit/wgpu product-window runner; `src/bin/self_hosted_app.rs` is only a thin
+executable launcher. The boundary type is `SelfHostedPanelModels`: real `AppState` /
 `EditorState` adapters should produce this model, while
 `SelfHostedPanelModels::demo()` is test-only fixture code and must not be part
 of product entrypoints.
