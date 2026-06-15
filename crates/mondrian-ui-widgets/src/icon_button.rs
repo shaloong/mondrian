@@ -10,22 +10,11 @@ use crate::paint::{color_with_alpha, paint_focus_ring};
 use crate::vector_icon::VectorIcon;
 
 const ICON_BUTTON_SIZE: f32 = 28.0;
-const ICON_TRIANGLE_HALF_WIDTH: f32 = 5.0;
-const ICON_TRIANGLE_HALF_HEIGHT: f32 = 4.0;
-
-/// Built-in icon glyphs that are painted without font dependencies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IconButtonIcon {
-    /// Upward triangle, useful for moving an item earlier in an ordered list.
-    ChevronUp,
-    /// Downward triangle, useful for moving an item later in an ordered list.
-    ChevronDown,
-}
 
 /// A compact button that paints vector icon geometry instead of text.
 pub struct IconButton {
     id: WidgetId,
-    icon: IconGlyph,
+    icon: VectorIcon,
     bounds: Rect,
     state: ButtonState,
     enabled: bool,
@@ -33,18 +22,12 @@ pub struct IconButton {
     focus_visible: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-enum IconGlyph {
-    Builtin(IconButtonIcon),
-    Vector(VectorIcon),
-}
-
 impl IconButton {
-    /// Create an enabled icon button.
-    pub fn new(icon: IconButtonIcon) -> Self {
+    /// Create an enabled button from parsed SVG-backed vector geometry.
+    pub fn new(icon: VectorIcon) -> Self {
         Self {
             id: WidgetId::new(),
-            icon: IconGlyph::Builtin(icon),
+            icon,
             bounds: Rect::ZERO,
             state: ButtonState::Normal,
             enabled: true,
@@ -55,15 +38,7 @@ impl IconButton {
 
     /// Create an enabled button from parsed SVG-backed vector geometry.
     pub fn from_vector_icon(icon: VectorIcon) -> Self {
-        Self {
-            id: WidgetId::new(),
-            icon: IconGlyph::Vector(icon),
-            bounds: Rect::ZERO,
-            state: ButtonState::Normal,
-            enabled: true,
-            on_click: None,
-            focus_visible: false,
-        }
+        Self::new(icon)
     }
 
     /// Set the action dispatched when the button is activated.
@@ -204,14 +179,7 @@ impl Widget for IconButton {
             paint_focus_ring(ctx, self.bounds, spacing.radius_md);
         }
         let icon_color = color_with_alpha(icon_color, 0.92);
-        match &self.icon {
-            IconGlyph::Builtin(icon) => {
-                ctx.encoder.draw_triangles(&icon_vertices(*icon, self.bounds), icon_color);
-            }
-            IconGlyph::Vector(icon) => {
-                icon.paint(ctx, self.bounds.inset(5.0, 5.0), icon_color);
-            }
-        }
+        self.icon.paint(ctx, self.bounds.inset(5.0, 5.0), icon_color);
     }
 
     fn hit_test(&self, point: Point) -> bool {
@@ -220,35 +188,6 @@ impl Widget for IconButton {
 
     fn can_focus(&self) -> bool {
         self.enabled
-    }
-}
-
-fn icon_vertices(icon: IconButtonIcon, bounds: Rect) -> [Point; 3] {
-    let cx = bounds.x + bounds.width * 0.5;
-    let cy = bounds.y + bounds.height * 0.5;
-    match icon {
-        IconButtonIcon::ChevronUp => [
-            Point::new(cx, cy - ICON_TRIANGLE_HALF_HEIGHT),
-            Point::new(
-                cx - ICON_TRIANGLE_HALF_WIDTH,
-                cy + ICON_TRIANGLE_HALF_HEIGHT,
-            ),
-            Point::new(
-                cx + ICON_TRIANGLE_HALF_WIDTH,
-                cy + ICON_TRIANGLE_HALF_HEIGHT,
-            ),
-        ],
-        IconButtonIcon::ChevronDown => [
-            Point::new(
-                cx - ICON_TRIANGLE_HALF_WIDTH,
-                cy - ICON_TRIANGLE_HALF_HEIGHT,
-            ),
-            Point::new(
-                cx + ICON_TRIANGLE_HALF_WIDTH,
-                cy - ICON_TRIANGLE_HALF_HEIGHT,
-            ),
-            Point::new(cx, cy + ICON_TRIANGLE_HALF_HEIGHT),
-        ],
     }
 }
 
@@ -295,9 +234,16 @@ mod tests {
         }
     }
 
+    fn test_icon() -> VectorIcon {
+        VectorIcon::from_svg_str(
+            r#"<svg viewBox="0 0 24 24"><path d="M6 12L18 12" fill="none" stroke="black"/></svg>"#,
+        )
+        .expect("svg icon")
+    }
+
     #[test]
     fn icon_button_dispatches_action_on_click() {
-        let mut button = IconButton::new(IconButtonIcon::ChevronUp).on_click(Action::Play);
+        let mut button = IconButton::new(test_icon()).on_click(Action::Play);
         button.layout(Rect::new(0.0, 0.0, 28.0, 28.0));
         let actions = RefCell::new(Vec::<Action>::new());
         let dispatch = |action| actions.borrow_mut().push(action);
@@ -334,8 +280,7 @@ mod tests {
 
     #[test]
     fn disabled_icon_button_ignores_input_and_focus() {
-        let mut button =
-            IconButton::new(IconButtonIcon::ChevronDown).on_click(Action::Play).disabled();
+        let mut button = IconButton::new(test_icon()).on_click(Action::Play).disabled();
         button.layout(Rect::new(0.0, 0.0, 28.0, 28.0));
         let actions = RefCell::new(Vec::<Action>::new());
         let dispatch = |action| actions.borrow_mut().push(action);
@@ -364,25 +309,8 @@ mod tests {
     }
 
     #[test]
-    fn icon_button_paints_triangle_icon_without_text() {
-        let mut button = IconButton::new(IconButtonIcon::ChevronUp);
-        button.layout(Rect::new(0.0, 0.0, 28.0, 28.0));
-        let mut recorder = PaintRecorder::default();
-        let mut ctx = paint_ctx(&mut recorder);
-
-        button.paint(&mut ctx);
-
-        assert_eq!(recorder.triangles, 3);
-        assert!(recorder.texts.is_empty());
-    }
-
-    #[test]
-    fn icon_button_paints_svg_backed_vector_icon_without_text() {
-        let vector = VectorIcon::from_svg_str(
-            r#"<svg viewBox="0 0 24 24"><path d="M6 12L18 12" fill="none" stroke="black"/></svg>"#,
-        )
-        .expect("svg icon");
-        let mut button = IconButton::from_vector_icon(vector);
+    fn icon_button_paints_vector_icon_without_text() {
+        let mut button = IconButton::new(test_icon());
         button.layout(Rect::new(0.0, 0.0, 28.0, 28.0));
         let mut recorder = PaintRecorder::default();
         let mut ctx = paint_ctx(&mut recorder);

@@ -27,12 +27,11 @@ use mondrian_ui_widgets::dock_tab_bar::TabInfo;
 use mondrian_ui_widgets::panel_slot::SlotKind;
 use mondrian_ui_widgets::{
     Button, Checkbox, ColorPickerAreaMode, ColorPickerTrigger, CurveEditor, CurvePoint, DockPanel,
-    Dropdown, FlexChild, FlexContainer, IconButton, IconButtonIcon, Label, MenuItem, NodeGraphEdge,
-    NodeGraphNode, NodeGraphView, PanelList, PanelListItem, PropertyPanel, PropertyRow,
-    PropertySection, ScrollView, Slider, TextInput, TimelineAssetDrop, TimelineClip,
-    TimelineClipMove, TimelineClipRef, TimelineClipTrim, TimelineEditCommand, TimelineTrack,
-    TimelineTrackControl, TimelineTrackMove, TimelineTrackRef, TimelineTrimEdge, TimelineView,
-    ViewerSurface,
+    Dropdown, FlexChild, FlexContainer, Label, MenuItem, NodeGraphEdge, NodeGraphNode,
+    NodeGraphView, PanelList, PanelListItem, PropertyPanel, PropertyRow, PropertySection,
+    ScrollView, Slider, TextInput, TimelineAssetDrop, TimelineClip, TimelineClipMove,
+    TimelineClipRef, TimelineClipTrim, TimelineEditCommand, TimelineTrack, TimelineTrackControl,
+    TimelineTrackMove, TimelineTrackRef, TimelineTrimEdge, TimelineView, ViewerSurface,
 };
 
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
@@ -58,6 +57,7 @@ use crate::app::ui_actions::{
     TimelineTrimClipPayload, TimelineTrimPayloadEdge,
 };
 use crate::app::{AppState, SelectedClipRef};
+use crate::self_hosted::icons::AppIcon;
 
 /// Complete set of view models needed by the self-hosted panel shell.
 #[derive(Debug, Clone)]
@@ -1986,7 +1986,9 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                             1.0,
                         ),
                         FlexChild::fixed(Box::new(
-                            IconButton::new(IconButtonIcon::ChevronUp)
+                            AppIcon::ArrowUp
+                                .icon_button()
+                                .expect("bundled ArrowUp icon asset should parse")
                                 .enabled(can_move_up)
                                 .on_click(inspector_reorder_effect_action(
                                     selected_clip,
@@ -1995,7 +1997,9 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                                 )),
                         )),
                         FlexChild::fixed(Box::new(
-                            IconButton::new(IconButtonIcon::ChevronDown)
+                            AppIcon::ArrowDown
+                                .icon_button()
+                                .expect("bundled ArrowDown icon asset should parse")
                                 .enabled(can_move_down)
                                 .on_click(inspector_reorder_effect_action(
                                     selected_clip,

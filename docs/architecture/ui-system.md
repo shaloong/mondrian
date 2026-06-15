@@ -873,8 +873,7 @@ Icon-only buttons paint `VectorIcon` geometry rather than text glyphs. SVG is an
 import format for designers: the widget layer normalizes SVG documents through
 usvg so basic shapes, inherited paint, relative path commands, arcs, and
 transforms become renderable path data, then uses lyon to tessellate fills and
-strokes into cached theme-tinted triangle meshes. Built-in chevrons remain a
-convenience fallback, not the long-term authoring format.
+strokes into cached theme-tinted triangle meshes.
 Bundled SVGs should be loaded through `VectorIcon::from_static_svg` with a
 stable icon id so parsing and lyon tessellation happen once; repeated widget-tree
 construction must clone cached geometry rather than reparsing XML.

@@ -17,6 +17,8 @@ pub enum AppIcon {
     ArrowDown,
     /// Right arrow icon.
     ArrowRight,
+    /// Up arrow icon.
+    ArrowUp,
     /// Circle shape icon.
     Circle,
     /// Clipboard text icon.
@@ -97,11 +99,12 @@ pub enum AppIcon {
 
 impl AppIcon {
     /// Every bundled product icon that should remain parseable by the custom UI.
-    pub const ALL: [Self; 42] = [
+    pub const ALL: [Self; 43] = [
         Self::Add,
         Self::Anchor,
         Self::ArrowDown,
         Self::ArrowRight,
+        Self::ArrowUp,
         Self::Circle,
         Self::ClipboardText,
         Self::Clock,
@@ -149,6 +152,7 @@ impl AppIcon {
             Self::Anchor => "app.anchor",
             Self::ArrowDown => "app.arrow-down",
             Self::ArrowRight => "app.arrow-right",
+            Self::ArrowUp => "app.arrow-up",
             Self::Circle => "app.circle",
             Self::ClipboardText => "app.clipboard-text",
             Self::Clock => "app.clock",
@@ -197,6 +201,7 @@ impl AppIcon {
             Self::Anchor => include_str!("../../assets/icons/anchor.svg"),
             Self::ArrowDown => include_str!("../../assets/icons/arrow_down.svg"),
             Self::ArrowRight => include_str!("../../assets/icons/arrow_right.svg"),
+            Self::ArrowUp => include_str!("../../assets/icons/arrow_up.svg"),
             Self::Circle => include_str!("../../assets/icons/circle.svg"),
             Self::ClipboardText => include_str!("../../assets/icons/clipboard_text.svg"),
             Self::Clock => include_str!("../../assets/icons/clock.svg"),

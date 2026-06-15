@@ -49,7 +49,7 @@ pub use dock_splitter::DockSplitter;
 pub use dock_tab_bar::{DockTabBar, TabInfo};
 pub use flex_container::{FlexChild, FlexContainer};
 pub use form_layout::{FormLayout, FormRowOptions, FormRowRects};
-pub use icon_button::{IconButton, IconButtonIcon};
+pub use icon_button::IconButton;
 pub use label::Label;
 pub use list::{List, ListItem};
 pub use menu::{Dropdown, MenuItem};
