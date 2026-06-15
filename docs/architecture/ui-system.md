@@ -52,8 +52,11 @@ wgpu frame submission path for self-hosted windows, including cosmic-text glyph
 uploads, surface texture acquisition, present, and surface reconfigure on
 loss/outdating. `self_hosted::shell` owns reusable root-widget composition such
 as the menu bar plus dock tree; developer binaries should use `SelfHostedAppRoot`
-rather than defining shell widgets inline. `self_hosted::panels` owns panel
-adapters that map application-facing concepts into generic widget view models.
+rather than defining shell widgets inline. `self_hosted::icons` owns the
+app-layer registry for bundled designer SVG icon assets and converts them into
+`mondrian-ui-widgets::VectorIcon` / `IconButton` values without depending on
+legacy egui theme types. `self_hosted::panels` owns panel adapters that map
+application-facing concepts into generic widget view models.
 `self_hosted::host::SelfHostedUiHost` owns the reusable product
 state bridge: it keeps the root widget, current `AppState`, dirty refresh flag,
 and queued-action draining together so window entrypoints do not duplicate
@@ -875,6 +878,9 @@ convenience fallback, not the long-term authoring format.
 Bundled SVGs should be loaded through `VectorIcon::from_static_svg` with a
 stable icon id so parsing and lyon tessellation happen once; repeated widget-tree
 construction must clone cached geometry rather than reparsing XML.
+Product-level bundled icons should enter the custom UI through
+`self_hosted::icons::AppIcon` so panel migration code does not duplicate
+`include_str!()` paths or depend on legacy egui icon enums.
 Controls with different geometry, such as slider thumb halos or inset timeline
 focus borders, may keep local painting while preserving the same theme token
 vocabulary.
