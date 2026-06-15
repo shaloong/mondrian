@@ -211,6 +211,23 @@ impl PanelListModel {
             );
         }
 
+        if let Some((message, is_error)) = &state.status_hint {
+            let mut item = PanelListItem::new(if *is_error { "Error" } else { "Status" })
+                .with_subtitle(message.clone())
+                .with_badge(if *is_error { "!" } else { "OK" });
+            if *is_error {
+                item = item.with_accent(Color::from_hex(0xB91C1C));
+            }
+            items.push(item);
+        } else {
+            items.push(
+                PanelListItem::new("Status")
+                    .with_subtitle("Ready")
+                    .with_badge("OK")
+                    .disabled(true),
+            );
+        }
+
         items.push(
             PanelListItem::new("Asset library")
                 .with_subtitle(if state.asset_library.is_some() {
@@ -265,23 +282,6 @@ impl PanelListModel {
                 .with_activate_action(app_shell_save_project_as_dialog_action())
                 .disabled(!has_sequence),
         );
-
-        if let Some((message, is_error)) = &state.status_hint {
-            let mut item = PanelListItem::new(if *is_error { "Error" } else { "Status" })
-                .with_subtitle(message.clone())
-                .with_badge(if *is_error { "!" } else { "OK" });
-            if *is_error {
-                item = item.with_accent(Color::from_hex(0xB91C1C));
-            }
-            items.push(item);
-        } else {
-            items.push(
-                PanelListItem::new("Status")
-                    .with_subtitle("Ready")
-                    .with_badge("OK")
-                    .disabled(true),
-            );
-        }
 
         PanelListModel::new("Project", items).with_subtitle("Project state")
     }

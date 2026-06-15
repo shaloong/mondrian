@@ -87,9 +87,8 @@ impl SelfHostedUiHost {
             tracing::debug!(?action, "custom UI action");
             if let Err(err) = self.app_state.borrow_mut().dispatch_action(action) {
                 tracing::warn!("custom UI action failed: {err}");
-            } else {
-                self.mark_dirty();
             }
+            self.mark_dirty();
             needs_layout = true;
         }
 
@@ -103,8 +102,59 @@ impl SelfHostedUiHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mondrian_core::types::AssetId;
     use mondrian_editor_state::Action;
     use mondrian_platform::NoopPlatformService;
+    use mondrian_ui_core::widget::{DrawCommandEncoder, PaintContext, Widget};
+    use mondrian_ui_core::Point;
+    use mondrian_ui_theme::ThemePreset;
+
+    #[derive(Default)]
+    struct RecordingEncoder {
+        texts: Vec<String>,
+    }
+
+    impl DrawCommandEncoder for RecordingEncoder {
+        fn push_clip(&mut self, _bounds: Rect) {}
+
+        fn pop_clip(&mut self) {}
+
+        fn draw_rect(&mut self, _bounds: Rect, _color: mondrian_core::Color, _corner_radius: f32) {}
+
+        fn draw_line(
+            &mut self,
+            _start: Point,
+            _end: Point,
+            _width: f32,
+            _color: mondrian_core::Color,
+        ) {
+        }
+
+        fn draw_text(
+            &mut self,
+            text: &str,
+            _font_size: f32,
+            _position: Point,
+            _color: mondrian_core::Color,
+        ) {
+            self.texts.push(text.to_string());
+        }
+
+        fn draw_text_box(
+            &mut self,
+            text: &str,
+            _font_size: f32,
+            _position: Point,
+            _max_width: f32,
+            _color: mondrian_core::Color,
+        ) {
+            self.texts.push(text.to_string());
+        }
+
+        fn push_translate(&mut self, _offset: glam::Vec2) {}
+
+        fn pop_transform(&mut self) {}
+    }
 
     #[test]
     fn host_builds_root_from_initial_app_state() {
@@ -129,5 +179,47 @@ mod tests {
         );
 
         assert!(host.root().dock().ratio() > 0.0);
+    }
+
+    #[test]
+    fn host_refreshes_root_after_failed_editor_action() {
+        let mut host = SelfHostedUiHost::new(AppState::new());
+        let pending = PendingUiActions::default();
+
+        pending.push(crate::app::ui_actions::assets_prepare_drag_action(
+            crate::app::ui_actions::AssetsPrepareDragPayload { asset_id: AssetId::new() },
+        ));
+        host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+        assert!(
+            host.app_state().status_hint.as_ref().is_some_and(|(message, is_error)| {
+                *is_error && message.contains("素材准备失败")
+            }),
+            "status hint: {:?}",
+            host.app_state().status_hint
+        );
+
+        let mut encoder = RecordingEncoder::default();
+        let theme = ThemePreset::Dark.build();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 1280.0, 720.0),
+        };
+        host.root().paint(&mut ctx);
+
+        assert!(
+            encoder.texts.iter().any(|text| text == "Error"),
+            "painted texts: {:?}",
+            encoder.texts
+        );
+        assert!(
+            encoder.texts.iter().any(|text| text.contains("素材准备失败")),
+            "painted texts: {:?}",
+            encoder.texts
+        );
     }
 }

@@ -437,7 +437,11 @@ selection through that module so nested selection scopes stay consistent.
 Panel model adapters should read primary and multi-clip selection through the
 same AppState selection queries instead of depending on `SelectionState` fields.
 Timeline mutations that move clips should refresh selected clip track metadata
-through the selection module; clip id remains the durable identity.
+through the selection module; clip id remains the durable identity. Self-hosted
+Timeline move actions must call the same semantic AppState command path as
+keyboard/menu moves, rather than invoking low-level sequence mutation helpers
+directly, so linked selections, undo snapshots, overlap policy, and locked-track
+checks stay identical across UI surfaces.
 `primary_selected_clip()` resolves the current sequence before returning so
 single-target panels do not inherit stale track metadata.
 Panel models should also resolve selected clips by clip id when reading a
@@ -556,7 +560,12 @@ action consumed by `AppState`.
 The pending queue lives in `self_hosted::action_queue`; `SelfHostedUiHost`
 drains it after routing and applies shell/AppState refresh policy. Entry
 binaries should use these types rather than open-coding shell/AppState
-dispatch.
+dispatch. The host refreshes panel models after every dispatched editor action,
+including actions that return an error, because action handlers may still update
+status hints or other user-visible state before reporting the failure.
+Project/status panel models should keep transient status rows near the top of
+the list, before command rows, so error feedback from failed actions is visible
+without requiring the user to scroll a compact dock panel.
 Registered self-hosted UI action namespaces are strict protocols: known
 namespaces with unknown action names return workflow errors instead of being
 silently ignored, so widget/app wiring mistakes fail during development.

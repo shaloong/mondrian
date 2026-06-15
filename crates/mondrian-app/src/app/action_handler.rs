@@ -567,12 +567,11 @@ impl AppState {
                     name,
                     payload,
                 )?;
-                self.move_clip_to_track_with_mode(
+                self.move_clip_with_snapshot(
                     payload.target_track_id,
                     payload.is_video_track,
                     payload.clip_id,
                     payload.frame,
-                    ClipOverlapMode::Overwrite,
                 )
             }
             TIMELINE_TRIM_CLIP => {
@@ -1263,8 +1262,13 @@ mod tests {
 
     #[test]
     fn dispatch_timeline_ui_moves_clip_to_target_track() {
-        let (mut state, _, clip_id) = state_with_two_video_tracks();
+        let (mut state, source_track_id, clip_id) = state_with_two_video_tracks();
         let target_track_id = state.sequence.as_ref().unwrap().video_tracks[1].id;
+        state.selection.selected_clips = vec![SelectedClipRef {
+            track_id: source_track_id,
+            is_video_track: true,
+            clip_id,
+        }];
 
         state
             .dispatch_action(timeline_move_clip_action(TimelineMoveClipPayload {
@@ -1280,6 +1284,15 @@ mod tests {
         let moved = &sequence.video_tracks[1].clips[0];
         assert_eq!(moved.id, clip_id);
         assert_eq!(moved.position.frame, 42);
+        assert_eq!(
+            state.selection.selected_clips,
+            vec![SelectedClipRef {
+                track_id: target_track_id,
+                is_video_track: true,
+                clip_id,
+            }]
+        );
+        assert!(state.can_undo_action());
     }
 
     #[test]
