@@ -28,6 +28,8 @@ pub const TIMELINE_SET_TRACK_CONTROL: &str = "set_track_control";
 pub const TIMELINE_ADD_TRACK: &str = "add_track";
 /// Action name for reordering one timeline track.
 pub const TIMELINE_MOVE_TRACK: &str = "move_track";
+/// Action name for dropping one prepared asset onto a timeline track.
+pub const TIMELINE_DROP_ASSET: &str = "drop_asset";
 
 /// Custom action namespace for inspector UI operations.
 pub const INSPECTOR_NAMESPACE: &str = "ui.inspector";
@@ -185,6 +187,19 @@ pub struct TimelineMoveTrackPayload {
     pub is_video_track: bool,
     /// Target index within the matching video/audio track list.
     pub target_index: usize,
+}
+
+/// Drop an asset onto one timeline track at a target frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineDropAssetPayload {
+    /// Asset being dropped.
+    pub asset_id: AssetId,
+    /// Track that should receive the created clip.
+    pub target_track_id: TrackId,
+    /// Whether `target_track_id` is a video track rather than an audio track.
+    pub is_video_track: bool,
+    /// Target timeline frame for the new clip start.
+    pub frame: i64,
 }
 
 /// Application-level identity for an inspector-selected clip.
@@ -366,6 +381,11 @@ pub fn timeline_add_track_action(payload: TimelineAddTrackPayload) -> Action {
 /// Build an action that moves a timeline track.
 pub fn timeline_move_track_action(payload: TimelineMoveTrackPayload) -> Action {
     custom_timeline_action(TIMELINE_MOVE_TRACK, payload)
+}
+
+/// Build an action that drops an asset onto a timeline track.
+pub fn timeline_drop_asset_action(payload: TimelineDropAssetPayload) -> Action {
+    custom_timeline_action(TIMELINE_DROP_ASSET, payload)
 }
 
 /// Build an action that toggles a clip enabled state from an inspector panel.

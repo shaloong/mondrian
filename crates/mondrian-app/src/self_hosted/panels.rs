@@ -25,9 +25,9 @@ use mondrian_ui_widgets::panel_slot::SlotKind;
 use mondrian_ui_widgets::{
     Button, Checkbox, ColorPickerAreaMode, ColorPickerTrigger, CurveEditor, CurvePoint, DockPanel,
     FlexChild, FlexContainer, PanelList, PanelListItem, PropertyPanel, PropertyRow,
-    PropertySection, ScrollView, Slider, TimelineClip, TimelineClipMove, TimelineClipRef,
-    TimelineClipTrim, TimelineEditCommand, TimelineTrack, TimelineTrackControl, TimelineTrackMove,
-    TimelineTrackRef, TimelineTrimEdge, TimelineView, ViewerSurface,
+    PropertySection, ScrollView, Slider, TimelineAssetDrop, TimelineClip, TimelineClipMove,
+    TimelineClipRef, TimelineClipTrim, TimelineEditCommand, TimelineTrack, TimelineTrackControl,
+    TimelineTrackMove, TimelineTrackRef, TimelineTrimEdge, TimelineView, ViewerSurface,
 };
 
 use crate::app::ui_actions::{
@@ -37,16 +37,16 @@ use crate::app::ui_actions::{
     inspector_set_clip_curve_action, inspector_set_clip_enabled_action,
     inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
     inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
-    timeline_add_track_action, timeline_move_clip_action, timeline_move_track_action,
-    timeline_seek_action, timeline_select_clip_action, timeline_set_track_control_action,
-    timeline_trim_clip_action, AssetsPrepareDragPayload, EffectsAddToClipPayload,
-    InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
-    InspectorRemoveEffectPayload, InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
-    InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+    timeline_add_track_action, timeline_drop_asset_action, timeline_move_clip_action,
+    timeline_move_track_action, timeline_seek_action, timeline_select_clip_action,
+    timeline_set_track_control_action, timeline_trim_clip_action, AssetsPrepareDragPayload,
+    EffectsAddToClipPayload, InspectorClipRefPayload, InspectorClipTransformField,
+    InspectorCurvePointPayload, InspectorRemoveEffectPayload, InspectorSetClipCurvePayload,
+    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
     InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload, TimelineAddTrackKind,
-    TimelineAddTrackPayload, TimelineMoveClipPayload, TimelineMoveTrackPayload,
-    TimelineSelectClipPayload, TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind,
-    TimelineTrimClipPayload, TimelineTrimPayloadEdge,
+    TimelineAddTrackPayload, TimelineDropAssetPayload, TimelineMoveClipPayload,
+    TimelineMoveTrackPayload, TimelineSelectClipPayload, TimelineSetTrackControlPayload,
+    TimelineTrackControlPayloadKind, TimelineTrimClipPayload, TimelineTrimPayloadEdge,
 };
 use crate::app::{AppState, SelectedClipRef};
 
@@ -602,6 +602,16 @@ impl TimelinePanelModel {
             track_id: source.track_id,
             is_video_track: source.is_video_track,
             target_index,
+        })
+    }
+
+    fn asset_drop_payload(&self, drop: TimelineAssetDrop) -> Option<TimelineDropAssetPayload> {
+        let target = self.track_identity(drop.track_ref)?;
+        Some(TimelineDropAssetPayload {
+            asset_id: drop.asset_id,
+            target_track_id: target.track_id,
+            is_video_track: target.is_video_track,
+            frame: drop.frame.max(0),
         })
     }
 
@@ -1299,6 +1309,15 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
             };
             timeline_add_track_action(TimelineAddTrackPayload { kind })
         })
+        .on_asset_drop({
+            let action_model = action_model.clone();
+            move |drop, _track| {
+                action_model
+                    .asset_drop_payload(drop)
+                    .map(timeline_drop_asset_action)
+                    .unwrap_or(Action::NoOp)
+            }
+        })
         .on_edit_command(|command| match command {
             TimelineEditCommand::DeleteSelection => Action::DeleteSelection,
             TimelineEditCommand::RippleDeleteSelection => Action::RippleDeleteSelection,
@@ -1629,7 +1648,8 @@ mod tests {
         APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
         APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_SAVE_PROJECT_AS_DIALOG, ASSETS_NAMESPACE,
         ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE,
-        INSPECTOR_SET_CLIP_CURVE, TIMELINE_ADD_TRACK, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
+        INSPECTOR_SET_CLIP_CURVE, TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET, TIMELINE_MOVE_TRACK,
+        TIMELINE_NAMESPACE,
     };
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
@@ -1639,6 +1659,7 @@ mod tests {
         EventResult, KeyCode, LayoutConstraint, Modifiers, MouseButton, Point, Size,
     };
     use mondrian_ui_core::widget::EventRequests;
+    use mondrian_ui_core::DragPayload;
     use mondrian_ui_core::UiEvent;
     use std::cell::RefCell;
     use std::path::PathBuf;
@@ -1988,6 +2009,36 @@ mod tests {
     }
 
     #[test]
+    fn timeline_model_maps_asset_drop_payload_to_stable_track_id() {
+        let mut sequence = Sequence::new("edit");
+        sequence.add_audio_track();
+        let first_audio_ref = TimelineTrackRef { track_index: sequence.video_tracks.len() };
+        let target_track_id = sequence.audio_tracks[0].id;
+        let asset_id = AssetId::new();
+        let model = TimelinePanelModel::from_sequence(&sequence, &[], &[]);
+
+        let payload = model
+            .asset_drop_payload(TimelineAssetDrop {
+                asset_id,
+                track_ref: first_audio_ref,
+                frame: -12,
+            })
+            .expect("asset drop payload");
+
+        assert_eq!(payload.asset_id, asset_id);
+        assert_eq!(payload.target_track_id, target_track_id);
+        assert!(!payload.is_video_track);
+        assert_eq!(payload.frame, 0);
+        assert!(model
+            .asset_drop_payload(TimelineAssetDrop {
+                asset_id,
+                track_ref: TimelineTrackRef { track_index: usize::MAX },
+                frame: 24,
+            })
+            .is_none());
+    }
+
+    #[test]
     fn timeline_panel_corner_add_buttons_emit_typed_timeline_actions() {
         let model = demo_timeline_model();
         let actions = RefCell::new(Vec::<Action>::new());
@@ -2093,6 +2144,58 @@ mod tests {
         assert_eq!(payload.track_id, moved.track_id);
         assert!(payload.is_video_track);
         assert_eq!(payload.target_index, 0);
+    }
+
+    #[test]
+    fn timeline_panel_asset_drop_emits_typed_drop_asset_action() {
+        let model = demo_timeline_model();
+        let target = model.track_identity(TimelineTrackRef { track_index: 0 }).expect("track");
+        let asset_id = AssetId::new();
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut panel = timeline_panel(&model);
+        panel.layout(mondrian_ui_core::types::Rect::new(0.0, 0.0, 520.0, 220.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        panel.event(
+            &UiEvent::Drop {
+                payload: DragPayload::Asset(asset_id),
+                position: Point::new(168.0, 55.0),
+            },
+            &mut ctx,
+        );
+
+        let recorded = actions.borrow();
+        let drop_action = recorded
+            .iter()
+            .find(|action| {
+                matches!(
+                    action,
+                    Action::Custom { namespace, name, .. }
+                        if namespace == TIMELINE_NAMESPACE && name == TIMELINE_DROP_ASSET
+                )
+            })
+            .expect("drop asset action");
+        let Action::Custom { payload, .. } = drop_action else {
+            panic!("expected custom drop-asset action");
+        };
+        let payload: TimelineDropAssetPayload =
+            serde_json::from_value(payload.clone()).expect("drop asset payload");
+        assert_eq!(payload.asset_id, asset_id);
+        assert_eq!(payload.target_track_id, target.track_id);
+        assert!(payload.is_video_track);
+        assert_eq!(payload.frame, 10);
     }
 
     #[test]

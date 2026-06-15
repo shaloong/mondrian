@@ -16,13 +16,14 @@ use crate::app::ui_actions::{
     InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
     InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
     ProjectCreateWithSettingsPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
-    TimelineMoveClipPayload, TimelineMoveTrackPayload, TimelineSeekPayload,
-    TimelineSelectClipPayload, TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind,
-    TimelineTrimClipPayload, TimelineTrimPayloadEdge, ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG,
-    EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT,
-    INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY,
-    INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD, INSPECTOR_SET_EFFECT_ENABLED,
-    PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE, TIMELINE_ADD_TRACK, TIMELINE_MOVE_CLIP,
+    TimelineDropAssetPayload, TimelineMoveClipPayload, TimelineMoveTrackPayload,
+    TimelineSeekPayload, TimelineSelectClipPayload, TimelineSetTrackControlPayload,
+    TimelineTrackControlPayloadKind, TimelineTrimClipPayload, TimelineTrimPayloadEdge,
+    ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE,
+    INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT, INSPECTOR_SET_CLIP_CURVE,
+    INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY, INSPECTOR_SET_CLIP_TINT,
+    INSPECTOR_SET_CLIP_TRANSFORM_FIELD, INSPECTOR_SET_EFFECT_ENABLED, PROJECT_CREATE_WITH_SETTINGS,
+    PROJECT_NAMESPACE, TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET, TIMELINE_MOVE_CLIP,
     TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_SEEK, TIMELINE_SELECT_CLIP,
     TIMELINE_SET_TRACK_CONTROL, TIMELINE_TRIM_CLIP,
 };
@@ -673,6 +674,14 @@ impl AppState {
                     payload.target_index,
                 )
             }
+            TIMELINE_DROP_ASSET => {
+                let payload = parse_ui_payload::<TimelineDropAssetPayload>(
+                    "timeline_ui_action",
+                    name,
+                    payload,
+                )?;
+                self.drop_asset_from_ui(payload)
+            }
             _ => Err(unknown_ui_action_error("timeline_ui_action", name)),
         }
     }
@@ -846,6 +855,34 @@ impl AppState {
         );
         self.set_status_hint(format!("已准备拖放：{}（释放到{lane}）", asset.name), false);
         Ok(())
+    }
+
+    fn drop_asset_from_ui(&mut self, payload: TimelineDropAssetPayload) -> Result<()> {
+        let needs_prepare = self
+            .dragging_asset()
+            .map_or(true, |dragging| dragging.asset_id != payload.asset_id);
+        if needs_prepare {
+            self.prepare_asset_drag_from_ui(AssetsPrepareDragPayload {
+                asset_id: payload.asset_id,
+            })?;
+        }
+
+        let result = if payload.is_video_track {
+            self.drop_dragging_asset_to_video_track(payload.target_track_id, payload.frame)
+        } else {
+            self.drop_dragging_asset_to_audio_track(payload.target_track_id, payload.frame)
+        };
+
+        match result {
+            Ok(_) => {
+                self.set_status_hint("已添加素材到时间线".to_string(), false);
+                Ok(())
+            }
+            Err(err) => {
+                self.set_status_hint(format!("素材放置失败：{err}"), true);
+                Err(err)
+            }
+        }
     }
 
     fn set_clip_enabled_from_ui(&mut self, clip_id: ClipId, enabled: bool) -> Result<()> {
@@ -1192,15 +1229,16 @@ mod tests {
         inspector_set_clip_curve_action, inspector_set_clip_enabled_action,
         inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
         inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
-        project_create_with_settings_action, timeline_add_track_action, timeline_move_clip_action,
-        timeline_move_track_action, timeline_seek_action, timeline_select_clip_action,
-        timeline_set_track_control_action, timeline_trim_clip_action, AssetsPrepareDragPayload,
-        EffectsAddToClipPayload, InspectorClipRefPayload, InspectorClipTransformField,
-        InspectorCurvePointPayload, InspectorRemoveEffectPayload, InspectorSetClipCurvePayload,
-        InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
-        InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
-        InspectorSetEffectEnabledPayload, ProjectCreateWithSettingsPayload, TimelineAddTrackKind,
-        TimelineAddTrackPayload, TimelineMoveTrackPayload, TimelineSetTrackControlPayload,
+        project_create_with_settings_action, timeline_add_track_action, timeline_drop_asset_action,
+        timeline_move_clip_action, timeline_move_track_action, timeline_seek_action,
+        timeline_select_clip_action, timeline_set_track_control_action, timeline_trim_clip_action,
+        AssetsPrepareDragPayload, EffectsAddToClipPayload, InspectorClipRefPayload,
+        InspectorClipTransformField, InspectorCurvePointPayload, InspectorRemoveEffectPayload,
+        InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
+        InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+        InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
+        ProjectCreateWithSettingsPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
+        TimelineDropAssetPayload, TimelineMoveTrackPayload, TimelineSetTrackControlPayload,
         TimelineTrackControlPayloadKind,
     };
     use mondrian_assets::AssetLibrary;
@@ -1408,6 +1446,76 @@ mod tests {
         assert_eq!(sequence.video_tracks[0].id, second_track_id);
         assert_eq!(sequence.video_tracks[1].id, first_track_id);
         assert!(state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_timeline_ui_drops_asset_to_video_track() {
+        let (mut state, target_track_id, _) = state_with_two_video_tracks();
+        let library_root = unique_temp_path("timeline-drop-asset-library");
+        let library = AssetLibrary::open(library_root.clone()).expect("library");
+        let asset_id = library
+            .create_solid_color_asset(Some("Slate"))
+            .expect("create solid color asset");
+        state.asset_library = Some(library);
+
+        state
+            .dispatch_action(timeline_drop_asset_action(TimelineDropAssetPayload {
+                asset_id,
+                target_track_id,
+                is_video_track: true,
+                frame: 40,
+            }))
+            .expect("drop asset");
+
+        let sequence = state.sequence.as_ref().expect("sequence");
+        let created = sequence.video_tracks[0]
+            .clips
+            .iter()
+            .find(|clip| clip.asset_id == asset_id)
+            .expect("created clip");
+        assert_eq!(created.position.frame, 40);
+        assert_eq!(created.label.as_deref(), Some("Slate"));
+        assert!(state.dragging_asset().is_none());
+        assert!(state.can_undo_action());
+        assert!(state
+            .status_hint
+            .as_ref()
+            .is_some_and(|(message, is_error)| !*is_error && message.contains("已添加素材")));
+
+        remove_temp_path(&library_root);
+    }
+
+    #[test]
+    fn dispatch_timeline_ui_rejects_incompatible_asset_drop_without_clip_mutation() {
+        let (mut state, _, _) = state_with_two_video_tracks();
+        let target_track_id = state.sequence.as_ref().expect("sequence").audio_tracks[0].id;
+        let initial_audio_clip_count =
+            state.sequence.as_ref().expect("sequence").audio_tracks[0].clips.len();
+        let library_root = unique_temp_path("timeline-drop-incompatible-library");
+        let library = AssetLibrary::open(library_root.clone()).expect("library");
+        let asset_id = library
+            .create_solid_color_asset(Some("Video Only"))
+            .expect("create solid color asset");
+        state.asset_library = Some(library);
+
+        let err = state
+            .dispatch_action(timeline_drop_asset_action(TimelineDropAssetPayload {
+                asset_id,
+                target_track_id,
+                is_video_track: false,
+                frame: 12,
+            }))
+            .expect_err("solid color should not drop onto audio track");
+
+        assert!(matches!(err, MondrianError::UnsupportedFormat { .. }));
+        assert_eq!(
+            state.sequence.as_ref().expect("sequence").audio_tracks[0].clips.len(),
+            initial_audio_clip_count
+        );
+        assert!(state.dragging_asset().is_some());
+        assert!(state.status_hint.as_ref().is_some_and(|(_, is_error)| *is_error));
+
+        remove_temp_path(&library_root);
     }
 
     #[test]

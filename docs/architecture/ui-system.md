@@ -460,6 +460,14 @@ Timeline corner controls for adding video/audio tracks emit only a
 `TimelineTrackKind`; the app adapter translates that into
 `ui.timeline.add_track`, and `AppState` routes it through the existing undoable
 track creation commands.
+Asset drops follow the same boundary. `TimelineView` accepts
+`DragPayload::Asset` only as a domain-light drop proposal with a view track ref
+and frame. The self-hosted adapter resolves that view ref to a stable
+`TrackId`, dispatches `ui.timeline.drop_asset`, and `AppState` prepares the
+asset when necessary before calling the existing video/audio drop commands.
+Clip construction, media-kind validation, linked audio creation, conflict
+resolution, undo snapshots, event publication, and autosave therefore stay in
+the app command layer rather than leaking into widgets or panel adapters.
 Timeline-focused keyboard editing follows the same rule: `TimelineView` emits
 domain-light `TimelineEditCommand`s, and the app adapter maps them onto shared
 editor actions such as `Action::DeleteSelection` and

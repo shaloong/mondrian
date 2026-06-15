@@ -56,10 +56,11 @@ pub use scroll::ScrollView;
 pub use slider::Slider;
 pub use text_input::{TextInput, TextInputChangeAction};
 pub use timeline_view::{
-    TimelineClip, TimelineClipAction, TimelineClipMove, TimelineClipMoveAction, TimelineClipRef,
-    TimelineClipTrim, TimelineClipTrimAction, TimelineEditCommand, TimelineEditCommandAction,
-    TimelineSeekAction, TimelineTrack, TimelineTrackAction, TimelineTrackAddAction,
-    TimelineTrackControl, TimelineTrackControlAction, TimelineTrackKind, TimelineTrackMove,
-    TimelineTrackMoveAction, TimelineTrackRef, TimelineTrimEdge, TimelineView,
+    TimelineAssetDrop, TimelineAssetDropAction, TimelineClip, TimelineClipAction, TimelineClipMove,
+    TimelineClipMoveAction, TimelineClipRef, TimelineClipTrim, TimelineClipTrimAction,
+    TimelineEditCommand, TimelineEditCommandAction, TimelineSeekAction, TimelineTrack,
+    TimelineTrackAction, TimelineTrackAddAction, TimelineTrackControl, TimelineTrackControlAction,
+    TimelineTrackKind, TimelineTrackMove, TimelineTrackMoveAction, TimelineTrackRef,
+    TimelineTrimEdge, TimelineView,
 };
 pub use viewer_surface::ViewerSurface;

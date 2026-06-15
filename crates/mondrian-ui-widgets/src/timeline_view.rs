@@ -5,6 +5,7 @@
 //! map real `Sequence` / `Track` / `Clip` data into these view models without
 //! pulling timeline command logic into the widget layer.
 
+use mondrian_core::types::AssetId;
 use mondrian_core::Color;
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
@@ -35,6 +36,9 @@ pub type TimelineEditCommandAction = dyn Fn(TimelineEditCommand) -> Action;
 
 /// Action factory for playhead seeking.
 pub type TimelineSeekAction = dyn Fn(i64) -> Action;
+
+/// Action factory for dropping an asset onto a timeline track.
+pub type TimelineAssetDropAction = dyn Fn(TimelineAssetDrop, &TimelineTrack) -> Action;
 
 /// Action factory for clip move commits.
 pub type TimelineClipMoveAction = dyn Fn(TimelineClipMove, &TimelineClip) -> Action;
@@ -78,6 +82,14 @@ pub struct TimelineTrackMove {
     pub track_ref: TimelineTrackRef,
     pub old_track_index: usize,
     pub new_track_index: usize,
+}
+
+/// Domain-light asset drop proposal emitted for timeline drop targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimelineAssetDrop {
+    pub asset_id: AssetId,
+    pub track_ref: TimelineTrackRef,
+    pub frame: i64,
 }
 
 /// Clip edge being trimmed.
@@ -274,6 +286,7 @@ pub struct TimelineView {
     header_width: f32,
     ruler_height: f32,
     playhead_dragging: bool,
+    asset_drop_hover: Option<TimelineAssetDropHover>,
     track_drag: Option<TimelineTrackDrag>,
     clip_drag: Option<TimelineClipDrag>,
     trim_drag: Option<TimelineTrimDrag>,
@@ -287,8 +300,16 @@ pub struct TimelineView {
     on_track_add: Option<Box<TimelineTrackAddAction>>,
     on_edit_command: Option<Box<TimelineEditCommandAction>>,
     on_seek: Option<Box<TimelineSeekAction>>,
+    on_asset_drop: Option<Box<TimelineAssetDropAction>>,
     on_clip_move: Option<Box<TimelineClipMoveAction>>,
     on_clip_trim: Option<Box<TimelineClipTrimAction>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TimelineAssetDropHover {
+    asset_id: AssetId,
+    track_index: usize,
+    frame: i64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -360,6 +381,7 @@ impl TimelineView {
             header_width: 96.0,
             ruler_height: 30.0,
             playhead_dragging: false,
+            asset_drop_hover: None,
             track_drag: None,
             clip_drag: None,
             trim_drag: None,
@@ -373,6 +395,7 @@ impl TimelineView {
             on_track_add: None,
             on_edit_command: None,
             on_seek: None,
+            on_asset_drop: None,
             on_clip_move: None,
             on_clip_trim: None,
         }
@@ -429,6 +452,7 @@ impl TimelineView {
             self.hovered_track_control = None;
             self.hovered_track_add = None;
             self.selected_track = None;
+            self.asset_drop_hover = None;
             self.track_drag = None;
             self.horizontal_scrollbar_hovered = false;
             self.vertical_scrollbar_hovered = false;
@@ -489,6 +513,15 @@ impl TimelineView {
     /// Set a dynamic seek action factory.
     pub fn on_seek(mut self, action: impl Fn(i64) -> Action + 'static) -> Self {
         self.on_seek = Some(Box::new(action));
+        self
+    }
+
+    /// Set a dynamic action factory for asset drops onto timeline tracks.
+    pub fn on_asset_drop(
+        mut self,
+        action: impl Fn(TimelineAssetDrop, &TimelineTrack) -> Action + 'static,
+    ) -> Self {
+        self.on_asset_drop = Some(Box::new(action));
         self
     }
 
@@ -1184,6 +1217,54 @@ impl TimelineView {
         }
     }
 
+    fn asset_drop_target_at(&self, position: Point) -> Option<(usize, i64)> {
+        let track_index = self.track_index_at(position)?;
+        Some((track_index, self.x_to_frame(position.x).max(0)))
+    }
+
+    fn hover_asset_drop(&mut self, asset_id: AssetId, position: Point, ctx: &mut EventContext) {
+        let next = self
+            .asset_drop_target_at(position)
+            .map(|(track_index, frame)| TimelineAssetDropHover { asset_id, track_index, frame });
+        if self
+            .asset_drop_hover
+            .map(|hover| (hover.asset_id, hover.track_index, hover.frame))
+            != next.map(|hover| (hover.asset_id, hover.track_index, hover.frame))
+        {
+            self.asset_drop_hover = next;
+            ctx.request_repaint();
+        }
+    }
+
+    fn finish_asset_drop(
+        &mut self,
+        asset_id: AssetId,
+        position: Point,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        self.asset_drop_hover = None;
+        let Some((track_index, frame)) = self.asset_drop_target_at(position) else {
+            ctx.request_repaint();
+            return EventResult::Handled;
+        };
+        let Some(track) = self.tracks.get(track_index) else {
+            ctx.request_repaint();
+            return EventResult::Handled;
+        };
+        if let Some(factory) = &self.on_asset_drop {
+            (ctx.dispatch)(factory(
+                TimelineAssetDrop {
+                    asset_id,
+                    track_ref: TimelineTrackRef { track_index },
+                    frame,
+                },
+                track,
+            ));
+        }
+        ctx.request_repaint();
+        EventResult::Handled
+    }
+
     fn keyboard_seek(
         &mut self,
         key: KeyCode,
@@ -1449,6 +1530,11 @@ impl TimelineView {
             };
             ctx.encoder.draw_rect(row, row_fill, 0.0);
             self.paint_in_out_row_region(ctx, row);
+            if self.asset_drop_hover.is_some_and(|hover| hover.track_index == track_index) {
+                let mut target = colors.accent;
+                target.a = 0.14;
+                ctx.encoder.draw_rect(row, target, 0.0);
+            }
             if self.track_drag.is_some_and(|drag| drag.current_track_index == track_index) {
                 let mut target = colors.ring;
                 target.a = 0.10;
@@ -1511,6 +1597,32 @@ impl TimelineView {
         }
 
         self.paint_track_drag_indicator(ctx);
+        self.paint_asset_drop_indicator(ctx);
+    }
+
+    fn paint_asset_drop_indicator(&self, ctx: &mut PaintContext) {
+        let Some(hover) = self.asset_drop_hover else {
+            return;
+        };
+        if self.tracks.get(hover.track_index).is_none() {
+            return;
+        }
+        let colors = &ctx.theme.colors;
+        let mut color = colors.accent;
+        color.a = 0.85;
+        let x = self.frame_to_x(hover.frame).round();
+        let row_top = self.track_y(hover.track_index).round();
+        let row_bottom =
+            (row_top + self.track_height).min(self.body_rect.y + self.body_rect.height);
+        if x < self.body_rect.x || x > self.body_rect.x + self.body_rect.width {
+            return;
+        }
+        ctx.encoder.draw_line(
+            Point::new(x, row_top),
+            Point::new(x, row_bottom),
+            2.0,
+            color,
+        );
     }
 
     fn paint_track_drag_indicator(&self, ctx: &mut PaintContext) {
@@ -1946,6 +2058,7 @@ impl Widget for TimelineView {
             self.focused = false;
             self.focus_visible = false;
             self.playhead_dragging = false;
+            self.asset_drop_hover = None;
             self.track_drag = None;
             self.clip_drag = None;
             self.trim_drag = None;
@@ -1959,6 +2072,24 @@ impl Widget for TimelineView {
         }
 
         match event {
+            UiEvent::DragEnter { payload: DragPayload::Asset(asset_id), position } => {
+                self.hover_asset_drop(*asset_id, *position, ctx);
+                return EventResult::Handled;
+            }
+            UiEvent::DragOver { position } if self.asset_drop_hover.is_some() => {
+                if let Some(hover) = self.asset_drop_hover {
+                    self.hover_asset_drop(hover.asset_id, *position, ctx);
+                }
+                return EventResult::Handled;
+            }
+            UiEvent::DragLeave if self.asset_drop_hover.is_some() => {
+                self.asset_drop_hover = None;
+                ctx.request_repaint();
+                return EventResult::Handled;
+            }
+            UiEvent::Drop { payload: DragPayload::Asset(asset_id), position } => {
+                return self.finish_asset_drop(*asset_id, *position, ctx);
+            }
             UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
                 if !self.bounds.contains(*position) {
                     return EventResult::Ignored;
@@ -2150,6 +2281,7 @@ impl Widget for TimelineView {
                 self.focused = false;
                 self.focus_visible = false;
                 self.playhead_dragging = false;
+                self.asset_drop_hover = None;
                 self.track_drag = None;
                 self.clip_drag = None;
                 self.trim_drag = None;
@@ -2529,6 +2661,103 @@ mod tests {
                 position: Point::new(12.0, 105.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn dropping_asset_on_track_dispatches_drop_proposal() {
+        let actions = RefCell::new(Vec::new());
+        let drops = Rc::new(RefCell::new(Vec::new()));
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let drop_log = Rc::clone(&drops);
+        let asset_id = AssetId::new();
+        let mut view = TimelineView::new(vec![
+            TimelineTrack::video("V1", vec![]),
+            TimelineTrack::audio("A1", vec![]),
+        ])
+        .with_header_width(128.0)
+        .on_asset_drop(move |drop, _track| {
+            drop_log.borrow_mut().push(drop);
+            Action::Paste
+        });
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            view.event(
+                &UiEvent::DragEnter {
+                    payload: DragPayload::Asset(asset_id),
+                    position: Point::new(168.0, 105.0),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert!(view.asset_drop_hover.is_some());
+        assert_eq!(
+            view.event(
+                &UiEvent::Drop {
+                    payload: DragPayload::Asset(asset_id),
+                    position: Point::new(168.0, 105.0),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(actions.borrow().as_slice(), &[Action::Paste]);
+        assert_eq!(
+            drops.borrow().as_slice(),
+            &[TimelineAssetDrop {
+                asset_id,
+                track_ref: TimelineTrackRef { track_index: 1 },
+                frame: 10,
+            }]
+        );
+        assert!(view.asset_drop_hover.is_none());
+    }
+
+    #[test]
+    fn dropping_asset_outside_timeline_body_does_not_dispatch() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let asset_id = AssetId::new();
+        let mut view = TimelineView::new(vec![TimelineTrack::video("V1", vec![])])
+            .with_header_width(128.0)
+            .on_asset_drop(|_, _| Action::Paste);
+        view.layout(Rect::new(0.0, 0.0, 520.0, 140.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        view.event(
+            &UiEvent::Drop {
+                payload: DragPayload::Asset(asset_id),
+                position: Point::new(64.0, 48.0),
             },
             &mut ctx,
         );
