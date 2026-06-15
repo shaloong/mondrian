@@ -3,7 +3,7 @@
 //! Developer binaries own native window setup and event-loop plumbing. This
 //! module owns the reusable root widget composition above the dock/panel layer.
 
-use mondrian_editor_state::state::PanelKind;
+use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
 use mondrian_editor_state::Action;
 use mondrian_platform::{FileFilter, PlatformService};
 use mondrian_ui_core::types::*;
@@ -30,9 +30,7 @@ use crate::self_hosted::modal::ShellModal;
 use crate::self_hosted::new_project_dialog::{
     default_project_file_name, SelfHostedNewProjectDraft,
 };
-#[cfg(test)]
-use crate::self_hosted::panels::build_demo_dock_tree;
-use crate::self_hosted::panels::{build_dock_tree, SelfHostedPanelModels};
+use crate::self_hosted::panels::{build_dock_tree_for_preset, SelfHostedPanelModels};
 
 /// Height reserved for the self-hosted top menu bar.
 pub const MENU_BAR_HEIGHT: f32 = 28.0;
@@ -189,12 +187,29 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
         (
             "View",
             vec![
-                MenuItem::new("Toggle Console", Action::TogglePanel(PanelKind::Console)),
-                MenuItem::new("Toggle Timeline", Action::TogglePanel(PanelKind::Timeline)),
+                MenuItem::new("Viewer", Action::FocusPanel(PanelKind::Viewer)),
+                MenuItem::new("Timeline", Action::FocusPanel(PanelKind::Timeline)),
+                MenuItem::new("Inspector", Action::FocusPanel(PanelKind::Inspector)),
+                MenuItem::separator(),
+                MenuItem::new("Assets", Action::FocusPanel(PanelKind::Assets)),
+                MenuItem::new("Effects", Action::FocusPanel(PanelKind::Effects)),
+                MenuItem::new("Project", Action::FocusPanel(PanelKind::Project)),
+                MenuItem::new("Console", Action::FocusPanel(PanelKind::Console)),
+                MenuItem::new("Node Graph", Action::FocusPanel(PanelKind::NodeGraph)),
+                MenuItem::new("Export", Action::FocusPanel(PanelKind::Export)),
+            ],
+        ),
+        (
+            "Workspace",
+            vec![
+                MenuItem::new("Editing", Action::SwitchWorkspace(WorkspacePreset::Editing)),
+                MenuItem::new("Color", Action::SwitchWorkspace(WorkspacePreset::Color)),
+                MenuItem::new("Audio", Action::SwitchWorkspace(WorkspacePreset::Audio)),
                 MenuItem::new(
-                    "Toggle Inspector",
-                    Action::TogglePanel(PanelKind::Inspector),
+                    "Compositing",
+                    Action::SwitchWorkspace(WorkspacePreset::Compositing),
                 ),
+                MenuItem::new("Export", Action::SwitchWorkspace(WorkspacePreset::Export)),
             ],
         ),
         (
@@ -330,6 +345,8 @@ pub struct SelfHostedAppRoot {
     id: WidgetId,
     menu_bar: MenuBar,
     dock: DockSplitter,
+    models: SelfHostedPanelModels,
+    workspace_preset: WorkspacePreset,
     modal: Option<ShellModal>,
     bounds: Rect,
 }
@@ -342,24 +359,40 @@ impl SelfHostedAppRoot {
 
     /// Build a root widget from app-facing panel models.
     pub fn from_models(models: SelfHostedPanelModels) -> Self {
-        Self::new(MenuBar::default(), build_dock_tree(models))
+        Self::new(MenuBar::default(), models, WorkspacePreset::Editing)
     }
 
     /// Build a root widget using test-only demo fixtures.
     #[cfg(test)]
     pub fn demo() -> Self {
-        Self::new(MenuBar::default(), build_demo_dock_tree())
+        Self::new(
+            MenuBar::default(),
+            SelfHostedPanelModels::demo(),
+            WorkspacePreset::Editing,
+        )
     }
 
     /// Build a root widget from explicit shell parts.
-    pub fn new(menu_bar: MenuBar, dock: DockSplitter) -> Self {
+    pub fn new(
+        menu_bar: MenuBar,
+        models: SelfHostedPanelModels,
+        workspace_preset: WorkspacePreset,
+    ) -> Self {
+        let dock = build_dock_tree_for_preset(models.clone(), workspace_preset);
         Self {
             id: WidgetId::new(),
             menu_bar,
             dock,
+            models,
+            workspace_preset,
             modal: None,
             bounds: Rect::ZERO,
         }
+    }
+
+    /// Current built-in workspace preset used by the dock tree.
+    pub fn workspace_preset(&self) -> WorkspacePreset {
+        self.workspace_preset
     }
 
     /// Access the inner dock splitter for shell-owned grab zone cursor queries.
@@ -376,7 +409,8 @@ impl SelfHostedAppRoot {
     /// root widget id and menu state.
     pub fn set_models(&mut self, models: SelfHostedPanelModels) {
         let layout = self.dock.layout_snapshot();
-        self.dock = build_dock_tree(models);
+        self.models = models;
+        self.dock = build_dock_tree_for_preset(self.models.clone(), self.workspace_preset);
         self.dock.restore_layout(&layout);
         if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
             self.layout(self.bounds);
@@ -390,12 +424,23 @@ impl SelfHostedAppRoot {
 
     /// Activate a dock panel or grouped tab in the default self-hosted layout.
     pub fn activate_panel(&mut self, panel: PanelKind) -> bool {
-        let (owner, active_index) = dock_panel_location(panel);
-        let activated = activate_panel_in_widget(&mut self.dock, owner, active_index);
+        let activated = dock_panel_locations(panel).into_iter().any(|(owner, active_index)| {
+            activate_panel_in_widget(&mut self.dock, owner, active_index)
+        });
         if activated && self.bounds.width > 0.0 && self.bounds.height > 0.0 {
             self.layout(self.bounds);
         }
         activated
+    }
+
+    /// Switch to a built-in workspace preset and rebuild the dock tree from the
+    /// current shell models.
+    pub fn switch_workspace(&mut self, preset: WorkspacePreset) {
+        self.workspace_preset = preset;
+        self.dock = build_dock_tree_for_preset(self.models.clone(), preset);
+        if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
+            self.layout(self.bounds);
+        }
     }
 
     /// Apply a shell-local action and return an editor action when one should
@@ -409,6 +454,10 @@ impl SelfHostedAppRoot {
         match action {
             Action::FocusPanel(panel) | Action::TogglePanel(panel) => {
                 self.activate_panel(panel);
+                None
+            }
+            Action::SwitchWorkspace(preset) => {
+                self.switch_workspace(preset);
                 None
             }
             Action::Custom { namespace, name, .. }
@@ -483,15 +532,15 @@ impl SelfHostedAppRoot {
     }
 }
 
-fn dock_panel_location(panel: PanelKind) -> (PanelKind, usize) {
+fn dock_panel_locations(panel: PanelKind) -> Vec<(PanelKind, usize)> {
     match panel {
-        PanelKind::Assets => (PanelKind::Assets, 0),
-        PanelKind::Effects => (PanelKind::Assets, 1),
-        PanelKind::Project => (PanelKind::Console, 0),
-        PanelKind::Console => (PanelKind::Console, 1),
-        PanelKind::Export => (PanelKind::Console, 2),
+        PanelKind::Assets => vec![(PanelKind::Assets, 0)],
+        PanelKind::Effects => vec![(PanelKind::Assets, 1), (PanelKind::Effects, 0)],
+        PanelKind::Project => vec![(PanelKind::Console, 0), (PanelKind::Project, 0)],
+        PanelKind::Console => vec![(PanelKind::Console, 1), (PanelKind::Console, 0)],
+        PanelKind::Export => vec![(PanelKind::Console, 2), (PanelKind::Export, 0)],
         PanelKind::Viewer | PanelKind::Timeline | PanelKind::Inspector | PanelKind::NodeGraph => {
-            (panel, 0)
+            vec![(panel, 0)]
         }
     }
 }
@@ -753,7 +802,41 @@ mod tests {
     fn default_menu_bar_exposes_primary_menu_groups() {
         let menu = MenuBar::default();
 
-        assert_eq!(menu.child_count(), 4);
+        assert_eq!(menu.child_count(), 5);
+    }
+
+    #[test]
+    fn default_menu_items_expose_all_panels_and_builtin_workspaces() {
+        let menu_items = default_menu_items();
+        let view_items = menu_items
+            .iter()
+            .find_map(|(label, items)| (*label == "View").then_some(items))
+            .expect("view menu");
+        let workspace_items = menu_items
+            .iter()
+            .find_map(|(label, items)| (*label == "Workspace").then_some(items))
+            .expect("workspace menu");
+
+        for panel in PanelKind::ALL {
+            assert!(
+                view_items.iter().any(|item| item.action == Action::FocusPanel(panel)),
+                "missing panel menu item for {panel:?}"
+            );
+        }
+        for preset in [
+            WorkspacePreset::Editing,
+            WorkspacePreset::Color,
+            WorkspacePreset::Audio,
+            WorkspacePreset::Compositing,
+            WorkspacePreset::Export,
+        ] {
+            assert!(
+                workspace_items
+                    .iter()
+                    .any(|item| item.action == Action::SwitchWorkspace(preset)),
+                "missing workspace menu item for {preset:?}"
+            );
+        }
     }
 
     #[test]
@@ -778,8 +861,8 @@ mod tests {
         );
 
         click_menu(&mut menu, &mut ctx, Point::new(10.0, 10.0));
-        click_menu(&mut menu, &mut ctx, Point::new(310.0, 10.0));
-        click_menu(&mut menu, &mut ctx, Point::new(310.0, 42.0));
+        click_menu(&mut menu, &mut ctx, Point::new(410.0, 10.0));
+        click_menu(&mut menu, &mut ctx, Point::new(410.0, 42.0));
 
         assert_eq!(dispatched.borrow().len(), 1);
         let action = dispatched.borrow()[0].clone();
@@ -818,14 +901,14 @@ mod tests {
         assert_eq!(
             menu.event(
                 &UiEvent::MouseMove {
-                    position: Point::new(310.0, 10.0),
+                    position: Point::new(410.0, 10.0),
                     modifiers: Modifiers::none(),
                 },
                 &mut ctx,
             ),
             EventResult::Handled
         );
-        click_menu(&mut menu, &mut ctx, Point::new(310.0, 42.0));
+        click_menu(&mut menu, &mut ctx, Point::new(410.0, 42.0));
 
         assert_eq!(dispatched.borrow().len(), 1);
         let action = dispatched.borrow()[0].clone();
@@ -889,6 +972,48 @@ mod tests {
         assert_eq!(
             active_index_for_dock_panel(&root, PanelKind::Assets),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn app_root_switch_workspace_rebuilds_dock_without_editor_action() {
+        let platform = FakePlatform::default();
+        let mut root = SelfHostedAppRoot::demo();
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+
+        let action = root.handle_shell_action(
+            Action::SwitchWorkspace(WorkspacePreset::Export),
+            &platform,
+            None,
+        );
+
+        assert_eq!(action, None);
+        assert_eq!(root.workspace_preset(), WorkspacePreset::Export);
+        assert!((root.dock().ratio() - 0.55).abs() < f32::EPSILON);
+        assert_eq!(
+            active_index_for_dock_panel(&root, PanelKind::Export),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn app_root_focus_panel_handles_direct_panels_after_workspace_switch() {
+        let platform = FakePlatform::default();
+        let mut root = SelfHostedAppRoot::demo();
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        root.handle_shell_action(
+            Action::SwitchWorkspace(WorkspacePreset::Color),
+            &platform,
+            None,
+        );
+
+        let action =
+            root.handle_shell_action(Action::FocusPanel(PanelKind::Effects), &platform, None);
+
+        assert_eq!(action, None);
+        assert_eq!(
+            active_index_for_dock_panel(&root, PanelKind::Effects),
+            Some(0)
         );
     }
 
@@ -1348,5 +1473,27 @@ mod tests {
         root.refresh_from_app_state(&state);
 
         assert!((root.dock().ratio() - dragged_ratio).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn refresh_from_app_state_preserves_workspace_preset() {
+        let state = AppState::new();
+        let platform = FakePlatform::default();
+        let mut root = SelfHostedAppRoot::from_app_state(&state);
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        root.handle_shell_action(
+            Action::SwitchWorkspace(WorkspacePreset::Compositing),
+            &platform,
+            None,
+        );
+
+        root.refresh_from_app_state(&state);
+
+        assert_eq!(root.workspace_preset(), WorkspacePreset::Compositing);
+        assert!((root.dock().ratio() - 0.35).abs() < f32::EPSILON);
+        assert_eq!(
+            active_index_for_dock_panel(&root, PanelKind::NodeGraph),
+            Some(0)
+        );
     }
 }

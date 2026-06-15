@@ -12,6 +12,7 @@ use mondrian_core::effect_data::EffectType;
 use mondrian_core::types::AssetId;
 use mondrian_core::types::{ClipId, EffectId, SequenceId, TimeCode, TrackId};
 use mondrian_core::Color;
+use mondrian_editor_state::state::WorkspacePreset;
 use mondrian_editor_state::Action;
 use mondrian_effects::{effect_display_name, effect_library_types};
 use mondrian_export::preset::{ExportPreset, TimelineExportRange, VideoCodecConfig};
@@ -970,30 +971,90 @@ impl ExportPanelModel {
 
 /// Build the default self-hosted dock tree from explicit panel models.
 pub fn build_dock_tree(models: SelfHostedPanelModels) -> DockSplitter {
-    let left = DockSplitter::new(
-        SplitDirection::Vertical,
-        0.6,
-        slot(SlotKind::Assets, models.clone()),
-        slot(SlotKind::Console, models.clone()),
-    );
-    let right_bottom = DockSplitter::new(
-        SplitDirection::Horizontal,
-        0.7,
-        slot(SlotKind::Timeline, models.clone()),
-        slot(SlotKind::Inspector, models.clone()),
-    );
-    let right = DockSplitter::new(
-        SplitDirection::Vertical,
-        0.65,
-        slot(SlotKind::Viewer, models.clone()),
-        Box::new(right_bottom),
-    );
-    DockSplitter::new(
-        SplitDirection::Horizontal,
-        0.28,
-        Box::new(left),
-        Box::new(right),
-    )
+    build_dock_tree_for_preset(models, WorkspacePreset::Editing)
+}
+
+/// Build a self-hosted dock tree for one built-in workspace preset.
+pub fn build_dock_tree_for_preset(
+    models: SelfHostedPanelModels,
+    preset: WorkspacePreset,
+) -> DockSplitter {
+    match preset {
+        WorkspacePreset::Editing | WorkspacePreset::Custom => {
+            let left = DockSplitter::new(
+                SplitDirection::Vertical,
+                0.6,
+                slot(SlotKind::Assets, models.clone()),
+                slot(SlotKind::Console, models.clone()),
+            );
+            let right_bottom = DockSplitter::new(
+                SplitDirection::Horizontal,
+                0.7,
+                slot(SlotKind::Timeline, models.clone()),
+                slot(SlotKind::Inspector, models.clone()),
+            );
+            let right = DockSplitter::new(
+                SplitDirection::Vertical,
+                0.65,
+                slot(SlotKind::Viewer, models.clone()),
+                Box::new(right_bottom),
+            );
+            DockSplitter::new(
+                SplitDirection::Horizontal,
+                0.28,
+                Box::new(left),
+                Box::new(right),
+            )
+        }
+        WorkspacePreset::Color => {
+            let right = DockSplitter::new(
+                SplitDirection::Vertical,
+                0.5,
+                slot(SlotKind::Inspector, models.clone()),
+                slot(SlotKind::Effects, models.clone()),
+            );
+            DockSplitter::new(
+                SplitDirection::Horizontal,
+                0.7,
+                slot(SlotKind::Viewer, models),
+                Box::new(right),
+            )
+        }
+        WorkspacePreset::Audio => {
+            let bottom = DockSplitter::new(
+                SplitDirection::Horizontal,
+                0.3,
+                slot(SlotKind::Timeline, models.clone()),
+                slot(SlotKind::Inspector, models.clone()),
+            );
+            DockSplitter::new(
+                SplitDirection::Vertical,
+                0.4,
+                slot(SlotKind::Viewer, models),
+                Box::new(bottom),
+            )
+        }
+        WorkspacePreset::Compositing => {
+            let right = DockSplitter::new(
+                SplitDirection::Vertical,
+                0.6,
+                slot(SlotKind::Viewer, models.clone()),
+                slot(SlotKind::Effects, models.clone()),
+            );
+            DockSplitter::new(
+                SplitDirection::Horizontal,
+                0.35,
+                slot(SlotKind::NodeGraph, models),
+                Box::new(right),
+            )
+        }
+        WorkspacePreset::Export => DockSplitter::new(
+            SplitDirection::Horizontal,
+            0.55,
+            slot(SlotKind::Export, models.clone()),
+            slot(SlotKind::Viewer, models),
+        ),
+    }
 }
 
 /// Build a dock tree using built-in demo panel fixtures.

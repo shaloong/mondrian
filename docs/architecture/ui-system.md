@@ -559,9 +559,16 @@ Console, so product-shell state is visible in the default layout without adding
 another split.
 Self-hosted `FocusPanel` and current View-menu `TogglePanel` actions activate
 the matching dock panel or grouped tab through shell-local dock traversal and do
-not continue into `AppState`. True hide/show panel visibility should be added
-as a separate dock-tree policy so it can handle split collapse and restoration
-deliberately.
+not continue into `AppState`. The traversal first understands grouped tabs in
+the default layout, then falls back to direct panels used by built-in workspace
+presets such as Color, Compositing, and Export. True hide/show panel visibility
+should be added as a separate dock-tree policy so it can handle split collapse
+and restoration deliberately.
+Self-hosted `SwitchWorkspace` is also shell-local: it rebuilds the dock tree
+from the current `SelfHostedPanelModels` using a built-in preset while keeping
+panel models read-only and app/domain mutation in `AppState`. Refreshing panel
+models must preserve the selected workspace preset so live app snapshots do not
+silently reset the user's shell layout.
 The self-hosted Assets panel maps real library rows to `ui.assets.prepare_drag`;
 `AppState` resolves the asset record and reuses the existing `begin_drag_asset`
 path so later Timeline drop handling stays shared with the egui implementation.
