@@ -4,7 +4,7 @@
 //! assets. Reusable widgets stay asset-agnostic; panels ask this registry for
 //! vector geometry or icon buttons when they need Mondrian product icons.
 
-use mondrian_ui_widgets::{IconButton, VectorIcon, VectorIconError};
+use mondrian_ui_widgets::{Button, IconButton, VectorIcon, VectorIconError};
 
 /// Built-in product icons available to the self-hosted UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -252,11 +252,17 @@ impl AppIcon {
     pub fn icon_button(self) -> Result<IconButton, VectorIconError> {
         Ok(IconButton::from_vector_icon(self.vector_icon()?))
     }
+
+    /// Build a text button with this asset painted before the label.
+    pub fn text_button(self, label: impl Into<String>) -> Result<Button, VectorIconError> {
+        Ok(Button::new(label).with_leading_icon(self.vector_icon()?))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mondrian_ui_core::Widget;
     use std::collections::HashSet;
 
     #[test]
@@ -277,5 +283,12 @@ mod tests {
         for icon in AppIcon::ALL {
             assert!(ids.insert(icon.id()), "duplicate icon id {}", icon.id());
         }
+    }
+
+    #[test]
+    fn self_hosted_icons_build_text_buttons() {
+        let button = AppIcon::Trash.text_button("Remove").expect("trash text button");
+
+        assert!(button.measure(mondrian_ui_core::types::LayoutConstraint::LOOSE).width > 0.0);
     }
 }

@@ -2007,9 +2007,15 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                                     (index + 1).min(model.effects.len().saturating_sub(1)),
                                 )),
                         )),
-                        FlexChild::fixed(Box::new(Button::new("Remove").on_click(
-                            inspector_remove_effect_row_action(selected_clip, effect_id),
-                        ))),
+                        FlexChild::fixed(Box::new(
+                            AppIcon::Trash
+                                .text_button("Remove")
+                                .expect("bundled Trash icon asset should parse")
+                                .on_click(inspector_remove_effect_row_action(
+                                    selected_clip,
+                                    effect_id,
+                                )),
+                        )),
                     ])
                     .with_gap(8.0),
                 ),

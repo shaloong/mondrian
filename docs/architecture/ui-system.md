@@ -874,6 +874,9 @@ import format for designers: the widget layer normalizes SVG documents through
 usvg so basic shapes, inherited paint, relative path commands, arcs, and
 transforms become renderable path data, then uses lyon to tessellate fills and
 strokes into cached theme-tinted triangle meshes.
+Text buttons that need command glyphs use the same optional leading
+`VectorIcon` path, so icon-only and icon-plus-label controls share parsing,
+caching, focus, disabled, and text clipping behavior.
 Bundled SVGs should be loaded through `VectorIcon::from_static_svg` with a
 stable icon id so parsing and lyon tessellation happen once; repeated widget-tree
 construction must clone cached geometry rather than reparsing XML.

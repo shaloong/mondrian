@@ -9,9 +9,12 @@ use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
 use crate::paint::paint_focus_ring;
 use crate::text_metrics::{centered_text_x, measure_single_line};
+use crate::vector_icon::VectorIcon;
 
 const BUTTON_PADDING_X: f32 = 12.0;
 const BUTTON_HEIGHT: f32 = 28.0;
+const BUTTON_ICON_GAP: f32 = 6.0;
+const BUTTON_ICON_SIZE: f32 = 14.0;
 
 /// 按钮状态
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +28,7 @@ pub enum ButtonState {
 pub struct Button {
     id: WidgetId,
     label: String,
+    leading_icon: Option<VectorIcon>,
     bounds: Rect,
     state: ButtonState,
     enabled: bool,
@@ -37,12 +41,19 @@ impl Button {
         Self {
             id: WidgetId::new(),
             label: label.into(),
+            leading_icon: None,
             bounds: Rect::ZERO,
             state: ButtonState::Normal,
             enabled: true,
             on_click: None,
             focus_visible: false,
         }
+    }
+
+    /// Paint a vector icon before the label.
+    pub fn with_leading_icon(mut self, icon: VectorIcon) -> Self {
+        self.leading_icon = Some(icon);
+        self
     }
 
     pub fn on_click(mut self, action: Action) -> Self {
@@ -88,7 +99,16 @@ impl Widget for Button {
 
     fn measure(&self, constraint: LayoutConstraint) -> Size {
         let (label_width, _) = measure_single_line(&self.label, 14.0);
-        let preferred = Size::new(label_width + BUTTON_PADDING_X * 2.0, BUTTON_HEIGHT);
+        let icon_width = self.leading_icon.as_ref().map_or(0.0, |_| BUTTON_ICON_SIZE);
+        let icon_gap = if self.leading_icon.is_some() && !self.label.is_empty() {
+            BUTTON_ICON_GAP
+        } else {
+            0.0
+        };
+        let preferred = Size::new(
+            icon_width + icon_gap + label_width + BUTTON_PADDING_X * 2.0,
+            BUTTON_HEIGHT,
+        );
         constraint.constrain(preferred)
     }
 
@@ -175,22 +195,53 @@ impl Widget for Button {
         if self.focus_visible {
             paint_focus_ring(ctx, self.bounds, spacing.radius_md);
         }
-        if !self.label.is_empty() {
-            let text_clip = self.bounds.inset(BUTTON_PADDING_X, 0.0);
-            let tx = centered_text_x(text_clip.x, text_clip.width, &self.label, font_size);
-            let ty = self.bounds.y + (self.bounds.height - font_size * 1.3).max(0.0) * 0.5;
-            ctx.encoder.push_clip(text_clip);
-            ctx.encoder.draw_text(
-                &self.label,
-                font_size,
-                Point::new(tx, ty),
-                if self.enabled {
-                    tokens.foreground
-                } else {
-                    tokens.muted_foreground
-                },
+
+        let content = self.bounds.inset(BUTTON_PADDING_X, 0.0);
+        let icon_size = spacing.icon_size.min(content.height).clamp(1.0, BUTTON_ICON_SIZE);
+        let icon_color = if self.enabled {
+            tokens.foreground
+        } else {
+            tokens.muted_foreground
+        };
+
+        if let Some(icon) = &self.leading_icon {
+            let (label_width, _) = measure_single_line(&self.label, font_size);
+            let gap = if self.label.is_empty() {
+                0.0
+            } else {
+                BUTTON_ICON_GAP
+            };
+            let desired_width = icon_size + gap + label_width;
+            let content_x = content.x + (content.width - desired_width).max(0.0) * 0.5;
+            let icon_rect = Rect::new(
+                content_x,
+                self.bounds.y + (self.bounds.height - icon_size).max(0.0) * 0.5,
+                icon_size,
+                icon_size,
             );
-            ctx.encoder.pop_clip();
+            icon.paint(ctx, icon_rect, icon_color);
+
+            if !self.label.is_empty() {
+                let content_right = content.x + content.width;
+                let text_clip_x = (icon_rect.x + icon_rect.width + gap).min(content_right);
+                let text_clip = Rect::new(
+                    text_clip_x,
+                    content.y,
+                    (content_right - text_clip_x).max(0.0),
+                    content.height,
+                );
+                paint_button_label(
+                    ctx,
+                    &self.label,
+                    text_clip,
+                    text_clip.x,
+                    font_size,
+                    icon_color,
+                );
+            }
+        } else if !self.label.is_empty() {
+            let tx = centered_text_x(content.x, content.width, &self.label, font_size);
+            paint_button_label(ctx, &self.label, content, tx, font_size, icon_color);
         }
     }
 
@@ -201,6 +252,20 @@ impl Widget for Button {
     fn can_focus(&self) -> bool {
         self.enabled
     }
+}
+
+fn paint_button_label(
+    ctx: &mut PaintContext,
+    label: &str,
+    clip: Rect,
+    text_x: f32,
+    font_size: f32,
+    color: mondrian_core::Color,
+) {
+    let ty = clip.y + (clip.height - font_size * 1.3).max(0.0) * 0.5;
+    ctx.encoder.push_clip(clip);
+    ctx.encoder.draw_text(label, font_size, Point::new(text_x, ty), color);
+    ctx.encoder.pop_clip();
 }
 
 #[cfg(test)]
@@ -215,6 +280,7 @@ mod tests {
     struct PaintRecorder {
         clips: Vec<Rect>,
         clip_pops: usize,
+        triangles: usize,
         texts: Vec<String>,
     }
 
@@ -248,9 +314,20 @@ mod tests {
             self.texts.push(text.into());
         }
 
+        fn draw_triangles(&mut self, vertices: &[Point], _color: mondrian_core::Color) {
+            self.triangles += vertices.len();
+        }
+
         fn push_translate(&mut self, _offset: glam::Vec2) {}
 
         fn pop_transform(&mut self) {}
+    }
+
+    fn test_icon() -> VectorIcon {
+        VectorIcon::from_svg_str(
+            r#"<svg viewBox="0 0 24 24"><path d="M6 12L18 12" fill="none" stroke="black"/></svg>"#,
+        )
+        .expect("svg icon")
     }
 
     fn event_ctx_with_capture<'a>(
@@ -277,6 +354,17 @@ mod tests {
     }
 
     #[test]
+    fn button_measure_includes_leading_icon_and_gap() {
+        let plain = Button::new("Hello").measure(LayoutConstraint::LOOSE);
+        let icon = Button::new("Hello")
+            .with_leading_icon(test_icon())
+            .measure(LayoutConstraint::LOOSE);
+
+        assert!(icon.width > plain.width + BUTTON_ICON_SIZE);
+        assert_eq!(icon.height, plain.height);
+    }
+
+    #[test]
     fn button_paint_clips_long_label_to_inner_text_area() {
         let mut b = Button::new("A very long button label");
         b.layout(Rect::new(10.0, 20.0, 80.0, 28.0));
@@ -293,6 +381,27 @@ mod tests {
         assert_eq!(encoder.texts, vec!["A very long button label"]);
         assert_eq!(encoder.clips, vec![Rect::new(22.0, 20.0, 56.0, 28.0)]);
         assert_eq!(encoder.clip_pops, 1);
+    }
+
+    #[test]
+    fn button_paints_leading_icon_and_clips_label_after_icon() {
+        let mut b = Button::new("Remove").with_leading_icon(test_icon());
+        b.layout(Rect::new(10.0, 20.0, 96.0, 28.0));
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = PaintRecorder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 200.0, 100.0),
+        };
+
+        b.paint(&mut ctx);
+
+        assert!(encoder.triangles > 0);
+        assert_eq!(encoder.texts, vec!["Remove"]);
+        assert_eq!(encoder.clip_pops, 1);
+        assert!(encoder.clips[0].x > 22.0);
+        assert!(encoder.clips[0].width < 72.0);
     }
 
     #[test]
