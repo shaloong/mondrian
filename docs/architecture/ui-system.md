@@ -284,6 +284,18 @@ focus and IME state but returns `Ignored`; the clicked sibling must still receiv
 the event. Intentional focus loss that should stop propagation is delivered by
 the router through `FocusLost`.
 
+## Shortcut Routing
+
+`mondrian-ui-events::EventRouter` resolves registered shortcuts only after the
+focused widget has had a chance to handle a `KeyDown`. This keeps text editing,
+IME composition, and panel-local keyboard commands ahead of global shell
+bindings while still giving menus and workspace commands a keyboard path when
+no widget consumes the key. The self-hosted product window registers default
+global shortcuts at the router boundary, not inside widgets: file commands use
+Ctrl/Ctrl+Shift combinations, workspace switching uses Ctrl+Alt+number, and
+panel focus uses Ctrl+Alt+mnemonics. Plain Space is intentionally not registered
+globally so text input cannot accidentally toggle playback while typing.
+
 ## Pointer Capture
 
 Drag widgets request capture on mouse down and release capture on mouse up.

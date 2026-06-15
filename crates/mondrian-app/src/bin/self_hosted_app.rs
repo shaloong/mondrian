@@ -13,6 +13,7 @@ use mondrian_app::self_hosted::runtime::{
     winit_cursor_icon_for_ui_state, winit_mouse_button_to_ui_button,
     winit_scroll_delta_to_ui_delta, WinitUiRuntime,
 };
+use mondrian_app::self_hosted::shortcuts::register_default_shortcuts;
 use mondrian_panel_console::tracing_layer::ConsoleLogLayer;
 use mondrian_platform::SystemPlatformService;
 use mondrian_ui_core::types::*;
@@ -75,6 +76,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Box::new(SystemPlatformService),
         Box::new(TooltipManagerImpl::new(450)),
     );
+    register_default_shortcuts(&mut router);
     let mut ui_runtime = WinitUiRuntime::new();
 
     let mut last_cursor = Point::new(0.0, 0.0);

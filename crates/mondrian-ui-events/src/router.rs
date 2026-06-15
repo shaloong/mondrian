@@ -6,6 +6,7 @@
 use mondrian_editor_state::Action;
 use mondrian_platform::{NoopPlatformService, PlatformService};
 use mondrian_ui_core::focus::FocusManager;
+use mondrian_ui_core::shortcut::ShortcutManager;
 use mondrian_ui_core::tooltip::{TooltipManager, TooltipState};
 use mondrian_ui_core::types::{
     DragPayload, EventResult, KeyCode, MouseButton, Point, UiEvent, WidgetId,
@@ -394,6 +395,13 @@ impl EventRouter {
                         } else {
                             break;
                         }
+                    }
+                }
+
+                if let UiEvent::KeyDown { key, modifiers } = &event {
+                    if let Some(action) = self.shortcut_mgr.resolve(*key, *modifiers) {
+                        dispatch(action);
+                        return EventResult::Handled;
                     }
                 }
 
@@ -870,6 +878,48 @@ mod tests {
         }
     }
 
+    struct KeyHandlingWidget {
+        id: WidgetId,
+        bounds: Rect,
+    }
+
+    impl KeyHandlingWidget {
+        fn new(bounds: Rect) -> Self {
+            Self { id: WidgetId::new(), bounds }
+        }
+    }
+
+    impl Widget for KeyHandlingWidget {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+
+        fn measure(&self, _constraint: LayoutConstraint) -> Size {
+            Size::new(self.bounds.width, self.bounds.height)
+        }
+
+        fn layout(&mut self, bounds: Rect) {
+            self.bounds = bounds;
+        }
+
+        fn event(&mut self, event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+            match event {
+                UiEvent::KeyDown { .. } => EventResult::Handled,
+                _ => EventResult::Ignored,
+            }
+        }
+
+        fn paint(&self, _ctx: &mut PaintContext) {}
+
+        fn hit_test(&self, point: Point) -> bool {
+            self.bounds.contains(point)
+        }
+
+        fn can_focus(&self) -> bool {
+            true
+        }
+    }
+
     #[derive(Default)]
     struct ImmediateTooltip {
         state: Option<TooltipState>,
@@ -918,6 +968,64 @@ mod tests {
         let result = router.route(UiEvent::ImeCommit("你好".into()), &mut tree, &|_| {});
         assert_eq!(result, EventResult::Handled);
         assert!(log.borrow().contains(&"commit:你好".into()));
+    }
+
+    #[test]
+    fn router_dispatches_shortcut_when_keydown_is_unhandled() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let root = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(root);
+        router.shortcut_manager_mut().register_global(
+            mondrian_ui_core::shortcut::ShortcutBinding::ctrl(KeyCode::S),
+            Action::SaveProject,
+        );
+        let dispatched = RefCell::new(Vec::new());
+
+        let result = router.route(
+            UiEvent::KeyDown {
+                key: KeyCode::S,
+                modifiers: mondrian_ui_core::types::Modifiers::ctrl(),
+            },
+            &mut tree,
+            &|action| dispatched.borrow_mut().push(action),
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(dispatched.borrow().as_slice(), &[Action::SaveProject]);
+    }
+
+    #[test]
+    fn router_does_not_dispatch_shortcut_when_focused_widget_handles_keydown() {
+        let widget = KeyHandlingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0));
+        let root = widget.id();
+        let mut tree = TestTree::single(RecordingWidget::new(
+            Rect::new(200.0, 200.0, 10.0, 10.0),
+            Rc::new(RefCell::new(Vec::new())),
+        ));
+        tree.root = root;
+        tree.nodes.clear();
+        tree.nodes.insert(root, Box::new(widget));
+        let mut router = EventRouter::new(root);
+        router.focus_manager_mut().request_focus(root, PanelKind::Console);
+        router.shortcut_manager_mut().register_global(
+            mondrian_ui_core::shortcut::ShortcutBinding::ctrl(KeyCode::S),
+            Action::SaveProject,
+        );
+        let dispatched = RefCell::new(Vec::new());
+
+        let result = router.route(
+            UiEvent::KeyDown {
+                key: KeyCode::S,
+                modifiers: mondrian_ui_core::types::Modifiers::ctrl(),
+            },
+            &mut tree,
+            &|action| dispatched.borrow_mut().push(action),
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert!(dispatched.borrow().is_empty());
     }
 
     #[test]
