@@ -829,9 +829,9 @@ next control before a parent-level clip catches it.
 
 Node graph rendering starts as a domain-light projection in
 `mondrian-ui-widgets::NodeGraphView`. The widget owns compact node layout,
-port/edge painting, selection chrome, and hit testing for generic
-`NodeGraphNode` / `NodeGraphEdge` values. It does not own effect semantics,
-undo history, or graph mutation rules.
+port/edge painting, focus/keyboard selection, disabled presentation, selection
+chrome, and hit testing for generic `NodeGraphNode` / `NodeGraphEdge` values.
+It does not own effect semantics, undo history, or graph mutation rules.
 
 The self-hosted `SlotKind::NodeGraph` panel maps the currently selected clip to
 a read-only render chain: Source -> each clip effect -> Output. The app adapter

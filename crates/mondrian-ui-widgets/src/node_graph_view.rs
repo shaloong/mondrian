@@ -11,7 +11,7 @@ use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, MouseButton, UiEvent, Widget};
 
-use crate::paint::{color_with_alpha, mix_color, soft_border};
+use crate::paint::{color_with_alpha, mix_color, paint_focus_ring, soft_border};
 
 const DEFAULT_WIDTH: f32 = 460.0;
 const DEFAULT_HEIGHT: f32 = 260.0;
@@ -98,6 +98,9 @@ pub struct NodeGraphView {
     edges: Vec<NodeGraphEdge>,
     selected_node_id: Option<String>,
     node_rects: Vec<(String, Rect)>,
+    focused: bool,
+    focus_visible: bool,
+    enabled: bool,
     on_select: Option<Box<NodeGraphSelectAction>>,
 }
 
@@ -113,7 +116,35 @@ impl NodeGraphView {
             edges,
             selected_node_id: None,
             node_rects: Vec::new(),
+            focused: false,
+            focus_visible: false,
+            enabled: true,
             on_select: None,
+        }
+    }
+
+    /// Set whether the graph accepts pointer, keyboard, and focus input.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.set_enabled(enabled);
+        self
+    }
+
+    /// Disable pointer, keyboard, and focus input.
+    pub fn disabled(self) -> Self {
+        self.enabled(false)
+    }
+
+    /// Whether the graph accepts user input.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Set whether the graph accepts pointer, keyboard, and focus input.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+        if !enabled {
+            self.focused = false;
+            self.focus_visible = false;
         }
     }
 
@@ -177,6 +208,44 @@ impl NodeGraphView {
             .find_map(|(id, rect)| rect.contains(position).then(|| id.clone()))
     }
 
+    fn selected_index(&self) -> Option<usize> {
+        self.selected_node_id
+            .as_deref()
+            .and_then(|selected| self.nodes.iter().position(|node| node.id == selected))
+    }
+
+    fn select_index_from_input(&mut self, index: usize, ctx: &mut EventContext) -> EventResult {
+        let Some(node) = self.nodes.get(index) else {
+            return EventResult::Ignored;
+        };
+        self.selected_node_id = Some(node.id.clone());
+        if let Some(on_select) = &self.on_select {
+            (ctx.dispatch)(on_select(&node.id));
+        }
+        ctx.request_repaint();
+        EventResult::Handled
+    }
+
+    fn select_node_from_input(&mut self, node_id: String, ctx: &mut EventContext) -> EventResult {
+        let Some(index) = self.nodes.iter().position(|node| node.id == node_id) else {
+            return EventResult::Ignored;
+        };
+        self.select_index_from_input(index, ctx)
+    }
+
+    fn step_selection(&mut self, direction: i32, ctx: &mut EventContext) -> EventResult {
+        if self.nodes.is_empty() {
+            return EventResult::Ignored;
+        }
+        let next = match self.selected_index() {
+            Some(current) if direction < 0 => (current + self.nodes.len() - 1) % self.nodes.len(),
+            Some(current) => (current + 1) % self.nodes.len(),
+            None if direction < 0 => self.nodes.len() - 1,
+            None => 0,
+        };
+        self.select_index_from_input(next, ctx)
+    }
+
     fn relayout_nodes(&mut self) {
         let rects = layout_node_rects(self.graph_rect(), self.nodes.len());
         self.node_rects = self
@@ -203,32 +272,61 @@ impl Widget for NodeGraphView {
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
-        let UiEvent::MouseDown { position, button: MouseButton::Left, .. } = event else {
+        if !self.enabled {
+            self.focused = false;
+            self.focus_visible = false;
             return EventResult::Ignored;
-        };
-        let Some(node_id) = self.node_id_at(*position) else {
-            return EventResult::Ignored;
-        };
-
-        self.selected_node_id = Some(node_id.clone());
-        if let Some(on_select) = &self.on_select {
-            (ctx.dispatch)(on_select(&node_id));
         }
-        EventResult::Handled
+
+        match event {
+            UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
+                self.focus_visible = false;
+                let Some(node_id) = self.node_id_at(*position) else {
+                    return EventResult::Ignored;
+                };
+                self.select_node_from_input(node_id, ctx)
+            }
+            UiEvent::KeyDown { key: KeyCode::Right | KeyCode::Down, .. } if self.focused => {
+                self.step_selection(1, ctx)
+            }
+            UiEvent::KeyDown { key: KeyCode::Left | KeyCode::Up, .. } if self.focused => {
+                self.step_selection(-1, ctx)
+            }
+            UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, .. } if self.focused => {
+                let index = self.selected_index().unwrap_or(0);
+                self.select_index_from_input(index, ctx)
+            }
+            UiEvent::FocusGained => {
+                self.focused = true;
+                self.focus_visible = true;
+                EventResult::Handled
+            }
+            UiEvent::FocusLost => {
+                self.focused = false;
+                self.focus_visible = false;
+                EventResult::Handled
+            }
+            _ => EventResult::Ignored,
+        }
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
         let colors = &ctx.theme.colors;
         let spacing = &ctx.theme.spacing;
         let typography = &ctx.theme.typography;
+        let alpha = if self.enabled { 1.0 } else { 0.55 };
 
-        ctx.encoder.draw_rect(self.bounds, colors.background, 0.0);
+        ctx.encoder
+            .draw_rect(self.bounds, color_with_alpha(colors.background, alpha), 0.0);
+        if self.focus_visible {
+            paint_focus_ring(ctx, self.bounds, spacing.radius_md);
+        }
         ctx.encoder.draw_text_box(
             &self.title,
             typography.body.font_size,
             Point::new(self.bounds.x + 14.0, self.bounds.y + 12.0),
             (self.bounds.width - 28.0).max(32.0),
-            colors.foreground,
+            color_with_alpha(colors.foreground, alpha),
         );
         if !self.subtitle.is_empty() {
             ctx.encoder.draw_text_box(
@@ -236,14 +334,14 @@ impl Widget for NodeGraphView {
                 typography.small.font_size,
                 Point::new(self.bounds.x + 126.0, self.bounds.y + 13.0),
                 (self.bounds.width - 140.0).max(32.0),
-                colors.muted_foreground,
+                color_with_alpha(colors.muted_foreground, alpha),
             );
         }
 
         let graph_rect = self.graph_rect();
         ctx.encoder.draw_rect(
             graph_rect,
-            mix_color(colors.card, colors.background, 0.35),
+            color_with_alpha(mix_color(colors.card, colors.background, 0.35), alpha),
             0.0,
         );
 
@@ -253,7 +351,7 @@ impl Widget for NodeGraphView {
                 typography.body.font_size,
                 Point::new(graph_rect.x + PADDING, graph_rect.y + PADDING),
                 (graph_rect.width - PADDING * 2.0).max(32.0),
-                colors.muted_foreground,
+                color_with_alpha(colors.muted_foreground, alpha),
             );
             return;
         }
@@ -270,7 +368,7 @@ impl Widget for NodeGraphView {
 
         for (node, (_, rect)) in self.nodes.iter().zip(self.node_rects.iter()) {
             let selected = self.selected_node_id.as_deref() == Some(node.id.as_str());
-            let disabled_alpha = if node.disabled { 0.56 } else { 1.0 };
+            let disabled_alpha = alpha * if node.disabled { 0.56 } else { 1.0 };
             let border = if selected {
                 colors.ring
             } else {
@@ -329,6 +427,10 @@ impl Widget for NodeGraphView {
 
     fn hit_test(&self, point: Point) -> bool {
         self.bounds.contains(point)
+    }
+
+    fn can_focus(&self) -> bool {
+        self.enabled && !self.nodes.is_empty()
     }
 }
 
@@ -466,5 +568,104 @@ mod tests {
         assert_eq!(result, EventResult::Handled);
         assert_eq!(graph.selected_node_id(), Some("output"));
         assert_eq!(selected.borrow().as_slice(), &[Action::Play]);
+    }
+
+    #[test]
+    fn node_graph_keyboard_navigation_selects_nodes_when_focused() {
+        let selected = Rc::new(RefCell::new(Vec::new()));
+        let mut graph = NodeGraphView::new(
+            vec![
+                NodeGraphNode::new("source", "Source"),
+                NodeGraphNode::new("grade", "Grade"),
+                NodeGraphNode::new("output", "Output"),
+            ],
+            vec![],
+        )
+        .on_select(|id| Action::OpenProject(std::path::PathBuf::from(id)));
+        graph.layout(Rect::new(0.0, 0.0, 520.0, 240.0));
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let dispatch = {
+            let selected = Rc::clone(&selected);
+            move |action| selected.borrow_mut().push(action)
+        };
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        assert_eq!(
+            graph.event(&UiEvent::FocusGained, &mut ctx),
+            EventResult::Handled
+        );
+        assert_eq!(
+            graph.event(
+                &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(graph.selected_node_id(), Some("source"));
+        assert!(ctx.requests.repaint);
+
+        assert_eq!(
+            graph.event(
+                &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(graph.selected_node_id(), Some("grade"));
+
+        let actions = selected.borrow();
+        assert_eq!(actions.len(), 2);
+        assert_eq!(
+            actions[0],
+            Action::OpenProject(std::path::PathBuf::from("source"))
+        );
+        assert_eq!(
+            actions[1],
+            Action::OpenProject(std::path::PathBuf::from("grade"))
+        );
+    }
+
+    #[test]
+    fn disabled_node_graph_ignores_input_and_focus() {
+        let selected = Rc::new(RefCell::new(Vec::new()));
+        let mut graph = NodeGraphView::new(vec![NodeGraphNode::new("source", "Source")], vec![])
+            .on_select(|_| Action::Play)
+            .disabled();
+        graph.layout(Rect::new(0.0, 0.0, 420.0, 220.0));
+        let target = graph.node_rect_by_id("source").expect("source rect").center();
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let dispatch = {
+            let selected = Rc::clone(&selected);
+            move |action| selected.borrow_mut().push(action)
+        };
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        assert!(!graph.is_enabled());
+        assert!(!graph.can_focus());
+        assert_eq!(
+            graph.event(
+                &UiEvent::MouseDown {
+                    position: target,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+        assert_eq!(graph.selected_node_id(), None);
+        assert!(selected.borrow().is_empty());
+    }
+
+    #[test]
+    fn empty_node_graph_does_not_participate_in_focus_traversal() {
+        let graph = NodeGraphView::new(Vec::new(), Vec::new());
+
+        assert_eq!(graph.node_count(), 0);
+        assert!(!graph.can_focus());
     }
 }
