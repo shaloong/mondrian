@@ -10,6 +10,7 @@ pub mod host;
 pub mod modal;
 pub mod new_project_dialog;
 pub mod panels;
+pub mod rendering;
 pub mod runtime;
 pub mod shell;
 pub mod shortcuts;

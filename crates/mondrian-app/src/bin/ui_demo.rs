@@ -12,6 +12,7 @@ use std::cell::Cell;
 use std::cell::RefCell;
 use std::sync::Arc;
 
+use mondrian_app::self_hosted::rendering::SelfHostedFrameRenderer;
 use mondrian_app::self_hosted::runtime::{
     winit_cursor_icon_for_ui_state, winit_mouse_button_to_ui_button,
     winit_scroll_delta_to_ui_delta, WinitUiRuntime,
@@ -24,8 +25,6 @@ use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, TreeWalker, Widget};
 use mondrian_ui_events::EventRouter;
 use mondrian_ui_renderer::command::DrawEncoder;
-use mondrian_ui_renderer::UiRenderer;
-use mondrian_ui_text::{resolve_text_commands, TextRenderer};
 use mondrian_ui_tooltip::TooltipManagerImpl;
 use mondrian_ui_tooltip::TooltipWidget;
 use mondrian_ui_widgets::button::Button;
@@ -1210,8 +1209,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("Failed surface config")?;
     surface.configure(&device, &config);
 
-    let ui_renderer = UiRenderer::new(&device, config.format);
-    let mut text_renderer = TextRenderer::new();
+    let mut frame_renderer = SelfHostedFrameRenderer::new(&device, config.format);
 
     let mut root = build_dock_tree();
     let bounds = Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
@@ -1283,38 +1281,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 ui_runtime.paint_shell_overlays(&mut encoder, &theme, b, last_cursor, &router);
 
-                let commands = resolve_text_commands(encoder.finish(), &mut text_renderer);
-                let pending: Vec<mondrian_ui_renderer::GlyphUpload> = text_renderer
-                    .take_pending_uploads()
-                    .into_iter()
-                    .map(|u| mondrian_ui_renderer::GlyphUpload {
-                        x: u.x,
-                        y: u.y,
-                        width: u.width,
-                        height: u.height,
-                        data: u.data,
-                    })
-                    .collect();
-                if !pending.is_empty() {
-                    ui_renderer.upload_glyphs(&queue, &pending);
-                }
-
-                let current = surface.get_current_texture();
-                match current {
-                    wgpu::CurrentSurfaceTexture::Success(output)
-                    | wgpu::CurrentSurfaceTexture::Suboptimal(output) => {
-                        let v = output.texture.create_view(&Default::default());
-                        let sz = window.inner_size();
-                        ui_renderer.render(&device, &queue, &v, &commands, (sz.width, sz.height));
-                        output.present();
-                    }
-                    wgpu::CurrentSurfaceTexture::Timeout
-                    | wgpu::CurrentSurfaceTexture::Occluded => {}
-                    wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                        surface.configure(&device, &config);
-                    }
-                    _ => {}
-                }
+                let size = window.inner_size();
+                let _ = frame_renderer.render_draw_commands(
+                    &device,
+                    &queue,
+                    &surface,
+                    &config,
+                    (size.width, size.height),
+                    encoder.finish(),
+                );
             }
 
             Event::WindowEvent { event: WindowEvent::Resized(new_size), .. } => {

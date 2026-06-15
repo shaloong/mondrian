@@ -47,11 +47,14 @@ it is deliberately bridging or deleting legacy egui behavior.
 
 The self-hosted UI application adapter lives under
 `mondrian-app/src/self_hosted`. `self_hosted::runtime` owns winit-side request
-application for reusable widgets. `self_hosted::shell` owns reusable root-widget
-composition such as the menu bar plus dock tree; developer binaries should use
-`SelfHostedAppRoot` rather than defining shell widgets inline. `self_hosted::panels`
-owns panel adapters that map application-facing concepts into generic widget
-view models. `self_hosted::host::SelfHostedUiHost` owns the reusable product
+application for reusable widgets. `self_hosted::rendering` owns the shared
+wgpu frame submission path for self-hosted windows, including cosmic-text glyph
+uploads, surface texture acquisition, present, and surface reconfigure on
+loss/outdating. `self_hosted::shell` owns reusable root-widget composition such
+as the menu bar plus dock tree; developer binaries should use `SelfHostedAppRoot`
+rather than defining shell widgets inline. `self_hosted::panels` owns panel
+adapters that map application-facing concepts into generic widget view models.
+`self_hosted::host::SelfHostedUiHost` owns the reusable product
 state bridge: it keeps the root widget, current `AppState`, dirty refresh flag,
 and queued-action draining together so window entrypoints do not duplicate
 root/AppState refresh plumbing. `self_hosted::window` owns the reusable

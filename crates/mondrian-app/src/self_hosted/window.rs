@@ -10,6 +10,7 @@ use std::sync::Arc;
 use crate::app::AppState;
 use crate::self_hosted::action_queue::PendingUiActions;
 use crate::self_hosted::host::{SelfHostedShellCommands, SelfHostedUiHost};
+use crate::self_hosted::rendering::SelfHostedFrameRenderer;
 use crate::self_hosted::runtime::{
     winit_cursor_icon_for_ui_state, winit_mouse_button_to_ui_button,
     winit_scroll_delta_to_ui_delta, WinitUiRuntime,
@@ -21,8 +22,6 @@ use mondrian_ui_core::types::*;
 use mondrian_ui_core::{TreeWalker, Widget};
 use mondrian_ui_events::EventRouter;
 use mondrian_ui_renderer::command::DrawEncoder;
-use mondrian_ui_renderer::UiRenderer;
-use mondrian_ui_text::{resolve_text_commands, TextRenderer};
 use mondrian_ui_tooltip::TooltipManagerImpl;
 use tracing_subscriber::prelude::*;
 
@@ -67,8 +66,7 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("Failed surface config")?;
     surface.configure(&device, &config);
 
-    let ui_renderer = UiRenderer::new(&device, config.format);
-    let mut text_renderer = TextRenderer::new();
+    let mut frame_renderer = SelfHostedFrameRenderer::new(&device, config.format);
 
     let mut host = SelfHostedUiHost::new(AppState::new());
     let bounds = Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
@@ -151,39 +149,15 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                 encoder.draw_rect(b, theme.colors.background, 0.0);
                 TreeWalker::paint(host.root(), &mut encoder, &theme);
                 ui_runtime.paint_shell_overlays(&mut encoder, &theme, b, last_cursor, &router);
-                let commands = resolve_text_commands(encoder.finish(), &mut text_renderer);
-                // Upload any newly rasterized glyphs to GPU atlas
-                let pending: Vec<mondrian_ui_renderer::GlyphUpload> = text_renderer
-                    .take_pending_uploads()
-                    .into_iter()
-                    .map(|u| mondrian_ui_renderer::GlyphUpload {
-                        x: u.x,
-                        y: u.y,
-                        width: u.width,
-                        height: u.height,
-                        data: u.data,
-                    })
-                    .collect();
-                if !pending.is_empty() {
-                    ui_renderer.upload_glyphs(&queue, &pending);
-                }
-
-                let current = surface.get_current_texture();
-                match current {
-                    wgpu::CurrentSurfaceTexture::Success(output)
-                    | wgpu::CurrentSurfaceTexture::Suboptimal(output) => {
-                        let v = output.texture.create_view(&Default::default());
-                        let sz = window.inner_size();
-                        ui_renderer.render(&device, &queue, &v, &commands, (sz.width, sz.height));
-                        output.present();
-                    }
-                    wgpu::CurrentSurfaceTexture::Timeout
-                    | wgpu::CurrentSurfaceTexture::Occluded => {}
-                    wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                        surface.configure(&device, &config);
-                    }
-                    _ => {}
-                }
+                let size = window.inner_size();
+                let _ = frame_renderer.render_draw_commands(
+                    &device,
+                    &queue,
+                    &surface,
+                    &config,
+                    (size.width, size.height),
+                    encoder.finish(),
+                );
             }
 
             Event::WindowEvent { event: WindowEvent::Resized(new_size), .. } => {
