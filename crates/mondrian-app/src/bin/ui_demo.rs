@@ -1311,6 +1311,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
+            Event::WindowEvent { event: WindowEvent::HoveredFile(path), .. } => {
+                let _ = route_demo_window_event(
+                    &window,
+                    &mut router,
+                    &mut root,
+                    UiEvent::DragEnter {
+                        payload: DragPayload::File(vec![path]),
+                        position: last_cursor,
+                    },
+                    &mut ui_runtime,
+                );
+                window.request_redraw();
+            }
+
+            Event::WindowEvent { event: WindowEvent::HoveredFileCancelled, .. } => {
+                let _ = route_demo_window_event(
+                    &window,
+                    &mut router,
+                    &mut root,
+                    UiEvent::DragLeave,
+                    &mut ui_runtime,
+                );
+                window.request_redraw();
+            }
+
+            Event::WindowEvent { event: WindowEvent::DroppedFile(path), .. } => {
+                let _ = route_demo_window_event(
+                    &window,
+                    &mut router,
+                    &mut root,
+                    UiEvent::Drop {
+                        payload: DragPayload::File(vec![path]),
+                        position: last_cursor,
+                    },
+                    &mut ui_runtime,
+                );
+                window.request_redraw();
+            }
+
             Event::WindowEvent {
                 event: WindowEvent::CursorMoved { position, .. }, ..
             } => {

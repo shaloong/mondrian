@@ -178,6 +178,54 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
+            Event::WindowEvent { event: WindowEvent::HoveredFile(path), .. } => {
+                let _ = ui_runtime.route_window_event(
+                    &window,
+                    &mut router,
+                    host.root_mut(),
+                    UiEvent::DragEnter {
+                        payload: DragPayload::File(vec![path]),
+                        position: last_cursor,
+                    },
+                    &dispatch_action,
+                );
+                window.request_redraw();
+            }
+
+            Event::WindowEvent { event: WindowEvent::HoveredFileCancelled, .. } => {
+                let _ = ui_runtime.route_window_event(
+                    &window,
+                    &mut router,
+                    host.root_mut(),
+                    UiEvent::DragLeave,
+                    &dispatch_action,
+                );
+                window.request_redraw();
+            }
+
+            Event::WindowEvent { event: WindowEvent::DroppedFile(path), .. } => {
+                let paths = vec![path];
+                let result = ui_runtime.route_window_event(
+                    &window,
+                    &mut router,
+                    host.root_mut(),
+                    UiEvent::Drop {
+                        payload: DragPayload::File(paths.clone()),
+                        position: last_cursor,
+                    },
+                    &dispatch_action,
+                );
+                if result == EventResult::Ignored {
+                    pending_actions.push(mondrian_editor_state::Action::ImportMedia(paths));
+                }
+                apply_shell_commands(
+                    host.drain_pending_actions(&pending_actions, current_bounds.get(), &platform),
+                    &window,
+                    elwt,
+                );
+                window.request_redraw();
+            }
+
             Event::WindowEvent {
                 event: WindowEvent::CursorMoved { position, .. }, ..
             } => {

@@ -665,6 +665,11 @@ Winit mouse buttons are converted losslessly at the shell boundary for the
 buttons the UI model understands: left, right, middle, back, forward, and
 opaque `Other(u16)`. Unknown buttons must not be downgraded to left click,
 otherwise side buttons can accidentally activate destructive controls.
+OS file drag/drop enters the same UI event model as internal drags via
+`DragPayload::File`. Product windows route hovered/dropped files through the
+widget tree first; if no widget handles the final drop, the self-hosted app
+falls back to `Action::ImportMedia` so dropping media into the window remains a
+useful default workflow.
 Shell cursor selection is also centralized in the runtime. Entrypoints provide
 the current eyedropper, splitter, and focused-text state; the runtime resolves
 priority as eyedropper sampling, splitter resize affordance, focused text
