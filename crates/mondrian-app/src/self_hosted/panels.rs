@@ -1657,13 +1657,79 @@ mod tests {
     use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
     use mondrian_core::types::{AssetId, TimeCode};
     use mondrian_effects::EffectNodeExt;
+    use mondrian_ui_core::tree::WidgetTreeView;
     use mondrian_ui_core::types::{
-        EventResult, KeyCode, LayoutConstraint, Modifiers, MouseButton, Point, Size,
+        EventResult, KeyCode, LayoutConstraint, Modifiers, MouseButton, Point, Rect, Size, WidgetId,
     };
-    use mondrian_ui_core::widget::EventRequests;
+    use mondrian_ui_core::widget::{EventContext, EventRequests, PaintContext};
     use mondrian_ui_core::UiEvent;
+    use mondrian_ui_events::EventRouter;
     use std::cell::RefCell;
     use std::path::PathBuf;
+
+    struct AssetTimelineDragHarness {
+        id: WidgetId,
+        bounds: Rect,
+        assets: PanelList,
+        timeline: TimelineView,
+    }
+
+    impl AssetTimelineDragHarness {
+        fn new(assets: PanelList, timeline: TimelineView) -> Self {
+            Self {
+                id: WidgetId::new(),
+                bounds: Rect::ZERO,
+                assets,
+                timeline,
+            }
+        }
+    }
+
+    impl Widget for AssetTimelineDragHarness {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+
+        fn measure(&self, constraint: LayoutConstraint) -> Size {
+            constraint.constrain(Size::new(840.0, 240.0))
+        }
+
+        fn layout(&mut self, bounds: Rect) {
+            self.bounds = bounds;
+            self.assets.layout(Rect::new(bounds.x, bounds.y, 260.0, 180.0));
+            self.timeline.layout(Rect::new(bounds.x + 300.0, bounds.y, 520.0, 220.0));
+        }
+
+        fn event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+            EventResult::Ignored
+        }
+
+        fn paint(&self, _ctx: &mut PaintContext) {}
+
+        fn hit_test(&self, point: Point) -> bool {
+            self.bounds.contains(point)
+        }
+
+        fn child_count(&self) -> usize {
+            2
+        }
+
+        fn child(&self, index: usize) -> Option<&dyn Widget> {
+            match index {
+                0 => Some(&self.assets),
+                1 => Some(&self.timeline),
+                _ => None,
+            }
+        }
+
+        fn child_mut(&mut self, index: usize) -> Option<&mut dyn Widget> {
+            match index {
+                0 => Some(&mut self.assets),
+                1 => Some(&mut self.timeline),
+                _ => None,
+            }
+        }
+    }
 
     #[test]
     fn demo_panel_models_cover_primary_editor_surfaces() {
@@ -2177,6 +2243,98 @@ mod tests {
             &mut ctx,
         );
 
+        let recorded = actions.borrow();
+        let drop_action = recorded
+            .iter()
+            .find(|action| {
+                matches!(
+                    action,
+                    Action::Custom { namespace, name, .. }
+                        if namespace == TIMELINE_NAMESPACE && name == TIMELINE_DROP_ASSET
+                )
+            })
+            .expect("drop asset action");
+        let Action::Custom { payload, .. } = drop_action else {
+            panic!("expected custom drop-asset action");
+        };
+        let payload: TimelineDropAssetPayload =
+            serde_json::from_value(payload.clone()).expect("drop asset payload");
+        assert_eq!(payload.asset_id, asset_id);
+        assert_eq!(payload.target_track_id, target.track_id);
+        assert!(payload.is_video_track);
+        assert_eq!(payload.frame, 10);
+    }
+
+    #[test]
+    fn router_drags_panel_list_asset_to_timeline_drop_action() {
+        let model = demo_timeline_model();
+        let target = model.track_identity(TimelineTrackRef { track_index: 0 }).expect("track");
+        let asset_id = AssetId::new();
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let assets = PanelList::new(
+            "Assets",
+            vec![PanelListItem::new("Clip A").with_drag_payload(DragPayload::Asset(asset_id))],
+        );
+        let timeline = timeline_panel(&model);
+        let mut root = AssetTimelineDragHarness::new(assets, timeline);
+        root.layout(Rect::new(0.0, 0.0, 840.0, 240.0));
+        let mut router = EventRouter::new(root.id());
+
+        {
+            let mut tree = WidgetTreeView::new(&mut root);
+            router.route(
+                UiEvent::MouseDown {
+                    position: Point::new(30.0, 60.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::default(),
+                },
+                &mut tree,
+                &dispatch,
+            );
+        }
+        {
+            let mut tree = WidgetTreeView::new(&mut root);
+            router.route(
+                UiEvent::MouseMove {
+                    position: Point::new(42.0, 60.0),
+                    modifiers: Modifiers::default(),
+                },
+                &mut tree,
+                &dispatch,
+            );
+        }
+
+        assert_eq!(
+            router.active_drag_payload(),
+            Some(&DragPayload::Asset(asset_id))
+        );
+
+        {
+            let mut tree = WidgetTreeView::new(&mut root);
+            router.route(
+                UiEvent::MouseMove {
+                    position: Point::new(468.0, 55.0),
+                    modifiers: Modifiers::default(),
+                },
+                &mut tree,
+                &dispatch,
+            );
+        }
+        {
+            let mut tree = WidgetTreeView::new(&mut root);
+            router.route(
+                UiEvent::MouseUp {
+                    position: Point::new(468.0, 55.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::default(),
+                },
+                &mut tree,
+                &dispatch,
+            );
+        }
+
+        assert!(router.active_drag_payload().is_none());
         let recorded = actions.borrow();
         let drop_action = recorded
             .iter()
