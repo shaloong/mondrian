@@ -1312,40 +1312,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             Event::WindowEvent { event: WindowEvent::HoveredFile(path), .. } => {
-                let _ = route_demo_window_event(
+                let _ = ui_runtime.route_hovered_file(
                     &window,
                     &mut router,
                     &mut root,
-                    UiEvent::DragEnter {
-                        payload: DragPayload::File(vec![path]),
-                        position: last_cursor,
-                    },
-                    &mut ui_runtime,
+                    path,
+                    last_cursor,
+                    &record_demo_action,
                 );
                 window.request_redraw();
             }
 
             Event::WindowEvent { event: WindowEvent::HoveredFileCancelled, .. } => {
-                let _ = route_demo_window_event(
+                let _ = ui_runtime.route_hovered_file_cancelled(
                     &window,
                     &mut router,
                     &mut root,
-                    UiEvent::DragLeave,
-                    &mut ui_runtime,
+                    &record_demo_action,
                 );
                 window.request_redraw();
             }
 
             Event::WindowEvent { event: WindowEvent::DroppedFile(path), .. } => {
-                let _ = route_demo_window_event(
+                let _ = ui_runtime.route_dropped_file(
                     &window,
                     &mut router,
                     &mut root,
-                    UiEvent::Drop {
-                        payload: DragPayload::File(vec![path]),
-                        position: last_cursor,
-                    },
-                    &mut ui_runtime,
+                    path,
+                    last_cursor,
+                    &record_demo_action,
                 );
                 window.request_redraw();
             }

@@ -179,40 +179,36 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             Event::WindowEvent { event: WindowEvent::HoveredFile(path), .. } => {
-                let _ = ui_runtime.route_window_event(
+                let _ = ui_runtime.route_hovered_file(
                     &window,
                     &mut router,
                     host.root_mut(),
-                    UiEvent::DragEnter {
-                        payload: DragPayload::File(vec![path]),
-                        position: last_cursor,
-                    },
+                    path,
+                    last_cursor,
                     &dispatch_action,
                 );
                 window.request_redraw();
             }
 
             Event::WindowEvent { event: WindowEvent::HoveredFileCancelled, .. } => {
-                let _ = ui_runtime.route_window_event(
+                let _ = ui_runtime.route_hovered_file_cancelled(
                     &window,
                     &mut router,
                     host.root_mut(),
-                    UiEvent::DragLeave,
                     &dispatch_action,
                 );
                 window.request_redraw();
             }
 
             Event::WindowEvent { event: WindowEvent::DroppedFile(path), .. } => {
+                let ui_path = path.clone();
                 let paths = vec![path];
-                let result = ui_runtime.route_window_event(
+                let result = ui_runtime.route_dropped_file(
                     &window,
                     &mut router,
                     host.root_mut(),
-                    UiEvent::Drop {
-                        payload: DragPayload::File(paths.clone()),
-                        position: last_cursor,
-                    },
+                    ui_path,
+                    last_cursor,
                     &dispatch_action,
                 );
                 if result == EventResult::Ignored {

@@ -5,6 +5,7 @@
 
 #![allow(deprecated)]
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use mondrian_core::Color;
@@ -12,7 +13,7 @@ use mondrian_editor_state::Action;
 use mondrian_platform::{DesktopEyedropper, DesktopPoint};
 use mondrian_ui_core::tree::WidgetTreeView;
 use mondrian_ui_core::types::{
-    EventResult, KeyCode, Modifiers, MouseButton, Point, Rect, SplitDirection, UiEvent,
+    DragPayload, EventResult, KeyCode, Modifiers, MouseButton, Point, Rect, SplitDirection, UiEvent,
 };
 use mondrian_ui_core::widget::{CursorRequest, DrawCommandEncoder, ImeRequest, PaintContext};
 use mondrian_ui_core::Widget;
@@ -146,6 +147,55 @@ impl WinitUiRuntime {
             ),
             Ime::Enabled => EventResult::Ignored,
         }
+    }
+
+    /// Route a native file-hover event into the UI drag/drop model.
+    pub fn route_hovered_file(
+        &mut self,
+        window: &winit::window::Window,
+        router: &mut EventRouter,
+        root: &mut dyn Widget,
+        path: PathBuf,
+        position: Point,
+        dispatch: &dyn Fn(Action),
+    ) -> EventResult {
+        self.route_window_event(
+            window,
+            router,
+            root,
+            UiEvent::DragEnter { payload: DragPayload::File(vec![path]), position },
+            dispatch,
+        )
+    }
+
+    /// Route a native file-hover cancellation into the UI drag/drop model.
+    pub fn route_hovered_file_cancelled(
+        &mut self,
+        window: &winit::window::Window,
+        router: &mut EventRouter,
+        root: &mut dyn Widget,
+        dispatch: &dyn Fn(Action),
+    ) -> EventResult {
+        self.route_window_event(window, router, root, UiEvent::DragLeave, dispatch)
+    }
+
+    /// Route a native file-drop event into the UI drag/drop model.
+    pub fn route_dropped_file(
+        &mut self,
+        window: &winit::window::Window,
+        router: &mut EventRouter,
+        root: &mut dyn Widget,
+        path: PathBuf,
+        position: Point,
+        dispatch: &dyn Fn(Action),
+    ) -> EventResult {
+        self.route_window_event(
+            window,
+            router,
+            root,
+            UiEvent::Drop { payload: DragPayload::File(vec![path]), position },
+            dispatch,
+        )
     }
 
     /// Update eyedropper preview from a window-local pointer position.
