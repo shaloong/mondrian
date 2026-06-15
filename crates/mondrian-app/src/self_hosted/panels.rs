@@ -18,7 +18,6 @@ use mondrian_timeline::clip::{Clip, Transform2D};
 use mondrian_timeline::sequence::Sequence;
 use mondrian_timeline::track::Track;
 use mondrian_ui_core::types::SplitDirection;
-use mondrian_ui_core::widgets::ColoredBox;
 use mondrian_ui_core::Widget;
 use mondrian_ui_widgets::dock_splitter::DockSplitter;
 use mondrian_ui_widgets::dock_tab_bar::TabInfo;
@@ -392,6 +391,22 @@ impl PanelListModel {
         );
 
         PanelListModel::new("Console", items).with_subtitle("Runtime messages")
+    }
+
+    /// Build an explicit disabled empty state for panel kinds not migrated into
+    /// the self-hosted product shell yet.
+    pub fn unsupported_panel(kind: SlotKind) -> Self {
+        PanelListModel::new(
+            kind.display_name(),
+            vec![PanelListItem::new("Panel not available")
+                .with_subtitle(format!(
+                    "{} is not mapped to the self-hosted UI yet",
+                    kind.display_name()
+                ))
+                .with_badge("Pending")
+                .disabled(true)],
+        )
+        .with_subtitle("Self-hosted panel")
     }
 }
 
@@ -797,7 +812,12 @@ fn panel_content_for_slot(kind: SlotKind, models: &SelfHostedPanelModels) -> Box
         SlotKind::Viewer => Box::new(viewer_panel(&models.viewer)),
         SlotKind::Timeline => Box::new(timeline_panel(&models.timeline)),
         SlotKind::Project => Box::new(panel_list(&models.project)),
-        _ => Box::new(ColoredBox::new(Color::from_hex(0x1A1A1A), 1.0, 1.0)),
+        SlotKind::Inspector => Box::new(ScrollView::new(Some(Box::new(inspector_panel(
+            &models.inspector,
+        ))))),
+        SlotKind::NodeGraph | SlotKind::Export => {
+            Box::new(panel_list(&PanelListModel::unsupported_panel(kind)))
+        }
     }
 }
 
@@ -1500,6 +1520,7 @@ mod tests {
     use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
     use mondrian_core::types::{AssetId, TimeCode};
     use mondrian_effects::EffectNodeExt;
+    use mondrian_ui_core::types::{LayoutConstraint, Size};
     use std::path::PathBuf;
 
     #[test]
@@ -1559,6 +1580,38 @@ mod tests {
         assert_eq!(models.inspector.selected_clip, None);
         assert_eq!(models.inspector.opacity, 100.0);
         assert!(models.inspector.effects.is_empty());
+    }
+
+    #[test]
+    fn unsupported_panel_model_is_explicit_disabled_empty_state() {
+        let model = PanelListModel::unsupported_panel(SlotKind::NodeGraph);
+
+        assert_eq!(model.title, SlotKind::NodeGraph.display_name());
+        assert_eq!(model.subtitle, "Self-hosted panel");
+        assert_eq!(model.items.len(), 1);
+        assert_eq!(model.items[0].title, "Panel not available");
+        assert!(model.items[0].disabled);
+        assert_eq!(model.items[0].badge.as_deref(), Some("Pending"));
+    }
+
+    #[test]
+    fn self_hosted_content_factory_covers_every_panel_kind() {
+        let models = SelfHostedPanelModels::from_app_state(&AppState::new());
+        let constraint = LayoutConstraint { min: Size::ZERO, max: Size::new(320.0, 240.0) };
+
+        for kind in SlotKind::ALL {
+            let widget = panel_content_for_slot(kind, &models);
+            let measured = widget.measure(constraint);
+
+            assert!(
+                measured.width.is_finite(),
+                "{kind:?} width should be finite"
+            );
+            assert!(
+                measured.height.is_finite(),
+                "{kind:?} height should be finite"
+            );
+        }
     }
 
     #[test]

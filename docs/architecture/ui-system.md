@@ -488,6 +488,10 @@ The self-hosted Assets panel maps real library rows to `ui.assets.prepare_drag`;
 path so later Timeline drop handling stays shared with the egui implementation.
 The same left dock hosts the Effects browser as an `Effects` tab so effect
 insertion remains visible without changing the default split layout.
+Panel content factories must cover every `PanelKind` explicitly. Product shell
+fallbacks should be disabled `PanelList` empty states that name the unsupported
+panel, not anonymous colored boxes, so missing migrations stay visible and new
+panel kinds force an intentional mapping.
 
 Timeline migration starts with the domain-light `TimelineView` surface in
 `mondrian-ui-widgets`. It renders frame-space tracks, clips, ruler ticks,
