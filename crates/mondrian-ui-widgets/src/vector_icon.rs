@@ -1,25 +1,24 @@
 //! SVG-backed vector icon geometry.
 //!
 //! SVG is the designer-facing authoring format. Runtime widgets consume a
-//! cached `VectorIcon` mesh produced by lyon tessellation and emit existing
-//! triangle draw commands during paint.
+//! cached `VectorIcon` mesh. SVG documents are normalized through usvg, then
+//! tessellated by lyon, and finally emitted as existing triangle draw commands
+//! during paint.
 
 use std::fmt;
-use std::str::FromStr;
 use std::sync::{Mutex, OnceLock};
 
 use lyon::math::{point, Point as LyonPoint};
 use lyon::path::Path;
 use lyon::tessellation::{
-    BuffersBuilder, FillOptions, FillTessellator, FillVertex, LineCap, LineJoin, StrokeOptions,
-    StrokeTessellator, StrokeVertex, TessellationError, VertexBuffers,
+    BuffersBuilder, FillOptions, FillRule as LyonFillRule, FillTessellator, FillVertex, LineCap,
+    LineJoin, StrokeOptions, StrokeTessellator, StrokeVertex, TessellationError, VertexBuffers,
 };
 use mondrian_core::Color;
 use mondrian_ui_core::types::{Point, Rect};
 use mondrian_ui_core::widget::PaintContext;
-use svgtypes::{PathParser, PathSegment};
+use tiny_skia_path::{PathSegment as TinyPathSegment, Point as TinyPoint, Transform};
 
-const DEFAULT_STROKE_WIDTH: f32 = 2.0;
 const TESSELLATION_TOLERANCE: f32 = 0.08;
 
 static STATIC_SVG_ICON_CACHE: OnceLock<Mutex<std::collections::HashMap<&'static str, VectorIcon>>> =
@@ -66,46 +65,21 @@ impl From<TessellationError> for VectorIconError {
 impl VectorIcon {
     /// Create vector icon geometry from an SVG document.
     ///
-    /// The supported authoring subset is intentionally designer-friendly for
-    /// UI icons: `viewBox`, nested `<g>` containers, and `<path d>` elements
-    /// with `fill`, `stroke`, and `stroke-width` attributes. Paths are converted
-    /// to lyon paths, then fill and stroke tessellators produce triangle meshes.
+    /// SVG parsing is intentionally delegated to usvg so designer-authored
+    /// basic shapes, paths, relative commands, arcs, inherited paint, and
+    /// transforms are normalized before this crate converts geometry to lyon.
     pub fn from_svg_str(svg: &str) -> Result<Self, VectorIconError> {
-        let doc =
-            roxmltree::Document::parse(svg).map_err(|err| VectorIconError::new(err.to_string()))?;
-        let root = doc
-            .descendants()
-            .find(|node| node.has_tag_name("svg"))
-            .ok_or_else(|| VectorIconError::new("SVG document has no <svg> root"))?;
-        let view_box = svg_view_box(root)?;
+        let tree = usvg::Tree::from_data(svg.as_bytes(), &usvg::Options::default())
+            .map_err(|err| VectorIconError::new(err.to_string()))?;
+        let size = tree.size();
+        let view_box = Rect::new(0.0, 0.0, size.width().max(1.0), size.height().max(1.0));
         let mut meshes = Vec::new();
 
-        for node in doc.descendants().filter(|node| node.has_tag_name("path")) {
-            let Some(data) = node.attribute("d") else {
-                continue;
-            };
-            let path = svg_path_to_lyon(data)?;
-            let stroke_enabled =
-                inherited_attr(node, "stroke").is_some_and(|value| value != "none");
-            let fill_enabled = inherited_attr(node, "fill") != Some("none");
-
-            if fill_enabled {
-                if let Some(mesh) = tessellate_fill(&path)? {
-                    meshes.push(mesh);
-                }
-            }
-            if stroke_enabled {
-                let stroke_width = parse_svg_number(inherited_attr(node, "stroke-width"))
-                    .unwrap_or(DEFAULT_STROKE_WIDTH);
-                if let Some(mesh) = tessellate_stroke(&path, stroke_width)? {
-                    meshes.push(mesh);
-                }
-            }
-        }
+        collect_usvg_group(tree.root(), &mut meshes)?;
 
         if meshes.is_empty() {
             return Err(VectorIconError::new(
-                "SVG icon contains no supported path geometry",
+                "SVG icon contains no renderable vector geometry",
             ));
         }
 
@@ -167,157 +141,156 @@ impl VectorIcon {
     }
 }
 
-fn svg_view_box(root: roxmltree::Node<'_, '_>) -> Result<Rect, VectorIconError> {
-    if let Some(value) = root.attribute("viewBox") {
-        let view_box = svgtypes::ViewBox::from_str(value)
-            .map_err(|err| VectorIconError::new(err.to_string()))?;
-        return Ok(Rect::new(
-            view_box.x as f32,
-            view_box.y as f32,
-            view_box.w.max(1.0) as f32,
-            view_box.h.max(1.0) as f32,
-        ));
+fn collect_usvg_group(
+    group: &usvg::Group,
+    meshes: &mut Vec<VectorIconMesh>,
+) -> Result<(), VectorIconError> {
+    for node in group.children() {
+        match node {
+            usvg::Node::Group(group) => collect_usvg_group(group, meshes)?,
+            usvg::Node::Path(path) => collect_usvg_path(path, meshes)?,
+            usvg::Node::Image(_) | usvg::Node::Text(_) => {}
+        }
     }
 
-    let width = parse_svg_number(root.attribute("width")).unwrap_or(24.0);
-    let height = parse_svg_number(root.attribute("height")).unwrap_or(width);
-    Ok(Rect::new(0.0, 0.0, width.max(1.0), height.max(1.0)))
+    Ok(())
 }
 
-fn parse_svg_number(value: Option<&str>) -> Option<f32> {
-    let raw = value?;
-    let number = raw.trim().trim_end_matches("px").parse::<f32>().ok()?;
-    number.is_finite().then_some(number)
+fn collect_usvg_path(
+    source: &usvg::Path,
+    meshes: &mut Vec<VectorIconMesh>,
+) -> Result<(), VectorIconError> {
+    if !source.is_visible() {
+        return Ok(());
+    }
+
+    let path = tiny_path_to_lyon(source.data(), source.abs_transform());
+    let render_fill = |meshes: &mut Vec<VectorIconMesh>| -> Result<(), VectorIconError> {
+        let Some(fill) = source.fill() else {
+            return Ok(());
+        };
+        if let Some(mesh) = tessellate_fill(&path, fill_rule(fill.rule()))? {
+            meshes.push(mesh);
+        }
+        Ok(())
+    };
+    let render_stroke = |meshes: &mut Vec<VectorIconMesh>| -> Result<(), VectorIconError> {
+        let Some(stroke) = source.stroke() else {
+            return Ok(());
+        };
+        let stroke_width = stroke.width().get() * stroke_scale(source.abs_transform());
+        if let Some(mesh) = tessellate_stroke(
+            &path,
+            stroke_width,
+            line_cap(stroke.linecap()),
+            line_join(stroke.linejoin()),
+            stroke.miterlimit().get(),
+        )? {
+            meshes.push(mesh);
+        }
+        Ok(())
+    };
+
+    match source.paint_order() {
+        usvg::PaintOrder::FillAndStroke => {
+            render_fill(meshes)?;
+            render_stroke(meshes)?;
+        }
+        usvg::PaintOrder::StrokeAndFill => {
+            render_stroke(meshes)?;
+            render_fill(meshes)?;
+        }
+    }
+
+    Ok(())
 }
 
-fn inherited_attr<'a>(node: roxmltree::Node<'a, 'a>, name: &str) -> Option<&'a str> {
-    node.ancestors().find_map(|ancestor| ancestor.attribute(name))
-}
-
-fn svg_path_to_lyon(data: &str) -> Result<Path, VectorIconError> {
+fn tiny_path_to_lyon(data: &tiny_skia_path::Path, transform: Transform) -> Path {
     let mut builder = Path::builder();
-    let mut cursor = point(0.0, 0.0);
-    let mut start = point(0.0, 0.0);
     let mut path_started = false;
-    let mut last_cubic_control: Option<LyonPoint> = None;
-    let mut last_quadratic_control: Option<LyonPoint> = None;
 
-    for segment in PathParser::from(data) {
-        let segment = segment.map_err(|err| VectorIconError::new(err.to_string()))?;
+    for segment in data.segments() {
         match segment {
-            PathSegment::MoveTo { abs, x, y } => {
+            TinyPathSegment::MoveTo(point) => {
                 if path_started {
                     builder.end(false);
                 }
-                cursor = resolve_point(cursor, abs, x, y);
-                start = cursor;
-                builder.begin(cursor);
+                builder.begin(transformed_point(point, transform));
                 path_started = true;
-                last_cubic_control = None;
-                last_quadratic_control = None;
             }
-            PathSegment::LineTo { abs, x, y } => {
-                cursor = resolve_point(cursor, abs, x, y);
-                builder.line_to(cursor);
-                last_cubic_control = None;
-                last_quadratic_control = None;
+            TinyPathSegment::LineTo(point) => {
+                builder.line_to(transformed_point(point, transform));
             }
-            PathSegment::HorizontalLineTo { abs, x } => {
-                cursor = if abs {
-                    point(x as f32, cursor.y)
-                } else {
-                    point(cursor.x + x as f32, cursor.y)
-                };
-                builder.line_to(cursor);
-                last_cubic_control = None;
-                last_quadratic_control = None;
+            TinyPathSegment::QuadTo(control, end) => {
+                builder.quadratic_bezier_to(
+                    transformed_point(control, transform),
+                    transformed_point(end, transform),
+                );
             }
-            PathSegment::VerticalLineTo { abs, y } => {
-                cursor = if abs {
-                    point(cursor.x, y as f32)
-                } else {
-                    point(cursor.x, cursor.y + y as f32)
-                };
-                builder.line_to(cursor);
-                last_cubic_control = None;
-                last_quadratic_control = None;
+            TinyPathSegment::CubicTo(control_a, control_b, end) => {
+                builder.cubic_bezier_to(
+                    transformed_point(control_a, transform),
+                    transformed_point(control_b, transform),
+                    transformed_point(end, transform),
+                );
             }
-            PathSegment::CurveTo { abs, x1, y1, x2, y2, x, y } => {
-                let c1 = resolve_point(cursor, abs, x1, y1);
-                let c2 = resolve_point(cursor, abs, x2, y2);
-                let end = resolve_point(cursor, abs, x, y);
-                builder.cubic_bezier_to(c1, c2, end);
-                cursor = end;
-                last_cubic_control = Some(c2);
-                last_quadratic_control = None;
-            }
-            PathSegment::SmoothCurveTo { abs, x2, y2, x, y } => {
-                let c1 = last_cubic_control
-                    .map(|control| reflect_point(control, cursor))
-                    .unwrap_or(cursor);
-                let c2 = resolve_point(cursor, abs, x2, y2);
-                let end = resolve_point(cursor, abs, x, y);
-                builder.cubic_bezier_to(c1, c2, end);
-                cursor = end;
-                last_cubic_control = Some(c2);
-                last_quadratic_control = None;
-            }
-            PathSegment::Quadratic { abs, x1, y1, x, y } => {
-                let c = resolve_point(cursor, abs, x1, y1);
-                let end = resolve_point(cursor, abs, x, y);
-                builder.quadratic_bezier_to(c, end);
-                cursor = end;
-                last_quadratic_control = Some(c);
-                last_cubic_control = None;
-            }
-            PathSegment::SmoothQuadratic { abs, x, y } => {
-                let c = last_quadratic_control
-                    .map(|control| reflect_point(control, cursor))
-                    .unwrap_or(cursor);
-                let end = resolve_point(cursor, abs, x, y);
-                builder.quadratic_bezier_to(c, end);
-                cursor = end;
-                last_quadratic_control = Some(c);
-                last_cubic_control = None;
-            }
-            PathSegment::EllipticalArc { abs, x, y, .. } => {
-                cursor = resolve_point(cursor, abs, x, y);
-                builder.line_to(cursor);
-                last_cubic_control = None;
-                last_quadratic_control = None;
-            }
-            PathSegment::ClosePath { .. } => {
+            TinyPathSegment::Close => {
                 builder.close();
-                cursor = start;
                 path_started = false;
-                last_cubic_control = None;
-                last_quadratic_control = None;
             }
         }
     }
     if path_started {
         builder.end(false);
     }
-    Ok(builder.build())
+    builder.build()
 }
 
-fn resolve_point(cursor: LyonPoint, abs: bool, x: f64, y: f64) -> LyonPoint {
-    if abs {
-        point(x as f32, y as f32)
-    } else {
-        point(cursor.x + x as f32, cursor.y + y as f32)
+fn transformed_point(mut value: TinyPoint, transform: Transform) -> LyonPoint {
+    transform.map_point(&mut value);
+    point(value.x, value.y)
+}
+
+fn fill_rule(rule: usvg::FillRule) -> LyonFillRule {
+    match rule {
+        usvg::FillRule::NonZero => LyonFillRule::NonZero,
+        usvg::FillRule::EvenOdd => LyonFillRule::EvenOdd,
     }
 }
 
-fn reflect_point(point: LyonPoint, around: LyonPoint) -> LyonPoint {
-    lyon::math::point(around.x * 2.0 - point.x, around.y * 2.0 - point.y)
+fn line_cap(cap: usvg::LineCap) -> LineCap {
+    match cap {
+        usvg::LineCap::Butt => LineCap::Butt,
+        usvg::LineCap::Round => LineCap::Round,
+        usvg::LineCap::Square => LineCap::Square,
+    }
 }
 
-fn tessellate_fill(path: &Path) -> Result<Option<VectorIconMesh>, VectorIconError> {
+fn line_join(join: usvg::LineJoin) -> LineJoin {
+    match join {
+        usvg::LineJoin::Miter => LineJoin::Miter,
+        usvg::LineJoin::MiterClip => LineJoin::MiterClip,
+        usvg::LineJoin::Round => LineJoin::Round,
+        usvg::LineJoin::Bevel => LineJoin::Bevel,
+    }
+}
+
+fn stroke_scale(transform: Transform) -> f32 {
+    let x_scale = transform.sx.hypot(transform.ky);
+    let y_scale = transform.kx.hypot(transform.sy);
+    ((x_scale + y_scale) * 0.5).max(0.01)
+}
+
+fn tessellate_fill(
+    path: &Path,
+    fill_rule: LyonFillRule,
+) -> Result<Option<VectorIconMesh>, VectorIconError> {
     let mut geometry = VertexBuffers::<Point, u32>::new();
     FillTessellator::new().tessellate_path(
         path,
-        &FillOptions::default().with_tolerance(TESSELLATION_TOLERANCE),
+        &FillOptions::default()
+            .with_tolerance(TESSELLATION_TOLERANCE)
+            .with_fill_rule(fill_rule),
         &mut BuffersBuilder::new(&mut geometry, |vertex: FillVertex| {
             let position = vertex.position();
             Point::new(position.x, position.y)
@@ -326,14 +299,21 @@ fn tessellate_fill(path: &Path) -> Result<Option<VectorIconMesh>, VectorIconErro
     Ok(mesh_from_geometry(geometry))
 }
 
-fn tessellate_stroke(path: &Path, width: f32) -> Result<Option<VectorIconMesh>, VectorIconError> {
+fn tessellate_stroke(
+    path: &Path,
+    width: f32,
+    cap: LineCap,
+    join: LineJoin,
+    miter_limit: f32,
+) -> Result<Option<VectorIconMesh>, VectorIconError> {
     let mut geometry = VertexBuffers::<Point, u32>::new();
     StrokeTessellator::new().tessellate_path(
         path,
         &StrokeOptions::default()
             .with_line_width(width.max(0.1))
-            .with_line_cap(LineCap::Round)
-            .with_line_join(LineJoin::Round)
+            .with_line_cap(cap)
+            .with_line_join(join)
+            .with_miter_limit(miter_limit.max(1.0))
             .with_tolerance(TESSELLATION_TOLERANCE),
         &mut BuffersBuilder::new(&mut geometry, |vertex: StrokeVertex| {
             let position = vertex.position();
@@ -459,6 +439,58 @@ mod tests {
     }
 
     #[test]
+    fn parses_basic_svg_shapes_normalized_by_usvg() {
+        let icon = VectorIcon::from_svg_str(
+            r#"<svg viewBox="0 0 24 24">
+                <g fill="black">
+                    <rect x="2" y="2" width="6" height="6"/>
+                    <circle cx="16" cy="6" r="3"/>
+                </g>
+                <line x1="4" y1="18" x2="20" y2="18" stroke="black" stroke-width="2"/>
+            </svg>"#,
+        )
+        .expect("icon");
+
+        assert_eq!(icon.shape_count(), 3);
+        assert!(icon.triangle_count() > 6);
+    }
+
+    #[test]
+    fn applies_group_transforms_before_tessellation() {
+        let icon = VectorIcon::from_svg_str(
+            r#"<svg viewBox="0 0 24 24">
+                <g transform="translate(8 4)">
+                    <path d="M0 0L4 0L0 4Z" fill="black"/>
+                </g>
+            </svg>"#,
+        )
+        .expect("icon");
+
+        let min_x = icon
+            .meshes
+            .iter()
+            .flat_map(|mesh| mesh.triangles.iter().flatten())
+            .map(|point| point.x)
+            .fold(f32::INFINITY, f32::min);
+        let min_y = icon
+            .meshes
+            .iter()
+            .flat_map(|mesh| mesh.triangles.iter().flatten())
+            .map(|point| point.y)
+            .fold(f32::INFINITY, f32::min);
+
+        assert!(min_x >= 8.0);
+        assert!(min_y >= 4.0);
+    }
+
+    #[test]
+    fn scales_strokes_when_svg_transform_scales_geometry() {
+        let scale = stroke_scale(Transform::from_scale(-2.0, 3.0));
+
+        assert!((scale - 2.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
     fn paints_closed_fill_as_tessellated_triangles() {
         let icon = VectorIcon::from_svg_str(
             r#"<svg viewBox="0 0 24 24"><path d="M4 4L20 4L12 20Z" fill="black"/></svg>"#,
@@ -481,6 +513,6 @@ mod tests {
         let err = VectorIcon::from_svg_str(r#"<svg viewBox="0 0 24 24"></svg>"#)
             .expect_err("empty icon should fail");
 
-        assert!(err.to_string().contains("no supported path"));
+        assert!(err.to_string().contains("no renderable vector geometry"));
     }
 }

@@ -3486,9 +3486,9 @@ dependencies = [
  "mondrian-ui-layout",
  "mondrian-ui-text",
  "mondrian-ui-theme",
- "roxmltree",
- "svgtypes",
+ "tiny-skia-path",
  "unicode-segmentation",
+ "usvg",
 ]
 
 [[package]]
