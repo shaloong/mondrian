@@ -1574,13 +1574,18 @@ impl ColorPickerTrigger {
         }
     }
 
-    fn close_popup(&mut self, ctx: &mut EventContext) {
+    fn close_popup(&mut self, ctx: &mut EventContext, release_focus: bool) {
         self.open = false;
         self.pressed = false;
+        let _ = self.picker.event(&UiEvent::FocusLost, ctx);
+        self.translate_picker_capture_request(ctx);
         self.picker.cancel_interaction();
         if self.picker_pointer_captured {
             self.picker_pointer_captured = false;
             ctx.release_pointer_capture(self.id);
+        }
+        if release_focus {
+            ctx.focus.release_focus(self.id);
         }
     }
 }
@@ -1609,7 +1614,7 @@ impl Widget for ColorPickerTrigger {
                 || self.picker_pointer_captured
                 || self.picker.is_eyedropper_active()
             {
-                self.close_popup(ctx);
+                self.close_popup(ctx, true);
                 self.picker.cancel_eyedropper();
                 ctx.set_cursor(CursorRequest::Default);
                 ctx.set_eyedropper(false, None);
@@ -1628,7 +1633,7 @@ impl Widget for ColorPickerTrigger {
             if !eyedropper_active {
                 if let UiEvent::MouseDown { position, button: MouseButton::Left, .. } = event {
                     if !self.bounds.contains(*position) && !self.popup_rect().contains(*position) {
-                        self.close_popup(ctx);
+                        self.close_popup(ctx, true);
                         return EventResult::Handled;
                     }
                 }
@@ -1670,13 +1675,28 @@ impl Widget for ColorPickerTrigger {
                     && !self.bounds.contains(*position)
                     && !self.popup_rect().contains(*position)
                 {
-                    self.close_popup(ctx);
+                    self.close_popup(ctx, true);
                     return EventResult::Handled;
                 }
                 EventResult::Ignored
             }
             UiEvent::KeyDown { key: KeyCode::Escape, .. } if self.open => {
-                self.close_popup(ctx);
+                self.close_popup(ctx, false);
+                EventResult::Handled
+            }
+            UiEvent::FocusGained => EventResult::Handled,
+            UiEvent::FocusLost => {
+                if self.open
+                    || self.pressed
+                    || self.picker_pointer_captured
+                    || self.picker.is_eyedropper_active()
+                {
+                    self.close_popup(ctx, false);
+                    self.picker.cancel_eyedropper();
+                    ctx.set_cursor(CursorRequest::Default);
+                    ctx.set_eyedropper(false, None);
+                }
+                self.pressed = false;
                 EventResult::Handled
             }
             _ => EventResult::Ignored,
@@ -1729,6 +1749,10 @@ impl Widget for ColorPickerTrigger {
 
     fn hit_test(&self, point: Point) -> bool {
         self.bounds.contains(point)
+    }
+
+    fn can_focus(&self) -> bool {
+        self.enabled
     }
 }
 
@@ -2681,6 +2705,64 @@ mod tests {
         assert_eq!(
             ctx.requests.pointer_capture,
             Some(PointerCaptureRequest::Capture(trigger.id()))
+        );
+    }
+
+    #[test]
+    fn trigger_is_focusable_and_closing_popup_blurs_inner_field() {
+        let mut trigger = ColorPickerTrigger::new(Color::BLACK);
+        trigger.picker_mut().set_mode(ColorPickerMode::Rgb);
+        trigger.layout(Rect::new(20.0, 30.0, 32.0, 32.0));
+        let trigger_center = trigger.bounds.center();
+        let mut ctx = event_ctx();
+
+        assert!(trigger.can_focus());
+
+        trigger.event(
+            &UiEvent::MouseDown {
+                position: trigger_center,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        trigger.event(
+            &UiEvent::MouseUp {
+                position: trigger_center,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert!(trigger.is_open());
+
+        let red = trigger.picker.field_rect(0).center();
+        trigger.event(
+            &UiEvent::MouseDown {
+                position: red,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(trigger.picker.focused_field, Some(0));
+        assert!(ctx.requests.ime.as_ref().is_some_and(|ime| ime.enabled));
+
+        trigger.event(
+            &UiEvent::MouseDown {
+                position: Point::new(500.0, 500.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert!(!trigger.is_open());
+        assert_eq!(trigger.picker.focused_field, None);
+        assert!(ctx.requests.ime.as_ref().is_some_and(|ime| !ime.enabled));
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Release(trigger.id()))
         );
     }
 

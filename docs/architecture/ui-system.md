@@ -801,6 +801,10 @@ screen-capture or OS pointer APIs directly. Winit shells complete sampling via
 `mondrian_app::self_hosted::runtime::WinitUiRuntime`, which delegates platform work to
 `mondrian-platform::DesktopEyedropper` and routes the sampled color back as
 `UiEvent::EyedropperSample`.
+The trigger owns tree-level focus for its popup. Inner text fields are embedded
+editing state inside the picker; closing the popup must send them `FocusLost`
+and disable IME rather than leaving focus on an internal field id that is not a
+stable widget-tree node.
 The mode selector shares the generic dropdown's token vocabulary and overlay
 behavior, but it remains an internal selector because changing color models is
 local widget state rather than an editor `Action`.
