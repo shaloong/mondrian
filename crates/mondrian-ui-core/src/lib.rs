@@ -21,7 +21,7 @@ pub mod widget;
 pub mod widgets;
 
 pub use focus::FocusManager;
-pub use shortcut::{ShortcutBinding, ShortcutManager, ShortcutScope};
+pub use shortcut::{ShortcutBinding, ShortcutContext, ShortcutManager, ShortcutScope};
 pub use tooltip::{TooltipManager, TooltipState};
 pub use tree::{TreeWalker, WidgetTree};
 pub use types::*;

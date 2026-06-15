@@ -6,7 +6,7 @@
 use mondrian_editor_state::Action;
 use mondrian_platform::{NoopPlatformService, PlatformService};
 use mondrian_ui_core::focus::FocusManager;
-use mondrian_ui_core::shortcut::ShortcutManager;
+use mondrian_ui_core::shortcut::{ShortcutContext, ShortcutManager};
 use mondrian_ui_core::tooltip::{TooltipManager, TooltipState};
 use mondrian_ui_core::types::{
     DragPayload, EventResult, KeyCode, MouseButton, Point, UiEvent, WidgetId,
@@ -399,7 +399,13 @@ impl EventRouter {
                 }
 
                 if let UiEvent::KeyDown { key, modifiers } = &event {
-                    if let Some(action) = self.shortcut_mgr.resolve(*key, *modifiers) {
+                    let shortcut_context = ShortcutContext::new(
+                        self.focus_mgr.focused_widget(),
+                        self.focus_mgr.focused_panel(),
+                    );
+                    if let Some(action) =
+                        self.shortcut_mgr.resolve(*key, *modifiers, shortcut_context)
+                    {
                         dispatch(action);
                         return EventResult::Handled;
                     }
@@ -736,6 +742,7 @@ mod tests {
         let found = router.shortcut_manager().resolve(
             mondrian_ui_core::types::KeyCode::S,
             mondrian_ui_core::types::Modifiers::ctrl(),
+            ShortcutContext::default(),
         );
         assert_eq!(found, Some(Action::SaveProject));
     }

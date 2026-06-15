@@ -6,7 +6,9 @@
 use std::collections::HashMap;
 
 use mondrian_editor_state::Action;
-use mondrian_ui_core::shortcut::{ShortcutBinding, ShortcutManager, ShortcutScope};
+use mondrian_ui_core::shortcut::{
+    ShortcutBinding, ShortcutContext, ShortcutManager, ShortcutScope,
+};
 use mondrian_ui_core::types::{KeyCode, Modifiers};
 
 /// ShortcutManager 的具体实现
@@ -32,7 +34,9 @@ impl ShortcutManagerImpl {
 
 impl ShortcutManager for ShortcutManagerImpl {
     fn register(&mut self, scope: ShortcutScope, binding: ShortcutBinding, action: Action) {
-        self.bindings.entry(scope).or_default().push((binding, action));
+        let list = self.bindings.entry(scope).or_default();
+        list.retain(|(registered, _)| registered != &binding);
+        list.push((binding, action));
     }
 
     fn unregister(&mut self, scope: ShortcutScope, binding: &ShortcutBinding) {
@@ -41,15 +45,27 @@ impl ShortcutManager for ShortcutManagerImpl {
         }
     }
 
-    fn resolve(&self, key: KeyCode, modifiers: Modifiers) -> Option<Action> {
-        for list in self.bindings.values() {
-            for (binding, action) in list {
-                if binding.key == key && binding.modifiers == modifiers {
-                    return Some(action.clone());
-                }
+    fn resolve(
+        &self,
+        key: KeyCode,
+        modifiers: Modifiers,
+        context: ShortcutContext,
+    ) -> Option<Action> {
+        if let Some(widget) = context.widget {
+            if let Some(action) =
+                self.resolve_in_scope(ShortcutScope::Widget(widget), key, modifiers)
+            {
+                return Some(action);
             }
         }
-        None
+        if let Some(panel) = context.panel {
+            if let Some(action) = self.resolve_in_scope(ShortcutScope::Panel(panel), key, modifiers)
+            {
+                return Some(action);
+            }
+        }
+        self.resolve_in_scope(ShortcutScope::Workspace, key, modifiers)
+            .or_else(|| self.resolve_in_scope(ShortcutScope::Global, key, modifiers))
     }
 
     fn clear_scope(&mut self, scope: ShortcutScope) {
@@ -58,6 +74,21 @@ impl ShortcutManager for ShortcutManagerImpl {
 
     fn clear_all(&mut self) {
         self.bindings.clear();
+    }
+}
+
+impl ShortcutManagerImpl {
+    fn resolve_in_scope(
+        &self,
+        scope: ShortcutScope,
+        key: KeyCode,
+        modifiers: Modifiers,
+    ) -> Option<Action> {
+        self.bindings.get(&scope).and_then(|list| {
+            list.iter()
+                .find(|(binding, _)| binding.key == key && binding.modifiers == modifiers)
+                .map(|(_, action)| action.clone())
+        })
     }
 }
 
@@ -71,14 +102,17 @@ mod tests {
         let mut mgr = ShortcutManagerImpl::new();
         mgr.register_global(ShortcutBinding::ctrl(KeyCode::S), Action::SaveProject);
 
-        let found = mgr.resolve(KeyCode::S, Modifiers::ctrl());
+        let found = mgr.resolve(KeyCode::S, Modifiers::ctrl(), ShortcutContext::default());
         assert_eq!(found, Some(Action::SaveProject));
     }
 
     #[test]
     fn resolve_returns_none_for_unknown() {
         let mgr = ShortcutManagerImpl::new();
-        assert_eq!(mgr.resolve(KeyCode::X, Modifiers::none()), None);
+        assert_eq!(
+            mgr.resolve(KeyCode::X, Modifiers::none(), ShortcutContext::default()),
+            None
+        );
     }
 
     #[test]
@@ -87,7 +121,10 @@ mod tests {
         let binding = ShortcutBinding::ctrl(KeyCode::Z);
         mgr.register_global(binding.clone(), Action::Undo);
         mgr.unregister(ShortcutScope::Global, &binding);
-        assert_eq!(mgr.resolve(KeyCode::Z, Modifiers::ctrl()), None);
+        assert_eq!(
+            mgr.resolve(KeyCode::Z, Modifiers::ctrl(), ShortcutContext::default()),
+            None
+        );
     }
 
     #[test]
@@ -96,8 +133,14 @@ mod tests {
         mgr.register_global(ShortcutBinding::ctrl(KeyCode::S), Action::SaveProject);
         mgr.register_global(ShortcutBinding::ctrl(KeyCode::Z), Action::Undo);
         mgr.clear_scope(ShortcutScope::Global);
-        assert_eq!(mgr.resolve(KeyCode::S, Modifiers::ctrl()), None);
-        assert_eq!(mgr.resolve(KeyCode::Z, Modifiers::ctrl()), None);
+        assert_eq!(
+            mgr.resolve(KeyCode::S, Modifiers::ctrl(), ShortcutContext::default()),
+            None
+        );
+        assert_eq!(
+            mgr.resolve(KeyCode::Z, Modifiers::ctrl(), ShortcutContext::default()),
+            None
+        );
     }
 
     #[test]
@@ -114,7 +157,69 @@ mod tests {
             Action::DeleteSelection,
         );
         mgr.clear_all();
-        assert!(mgr.resolve(KeyCode::S, Modifiers::ctrl()).is_none());
-        assert!(mgr.resolve(KeyCode::Delete, Modifiers::none()).is_none());
+        assert!(mgr.resolve(KeyCode::S, Modifiers::ctrl(), ShortcutContext::default()).is_none());
+        assert!(mgr
+            .resolve(
+                KeyCode::Delete,
+                Modifiers::none(),
+                ShortcutContext::default()
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn resolve_uses_focused_scope_priority_deterministically() {
+        let mut mgr = ShortcutManagerImpl::new();
+        let widget = mondrian_ui_core::types::WidgetId::new();
+        mgr.register_global(ShortcutBinding::ctrl(KeyCode::S), Action::SaveProject);
+        mgr.register(
+            ShortcutScope::Workspace,
+            ShortcutBinding::ctrl(KeyCode::S),
+            Action::SaveProjectAs("workspace.mdp".into()),
+        );
+        mgr.register(
+            ShortcutScope::Panel(PanelKind::Timeline),
+            ShortcutBinding::ctrl(KeyCode::S),
+            Action::SplitClipAtPlayhead,
+        );
+        mgr.register(
+            ShortcutScope::Widget(widget),
+            ShortcutBinding::ctrl(KeyCode::S),
+            Action::NoOp,
+        );
+
+        assert_eq!(
+            mgr.resolve(
+                KeyCode::S,
+                Modifiers::ctrl(),
+                ShortcutContext::new(Some(widget), Some(PanelKind::Timeline)),
+            ),
+            Some(Action::NoOp)
+        );
+        assert_eq!(
+            mgr.resolve(
+                KeyCode::S,
+                Modifiers::ctrl(),
+                ShortcutContext::new(None, Some(PanelKind::Timeline)),
+            ),
+            Some(Action::SplitClipAtPlayhead)
+        );
+        assert_eq!(
+            mgr.resolve(KeyCode::S, Modifiers::ctrl(), ShortcutContext::default()),
+            Some(Action::SaveProjectAs("workspace.mdp".into()))
+        );
+    }
+
+    #[test]
+    fn register_replaces_existing_binding_in_same_scope() {
+        let mut mgr = ShortcutManagerImpl::new();
+        let binding = ShortcutBinding::ctrl(KeyCode::S);
+        mgr.register_global(binding.clone(), Action::SaveProject);
+        mgr.register_global(binding, Action::SaveProjectAs("next.mdp".into()));
+
+        assert_eq!(
+            mgr.resolve(KeyCode::S, Modifiers::ctrl(), ShortcutContext::default()),
+            Some(Action::SaveProjectAs("next.mdp".into()))
+        );
     }
 }

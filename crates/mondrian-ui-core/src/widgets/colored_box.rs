@@ -133,7 +133,12 @@ mod tests {
     impl crate::shortcut::ShortcutManager for MockShortcut {
         fn register(&mut self, _s: crate::ShortcutScope, _b: crate::ShortcutBinding, _a: Action) {}
         fn unregister(&mut self, _s: crate::ShortcutScope, _b: &crate::ShortcutBinding) {}
-        fn resolve(&self, _k: crate::KeyCode, _m: Modifiers) -> Option<Action> {
+        fn resolve(
+            &self,
+            _k: crate::KeyCode,
+            _m: Modifiers,
+            _c: crate::ShortcutContext,
+        ) -> Option<Action> {
             None
         }
         fn clear_scope(&mut self, _s: crate::ShortcutScope) {}

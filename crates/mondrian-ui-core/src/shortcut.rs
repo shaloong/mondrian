@@ -48,6 +48,21 @@ impl ShortcutBinding {
     }
 }
 
+/// Shortcut resolution context captured from the current focus state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ShortcutContext {
+    /// Currently focused widget, if any.
+    pub widget: Option<WidgetId>,
+    /// Currently focused panel, if any.
+    pub panel: Option<PanelKind>,
+}
+
+impl ShortcutContext {
+    pub fn new(widget: Option<WidgetId>, panel: Option<PanelKind>) -> Self {
+        Self { widget, panel }
+    }
+}
+
 /// 快捷键管理器
 ///
 /// ## 职责
@@ -63,7 +78,12 @@ pub trait ShortcutManager {
     fn unregister(&mut self, scope: ShortcutScope, binding: &ShortcutBinding);
 
     /// 根据按键和当前焦点上下文，查找对应的 Action
-    fn resolve(&self, key: KeyCode, modifiers: Modifiers) -> Option<Action>;
+    fn resolve(
+        &self,
+        key: KeyCode,
+        modifiers: Modifiers,
+        context: ShortcutContext,
+    ) -> Option<Action>;
 
     /// 清除某个作用域的所有绑定
     fn clear_scope(&mut self, scope: ShortcutScope);

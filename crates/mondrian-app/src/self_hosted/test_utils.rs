@@ -6,7 +6,8 @@ use mondrian_platform::NoopPlatformService;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, EventRequests};
 use mondrian_ui_core::{
-    FocusManager, ShortcutBinding, ShortcutManager, ShortcutScope, TooltipManager, TooltipState,
+    FocusManager, ShortcutBinding, ShortcutContext, ShortcutManager, ShortcutScope, TooltipManager,
+    TooltipState,
 };
 
 pub(crate) struct DummyFocus;
@@ -38,7 +39,12 @@ impl ShortcutManager for DummyShortcut {
 
     fn unregister(&mut self, _scope: ShortcutScope, _binding: &ShortcutBinding) {}
 
-    fn resolve(&self, _key: KeyCode, _modifiers: Modifiers) -> Option<Action> {
+    fn resolve(
+        &self,
+        _key: KeyCode,
+        _modifiers: Modifiers,
+        _context: ShortcutContext,
+    ) -> Option<Action> {
         None
     }
 

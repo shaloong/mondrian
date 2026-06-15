@@ -295,6 +295,10 @@ global shortcuts at the router boundary, not inside widgets: file commands use
 Ctrl/Ctrl+Shift combinations, workspace switching uses Ctrl+Alt+number, and
 panel focus uses Ctrl+Alt+mnemonics. Plain Space is intentionally not registered
 globally so text input cannot accidentally toggle playback while typing.
+Shortcut resolution receives a `ShortcutContext` from the router focus state and
+must search scopes in a fixed order: focused widget, focused panel, workspace,
+then global. Same-scope duplicate registrations replace the older binding so
+the active command is deterministic.
 
 ## Pointer Capture
 

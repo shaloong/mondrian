@@ -128,7 +128,7 @@ fn ctrl_alt() -> Modifiers {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mondrian_ui_core::shortcut::ShortcutManager;
+    use mondrian_ui_core::shortcut::{ShortcutContext, ShortcutManager};
 
     #[test]
     fn default_shortcuts_cover_file_commands_and_workspace_switching() {
@@ -137,15 +137,25 @@ mod tests {
         register_default_shortcuts(&mut router);
 
         assert_eq!(
-            router.shortcut_manager().resolve(KeyCode::S, Modifiers::ctrl()),
+            router.shortcut_manager().resolve(
+                KeyCode::S,
+                Modifiers::ctrl(),
+                ShortcutContext::default()
+            ),
             Some(Action::SaveProject)
         );
         assert_eq!(
-            router.shortcut_manager().resolve(KeyCode::Digit4, ctrl_alt()),
+            router.shortcut_manager().resolve(
+                KeyCode::Digit4,
+                ctrl_alt(),
+                ShortcutContext::default()
+            ),
             Some(Action::SwitchWorkspace(WorkspacePreset::Compositing))
         );
         assert_eq!(
-            router.shortcut_manager().resolve(KeyCode::T, ctrl_alt()),
+            router
+                .shortcut_manager()
+                .resolve(KeyCode::T, ctrl_alt(), ShortcutContext::default()),
             Some(Action::FocusPanel(PanelKind::Timeline))
         );
     }
@@ -157,7 +167,11 @@ mod tests {
         register_default_shortcuts(&mut router);
 
         assert_eq!(
-            router.shortcut_manager().resolve(KeyCode::Space, Modifiers::none()),
+            router.shortcut_manager().resolve(
+                KeyCode::Space,
+                Modifiers::none(),
+                ShortcutContext::default()
+            ),
             None
         );
     }
