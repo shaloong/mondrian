@@ -37,12 +37,13 @@ use crate::app::ui_actions::{
     inspector_set_clip_curve_action, inspector_set_clip_enabled_action,
     inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
     inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
-    timeline_move_clip_action, timeline_seek_action, timeline_select_clip_action,
-    timeline_set_track_control_action, timeline_trim_clip_action, AssetsPrepareDragPayload,
-    EffectsAddToClipPayload, InspectorClipRefPayload, InspectorClipTransformField,
-    InspectorCurvePointPayload, InspectorRemoveEffectPayload, InspectorSetClipCurvePayload,
-    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
-    InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
+    timeline_add_track_action, timeline_move_clip_action, timeline_seek_action,
+    timeline_select_clip_action, timeline_set_track_control_action, timeline_trim_clip_action,
+    AssetsPrepareDragPayload, EffectsAddToClipPayload, InspectorClipRefPayload,
+    InspectorClipTransformField, InspectorCurvePointPayload, InspectorRemoveEffectPayload,
+    InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
+    InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
+    InspectorSetEffectEnabledPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
     TimelineMoveClipPayload, TimelineSelectClipPayload, TimelineSetTrackControlPayload,
     TimelineTrackControlPayloadKind, TimelineTrimClipPayload, TimelineTrimPayloadEdge,
 };
@@ -1257,6 +1258,13 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
                     .unwrap_or(Action::NoOp)
             }
         })
+        .on_track_add(|kind| {
+            let kind = match kind {
+                mondrian_ui_widgets::TimelineTrackKind::Video => TimelineAddTrackKind::Video,
+                mondrian_ui_widgets::TimelineTrackKind::Audio => TimelineAddTrackKind::Audio,
+            };
+            timeline_add_track_action(TimelineAddTrackPayload { kind })
+        })
         .on_clip_move({
             let action_model = action_model.clone();
             move |movement, _clip| {
@@ -1580,12 +1588,18 @@ mod tests {
         APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
         APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_SAVE_PROJECT_AS_DIALOG, ASSETS_NAMESPACE,
         ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE,
-        INSPECTOR_SET_CLIP_CURVE,
+        INSPECTOR_SET_CLIP_CURVE, TIMELINE_ADD_TRACK, TIMELINE_NAMESPACE,
     };
+    use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
     use mondrian_core::types::{AssetId, TimeCode};
     use mondrian_effects::EffectNodeExt;
-    use mondrian_ui_core::types::{LayoutConstraint, Size};
+    use mondrian_ui_core::types::{
+        EventResult, LayoutConstraint, Modifiers, MouseButton, Point, Size,
+    };
+    use mondrian_ui_core::widget::EventRequests;
+    use mondrian_ui_core::UiEvent;
+    use std::cell::RefCell;
     use std::path::PathBuf;
 
     #[test]
@@ -1897,6 +1911,48 @@ mod tests {
         assert!(!mute.is_video_track);
         assert_eq!(mute.control, TimelineTrackControlPayloadKind::Mute);
         assert!(!mute.enabled);
+    }
+
+    #[test]
+    fn timeline_panel_corner_add_buttons_emit_typed_timeline_actions() {
+        let model = demo_timeline_model();
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut panel = timeline_panel(&model);
+        panel.layout(mondrian_ui_core::types::Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let result = panel.event(
+            &UiEvent::MouseDown {
+                position: Point::new(16.0, 15.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        let recorded = actions.borrow();
+        assert_eq!(recorded.len(), 1);
+        let Action::Custom { namespace, name, payload } = &recorded[0] else {
+            panic!("expected custom add-track action");
+        };
+        assert_eq!(namespace, TIMELINE_NAMESPACE);
+        assert_eq!(name, TIMELINE_ADD_TRACK);
+        let payload: TimelineAddTrackPayload =
+            serde_json::from_value(payload.clone()).expect("add track payload");
+        assert_eq!(payload.kind, TimelineAddTrackKind::Video);
     }
 
     #[test]

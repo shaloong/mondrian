@@ -448,6 +448,10 @@ domain-light control kind for visibility, mute, or lock, while the app adapter
 turns the current snapshot into a stable `ui.timeline.set_track_control`
 payload. `AppState` then calls the undoable `set_track_visible`,
 `set_track_muted`, or `set_track_locked` command path.
+Timeline corner controls for adding video/audio tracks emit only a
+`TimelineTrackKind`; the app adapter translates that into
+`ui.timeline.add_track`, and `AppState` routes it through the existing undoable
+track creation commands.
 Timeline structure mutations that can invalidate ids, such as removing tracks,
 must call the app selection pruning helper after the sequence mutation succeeds.
 That pruning removes stale selected tracks, clips, masks, and animation

@@ -15,14 +15,15 @@ use crate::app::ui_actions::{
     InspectorRemoveEffectPayload, InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
     InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
     InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
-    ProjectCreateWithSettingsPayload, TimelineMoveClipPayload, TimelineSeekPayload,
-    TimelineSelectClipPayload, TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind,
-    TimelineTrimClipPayload, TimelineTrimPayloadEdge, ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG,
-    EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT,
-    INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY,
-    INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD, INSPECTOR_SET_EFFECT_ENABLED,
-    PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE, TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE,
-    TIMELINE_SEEK, TIMELINE_SELECT_CLIP, TIMELINE_SET_TRACK_CONTROL, TIMELINE_TRIM_CLIP,
+    ProjectCreateWithSettingsPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
+    TimelineMoveClipPayload, TimelineSeekPayload, TimelineSelectClipPayload,
+    TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipPayload,
+    TimelineTrimPayloadEdge, ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP,
+    EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT, INSPECTOR_SET_CLIP_CURVE,
+    INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY, INSPECTOR_SET_CLIP_TINT,
+    INSPECTOR_SET_CLIP_TRANSFORM_FIELD, INSPECTOR_SET_EFFECT_ENABLED, PROJECT_CREATE_WITH_SETTINGS,
+    PROJECT_NAMESPACE, TIMELINE_ADD_TRACK, TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_SEEK,
+    TIMELINE_SELECT_CLIP, TIMELINE_SET_TRACK_CONTROL, TIMELINE_TRIM_CLIP,
 };
 use crate::app::{AppClipboardKind, AppState, ClipOverlapMode, SelectedClipRef};
 use glam::Vec2;
@@ -635,6 +636,21 @@ impl AppState {
                     ),
                 }
             }
+            TIMELINE_ADD_TRACK => {
+                let payload = parse_ui_payload::<TimelineAddTrackPayload>(
+                    "timeline_ui_action",
+                    name,
+                    payload,
+                )?;
+                match payload.kind {
+                    TimelineAddTrackKind::Video => self.add_video_track(),
+                    TimelineAddTrackKind::Audio => self.add_audio_track(),
+                }
+                .map_err(|err| MondrianError::WorkflowStepFailed {
+                    step_id: "timeline_add_track".to_string(),
+                    reason: err.to_string(),
+                })
+            }
             _ => Err(unknown_ui_action_error("timeline_ui_action", name)),
         }
     }
@@ -1154,15 +1170,15 @@ mod tests {
         inspector_set_clip_curve_action, inspector_set_clip_enabled_action,
         inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
         inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
-        project_create_with_settings_action, timeline_move_clip_action, timeline_seek_action,
-        timeline_select_clip_action, timeline_set_track_control_action, timeline_trim_clip_action,
-        AssetsPrepareDragPayload, EffectsAddToClipPayload, InspectorClipRefPayload,
-        InspectorClipTransformField, InspectorCurvePointPayload, InspectorRemoveEffectPayload,
-        InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
+        project_create_with_settings_action, timeline_add_track_action, timeline_move_clip_action,
+        timeline_seek_action, timeline_select_clip_action, timeline_set_track_control_action,
+        timeline_trim_clip_action, AssetsPrepareDragPayload, EffectsAddToClipPayload,
+        InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
+        InspectorRemoveEffectPayload, InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
         InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
         InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
-        ProjectCreateWithSettingsPayload, TimelineSetTrackControlPayload,
-        TimelineTrackControlPayloadKind,
+        ProjectCreateWithSettingsPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
+        TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind,
     };
     use mondrian_assets::AssetLibrary;
     use mondrian_core::types::{AssetId, MaskId, TimeCode, TrackId};
@@ -1350,6 +1366,39 @@ mod tests {
         assert!(!state.sequence.as_ref().expect("sequence").video_tracks[0].is_locked);
         assert!(!state.sequence.as_ref().expect("sequence").video_tracks[0].is_visible);
         assert!(state.sequence.as_ref().expect("sequence").audio_tracks[0].is_muted);
+    }
+
+    #[test]
+    fn dispatch_timeline_ui_adds_video_and_audio_tracks() {
+        let (mut state, _, _) = state_with_two_video_tracks();
+        let initial_video_tracks = state.sequence.as_ref().expect("sequence").video_tracks.len();
+        let initial_audio_tracks = state.sequence.as_ref().expect("sequence").audio_tracks.len();
+
+        state
+            .dispatch_action(timeline_add_track_action(TimelineAddTrackPayload {
+                kind: TimelineAddTrackKind::Video,
+            }))
+            .expect("add video track");
+        state
+            .dispatch_action(timeline_add_track_action(TimelineAddTrackPayload {
+                kind: TimelineAddTrackKind::Audio,
+            }))
+            .expect("add audio track");
+
+        let sequence = state.sequence.as_ref().expect("sequence");
+        assert_eq!(sequence.video_tracks.len(), initial_video_tracks + 1);
+        assert_eq!(sequence.audio_tracks.len(), initial_audio_tracks + 1);
+        assert!(state.can_undo_action());
+
+        state.undo_timeline().expect("undo audio track add");
+        let sequence = state.sequence.as_ref().expect("sequence");
+        assert_eq!(sequence.video_tracks.len(), initial_video_tracks + 1);
+        assert_eq!(sequence.audio_tracks.len(), initial_audio_tracks);
+
+        state.undo_timeline().expect("undo video track add");
+        let sequence = state.sequence.as_ref().expect("sequence");
+        assert_eq!(sequence.video_tracks.len(), initial_video_tracks);
+        assert_eq!(sequence.audio_tracks.len(), initial_audio_tracks);
     }
 
     #[test]

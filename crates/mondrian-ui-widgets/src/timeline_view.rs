@@ -24,6 +24,9 @@ pub type TimelineTrackAction = dyn Fn(TimelineTrackRef, &TimelineTrack) -> Actio
 pub type TimelineTrackControlAction =
     dyn Fn(TimelineTrackControl, TimelineTrackRef, &TimelineTrack) -> Action;
 
+/// Action factory for adding a track from the timeline corner controls.
+pub type TimelineTrackAddAction = dyn Fn(TimelineTrackKind) -> Action;
+
 /// Action factory for playhead seeking.
 pub type TimelineSeekAction = dyn Fn(i64) -> Action;
 
@@ -228,6 +231,7 @@ pub struct TimelineView {
     selected_clip: Option<TimelineClipRef>,
     hovered_clip: Option<TimelineClipRef>,
     hovered_track_control: Option<(TimelineTrackRef, TimelineTrackControl)>,
+    hovered_track_add: Option<TimelineTrackKind>,
     playhead_frame: i64,
     pixels_per_frame: f32,
     scroll_x: f32,
@@ -247,6 +251,7 @@ pub struct TimelineView {
     on_clip_select: Option<Box<TimelineClipAction>>,
     on_track_select: Option<Box<TimelineTrackAction>>,
     on_track_control: Option<Box<TimelineTrackControlAction>>,
+    on_track_add: Option<Box<TimelineTrackAddAction>>,
     on_seek: Option<Box<TimelineSeekAction>>,
     on_clip_move: Option<Box<TimelineClipMoveAction>>,
     on_clip_trim: Option<Box<TimelineClipTrimAction>>,
@@ -300,6 +305,7 @@ impl TimelineView {
             selected_clip: None,
             hovered_clip: None,
             hovered_track_control: None,
+            hovered_track_add: None,
             playhead_frame: 0,
             pixels_per_frame: 4.0,
             scroll_x: 0.0,
@@ -319,6 +325,7 @@ impl TimelineView {
             on_clip_select: None,
             on_track_select: None,
             on_track_control: None,
+            on_track_add: None,
             on_seek: None,
             on_clip_move: None,
             on_clip_trim: None,
@@ -367,6 +374,7 @@ impl TimelineView {
             self.focus_visible = false;
             self.hovered_clip = None;
             self.hovered_track_control = None;
+            self.hovered_track_add = None;
             self.selected_track = None;
             self.horizontal_scrollbar_hovered = false;
             self.vertical_scrollbar_hovered = false;
@@ -397,6 +405,12 @@ impl TimelineView {
         action: impl Fn(TimelineTrackControl, TimelineTrackRef, &TimelineTrack) -> Action + 'static,
     ) -> Self {
         self.on_track_control = Some(Box::new(action));
+        self
+    }
+
+    /// Set a dynamic add-track action factory for the timeline corner buttons.
+    pub fn on_track_add(mut self, action: impl Fn(TimelineTrackKind) -> Action + 'static) -> Self {
+        self.on_track_add = Some(Box::new(action));
         self
     }
 
@@ -666,6 +680,40 @@ impl TimelineView {
         .map(|control| (track_ref, control))
     }
 
+    fn timeline_corner_rect(&self) -> Rect {
+        Rect::new(
+            self.bounds.x,
+            self.bounds.y,
+            self.header_width,
+            self.ruler_height,
+        )
+    }
+
+    fn track_add_button_rect(&self, kind: TimelineTrackKind) -> Rect {
+        let size = 20.0;
+        let gap = 6.0;
+        let x = self.bounds.x
+            + match kind {
+                TimelineTrackKind::Video => 8.0,
+                TimelineTrackKind::Audio => 8.0 + size + gap,
+            };
+        Rect::new(
+            x,
+            self.bounds.y + (self.ruler_height - size) * 0.5,
+            size,
+            size,
+        )
+    }
+
+    fn track_add_at(&self, point: Point) -> Option<TimelineTrackKind> {
+        if !self.timeline_corner_rect().contains(point) {
+            return None;
+        }
+        [TimelineTrackKind::Video, TimelineTrackKind::Audio]
+            .into_iter()
+            .find(|kind| self.track_add_button_rect(*kind).contains(point))
+    }
+
     fn clip_rect(&self, track_index: usize, clip: &TimelineClip) -> Rect {
         self.clip_rect_at(track_index, clip.start_frame, clip)
     }
@@ -798,6 +846,18 @@ impl TimelineView {
             if let Some(factory) = &self.on_track_control {
                 (ctx.dispatch)(factory(control, track_ref, track));
             }
+        }
+        ctx.request_repaint();
+        EventResult::Handled
+    }
+
+    fn activate_track_add_from_input(
+        &mut self,
+        kind: TimelineTrackKind,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        if let Some(factory) = &self.on_track_add {
+            (ctx.dispatch)(factory(kind));
         }
         ctx.request_repaint();
         EventResult::Handled
@@ -1041,6 +1101,93 @@ impl TimelineView {
             ),
             1.0,
             colors.border,
+        );
+    }
+
+    fn paint_timeline_corner(&self, ctx: &mut PaintContext) {
+        let colors = &ctx.theme.colors;
+        let corner = self.timeline_corner_rect();
+        ctx.encoder.draw_rect(corner, colors.card, 0.0);
+        ctx.encoder.draw_line(
+            Point::new(corner.x, corner.y + corner.height - 1.0),
+            Point::new(corner.x + corner.width, corner.y + corner.height - 1.0),
+            1.0,
+            colors.border,
+        );
+        ctx.encoder.draw_line(
+            Point::new(corner.x + corner.width - 1.0, corner.y),
+            Point::new(corner.x + corner.width - 1.0, corner.y + corner.height),
+            1.0,
+            colors.border,
+        );
+        self.paint_track_add_button(ctx, TimelineTrackKind::Video);
+        self.paint_track_add_button(ctx, TimelineTrackKind::Audio);
+    }
+
+    fn paint_track_add_button(&self, ctx: &mut PaintContext, kind: TimelineTrackKind) {
+        let colors = &ctx.theme.colors;
+        let rect = self.track_add_button_rect(kind);
+        let hovered = self.hovered_track_add == Some(kind);
+        let mut bg = if hovered {
+            colors.secondary
+        } else {
+            colors.card
+        };
+        bg.a = if hovered { 0.9 } else { 0.32 };
+        ctx.encoder.draw_rect(rect, bg, ctx.theme.spacing.radius_sm);
+
+        let icon = if hovered {
+            colors.foreground
+        } else {
+            colors.muted_foreground
+        };
+        match kind {
+            TimelineTrackKind::Video => {
+                let frame = Rect::new(rect.x + 4.0, rect.y + 6.0, 8.0, 6.0);
+                ctx.encoder.draw_rect(frame, icon, 1.5);
+                ctx.encoder.draw_triangles(
+                    &[
+                        Point::new(frame.x + frame.width, frame.y + 1.2),
+                        Point::new(frame.x + frame.width + 4.0, frame.y - 0.6),
+                        Point::new(frame.x + frame.width + 4.0, frame.y + frame.height + 0.6),
+                    ],
+                    icon,
+                );
+            }
+            TimelineTrackKind::Audio => {
+                let cy = rect.center().y;
+                ctx.encoder.draw_line(
+                    Point::new(rect.x + 4.0, cy + 2.0),
+                    Point::new(rect.x + 7.0, cy - 3.0),
+                    1.4,
+                    icon,
+                );
+                ctx.encoder.draw_line(
+                    Point::new(rect.x + 7.0, cy - 3.0),
+                    Point::new(rect.x + 10.0, cy + 3.0),
+                    1.4,
+                    icon,
+                );
+                ctx.encoder.draw_line(
+                    Point::new(rect.x + 10.0, cy + 3.0),
+                    Point::new(rect.x + 13.0, cy - 2.0),
+                    1.4,
+                    icon,
+                );
+            }
+        }
+        let plus_center = Point::new(rect.x + rect.width - 5.0, rect.y + 5.0);
+        ctx.encoder.draw_line(
+            Point::new(plus_center.x - 3.0, plus_center.y),
+            Point::new(plus_center.x + 3.0, plus_center.y),
+            1.5,
+            icon,
+        );
+        ctx.encoder.draw_line(
+            Point::new(plus_center.x, plus_center.y - 3.0),
+            Point::new(plus_center.x, plus_center.y + 3.0),
+            1.5,
+            icon,
         );
     }
 
@@ -1506,6 +1653,7 @@ impl Widget for TimelineView {
             self.scrollbar_drag = None;
             self.hovered_clip = None;
             self.hovered_track_control = None;
+            self.hovered_track_add = None;
             self.horizontal_scrollbar_hovered = false;
             self.vertical_scrollbar_hovered = false;
             return EventResult::Ignored;
@@ -1578,6 +1726,9 @@ impl Widget for TimelineView {
                         return EventResult::Handled;
                     }
                 }
+                if let Some(kind) = self.track_add_at(*position) {
+                    return self.activate_track_add_from_input(kind, ctx);
+                }
                 if self.ruler_rect.contains(*position) {
                     self.playhead_dragging = true;
                     ctx.request_pointer_capture(self.id);
@@ -1635,6 +1786,12 @@ impl Widget for TimelineView {
                     return EventResult::Handled;
                 }
                 if self.set_scrollbar_hovered(*position) {
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
+                let hovered_track_add = self.track_add_at(*position);
+                if hovered_track_add != self.hovered_track_add {
+                    self.hovered_track_add = hovered_track_add;
                     ctx.request_repaint();
                     return EventResult::Handled;
                 }
@@ -1730,16 +1887,7 @@ impl Widget for TimelineView {
                 ctx.theme.spacing.radius_sm,
             );
         }
-        ctx.encoder.draw_rect(
-            Rect::new(
-                self.bounds.x,
-                self.bounds.y,
-                self.header_width,
-                self.ruler_height,
-            ),
-            colors.card,
-            0.0,
-        );
+        self.paint_timeline_corner(ctx);
 
         ctx.encoder.push_clip(self.ruler_rect);
         self.paint_ruler(ctx);
@@ -1998,6 +2146,60 @@ mod tests {
         assert_eq!(view.selected_track(), None);
         assert_eq!(view.selected_clip(), None);
         assert_eq!(actions.borrow().as_slice(), &[Action::Pause]);
+        assert!(ctx.requests.repaint);
+    }
+
+    #[test]
+    fn clicking_timeline_corner_add_buttons_dispatches_track_kind_without_seeking() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut view = timeline().on_track_add(|kind| match kind {
+            TimelineTrackKind::Video => Action::Play,
+            TimelineTrackKind::Audio => Action::Pause,
+        });
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let result = view.event(
+            &UiEvent::MouseDown {
+                position: Point::new(16.0, 15.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(view.playhead_frame(), 12);
+        assert_eq!(actions.borrow().as_slice(), &[Action::Play]);
+        assert!(ctx.requests.pointer_capture.is_none());
+        assert!(ctx.requests.repaint);
+
+        ctx.requests.repaint = false;
+        let result = view.event(
+            &UiEvent::MouseDown {
+                position: Point::new(42.0, 15.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(view.playhead_frame(), 12);
+        assert_eq!(actions.borrow().as_slice(), &[Action::Play, Action::Pause]);
+        assert!(ctx.requests.pointer_capture.is_none());
         assert!(ctx.requests.repaint);
     }
 
