@@ -17,7 +17,7 @@ use std::path::Path;
 use crate::app::ui_actions::{
     app_shell_about_action, app_shell_import_media_dialog_action,
     app_shell_new_project_dialog_action, app_shell_open_project_dialog_action,
-    app_shell_save_project_as_dialog_action, export_set_draft_action,
+    app_shell_quit_action, app_shell_save_project_as_dialog_action, export_set_draft_action,
     project_create_with_settings_action, ExportDraftUpdatePayload, ExportOutputDialogPayload,
     NewProjectDraftUpdatePayload, APP_SHELL_ABOUT, APP_SHELL_CANCEL_NEW_PROJECT_DIALOG,
     APP_SHELL_CLOSE_MODAL, APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_EXPORT_OUTPUT_DIALOG,
@@ -171,7 +171,9 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
                 MenuItem::new("Import Media...", app_shell_import_media_dialog_action()),
                 MenuItem::new("Save", Action::SaveProject),
                 MenuItem::new("Save As...", app_shell_save_project_as_dialog_action()),
-                MenuItem::new("Quit", Action::CloseProject),
+                MenuItem::separator(),
+                MenuItem::new("Close Project", Action::CloseProject),
+                MenuItem::new("Quit", app_shell_quit_action()),
             ],
         ),
         (
@@ -197,6 +199,8 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
                 MenuItem::new("Console", Action::FocusPanel(PanelKind::Console)),
                 MenuItem::new("Node Graph", Action::FocusPanel(PanelKind::NodeGraph)),
                 MenuItem::new("Export", Action::FocusPanel(PanelKind::Export)),
+                MenuItem::separator(),
+                MenuItem::new("Toggle Fullscreen", Action::ToggleFullscreen),
             ],
         ),
         (
@@ -941,6 +945,45 @@ mod tests {
             }
             other => panic!("expected app-shell about action, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn default_menu_items_separate_close_project_from_quit() {
+        let menu_items = default_menu_items();
+        let file_items = menu_items
+            .iter()
+            .find_map(|(label, items)| (*label == "File").then_some(items))
+            .expect("file menu");
+        let close_project = file_items
+            .iter()
+            .find(|item| item.label == "Close Project")
+            .expect("close project item");
+        let quit = file_items.iter().find(|item| item.label == "Quit").expect("quit item");
+
+        assert_eq!(close_project.action, Action::CloseProject);
+        match &quit.action {
+            Action::Custom { namespace, name, payload } => {
+                assert_eq!(namespace, APP_SHELL_NAMESPACE);
+                assert_eq!(name, crate::app::ui_actions::APP_SHELL_QUIT);
+                assert!(payload.is_null());
+            }
+            other => panic!("expected app-shell quit action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn default_menu_items_expose_window_fullscreen_command() {
+        let menu_items = default_menu_items();
+        let view_items = menu_items
+            .iter()
+            .find_map(|(label, items)| (*label == "View").then_some(items))
+            .expect("view menu");
+        let fullscreen = view_items
+            .iter()
+            .find(|item| item.label == "Toggle Fullscreen")
+            .expect("fullscreen item");
+
+        assert_eq!(fullscreen.action, Action::ToggleFullscreen);
     }
 
     #[test]

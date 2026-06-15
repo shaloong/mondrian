@@ -11,7 +11,8 @@ use mondrian_ui_events::EventRouter;
 
 use crate::app::ui_actions::{
     app_shell_import_media_dialog_action, app_shell_new_project_dialog_action,
-    app_shell_open_project_dialog_action, app_shell_save_project_as_dialog_action,
+    app_shell_open_project_dialog_action, app_shell_quit_action,
+    app_shell_save_project_as_dialog_action,
 };
 
 /// Register the default global shortcuts for a self-hosted editor window.
@@ -40,6 +41,16 @@ pub fn register_default_shortcuts(router: &mut EventRouter) {
         router,
         ShortcutBinding::ctrl_shift(KeyCode::S),
         app_shell_save_project_as_dialog_action(),
+    );
+    register(
+        router,
+        ShortcutBinding::ctrl(KeyCode::Q),
+        app_shell_quit_action(),
+    );
+    register(
+        router,
+        ShortcutBinding::new(KeyCode::F11, Modifiers::none()),
+        Action::ToggleFullscreen,
     );
 
     register(router, ShortcutBinding::ctrl(KeyCode::Z), Action::Undo);
@@ -144,6 +155,26 @@ mod tests {
             ),
             Some(Action::SaveProject)
         );
+        assert_eq!(
+            router.shortcut_manager().resolve(
+                KeyCode::F11,
+                Modifiers::none(),
+                ShortcutContext::default()
+            ),
+            Some(Action::ToggleFullscreen)
+        );
+        let quit_action = router
+            .shortcut_manager()
+            .resolve(KeyCode::Q, Modifiers::ctrl(), ShortcutContext::default())
+            .expect("quit shortcut");
+        match quit_action {
+            Action::Custom { namespace, name, payload } => {
+                assert_eq!(namespace, crate::app::ui_actions::APP_SHELL_NAMESPACE);
+                assert_eq!(name, crate::app::ui_actions::APP_SHELL_QUIT);
+                assert!(payload.is_null());
+            }
+            other => panic!("expected app-shell quit action, got {other:?}"),
+        }
         assert_eq!(
             router.shortcut_manager().resolve(
                 KeyCode::Digit4,

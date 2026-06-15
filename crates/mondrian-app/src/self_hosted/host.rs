@@ -10,9 +10,23 @@ use mondrian_platform::PlatformService;
 use mondrian_ui_core::types::Rect;
 use mondrian_ui_core::TreeWalker;
 
+use crate::app::ui_actions::{APP_SHELL_NAMESPACE, APP_SHELL_QUIT};
 use crate::app::AppState;
 use crate::self_hosted::action_queue::PendingUiActions;
 use crate::self_hosted::shell::SelfHostedAppRoot;
+use mondrian_editor_state::Action;
+
+/// Window-host commands produced while draining self-hosted UI actions.
+///
+/// These are native shell side effects, not editor-state mutations. Entrypoints
+/// apply them after the widget tree and `AppState` borrows have ended.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SelfHostedShellCommands {
+    /// The native window should request application exit.
+    pub quit: bool,
+    /// The native window should toggle fullscreen mode.
+    pub toggle_fullscreen: bool,
+}
 
 /// Product-facing self-hosted UI session state.
 pub struct SelfHostedUiHost {
@@ -67,15 +81,20 @@ impl SelfHostedUiHost {
         pending_actions: &PendingUiActions,
         bounds: Rect,
         platform: &dyn PlatformService,
-    ) {
+    ) -> SelfHostedShellCommands {
+        let mut commands = SelfHostedShellCommands::default();
         let actions = pending_actions.take_all();
         if actions.is_empty() {
             self.refresh_if_dirty(bounds);
-            return;
+            return commands;
         }
 
         let mut needs_layout = false;
         for action in actions {
+            if take_shell_window_command(&mut commands, &action) {
+                continue;
+            }
+
             let current_project_path = self.app_state.borrow().current_project_path.clone();
             let Some(action) =
                 self.root.handle_shell_action(action, platform, current_project_path.as_deref())
@@ -96,6 +115,23 @@ impl SelfHostedUiHost {
         if needs_layout {
             TreeWalker::layout(&mut self.root, bounds);
         }
+        commands
+    }
+}
+
+fn take_shell_window_command(commands: &mut SelfHostedShellCommands, action: &Action) -> bool {
+    match action {
+        Action::ToggleFullscreen => {
+            commands.toggle_fullscreen = true;
+            true
+        }
+        Action::Custom { namespace, name, .. }
+            if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_QUIT =>
+        {
+            commands.quit = true;
+            true
+        }
+        _ => false,
     }
 }
 
@@ -172,13 +208,34 @@ mod tests {
         let pending = PendingUiActions::default();
 
         pending.push(Action::NoOp);
-        host.drain_pending_actions(
+        let commands = host.drain_pending_actions(
             &pending,
             Rect::new(0.0, 0.0, 1280.0, 720.0),
             &NoopPlatformService,
         );
 
+        assert_eq!(commands, SelfHostedShellCommands::default());
         assert!(host.root().dock().ratio() > 0.0);
+    }
+
+    #[test]
+    fn host_returns_window_commands_without_dispatching_to_app_state() {
+        let mut host = SelfHostedUiHost::new(AppState::new());
+        let pending = PendingUiActions::default();
+
+        pending.push(Action::ToggleFullscreen);
+        pending.push(crate::app::ui_actions::app_shell_quit_action());
+        let commands = host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+
+        assert_eq!(
+            commands,
+            SelfHostedShellCommands { quit: true, toggle_fullscreen: true }
+        );
+        assert!(!host.app_state().has_open_project());
     }
 
     #[test]
@@ -189,11 +246,12 @@ mod tests {
         pending.push(crate::app::ui_actions::assets_prepare_drag_action(
             crate::app::ui_actions::AssetsPrepareDragPayload { asset_id: AssetId::new() },
         ));
-        host.drain_pending_actions(
+        let commands = host.drain_pending_actions(
             &pending,
             Rect::new(0.0, 0.0, 1280.0, 720.0),
             &NoopPlatformService,
         );
+        assert_eq!(commands, SelfHostedShellCommands::default());
         assert!(
             host.app_state().status_hint.as_ref().is_some_and(|(message, is_error)| {
                 *is_error && message.contains("素材准备失败")

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use mondrian_app::app::AppState;
 use mondrian_app::self_hosted::action_queue::PendingUiActions;
-use mondrian_app::self_hosted::host::SelfHostedUiHost;
+use mondrian_app::self_hosted::host::{SelfHostedShellCommands, SelfHostedUiHost};
 use mondrian_app::self_hosted::runtime::{
     winit_cursor_icon_for_ui_state, winit_mouse_button_to_ui_button,
     winit_scroll_delta_to_ui_delta, WinitUiRuntime,
@@ -115,7 +115,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &mut modifiers_state,
                     &dispatch_action,
                 );
-                host.drain_pending_actions(&pending_actions, current_bounds.get(), &platform);
+                apply_shell_commands(
+                    host.drain_pending_actions(&pending_actions, current_bounds.get(), &platform),
+                    &window,
+                    elwt,
+                );
                 if pressed && is_escape && result == EventResult::Ignored {
                     elwt.exit();
                 }
@@ -130,7 +134,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ime,
                     &dispatch_action,
                 );
-                host.drain_pending_actions(&pending_actions, current_bounds.get(), &platform);
+                apply_shell_commands(
+                    host.drain_pending_actions(&pending_actions, current_bounds.get(), &platform),
+                    &window,
+                    elwt,
+                );
                 window.request_redraw();
             }
 
@@ -200,7 +208,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     UiEvent::MouseMove { position: last_cursor, modifiers: modifiers_state },
                     &dispatch_action,
                 );
-                host.drain_pending_actions(&pending_actions, current_bounds.get(), &platform);
+                apply_shell_commands(
+                    host.drain_pending_actions(&pending_actions, current_bounds.get(), &platform),
+                    &window,
+                    elwt,
+                );
                 let zones = host.root().dock().collect_grab_zones();
                 let dir = zones.iter().find(|(z, _)| z.contains(last_cursor)).map(|(_, d)| *d);
                 window.set_cursor_icon(winit_cursor_icon_for_ui_state(
@@ -236,7 +248,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         last_cursor,
                         &dispatch_action,
                     );
-                    host.drain_pending_actions(&pending_actions, current_bounds.get(), &platform);
+                    apply_shell_commands(
+                        host.drain_pending_actions(
+                            &pending_actions,
+                            current_bounds.get(),
+                            &platform,
+                        ),
+                        &window,
+                        elwt,
+                    );
                 } else {
                     let _ = ui_runtime.route_window_event(
                         &window,
@@ -245,7 +265,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         evt,
                         &dispatch_action,
                     );
-                    host.drain_pending_actions(&pending_actions, current_bounds.get(), &platform);
+                    apply_shell_commands(
+                        host.drain_pending_actions(
+                            &pending_actions,
+                            current_bounds.get(),
+                            &platform,
+                        ),
+                        &window,
+                        elwt,
+                    );
                 }
                 window.request_redraw();
             }
@@ -262,7 +290,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     },
                     &dispatch_action,
                 );
-                host.drain_pending_actions(&pending_actions, current_bounds.get(), &platform);
+                apply_shell_commands(
+                    host.drain_pending_actions(&pending_actions, current_bounds.get(), &platform),
+                    &window,
+                    elwt,
+                );
                 window.request_redraw();
             }
 
@@ -277,7 +309,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         modifiers_state,
                         &dispatch_action,
                     );
-                    host.drain_pending_actions(&pending_actions, current_bounds.get(), &platform);
+                    apply_shell_commands(
+                        host.drain_pending_actions(
+                            &pending_actions,
+                            current_bounds.get(),
+                            &platform,
+                        ),
+                        &window,
+                        elwt,
+                    );
                     window.request_redraw();
                     elwt.set_control_flow(ControlFlow::Poll);
                 }
@@ -287,4 +327,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     Ok(())
+}
+
+fn apply_shell_commands(
+    commands: SelfHostedShellCommands,
+    window: &winit::window::Window,
+    elwt: &winit::event_loop::ActiveEventLoop,
+) {
+    if commands.toggle_fullscreen {
+        toggle_window_fullscreen(window);
+    }
+    if commands.quit {
+        elwt.exit();
+    }
+}
+
+fn toggle_window_fullscreen(window: &winit::window::Window) {
+    if window.fullscreen().is_some() {
+        window.set_fullscreen(None);
+    } else {
+        window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(
+            window.current_monitor(),
+        )));
+    }
 }

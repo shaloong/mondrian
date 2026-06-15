@@ -140,7 +140,12 @@ platform file dialogs directly.
 Those app-shell dialog intents are built through `app::ui_actions` helpers so
 menus and self-hosted panels share the same stable custom-action ids. Shell
 local actions, such as About and close-modal, use the same helper boundary
-even when they do not resolve to editor-state actions.
+even when they do not resolve to editor-state actions. Native window commands
+are deliberately separate from editor state: Quit is emitted as
+`app.shell.quit`, and `Action::ToggleFullscreen` is consumed by the
+self-hosted host as a `SelfHostedShellCommands` value for the winit entrypoint.
+They must not be dispatched into `AppState`, where `CloseProject` keeps the
+narrow meaning of closing the current project.
 `self_hosted::shell::resolve_app_shell_action` is the tested boundary that
 turns those intents into concrete project creation, `OpenProject`,
 `ImportMedia`, and `SaveProjectAs` actions after a native adapter supplies
@@ -667,6 +672,10 @@ binaries should use these types rather than open-coding shell/AppState
 dispatch. The host refreshes panel models after every dispatched editor action,
 including actions that return an error, because action handlers may still update
 status hints or other user-visible state before reporting the failure.
+`SelfHostedUiHost::drain_pending_actions` also returns window-host commands
+such as quit and toggle-fullscreen. Entrypoints apply those commands only after
+event routing and model refresh have completed, so native side effects stay out
+of widget code and out of `AppState`.
 Project/status panel models should keep transient status rows near the top of
 the list, before command rows, so error feedback from failed actions is visible
 without requiring the user to scroll a compact dock panel.

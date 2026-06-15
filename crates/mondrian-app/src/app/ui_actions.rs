@@ -99,6 +99,8 @@ pub const APP_SHELL_EXPORT_OUTPUT_DIALOG: &str = "export_output_dialog";
 pub const APP_SHELL_ABOUT: &str = "about";
 /// App-shell request to close the current shell-local modal.
 pub const APP_SHELL_CLOSE_MODAL: &str = "close_modal";
+/// App-shell request to quit the native application window.
+pub const APP_SHELL_QUIT: &str = "quit";
 
 /// Clip edge being trimmed by a timeline UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -544,6 +546,11 @@ pub fn app_shell_about_action() -> Action {
 /// Build an app-shell request for closing the current shell-local modal.
 pub fn app_shell_close_modal_action() -> Action {
     custom_app_shell_action(APP_SHELL_CLOSE_MODAL)
+}
+
+/// Build an app-shell request for quitting the native application window.
+pub fn app_shell_quit_action() -> Action {
+    custom_app_shell_action(APP_SHELL_QUIT)
 }
 
 fn custom_timeline_action<T: Serialize>(name: &'static str, payload: T) -> Action {
