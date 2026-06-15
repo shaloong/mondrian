@@ -557,6 +557,11 @@ confused with the app-layer `ui.assets`, `ui.effects`, `ui.timeline`, or
 The lower-left dock exposes that Project status as the first tab beside
 Console, so product-shell state is visible in the default layout without adding
 another split.
+Self-hosted `FocusPanel` and current View-menu `TogglePanel` actions activate
+the matching dock panel or grouped tab through shell-local dock traversal and do
+not continue into `AppState`. True hide/show panel visibility should be added
+as a separate dock-tree policy so it can handle split collapse and restoration
+deliberately.
 The self-hosted Assets panel maps real library rows to `ui.assets.prepare_drag`;
 `AppState` resolves the asset record and reuses the existing `begin_drag_asset`
 path so later Timeline drop handling stays shared with the egui implementation.

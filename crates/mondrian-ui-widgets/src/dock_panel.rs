@@ -54,6 +54,12 @@ impl DockPanel {
         self.tab_bar.active_index()
     }
 
+    /// Activate one tab and rebuild content when the active tab changes.
+    pub fn set_active_index(&mut self, index: usize) {
+        self.tab_bar.set_active(index);
+        self.sync_active_tab();
+    }
+
     /// Panel kind carried by the content slot.
     pub fn kind(&self) -> SlotKind {
         self.kind
@@ -142,6 +148,14 @@ impl Widget for DockPanel {
             1 => Some(self.content.as_mut()),
             _ => None,
         }
+    }
+
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
     }
 }
 
@@ -262,6 +276,30 @@ mod tests {
         );
 
         assert_eq!(result, EventResult::Handled);
+        assert_eq!(panel.active_index(), 1);
+        assert_eq!(build_count.get(), 2);
+        assert!(laid_out.get());
+    }
+
+    #[test]
+    fn dock_panel_set_active_index_rebuilds_content() {
+        let build_count = Rc::new(Cell::new(0));
+        let laid_out = Rc::new(Cell::new(false));
+        let mut panel = DockPanel::new(PanelKind::Inspector, tabs(), {
+            let build_count = Rc::clone(&build_count);
+            let laid_out = Rc::clone(&laid_out);
+            move |_kind, _active| {
+                build_count.set(build_count.get() + 1);
+                Box::new(ProbeContent::new(
+                    Rc::new(Cell::new(false)),
+                    Rc::clone(&laid_out),
+                ))
+            }
+        });
+        panel.layout(Rect::new(0.0, 0.0, 200.0, 120.0));
+
+        panel.set_active_index(1);
+
         assert_eq!(panel.active_index(), 1);
         assert_eq!(build_count.get(), 2);
         assert!(laid_out.get());

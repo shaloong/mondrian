@@ -9,6 +9,7 @@ use mondrian_platform::{FileFilter, PlatformService};
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, Widget};
+use mondrian_ui_widgets::dock_panel::DockPanel;
 use mondrian_ui_widgets::dock_splitter::DockSplitter;
 use mondrian_ui_widgets::menu::{Dropdown, MenuItem};
 use std::path::Path;
@@ -387,6 +388,16 @@ impl SelfHostedAppRoot {
         self.set_models(SelfHostedPanelModels::from_app_state(state));
     }
 
+    /// Activate a dock panel or grouped tab in the default self-hosted layout.
+    pub fn activate_panel(&mut self, panel: PanelKind) -> bool {
+        let (owner, active_index) = dock_panel_location(panel);
+        let activated = activate_panel_in_widget(&mut self.dock, owner, active_index);
+        if activated && self.bounds.width > 0.0 && self.bounds.height > 0.0 {
+            self.layout(self.bounds);
+        }
+        activated
+    }
+
     /// Apply a shell-local action and return an editor action when one should
     /// continue to [`AppState`](crate::app::AppState).
     pub fn handle_shell_action(
@@ -396,6 +407,10 @@ impl SelfHostedAppRoot {
         current_project_path: Option<&Path>,
     ) -> Option<Action> {
         match action {
+            Action::FocusPanel(panel) | Action::TogglePanel(panel) => {
+                self.activate_panel(panel);
+                None
+            }
             Action::Custom { namespace, name, .. }
                 if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_NEW_PROJECT_DIALOG =>
             {
@@ -466,6 +481,41 @@ impl SelfHostedAppRoot {
             action => resolve_app_shell_action(action, platform, current_project_path),
         }
     }
+}
+
+fn dock_panel_location(panel: PanelKind) -> (PanelKind, usize) {
+    match panel {
+        PanelKind::Assets => (PanelKind::Assets, 0),
+        PanelKind::Effects => (PanelKind::Assets, 1),
+        PanelKind::Project => (PanelKind::Console, 0),
+        PanelKind::Console => (PanelKind::Console, 1),
+        PanelKind::Export => (PanelKind::Console, 2),
+        PanelKind::Viewer | PanelKind::Timeline | PanelKind::Inspector | PanelKind::NodeGraph => {
+            (panel, 0)
+        }
+    }
+}
+
+fn activate_panel_in_widget(
+    widget: &mut dyn Widget,
+    owner: PanelKind,
+    active_index: usize,
+) -> bool {
+    if let Some(panel) = widget.as_any_mut().and_then(|any| any.downcast_mut::<DockPanel>()) {
+        if panel.kind() == owner {
+            panel.set_active_index(active_index);
+            return true;
+        }
+    }
+
+    for index in 0..widget.child_count() {
+        if let Some(child) = widget.child_mut(index) {
+            if activate_panel_in_widget(child, owner, active_index) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 impl Widget for SelfHostedAppRoot {
@@ -683,6 +733,22 @@ mod tests {
         menu_mouse_up(menu, ctx, position);
     }
 
+    fn active_index_for_dock_panel(widget: &dyn Widget, kind: PanelKind) -> Option<usize> {
+        if let Some(panel) = widget.as_any().and_then(|any| any.downcast_ref::<DockPanel>()) {
+            if panel.kind() == kind {
+                return Some(panel.active_index());
+            }
+        }
+        for index in 0..widget.child_count() {
+            if let Some(child) = widget.child(index) {
+                if let Some(active) = active_index_for_dock_panel(child, kind) {
+                    return Some(active);
+                }
+            }
+        }
+        None
+    }
+
     #[test]
     fn default_menu_bar_exposes_primary_menu_groups() {
         let menu = MenuBar::default();
@@ -792,6 +858,38 @@ mod tests {
             }
             other => panic!("expected app-shell about action, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn app_root_focus_panel_activates_grouped_export_tab_without_editor_action() {
+        let platform = FakePlatform::default();
+        let mut root = SelfHostedAppRoot::demo();
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+
+        let action =
+            root.handle_shell_action(Action::FocusPanel(PanelKind::Export), &platform, None);
+
+        assert_eq!(action, None);
+        assert_eq!(
+            active_index_for_dock_panel(&root, PanelKind::Console),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn app_root_toggle_panel_activates_grouped_effects_tab_without_editor_action() {
+        let platform = FakePlatform::default();
+        let mut root = SelfHostedAppRoot::demo();
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+
+        let action =
+            root.handle_shell_action(Action::TogglePanel(PanelKind::Effects), &platform, None);
+
+        assert_eq!(action, None);
+        assert_eq!(
+            active_index_for_dock_panel(&root, PanelKind::Assets),
+            Some(1)
+        );
     }
 
     #[test]
