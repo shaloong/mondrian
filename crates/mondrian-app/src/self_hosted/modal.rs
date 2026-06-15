@@ -96,6 +96,10 @@ impl Widget for ShellModal {
         }
     }
 
+    fn overlay_hit_test(&self, point: Point) -> bool {
+        self.hit_test(point)
+    }
+
     fn child_count(&self) -> usize {
         match self {
             Self::About(dialog) => dialog.child_count(),

@@ -670,8 +670,8 @@ impl Widget for SelfHostedAppRoot {
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
-        self.menu_bar.paint(ctx);
         self.dock.paint(ctx);
+        self.menu_bar.paint(ctx);
         if let Some(modal) = &self.modal {
             modal.paint(ctx);
         }
@@ -720,11 +720,61 @@ mod tests {
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::{Rational, Resolution};
     use mondrian_timeline::sequence::PreviewRenderFormat;
+    use mondrian_ui_core::tree::WidgetTreeView;
+    use mondrian_ui_core::widget::{DrawCommandEncoder, PaintContext};
     use mondrian_ui_core::EventRequests;
     use mondrian_ui_core::Widget;
+    use mondrian_ui_events::hit_test::hit_test_deepest;
     use std::cell::RefCell;
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
+
+    #[derive(Default)]
+    struct PaintOrderRecorder {
+        texts: Vec<String>,
+    }
+
+    impl DrawCommandEncoder for PaintOrderRecorder {
+        fn push_clip(&mut self, _bounds: Rect) {}
+
+        fn pop_clip(&mut self) {}
+
+        fn draw_rect(&mut self, _bounds: Rect, _color: mondrian_core::Color, _corner_radius: f32) {}
+
+        fn draw_line(
+            &mut self,
+            _start: Point,
+            _end: Point,
+            _width: f32,
+            _color: mondrian_core::Color,
+        ) {
+        }
+
+        fn draw_text(
+            &mut self,
+            text: &str,
+            _font_size: f32,
+            _position: Point,
+            _color: mondrian_core::Color,
+        ) {
+            self.texts.push(text.to_owned());
+        }
+
+        fn draw_text_box(
+            &mut self,
+            text: &str,
+            _font_size: f32,
+            _position: Point,
+            _max_width: f32,
+            _color: mondrian_core::Color,
+        ) {
+            self.texts.push(text.to_owned());
+        }
+
+        fn push_translate(&mut self, _offset: glam::Vec2) {}
+
+        fn pop_transform(&mut self) {}
+    }
 
     #[derive(Debug, Default)]
     struct FakePlatform {
@@ -1563,6 +1613,85 @@ mod tests {
             root.child(2).map(Widget::id),
             root.modal.as_ref().map(Widget::id)
         );
+    }
+
+    #[test]
+    fn app_root_paints_in_bottom_to_top_z_order() {
+        let mut root = SelfHostedAppRoot::demo();
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        let theme = mondrian_ui_theme::ThemePreset::Dark.build();
+        let mut encoder = PaintOrderRecorder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 1280.0, 720.0),
+        };
+
+        root.paint(&mut ctx);
+
+        let first_menu_text = encoder
+            .texts
+            .iter()
+            .position(|text| text == "File")
+            .expect("menu bar should paint");
+        assert!(
+            first_menu_text > 0,
+            "dock content must paint before menu chrome: {:?}",
+            encoder.texts
+        );
+
+        let platform = FakePlatform::default();
+        root.handle_shell_action(app_shell_about_action(), &platform, None);
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        let mut encoder = PaintOrderRecorder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 1280.0, 720.0),
+        };
+
+        root.paint(&mut ctx);
+
+        let menu_text = encoder
+            .texts
+            .iter()
+            .position(|text| text == "File")
+            .expect("menu bar should paint");
+        let modal_text = encoder
+            .texts
+            .iter()
+            .rposition(|text| text == "Mondrian")
+            .expect("modal title should paint");
+        assert!(menu_text < modal_text, "modal must paint above menu chrome");
+    }
+
+    #[test]
+    fn app_root_modal_overlay_wins_over_open_menu_overlay() {
+        let mut root = SelfHostedAppRoot::demo();
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let dispatch = |_| {};
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        click_menu(&mut root.menu_bar, &mut ctx, Point::new(20.0, 14.0));
+        let platform = FakePlatform::default();
+        root.handle_shell_action(app_shell_about_action(), &platform, None);
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        let modal_id = root.modal.as_ref().map(Widget::id).expect("active modal");
+        let tree = WidgetTreeView::new(&mut root);
+
+        let hit = hit_test_deepest(&tree, Point::new(50.0, 50.0));
+
+        assert_eq!(hit, Some(modal_id));
     }
 
     #[test]
