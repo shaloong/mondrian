@@ -557,6 +557,9 @@ The pending queue lives in `self_hosted::action_queue`; `SelfHostedUiHost`
 drains it after routing and applies shell/AppState refresh policy. Entry
 binaries should use these types rather than open-coding shell/AppState
 dispatch.
+Registered self-hosted UI action namespaces are strict protocols: known
+namespaces with unknown action names return workflow errors instead of being
+silently ignored, so widget/app wiring mistakes fail during development.
 The new-project dialog edits the real `SelfHostedNewProjectDraft` settings via
 typed draft-update payloads and presents validated production presets for frame
 size, frame rate, audio sample rate, proxy generation, and preview caching.

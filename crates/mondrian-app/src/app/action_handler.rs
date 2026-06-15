@@ -594,13 +594,7 @@ impl AppState {
                 self.seek(payload.frame.max(0));
                 Ok(())
             }
-            _ => {
-                tracing::debug!(
-                    target: "mondrian::action",
-                    "Unknown self-hosted timeline action: {name}"
-                );
-                Ok(())
-            }
+            _ => Err(unknown_ui_action_error("timeline_ui_action", name)),
         }
     }
 
@@ -687,13 +681,7 @@ impl AppState {
                 )
                 .map(|_| ())
             }
-            _ => {
-                tracing::debug!(
-                    target: "mondrian::action",
-                    "Unknown self-hosted inspector action: {name}"
-                );
-                Ok(())
-            }
+            _ => Err(unknown_ui_action_error("inspector_ui_action", name)),
         }
     }
 
@@ -715,13 +703,7 @@ impl AppState {
                 )
                 .map(|_| ())
             }
-            _ => {
-                tracing::debug!(
-                    target: "mondrian::action",
-                    "Unknown self-hosted effects action: {name}"
-                );
-                Ok(())
-            }
+            _ => Err(unknown_ui_action_error("effects_ui_action", name)),
         }
     }
 
@@ -735,13 +717,7 @@ impl AppState {
                 )?;
                 self.prepare_asset_drag_from_ui(payload)
             }
-            _ => {
-                tracing::debug!(
-                    target: "mondrian::action",
-                    "Unknown self-hosted assets action: {name}"
-                );
-                Ok(())
-            }
+            _ => Err(unknown_ui_action_error("assets_ui_action", name)),
         }
     }
 
@@ -755,13 +731,7 @@ impl AppState {
                 )?;
                 self.create_project_from_ui(payload)
             }
-            _ => {
-                tracing::debug!(
-                    target: "mondrian::action",
-                    "Unknown self-hosted project action: {name}"
-                );
-                Ok(())
-            }
+            _ => Err(unknown_ui_action_error("project_ui_action", name)),
         }
     }
 
@@ -1104,6 +1074,13 @@ fn parse_ui_payload<T: serde::de::DeserializeOwned>(
     })
 }
 
+fn unknown_ui_action_error(step_prefix: &'static str, name: &str) -> MondrianError {
+    MondrianError::WorkflowStepFailed {
+        step_id: format!("{step_prefix}.{name}"),
+        reason: format!("unknown self-hosted UI action: {name}"),
+    }
+}
+
 fn missing_sequence_error(step_id: &'static str) -> MondrianError {
     MondrianError::WorkflowStepFailed {
         step_id: step_id.to_string(),
@@ -1193,6 +1170,34 @@ mod tests {
             vec![SelectedClipRef { track_id, is_video_track: true, clip_id }]
         );
         assert!(!state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_registered_ui_namespaces_reject_unknown_action_names() {
+        for (namespace, expected_step) in [
+            (TIMELINE_NAMESPACE, "timeline_ui_action.unknown"),
+            (INSPECTOR_NAMESPACE, "inspector_ui_action.unknown"),
+            (EFFECTS_NAMESPACE, "effects_ui_action.unknown"),
+            (ASSETS_NAMESPACE, "assets_ui_action.unknown"),
+            (PROJECT_NAMESPACE, "project_ui_action.unknown"),
+        ] {
+            let mut state = AppState::new();
+            let err = state
+                .dispatch_action(mondrian_editor_state::Action::Custom {
+                    namespace: namespace.into(),
+                    name: "unknown".into(),
+                    payload: serde_json::Value::Null,
+                })
+                .expect_err("registered UI namespace should reject unknown action names");
+
+            match err {
+                MondrianError::WorkflowStepFailed { step_id, reason } => {
+                    assert_eq!(step_id, expected_step);
+                    assert!(reason.contains("unknown self-hosted UI action"));
+                }
+                other => panic!("expected unknown UI action workflow error, got {other:?}"),
+            }
+        }
     }
 
     #[test]
