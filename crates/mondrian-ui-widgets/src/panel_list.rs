@@ -108,6 +108,7 @@ pub struct PanelList {
     scrollbar_dragging: bool,
     drag_start_y: f32,
     drag_start_scroll_y: f32,
+    drop_hovered: bool,
     drag_candidate: Option<PanelListDragCandidate>,
     last_click: Option<PanelListClick>,
     focused: bool,
@@ -149,6 +150,7 @@ impl PanelList {
             scrollbar_dragging: false,
             drag_start_y: 0.0,
             drag_start_scroll_y: 0.0,
+            drop_hovered: false,
             drag_candidate: None,
             last_click: None,
             focused: false,
@@ -206,6 +208,7 @@ impl PanelList {
         self.items = items;
         self.selected = self.selected.filter(|idx| self.is_enabled_index(*idx));
         self.hovered = None;
+        self.drop_hovered = false;
         self.drag_candidate = None;
         self.last_click = None;
         self.clamp_scroll();
@@ -680,18 +683,25 @@ impl Widget for PanelList {
             UiEvent::DragEnter { position, .. } | UiEvent::DragOver { position, .. }
                 if self.on_drop.is_some() && self.bounds.contains(*position) =>
             {
-                ctx.request_repaint();
+                if !self.drop_hovered {
+                    self.drop_hovered = true;
+                    ctx.request_repaint();
+                }
                 return EventResult::Handled;
             }
             UiEvent::Drop { payload, position }
                 if self.on_drop.is_some() && self.bounds.contains(*position) =>
             {
+                self.drop_hovered = false;
                 self.drop_payload(payload, *position, ctx);
                 ctx.request_repaint();
                 return EventResult::Handled;
             }
             UiEvent::DragLeave if self.on_drop.is_some() => {
-                ctx.request_repaint();
+                if self.drop_hovered {
+                    self.drop_hovered = false;
+                    ctx.request_repaint();
+                }
                 return EventResult::Handled;
             }
             UiEvent::FocusGained => {
@@ -703,6 +713,7 @@ impl Widget for PanelList {
                 self.focused = false;
                 self.focus_visible = false;
                 self.drag_candidate = None;
+                self.drop_hovered = false;
                 self.last_click = None;
                 return EventResult::Handled;
             }
@@ -796,6 +807,20 @@ impl Widget for PanelList {
         if self.focus_visible {
             let mut ring = colors.ring;
             ring.a = 0.34;
+            ctx.encoder
+                .draw_rect(self.bounds.inset(-2.0, -2.0), ring, spacing.radius_sm + 2.0);
+        }
+
+        if self.drop_hovered {
+            let mut fill = colors.accent;
+            fill.a = 0.12;
+            ctx.encoder.draw_rect(
+                self.viewport.inset(-2.0, -2.0),
+                fill,
+                spacing.radius_sm + 1.0,
+            );
+            let mut ring = colors.ring;
+            ring.a = 0.48;
             ctx.encoder
                 .draw_rect(self.bounds.inset(-2.0, -2.0), ring, spacing.radius_sm + 2.0);
         }
@@ -1095,6 +1120,56 @@ mod tests {
             &[Action::ImportMedia(vec![path])]
         );
         assert!(requests.repaint);
+    }
+
+    #[test]
+    fn file_drag_hover_sets_and_clears_drop_feedback() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut list = PanelList::new("Assets", sample_items())
+            .on_drop(|_payload, _position| Some(Action::NoOp));
+        list.layout(Rect::new(0.0, 0.0, 240.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        {
+            let mut ctx = dispatching_ctx(
+                &mut focus,
+                &mut shortcut,
+                &mut tooltip,
+                &mut requests,
+                &dispatch,
+            );
+            let result = list.event(
+                &UiEvent::DragEnter {
+                    payload: DragPayload::File(vec![PathBuf::from("E:/media/clip.mov")]),
+                    position: Point::new(24.0, 76.0),
+                },
+                &mut ctx,
+            );
+
+            assert_eq!(result, EventResult::Handled);
+            assert!(list.drop_hovered);
+            assert!(requests.repaint);
+        }
+
+        requests.repaint = false;
+        {
+            let mut ctx = dispatching_ctx(
+                &mut focus,
+                &mut shortcut,
+                &mut tooltip,
+                &mut requests,
+                &dispatch,
+            );
+            let result = list.event(&UiEvent::DragLeave, &mut ctx);
+
+            assert_eq!(result, EventResult::Handled);
+            assert!(!list.drop_hovered);
+            assert!(requests.repaint);
+        }
     }
 
     #[test]
