@@ -132,6 +132,11 @@ offline-asset checks, and `RenderJob` creation through
 Self-hosted export forms persist their editable draft in `AppState::export_draft`
 through `ui.export.set_draft`, so widget-tree refreshes and dock layout changes
 do not reset selected preset, selected sequence, range, or output path.
+Choosing an export output path is also an app-shell intent: panels emit
+`app.shell.export_output_dialog` with a suggested name/container extension, and
+`self_hosted::shell::resolve_app_shell_action` converts the native save-dialog
+result into `ui.export.set_draft(OutputPath(...))`. Widgets must not call
+platform file dialogs directly.
 Those app-shell dialog intents are built through `app::ui_actions` helpers so
 menus and self-hosted panels share the same stable custom-action ids. Shell
 local actions, such as About and close-modal, use the same helper boundary

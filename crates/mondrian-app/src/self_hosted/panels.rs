@@ -35,23 +35,25 @@ use mondrian_ui_widgets::{
 
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
 use crate::app::ui_actions::{
-    app_shell_import_media_dialog_action, app_shell_new_project_dialog_action,
-    app_shell_open_project_dialog_action, app_shell_save_project_as_dialog_action,
-    assets_prepare_drag_action, effects_add_to_clip_action, export_enqueue_action,
-    export_set_draft_action, inspector_remove_effect_action, inspector_set_clip_curve_action,
+    app_shell_export_output_dialog_action, app_shell_import_media_dialog_action,
+    app_shell_new_project_dialog_action, app_shell_open_project_dialog_action,
+    app_shell_save_project_as_dialog_action, assets_prepare_drag_action,
+    effects_add_to_clip_action, export_enqueue_action, export_set_draft_action,
+    inspector_remove_effect_action, inspector_set_clip_curve_action,
     inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
     inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
     inspector_set_effect_enabled_action, timeline_add_track_action, timeline_drop_asset_action,
     timeline_move_clip_action, timeline_move_track_action, timeline_seek_action,
     timeline_select_clip_action, timeline_set_track_control_action, timeline_trim_clip_action,
     AssetsPrepareDragPayload, EffectsAddToClipPayload, ExportDraftUpdatePayload,
-    ExportEnqueuePayload, InspectorClipRefPayload, InspectorClipTransformField,
-    InspectorCurvePointPayload, InspectorRemoveEffectPayload, InspectorSetClipCurvePayload,
-    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
-    InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload, TimelineAddTrackKind,
-    TimelineAddTrackPayload, TimelineDropAssetPayload, TimelineMoveClipPayload,
-    TimelineMoveTrackPayload, TimelineSelectClipPayload, TimelineSetTrackControlPayload,
-    TimelineTrackControlPayloadKind, TimelineTrimClipPayload, TimelineTrimPayloadEdge,
+    ExportEnqueuePayload, ExportOutputDialogPayload, InspectorClipRefPayload,
+    InspectorClipTransformField, InspectorCurvePointPayload, InspectorRemoveEffectPayload,
+    InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
+    InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
+    InspectorSetEffectEnabledPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
+    TimelineDropAssetPayload, TimelineMoveClipPayload, TimelineMoveTrackPayload,
+    TimelineSelectClipPayload, TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind,
+    TimelineTrimClipPayload, TimelineTrimPayloadEdge,
 };
 use crate::app::{AppState, SelectedClipRef};
 
@@ -1507,17 +1509,29 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
         ],
     );
 
+    let selected_preset = model.selected_preset();
+    let output_extension = selected_preset.map(export_preset_extension).unwrap_or("mp4").to_owned();
+    let output_browse = Button::new("Browse...").on_click(app_shell_export_output_dialog_action(
+        ExportOutputDialogPayload {
+            default_file_name: export_default_file_name(selected_preset),
+            extension: output_extension,
+        },
+    ));
     let output_input = TextInput::new("Output path")
         .with_text(model.output_path.clone())
         .on_change(|text| {
             export_set_draft_action(ExportDraftUpdatePayload::OutputPath(text.to_owned()))
         });
+    let output_row = FlexContainer::row(vec![
+        FlexChild::flex(Box::new(output_input), 1.0),
+        FlexChild::fixed(Box::new(output_browse)),
+    ])
+    .with_gap(8.0);
     let enqueue_action = model.enqueue_payload().map(export_enqueue_action).unwrap_or(Action::NoOp);
     let enqueue_button = Button::new("Add to queue")
         .enabled(model.can_enqueue())
         .on_click(enqueue_action);
 
-    let selected_preset = model.selected_preset();
     let sequence_summary = selected_sequence
         .map(|sequence| {
             format!(
@@ -1564,13 +1578,20 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
         )
         .with_section(
             PropertySection::new("Output")
-                .with_row(PropertyRow::new("Path", Box::new(output_input)))
+                .with_row(PropertyRow::new("Path", Box::new(output_row)))
                 .with_row(PropertyRow::new(
                     "Status",
                     Box::new(Label::new(status_text).muted()),
                 ))
                 .with_row(PropertyRow::new("", Box::new(enqueue_button))),
         )
+}
+
+fn export_default_file_name(preset: Option<&ExportPreset>) -> String {
+    format!(
+        "mondrian-export.{}",
+        preset.map(export_preset_extension).unwrap_or("mp4")
+    )
 }
 
 fn export_preset_summary(preset: Option<&ExportPreset>) -> String {

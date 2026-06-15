@@ -16,11 +16,13 @@ use std::path::Path;
 use crate::app::ui_actions::{
     app_shell_about_action, app_shell_import_media_dialog_action,
     app_shell_new_project_dialog_action, app_shell_open_project_dialog_action,
-    app_shell_save_project_as_dialog_action, project_create_with_settings_action,
+    app_shell_save_project_as_dialog_action, export_set_draft_action,
+    project_create_with_settings_action, ExportDraftUpdatePayload, ExportOutputDialogPayload,
     NewProjectDraftUpdatePayload, APP_SHELL_ABOUT, APP_SHELL_CANCEL_NEW_PROJECT_DIALOG,
-    APP_SHELL_CLOSE_MODAL, APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_IMPORT_MEDIA_DIALOG,
-    APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_NEW_PROJECT_DRAFT_CHANGED,
-    APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
+    APP_SHELL_CLOSE_MODAL, APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_EXPORT_OUTPUT_DIALOG,
+    APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
+    APP_SHELL_NEW_PROJECT_DRAFT_CHANGED, APP_SHELL_OPEN_PROJECT_DIALOG,
+    APP_SHELL_SAVE_PROJECT_AS_DIALOG,
 };
 use crate::app::AppState;
 use crate::self_hosted::modal::ShellModal;
@@ -51,6 +53,23 @@ pub fn media_import_filters() -> Vec<FileFilter> {
         FileFilter::new("Video", vec!["mp4", "mov", "mkv", "webm", "avi"]),
         FileFilter::new("Audio", vec!["mp3", "wav", "aac", "flac", "m4a"]),
     ]
+}
+
+/// File dialog filter for timeline export output commands.
+pub fn export_output_filters(extension: &str) -> Vec<FileFilter> {
+    let extension = normalized_export_extension(extension);
+    if extension.is_empty() {
+        vec![FileFilter::new(
+            "Media",
+            vec!["mp4", "mov", "mkv", "gif", "mxf", "webm"],
+        )]
+    } else {
+        vec![FileFilter::new("Export", vec![extension])]
+    }
+}
+
+fn normalized_export_extension(extension: &str) -> String {
+    extension.trim().trim_start_matches('.').trim().to_ascii_lowercase()
 }
 
 /// Resolve a self-hosted app-shell action into a concrete editor action.
@@ -106,7 +125,39 @@ pub fn resolve_app_shell_action(
                 )
                 .map(Action::SaveProjectAs)
         }
+        Action::Custom { namespace, name, payload }
+            if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_EXPORT_OUTPUT_DIALOG =>
+        {
+            let payload: ExportOutputDialogPayload = serde_json::from_value(payload).ok()?;
+            let extension = normalized_export_extension(&payload.extension);
+            let default_name =
+                normalized_export_default_file_name(&payload.default_file_name, &extension);
+            platform
+                .save_file_dialog(
+                    "Choose Export Output",
+                    &default_name,
+                    &export_output_filters(&extension),
+                )
+                .map(|path| {
+                    export_set_draft_action(ExportDraftUpdatePayload::OutputPath(
+                        path.display().to_string(),
+                    ))
+                })
+        }
         action => Some(action),
+    }
+}
+
+fn normalized_export_default_file_name(default_file_name: &str, extension: &str) -> String {
+    let trimmed = default_file_name.trim();
+    if !trimmed.is_empty() {
+        return trimmed.to_owned();
+    }
+
+    if extension.is_empty() {
+        "mondrian-export.mp4".to_owned()
+    } else {
+        format!("mondrian-export.{extension}")
     }
 }
 
@@ -495,10 +546,12 @@ mod tests {
     use crate::app::ui_actions::{
         app_shell_about_action, app_shell_cancel_new_project_dialog_action,
         app_shell_close_modal_action, app_shell_confirm_new_project_dialog_action,
-        app_shell_import_media_dialog_action, app_shell_new_project_dialog_action,
-        app_shell_new_project_draft_changed_action, app_shell_open_project_dialog_action,
-        app_shell_save_project_as_dialog_action, NewProjectDraftUpdatePayload,
-        ProjectCreateWithSettingsPayload, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
+        app_shell_export_output_dialog_action, app_shell_import_media_dialog_action,
+        app_shell_new_project_dialog_action, app_shell_new_project_draft_changed_action,
+        app_shell_open_project_dialog_action, app_shell_save_project_as_dialog_action,
+        ExportDraftUpdatePayload, ExportOutputDialogPayload, NewProjectDraftUpdatePayload,
+        ProjectCreateWithSettingsPayload, EXPORT_NAMESPACE, EXPORT_SET_DRAFT,
+        PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
     };
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::{Rational, Resolution};
@@ -763,6 +816,25 @@ mod tests {
             .extensions
             .iter()
             .any(|extension| extension == PROJECT_FILE_EXTENSION));
+    }
+
+    #[test]
+    fn export_output_filters_normalize_requested_extension() {
+        let filters = export_output_filters(".MP4 ");
+
+        assert_eq!(filters.len(), 1);
+        assert_eq!(filters[0].name, "Export");
+        assert_eq!(filters[0].extensions, vec!["mp4"]);
+    }
+
+    #[test]
+    fn export_output_filters_fall_back_for_empty_extension() {
+        let filters = export_output_filters(" . ");
+
+        assert_eq!(filters.len(), 1);
+        assert_eq!(filters[0].name, "Media");
+        assert!(filters[0].extensions.iter().any(|extension| extension == "mp4"));
+        assert!(filters[0].extensions.iter().any(|extension| extension == "gif"));
     }
 
     #[test]
@@ -1055,6 +1127,38 @@ mod tests {
         assert_eq!(
             action,
             Some(Action::SaveProjectAs(PathBuf::from("E:/projects/out.mdp")))
+        );
+    }
+
+    #[test]
+    fn resolve_app_shell_export_output_dialog_returns_draft_update() {
+        let platform = FakePlatform {
+            open_paths: None,
+            save_path: Some(PathBuf::from("E:/renders/deliverable.mp4")),
+        };
+
+        let action = resolve_app_shell_action(
+            app_shell_export_output_dialog_action(ExportOutputDialogPayload {
+                default_file_name: "rough-cut.mp4".to_owned(),
+                extension: ".MP4".to_owned(),
+            }),
+            &platform,
+            None,
+        )
+        .expect("export output action");
+
+        let Action::Custom { namespace, name, payload } = action else {
+            panic!("expected export draft action");
+        };
+        assert_eq!(namespace, EXPORT_NAMESPACE);
+        assert_eq!(name, EXPORT_SET_DRAFT);
+        let payload: ExportDraftUpdatePayload =
+            serde_json::from_value(payload).expect("export draft payload");
+        assert_eq!(
+            payload,
+            ExportDraftUpdatePayload::OutputPath(
+                PathBuf::from("E:/renders/deliverable.mp4").display().to_string()
+            )
         );
     }
 

@@ -93,6 +93,8 @@ pub const APP_SHELL_OPEN_PROJECT_DIALOG: &str = "open_project_dialog";
 pub const APP_SHELL_IMPORT_MEDIA_DIALOG: &str = "import_media_dialog";
 /// App-shell request to open a platform project save-as dialog.
 pub const APP_SHELL_SAVE_PROJECT_AS_DIALOG: &str = "save_project_as_dialog";
+/// App-shell request to choose a timeline export output file.
+pub const APP_SHELL_EXPORT_OUTPUT_DIALOG: &str = "export_output_dialog";
 /// App-shell request to show product about information.
 pub const APP_SHELL_ABOUT: &str = "about";
 /// App-shell request to close the current shell-local modal.
@@ -353,6 +355,15 @@ pub enum ExportDraftUpdatePayload {
     OutputPath(String),
 }
 
+/// Platform save-dialog defaults for choosing an export output file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExportOutputDialogPayload {
+    /// Suggested file name shown by the native save dialog.
+    pub default_file_name: String,
+    /// Preferred container extension without a leading dot.
+    pub extension: String,
+}
+
 /// Create a project at a user-selected path with explicit initial settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectCreateWithSettingsPayload {
@@ -518,6 +529,11 @@ pub fn app_shell_import_media_dialog_action() -> Action {
 /// Build an app-shell request for saving the current project to a chosen path.
 pub fn app_shell_save_project_as_dialog_action() -> Action {
     custom_app_shell_action(APP_SHELL_SAVE_PROJECT_AS_DIALOG)
+}
+
+/// Build an app-shell request for choosing an export output file.
+pub fn app_shell_export_output_dialog_action(payload: ExportOutputDialogPayload) -> Action {
+    custom_app_shell_action_with_payload(APP_SHELL_EXPORT_OUTPUT_DIALOG, payload)
 }
 
 /// Build an app-shell request for showing product about information.
