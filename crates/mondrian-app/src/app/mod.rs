@@ -51,6 +51,7 @@ use crate::shortcuts::{ShortcutAction, ShortcutBinding, ShortcutKey, ShortcutPre
 
 const PROJECT_EXTENSION: &str = "mdp";
 const DEFAULT_ADJUSTMENT_LAYER_DURATION_SECS: f64 = 5.0;
+const MAX_STATUS_LOG_ENTRIES: usize = 64;
 
 mod action_handler;
 mod animation_state;
@@ -174,6 +175,15 @@ pub enum AppClipboardKind {
     AnimationKeyframes,
     /// Timeline clips copied from the active sequence.
     Clips,
+}
+
+/// One user-visible runtime status message retained for diagnostics panels.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusLogEntry {
+    /// Human-readable status message.
+    pub message: String,
+    /// Whether the message represents an error.
+    pub is_error: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -632,6 +642,8 @@ pub struct AppState {
 
     // 底部状态栏提示（message, is_error）
     pub status_hint: Option<(String, bool)>,
+    /// Bounded history of user-visible status messages for diagnostics panels.
+    pub status_log: Vec<StatusLogEntry>,
 
     // 动画选择状态（timeline / inspector / future graph 共用）
     pub animation_selection: AnimationSelectionState,
@@ -719,6 +731,7 @@ impl AppState {
             render_queue: RenderQueue::new(),
             export_draft: TimelineExportDraft::default(),
             status_hint: None,
+            status_log: Vec::new(),
             animation_selection: AnimationSelectionState::default(),
             animation_clipboard: None,
             clip_clipboard: None,
@@ -757,11 +770,31 @@ impl AppState {
     }
 
     pub fn set_status_hint(&mut self, message: impl Into<String>, is_error: bool) {
-        self.status_hint = Some((message.into(), is_error));
+        let message = message.into();
+        self.status_hint = Some((message.clone(), is_error));
+        self.push_status_log(message, is_error);
     }
 
     pub fn clear_status_hint(&mut self) {
         self.status_hint = None;
+    }
+
+    fn push_status_log(&mut self, message: String, is_error: bool) {
+        if message.trim().is_empty() {
+            return;
+        }
+        if self
+            .status_log
+            .last()
+            .is_some_and(|entry| entry.message == message && entry.is_error == is_error)
+        {
+            return;
+        }
+        self.status_log.push(StatusLogEntry { message, is_error });
+        let overflow = self.status_log.len().saturating_sub(MAX_STATUS_LOG_ENTRIES);
+        if overflow > 0 {
+            self.status_log.drain(0..overflow);
+        }
     }
 
     pub fn set_auto_proxy_enabled(&mut self, enabled: bool) {
@@ -784,6 +817,54 @@ impl AppState {
 impl Default for AppState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod status_log_tests {
+    use super::*;
+
+    #[test]
+    fn set_status_hint_records_bounded_status_log_without_duplicate_tail() {
+        let mut state = AppState::new();
+
+        state.set_status_hint("Ready", false);
+        state.set_status_hint("Ready", false);
+        state.set_status_hint("Failed", true);
+
+        assert_eq!(
+            state.status_log,
+            vec![
+                StatusLogEntry { message: "Ready".to_owned(), is_error: false },
+                StatusLogEntry { message: "Failed".to_owned(), is_error: true },
+            ]
+        );
+
+        for index in 0..(MAX_STATUS_LOG_ENTRIES + 4) {
+            state.set_status_hint(format!("Message {index}"), false);
+        }
+
+        assert_eq!(state.status_log.len(), MAX_STATUS_LOG_ENTRIES);
+        assert_eq!(
+            state.status_log.first().expect("first status").message,
+            "Message 4"
+        );
+        assert_eq!(
+            state.status_log.last().expect("last status").message,
+            format!("Message {}", MAX_STATUS_LOG_ENTRIES + 3)
+        );
+    }
+
+    #[test]
+    fn clear_status_hint_preserves_status_log_history() {
+        let mut state = AppState::new();
+
+        state.set_status_hint("Saved", false);
+        state.clear_status_hint();
+
+        assert!(state.status_hint.is_none());
+        assert_eq!(state.status_log.len(), 1);
+        assert_eq!(state.status_log[0].message, "Saved");
     }
 }
 

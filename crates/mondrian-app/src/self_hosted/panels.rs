@@ -379,17 +379,20 @@ impl PanelListModel {
         PanelListModel::new("Effects", items).with_subtitle("Effect browser")
     }
 
-    /// Summarize app runtime status for the console panel until the real log
-    /// buffer is wired into self-hosted panels.
+    /// Build the console panel from recent app status history plus runtime summary.
     pub fn from_app_status(state: &AppState) -> Self {
         let mut items = Vec::new();
-        if let Some((message, is_error)) = &state.status_hint {
-            let mut item = PanelListItem::new(if *is_error { "Error" } else { "Status" })
-                .with_subtitle(message.clone());
-            if *is_error {
-                item = item.with_badge("!");
-            }
-            items.push(item);
+        for entry in state.status_log.iter().rev().take(8) {
+            items.push(status_log_item(entry.message.clone(), entry.is_error));
+        }
+
+        if items.is_empty() {
+            items.push(
+                PanelListItem::new("No messages")
+                    .with_subtitle("Status history is empty")
+                    .with_badge("OK")
+                    .disabled(true),
+            );
         }
 
         let sequence_label = state
@@ -432,6 +435,16 @@ impl PanelListModel {
         )
         .with_subtitle("Self-hosted panel")
     }
+}
+
+fn status_log_item(message: String, is_error: bool) -> PanelListItem {
+    let mut item = PanelListItem::new(if is_error { "Error" } else { "Status" })
+        .with_subtitle(message)
+        .with_badge(if is_error { "ERR" } else { "OK" });
+    if is_error {
+        item = item.with_accent(Color::from_hex(0xB91C1C));
+    }
+    item
 }
 
 /// Viewer panel data independent from preview texture plumbing.
@@ -2179,6 +2192,8 @@ mod tests {
         assert!(!models.effects.items.is_empty());
         assert_eq!(models.console.title, "Console");
         assert!(!models.console.items.is_empty());
+        assert_eq!(models.console.items[0].title, "No messages");
+        assert!(models.console.items[0].disabled);
         assert_eq!(models.viewer.title, "Viewer");
         assert!(!models.viewer.enabled);
         assert_eq!(models.viewer.resolution_label, "No signal");
@@ -2219,6 +2234,25 @@ mod tests {
             payload.output_path,
             std::path::PathBuf::from("E:/renders/deliverable.mp4")
         );
+    }
+
+    #[test]
+    fn console_panel_model_reads_recent_status_log_newest_first() {
+        let mut state = AppState::new();
+        for index in 0..10 {
+            state.set_status_hint(format!("status {index}"), index == 7);
+        }
+
+        let model = PanelListModel::from_app_status(&state);
+
+        assert_eq!(model.title, "Console");
+        assert_eq!(model.items[0].subtitle, "status 9");
+        assert_eq!(model.items[0].badge.as_deref(), Some("OK"));
+        assert_eq!(model.items[2].subtitle, "status 7");
+        assert_eq!(model.items[2].badge.as_deref(), Some("ERR"));
+        assert!(model.items[2].accent.is_some());
+        assert!(!model.items.iter().any(|item| item.subtitle == "status 1"));
+        assert!(model.items.iter().any(|item| item.title == "Sequence"));
     }
 
     #[test]
