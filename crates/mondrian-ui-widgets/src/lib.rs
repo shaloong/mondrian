@@ -13,6 +13,7 @@ pub mod dock_splitter;
 pub mod dock_tab_bar;
 pub mod flex_container;
 pub mod form_layout;
+pub mod icon_button;
 pub mod label;
 pub mod list;
 pub mod menu;
@@ -26,6 +27,7 @@ pub mod slider;
 pub mod text_input;
 mod text_metrics;
 pub mod timeline_view;
+pub mod vector_icon;
 pub mod viewer_surface;
 
 #[cfg(test)]
@@ -47,6 +49,7 @@ pub use dock_splitter::DockSplitter;
 pub use dock_tab_bar::{DockTabBar, TabInfo};
 pub use flex_container::{FlexChild, FlexContainer};
 pub use form_layout::{FormLayout, FormRowOptions, FormRowRects};
+pub use icon_button::{IconButton, IconButtonIcon};
 pub use label::Label;
 pub use list::{List, ListItem};
 pub use menu::{Dropdown, MenuItem};
@@ -65,4 +68,5 @@ pub use timeline_view::{
     TimelineTrackKind, TimelineTrackMove, TimelineTrackMoveAction, TimelineTrackRef,
     TimelineTrimEdge, TimelineView,
 };
+pub use vector_icon::{VectorIcon, VectorIconError};
 pub use viewer_surface::ViewerSurface;

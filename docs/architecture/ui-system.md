@@ -866,6 +866,14 @@ manually wrapped inside individual widgets. Tooltip widgets draw border, fill,
 and text commands in that order. Standard focus-visible outer rings use the
 shared widget paint helper so their alpha, outset, and corner-radius expansion
 stay consistent across buttons, dropdowns, pickers, lists, and other controls.
+Icon-only buttons paint `VectorIcon` geometry rather than text glyphs. SVG is an
+import format for designers: the widget layer parses SVG paths, uses lyon to
+tessellate fills and strokes into a cached theme-tinted triangle mesh, then
+emits triangle draw commands. Built-in chevrons remain a convenience fallback,
+not the long-term authoring format.
+Bundled SVGs should be loaded through `VectorIcon::from_static_svg` with a
+stable icon id so parsing and lyon tessellation happen once; repeated widget-tree
+construction must clone cached geometry rather than reparsing XML.
 Controls with different geometry, such as slider thumb halos or inset timeline
 focus borders, may keep local painting while preserving the same theme token
 vocabulary.
