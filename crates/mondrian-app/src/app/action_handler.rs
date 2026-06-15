@@ -800,6 +800,7 @@ impl AppState {
     }
 
     fn set_clip_enabled_from_ui(&mut self, clip_id: ClipId, enabled: bool) -> Result<()> {
+        self.ensure_clip_track_unlocked("inspector_set_clip_enabled", clip_id)?;
         let Some(seq) = self.sequence.as_mut() else {
             return Err(missing_sequence_error("inspector_set_clip_enabled"));
         };
@@ -816,6 +817,7 @@ impl AppState {
     }
 
     fn set_clip_opacity_from_ui(&mut self, clip_id: ClipId, opacity_percent: f32) -> Result<()> {
+        self.ensure_clip_track_unlocked("inspector_set_clip_opacity", clip_id)?;
         let Some(seq) = self.sequence.as_mut() else {
             return Err(missing_sequence_error("inspector_set_clip_opacity"));
         };
@@ -846,6 +848,7 @@ impl AppState {
         clip_id: ClipId,
         color: mondrian_core::Color,
     ) -> Result<()> {
+        self.ensure_clip_track_unlocked("inspector_set_clip_tint", clip_id)?;
         let Some(seq) = self.sequence.as_mut() else {
             return Err(missing_sequence_error("inspector_set_clip_tint"));
         };
@@ -882,6 +885,7 @@ impl AppState {
             });
         }
 
+        self.ensure_clip_track_unlocked("inspector_set_clip_transform_field", clip_id)?;
         let Some(seq) = self.sequence.as_mut() else {
             return Err(missing_sequence_error("inspector_set_clip_transform_field"));
         };
@@ -972,6 +976,7 @@ impl AppState {
                 reason: "curve points must be finite".to_string(),
             });
         }
+        self.ensure_clip_track_unlocked("inspector_set_clip_curve", payload.clip.clip_id)?;
         let Some(seq) = self.sequence.as_mut() else {
             return Err(missing_sequence_error("inspector_set_clip_curve"));
         };
@@ -1009,6 +1014,19 @@ impl AppState {
             }
         }
         self.record_timeline_edit_snapshot("调整片段不透明度曲线", before);
+        Ok(())
+    }
+
+    fn ensure_clip_track_unlocked(&self, step_id: &'static str, clip_id: ClipId) -> Result<()> {
+        let Some(seq) = self.sequence.as_ref() else {
+            return Err(missing_sequence_error(step_id));
+        };
+        let Some((track_id, _, is_locked)) = find_clip_track_lock(seq, clip_id) else {
+            return Err(missing_clip_error(step_id, clip_id));
+        };
+        if is_locked {
+            return Err(MondrianError::TrackLocked { track_id: track_id.to_string() });
+        }
         Ok(())
     }
 }
@@ -1993,6 +2011,56 @@ mod tests {
         assert!((clip.transform.evaluate_opacity(TimeCode::new(20, tb)) - 0.72).abs() < 1.0e-6);
         assert!((clip.transform.evaluate_opacity(TimeCode::new(30, tb)) - 1.0).abs() < 1.0e-6);
         assert!(state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_inspector_clip_mutations_preserve_locked_track() {
+        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+        state.sequence.as_mut().expect("sequence").video_tracks[0].is_locked = true;
+        let clip_ref = inspector_clip_payload(track_id, clip_id);
+
+        for action in [
+            inspector_set_clip_enabled_action(InspectorSetClipEnabledPayload {
+                clip: clip_ref,
+                enabled: false,
+            }),
+            inspector_set_clip_opacity_action(InspectorSetClipOpacityPayload {
+                clip: clip_ref,
+                opacity_percent: 42.0,
+            }),
+            inspector_set_clip_tint_action(InspectorSetClipTintPayload {
+                clip: clip_ref,
+                color: Color::from_hex(0x2255AA),
+            }),
+            inspector_set_clip_transform_field_action(InspectorSetClipTransformFieldPayload {
+                clip: clip_ref,
+                field: InspectorClipTransformField::PositionX,
+                value: 128.0,
+            }),
+            inspector_set_clip_curve_action(InspectorSetClipCurvePayload {
+                clip: clip_ref,
+                points: vec![
+                    InspectorCurvePointPayload { x: 0.0, y: 0.0 },
+                    InspectorCurvePointPayload { x: 1.0, y: 0.5 },
+                ],
+            }),
+        ] {
+            let err = state
+                .dispatch_action(action)
+                .expect_err("locked track should reject inspector clip mutation");
+            assert!(matches!(err, MondrianError::TrackLocked { .. }));
+        }
+
+        let sequence = state.sequence.as_ref().expect("sequence");
+        let clip = &sequence.video_tracks[0].clips[0];
+        assert!(!clip.is_disabled);
+        assert_eq!(clip.solid_color, None);
+        assert_eq!(
+            clip.transform.get_position(sequence.playhead),
+            glam::Vec2::ZERO
+        );
+        assert!((clip.transform.evaluate_opacity(sequence.playhead) - 1.0).abs() < 1.0e-6);
+        assert!(!state.can_undo_action());
     }
 
     #[test]
