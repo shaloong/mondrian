@@ -207,6 +207,9 @@ impl EventRouter {
         dispatch: &dyn Fn(Action),
     ) -> EventResult {
         self.prune_stale_widget_state(tree, dispatch);
+        if matches!(&event, UiEvent::FocusLost) {
+            return self.route_window_focus_lost(tree, dispatch);
+        }
         if self.active_drag.is_some() {
             match &event {
                 UiEvent::MouseMove { position, .. } => {
@@ -215,7 +218,7 @@ impl EventRouter {
                 UiEvent::MouseUp { position, button: MouseButton::Left, .. } => {
                     return self.route_active_drag_drop(*position, tree, dispatch);
                 }
-                UiEvent::FocusLost | UiEvent::KeyDown { key: KeyCode::Escape, .. } => {
+                UiEvent::KeyDown { key: KeyCode::Escape, .. } => {
                     self.cancel_active_drag(tree, dispatch);
                     return EventResult::Handled;
                 }
@@ -449,6 +452,30 @@ impl EventRouter {
         } else if let Some(target) = target {
             self.dispatch_bubbling_event(tree, target, &UiEvent::DragOver { position }, dispatch);
         }
+        EventResult::Handled
+    }
+
+    fn route_window_focus_lost(
+        &mut self,
+        tree: &mut dyn WidgetTree,
+        dispatch: &dyn Fn(Action),
+    ) -> EventResult {
+        let focused = self.focus_mgr.focused_widget();
+
+        self.cancel_active_drag(tree, dispatch);
+        self.hovered = None;
+        self.tooltip.hide();
+
+        if let Some(focused) = focused {
+            self.send_focus_lost(tree, focused, dispatch);
+        }
+
+        self.focus_mgr.clear_focus();
+        self.focused = None;
+        self.captured = None;
+        self.last_ime_request = Some(ImeRequest { enabled: false, cursor_area: None });
+        self.repaint_requested = true;
+
         EventResult::Handled
     }
 
@@ -1169,6 +1196,68 @@ mod tests {
         let ime = router.take_ime_request().expect("blur should disable IME");
         assert!(!ime.enabled);
         assert_eq!(ime.cursor_area, None);
+    }
+
+    #[test]
+    fn router_clears_focus_capture_and_ime_on_window_focus_loss() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let root = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(root);
+
+        router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.focused(), Some(root));
+        assert_eq!(router.captured(), Some(root));
+        let ime = router.take_ime_request().expect("focused widget should enable IME");
+        assert!(ime.enabled);
+        assert!(ime.cursor_area.is_some());
+        log.borrow_mut().clear();
+
+        let result = router.route(UiEvent::FocusLost, &mut tree, &|_| {});
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(router.focused(), None);
+        assert_eq!(router.focus_manager().focused_widget(), None);
+        assert_eq!(router.captured(), None);
+        assert_eq!(router.hovered(), None);
+        assert_eq!(log.borrow().as_slice(), ["focus-lost"]);
+        let ime = router.take_ime_request().expect("window blur should disable IME");
+        assert!(!ime.enabled);
+        assert_eq!(ime.cursor_area, None);
+        assert!(router.take_repaint_request());
+    }
+
+    #[test]
+    fn router_cancels_active_drag_on_window_focus_loss() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let root = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(root);
+        let asset_id = AssetId::new();
+        router.active_drag = Some(ActiveDrag {
+            payload: DragPayload::Asset(asset_id),
+            target: Some(root),
+        });
+        router.set_capture(Some(root));
+
+        let result = router.route(UiEvent::FocusLost, &mut tree, &|_| {});
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(log.borrow().as_slice(), ["drag-leave"]);
+        assert!(router.active_drag_payload().is_none());
+        assert_eq!(router.captured(), None);
+        let ime = router.take_ime_request().expect("window blur should disable IME");
+        assert!(!ime.enabled);
     }
 
     #[test]

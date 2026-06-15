@@ -1242,6 +1242,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 modifiers_state = winit_modifiers_to_ui_modifiers(modifiers);
             }
 
+            Event::WindowEvent { event: WindowEvent::Focused(false), .. } => {
+                modifiers_state = Modifiers::none();
+                let _ = route_demo_window_event(
+                    &window,
+                    &mut router,
+                    &mut root,
+                    UiEvent::FocusLost,
+                    &mut ui_runtime,
+                );
+                window.request_redraw();
+            }
+
             // Keyboard input → dispatch KeyDown / TextInput to widget tree
             Event::WindowEvent {
                 event: WindowEvent::KeyboardInput { event: key_event, .. },

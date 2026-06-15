@@ -657,6 +657,11 @@ through the widget tree first and only treat it as a window close when ignored.
 Entrypoints must also consume `WindowEvent::ModifiersChanged` through
 `winit_modifiers_to_ui_modifiers`; key-edge tracking is only a fallback for the
 current keyboard event and must not be the sole source of modifier state.
+When a winit window reports `WindowEvent::Focused(false)`, entrypoints must
+route `UiEvent::FocusLost` and reset the tracked modifiers to
+`Modifiers::none()`. The router treats that as a window-level blur: active
+drags are cancelled, capture and hover are released, focused widgets receive
+`FocusLost`, IME is disabled, and tooltip state is hidden.
 Pointer and wheel events, including runtime-synthesized pointer events such as
 eyedropper polling, must carry the current modifier state tracked by the
 entrypoint so timeline zoom, alternate drag modes, and shifted scrolling do not

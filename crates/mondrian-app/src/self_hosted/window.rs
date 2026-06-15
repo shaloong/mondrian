@@ -104,6 +104,23 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                 modifiers_state = winit_modifiers_to_ui_modifiers(modifiers);
             }
 
+            Event::WindowEvent { event: WindowEvent::Focused(false), .. } => {
+                modifiers_state = Modifiers::none();
+                let _ = ui_runtime.route_window_event(
+                    &window,
+                    &mut router,
+                    host.root_mut(),
+                    UiEvent::FocusLost,
+                    &dispatch_action,
+                );
+                apply_shell_commands(
+                    host.drain_pending_actions(&pending_actions, current_bounds.get(), &platform),
+                    &window,
+                    elwt,
+                );
+                window.request_redraw();
+            }
+
             Event::WindowEvent {
                 event: WindowEvent::KeyboardInput { event: key_event, .. },
                 ..
