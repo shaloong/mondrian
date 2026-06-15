@@ -31,6 +31,7 @@ use crate::self_hosted::new_project_dialog::{
     default_project_file_name, SelfHostedNewProjectDraft,
 };
 use crate::self_hosted::panels::{build_dock_tree_for_preset, SelfHostedPanelModels};
+use mondrian_core::{MondrianError, Result};
 
 /// Height reserved for the self-hosted top menu bar.
 pub const MENU_BAR_HEIGHT: f32 = 28.0;
@@ -81,6 +82,21 @@ pub fn resolve_app_shell_action(
     platform: &dyn PlatformService,
     current_project_path: Option<&Path>,
 ) -> Option<Action> {
+    match try_resolve_app_shell_action(action, platform, current_project_path) {
+        Ok(action) => action,
+        Err(err) => {
+            tracing::warn!("self-hosted app-shell action failed: {err}");
+            None
+        }
+    }
+}
+
+/// Resolve a self-hosted app-shell action and report protocol errors.
+pub fn try_resolve_app_shell_action(
+    action: Action,
+    platform: &dyn PlatformService,
+    current_project_path: Option<&Path>,
+) -> Result<Option<Action>> {
     match action {
         Action::Custom { namespace, name, .. }
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_NEW_PROJECT_DIALOG =>
@@ -89,24 +105,33 @@ pub fn resolve_app_shell_action(
                 "Create Mondrian Project",
                 &format!("Untitled.{PROJECT_FILE_EXTENSION}"),
                 &project_file_filters(),
-            )?;
+            );
+            let Some(path) = path else {
+                return Ok(None);
+            };
             let draft = SelfHostedNewProjectDraft::from_project_path(&path);
-            Some(project_create_with_settings_action(
+            Ok(Some(project_create_with_settings_action(
                 draft.into_payload(path),
-            ))
+            )))
         }
         Action::Custom { namespace, name, .. }
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_OPEN_PROJECT_DIALOG =>
         {
-            let paths =
-                platform.open_file_dialog("Open Mondrian Project", &project_file_filters())?;
-            paths.into_iter().next().map(Action::OpenProject)
+            let Some(paths) =
+                platform.open_file_dialog("Open Mondrian Project", &project_file_filters())
+            else {
+                return Ok(None);
+            };
+            Ok(paths.into_iter().next().map(Action::OpenProject))
         }
         Action::Custom { namespace, name, .. }
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_IMPORT_MEDIA_DIALOG =>
         {
-            let paths = platform.open_file_dialog("Import Media", &media_import_filters())?;
-            (!paths.is_empty()).then_some(Action::ImportMedia(paths))
+            let Some(paths) = platform.open_file_dialog("Import Media", &media_import_filters())
+            else {
+                return Ok(None);
+            };
+            Ok((!paths.is_empty()).then_some(Action::ImportMedia(paths)))
         }
         Action::Custom { namespace, name, .. }
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_SAVE_PROJECT_AS_DIALOG =>
@@ -116,22 +141,23 @@ pub fn resolve_app_shell_action(
                 .and_then(|name| name.to_str())
                 .map(str::to_string)
                 .unwrap_or_else(|| format!("untitled.{PROJECT_FILE_EXTENSION}"));
-            platform
+            Ok(platform
                 .save_file_dialog(
                     "Save Mondrian Project As",
                     &default_name,
                     &project_file_filters(),
                 )
-                .map(Action::SaveProjectAs)
+                .map(Action::SaveProjectAs))
         }
         Action::Custom { namespace, name, payload }
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_EXPORT_OUTPUT_DIALOG =>
         {
-            let payload: ExportOutputDialogPayload = serde_json::from_value(payload).ok()?;
+            let payload: ExportOutputDialogPayload = serde_json::from_value(payload)
+                .map_err(|err| app_shell_action_error(&name, err))?;
             let extension = normalized_export_extension(&payload.extension);
             let default_name =
                 normalized_export_default_file_name(&payload.default_file_name, &extension);
-            platform
+            Ok(platform
                 .save_file_dialog(
                     "Choose Export Output",
                     &default_name,
@@ -141,9 +167,26 @@ pub fn resolve_app_shell_action(
                     export_set_draft_action(ExportDraftUpdatePayload::OutputPath(
                         path.display().to_string(),
                     ))
-                })
+                }))
         }
-        action => Some(action),
+        Action::Custom { namespace, name, .. } if namespace == APP_SHELL_NAMESPACE => {
+            Err(unknown_app_shell_action_error(&name))
+        }
+        action => Ok(Some(action)),
+    }
+}
+
+fn app_shell_action_error(name: &str, err: serde_json::Error) -> MondrianError {
+    MondrianError::WorkflowStepFailed {
+        step_id: format!("app_shell_action.{name}"),
+        reason: format!("invalid action payload: {err}"),
+    }
+}
+
+fn unknown_app_shell_action_error(name: &str) -> MondrianError {
+    MondrianError::WorkflowStepFailed {
+        step_id: format!("app_shell_action.{name}"),
+        reason: format!("unknown self-hosted app-shell action: {name}"),
     }
 }
 
@@ -455,14 +498,30 @@ impl SelfHostedAppRoot {
         platform: &dyn PlatformService,
         current_project_path: Option<&Path>,
     ) -> Option<Action> {
+        match self.try_handle_shell_action(action, platform, current_project_path) {
+            Ok(action) => action,
+            Err(err) => {
+                tracing::warn!("self-hosted shell action failed: {err}");
+                None
+            }
+        }
+    }
+
+    /// Apply a shell-local action and report shell protocol errors.
+    pub fn try_handle_shell_action(
+        &mut self,
+        action: Action,
+        platform: &dyn PlatformService,
+        current_project_path: Option<&Path>,
+    ) -> Result<Option<Action>> {
         match action {
             Action::FocusPanel(panel) | Action::TogglePanel(panel) => {
                 self.activate_panel(panel);
-                None
+                Ok(None)
             }
             Action::SwitchWorkspace(preset) => {
                 self.switch_workspace(preset);
-                None
+                Ok(None)
             }
             Action::Custom { namespace, name, .. }
                 if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_NEW_PROJECT_DIALOG =>
@@ -471,7 +530,7 @@ impl SelfHostedAppRoot {
                 if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
                     self.layout(self.bounds);
                 }
-                None
+                Ok(None)
             }
             Action::Custom { namespace, name, payload }
                 if namespace == APP_SHELL_NAMESPACE
@@ -484,14 +543,14 @@ impl SelfHostedAppRoot {
                         dialog.apply_update(update);
                     }
                 }
-                None
+                Ok(None)
             }
             Action::Custom { namespace, name, .. }
                 if namespace == APP_SHELL_NAMESPACE
                     && name == APP_SHELL_CANCEL_NEW_PROJECT_DIALOG =>
             {
                 self.modal = None;
-                None
+                Ok(None)
             }
             Action::Custom { namespace, name, .. }
                 if namespace == APP_SHELL_NAMESPACE
@@ -504,17 +563,19 @@ impl SelfHostedAppRoot {
                     .map(|dialog| dialog.draft().clone())
                     .unwrap_or_default();
                 if draft.validate().is_err() {
-                    return None;
+                    return Ok(None);
                 }
-                let path = platform.save_file_dialog(
+                let Some(path) = platform.save_file_dialog(
                     "Create Mondrian Project",
                     &default_project_file_name(&draft.name),
                     &project_file_filters(),
-                )?;
+                ) else {
+                    return Ok(None);
+                };
                 self.modal = None;
-                Some(project_create_with_settings_action(
+                Ok(Some(project_create_with_settings_action(
                     draft.into_payload(path),
-                ))
+                )))
             }
             Action::Custom { namespace, name, .. }
                 if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_ABOUT =>
@@ -523,15 +584,15 @@ impl SelfHostedAppRoot {
                 if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
                     self.layout(self.bounds);
                 }
-                None
+                Ok(None)
             }
             Action::Custom { namespace, name, .. }
                 if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_CLOSE_MODAL =>
             {
                 self.modal = None;
-                None
+                Ok(None)
             }
-            action => resolve_app_shell_action(action, platform, current_project_path),
+            action => try_resolve_app_shell_action(action, platform, current_project_path),
         }
     }
 }
@@ -1445,6 +1506,30 @@ mod tests {
         let action = resolve_app_shell_action(Action::SaveProject, &platform, None);
 
         assert_eq!(action, Some(Action::SaveProject));
+    }
+
+    #[test]
+    fn try_resolve_app_shell_unknown_action_returns_protocol_error() {
+        let platform = FakePlatform::default();
+
+        let err = try_resolve_app_shell_action(
+            Action::Custom {
+                namespace: APP_SHELL_NAMESPACE.into(),
+                name: "missing_command".into(),
+                payload: serde_json::Value::Null,
+            },
+            &platform,
+            None,
+        )
+        .expect_err("unknown app-shell command should fail");
+
+        match err {
+            MondrianError::WorkflowStepFailed { step_id, reason } => {
+                assert_eq!(step_id, "app_shell_action.missing_command");
+                assert!(reason.contains("unknown self-hosted app-shell action"));
+            }
+            other => panic!("expected app-shell workflow error, got {other:?}"),
+        }
     }
 
     #[test]

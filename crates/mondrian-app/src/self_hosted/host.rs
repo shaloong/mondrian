@@ -96,11 +96,25 @@ impl SelfHostedUiHost {
             }
 
             let current_project_path = self.app_state.borrow().current_project_path.clone();
-            let Some(action) =
-                self.root.handle_shell_action(action, platform, current_project_path.as_deref())
-            else {
-                needs_layout = true;
-                continue;
+            let action = match self.root.try_handle_shell_action(
+                action,
+                platform,
+                current_project_path.as_deref(),
+            ) {
+                Ok(Some(action)) => action,
+                Ok(None) => {
+                    needs_layout = true;
+                    continue;
+                }
+                Err(err) => {
+                    tracing::warn!("custom UI shell action failed: {err}");
+                    self.app_state
+                        .borrow_mut()
+                        .set_status_hint(format!("UI shell action failed: {err}"), true);
+                    self.mark_dirty();
+                    needs_layout = true;
+                    continue;
+                }
             };
 
             tracing::debug!(?action, "custom UI action");
@@ -236,6 +250,30 @@ mod tests {
             SelfHostedShellCommands { quit: true, toggle_fullscreen: true }
         );
         assert!(!host.app_state().has_open_project());
+    }
+
+    #[test]
+    fn host_reports_unknown_app_shell_actions_as_status_errors() {
+        let mut host = SelfHostedUiHost::new(AppState::new());
+        let pending = PendingUiActions::default();
+
+        pending.push(Action::Custom {
+            namespace: crate::app::ui_actions::APP_SHELL_NAMESPACE.into(),
+            name: "missing_command".into(),
+            payload: serde_json::Value::Null,
+        });
+        let commands = host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+
+        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert!(
+            host.app_state().status_hint.as_ref().is_some_and(|(message, is_error)| {
+                *is_error && message.contains("missing_command")
+            })
+        );
     }
 
     #[test]
