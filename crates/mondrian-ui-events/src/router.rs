@@ -3,6 +3,7 @@
 //! 管理 hover/focus/capture 状态，将事件分发给正确的 Widget。
 //! 使用真实的 FocusManager + ShortcutManager 实现。
 
+use mondrian_editor_state::state::PanelKind;
 use mondrian_editor_state::Action;
 use mondrian_platform::{NoopPlatformService, PlatformService};
 use mondrian_ui_core::focus::FocusManager;
@@ -15,7 +16,7 @@ use mondrian_ui_core::widget::{
     CursorRequest, DragRequest, EventContext, EventRequests, EyedropperRequest, ImeRequest,
     PointerCaptureRequest,
 };
-use mondrian_ui_core::{TreeWalker, WidgetTree};
+use mondrian_ui_core::{TreeWalker, Widget, WidgetTree};
 
 use crate::focus_manager::FocusManagerImpl;
 use crate::hit_test::hit_test_deepest;
@@ -279,8 +280,6 @@ impl EventRouter {
                 if let UiEvent::KeyDown { key: KeyCode::Tab, modifiers } = &event {
                     let reverse = modifiers.shift;
                     let current = self.focus_mgr.focused_widget();
-                    // Preserve the panel from the currently focused widget.
-                    let panel = self.focus_mgr.focused_panel();
                     let traversal_origin = current.unwrap_or_default();
                     let next = if reverse {
                         TreeWalker::focus_prev(tree, traversal_origin)
@@ -299,6 +298,9 @@ impl EventRouter {
                     if let Some(next_id) = next {
                         self.send_focus_gained(tree, next_id, dispatch);
                     }
+                    let panel = next
+                        .and_then(|id| panel_kind_for_widget(tree, id))
+                        .or_else(|| self.focus_mgr.focused_panel());
                     self.focus_mgr.set_focused_widget(next, panel);
                     self.focused = self.focus_mgr.focused_widget();
                     return EventResult::Handled;
@@ -346,7 +348,8 @@ impl EventRouter {
                                 if let Some(old) = current_focused {
                                     self.send_focus_lost(tree, old, dispatch);
                                 }
-                                let panel = self.focus_mgr.focused_panel();
+                                let panel = panel_kind_for_widget(tree, clicked_id)
+                                    .or_else(|| self.focus_mgr.focused_panel());
                                 self.send_focus_gained(tree, clicked_id, dispatch);
                                 self.focus_mgr.set_focused_widget(Some(clicked_id), panel);
                             } else if let Some(old) = current_focused {
@@ -383,6 +386,7 @@ impl EventRouter {
                             };
                             self.focused = self.focus_mgr.focused_widget();
                             self.apply_event_requests(requests);
+                            normalize_focused_panel(&mut self.focus_mgr, tree);
                             match result {
                                 EventResult::Handled => {
                                     self.after_child_handled(tree, id, &event, dispatch);
@@ -703,6 +707,28 @@ impl EventRouter {
     }
 }
 
+fn panel_kind_for_widget(tree: &dyn WidgetTree, widget: WidgetId) -> Option<PanelKind> {
+    let mut current = Some(widget);
+    while let Some(id) = current {
+        if let Some(kind) = tree.get(id).and_then(Widget::panel_kind) {
+            return Some(kind);
+        }
+        current = tree.parent_id(id);
+    }
+    None
+}
+
+fn normalize_focused_panel(focus: &mut FocusManagerImpl, tree: &dyn WidgetTree) {
+    let Some(focused) = focus.focused_widget() else {
+        return;
+    };
+    if let Some(panel) = panel_kind_for_widget(tree, focused) {
+        if focus.focused_panel() != Some(panel) {
+            focus.set_focused_widget(Some(focused), Some(panel));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -849,6 +875,8 @@ mod tests {
     struct TestTree {
         root: WidgetId,
         nodes: HashMap<WidgetId, Box<dyn Widget>>,
+        parents: HashMap<WidgetId, WidgetId>,
+        children: HashMap<WidgetId, Vec<WidgetId>>,
     }
 
     impl TestTree {
@@ -856,7 +884,26 @@ mod tests {
             let root = widget.id();
             let mut nodes = HashMap::new();
             nodes.insert(root, Box::new(widget) as Box<dyn Widget>);
-            Self { root, nodes }
+            Self {
+                root,
+                nodes,
+                parents: HashMap::new(),
+                children: HashMap::new(),
+            }
+        }
+
+        fn parent_child(parent: impl Widget + 'static, child: impl Widget + 'static) -> Self {
+            let root = parent.id();
+            let child_id = child.id();
+            let mut nodes = HashMap::new();
+            nodes.insert(root, Box::new(parent) as Box<dyn Widget>);
+            nodes.insert(child_id, Box::new(child) as Box<dyn Widget>);
+            Self {
+                root,
+                nodes,
+                parents: HashMap::from([(child_id, root)]),
+                children: HashMap::from([(root, vec![child_id])]),
+            }
         }
     }
 
@@ -876,12 +923,52 @@ mod tests {
             self.root
         }
 
-        fn parent_id(&self, _id: WidgetId) -> Option<WidgetId> {
-            None
+        fn parent_id(&self, id: WidgetId) -> Option<WidgetId> {
+            self.parents.get(&id).copied()
         }
 
-        fn children_ids(&self, _id: WidgetId) -> Vec<WidgetId> {
-            vec![]
+        fn children_ids(&self, id: WidgetId) -> Vec<WidgetId> {
+            self.children.get(&id).cloned().unwrap_or_default()
+        }
+    }
+
+    struct PanelBoundaryWidget {
+        id: WidgetId,
+        bounds: Rect,
+        panel: PanelKind,
+    }
+
+    impl PanelBoundaryWidget {
+        fn new(bounds: Rect, panel: PanelKind) -> Self {
+            Self { id: WidgetId::new(), bounds, panel }
+        }
+    }
+
+    impl Widget for PanelBoundaryWidget {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+
+        fn panel_kind(&self) -> Option<PanelKind> {
+            Some(self.panel)
+        }
+
+        fn measure(&self, _constraint: LayoutConstraint) -> Size {
+            Size::new(self.bounds.width, self.bounds.height)
+        }
+
+        fn layout(&mut self, bounds: Rect) {
+            self.bounds = bounds;
+        }
+
+        fn event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+            EventResult::Ignored
+        }
+
+        fn paint(&self, _ctx: &mut PaintContext) {}
+
+        fn hit_test(&self, point: Point) -> bool {
+            self.bounds.contains(point)
         }
     }
 
@@ -1080,6 +1167,64 @@ mod tests {
         let ime = router.take_ime_request().expect("blur should disable IME");
         assert!(!ime.enabled);
         assert_eq!(ime.cursor_area, None);
+    }
+
+    #[test]
+    fn router_derives_focused_panel_from_clicked_widget_ancestors() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let child = RecordingWidget::new(Rect::new(10.0, 10.0, 100.0, 30.0), Rc::clone(&log));
+        let child_id = child.id();
+        let panel =
+            PanelBoundaryWidget::new(Rect::new(0.0, 0.0, 240.0, 120.0), PanelKind::Inspector);
+        let root = panel.id();
+        let mut tree = TestTree::parent_child(panel, child);
+        let mut router = EventRouter::new(root);
+
+        let result = router.route(
+            UiEvent::MouseDown {
+                position: Point::new(20.0, 20.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(router.focused(), Some(child_id));
+        assert_eq!(
+            router.focus_manager().focused_panel(),
+            Some(PanelKind::Inspector)
+        );
+        assert!(log.borrow().contains(&"down".into()));
+    }
+
+    #[test]
+    fn router_tab_focus_derives_panel_from_next_widget_ancestors() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let child = RecordingWidget::new(Rect::new(10.0, 10.0, 100.0, 30.0), Rc::clone(&log));
+        let child_id = child.id();
+        let panel =
+            PanelBoundaryWidget::new(Rect::new(0.0, 0.0, 240.0, 120.0), PanelKind::Timeline);
+        let root = panel.id();
+        let mut tree = TestTree::parent_child(panel, child);
+        let mut router = EventRouter::new(root);
+
+        let result = router.route(
+            UiEvent::KeyDown {
+                key: KeyCode::Tab,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(router.focused(), Some(child_id));
+        assert_eq!(
+            router.focus_manager().focused_panel(),
+            Some(PanelKind::Timeline)
+        );
     }
 
     #[test]
@@ -1460,7 +1605,12 @@ mod tests {
         let root = widget.id;
         let mut nodes = HashMap::new();
         nodes.insert(root, Box::new(widget) as Box<dyn Widget>);
-        let mut tree = TestTree { root, nodes };
+        let mut tree = TestTree {
+            root,
+            nodes,
+            parents: HashMap::new(),
+            children: HashMap::new(),
+        };
         let mut router = EventRouter::new(root);
 
         router.route(
@@ -1487,7 +1637,12 @@ mod tests {
         let root = widget.id;
         let mut nodes = HashMap::new();
         nodes.insert(root, Box::new(widget) as Box<dyn Widget>);
-        let mut tree = TestTree { root, nodes };
+        let mut tree = TestTree {
+            root,
+            nodes,
+            parents: HashMap::new(),
+            children: HashMap::new(),
+        };
         let mut router = EventRouter::new(root);
 
         router.route(

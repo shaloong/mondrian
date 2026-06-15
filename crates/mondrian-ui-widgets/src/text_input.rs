@@ -464,8 +464,6 @@ impl Widget for TextInput {
             UiEvent::MouseDown { position, button: MouseButton::Left, modifiers } => {
                 let clicked = self.bounds.contains(*position);
                 if clicked {
-                    ctx.focus
-                        .request_focus(self.id, mondrian_editor_state::state::PanelKind::Console);
                     let text_x = self.text_x_from_pointer(*position);
                     if modifiers.shift {
                         // Shift+Click: extend selection from anchor (or current cursor)

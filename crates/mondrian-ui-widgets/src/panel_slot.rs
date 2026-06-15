@@ -37,6 +37,10 @@ impl Widget for PanelSlot {
         self.id
     }
 
+    fn panel_kind(&self) -> Option<PanelKind> {
+        Some(self.kind)
+    }
+
     fn measure(&self, constraint: LayoutConstraint) -> Size {
         if let Some(content) = &self.content {
             content.measure(constraint)

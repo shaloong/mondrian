@@ -299,6 +299,11 @@ Shortcut resolution receives a `ShortcutContext` from the router focus state and
 must search scopes in a fixed order: focused widget, focused panel, workspace,
 then global. Same-scope duplicate registrations replace the older binding so
 the active command is deterministic.
+Focused-panel context is inferred by walking from the focused widget to the
+nearest ancestor widget that exposes `Widget::panel_kind()`. `PanelSlot` is the
+normal boundary that returns a panel kind. Leaf controls must not hardcode panel
+identities when requesting focus; the router normalizes focused-panel state
+after widget events so panel shortcuts follow the actual dock location.
 
 ## Pointer Capture
 

@@ -15,6 +15,7 @@ use crate::focus::FocusManager;
 use crate::shortcut::ShortcutManager;
 use crate::tooltip::TooltipManager;
 use crate::types::*;
+use mondrian_editor_state::state::PanelKind;
 use mondrian_editor_state::Action;
 use mondrian_platform::PlatformService;
 use mondrian_ui_theme::Theme;
@@ -247,6 +248,16 @@ pub trait DrawCommandEncoder {
 pub trait Widget {
     /// 返回 Widget 的唯一标识
     fn id(&self) -> WidgetId;
+
+    /// Return the editor panel kind represented by this widget, if it is a
+    /// panel boundary.
+    ///
+    /// Leaf widgets normally return `None`; containers such as `PanelSlot`
+    /// expose this so the event router can derive focused-panel context without
+    /// individual controls hardcoding panel identities.
+    fn panel_kind(&self) -> Option<PanelKind> {
+        None
+    }
 
     /// 给定约束，返回期望尺寸。纯函数。
     fn measure(&self, constraint: LayoutConstraint) -> Size;
