@@ -513,12 +513,16 @@ relayout so app data changes do not reset user-resized panels.
 Browser-style panels should use `PanelList` / `PanelListItem` instead of
 ad-hoc colored placeholders or one-off row painting. `PanelList` owns local
 selection, disabled rows, keyboard navigation, activation, and internal
-positive-delta scrolling, but exposes static and value-aware action adapters so
-Assets, Effects, presets, and similar panels can bind to editor state outside
-the widget crate. Mouse single-click selects a row, a second click on the same
-row activates it, and keyboard Enter/Space uses the same activation path. The
-self-hosted Effects panel builds rows from the shared effect registry and, when
-a video clip is selected, activates rows through undoable
+positive-delta scrolling, but exposes static and value-aware action adapters
+plus optional `DragPayload`s so Assets, Effects, presets, and similar panels can
+bind to editor state outside the widget crate. Mouse single-click selects a row,
+a second click on the same row activates it, and keyboard Enter/Space uses the
+same activation path. Pointer movement beyond the drag threshold asks the
+router to begin an internal drag; the router, not the source widget, owns
+`DragEnter` / `DragOver` / `DragLeave` / `Drop` delivery so pointer capture from
+the source cannot block target panels. The self-hosted Effects panel builds rows
+from the shared effect registry and, when a video clip is selected, activates
+rows through undoable
 `AppState::add_effect_to_clip` commands. The `self_hosted_app` and `ui_demo`
 Assets/Effects-style panels use this shared surface as the tracer bullet for
 migrating list-heavy egui panels. The self-hosted Project slot also uses

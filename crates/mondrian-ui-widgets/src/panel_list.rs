@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 const DOUBLE_CLICK_MAX_AGE: Duration = Duration::from_millis(500);
 const DOUBLE_CLICK_MAX_DISTANCE: f32 = 5.0;
+const DRAG_START_DISTANCE: f32 = 6.0;
 
 /// Dynamic action factory used when a panel-list item changes state.
 pub type PanelListAction = dyn Fn(usize, &PanelListItem) -> Action;
@@ -27,6 +28,7 @@ pub struct PanelListItem {
     pub disabled: bool,
     pub select_action: Option<Action>,
     pub activate_action: Option<Action>,
+    pub drag_payload: Option<DragPayload>,
 }
 
 impl PanelListItem {
@@ -40,6 +42,7 @@ impl PanelListItem {
             disabled: false,
             select_action: None,
             activate_action: None,
+            drag_payload: None,
         }
     }
 
@@ -78,6 +81,13 @@ impl PanelListItem {
         self.activate_action = Some(action);
         self
     }
+
+    /// Start an internal UI drag with this payload after pointer movement
+    /// exceeds the drag threshold.
+    pub fn with_drag_payload(mut self, payload: DragPayload) -> Self {
+        self.drag_payload = Some(payload);
+        self
+    }
 }
 
 /// Scrollable, keyboard-navigable list for panel content.
@@ -96,6 +106,7 @@ pub struct PanelList {
     scrollbar_dragging: bool,
     drag_start_y: f32,
     drag_start_scroll_y: f32,
+    drag_candidate: Option<PanelListDragCandidate>,
     last_click: Option<PanelListClick>,
     focused: bool,
     focus_visible: bool,
@@ -108,6 +119,13 @@ struct PanelListClick {
     index: usize,
     position: Point,
     time: Instant,
+}
+
+#[derive(Debug, Clone)]
+struct PanelListDragCandidate {
+    index: usize,
+    start: Point,
+    payload: DragPayload,
 }
 
 impl PanelList {
@@ -128,6 +146,7 @@ impl PanelList {
             scrollbar_dragging: false,
             drag_start_y: 0.0,
             drag_start_scroll_y: 0.0,
+            drag_candidate: None,
             last_click: None,
             focused: false,
             focus_visible: false,
@@ -174,6 +193,7 @@ impl PanelList {
         self.items = items;
         self.selected = self.selected.filter(|idx| self.is_enabled_index(*idx));
         self.hovered = None;
+        self.drag_candidate = None;
         self.last_click = None;
         self.clamp_scroll();
     }
@@ -388,6 +408,30 @@ impl PanelList {
         EventResult::Handled
     }
 
+    fn begin_drag_candidate_if_needed(
+        &mut self,
+        position: Point,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        let Some(candidate) = self.drag_candidate.clone() else {
+            return EventResult::Ignored;
+        };
+        if !self.is_enabled_index(candidate.index) {
+            self.drag_candidate = None;
+            ctx.release_pointer_capture(self.id);
+            return EventResult::Handled;
+        }
+        let dx = position.x - candidate.start.x;
+        let dy = position.y - candidate.start.y;
+        if dx * dx + dy * dy < DRAG_START_DISTANCE * DRAG_START_DISTANCE {
+            return EventResult::Ignored;
+        }
+        self.drag_candidate = None;
+        ctx.begin_drag(candidate.payload);
+        ctx.request_repaint();
+        EventResult::Handled
+    }
+
     fn activate_selected(&self, ctx: &mut EventContext) -> EventResult {
         let Some(index) = self.selected.filter(|idx| self.is_enabled_index(*idx)) else {
             return EventResult::Ignored;
@@ -548,10 +592,24 @@ impl Widget for PanelList {
                         }
                     }
                     if let Some(index) = self.index_at(*position) {
-                        return self.select_or_activate_from_input(index, *position, ctx);
+                        let result = self.select_or_activate_from_input(index, *position, ctx);
+                        if let Some(payload) =
+                            self.items.get(index).and_then(|item| item.drag_payload.clone())
+                        {
+                            self.drag_candidate =
+                                Some(PanelListDragCandidate { index, start: *position, payload });
+                            ctx.request_pointer_capture(self.id);
+                        }
+                        return result;
                     }
                     return EventResult::Handled;
                 }
+            }
+            UiEvent::MouseUp { button: MouseButton::Left, .. } if self.drag_candidate.is_some() => {
+                self.drag_candidate = None;
+                ctx.release_pointer_capture(self.id);
+                ctx.request_repaint();
+                return EventResult::Handled;
             }
             UiEvent::MouseUp { button: MouseButton::Left, .. } if self.scrollbar_dragging => {
                 self.scrollbar_dragging = false;
@@ -560,6 +618,9 @@ impl Widget for PanelList {
                 return EventResult::Handled;
             }
             UiEvent::MouseMove { position, .. } => {
+                if self.begin_drag_candidate_if_needed(*position, ctx) == EventResult::Handled {
+                    return EventResult::Handled;
+                }
                 if self.scrollbar_dragging {
                     if self
                         .set_scroll_y(self.scroll_y_for_thumb_delta(position.y - self.drag_start_y))
@@ -602,6 +663,7 @@ impl Widget for PanelList {
             UiEvent::FocusLost => {
                 self.focused = false;
                 self.focus_visible = false;
+                self.drag_candidate = None;
                 self.last_click = None;
                 return EventResult::Handled;
             }
@@ -715,8 +777,11 @@ mod tests {
 
     use std::cell::RefCell;
 
+    use mondrian_core::types::AssetId;
     use mondrian_platform::NoopPlatformService;
-    use mondrian_ui_core::widget::{DrawCommandEncoder, EventRequests, PointerCaptureRequest};
+    use mondrian_ui_core::widget::{
+        DragRequest, DrawCommandEncoder, EventRequests, PointerCaptureRequest,
+    };
     use mondrian_ui_theme::ThemePreset;
 
     use crate::test_utils::{DummyFocus, DummyShortcut, DummyTooltip};
@@ -799,6 +864,10 @@ mod tests {
         ]
     }
 
+    fn drag_item(asset_id: AssetId) -> PanelListItem {
+        PanelListItem::new("Asset").with_drag_payload(DragPayload::Asset(asset_id))
+    }
+
     #[test]
     fn click_selects_enabled_item_and_dispatches_once() {
         let actions = RefCell::new(Vec::new());
@@ -867,6 +936,137 @@ mod tests {
 
         assert_eq!(list.event(&click, &mut ctx), EventResult::Handled);
         assert_eq!(actions.borrow().as_slice(), &[custom_action("activate-c")]);
+    }
+
+    #[test]
+    fn dragging_enabled_item_requests_internal_drag_after_threshold() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let asset_id = AssetId::new();
+        let mut list = PanelList::new("Assets", vec![drag_item(asset_id)]);
+        list.layout(Rect::new(0.0, 0.0, 240.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        {
+            let mut ctx = dispatching_ctx(
+                &mut focus,
+                &mut shortcut,
+                &mut tooltip,
+                &mut requests,
+                &dispatch,
+            );
+            list.event(
+                &UiEvent::MouseDown {
+                    position: Point::new(30.0, 74.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+        }
+        assert_eq!(
+            requests.pointer_capture,
+            Some(PointerCaptureRequest::Capture(list.id()))
+        );
+        requests.pointer_capture = None;
+
+        {
+            let mut ctx = dispatching_ctx(
+                &mut focus,
+                &mut shortcut,
+                &mut tooltip,
+                &mut requests,
+                &dispatch,
+            );
+            list.event(
+                &UiEvent::MouseMove {
+                    position: Point::new(33.0, 75.0),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+        }
+        assert!(requests.drag.is_none());
+
+        {
+            let mut ctx = dispatching_ctx(
+                &mut focus,
+                &mut shortcut,
+                &mut tooltip,
+                &mut requests,
+                &dispatch,
+            );
+            list.event(
+                &UiEvent::MouseMove {
+                    position: Point::new(48.0, 74.0),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+        }
+
+        assert_eq!(
+            requests.drag,
+            Some(DragRequest::Begin(DragPayload::Asset(asset_id)))
+        );
+        assert!(requests.repaint);
+    }
+
+    #[test]
+    fn releasing_drag_candidate_before_threshold_clears_capture() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut list = PanelList::new("Assets", vec![drag_item(AssetId::new())]);
+        list.layout(Rect::new(0.0, 0.0, 240.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        {
+            let mut ctx = dispatching_ctx(
+                &mut focus,
+                &mut shortcut,
+                &mut tooltip,
+                &mut requests,
+                &dispatch,
+            );
+            list.event(
+                &UiEvent::MouseDown {
+                    position: Point::new(30.0, 74.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+        }
+        requests.pointer_capture = None;
+        {
+            let mut ctx = dispatching_ctx(
+                &mut focus,
+                &mut shortcut,
+                &mut tooltip,
+                &mut requests,
+                &dispatch,
+            );
+            list.event(
+                &UiEvent::MouseUp {
+                    position: Point::new(30.0, 74.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+        }
+
+        assert_eq!(
+            requests.pointer_capture,
+            Some(PointerCaptureRequest::Release(list.id()))
+        );
+        assert!(requests.drag.is_none());
     }
 
     #[test]

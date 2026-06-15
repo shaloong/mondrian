@@ -7,9 +7,11 @@ use mondrian_editor_state::Action;
 use mondrian_platform::{NoopPlatformService, PlatformService};
 use mondrian_ui_core::focus::FocusManager;
 use mondrian_ui_core::tooltip::{TooltipManager, TooltipState};
-use mondrian_ui_core::types::{EventResult, KeyCode, Point, UiEvent, WidgetId};
+use mondrian_ui_core::types::{
+    DragPayload, EventResult, KeyCode, MouseButton, Point, UiEvent, WidgetId,
+};
 use mondrian_ui_core::widget::{
-    CursorRequest, EventContext, EventRequests, EyedropperRequest, ImeRequest,
+    CursorRequest, DragRequest, EventContext, EventRequests, EyedropperRequest, ImeRequest,
     PointerCaptureRequest,
 };
 use mondrian_ui_core::{TreeWalker, WidgetTree};
@@ -27,6 +29,7 @@ pub struct EventRouter {
     hovered: Option<WidgetId>,
     focused: Option<WidgetId>,
     captured: Option<WidgetId>,
+    active_drag: Option<ActiveDrag>,
 
     focus_mgr: FocusManagerImpl,
     shortcut_mgr: ShortcutManagerImpl,
@@ -36,6 +39,12 @@ pub struct EventRouter {
     last_cursor_request: Option<CursorRequest>,
     last_eyedropper_request: Option<EyedropperRequest>,
     repaint_requested: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveDrag {
+    payload: DragPayload,
+    target: Option<WidgetId>,
 }
 
 struct NoopTooltip;
@@ -55,6 +64,7 @@ impl EventRouter {
             hovered: None,
             focused: None,
             captured: None,
+            active_drag: None,
             focus_mgr: FocusManagerImpl::new(),
             shortcut_mgr: ShortcutManagerImpl::new(),
             platform: Box::new(NoopPlatformService),
@@ -72,6 +82,7 @@ impl EventRouter {
             hovered: None,
             focused: None,
             captured: None,
+            active_drag: None,
             focus_mgr: FocusManagerImpl::new(),
             shortcut_mgr: ShortcutManagerImpl::new(),
             platform,
@@ -97,6 +108,7 @@ impl EventRouter {
             hovered: None,
             focused: None,
             captured: None,
+            active_drag: None,
             focus_mgr: FocusManagerImpl::new(),
             shortcut_mgr: ShortcutManagerImpl::new(),
             platform,
@@ -116,6 +128,10 @@ impl EventRouter {
     }
     pub fn captured(&self) -> Option<WidgetId> {
         self.captured
+    }
+
+    pub fn active_drag_payload(&self) -> Option<&DragPayload> {
+        self.active_drag.as_ref().map(|drag| &drag.payload)
     }
 
     /// Take the latest platform IME request emitted by a widget event.
@@ -189,6 +205,21 @@ impl EventRouter {
         dispatch: &dyn Fn(Action),
     ) -> EventResult {
         self.prune_stale_widget_state(tree, dispatch);
+        if self.active_drag.is_some() {
+            match &event {
+                UiEvent::MouseMove { position, .. } => {
+                    return self.route_active_drag_move(*position, tree, dispatch);
+                }
+                UiEvent::MouseUp { position, button: MouseButton::Left, .. } => {
+                    return self.route_active_drag_drop(*position, tree, dispatch);
+                }
+                UiEvent::FocusLost | UiEvent::KeyDown { key: KeyCode::Escape, .. } => {
+                    self.cancel_active_drag(tree, dispatch);
+                    return EventResult::Handled;
+                }
+                _ => {}
+            }
+        }
         match &event {
             UiEvent::MouseMove { position, .. } => {
                 let target = if let Some(captured) = self.captured {
@@ -371,6 +402,108 @@ impl EventRouter {
         }
     }
 
+    fn route_active_drag_move(
+        &mut self,
+        position: Point,
+        tree: &mut dyn WidgetTree,
+        dispatch: &dyn Fn(Action),
+    ) -> EventResult {
+        let Some(payload) = self.active_drag.as_ref().map(|drag| drag.payload.clone()) else {
+            return EventResult::Ignored;
+        };
+        let target = hit_test_deepest(tree, position);
+        let old_target = self.active_drag.as_ref().and_then(|drag| drag.target);
+        if old_target != target {
+            if let Some(old) = old_target {
+                self.dispatch_direct_event(tree, old, &UiEvent::DragLeave, dispatch);
+            }
+            if let Some(new_target) = target {
+                self.dispatch_bubbling_event(
+                    tree,
+                    new_target,
+                    &UiEvent::DragEnter { payload, position },
+                    dispatch,
+                );
+            }
+            if let Some(drag) = self.active_drag.as_mut() {
+                drag.target = target;
+            }
+        } else if let Some(target) = target {
+            self.dispatch_bubbling_event(tree, target, &UiEvent::DragOver { position }, dispatch);
+        }
+        EventResult::Handled
+    }
+
+    fn route_active_drag_drop(
+        &mut self,
+        position: Point,
+        tree: &mut dyn WidgetTree,
+        dispatch: &dyn Fn(Action),
+    ) -> EventResult {
+        let Some(active_drag) = self.active_drag.take() else {
+            return EventResult::Ignored;
+        };
+        self.captured = None;
+        let target = hit_test_deepest(tree, position).or(active_drag.target);
+        if let Some(target) = target {
+            return self.dispatch_bubbling_event(
+                tree,
+                target,
+                &UiEvent::Drop { payload: active_drag.payload, position },
+                dispatch,
+            );
+        }
+        EventResult::Handled
+    }
+
+    fn cancel_active_drag(&mut self, tree: &mut dyn WidgetTree, dispatch: &dyn Fn(Action)) {
+        if let Some(active_drag) = self.active_drag.take() {
+            if let Some(target) = active_drag.target {
+                self.dispatch_direct_event(tree, target, &UiEvent::DragLeave, dispatch);
+            }
+        }
+        self.captured = None;
+    }
+
+    fn dispatch_direct_event(
+        &mut self,
+        tree: &mut dyn WidgetTree,
+        target: WidgetId,
+        event: &UiEvent,
+        dispatch: &dyn Fn(Action),
+    ) -> EventResult {
+        let Some(widget) = tree.get_mut(target) else {
+            return EventResult::Ignored;
+        };
+        let mut requests = EventRequests::default();
+        let result = {
+            let mut ctx = self.make_event_context(dispatch, &mut requests);
+            widget.event(event, &mut ctx)
+        };
+        self.focused = self.focus_mgr.focused_widget();
+        self.apply_event_requests(requests);
+        result
+    }
+
+    fn dispatch_bubbling_event(
+        &mut self,
+        tree: &mut dyn WidgetTree,
+        target: WidgetId,
+        event: &UiEvent,
+        dispatch: &dyn Fn(Action),
+    ) -> EventResult {
+        let mut current = Some(target);
+        while let Some(id) = current {
+            let parent = tree.parent_id(id);
+            if self.dispatch_direct_event(tree, id, event, dispatch) == EventResult::Handled {
+                self.after_child_handled(tree, id, event, dispatch);
+                return EventResult::Handled;
+            }
+            current = parent;
+        }
+        EventResult::Ignored
+    }
+
     fn is_ancestor_or_self(
         &self,
         tree: &dyn WidgetTree,
@@ -394,6 +527,16 @@ impl EventRouter {
         }
         if self.hovered.is_some_and(|id| tree.get(id).is_none()) {
             self.hovered = None;
+        }
+        if self
+            .active_drag
+            .as_ref()
+            .and_then(|drag| drag.target)
+            .is_some_and(|id| tree.get(id).is_none())
+        {
+            if let Some(drag) = self.active_drag.as_mut() {
+                drag.target = None;
+            }
         }
         if let Some(focused) = self.focus_mgr.focused_widget() {
             match tree.get(focused) {
@@ -480,6 +623,19 @@ impl EventRouter {
             Some(PointerCaptureRequest::Clear) => self.captured = None,
             _ => {}
         }
+        match requests.drag {
+            Some(DragRequest::Begin(payload)) => {
+                self.active_drag = Some(ActiveDrag { payload, target: None });
+                self.captured = None;
+                self.repaint_requested = true;
+            }
+            Some(DragRequest::Cancel) => {
+                self.active_drag = None;
+                self.captured = None;
+                self.repaint_requested = true;
+            }
+            None => {}
+        }
     }
 
     fn after_child_handled(
@@ -536,6 +692,7 @@ impl EventRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mondrian_core::types::AssetId;
     use mondrian_editor_state::state::PanelKind;
     use mondrian_ui_core::focus::FocusManager;
     use mondrian_ui_core::shortcut::ShortcutManager;
@@ -636,6 +793,22 @@ mod tests {
                 }
                 UiEvent::ImeCommit(text) => {
                     self.log.borrow_mut().push(format!("commit:{text}"));
+                    EventResult::Handled
+                }
+                UiEvent::DragEnter { .. } => {
+                    self.log.borrow_mut().push("drag-enter".into());
+                    EventResult::Handled
+                }
+                UiEvent::DragOver { .. } => {
+                    self.log.borrow_mut().push("drag-over".into());
+                    EventResult::Handled
+                }
+                UiEvent::DragLeave => {
+                    self.log.borrow_mut().push("drag-leave".into());
+                    EventResult::Handled
+                }
+                UiEvent::Drop { .. } => {
+                    self.log.borrow_mut().push("drop".into());
                     EventResult::Handled
                 }
                 UiEvent::FocusLost => {
@@ -832,6 +1005,65 @@ mod tests {
             &mut tree,
             &|_| {},
         );
+        assert_eq!(router.captured(), None);
+    }
+
+    #[test]
+    fn router_routes_active_drag_to_hit_target_until_drop() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let root = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(root);
+        let asset_id = AssetId::new();
+        router.active_drag = Some(ActiveDrag {
+            payload: DragPayload::Asset(asset_id),
+            target: None,
+        });
+        router.set_capture(Some(WidgetId::new()));
+
+        let result = router.route(
+            UiEvent::MouseMove {
+                position: Point::new(10.0, 10.0),
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(
+            router.active_drag.as_ref().and_then(|drag| drag.target),
+            Some(root)
+        );
+        assert_eq!(log.borrow().as_slice(), ["drag-enter"]);
+        assert_eq!(
+            router.active_drag_payload(),
+            Some(&DragPayload::Asset(asset_id))
+        );
+
+        router.route(
+            UiEvent::MouseMove {
+                position: Point::new(20.0, 10.0),
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(log.borrow().as_slice(), ["drag-enter", "drag-over"]);
+
+        router.route(
+            UiEvent::MouseUp {
+                position: Point::new(20.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(log.borrow().as_slice(), ["drag-enter", "drag-over", "drop"]);
+        assert!(router.active_drag_payload().is_none());
         assert_eq!(router.captured(), None);
     }
 

@@ -30,6 +30,13 @@ pub enum PointerCaptureRequest {
     Clear,
 }
 
+/// Internal drag lifecycle requested by a widget.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DragRequest {
+    Begin(DragPayload),
+    Cancel,
+}
+
 /// Input method state requested by a focused text widget.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ImeRequest {
@@ -62,6 +69,7 @@ pub struct EventRequests {
     pub ime: Option<ImeRequest>,
     pub cursor: Option<CursorRequest>,
     pub eyedropper: Option<EyedropperRequest>,
+    pub drag: Option<DragRequest>,
     pub repaint: bool,
 }
 
@@ -88,6 +96,14 @@ impl EventRequests {
 
     pub fn set_eyedropper(&mut self, active: bool, hotspot: Option<Point>) {
         self.eyedropper = Some(EyedropperRequest { active, hotspot });
+    }
+
+    pub fn begin_drag(&mut self, payload: DragPayload) {
+        self.drag = Some(DragRequest::Begin(payload));
+    }
+
+    pub fn cancel_drag(&mut self) {
+        self.drag = Some(DragRequest::Cancel);
     }
 
     pub fn request_repaint(&mut self) {
@@ -134,6 +150,14 @@ impl EventContext<'_> {
 
     pub fn set_eyedropper(&mut self, active: bool, hotspot: Option<Point>) {
         self.requests.set_eyedropper(active, hotspot);
+    }
+
+    pub fn begin_drag(&mut self, payload: DragPayload) {
+        self.requests.begin_drag(payload);
+    }
+
+    pub fn cancel_drag(&mut self) {
+        self.requests.cancel_drag();
     }
 
     pub fn request_repaint(&mut self) {

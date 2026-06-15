@@ -327,7 +327,7 @@ pub enum KeyCode {
 }
 
 /// 拖拽载荷 —— 跨 Widget 的拖拽数据
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DragPayload {
     Clip(ClipId),
     Asset(AssetId),

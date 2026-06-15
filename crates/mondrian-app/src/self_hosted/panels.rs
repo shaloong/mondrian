@@ -18,6 +18,7 @@ use mondrian_timeline::clip::{Clip, Transform2D};
 use mondrian_timeline::sequence::Sequence;
 use mondrian_timeline::track::Track;
 use mondrian_ui_core::types::SplitDirection;
+use mondrian_ui_core::DragPayload;
 use mondrian_ui_core::Widget;
 use mondrian_ui_widgets::dock_splitter::DockSplitter;
 use mondrian_ui_widgets::dock_tab_bar::TabInfo;
@@ -1035,6 +1036,7 @@ fn panel_item_from_asset(asset: AssetRecord) -> PanelListItem {
         .with_subtitle(subtitle)
         .with_badge(badge)
         .with_accent(accent)
+        .with_drag_payload(DragPayload::Asset(asset.id))
         .with_activate_action(assets_prepare_drag_action(AssetsPrepareDragPayload {
             asset_id: asset.id,
         }))
@@ -1659,7 +1661,6 @@ mod tests {
         EventResult, KeyCode, LayoutConstraint, Modifiers, MouseButton, Point, Size,
     };
     use mondrian_ui_core::widget::EventRequests;
-    use mondrian_ui_core::DragPayload;
     use mondrian_ui_core::UiEvent;
     use std::cell::RefCell;
     use std::path::PathBuf;
@@ -2546,6 +2547,7 @@ mod tests {
         assert_eq!(item.title, "Brand Purple");
         assert_eq!(item.badge.as_deref(), Some("CLR"));
         assert!(item.select_action.is_none());
+        assert_eq!(item.drag_payload, Some(DragPayload::Asset(asset_id)));
         let action = item.activate_action.as_ref().expect("activate action");
         let Action::Custom { namespace, name, payload } = action else {
             panic!("expected asset custom action, got {action:?}");
