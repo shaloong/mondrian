@@ -833,6 +833,7 @@ pub struct ExportSequenceOptionModel {
 pub struct NodeGraphPanelModel {
     pub title: String,
     pub subtitle: String,
+    pub selected_clip: Option<SelectedClipRef>,
     pub nodes: Vec<NodeGraphNode>,
     pub edges: Vec<NodeGraphEdge>,
     pub selected_node_id: Option<String>,
@@ -846,7 +847,7 @@ impl NodeGraphPanelModel {
         let Some(selection) = state.primary_selected_clip() else {
             return Self::empty();
         };
-        let Some((_resolved_selection, clip)) = clip_for_selection(sequence, &selection) else {
+        let Some((selected_clip, clip)) = clip_for_selection(sequence, &selection) else {
             return Self::empty();
         };
 
@@ -884,6 +885,7 @@ impl NodeGraphPanelModel {
         Self {
             title: "Node Graph".to_owned(),
             subtitle: format!("{clip_label} / {} effect(s)", clip.effects.len()),
+            selected_clip: Some(selected_clip),
             nodes,
             edges,
             selected_node_id: Some("source".to_owned()),
@@ -894,6 +896,7 @@ impl NodeGraphPanelModel {
         Self {
             title: "Node Graph".to_owned(),
             subtitle: "Select a clip to inspect its render chain".to_owned(),
+            selected_clip: None,
             nodes: Vec::new(),
             edges: Vec::new(),
             selected_node_id: None,
@@ -1635,9 +1638,11 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
 }
 
 fn node_graph_panel(model: &NodeGraphPanelModel) -> NodeGraphView {
+    let selected_clip = model.selected_clip;
     let mut graph = NodeGraphView::new(model.nodes.clone(), model.edges.clone())
         .with_title(model.title.clone())
-        .with_subtitle(model.subtitle.clone());
+        .with_subtitle(model.subtitle.clone())
+        .on_select(move |_node_id| node_graph_clip_action(selected_clip));
     if let Some(selected_node_id) = &model.selected_node_id {
         graph = graph.with_selected_node(selected_node_id.clone());
     }
@@ -2111,6 +2116,18 @@ fn inspector_curve_action(selection: Option<SelectedClipRef>, points: &[CurvePoi
     Action::NoOp
 }
 
+fn node_graph_clip_action(selection: Option<SelectedClipRef>) -> Action {
+    selection
+        .map(|selection| {
+            timeline_select_clip_action(TimelineSelectClipPayload {
+                track_id: selection.track_id,
+                is_video_track: selection.is_video_track,
+                clip_id: selection.clip_id,
+            })
+        })
+        .unwrap_or(Action::NoOp)
+}
+
 fn inspector_clip_payload(selection: SelectedClipRef) -> InspectorClipRefPayload {
     InspectorClipRefPayload {
         track_id: selection.track_id,
@@ -2127,7 +2144,7 @@ mod tests {
         APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_SAVE_PROJECT_AS_DIALOG, ASSETS_NAMESPACE,
         ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE,
         INSPECTOR_SET_CLIP_CURVE, TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET, TIMELINE_MOVE_TRACK,
-        TIMELINE_NAMESPACE,
+        TIMELINE_NAMESPACE, TIMELINE_SELECT_CLIP,
     };
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
@@ -3154,6 +3171,10 @@ mod tests {
             effect_display_name(&EffectType::GaussianBlur)
         );
         assert!(!models.inspector.effects[0].enabled);
+        assert_eq!(
+            models.node_graph.selected_clip,
+            Some(SelectedClipRef { track_id, is_video_track: true, clip_id })
+        );
         assert_eq!(models.node_graph.nodes.len(), 3);
         assert_eq!(models.node_graph.edges.len(), 2);
         assert_eq!(models.node_graph.nodes[0].id, "source");
@@ -3441,6 +3462,90 @@ mod tests {
             inspector_curve_action(None, &[CurvePoint::new(0.0, 1.0)]),
             Action::NoOp
         );
+    }
+
+    #[test]
+    fn node_graph_clip_action_uses_timeline_select_payload() {
+        let selection = SelectedClipRef {
+            track_id: TrackId::new(),
+            is_video_track: true,
+            clip_id: ClipId::new(),
+        };
+
+        match node_graph_clip_action(Some(selection)) {
+            Action::Custom { namespace, name, payload } => {
+                assert_eq!(namespace, TIMELINE_NAMESPACE);
+                assert_eq!(name, TIMELINE_SELECT_CLIP);
+                let payload: TimelineSelectClipPayload =
+                    serde_json::from_value(payload).expect("timeline select payload");
+                assert_eq!(payload.track_id, selection.track_id);
+                assert!(payload.is_video_track);
+                assert_eq!(payload.clip_id, selection.clip_id);
+            }
+            other => panic!("expected timeline select action, got {other:?}"),
+        }
+
+        assert_eq!(node_graph_clip_action(None), Action::NoOp);
+    }
+
+    #[test]
+    fn node_graph_panel_dispatches_clip_selection_from_keyboard() {
+        let selection = SelectedClipRef {
+            track_id: TrackId::new(),
+            is_video_track: false,
+            clip_id: ClipId::new(),
+        };
+        let model = NodeGraphPanelModel {
+            title: "Node Graph".to_owned(),
+            subtitle: "Audio / 0 effect(s)".to_owned(),
+            selected_clip: Some(selection),
+            nodes: vec![
+                NodeGraphNode::new("source", "Source"),
+                NodeGraphNode::new("output", "Output"),
+            ],
+            edges: vec![NodeGraphEdge::new("source", "output")],
+            selected_node_id: Some("source".to_owned()),
+        };
+        let mut panel = node_graph_panel(&model);
+        panel.layout(Rect::new(0.0, 0.0, 420.0, 220.0));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            panel.event(&UiEvent::FocusGained, &mut ctx),
+            EventResult::Handled
+        );
+        assert_eq!(
+            panel.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        let recorded = actions.borrow();
+        assert_eq!(recorded.len(), 1);
+        let Action::Custom { namespace, name, payload } = &recorded[0] else {
+            panic!("expected timeline select action, got {:?}", recorded[0]);
+        };
+        assert_eq!(namespace, TIMELINE_NAMESPACE);
+        assert_eq!(name, TIMELINE_SELECT_CLIP);
+        let payload: TimelineSelectClipPayload =
+            serde_json::from_value(payload.clone()).expect("timeline select payload");
+        assert_eq!(payload.track_id, selection.track_id);
+        assert!(!payload.is_video_track);
+        assert_eq!(payload.clip_id, selection.clip_id);
     }
 
     fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {

@@ -837,8 +837,10 @@ The self-hosted `SlotKind::NodeGraph` panel maps the currently selected clip to
 a read-only render chain: Source -> each clip effect -> Output. The app adapter
 derives node titles, disabled state, and semantic accents from the same clip
 and effect data used by the Inspector, so the graph is another view of the same
-state rather than a separate editor model. Future node editing should add typed
-app-layer actions before enabling rewiring or parameter mutation in the widget.
+state rather than a separate editor model. Node selection is translated back to
+the existing timeline clip-selection action while the editor state has no
+effect-node selection target; future node editing should add typed app-layer
+actions before enabling rewiring or parameter mutation in the widget.
 
 ## Curve Editing
 
