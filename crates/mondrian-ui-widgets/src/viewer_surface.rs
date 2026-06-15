@@ -207,7 +207,7 @@ impl Widget for ViewerSurface {
                 self.bounds.x + 14.0,
                 self.bounds.y + self.bounds.height - 24.0,
             ),
-            (self.bounds.width - 28.0).max(0.0),
+            (self.bounds.width - 28.0).max(1.0),
             colors.muted_foreground,
         );
     }

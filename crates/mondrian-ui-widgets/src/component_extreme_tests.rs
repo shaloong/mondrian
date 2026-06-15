@@ -10,8 +10,9 @@ use mondrian_ui_theme::{Theme, ThemePreset};
 
 use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
 use crate::{
-    Checkbox, ColorPickerTrigger, ColorPickerTriggerOptions, CurveEditor, CurvePoint, Dropdown,
-    MenuItem, Slider, TextInput, TimelineClip, TimelineTrack, TimelineView,
+    Checkbox, ColorPickerTrigger, ColorPickerTriggerOptions, ContextMenu, CurveEditor, CurvePoint,
+    Dropdown, Label, MenuItem, PanelList, PanelListItem, ScrollView, Slider, TextInput,
+    TimelineClip, TimelineTrack, TimelineView, ViewerSurface,
 };
 
 #[derive(Debug, Clone)]
@@ -385,6 +386,132 @@ fn color_picker_trigger_outside_click_closes_overlay_after_open() {
         &mut ctx,
     );
     assert!(!trigger.is_open());
+}
+
+#[test]
+fn panel_surfaces_extreme_scroll_keyboard_and_paint_remain_stable() {
+    let actions = RefCell::new(Vec::new());
+    let dispatch = |action| actions.borrow_mut().push(action);
+    let mut focus = DummyFocus;
+    let mut shortcut = DummyShortcut;
+    let mut tooltip = DummyTooltip;
+    let items = (0..18)
+        .map(|index| {
+            PanelListItem::new(format!("Item {index} with a very long production label"))
+                .with_subtitle("Nested metadata should wrap or clip without corrupting paint")
+                .with_badge(format!("{index:02}"))
+                .disabled(index % 7 == 0)
+        })
+        .collect::<Vec<_>>();
+    let mut list = PanelList::new("Assets", items)
+        .with_subtitle("Long list stress")
+        .with_row_height(40.0)
+        .on_select(|_, _| Action::ToggleFullscreen);
+    list.layout(Rect::new(0.25, 0.5, 118.0, 124.0));
+    let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+    list.event(
+        &UiEvent::MouseWheel {
+            delta: 240.0,
+            position: Point::new(24.0, 86.0),
+            modifiers: Modifiers::none(),
+        },
+        &mut ctx,
+    );
+    assert!(list.scroll_offset_y() > 0.0);
+
+    list.event(&UiEvent::FocusGained, &mut ctx);
+    assert_eq!(
+        list.event(
+            &UiEvent::KeyDown { key: KeyCode::End, modifiers: Modifiers::none() },
+            &mut ctx,
+        ),
+        EventResult::Handled
+    );
+    assert_eq!(list.selected_index(), Some(17));
+    assert!(!actions.borrow().is_empty());
+
+    let list_paint = paint_widget(&list, Rect::new(0.0, 0.0, 128.0, 128.0));
+    assert!(
+        list_paint.texts.iter().any(|text| text.text == "Assets"),
+        "panel list should keep painting its header in constrained layouts"
+    );
+
+    let mut viewer = ViewerSurface::new("Viewer with extremely narrow chrome", 1, 10_000)
+        .with_status("No signal")
+        .with_frame_label("F999999")
+        .disabled();
+    viewer.layout(Rect::new(0.0, 0.0, 20.0, 36.0));
+    let viewer_paint = paint_widget(&viewer, Rect::new(0.0, 0.0, 32.0, 48.0));
+    assert!(
+        viewer_paint.texts.iter().any(|text| text.text.contains("Viewer")),
+        "viewer should still issue bounded text commands when chrome collapses"
+    );
+}
+
+#[test]
+fn overlay_and_scroll_container_extremes_keep_paint_and_event_state_stable() {
+    let actions = RefCell::new(Vec::new());
+    let dispatch = |action| actions.borrow_mut().push(action);
+    let mut focus = DummyFocus;
+    let mut shortcut = DummyShortcut;
+    let mut tooltip = DummyTooltip;
+    let mut menu = ContextMenu::new(
+        Point::new(-4.5, 3.25),
+        vec![
+            MenuItem::new("Open with a very long menu label", custom_action("open")),
+            MenuItem::separator(),
+            MenuItem::new("Disabled", custom_action("disabled")).disabled(),
+            MenuItem::new("Reveal", custom_action("reveal")),
+        ],
+    );
+    let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+    let menu_paint = paint_widget(&menu, Rect::new(0.0, 0.0, 96.0, 96.0));
+    assert!(
+        menu_paint.texts.iter().any(|text| text.text.contains("Open")),
+        "context menu overlay should paint row labels through the shared menu helpers"
+    );
+    assert!(
+        menu.overlay_hit_test(Point::new(90.0, 90.0)),
+        "visible overlays should retain a broad close-hit region"
+    );
+
+    menu.event(
+        &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
+        &mut ctx,
+    );
+    assert_eq!(
+        menu.event(
+            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut ctx,
+        ),
+        EventResult::Handled
+    );
+    assert!(!menu.is_visible());
+    assert_eq!(actions.borrow().len(), 1);
+
+    let child = Label::new(
+        "Scrollable child text that is intentionally much taller than its parent viewport",
+    )
+    .wrapped()
+    .with_max_width(42.0);
+    let mut scroll = ScrollView::new(Some(Box::new(child)));
+    scroll.layout(Rect::new(0.0, 0.0, 48.0, 24.0));
+    scroll.event(
+        &UiEvent::MouseWheel {
+            delta: 64.0,
+            position: Point::new(10.0, 10.0),
+            modifiers: Modifiers::none(),
+        },
+        &mut ctx,
+    );
+    assert!(scroll.scroll_offset().y >= 0.0);
+    let scroll_paint = paint_widget(&scroll, Rect::new(0.0, 0.0, 48.0, 24.0));
+    assert!(
+        scroll_paint.texts.iter().any(|text| text.text.contains("Scrollable")),
+        "scroll view should paint translated child content through a balanced clip"
+    );
 }
 
 #[test]
