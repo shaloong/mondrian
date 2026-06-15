@@ -5,7 +5,7 @@
 //!
 //! 包含的 Widget 类型：
 //!   Interactive: Button, Checkbox, TextInput, Slider, List, Dropdown, ContextMenu,
-//!     Tooltip, ColorPicker, CurveEditor, TimelineView
+//!     Tooltip, ColorPicker, CurveEditor, TimelineView, NodeGraphView
 //!   Layout: DockSplitter, DockPanel, DockTabBar, PanelSlot, ScrollView, PropertyPanel
 
 use std::cell::Cell;
@@ -46,7 +46,8 @@ use mondrian_ui_widgets::scroll::ScrollView;
 use mondrian_ui_widgets::slider::Slider;
 use mondrian_ui_widgets::text_input::TextInput;
 use mondrian_ui_widgets::{
-    TimelineClip, TimelineClipRef, TimelineTrack, TimelineView, ViewerSurface,
+    NodeGraphEdge, NodeGraphNode, NodeGraphView, TimelineClip, TimelineClipRef, TimelineTrack,
+    TimelineView, ViewerSurface,
 };
 
 fn demo_action(name: &str) -> Action {
@@ -670,6 +671,10 @@ fn dock_panel(kind: SlotKind) -> Box<dyn Widget> {
 
 fn tab_infos(kind: SlotKind) -> Vec<TabInfo> {
     match kind {
+        SlotKind::Viewer => vec![
+            TabInfo { label: "查看器".into(), active: true },
+            TabInfo { label: "节点图".into(), active: false },
+        ],
         SlotKind::Timeline => vec![
             TabInfo { label: "时间线".into(), active: true },
             TabInfo { label: "音频".into(), active: false },
@@ -695,7 +700,10 @@ fn tab_infos(kind: SlotKind) -> Vec<TabInfo> {
 
 fn slot_content_for_tab(kind: SlotKind, tab_index: usize) -> Box<dyn Widget> {
     match kind {
-        SlotKind::Viewer => Box::new(demo_viewer_surface()),
+        SlotKind::Viewer => match tab_index {
+            0 => Box::new(demo_viewer_surface()),
+            _ => Box::new(demo_node_graph_panel()),
+        },
         SlotKind::Console => match tab_index {
             0 => Box::new(GalleryWidget::new()),
             1 => Box::new(TextDiagnosticWidget::new()),
@@ -738,6 +746,43 @@ fn demo_viewer_surface() -> ViewerSurface {
         .with_resolution_label("3840x2160 @ 29.97 fps")
         .with_frame_label("F68")
         .with_duration_label("224 frames")
+}
+
+fn demo_node_graph_panel() -> NodeGraphView {
+    NodeGraphView::new(
+        vec![
+            NodeGraphNode::new("source", "Source")
+                .with_subtitle("B-roll")
+                .with_accent(Color::from_hex(0x4B7BE5)),
+            NodeGraphNode::new("blur", "Gaussian Blur")
+                .with_subtitle("GPU 1")
+                .with_accent(Color::from_hex(0x3B82F6)),
+            NodeGraphNode::new("lut", "LUT 3D")
+                .with_subtitle("3D 2")
+                .with_accent(Color::from_hex(0x22C55E)),
+            NodeGraphNode::new("key", "Chroma Key")
+                .with_subtitle("KEY 3")
+                .with_accent(Color::from_hex(0xF59E0B))
+                .disabled(true),
+            NodeGraphNode::new("output", "Output")
+                .with_subtitle("Composite")
+                .with_accent(Color::from_hex(0x22C55E)),
+        ],
+        vec![
+            NodeGraphEdge::new("source", "blur"),
+            NodeGraphEdge::new("blur", "lut"),
+            NodeGraphEdge::new("lut", "key"),
+            NodeGraphEdge::new("key", "output"),
+        ],
+    )
+    .with_title("Node Graph")
+    .with_subtitle("Viewer tab demo / 3 effect(s)")
+    .with_selected_node("blur")
+    .on_select(|id| Action::Custom {
+        namespace: "demo.node_graph".into(),
+        name: format!("select:{id}"),
+        payload: serde_json::Value::Null,
+    })
 }
 
 fn demo_asset_panel() -> PanelList {
