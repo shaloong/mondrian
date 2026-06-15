@@ -109,12 +109,14 @@ pub struct AnimationKeyframeSelection {
     pub time: mondrian_core::automation::TimeTicks,
 }
 
-/// Unified clip + mask + effect selection — single source of truth.
+/// Unified timeline, clip, mask, and effect selection — single source of truth.
 ///
 /// All panels read from and write to this struct. No panel maintains its
 /// own copy of selection state.
 #[derive(Debug, Clone, Default)]
 pub struct SelectionState {
+    /// Selected timeline tracks (supports multi-select from track headers).
+    pub selected_track_ids: Vec<TrackId>,
     /// Selected clips (supports multi-select from timeline).
     pub selected_clips: Vec<SelectedClipRef>,
     /// Currently selected mask (canvas → effect controls).

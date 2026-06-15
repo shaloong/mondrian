@@ -89,7 +89,7 @@ impl AppState {
                 Ok(())
             }
 
-            // ── 选择（当前 AppState 可表达 clip / mask / animation selection）──
+            // ── 选择（当前 AppState 可表达 track / clip / mask / animation selection）──
             Action::Select(target) => self.select_from_action(target),
             Action::SelectAll => {
                 self.select_all_clips();
@@ -491,18 +491,12 @@ impl AppState {
                 self.select_all_clips();
                 Ok(())
             }
-            mondrian_editor_state::action::SelectionTarget::Track(track_id) => {
-                tracing::debug!(
-                    target: "mondrian::action",
-                    "Track selection is not represented in AppState yet: {track_id}"
-                );
-                Ok(())
-            }
+            mondrian_editor_state::action::SelectionTarget::Track(track_id) => self
+                .select_track_by_id(track_id)
+                .map(|_| ())
+                .ok_or_else(|| MondrianError::TrackNotFound { track_id: track_id.to_string() }),
             mondrian_editor_state::action::SelectionTarget::AllTracks => {
-                tracing::debug!(
-                    target: "mondrian::action",
-                    "Track selection is not represented in AppState yet"
-                );
+                self.select_all_tracks();
                 Ok(())
             }
         }
@@ -1121,7 +1115,7 @@ mod tests {
         InspectorSetEffectEnabledPayload, ProjectCreateWithSettingsPayload,
     };
     use mondrian_assets::AssetLibrary;
-    use mondrian_core::types::{AssetId, MaskId, TimeCode};
+    use mondrian_core::types::{AssetId, MaskId, TimeCode, TrackId};
     use mondrian_core::Color;
     use mondrian_core::{ProjectSettings, Rational, Resolution};
     use mondrian_effects::EffectType;
@@ -1576,6 +1570,7 @@ mod tests {
     #[test]
     fn dispatch_select_clip_resolves_selection_from_clip_id() {
         let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+        state.selection.selected_track_ids = vec![track_id];
         state.selection.selected_mask = Some((MaskId::new(), clip_id, track_id));
 
         state
@@ -1588,6 +1583,85 @@ mod tests {
             state.selection.selected_clips,
             vec![SelectedClipRef { track_id, is_video_track: true, clip_id }]
         );
+        assert!(state.selection.selected_track_ids.is_empty());
+        assert!(state.selection.selected_mask.is_none());
+        assert!(!state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_select_track_records_track_selection_and_clears_nested_selection() {
+        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+        state.selection.selected_clips =
+            vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
+        state.selection.selected_mask = Some((MaskId::new(), clip_id, track_id));
+        state.animation_selection.active_property = Some(crate::app::AnimationPropertySelection {
+            clip_id,
+            path: Transform2D::OPACITY_PATH.to_string(),
+        });
+        state.animation_selection.selected_keyframes.insert(
+            crate::app::AnimationKeyframeSelection {
+                clip_id,
+                path: Transform2D::OPACITY_PATH.to_string(),
+                time: 10,
+            },
+        );
+
+        state
+            .dispatch_action(mondrian_editor_state::Action::Select(
+                mondrian_editor_state::action::SelectionTarget::Track(track_id),
+            ))
+            .expect("select track");
+
+        assert_eq!(state.selection.selected_track_ids, vec![track_id]);
+        assert!(state.selection.selected_clips.is_empty());
+        assert!(state.selection.selected_mask.is_none());
+        assert!(state.animation_selection.active_property.is_none());
+        assert!(state.animation_selection.selected_keyframes.is_empty());
+        assert!(!state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_select_track_rejects_unknown_track_id() {
+        let (mut state, _, _) = state_with_two_video_tracks();
+        let missing_track_id = TrackId::new();
+
+        let err = state
+            .dispatch_action(mondrian_editor_state::Action::Select(
+                mondrian_editor_state::action::SelectionTarget::Track(missing_track_id),
+            ))
+            .expect_err("missing track should be rejected");
+
+        assert!(
+            matches!(err, MondrianError::TrackNotFound { track_id } if track_id == missing_track_id.to_string())
+        );
+    }
+
+    #[test]
+    fn dispatch_select_all_tracks_selects_video_and_audio_tracks() {
+        let (mut state, video_track_id, clip_id) = state_with_two_video_tracks();
+        let sequence = state.sequence.as_mut().expect("sequence");
+        sequence.add_audio_track();
+        let expected_track_ids = sequence
+            .video_tracks
+            .iter()
+            .map(|track| track.id)
+            .chain(sequence.audio_tracks.iter().map(|track| track.id))
+            .collect::<Vec<_>>();
+        state.selection.selected_clips = vec![SelectedClipRef {
+            track_id: video_track_id,
+            is_video_track: true,
+            clip_id,
+        }];
+        state.selection.selected_mask = Some((MaskId::new(), clip_id, video_track_id));
+
+        state
+            .dispatch_action(mondrian_editor_state::Action::Select(
+                mondrian_editor_state::action::SelectionTarget::AllTracks,
+            ))
+            .expect("select all tracks");
+
+        assert_eq!(state.selection.selected_track_ids, expected_track_ids);
+        assert!(state.selection.selected_clips.is_empty());
         assert!(state.selection.selected_mask.is_none());
         assert!(!state.can_undo_action());
     }
@@ -1605,6 +1679,7 @@ mod tests {
             .expect("audio track")
             .add_clip(audio_clip)
             .expect("add audio");
+        state.selection.selected_track_ids = vec![video_track_id, audio_track_id];
         state.selection.selected_mask = Some((MaskId::new(), video_clip_id, video_track_id));
         state.animation_selection.active_property = Some(crate::app::AnimationPropertySelection {
             clip_id: video_clip_id,
@@ -1630,6 +1705,7 @@ mod tests {
                 },
             ]
         );
+        assert!(state.selection.selected_track_ids.is_empty());
         assert!(state.selection.selected_mask.is_none());
         assert!(state.animation_selection.active_property.is_none());
         assert!(!state.can_undo_action());
@@ -1638,6 +1714,7 @@ mod tests {
     #[test]
     fn dispatch_deselect_all_clears_app_selection_scopes() {
         let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+        state.selection.selected_track_ids = vec![track_id];
         state.selection.selected_clips =
             vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
         state.selection.selected_mask = Some((MaskId::new(), clip_id, track_id));
@@ -1657,6 +1734,7 @@ mod tests {
             .dispatch_action(mondrian_editor_state::Action::DeselectAll)
             .expect("deselect all");
 
+        assert!(state.selection.selected_track_ids.is_empty());
         assert!(state.selection.selected_clips.is_empty());
         assert!(state.selection.selected_mask.is_none());
         assert!(state.animation_selection.active_property.is_none());

@@ -28,12 +28,18 @@ impl AppState {
         &self.selection.selected_clips
     }
 
+    /// All selected timeline tracks in visible track order.
+    pub fn selected_tracks(&self) -> &[TrackId] {
+        &self.selection.selected_track_ids
+    }
+
     /// Clear all app-level selections.
     ///
-    /// Clip, mask, and animation selections represent nested targeting scopes.
+    /// Track, clip, mask, and animation selections represent nested targeting scopes.
     /// Clearing selection resets all of them together so subsequent commands do
     /// not accidentally target stale sub-selection state.
     pub fn clear_selection(&mut self) {
+        self.selection.selected_track_ids.clear();
         self.selection.selected_clips.clear();
         self.selection.selected_mask = None;
         self.clear_animation_selection();
@@ -66,9 +72,42 @@ impl AppState {
         self.replace_clip_selection(selections);
     }
 
+    /// Select a timeline track by stable id in the active sequence.
+    ///
+    /// Track selection is a higher-level target than clip/mask/keyframe
+    /// selection. Selecting a track clears narrower scopes so commands and
+    /// panels cannot accidentally continue targeting a previously selected clip.
+    pub fn select_track_by_id(&mut self, track_id: TrackId) -> Option<TrackId> {
+        let sequence = self.sequence.as_ref()?;
+        track_exists(sequence, track_id).then(|| {
+            self.replace_track_selection(vec![track_id]);
+            track_id
+        })
+    }
+
+    /// Select every track in the active sequence in visible track order.
+    pub fn select_all_tracks(&mut self) {
+        let Some(sequence) = self.sequence.as_ref() else {
+            self.clear_selection();
+            return;
+        };
+
+        let tracks = all_track_ids(sequence);
+        self.replace_track_selection(tracks);
+    }
+
     /// Replace the selected clip set and clear narrower selection scopes.
     pub fn replace_clip_selection(&mut self, selections: Vec<SelectedClipRef>) {
+        self.selection.selected_track_ids.clear();
         self.selection.selected_clips = selections;
+        self.selection.selected_mask = None;
+        self.clear_animation_selection();
+    }
+
+    /// Replace the selected track set and clear narrower selection scopes.
+    pub fn replace_track_selection(&mut self, track_ids: Vec<TrackId>) {
+        self.selection.selected_track_ids = track_ids;
+        self.selection.selected_clips.clear();
         self.selection.selected_mask = None;
         self.clear_animation_selection();
     }
@@ -98,6 +137,16 @@ impl AppState {
     }
 }
 
+/// Return all track ids in video-track then audio-track order.
+pub fn all_track_ids(sequence: &Sequence) -> Vec<TrackId> {
+    sequence
+        .video_tracks
+        .iter()
+        .map(|track| track.id)
+        .chain(sequence.audio_tracks.iter().map(|track| track.id))
+        .collect()
+}
+
 /// Return all clip selections in video-track then audio-track order.
 pub fn all_clip_selections(sequence: &Sequence) -> Vec<SelectedClipRef> {
     sequence
@@ -118,6 +167,12 @@ pub fn all_clip_selections(sequence: &Sequence) -> Vec<SelectedClipRef> {
             })
         }))
         .collect()
+}
+
+/// Return whether a track id exists in the active sequence.
+pub fn track_exists(sequence: &Sequence, track_id: TrackId) -> bool {
+    sequence.video_tracks.iter().any(|track| track.id == track_id)
+        || sequence.audio_tracks.iter().any(|track| track.id == track_id)
 }
 
 /// Resolve a clip id to its current track-backed selection reference.

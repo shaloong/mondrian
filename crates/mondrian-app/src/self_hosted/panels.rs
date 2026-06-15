@@ -26,7 +26,8 @@ use mondrian_ui_widgets::{
     Button, Checkbox, ColorPickerAreaMode, ColorPickerTrigger, CurveEditor, CurvePoint, DockPanel,
     FlexChild, FlexContainer, PanelList, PanelListItem, PropertyPanel, PropertyRow,
     PropertySection, ScrollView, Slider, TimelineClip, TimelineClipMove, TimelineClipRef,
-    TimelineClipTrim, TimelineTrack, TimelineTrimEdge, TimelineView, ViewerSurface,
+    TimelineClipTrim, TimelineTrack, TimelineTrackRef, TimelineTrimEdge, TimelineView,
+    ViewerSurface,
 };
 
 use crate::app::ui_actions::{
@@ -75,8 +76,12 @@ impl SelfHostedPanelModels {
                 .sequence
                 .as_ref()
                 .map(|sequence| {
-                    TimelinePanelModel::from_sequence(sequence, state.selected_clips())
-                        .with_playhead_frame(state.current_frame())
+                    TimelinePanelModel::from_sequence(
+                        sequence,
+                        state.selected_clips(),
+                        state.selected_tracks(),
+                    )
+                    .with_playhead_frame(state.current_frame())
                 })
                 .unwrap_or_default(),
             inspector: InspectorPanelModel::from_app_state(state),
@@ -97,8 +102,12 @@ impl SelfHostedPanelModels {
                 .sequence
                 .as_ref()
                 .map(|sequence| {
-                    TimelinePanelModel::from_sequence(sequence, state.selected_clips())
-                        .with_playhead_frame(state.current_frame())
+                    TimelinePanelModel::from_sequence(
+                        sequence,
+                        state.selected_clips(),
+                        state.selected_tracks(),
+                    )
+                    .with_playhead_frame(state.current_frame())
                 })
                 .unwrap_or_else(demo_timeline_model),
             inspector: InspectorPanelModel::from_app_state(state),
@@ -475,12 +484,12 @@ impl ViewerPanelModel {
 pub struct TimelinePanelModel {
     pub tracks: Vec<TimelineTrack>,
     pub playhead_frame: i64,
-    track_refs: Vec<TimelineTrackRef>,
+    track_refs: Vec<AppTimelineTrackRef>,
     clip_refs: Vec<Vec<ClipId>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TimelineTrackRef {
+struct AppTimelineTrackRef {
     track_id: TrackId,
     is_video_track: bool,
 }
@@ -491,19 +500,23 @@ impl TimelinePanelModel {
     /// The widget layer stays index-based and domain-light; this adapter is the
     /// app-side boundary that carries stable track/clip ids into emitted
     /// actions.
-    pub fn from_sequence(sequence: &Sequence, selected_clips: &[SelectedClipRef]) -> Self {
+    pub fn from_sequence(
+        sequence: &Sequence,
+        selected_clips: &[SelectedClipRef],
+        selected_tracks: &[TrackId],
+    ) -> Self {
         let video_tracks = sequence.video_tracks.iter().map(|track| {
             (
-                TimelineTrackRef { track_id: track.id, is_video_track: true },
+                AppTimelineTrackRef { track_id: track.id, is_video_track: true },
                 track.clips.iter().map(|clip| clip.id).collect::<Vec<_>>(),
-                timeline_track_from_sequence_track(track, true, selected_clips),
+                timeline_track_from_sequence_track(track, true, selected_clips, selected_tracks),
             )
         });
         let audio_tracks = sequence.audio_tracks.iter().map(|track| {
             (
-                TimelineTrackRef { track_id: track.id, is_video_track: false },
+                AppTimelineTrackRef { track_id: track.id, is_video_track: false },
                 track.clips.iter().map(|clip| clip.id).collect::<Vec<_>>(),
-                timeline_track_from_sequence_track(track, false, selected_clips),
+                timeline_track_from_sequence_track(track, false, selected_clips, selected_tracks),
             )
         });
 
@@ -539,6 +552,10 @@ impl TimelinePanelModel {
             is_video_track: track.is_video_track,
             clip_id,
         })
+    }
+
+    fn track_identity(&self, track_ref: TimelineTrackRef) -> Option<TrackId> {
+        self.track_refs.get(track_ref.track_index).map(|track| track.track_id)
     }
 
     fn move_payload(&self, movement: TimelineClipMove) -> Option<TimelineMoveClipPayload> {
@@ -835,9 +852,11 @@ fn timeline_track_from_sequence_track(
     track: &Track,
     is_video_track: bool,
     selected_clips: &[SelectedClipRef],
+    selected_tracks: &[TrackId],
 ) -> TimelineTrack {
     let muted = track.is_muted;
     let locked = track.is_locked;
+    let selected = selected_tracks.contains(&track.id);
     let clips = track
         .clips
         .iter()
@@ -849,7 +868,7 @@ fn timeline_track_from_sequence_track(
     } else {
         TimelineTrack::audio(track.name.clone(), clips)
     };
-    track.muted(muted).locked(locked)
+    track.selected(selected).muted(muted).locked(locked)
 }
 
 fn timeline_clip_from_sequence_clip(
@@ -1080,7 +1099,7 @@ fn demo_console_model() -> PanelListModel {
 fn demo_timeline_model() -> TimelinePanelModel {
     let sequence = demo_sequence();
     let selected = demo_selection(&sequence).into_iter().collect::<Vec<_>>();
-    TimelinePanelModel::from_sequence(&sequence, &selected).with_playhead_frame(76)
+    TimelinePanelModel::from_sequence(&sequence, &selected, &[]).with_playhead_frame(76)
 }
 
 #[cfg(test)]
@@ -1189,6 +1208,19 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
                 action_model
                     .clip_identity(clip_ref)
                     .map(timeline_select_clip_action)
+                    .unwrap_or(Action::NoOp)
+            }
+        })
+        .on_track_select({
+            let action_model = action_model.clone();
+            move |track_ref, _track| {
+                action_model
+                    .track_identity(track_ref)
+                    .map(|track_id| {
+                        Action::Select(mondrian_editor_state::action::SelectionTarget::Track(
+                            track_id,
+                        ))
+                    })
                     .unwrap_or(Action::NoOp)
             }
         })
@@ -1761,7 +1793,8 @@ mod tests {
             is_video_track: true,
             clip_id: video_id,
         };
-        let model = TimelinePanelModel::from_sequence(&sequence, &[selected]);
+        let selected_track_id = sequence.audio_tracks[0].id;
+        let model = TimelinePanelModel::from_sequence(&sequence, &[selected], &[selected_track_id]);
 
         assert_eq!(model.playhead_frame, 42);
         assert_eq!(
@@ -1778,12 +1811,18 @@ mod tests {
         assert_eq!(model.tracks[0].clips[0].duration_frames, 20);
         assert!(model.tracks[0].clips[0].selected);
         assert!(model.tracks[0].clips[0].select_action.is_none());
-
+        assert!(!model.tracks[0].selected);
         let first_audio = sequence.video_tracks.len();
+        assert_eq!(
+            model.track_identity(TimelineTrackRef { track_index: first_audio }),
+            Some(selected_track_id)
+        );
+
         assert_eq!(
             model.tracks[first_audio].kind,
             mondrian_ui_widgets::TimelineTrackKind::Audio
         );
+        assert!(model.tracks[first_audio].selected);
         assert!(model.tracks[first_audio].muted);
         assert!(model.tracks[first_audio].locked);
         assert!(model.tracks[first_audio].clips[0].disabled);
@@ -2084,7 +2123,7 @@ mod tests {
         );
         sequence.video_tracks[0].add_clip(solid).expect("add solid clip");
 
-        let model = TimelinePanelModel::from_sequence(&sequence, &[]);
+        let model = TimelinePanelModel::from_sequence(&sequence, &[], &[]);
 
         assert_eq!(model.tracks[0].clips[0].label, "纯色层");
         assert_eq!(

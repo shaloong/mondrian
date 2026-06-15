@@ -17,6 +17,9 @@ const SCROLLBAR_MIN_THUMB: f32 = 28.0;
 /// Action factory for clip selection.
 pub type TimelineClipAction = dyn Fn(TimelineClipRef, &TimelineClip) -> Action;
 
+/// Action factory for track selection.
+pub type TimelineTrackAction = dyn Fn(TimelineTrackRef, &TimelineTrack) -> Action;
+
 /// Action factory for playhead seeking.
 pub type TimelineSeekAction = dyn Fn(i64) -> Action;
 
@@ -31,6 +34,12 @@ pub type TimelineClipTrimAction = dyn Fn(TimelineClipTrim, &TimelineClip) -> Act
 pub struct TimelineClipRef {
     pub track_index: usize,
     pub clip_index: usize,
+}
+
+/// Stable view reference to a track inside the timeline surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimelineTrackRef {
+    pub track_index: usize,
 }
 
 /// Domain-light clip move proposal emitted when a drag commits.
@@ -128,8 +137,10 @@ pub struct TimelineTrack {
     pub label: String,
     pub kind: TimelineTrackKind,
     pub clips: Vec<TimelineClip>,
+    pub selected: bool,
     pub muted: bool,
     pub locked: bool,
+    pub select_action: Option<Action>,
 }
 
 impl TimelineTrack {
@@ -153,9 +164,17 @@ impl TimelineTrack {
             label: label.into(),
             kind,
             clips,
+            selected: false,
             muted: false,
             locked: false,
+            select_action: None,
         }
+    }
+
+    /// Mark this track as selected.
+    pub fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
     }
 
     /// Mark this track as muted.
@@ -169,6 +188,12 @@ impl TimelineTrack {
         self.locked = locked;
         self
     }
+
+    /// Dispatch a static action when this track is selected by input.
+    pub fn with_select_action(mut self, action: Action) -> Self {
+        self.select_action = Some(action);
+        self
+    }
 }
 
 /// Scrollable, zoomable timeline surface.
@@ -179,6 +204,7 @@ pub struct TimelineView {
     ruler_rect: Rect,
     header_rect: Rect,
     body_rect: Rect,
+    selected_track: Option<TimelineTrackRef>,
     selected_clip: Option<TimelineClipRef>,
     hovered_clip: Option<TimelineClipRef>,
     playhead_frame: i64,
@@ -198,6 +224,7 @@ pub struct TimelineView {
     horizontal_scrollbar_hovered: bool,
     vertical_scrollbar_hovered: bool,
     on_clip_select: Option<Box<TimelineClipAction>>,
+    on_track_select: Option<Box<TimelineTrackAction>>,
     on_seek: Option<Box<TimelineSeekAction>>,
     on_clip_move: Option<Box<TimelineClipMoveAction>>,
     on_clip_trim: Option<Box<TimelineClipTrimAction>>,
@@ -247,6 +274,7 @@ impl TimelineView {
             ruler_rect: Rect::ZERO,
             header_rect: Rect::ZERO,
             body_rect: Rect::ZERO,
+            selected_track: None,
             selected_clip: None,
             hovered_clip: None,
             playhead_frame: 0,
@@ -266,6 +294,7 @@ impl TimelineView {
             horizontal_scrollbar_hovered: false,
             vertical_scrollbar_hovered: false,
             on_clip_select: None,
+            on_track_select: None,
             on_seek: None,
             on_clip_move: None,
             on_clip_trim: None,
@@ -307,6 +336,7 @@ impl TimelineView {
             self.focused = false;
             self.focus_visible = false;
             self.hovered_clip = None;
+            self.selected_track = None;
             self.horizontal_scrollbar_hovered = false;
             self.vertical_scrollbar_hovered = false;
         }
@@ -318,6 +348,15 @@ impl TimelineView {
         action: impl Fn(TimelineClipRef, &TimelineClip) -> Action + 'static,
     ) -> Self {
         self.on_clip_select = Some(Box::new(action));
+        self
+    }
+
+    /// Set a dynamic track-selection action factory.
+    pub fn on_track_select(
+        mut self,
+        action: impl Fn(TimelineTrackRef, &TimelineTrack) -> Action + 'static,
+    ) -> Self {
+        self.on_track_select = Some(Box::new(action));
         self
     }
 
@@ -348,6 +387,11 @@ impl TimelineView {
     /// Current selected clip reference.
     pub fn selected_clip(&self) -> Option<TimelineClipRef> {
         self.selected_clip
+    }
+
+    /// Current locally selected track reference.
+    pub fn selected_track(&self) -> Option<TimelineTrackRef> {
+        self.selected_track
     }
 
     /// Current playhead frame.
@@ -535,6 +579,16 @@ impl TimelineView {
             .filter(|index| *index < self.tracks.len())
     }
 
+    fn track_header_at(&self, point: Point) -> Option<TimelineTrackRef> {
+        if !self.header_rect.contains(point) {
+            return None;
+        }
+        let index = ((point.y - self.body_rect.y + self.scroll_y) / self.track_height).floor();
+        (index >= 0.0)
+            .then_some(TimelineTrackRef { track_index: index as usize })
+            .filter(|track_ref| track_ref.track_index < self.tracks.len())
+    }
+
     fn clip_rect(&self, track_index: usize, clip: &TimelineClip) -> Rect {
         self.clip_rect_at(track_index, clip.start_frame, clip)
     }
@@ -597,6 +651,10 @@ impl TimelineView {
             .and_then(|track| track.clips.get(clip_ref.clip_index))
     }
 
+    fn track(&self, track_ref: TimelineTrackRef) -> Option<&TimelineTrack> {
+        self.tracks.get(track_ref.track_index)
+    }
+
     fn track_locked(&self, track_index: usize) -> bool {
         self.tracks.get(track_index).is_some_and(|track| track.locked)
     }
@@ -620,6 +678,7 @@ impl TimelineView {
         clip_ref: TimelineClipRef,
         ctx: &mut EventContext,
     ) -> EventResult {
+        self.selected_track = None;
         self.selected_clip = Some(clip_ref);
         if let Some(clip) = self.clip(clip_ref) {
             if let Some(action) = clip.select_action.clone() {
@@ -627,6 +686,25 @@ impl TimelineView {
             }
             if let Some(factory) = &self.on_clip_select {
                 (ctx.dispatch)(factory(clip_ref, clip));
+            }
+        }
+        ctx.request_repaint();
+        EventResult::Handled
+    }
+
+    fn select_track_from_input(
+        &mut self,
+        track_ref: TimelineTrackRef,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        self.selected_track = Some(track_ref);
+        self.selected_clip = None;
+        if let Some(track) = self.track(track_ref) {
+            if let Some(action) = track.select_action.clone() {
+                (ctx.dispatch)(action);
+            }
+            if let Some(factory) = &self.on_track_select {
+                (ctx.dispatch)(factory(track_ref, track));
             }
         }
         ctx.request_repaint();
@@ -890,12 +968,24 @@ impl TimelineView {
                 self.header_rect.width,
                 self.track_height,
             );
-            ctx.encoder.draw_rect(header, colors.card, 0.0);
+            let track_ref = TimelineTrackRef { track_index };
+            let track_selected = track.selected || self.selected_track == Some(track_ref);
+            ctx.encoder.draw_rect(
+                header,
+                if track_selected {
+                    colors.accent
+                } else {
+                    colors.card
+                },
+                0.0,
+            );
             ctx.encoder.draw_text(
                 &track.label,
                 ctx.theme.typography.tab_label.font_size,
                 snap_point(Point::new(header.x + 10.0, header.y + 16.0)),
-                if track.locked {
+                if track_selected {
+                    colors.accent_foreground
+                } else if track.locked {
                     colors.muted_foreground
                 } else {
                     colors.foreground
@@ -1216,6 +1306,9 @@ impl Widget for TimelineView {
                     self.seek_from_input(self.x_to_frame(position.x), ctx);
                     return EventResult::Handled;
                 }
+                if let Some(track_ref) = self.track_header_at(*position) {
+                    return self.select_track_from_input(track_ref, ctx);
+                }
                 if let Some(clip_ref) = self.hit_clip(*position) {
                     let result = self.select_clip_from_input(clip_ref, ctx);
                     if let Some(edge) = self.hit_clip_edge(clip_ref, *position) {
@@ -1524,6 +1617,55 @@ mod tests {
         assert_eq!(
             actions.borrow().as_slice(),
             &[Action::SaveProject, Action::CloseProject]
+        );
+        assert!(ctx.requests.repaint);
+    }
+
+    #[test]
+    fn clicking_track_header_selects_track_without_selecting_clip() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut view = timeline().on_track_select(|track_ref, _track| {
+            if track_ref.track_index == 0 {
+                Action::FocusPanel(mondrian_editor_state::state::PanelKind::Timeline)
+            } else {
+                Action::Pause
+            }
+        });
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let result = view.event(
+            &UiEvent::MouseDown {
+                position: Point::new(20.0, 42.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(
+            view.selected_track(),
+            Some(TimelineTrackRef { track_index: 0 })
+        );
+        assert_eq!(view.selected_clip(), None);
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[Action::FocusPanel(
+                mondrian_editor_state::state::PanelKind::Timeline
+            )]
         );
         assert!(ctx.requests.repaint);
     }

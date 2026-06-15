@@ -429,11 +429,17 @@ payloads as the Timeline view.
 Timeline selection actions treat the clip id as authoritative and resolve the
 current track from `AppState`; track ids in widget snapshots are context only
 because they can be stale after moves, undo/redo, or refresh lag.
-Clip, mask, and animation keyframe selection state is owned by
+Track, clip, mask, and animation keyframe selection state is owned by
 `mondrian-app::app::selection`; action handlers should call its AppState
-methods instead of directly clearing individual selection fields. Clipboard,
+methods instead of directly clearing individual selection fields. Track
+selection is the broadest timeline target; selecting tracks clears clip, mask,
+and keyframe scopes, while selecting clips clears selected tracks. Clipboard,
 duplicate, paste, and timeline mutation paths should also replace or clear clip
 selection through that module so nested selection scopes stay consistent.
+Self-hosted Timeline track headers dispatch the generic
+`Action::Select(SelectionTarget::Track(_))`; the widget exposes only
+index-based `TimelineTrackRef`s, and the app adapter maps those refs to stable
+`TrackId`s.
 Panel model adapters should read primary and multi-clip selection through the
 same AppState selection queries instead of depending on `SelectionState` fields.
 Timeline mutations that move clips should refresh selected clip track metadata
