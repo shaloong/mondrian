@@ -749,6 +749,21 @@ Compact label-like controls such as buttons, checkboxes, list rows, and dock
 tabs also clip their text lane locally so a long caption cannot bleed into the
 next control before a parent-level clip catches it.
 
+## Node Graph
+
+Node graph rendering starts as a domain-light projection in
+`mondrian-ui-widgets::NodeGraphView`. The widget owns compact node layout,
+port/edge painting, selection chrome, and hit testing for generic
+`NodeGraphNode` / `NodeGraphEdge` values. It does not own effect semantics,
+undo history, or graph mutation rules.
+
+The self-hosted `SlotKind::NodeGraph` panel maps the currently selected clip to
+a read-only render chain: Source -> each clip effect -> Output. The app adapter
+derives node titles, disabled state, and semantic accents from the same clip
+and effect data used by the Inspector, so the graph is another view of the same
+state rather than a separate editor model. Future node editing should add typed
+app-layer actions before enabling rewiring or parameter mutation in the widget.
+
 ## Curve Editing
 
 Curve editing starts as a domain-independent widget primitive in

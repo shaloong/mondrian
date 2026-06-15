@@ -26,11 +26,11 @@ use mondrian_ui_widgets::dock_tab_bar::TabInfo;
 use mondrian_ui_widgets::panel_slot::SlotKind;
 use mondrian_ui_widgets::{
     Button, Checkbox, ColorPickerAreaMode, ColorPickerTrigger, CurveEditor, CurvePoint, DockPanel,
-    Dropdown, FlexChild, FlexContainer, Label, MenuItem, PanelList, PanelListItem, PropertyPanel,
-    PropertyRow, PropertySection, ScrollView, Slider, TextInput, TimelineAssetDrop, TimelineClip,
-    TimelineClipMove, TimelineClipRef, TimelineClipTrim, TimelineEditCommand, TimelineTrack,
-    TimelineTrackControl, TimelineTrackMove, TimelineTrackRef, TimelineTrimEdge, TimelineView,
-    ViewerSurface,
+    Dropdown, FlexChild, FlexContainer, Label, MenuItem, NodeGraphEdge, NodeGraphNode,
+    NodeGraphView, PanelList, PanelListItem, PropertyPanel, PropertyRow, PropertySection,
+    ScrollView, Slider, TextInput, TimelineAssetDrop, TimelineClip, TimelineClipMove,
+    TimelineClipRef, TimelineClipTrim, TimelineEditCommand, TimelineTrack, TimelineTrackControl,
+    TimelineTrackMove, TimelineTrackRef, TimelineTrimEdge, TimelineView, ViewerSurface,
 };
 
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
@@ -68,6 +68,7 @@ pub struct SelfHostedPanelModels {
     pub timeline: TimelinePanelModel,
     pub inspector: InspectorPanelModel,
     pub export: ExportPanelModel,
+    pub node_graph: NodeGraphPanelModel,
 }
 
 impl SelfHostedPanelModels {
@@ -96,6 +97,7 @@ impl SelfHostedPanelModels {
                 .unwrap_or_default(),
             inspector: InspectorPanelModel::from_app_state(state),
             export: ExportPanelModel::from_app_state(state),
+            node_graph: NodeGraphPanelModel::from_app_state(state),
         }
     }
 
@@ -123,6 +125,7 @@ impl SelfHostedPanelModels {
                 .unwrap_or_else(demo_timeline_model),
             inspector: InspectorPanelModel::from_app_state(state),
             export: ExportPanelModel::from_app_state(state),
+            node_graph: NodeGraphPanelModel::from_app_state(state),
         }
     }
 
@@ -811,6 +814,79 @@ pub struct ExportSequenceOptionModel {
     pub audio_clips: usize,
 }
 
+/// Node graph panel data independent from a concrete widget tree.
+#[derive(Debug, Clone)]
+pub struct NodeGraphPanelModel {
+    pub title: String,
+    pub subtitle: String,
+    pub nodes: Vec<NodeGraphNode>,
+    pub edges: Vec<NodeGraphEdge>,
+    pub selected_node_id: Option<String>,
+}
+
+impl NodeGraphPanelModel {
+    pub fn from_app_state(state: &AppState) -> Self {
+        let Some(sequence) = state.sequence.as_ref() else {
+            return Self::empty();
+        };
+        let Some(selection) = state.primary_selected_clip() else {
+            return Self::empty();
+        };
+        let Some((_resolved_selection, clip)) = clip_for_selection(sequence, &selection) else {
+            return Self::empty();
+        };
+
+        let clip_label = clip.label.clone().unwrap_or_else(|| default_clip_label(clip));
+        let mut nodes = vec![NodeGraphNode::new("source", "Source")
+            .with_subtitle(clip_source_subtitle(clip))
+            .with_accent(Color::from_hex(0x4B7BE5))
+            .disabled(clip.is_disabled)];
+        let mut edges = Vec::new();
+        let mut previous_id = "source".to_owned();
+
+        for (index, effect) in clip.effects.iter().enumerate() {
+            let id = format!("effect:{}", effect.id);
+            nodes.push(
+                NodeGraphNode::new(id.clone(), effect_display_name(&effect.effect_type))
+                    .with_subtitle(format!(
+                        "{} {}",
+                        effect_badge(&effect.effect_type),
+                        index + 1
+                    ))
+                    .with_accent(effect_node_accent(&effect.effect_type))
+                    .disabled(!effect.is_enabled),
+            );
+            edges.push(NodeGraphEdge::new(previous_id, id.clone()));
+            previous_id = id;
+        }
+
+        nodes.push(
+            NodeGraphNode::new("output", "Output")
+                .with_subtitle("Composite")
+                .with_accent(Color::from_hex(0x22C55E)),
+        );
+        edges.push(NodeGraphEdge::new(previous_id, "output"));
+
+        Self {
+            title: "Node Graph".to_owned(),
+            subtitle: format!("{clip_label} / {} effect(s)", clip.effects.len()),
+            nodes,
+            edges,
+            selected_node_id: Some("source".to_owned()),
+        }
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            title: "Node Graph".to_owned(),
+            subtitle: "Select a clip to inspect its render chain".to_owned(),
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            selected_node_id: None,
+        }
+    }
+}
+
 impl ExportPanelModel {
     pub fn from_app_state(state: &AppState) -> Self {
         let presets = builtin_export_presets()
@@ -998,7 +1074,7 @@ fn panel_content_for_slot(kind: SlotKind, models: &SelfHostedPanelModels) -> Box
         SlotKind::Inspector => Box::new(ScrollView::new(Some(Box::new(inspector_panel(
             &models.inspector,
         ))))),
-        SlotKind::NodeGraph => Box::new(panel_list(&PanelListModel::unsupported_panel(kind))),
+        SlotKind::NodeGraph => Box::new(node_graph_panel(&models.node_graph)),
     }
 }
 
@@ -1173,6 +1249,28 @@ fn effect_badge(effect_type: &EffectType) -> &'static str {
         EffectType::Lut3D => "3D",
         EffectType::ChromaKey | EffectType::LumaKey => "KEY",
         _ => "FX",
+    }
+}
+
+fn effect_node_accent(effect_type: &EffectType) -> Color {
+    match effect_type {
+        EffectType::Plugin(_) => Color::from_hex(0xD946EF),
+        EffectType::GaussianBlur | EffectType::Sharpen => Color::from_hex(0x3B82F6),
+        EffectType::Lut3D => Color::from_hex(0x22C55E),
+        EffectType::ChromaKey | EffectType::LumaKey => Color::from_hex(0xF59E0B),
+        _ => Color::from_hex(0x8B5CF6),
+    }
+}
+
+fn clip_source_subtitle(clip: &Clip) -> &'static str {
+    if clip.is_adjustment_layer() {
+        "Adjustment"
+    } else if clip.is_nested_sequence() {
+        "Nested Sequence"
+    } else if clip.is_solid_color() {
+        "Solid Color"
+    } else {
+        "Media Clip"
     }
 }
 
@@ -1452,6 +1550,16 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
             }
         })
         .on_seek(timeline_seek_action)
+}
+
+fn node_graph_panel(model: &NodeGraphPanelModel) -> NodeGraphView {
+    let mut graph = NodeGraphView::new(model.nodes.clone(), model.edges.clone())
+        .with_title(model.title.clone())
+        .with_subtitle(model.subtitle.clone());
+    if let Some(selected_node_id) = &model.selected_node_id {
+        graph = graph.with_selected_node(selected_node_id.clone());
+    }
+    graph
 }
 
 fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
@@ -2030,6 +2138,7 @@ mod tests {
         assert!(models.viewer.enabled);
         assert!(!models.timeline.tracks.is_empty());
         assert!(!models.inspector.curve_points.is_empty());
+        assert!(!models.node_graph.nodes.is_empty());
     }
 
     #[test]
@@ -2078,6 +2187,8 @@ mod tests {
         assert!(models.inspector.effects.is_empty());
         assert!(models.export.sequences.is_empty());
         assert!(!models.export.can_enqueue());
+        assert!(models.node_graph.nodes.is_empty());
+        assert!(models.node_graph.edges.is_empty());
     }
 
     #[test]
@@ -2108,18 +2219,6 @@ mod tests {
             payload.output_path,
             std::path::PathBuf::from("E:/renders/deliverable.mp4")
         );
-    }
-
-    #[test]
-    fn unsupported_panel_model_is_explicit_disabled_empty_state() {
-        let model = PanelListModel::unsupported_panel(SlotKind::NodeGraph);
-
-        assert_eq!(model.title, SlotKind::NodeGraph.display_name());
-        assert_eq!(model.subtitle, "Self-hosted panel");
-        assert_eq!(model.items.len(), 1);
-        assert_eq!(model.items[0].title, "Panel not available");
-        assert!(model.items[0].disabled);
-        assert_eq!(model.items[0].badge.as_deref(), Some("Pending"));
     }
 
     #[test]
@@ -2913,6 +3012,24 @@ mod tests {
             effect_display_name(&EffectType::GaussianBlur)
         );
         assert!(!models.inspector.effects[0].enabled);
+        assert_eq!(models.node_graph.nodes.len(), 3);
+        assert_eq!(models.node_graph.edges.len(), 2);
+        assert_eq!(models.node_graph.nodes[0].id, "source");
+        assert_eq!(models.node_graph.nodes[1].id, format!("effect:{effect_id}"));
+        assert_eq!(
+            models.node_graph.nodes[1].title,
+            effect_display_name(&EffectType::GaussianBlur)
+        );
+        assert!(models.node_graph.nodes[1].disabled);
+        assert_eq!(models.node_graph.nodes[2].id, "output");
+        assert_eq!(
+            models.node_graph.edges[0],
+            NodeGraphEdge::new("source", format!("effect:{effect_id}"))
+        );
+        assert_eq!(
+            models.node_graph.edges[1],
+            NodeGraphEdge::new(format!("effect:{effect_id}"), "output")
+        );
     }
 
     #[test]
