@@ -28,10 +28,6 @@ fn overlay_hit_test_recursive(
         return vec![];
     };
 
-    if widget.overlay_hit_test(position) {
-        return vec![node_id];
-    }
-
     let children = tree.children_ids(node_id);
     for child_id in children.iter().rev() {
         let child_path = overlay_hit_test_recursive(tree, *child_id, position);
@@ -40,6 +36,10 @@ fn overlay_hit_test_recursive(
             path.extend(child_path);
             return path;
         }
+    }
+
+    if widget.overlay_hit_test(position) {
+        return vec![node_id];
     }
 
     vec![]
@@ -310,5 +310,67 @@ mod tests {
         let hit = hit_test_deepest(&tree, Point::new(250.0, 50.0));
 
         assert_eq!(hit, Some(overlay_id));
+    }
+
+    #[test]
+    fn child_overlay_hit_test_wins_over_parent_overlay_close_layer() {
+        let root_id = WidgetId::new();
+        let parent_overlay_id = WidgetId::new();
+        let child_overlay_id = WidgetId::new();
+
+        let child_overlay = HitWidget {
+            id: child_overlay_id,
+            bounds: Rect::new(30.0, 30.0, 80.0, 80.0),
+            overlay_hit: true,
+            children: vec![],
+        };
+        let parent_overlay = HitWidget {
+            id: parent_overlay_id,
+            bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
+            overlay_hit: true,
+            children: vec![Box::new(child_overlay)],
+        };
+        let root = HitWidget {
+            id: root_id,
+            bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
+            overlay_hit: false,
+            children: vec![Box::new(parent_overlay)],
+        };
+
+        let mut widgets = std::collections::HashMap::new();
+        widgets.insert(root_id, root);
+        widgets.insert(
+            parent_overlay_id,
+            HitWidget {
+                id: parent_overlay_id,
+                bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
+                overlay_hit: true,
+                children: vec![Box::new(HitWidget {
+                    id: child_overlay_id,
+                    bounds: Rect::new(30.0, 30.0, 80.0, 80.0),
+                    overlay_hit: true,
+                    children: vec![],
+                })],
+            },
+        );
+        widgets.insert(
+            child_overlay_id,
+            HitWidget {
+                id: child_overlay_id,
+                bounds: Rect::new(30.0, 30.0, 80.0, 80.0),
+                overlay_hit: true,
+                children: vec![],
+            },
+        );
+
+        let mut parents = std::collections::HashMap::new();
+        parents.insert(parent_overlay_id, root_id);
+        parents.insert(child_overlay_id, parent_overlay_id);
+
+        let tree = TestTree { widgets, parents, root: root_id };
+
+        let hit = hit_test_deepest(&tree, Point::new(60.0, 60.0));
+
+        assert_eq!(hit, Some(child_overlay_id));
     }
 }

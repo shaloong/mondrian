@@ -438,8 +438,10 @@ Dropdowns, popovers, context menus, tooltips, and shell affordances paint in
 the overlay pass after normal widget content. A widget with an open top-layer
 popup that needs outside-click dismissal must expose that boundary through
 `overlay_hit_test()`, not by widening its normal `hit_test()` bounds. The event
-router resolves overlay hits before normal content hits, so a popup painted over
-a sibling panel also receives pointer and wheel events over that sibling.
+router resolves overlay hits before normal content hits and searches child
+overlays before a parent's broad close layer, so a nested or visually topmost
+popup receives pointer and wheel events before an ancestor outside-click
+catcher or a sibling panel.
 Dragging popup internals should use pointer capture so move/up events remain
 routed to the owning widget.
 
