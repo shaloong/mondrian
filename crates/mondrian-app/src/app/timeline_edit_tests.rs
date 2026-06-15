@@ -1,6 +1,6 @@
 use super::*;
 use mondrian_effects::EffectRenderOp;
-use mondrian_timeline::clip::{AlphaInterpretation, MediaInterpretation};
+use mondrian_timeline::clip::{AlphaInterpretation, MediaInterpretation, Transform2D};
 
 fn create_state_with_sequence() -> AppState {
     let mut state = AppState::new();
@@ -606,6 +606,65 @@ fn removing_track_renumbers_tracks_and_clears_broken_links() {
         .find(|clip| clip.id == audio_id)
         .expect("audio clip should remain");
     assert_eq!(audio_after.linked_clip, None);
+}
+
+#[test]
+fn removing_track_prunes_stale_app_selection() {
+    let mut state = create_state_with_sequence();
+    let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
+    let removed_track_id =
+        state.sequence.as_ref().expect("sequence should exist").video_tracks[1].id;
+    let retained_track_id =
+        state.sequence.as_ref().expect("sequence should exist").video_tracks[0].id;
+
+    let removed_clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(20, tb));
+    let removed_clip_id = removed_clip.id;
+    let retained_clip = Clip::new(AssetId::new(), TimeCode::new(4, tb), TimeCode::new(12, tb));
+    let retained_clip_id = retained_clip.id;
+    {
+        let seq = state.sequence.as_mut().expect("sequence should exist");
+        seq.video_tracks[1].add_clip(removed_clip).expect("add removed clip");
+        seq.video_tracks[0].add_clip(retained_clip).expect("add retained clip");
+    }
+
+    state.selection.selected_track_ids = vec![removed_track_id, retained_track_id];
+    state.selection.selected_clips = vec![
+        SelectedClipRef {
+            track_id: removed_track_id,
+            is_video_track: true,
+            clip_id: removed_clip_id,
+        },
+        SelectedClipRef {
+            track_id: retained_track_id,
+            is_video_track: true,
+            clip_id: retained_clip_id,
+        },
+    ];
+    state.selection.selected_mask = Some((MaskId::new(), removed_clip_id, removed_track_id));
+    state.animation_selection.active_property = Some(AnimationPropertySelection {
+        clip_id: removed_clip_id,
+        path: Transform2D::OPACITY_PATH.to_string(),
+    });
+    state.animation_selection.selected_keyframes.insert(AnimationKeyframeSelection {
+        clip_id: removed_clip_id,
+        path: Transform2D::OPACITY_PATH.to_string(),
+        time: 0,
+    });
+
+    state.remove_track(removed_track_id, true).expect("remove track");
+
+    assert_eq!(state.selection.selected_track_ids, vec![retained_track_id]);
+    assert_eq!(
+        state.selection.selected_clips,
+        vec![SelectedClipRef {
+            track_id: retained_track_id,
+            is_video_track: true,
+            clip_id: retained_clip_id,
+        }]
+    );
+    assert!(state.selection.selected_mask.is_none());
+    assert!(state.animation_selection.active_property.is_none());
+    assert!(state.animation_selection.selected_keyframes.is_empty());
 }
 
 #[test]

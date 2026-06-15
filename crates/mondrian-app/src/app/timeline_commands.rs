@@ -575,6 +575,7 @@ impl AppState {
             before
         };
 
+        self.prune_selection_to_active_sequence();
         self.record_timeline_edit_snapshot("删除轨道", before);
         Ok(())
     }
@@ -639,6 +640,7 @@ impl AppState {
             before
         };
 
+        self.prune_selection_to_active_sequence();
         self.record_timeline_edit_snapshot("删除轨道", before);
         Ok(())
     }

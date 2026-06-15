@@ -1,6 +1,7 @@
 use super::AppState;
 use mondrian_core::types::{ClipId, TrackId};
 use mondrian_timeline::sequence::Sequence;
+use std::collections::{HashMap, HashSet};
 
 /// UI-agnostic reference to a selected clip in the active sequence.
 ///
@@ -140,6 +141,64 @@ impl AppState {
                 selection.track_id = updated.track_id;
                 selection.is_video_track = updated.is_video_track;
             }
+        }
+    }
+
+    /// Drop or refresh selection references that no longer exist in the active sequence.
+    ///
+    /// Timeline structure edits such as track removal can invalidate selected
+    /// tracks, selected clips, masks, and animation keyframes. This method keeps
+    /// selection state aligned with the authoritative sequence after those
+    /// mutations, regardless of whether they came from legacy egui, self-hosted
+    /// widgets, shortcuts, or scripts.
+    pub fn prune_selection_to_active_sequence(&mut self) {
+        let Some(sequence) = self.sequence.as_ref() else {
+            self.clear_selection();
+            return;
+        };
+
+        let valid_track_ids = all_track_ids(sequence).into_iter().collect::<HashSet<_>>();
+        let clip_updates = all_clip_selections(sequence)
+            .into_iter()
+            .map(|selection| (selection.clip_id, selection))
+            .collect::<HashMap<_, _>>();
+        let valid_clip_ids = clip_updates.keys().copied().collect::<HashSet<_>>();
+
+        self.selection
+            .selected_track_ids
+            .retain(|track_id| valid_track_ids.contains(track_id));
+        self.selection.selected_clips = self
+            .selection
+            .selected_clips
+            .iter()
+            .filter_map(|selection| clip_updates.get(&selection.clip_id).copied())
+            .collect();
+
+        self.selection.selected_mask =
+            self.selection.selected_mask.and_then(|(mask_id, clip_id, _track_id)| {
+                clip_updates
+                    .get(&clip_id)
+                    .map(|selection| (mask_id, clip_id, selection.track_id))
+            });
+
+        if self
+            .animation_selection
+            .active_property
+            .as_ref()
+            .is_some_and(|selection| !valid_clip_ids.contains(&selection.clip_id))
+        {
+            self.animation_selection.active_property = None;
+        }
+        self.animation_selection
+            .selected_keyframes
+            .retain(|selection| valid_clip_ids.contains(&selection.clip_id));
+        self.animation_selection
+            .remembered_active_properties
+            .retain(|clip_id, _| valid_clip_ids.contains(clip_id));
+        if self.animation_selection.active_property.is_none()
+            && self.animation_selection.selected_keyframes.is_empty()
+        {
+            self.animation_selection.bubble_host = None;
         }
     }
 }

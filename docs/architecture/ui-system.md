@@ -443,6 +443,11 @@ Self-hosted Timeline track headers dispatch the generic
 `Action::Select(SelectionTarget::Track(_))`; the widget exposes only
 index-based `TimelineTrackRef`s, and the app adapter maps those refs to stable
 `TrackId`s.
+Timeline structure mutations that can invalidate ids, such as removing tracks,
+must call the app selection pruning helper after the sequence mutation succeeds.
+That pruning removes stale selected tracks, clips, masks, and animation
+keyframes regardless of whether the mutation came from legacy egui,
+self-hosted UI, shortcuts, or scripts.
 Panel model adapters should read primary and multi-clip selection through the
 same AppState selection queries instead of depending on `SelectionState` fields.
 Timeline mutations that move clips should refresh selected clip track metadata
