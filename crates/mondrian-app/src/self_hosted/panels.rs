@@ -26,8 +26,8 @@ use mondrian_ui_widgets::{
     Button, Checkbox, ColorPickerAreaMode, ColorPickerTrigger, CurveEditor, CurvePoint, DockPanel,
     FlexChild, FlexContainer, PanelList, PanelListItem, PropertyPanel, PropertyRow,
     PropertySection, ScrollView, Slider, TimelineClip, TimelineClipMove, TimelineClipRef,
-    TimelineClipTrim, TimelineTrack, TimelineTrackRef, TimelineTrimEdge, TimelineView,
-    ViewerSurface,
+    TimelineClipTrim, TimelineTrack, TimelineTrackControl, TimelineTrackRef, TimelineTrimEdge,
+    TimelineView, ViewerSurface,
 };
 
 use crate::app::ui_actions::{
@@ -38,13 +38,13 @@ use crate::app::ui_actions::{
     inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
     inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
     timeline_move_clip_action, timeline_seek_action, timeline_select_clip_action,
-    timeline_trim_clip_action, AssetsPrepareDragPayload, EffectsAddToClipPayload,
-    InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
-    InspectorRemoveEffectPayload, InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
-    InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+    timeline_set_track_control_action, timeline_trim_clip_action, AssetsPrepareDragPayload,
+    EffectsAddToClipPayload, InspectorClipRefPayload, InspectorClipTransformField,
+    InspectorCurvePointPayload, InspectorRemoveEffectPayload, InspectorSetClipCurvePayload,
+    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
     InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
-    TimelineMoveClipPayload, TimelineSelectClipPayload, TimelineTrimClipPayload,
-    TimelineTrimPayloadEdge,
+    TimelineMoveClipPayload, TimelineSelectClipPayload, TimelineSetTrackControlPayload,
+    TimelineTrackControlPayloadKind, TimelineTrimClipPayload, TimelineTrimPayloadEdge,
 };
 use crate::app::{AppState, SelectedClipRef};
 
@@ -554,8 +554,30 @@ impl TimelinePanelModel {
         })
     }
 
-    fn track_identity(&self, track_ref: TimelineTrackRef) -> Option<TrackId> {
-        self.track_refs.get(track_ref.track_index).map(|track| track.track_id)
+    fn track_identity(&self, track_ref: TimelineTrackRef) -> Option<AppTimelineTrackRef> {
+        self.track_refs.get(track_ref.track_index).copied()
+    }
+
+    fn track_control_payload(
+        &self,
+        control: TimelineTrackControl,
+        track_ref: TimelineTrackRef,
+        track: &TimelineTrack,
+    ) -> Option<TimelineSetTrackControlPayload> {
+        let identity = self.track_identity(track_ref)?;
+        let (control, enabled) = match control {
+            TimelineTrackControl::Visibility => {
+                (TimelineTrackControlPayloadKind::Visibility, !track.visible)
+            }
+            TimelineTrackControl::Mute => (TimelineTrackControlPayloadKind::Mute, !track.muted),
+            TimelineTrackControl::Lock => (TimelineTrackControlPayloadKind::Lock, !track.locked),
+        };
+        Some(TimelineSetTrackControlPayload {
+            track_id: identity.track_id,
+            is_video_track: identity.is_video_track,
+            control,
+            enabled,
+        })
     }
 
     fn move_payload(&self, movement: TimelineClipMove) -> Option<TimelineMoveClipPayload> {
@@ -856,6 +878,7 @@ fn timeline_track_from_sequence_track(
 ) -> TimelineTrack {
     let muted = track.is_muted;
     let locked = track.is_locked;
+    let visible = track.is_visible;
     let selected = selected_tracks.contains(&track.id);
     let clips = track
         .clips
@@ -868,7 +891,7 @@ fn timeline_track_from_sequence_track(
     } else {
         TimelineTrack::audio(track.name.clone(), clips)
     };
-    track.selected(selected).muted(muted).locked(locked)
+    track.selected(selected).visible(visible).muted(muted).locked(locked)
 }
 
 fn timeline_clip_from_sequence_clip(
@@ -1201,6 +1224,7 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
     let action_model = model.clone();
     TimelineView::new(model.tracks.clone())
         .enabled(!model.tracks.is_empty())
+        .with_header_width(128.0)
         .with_playhead(model.playhead_frame)
         .on_clip_select({
             let action_model = action_model.clone();
@@ -1216,11 +1240,20 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
             move |track_ref, _track| {
                 action_model
                     .track_identity(track_ref)
-                    .map(|track_id| {
+                    .map(|track| {
                         Action::Select(mondrian_editor_state::action::SelectionTarget::Track(
-                            track_id,
+                            track.track_id,
                         ))
                     })
+                    .unwrap_or(Action::NoOp)
+            }
+        })
+        .on_track_control({
+            let action_model = action_model.clone();
+            move |control, track_ref, track| {
+                action_model
+                    .track_control_payload(control, track_ref, track)
+                    .map(timeline_set_track_control_action)
                     .unwrap_or(Action::NoOp)
             }
         })
@@ -1815,7 +1848,7 @@ mod tests {
         let first_audio = sequence.video_tracks.len();
         assert_eq!(
             model.track_identity(TimelineTrackRef { track_index: first_audio }),
-            Some(selected_track_id)
+            Some(AppTimelineTrackRef { track_id: selected_track_id, is_video_track: false })
         );
 
         assert_eq!(
@@ -1826,6 +1859,44 @@ mod tests {
         assert!(model.tracks[first_audio].muted);
         assert!(model.tracks[first_audio].locked);
         assert!(model.tracks[first_audio].clips[0].disabled);
+    }
+
+    #[test]
+    fn timeline_model_maps_track_control_payloads_to_stable_track_ids() {
+        let mut sequence = Sequence::new("edit");
+        sequence.video_tracks[0].is_visible = false;
+        sequence.audio_tracks[0].is_muted = true;
+
+        let model = TimelinePanelModel::from_sequence(&sequence, &[], &[]);
+        let video_ref = TimelineTrackRef { track_index: 0 };
+        let first_audio_ref = TimelineTrackRef { track_index: sequence.video_tracks.len() };
+
+        let visibility = model
+            .track_control_payload(
+                TimelineTrackControl::Visibility,
+                video_ref,
+                &model.tracks[video_ref.track_index],
+            )
+            .expect("visibility payload");
+        assert_eq!(visibility.track_id, sequence.video_tracks[0].id);
+        assert!(visibility.is_video_track);
+        assert_eq!(
+            visibility.control,
+            TimelineTrackControlPayloadKind::Visibility
+        );
+        assert!(visibility.enabled);
+
+        let mute = model
+            .track_control_payload(
+                TimelineTrackControl::Mute,
+                first_audio_ref,
+                &model.tracks[first_audio_ref.track_index],
+            )
+            .expect("mute payload");
+        assert_eq!(mute.track_id, sequence.audio_tracks[0].id);
+        assert!(!mute.is_video_track);
+        assert_eq!(mute.control, TimelineTrackControlPayloadKind::Mute);
+        assert!(!mute.enabled);
     }
 
     #[test]

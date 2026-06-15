@@ -22,6 +22,8 @@ pub const TIMELINE_MOVE_CLIP: &str = "move_clip";
 pub const TIMELINE_TRIM_CLIP: &str = "trim_clip";
 /// Action name for seeking the active timeline.
 pub const TIMELINE_SEEK: &str = "seek";
+/// Action name for changing one timeline track header control.
+pub const TIMELINE_SET_TRACK_CONTROL: &str = "set_track_control";
 
 /// Custom action namespace for inspector UI operations.
 pub const INSPECTOR_NAMESPACE: &str = "ui.inspector";
@@ -128,6 +130,30 @@ pub struct TimelineTrimClipPayload {
 pub struct TimelineSeekPayload {
     /// Target timeline frame.
     pub frame: i64,
+}
+
+/// Track control targeted by the timeline header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TimelineTrackControlPayloadKind {
+    /// Track visibility in video/compositing output.
+    Visibility,
+    /// Track muted state.
+    Mute,
+    /// Track locked state.
+    Lock,
+}
+
+/// Set one track-level control from the timeline header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineSetTrackControlPayload {
+    /// Track targeted by the timeline header.
+    pub track_id: TrackId,
+    /// Whether `track_id` is a video track rather than an audio track.
+    pub is_video_track: bool,
+    /// Control being changed.
+    pub control: TimelineTrackControlPayloadKind,
+    /// New value for that control.
+    pub enabled: bool,
 }
 
 /// Application-level identity for an inspector-selected clip.
@@ -294,6 +320,11 @@ pub fn timeline_trim_clip_action(payload: TimelineTrimClipPayload) -> Action {
 /// Build an action that seeks the active timeline.
 pub fn timeline_seek_action(frame: i64) -> Action {
     custom_timeline_action(TIMELINE_SEEK, TimelineSeekPayload { frame: frame.max(0) })
+}
+
+/// Build an action that changes a timeline track header control.
+pub fn timeline_set_track_control_action(payload: TimelineSetTrackControlPayload) -> Action {
+    custom_timeline_action(TIMELINE_SET_TRACK_CONTROL, payload)
 }
 
 /// Build an action that toggles a clip enabled state from an inspector panel.

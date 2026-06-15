@@ -20,6 +20,10 @@ pub type TimelineClipAction = dyn Fn(TimelineClipRef, &TimelineClip) -> Action;
 /// Action factory for track selection.
 pub type TimelineTrackAction = dyn Fn(TimelineTrackRef, &TimelineTrack) -> Action;
 
+/// Action factory for track header control commits.
+pub type TimelineTrackControlAction =
+    dyn Fn(TimelineTrackControl, TimelineTrackRef, &TimelineTrack) -> Action;
+
 /// Action factory for playhead seeking.
 pub type TimelineSeekAction = dyn Fn(i64) -> Action;
 
@@ -40,6 +44,14 @@ pub struct TimelineClipRef {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimelineTrackRef {
     pub track_index: usize,
+}
+
+/// Track header control rendered by [`TimelineView`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineTrackControl {
+    Visibility,
+    Mute,
+    Lock,
 }
 
 /// Domain-light clip move proposal emitted when a drag commits.
@@ -138,6 +150,7 @@ pub struct TimelineTrack {
     pub kind: TimelineTrackKind,
     pub clips: Vec<TimelineClip>,
     pub selected: bool,
+    pub visible: bool,
     pub muted: bool,
     pub locked: bool,
     pub select_action: Option<Action>,
@@ -165,6 +178,7 @@ impl TimelineTrack {
             kind,
             clips,
             selected: false,
+            visible: true,
             muted: false,
             locked: false,
             select_action: None,
@@ -174,6 +188,12 @@ impl TimelineTrack {
     /// Mark this track as selected.
     pub fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
+        self
+    }
+
+    /// Mark this track as visible in video/compositing output.
+    pub fn visible(mut self, visible: bool) -> Self {
+        self.visible = visible;
         self
     }
 
@@ -207,6 +227,7 @@ pub struct TimelineView {
     selected_track: Option<TimelineTrackRef>,
     selected_clip: Option<TimelineClipRef>,
     hovered_clip: Option<TimelineClipRef>,
+    hovered_track_control: Option<(TimelineTrackRef, TimelineTrackControl)>,
     playhead_frame: i64,
     pixels_per_frame: f32,
     scroll_x: f32,
@@ -225,6 +246,7 @@ pub struct TimelineView {
     vertical_scrollbar_hovered: bool,
     on_clip_select: Option<Box<TimelineClipAction>>,
     on_track_select: Option<Box<TimelineTrackAction>>,
+    on_track_control: Option<Box<TimelineTrackControlAction>>,
     on_seek: Option<Box<TimelineSeekAction>>,
     on_clip_move: Option<Box<TimelineClipMoveAction>>,
     on_clip_trim: Option<Box<TimelineClipTrimAction>>,
@@ -277,6 +299,7 @@ impl TimelineView {
             selected_track: None,
             selected_clip: None,
             hovered_clip: None,
+            hovered_track_control: None,
             playhead_frame: 0,
             pixels_per_frame: 4.0,
             scroll_x: 0.0,
@@ -295,6 +318,7 @@ impl TimelineView {
             vertical_scrollbar_hovered: false,
             on_clip_select: None,
             on_track_select: None,
+            on_track_control: None,
             on_seek: None,
             on_clip_move: None,
             on_clip_trim: None,
@@ -310,6 +334,12 @@ impl TimelineView {
     /// Set initial zoom in pixels per frame.
     pub fn with_pixels_per_frame(mut self, pixels_per_frame: f32) -> Self {
         self.pixels_per_frame = pixels_per_frame.clamp(0.25, 64.0);
+        self
+    }
+
+    /// Set the track header width.
+    pub fn with_header_width(mut self, width: f32) -> Self {
+        self.header_width = width.max(96.0);
         self
     }
 
@@ -336,6 +366,7 @@ impl TimelineView {
             self.focused = false;
             self.focus_visible = false;
             self.hovered_clip = None;
+            self.hovered_track_control = None;
             self.selected_track = None;
             self.horizontal_scrollbar_hovered = false;
             self.vertical_scrollbar_hovered = false;
@@ -357,6 +388,15 @@ impl TimelineView {
         action: impl Fn(TimelineTrackRef, &TimelineTrack) -> Action + 'static,
     ) -> Self {
         self.on_track_select = Some(Box::new(action));
+        self
+    }
+
+    /// Set a dynamic track-control action factory.
+    pub fn on_track_control(
+        mut self,
+        action: impl Fn(TimelineTrackControl, TimelineTrackRef, &TimelineTrack) -> Action + 'static,
+    ) -> Self {
+        self.on_track_control = Some(Box::new(action));
         self
     }
 
@@ -589,6 +629,43 @@ impl TimelineView {
             .filter(|track_ref| track_ref.track_index < self.tracks.len())
     }
 
+    fn track_control_rect(&self, header: Rect, control: TimelineTrackControl) -> Rect {
+        let size = 18.0;
+        let gap = 5.0;
+        let right_padding = 8.0;
+        let group_width = size * 3.0 + gap * 2.0;
+        let start_x = header.x + header.width - right_padding - group_width;
+        let index = match control {
+            TimelineTrackControl::Visibility => 0.0,
+            TimelineTrackControl::Mute => 1.0,
+            TimelineTrackControl::Lock => 2.0,
+        };
+        Rect::new(
+            start_x + index * (size + gap),
+            header.y + (header.height - size) * 0.5,
+            size,
+            size,
+        )
+    }
+
+    fn track_control_at(&self, point: Point) -> Option<(TimelineTrackRef, TimelineTrackControl)> {
+        let track_ref = self.track_header_at(point)?;
+        let header = Rect::new(
+            self.header_rect.x,
+            self.track_y(track_ref.track_index),
+            self.header_rect.width,
+            self.track_height,
+        );
+        [
+            TimelineTrackControl::Visibility,
+            TimelineTrackControl::Mute,
+            TimelineTrackControl::Lock,
+        ]
+        .into_iter()
+        .find(|control| self.track_control_rect(header, *control).contains(point))
+        .map(|control| (track_ref, control))
+    }
+
     fn clip_rect(&self, track_index: usize, clip: &TimelineClip) -> Rect {
         self.clip_rect_at(track_index, clip.start_frame, clip)
     }
@@ -705,6 +782,21 @@ impl TimelineView {
             }
             if let Some(factory) = &self.on_track_select {
                 (ctx.dispatch)(factory(track_ref, track));
+            }
+        }
+        ctx.request_repaint();
+        EventResult::Handled
+    }
+
+    fn activate_track_control_from_input(
+        &mut self,
+        track_ref: TimelineTrackRef,
+        control: TimelineTrackControl,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        if let Some(track) = self.track(track_ref) {
+            if let Some(factory) = &self.on_track_control {
+                (ctx.dispatch)(factory(control, track_ref, track));
             }
         }
         ctx.request_repaint();
@@ -979,10 +1071,13 @@ impl TimelineView {
                 },
                 0.0,
             );
-            ctx.encoder.draw_text(
+            let control_group_x =
+                self.track_control_rect(header, TimelineTrackControl::Visibility).x;
+            ctx.encoder.draw_text_box(
                 &track.label,
                 ctx.theme.typography.tab_label.font_size,
                 snap_point(Point::new(header.x + 10.0, header.y + 16.0)),
+                (control_group_x - header.x - 18.0).max(0.0),
                 if track_selected {
                     colors.accent_foreground
                 } else if track.locked {
@@ -991,6 +1086,15 @@ impl TimelineView {
                     colors.foreground
                 },
             );
+            self.paint_track_control(
+                ctx,
+                header,
+                track_ref,
+                track,
+                TimelineTrackControl::Visibility,
+            );
+            self.paint_track_control(ctx, header, track_ref, track, TimelineTrackControl::Mute);
+            self.paint_track_control(ctx, header, track_ref, track, TimelineTrackControl::Lock);
 
             let row = Rect::new(self.body_rect.x, y, self.body_rect.width, self.track_height);
             let row_fill = if track_index % 2 == 0 {
@@ -1053,6 +1157,179 @@ impl TimelineView {
                     self.paint_clip(ctx, drag.clip_ref, clip, rect, true);
                 }
             }
+        }
+    }
+
+    fn paint_track_control(
+        &self,
+        ctx: &mut PaintContext,
+        header: Rect,
+        track_ref: TimelineTrackRef,
+        track: &TimelineTrack,
+        control: TimelineTrackControl,
+    ) {
+        let colors = &ctx.theme.colors;
+        let rect = self.track_control_rect(header, control);
+        let hovered = self.hovered_track_control == Some((track_ref, control));
+        let active = match control {
+            TimelineTrackControl::Visibility => track.visible,
+            TimelineTrackControl::Mute => track.muted,
+            TimelineTrackControl::Lock => track.locked,
+        };
+        let mut bg = if hovered {
+            colors.secondary
+        } else {
+            colors.card
+        };
+        bg.a = if hovered || active { 0.85 } else { 0.18 };
+        ctx.encoder.draw_rect(rect, bg, ctx.theme.spacing.radius_sm);
+
+        let mut icon = if active {
+            colors.foreground
+        } else {
+            colors.muted_foreground
+        };
+        if !track.visible && control != TimelineTrackControl::Visibility {
+            icon.a *= 0.52;
+        }
+        match control {
+            TimelineTrackControl::Visibility => {
+                self.paint_visibility_icon(ctx, rect, icon, !track.visible);
+            }
+            TimelineTrackControl::Mute => {
+                self.paint_mute_icon(ctx, rect, icon, track.muted);
+            }
+            TimelineTrackControl::Lock => {
+                self.paint_lock_icon(ctx, rect, icon, track.locked);
+            }
+        }
+    }
+
+    fn paint_visibility_icon(
+        &self,
+        ctx: &mut PaintContext,
+        rect: Rect,
+        color: Color,
+        hidden: bool,
+    ) {
+        let c = rect.center();
+        ctx.encoder.draw_line(
+            Point::new(c.x - 6.0, c.y),
+            Point::new(c.x - 2.0, c.y - 4.0),
+            1.3,
+            color,
+        );
+        ctx.encoder.draw_line(
+            Point::new(c.x - 2.0, c.y - 4.0),
+            Point::new(c.x + 2.0, c.y - 4.0),
+            1.3,
+            color,
+        );
+        ctx.encoder.draw_line(
+            Point::new(c.x + 2.0, c.y - 4.0),
+            Point::new(c.x + 6.0, c.y),
+            1.3,
+            color,
+        );
+        ctx.encoder.draw_line(
+            Point::new(c.x + 6.0, c.y),
+            Point::new(c.x + 2.0, c.y + 4.0),
+            1.3,
+            color,
+        );
+        ctx.encoder.draw_line(
+            Point::new(c.x + 2.0, c.y + 4.0),
+            Point::new(c.x - 2.0, c.y + 4.0),
+            1.3,
+            color,
+        );
+        ctx.encoder.draw_line(
+            Point::new(c.x - 2.0, c.y + 4.0),
+            Point::new(c.x - 6.0, c.y),
+            1.3,
+            color,
+        );
+        ctx.encoder.draw_rect(Rect::new(c.x - 1.6, c.y - 1.6, 3.2, 3.2), color, 2.0);
+        if hidden {
+            ctx.encoder.draw_line(
+                Point::new(rect.x + 4.0, rect.y + rect.height - 4.0),
+                Point::new(rect.x + rect.width - 4.0, rect.y + 4.0),
+                1.5,
+                color,
+            );
+        }
+    }
+
+    fn paint_mute_icon(&self, ctx: &mut PaintContext, rect: Rect, color: Color, muted: bool) {
+        let c = rect.center();
+        ctx.encoder.draw_rect(Rect::new(rect.x + 4.0, c.y - 3.0, 3.0, 6.0), color, 1.0);
+        ctx.encoder.draw_triangles(
+            &[
+                Point::new(rect.x + 7.0, c.y - 4.0),
+                Point::new(rect.x + 12.0, c.y - 7.0),
+                Point::new(rect.x + 12.0, c.y + 7.0),
+            ],
+            color,
+        );
+        if muted {
+            ctx.encoder.draw_line(
+                Point::new(rect.x + rect.width - 5.0, rect.y + 5.0),
+                Point::new(rect.x + rect.width - 2.5, rect.y + 7.5),
+                1.4,
+                color,
+            );
+            ctx.encoder.draw_line(
+                Point::new(rect.x + rect.width - 2.5, rect.y + 5.0),
+                Point::new(rect.x + rect.width - 5.0, rect.y + 7.5),
+                1.4,
+                color,
+            );
+        } else {
+            ctx.encoder.draw_line(
+                Point::new(rect.x + 14.0, c.y - 4.0),
+                Point::new(rect.x + 14.0, c.y + 4.0),
+                1.3,
+                color,
+            );
+        }
+    }
+
+    fn paint_lock_icon(&self, ctx: &mut PaintContext, rect: Rect, color: Color, locked: bool) {
+        let c = rect.center();
+        ctx.encoder.draw_rect(Rect::new(c.x - 5.0, c.y - 1.0, 10.0, 7.0), color, 2.0);
+        let shackle_top = if locked { c.y - 7.0 } else { c.y - 8.0 };
+        ctx.encoder.draw_line(
+            Point::new(c.x - 4.0, c.y - 1.0),
+            Point::new(c.x - 4.0, shackle_top + 4.0),
+            1.5,
+            color,
+        );
+        ctx.encoder.draw_line(
+            Point::new(c.x - 4.0, shackle_top + 4.0),
+            Point::new(c.x, shackle_top),
+            1.5,
+            color,
+        );
+        ctx.encoder.draw_line(
+            Point::new(c.x, shackle_top),
+            Point::new(c.x + 4.0, shackle_top + 4.0),
+            1.5,
+            color,
+        );
+        if locked {
+            ctx.encoder.draw_line(
+                Point::new(c.x + 4.0, shackle_top + 4.0),
+                Point::new(c.x + 4.0, c.y - 1.0),
+                1.5,
+                color,
+            );
+        } else {
+            ctx.encoder.draw_line(
+                Point::new(c.x + 4.0, shackle_top + 4.0),
+                Point::new(c.x + 7.0, c.y - 3.0),
+                1.5,
+                color,
+            );
         }
     }
 
@@ -1228,6 +1505,7 @@ impl Widget for TimelineView {
             self.trim_drag = None;
             self.scrollbar_drag = None;
             self.hovered_clip = None;
+            self.hovered_track_control = None;
             self.horizontal_scrollbar_hovered = false;
             self.vertical_scrollbar_hovered = false;
             return EventResult::Ignored;
@@ -1306,6 +1584,9 @@ impl Widget for TimelineView {
                     self.seek_from_input(self.x_to_frame(position.x), ctx);
                     return EventResult::Handled;
                 }
+                if let Some((track_ref, control)) = self.track_control_at(*position) {
+                    return self.activate_track_control_from_input(track_ref, control, ctx);
+                }
                 if let Some(track_ref) = self.track_header_at(*position) {
                     return self.select_track_from_input(track_ref, ctx);
                 }
@@ -1354,6 +1635,12 @@ impl Widget for TimelineView {
                     return EventResult::Handled;
                 }
                 if self.set_scrollbar_hovered(*position) {
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
+                let hovered_track_control = self.track_control_at(*position);
+                if hovered_track_control != self.hovered_track_control {
+                    self.hovered_track_control = hovered_track_control;
                     ctx.request_repaint();
                     return EventResult::Handled;
                 }
@@ -1667,6 +1954,50 @@ mod tests {
                 mondrian_editor_state::state::PanelKind::Timeline
             )]
         );
+        assert!(ctx.requests.repaint);
+    }
+
+    #[test]
+    fn clicking_track_control_dispatches_without_selecting_track() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut view =
+            timeline()
+                .with_header_width(128.0)
+                .on_track_control(|control, track_ref, _track| {
+                    if control == TimelineTrackControl::Mute && track_ref.track_index == 0 {
+                        Action::Pause
+                    } else {
+                        Action::NoOp
+                    }
+                });
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let result = view.event(
+            &UiEvent::MouseDown {
+                position: Point::new(88.0, 55.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(view.selected_track(), None);
+        assert_eq!(view.selected_clip(), None);
+        assert_eq!(actions.borrow().as_slice(), &[Action::Pause]);
         assert!(ctx.requests.repaint);
     }
 
@@ -2625,7 +2956,7 @@ mod tests {
 
         assert!(encoder.rects >= 6);
         assert!(encoder.lines >= 3);
-        assert_eq!(encoder.triangles, 1);
+        assert!(encoder.triangles >= 3);
         assert!(encoder.clips >= 3);
         assert!(encoder.texts.iter().any(|text| text == "V1"));
         assert!(encoder.texts.iter().any(|text| text == "Intro"));

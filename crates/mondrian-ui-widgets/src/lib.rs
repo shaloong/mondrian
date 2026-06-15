@@ -58,6 +58,7 @@ pub use text_input::{TextInput, TextInputChangeAction};
 pub use timeline_view::{
     TimelineClip, TimelineClipAction, TimelineClipMove, TimelineClipMoveAction, TimelineClipRef,
     TimelineClipTrim, TimelineClipTrimAction, TimelineSeekAction, TimelineTrack,
-    TimelineTrackAction, TimelineTrackKind, TimelineTrackRef, TimelineTrimEdge, TimelineView,
+    TimelineTrackAction, TimelineTrackControl, TimelineTrackControlAction, TimelineTrackKind,
+    TimelineTrackRef, TimelineTrimEdge, TimelineView,
 };
 pub use viewer_surface::ViewerSurface;
