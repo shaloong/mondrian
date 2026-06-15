@@ -68,7 +68,7 @@ mod timeline_editing;
 pub mod ui_actions;
 
 use audio_rendering::*;
-pub use selection::SelectedClipRef;
+pub use selection::{SelectedClipRef, SelectedTrackRef};
 use timeline_editing::*;
 
 // ─────────────────────────────────────────────

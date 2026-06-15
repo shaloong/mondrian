@@ -96,12 +96,15 @@ through `AppState` snapshot commands and `mondrian-timeline` property hosts.
 Generic selection actions update the app-level selection snapshot only:
 `Select(Clip)` resolves the active sequence track from the clip id,
 `SelectAll`/`Select(AllClips)` select all clips that AppState can currently
-represent, and `DeselectAll` clears clip, mask, and animation selection without
-entering undo history.
-The shared `Action::DeleteSelection` path deletes clips selected through the
-AppState selection module and `remove_clips_bulk`, so shortcuts, menus,
-scripts, and self-hosted widgets all reuse the same locked-track checks, linked
-clip cleanup, undo snapshot, and timeline modified event behavior.
+represent, `Select(AllTracks)` selects visible timeline tracks, and
+`DeselectAll` clears track, clip, mask, and animation selection without entering
+undo history.
+The shared `Action::DeleteSelection` path deletes clips or tracks selected
+through the AppState selection module. Clip deletes use `remove_clips_bulk`;
+track deletes use one prevalidated bulk track mutation, so shortcuts, menus,
+scripts, and self-hosted widgets all share one action boundary. Clip deletion
+keeps the existing locked-track checks and linked-clip cleanup; both clip and
+track deletion produce undo snapshots and timeline modified events.
 `Action::ImportMedia` is the shared boundary for platform file pickers, menus,
 scripts, and future self-hosted asset browser commands. The app layer batches
 the supplied paths through `AssetLibrary::import_media_file`, publishes

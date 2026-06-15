@@ -579,6 +579,70 @@ impl AppState {
         Ok(())
     }
 
+    /// Remove multiple timeline tracks as one undoable edit after validating all targets.
+    pub fn remove_tracks_bulk(&mut self, tracks: &[(TrackId, bool)]) -> mondrian_core::Result<()> {
+        let mut targets = Vec::<(TrackId, bool)>::new();
+        for target in tracks {
+            if !targets.contains(target) {
+                targets.push(*target);
+            }
+        }
+        if targets.is_empty() {
+            return Ok(());
+        }
+
+        let before = {
+            let seq = self.sequence.as_mut().ok_or_else(|| {
+                mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "remove_tracks".to_string(),
+                    reason: "当前无项目".to_string(),
+                }
+            })?;
+
+            for (track_id, is_video) in &targets {
+                let exists = if *is_video {
+                    seq.video_tracks.iter().any(|track| track.id == *track_id)
+                } else {
+                    seq.audio_tracks.iter().any(|track| track.id == *track_id)
+                };
+                if !exists {
+                    return Err(mondrian_core::MondrianError::TrackNotFound {
+                        track_id: track_id.to_string(),
+                    });
+                }
+            }
+
+            let selected_video_count = targets.iter().filter(|(_, is_video)| *is_video).count();
+            let selected_audio_count = targets.len() - selected_video_count;
+            if seq.video_tracks.len().saturating_sub(selected_video_count) < 1 {
+                return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "remove_tracks".to_string(),
+                    reason: "至少保留 1 条视频轨道".to_string(),
+                });
+            }
+            if seq.audio_tracks.len().saturating_sub(selected_audio_count) < 1 {
+                return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "remove_tracks".to_string(),
+                    reason: "至少保留 1 条音频轨道".to_string(),
+                });
+            }
+
+            let before = seq.clone();
+            for (track_id, is_video) in targets {
+                if is_video {
+                    seq.remove_video_track(track_id)?;
+                } else {
+                    seq.remove_audio_track(track_id)?;
+                }
+            }
+            clear_broken_links(seq);
+            before
+        };
+
+        self.record_timeline_edit_snapshot("删除轨道", before);
+        Ok(())
+    }
+
     pub fn move_track(
         &mut self,
         track_id: TrackId,

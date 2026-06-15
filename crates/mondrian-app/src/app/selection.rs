@@ -14,6 +14,13 @@ pub struct SelectedClipRef {
     pub clip_id: ClipId,
 }
 
+/// UI-agnostic reference to a selected timeline track in the active sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SelectedTrackRef {
+    pub track_id: TrackId,
+    pub is_video_track: bool,
+}
+
 impl AppState {
     /// The primary selected clip, used by single-target panels such as the
     /// Inspector and Effects browser.
@@ -137,6 +144,19 @@ impl AppState {
     }
 }
 
+/// Resolve a track id to its current timeline-track selection reference.
+pub fn resolve_track_selection(sequence: &Sequence, track_id: TrackId) -> Option<SelectedTrackRef> {
+    if sequence.video_tracks.iter().any(|track| track.id == track_id) {
+        return Some(SelectedTrackRef { track_id, is_video_track: true });
+    }
+
+    if sequence.audio_tracks.iter().any(|track| track.id == track_id) {
+        return Some(SelectedTrackRef { track_id, is_video_track: false });
+    }
+
+    None
+}
+
 /// Return all track ids in video-track then audio-track order.
 pub fn all_track_ids(sequence: &Sequence) -> Vec<TrackId> {
     sequence
@@ -171,8 +191,7 @@ pub fn all_clip_selections(sequence: &Sequence) -> Vec<SelectedClipRef> {
 
 /// Return whether a track id exists in the active sequence.
 pub fn track_exists(sequence: &Sequence, track_id: TrackId) -> bool {
-    sequence.video_tracks.iter().any(|track| track.id == track_id)
-        || sequence.audio_tracks.iter().any(|track| track.id == track_id)
+    resolve_track_selection(sequence, track_id).is_some()
 }
 
 /// Resolve a clip id to its current track-backed selection reference.

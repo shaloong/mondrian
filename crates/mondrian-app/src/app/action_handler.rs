@@ -6,6 +6,7 @@
 //! 当前版本的 action_handler 以最简方式实现：只对已确定存在的方法做桥接，
 //! 其余 Action 记录日志后忽略。每个 Stage 逐步增加映射。
 
+use crate::app::selection::resolve_track_selection;
 use crate::app::timeline_editing::{
     find_clip, find_clip_mut, find_clip_track_lock, set_clip_disabled,
 };
@@ -117,7 +118,7 @@ impl AppState {
             Action::Duplicate => self.duplicate_from_action(),
 
             // ── 时间线编辑（复用已有 undoable 命令层）────────────────────
-            Action::DeleteSelection => self.delete_selected_clips_from_ui(),
+            Action::DeleteSelection => self.delete_selection_from_ui(),
             Action::SplitClipAtPlayhead => self.split_at_playhead().map(|_| ()),
             Action::NudgeClip { clip_id, delta_frames } => {
                 self.nudge_clip_from_action(clip_id, delta_frames)
@@ -511,7 +512,7 @@ impl AppState {
             .ok_or_else(|| missing_clip_error(step_id, clip_id))
     }
 
-    fn delete_selected_clips_from_ui(&mut self) -> Result<()> {
+    fn delete_selection_from_ui(&mut self) -> Result<()> {
         let selections = self
             .selection
             .selected_clips
@@ -524,11 +525,34 @@ impl AppState {
                 )
             })
             .collect::<Vec<_>>();
-        if selections.is_empty() {
+        if !selections.is_empty() {
+            self.remove_clips_bulk(&selections, false)?;
+            self.clear_selection();
             return Ok(());
         }
 
-        self.remove_clips_bulk(&selections, false)?;
+        self.delete_selected_tracks_from_ui()
+    }
+
+    fn delete_selected_tracks_from_ui(&mut self) -> Result<()> {
+        let track_ids = self.selection.selected_track_ids.clone();
+        if track_ids.is_empty() {
+            return Ok(());
+        }
+
+        let Some(seq) = self.sequence.as_ref() else {
+            return Err(missing_sequence_error("delete_selected_tracks"));
+        };
+        let tracks = track_ids
+            .into_iter()
+            .map(|track_id| {
+                resolve_track_selection(seq, track_id)
+                    .map(|selection| (selection.track_id, selection.is_video_track))
+                    .ok_or_else(|| MondrianError::TrackNotFound { track_id: track_id.to_string() })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        self.remove_tracks_bulk(&tracks)?;
         self.clear_selection();
         Ok(())
     }
@@ -1825,6 +1849,93 @@ mod tests {
         assert!(sequence.audio_tracks[0].clips.is_empty());
         assert!(state.selection.selected_clips.is_empty());
         assert!(state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_delete_selection_removes_selected_track() {
+        let (mut state, track_id, _clip_id) = state_with_two_video_tracks();
+        state.selection.selected_track_ids = vec![track_id];
+
+        state
+            .dispatch_action(mondrian_editor_state::Action::DeleteSelection)
+            .expect("delete selected track");
+
+        let sequence = state.sequence.as_ref().expect("sequence");
+        assert!(!sequence.video_tracks.iter().any(|track| track.id == track_id));
+        assert!(state.selection.selected_track_ids.is_empty());
+        assert!(state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_delete_selection_removes_multiple_tracks_with_one_undo_snapshot() {
+        let mut state = AppState::new();
+        let mut sequence = Sequence::new("multi track edit");
+        sequence.add_video_track();
+        sequence.add_audio_track();
+        let video_count = sequence.video_tracks.len();
+        let audio_count = sequence.audio_tracks.len();
+        let video_track_id = sequence.video_tracks[1].id;
+        let audio_track_id = sequence.audio_tracks[1].id;
+        state.sequence = Some(sequence);
+        state.selection.selected_track_ids = vec![video_track_id, audio_track_id];
+
+        state
+            .dispatch_action(mondrian_editor_state::Action::DeleteSelection)
+            .expect("delete selected tracks");
+
+        let sequence = state.sequence.as_ref().expect("sequence");
+        assert_eq!(sequence.video_tracks.len(), video_count - 1);
+        assert_eq!(sequence.audio_tracks.len(), audio_count - 1);
+        assert!(!sequence.video_tracks.iter().any(|track| track.id == video_track_id));
+        assert!(!sequence.audio_tracks.iter().any(|track| track.id == audio_track_id));
+        assert!(state.selection.selected_track_ids.is_empty());
+
+        assert!(state.undo_timeline().expect("undo track delete"));
+        let sequence = state.sequence.as_ref().expect("sequence");
+        assert_eq!(sequence.video_tracks.len(), video_count);
+        assert_eq!(sequence.audio_tracks.len(), audio_count);
+        assert!(sequence.video_tracks.iter().any(|track| track.id == video_track_id));
+        assert!(sequence.audio_tracks.iter().any(|track| track.id == audio_track_id));
+        assert!(!state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_delete_selection_rejects_removing_last_track_without_partial_mutation() {
+        let mut state = AppState::new();
+        let sequence = Sequence::new("single track edit");
+        let track_ids = sequence.video_tracks.iter().map(|track| track.id).collect::<Vec<_>>();
+        state.sequence = Some(sequence);
+        state.selection.selected_track_ids = track_ids.clone();
+
+        let err = state
+            .dispatch_action(mondrian_editor_state::Action::DeleteSelection)
+            .expect_err("deleting all video tracks should be rejected");
+
+        assert!(matches!(
+            err,
+            MondrianError::WorkflowStepFailed { step_id, .. } if step_id == "remove_tracks"
+        ));
+        let sequence = state.sequence.as_ref().expect("sequence");
+        assert_eq!(sequence.video_tracks.len(), track_ids.len());
+        assert_eq!(state.selection.selected_track_ids, track_ids);
+        assert!(!state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_delete_selection_rejects_stale_selected_track() {
+        let (mut state, _, _) = state_with_two_video_tracks();
+        let missing_track_id = TrackId::new();
+        state.selection.selected_track_ids = vec![missing_track_id];
+
+        let err = state
+            .dispatch_action(mondrian_editor_state::Action::DeleteSelection)
+            .expect_err("stale selected track should be rejected");
+
+        assert!(
+            matches!(err, MondrianError::TrackNotFound { track_id } if track_id == missing_track_id.to_string())
+        );
+        assert_eq!(state.selection.selected_track_ids, vec![missing_track_id]);
+        assert!(!state.can_undo_action());
     }
 
     #[test]
