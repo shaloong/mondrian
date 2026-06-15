@@ -1268,6 +1268,7 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
         .on_edit_command(|command| match command {
             TimelineEditCommand::DeleteSelection => Action::DeleteSelection,
             TimelineEditCommand::RippleDeleteSelection => Action::RippleDeleteSelection,
+            TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
         })
         .on_clip_move({
             let action_model = action_model.clone();
@@ -2026,6 +2027,36 @@ mod tests {
             actions.borrow().as_slice(),
             &[Action::RippleDeleteSelection]
         );
+    }
+
+    #[test]
+    fn timeline_panel_ctrl_b_emits_shared_split_action() {
+        let model = demo_timeline_model();
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut panel = timeline_panel(&model);
+        panel.layout(mondrian_ui_core::types::Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        panel.event(&UiEvent::FocusGained, &mut ctx);
+        let result = panel.event(
+            &UiEvent::KeyDown { key: KeyCode::B, modifiers: Modifiers::ctrl() },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(actions.borrow().as_slice(), &[Action::SplitClipAtPlayhead]);
     }
 
     #[test]

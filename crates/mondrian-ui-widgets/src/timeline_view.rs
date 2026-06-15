@@ -101,6 +101,8 @@ pub enum TimelineEditCommand {
     DeleteSelection,
     /// Ripple-delete the current timeline clip selection.
     RippleDeleteSelection,
+    /// Split clips intersecting the playhead.
+    SplitAtPlayhead,
 }
 
 /// Clip view model rendered by [`TimelineView`].
@@ -1070,13 +1072,19 @@ impl TimelineView {
         modifiers: Modifiers,
         ctx: &mut EventContext,
     ) -> bool {
-        if modifiers.ctrl || modifiers.alt || modifiers.meta {
+        if modifiers.alt {
             return false;
         }
-        let command = match (key, modifiers.shift) {
-            (KeyCode::Delete | KeyCode::Backspace, false) => TimelineEditCommand::DeleteSelection,
-            (KeyCode::Delete | KeyCode::Backspace, true) => {
-                TimelineEditCommand::RippleDeleteSelection
+        let command = match key {
+            KeyCode::B if !modifiers.shift && (modifiers.ctrl || modifiers.meta) => {
+                TimelineEditCommand::SplitAtPlayhead
+            }
+            KeyCode::Delete | KeyCode::Backspace if !modifiers.ctrl && !modifiers.meta => {
+                if modifiers.shift {
+                    TimelineEditCommand::RippleDeleteSelection
+                } else {
+                    TimelineEditCommand::DeleteSelection
+                }
             }
             _ => return false,
         };
@@ -3189,6 +3197,7 @@ mod tests {
             match command {
                 TimelineEditCommand::DeleteSelection => Action::DeleteSelection,
                 TimelineEditCommand::RippleDeleteSelection => Action::RippleDeleteSelection,
+                TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
             }
         });
         view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
@@ -3223,6 +3232,44 @@ mod tests {
             actions.borrow().as_slice(),
             &[Action::RippleDeleteSelection]
         );
+    }
+
+    #[test]
+    fn ctrl_b_dispatches_split_at_playhead_command() {
+        let actions = RefCell::new(Vec::new());
+        let commands = Rc::new(RefCell::new(Vec::new()));
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let command_log = Rc::clone(&commands);
+        let mut view = timeline().on_edit_command(move |command| {
+            command_log.borrow_mut().push(command);
+            Action::SplitClipAtPlayhead
+        });
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        view.event(&UiEvent::FocusGained, &mut ctx);
+        let result = view.event(
+            &UiEvent::KeyDown { key: KeyCode::B, modifiers: Modifiers::ctrl() },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(
+            commands.borrow().as_slice(),
+            &[TimelineEditCommand::SplitAtPlayhead]
+        );
+        assert_eq!(actions.borrow().as_slice(), &[Action::SplitClipAtPlayhead]);
     }
 
     #[test]
