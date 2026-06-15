@@ -1964,8 +1964,10 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
 
     if !model.effects.is_empty() {
         let mut section = PropertySection::new("Effects");
-        for effect in &model.effects {
+        for (index, effect) in model.effects.iter().enumerate() {
             let effect_id = effect.effect_id;
+            let can_move_up = has_target && index > 0;
+            let can_move_down = has_target && index + 1 < model.effects.len();
             section = section.with_row(PropertyRow::new(
                 effect.label.clone(),
                 Box::new(
@@ -1982,6 +1984,24 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                             )),
                             1.0,
                         ),
+                        FlexChild::fixed(Box::new(
+                            Button::new("Up").enabled(can_move_up).on_click(
+                                inspector_reorder_effect_action(
+                                    selected_clip,
+                                    index,
+                                    index.saturating_sub(1),
+                                ),
+                            ),
+                        )),
+                        FlexChild::fixed(Box::new(
+                            Button::new("Down").enabled(can_move_down).on_click(
+                                inspector_reorder_effect_action(
+                                    selected_clip,
+                                    index,
+                                    (index + 1).min(model.effects.len().saturating_sub(1)),
+                                ),
+                            ),
+                        )),
                         FlexChild::fixed(Box::new(Button::new("Remove").on_click(
                             inspector_remove_effect_row_action(selected_clip, effect_id),
                         ))),
@@ -2096,6 +2116,19 @@ fn inspector_remove_effect_row_action(
         });
     }
     Action::NoOp
+}
+
+fn inspector_reorder_effect_action(
+    selection: Option<SelectedClipRef>,
+    from: usize,
+    to: usize,
+) -> Action {
+    if from == to {
+        return Action::NoOp;
+    }
+    selection
+        .map(|selection| Action::ReorderEffects { clip_id: selection.clip_id, from, to })
+        .unwrap_or(Action::NoOp)
 }
 
 fn inspector_curve_action(selection: Option<SelectedClipRef>, points: &[CurvePoint]) -> Action {
@@ -3458,8 +3491,27 @@ mod tests {
             inspector_remove_effect_row_action(None, EffectId::new()),
             Action::NoOp
         );
+        assert_eq!(inspector_reorder_effect_action(None, 1, 0), Action::NoOp);
         assert_eq!(
             inspector_curve_action(None, &[CurvePoint::new(0.0, 1.0)]),
+            Action::NoOp
+        );
+    }
+
+    #[test]
+    fn inspector_reorder_effect_action_uses_typed_app_action() {
+        let selection = SelectedClipRef {
+            track_id: TrackId::new(),
+            is_video_track: true,
+            clip_id: ClipId::new(),
+        };
+
+        assert_eq!(
+            inspector_reorder_effect_action(Some(selection), 2, 0),
+            Action::ReorderEffects { clip_id: selection.clip_id, from: 2, to: 0 }
+        );
+        assert_eq!(
+            inspector_reorder_effect_action(Some(selection), 1, 1),
             Action::NoOp
         );
     }
