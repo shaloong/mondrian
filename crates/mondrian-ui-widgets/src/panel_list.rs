@@ -11,9 +11,13 @@ use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use std::time::{Duration, Instant};
 
+use crate::vector_icon::VectorIcon;
+
 const DOUBLE_CLICK_MAX_AGE: Duration = Duration::from_millis(500);
 const DOUBLE_CLICK_MAX_DISTANCE: f32 = 5.0;
 const DRAG_START_DISTANCE: f32 = 6.0;
+const ROW_ICON_GAP: f32 = 8.0;
+const ROW_ICON_SIZE: f32 = 16.0;
 
 /// Dynamic action factory used when a panel-list item changes state.
 pub type PanelListAction = dyn Fn(usize, &PanelListItem) -> Action;
@@ -27,6 +31,7 @@ pub struct PanelListItem {
     pub subtitle: String,
     pub badge: Option<String>,
     pub accent: Option<Color>,
+    pub icon: Option<VectorIcon>,
     pub disabled: bool,
     pub select_action: Option<Action>,
     pub activate_action: Option<Action>,
@@ -41,6 +46,7 @@ impl PanelListItem {
             subtitle: String::new(),
             badge: None,
             accent: None,
+            icon: None,
             disabled: false,
             select_action: None,
             activate_action: None,
@@ -63,6 +69,12 @@ impl PanelListItem {
     /// Set a left accent swatch.
     pub fn with_accent(mut self, accent: Color) -> Self {
         self.accent = Some(accent);
+        self
+    }
+
+    /// Set a left-side vector icon painted before the text lane.
+    pub fn with_icon(mut self, icon: VectorIcon) -> Self {
+        self.icon = Some(icon);
         self
     }
 
@@ -514,9 +526,7 @@ impl PanelList {
         let swatch = Rect::new(row.x + 8.0, row.y + 13.0, 6.0, row.height - 26.0);
         ctx.encoder.draw_rect(swatch, accent, 3.0);
 
-        let text_x = row.x + 22.0;
         let badge_reserved = if item.badge.is_some() { 58.0 } else { 8.0 };
-        let text_width = (row.width - 30.0 - badge_reserved).max(24.0);
         let title_color = if item.disabled {
             colors.muted_foreground
         } else if selected {
@@ -524,14 +534,32 @@ impl PanelList {
         } else {
             colors.foreground
         };
+        let text_color = if item.disabled {
+            colors.muted_foreground
+        } else {
+            title_color
+        };
+        let mut text_x = row.x + 22.0;
 
         ctx.encoder.push_clip(row.inset(4.0, 2.0));
+        if let Some(icon) = &item.icon {
+            let icon_size = ctx.theme.spacing.icon_size.clamp(1.0, ROW_ICON_SIZE);
+            let icon_rect = Rect::new(
+                text_x,
+                row.y + (row.height - icon_size).max(0.0) * 0.5,
+                icon_size,
+                icon_size,
+            );
+            icon.paint(ctx, icon_rect, text_color);
+            text_x += icon_size + ROW_ICON_GAP;
+        }
+        let text_width = (row.x + row.width - badge_reserved - text_x).max(24.0);
         ctx.encoder.draw_text_box(
             &item.title,
             ctx.theme.typography.body.font_size,
             snap_point(Point::new(text_x, row.y + 7.0)),
             text_width,
-            title_color,
+            text_color,
         );
         if !item.subtitle.is_empty() {
             ctx.encoder.draw_text_box(
@@ -882,6 +910,7 @@ mod tests {
         rects: usize,
         rect_bounds: Vec<Rect>,
         lines: usize,
+        triangles: usize,
         texts: Vec<String>,
         clips: usize,
     }
@@ -900,6 +929,10 @@ mod tests {
 
         fn draw_line(&mut self, _start: Point, _end: Point, _width: f32, _color: Color) {
             self.lines += 1;
+        }
+
+        fn draw_triangles(&mut self, vertices: &[Point], _color: Color) {
+            self.triangles += vertices.len();
         }
 
         fn draw_text(&mut self, text: &str, _font_size: f32, _position: Point, _color: Color) {
@@ -931,6 +964,13 @@ mod tests {
 
     fn drag_item(asset_id: AssetId) -> PanelListItem {
         PanelListItem::new("Asset").with_drag_payload(DragPayload::Asset(asset_id))
+    }
+
+    fn test_icon() -> VectorIcon {
+        VectorIcon::from_svg_str(
+            r#"<svg viewBox="0 0 24 24"><path d="M6 12L18 12" fill="none" stroke="black"/></svg>"#,
+        )
+        .expect("svg icon")
     }
 
     #[test]
@@ -1452,6 +1492,27 @@ mod tests {
         assert!(encoder.clips >= 2);
         assert!(encoder.texts.iter().any(|text| text == "Assets"));
         assert!(encoder.texts.iter().any(|text| text == "Imported footage"));
+    }
+
+    #[test]
+    fn paint_row_draws_optional_vector_icon() {
+        let mut list = PanelList::new(
+            "Project",
+            vec![PanelListItem::new("New project...").with_icon(test_icon())],
+        );
+        list.layout(Rect::new(0.0, 0.0, 260.0, 140.0));
+
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 260.0, 140.0),
+        };
+        list.paint(&mut ctx);
+
+        assert!(encoder.triangles > 0);
+        assert!(encoder.texts.iter().any(|text| text == "New project..."));
     }
 
     #[test]

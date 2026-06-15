@@ -271,25 +271,28 @@ impl PanelListModel {
 
         let has_sequence = state.sequence.is_some();
         let has_project_path = state.current_project_path.is_some();
-        items.push(
+        items.push(with_app_icon(
             PanelListItem::new("New project...")
                 .with_subtitle("Create a project file and initialize timeline settings")
                 .with_badge("New")
                 .with_activate_action(app_shell_new_project_dialog_action()),
-        );
-        items.push(
+            AppIcon::PlusFilled,
+        ));
+        items.push(with_app_icon(
             PanelListItem::new("Open project...")
                 .with_subtitle("Choose an .mdp project file")
                 .with_badge("Open")
                 .with_activate_action(app_shell_open_project_dialog_action()),
-        );
-        items.push(
+            AppIcon::FolderOpenFilled,
+        ));
+        items.push(with_app_icon(
             PanelListItem::new("Import media...")
                 .with_subtitle("Add video or audio files to the project library")
                 .with_badge("Import")
                 .with_activate_action(app_shell_import_media_dialog_action())
                 .disabled(state.asset_library.is_none()),
-        );
+            AppIcon::Import,
+        ));
         items.push(
             PanelListItem::new("Save project")
                 .with_subtitle(if has_project_path {
@@ -1300,6 +1303,10 @@ fn panel_item_from_asset(asset: AssetRecord) -> PanelListItem {
         .with_activate_action(assets_prepare_drag_action(AssetsPrepareDragPayload {
             asset_id: asset.id,
         }))
+}
+
+fn with_app_icon(item: PanelListItem, icon: AppIcon) -> PanelListItem {
+    item.with_icon(icon.vector_icon().expect("bundled panel list icon asset should parse"))
 }
 
 fn asset_kind_badge(kind: &AssetKind) -> &'static str {
@@ -2455,18 +2462,22 @@ mod tests {
             project_item(&model, "New project...").activate_action.as_ref(),
             APP_SHELL_NEW_PROJECT_DIALOG,
         );
+        assert!(project_item(&model, "New project...").icon.is_some());
         assert_shell_action(
             project_item(&model, "Open project...").activate_action.as_ref(),
             APP_SHELL_OPEN_PROJECT_DIALOG,
         );
+        assert!(project_item(&model, "Open project...").icon.is_some());
         assert_shell_action(
             project_item(&model, "Import media...").activate_action.as_ref(),
             APP_SHELL_IMPORT_MEDIA_DIALOG,
         );
+        assert!(project_item(&model, "Import media...").icon.is_some());
         assert_eq!(
             project_item(&model, "Save project").activate_action.as_ref(),
             Some(&Action::SaveProject)
         );
+        assert!(project_item(&model, "Save project").icon.is_none());
         assert!(!project_item(&model, "Save project").disabled);
         assert_shell_action(
             project_item(&model, "Save project as...").activate_action.as_ref(),

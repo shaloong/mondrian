@@ -755,6 +755,10 @@ coordinate code. `FlexContainer` is only a widget adapter over the pure
 `mondrian-ui-layout::FlexLayout` algorithm, so layout math remains testable in
 the layout crate while panels get normal widget-tree behavior: event routing,
 overlay forwarding, hit testing, and child traversal.
+List-style panel rows use `PanelListItem` with optional `VectorIcon` geometry
+for command and asset affordances. App panels must source those icons from
+`self_hosted::icons::AppIcon` and pass only parsed vector geometry into the
+generic widget layer.
 
 ## Viewer Surface
 
