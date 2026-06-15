@@ -1294,15 +1294,19 @@ fn default_opacity_curve(opacity: f32) -> Vec<CurvePoint> {
 fn panel_item_from_asset(asset: AssetRecord) -> PanelListItem {
     let badge = asset_kind_badge(&asset.kind);
     let accent = asset_kind_accent(&asset.kind);
+    let icon = asset_kind_icon(&asset.kind);
     let subtitle = asset.path.display().to_string();
-    PanelListItem::new(asset.name)
-        .with_subtitle(subtitle)
-        .with_badge(badge)
-        .with_accent(accent)
-        .with_drag_payload(DragPayload::Asset(asset.id))
-        .with_activate_action(assets_prepare_drag_action(AssetsPrepareDragPayload {
-            asset_id: asset.id,
-        }))
+    with_app_icon(
+        PanelListItem::new(asset.name)
+            .with_subtitle(subtitle)
+            .with_badge(badge)
+            .with_accent(accent)
+            .with_drag_payload(DragPayload::Asset(asset.id))
+            .with_activate_action(assets_prepare_drag_action(AssetsPrepareDragPayload {
+                asset_id: asset.id,
+            })),
+        icon,
+    )
 }
 
 fn with_app_icon(item: PanelListItem, icon: AppIcon) -> PanelListItem {
@@ -1324,6 +1328,15 @@ fn asset_kind_accent(kind: &AssetKind) -> Color {
         AssetKind::Audio => Color::from_hex(0x1D587B),
         AssetKind::AdjustmentLayer => Color::from_hex(0x6D5DD3),
         AssetKind::SolidColor => Color::from_hex(0xD946EF),
+    }
+}
+
+fn asset_kind_icon(kind: &AssetKind) -> AppIcon {
+    match kind {
+        AssetKind::Video => AppIcon::Film,
+        AssetKind::Audio => AppIcon::Music,
+        AssetKind::AdjustmentLayer => AppIcon::Grid,
+        AssetKind::SolidColor => AppIcon::Rectangle,
     }
 }
 
@@ -3364,6 +3377,7 @@ mod tests {
         let item = &models.assets.items[0];
         assert_eq!(item.title, "Brand Purple");
         assert_eq!(item.badge.as_deref(), Some("CLR"));
+        assert!(item.icon.is_some());
         assert!(item.select_action.is_none());
         assert_eq!(item.drag_payload, Some(DragPayload::Asset(asset_id)));
         let action = item.activate_action.as_ref().expect("activate action");
