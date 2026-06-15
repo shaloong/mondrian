@@ -6,6 +6,9 @@
 用户点击「导出」
     │
     ▼
+TimelineExportRequest（UI 收集预设、序列、范围、输出路径）
+    │
+    ▼
 ExportConfig（预设 + 自定义参数）
     │
     ▼
@@ -23,6 +26,12 @@ RenderQueue（异步后台任务）
 ```
 
 导出 compositor 与 eframe preview 共享同一 wgpu device/queue（unified GPU），避免跨设备拷贝开销。GPU compositing 路径在导出中同样可用，包括 pass fusion 和 compute shader 效果加速。
+
+`mondrian-app::app::exporting` 是 UI 无关的导出编排边界。egui 与自研 UI
+都应提交 `TimelineExportRequest` 或对应的 `ui.export.enqueue` action，由
+`AppState` 负责解析目标序列、递归收集嵌套序列素材、过滤 synthetic adjustment
+asset、检查离线素材、构造 `TimelineExportInput`，最后将 `RenderJob` 放入
+`RenderQueue`。面板代码不应复制这些业务规则。
 
 ---
 

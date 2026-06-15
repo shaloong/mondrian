@@ -1,17 +1,9 @@
-use crate::app::AppState;
+use crate::app::{exporting::TimelineExportRequest, AppState};
 use crate::egui_ui::theme::{self, palette, tokens, typography};
 use egui::Ui;
-use mondrian_assets::AssetKind;
 use mondrian_core::types::SequenceId;
-use mondrian_export::{
-    preset::{
-        ExportConfig, ExportInput, ExportPreset, TimelineExportInput, TimelineExportRange,
-        VideoCodecConfig,
-    },
-    queue::RenderJob,
-};
+use mondrian_export::preset::{ExportPreset, TimelineExportRange, VideoCodecConfig};
 use rfd::FileDialog;
-use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 /// 导出弹窗面板
@@ -258,36 +250,16 @@ impl ExportPanel {
             return;
         };
 
-        let (asset_paths, asset_color_spaces) =
-            match collect_timeline_asset_paths(state, &sequence, &sequences) {
-                Ok(result) => result,
-                Err(err) => {
-                    if err == "素材库未连接" {
-                        self.status_msg = None;
-                        return;
-                    }
-                    self.status_msg = Some((format!("导出失败：{err}"), true));
-                    return;
-                }
-            };
-
-        let path = PathBuf::from(&self.output_path);
-        let config = ExportConfig {
+        let request = TimelineExportRequest {
             preset,
-            input: ExportInput::Timeline(Box::new(TimelineExportInput {
-                sequence,
-                sequences,
-                asset_paths,
-                asset_color_spaces,
-                range: self.selected_range,
-                project_color_management: state.project_settings.color_management.clone(),
-            })),
-            output_path: path,
+            sequence_id: Some(sequence.id),
+            range: self.selected_range,
+            output_path: PathBuf::from(&self.output_path),
         };
-        let job = RenderJob::new(config);
-        state.render_queue.enqueue(job);
-        self.status_msg = Some(("已加入导出队列".to_owned(), false));
-        tracing::info!("导出任务已加入队列: {}", self.output_path);
+        match state.enqueue_timeline_export(request) {
+            Ok(()) => self.status_msg = Some(("已加入导出队列".to_owned(), false)),
+            Err(err) => self.status_msg = Some((format!("导出失败：{err}"), true)),
+        }
     }
 }
 
@@ -297,86 +269,6 @@ fn export_range_label(range: TimelineExportRange) -> &'static str {
         TimelineExportRange::EntireSequence => "整个序列",
         TimelineExportRange::WorkArea { .. } => "工作区",
     }
-}
-
-fn collect_timeline_asset_paths(
-    state: &AppState,
-    sequence: &mondrian_timeline::sequence::Sequence,
-    sequences: &[mondrian_timeline::sequence::Sequence],
-) -> Result<TimelineAssetPaths, String> {
-    let library = state.asset_library.as_ref().ok_or_else(|| "素材库未连接".to_string())?;
-
-    let mut asset_ids = HashSet::new();
-    let mut visited_sequences = HashSet::new();
-    collect_sequence_asset_ids(sequence, sequences, &mut visited_sequences, &mut asset_ids)?;
-
-    let mut paths = HashMap::new();
-    let mut color_spaces = HashMap::new();
-    for asset_id in asset_ids {
-        let asset = library
-            .get_asset(asset_id)
-            .map_err(|err| format!("读取素材 {} 失败: {}", asset_id, err))?
-            .ok_or_else(|| format!("素材不存在: {}", asset_id))?;
-
-        if matches!(asset.kind, AssetKind::AdjustmentLayer) {
-            continue;
-        }
-
-        if !asset.path.exists() {
-            return Err(format!("素材离线: {}", asset.path.display()));
-        }
-        let color_space = asset
-            .media_info
-            .primary_video()
-            .map(|video| video.color_space)
-            .unwrap_or(mondrian_core::types::ColorSpace::Rec709);
-        paths.insert(asset_id, asset.path);
-        color_spaces.insert(asset_id, color_space);
-    }
-
-    Ok((paths, color_spaces))
-}
-
-type TimelineAssetPaths = (
-    HashMap<mondrian_core::types::AssetId, PathBuf>,
-    HashMap<mondrian_core::types::AssetId, mondrian_core::types::ColorSpace>,
-);
-
-fn collect_sequence_asset_ids(
-    sequence: &mondrian_timeline::sequence::Sequence,
-    sequences: &[mondrian_timeline::sequence::Sequence],
-    visited_sequences: &mut HashSet<SequenceId>,
-    asset_ids: &mut HashSet<mondrian_core::types::AssetId>,
-) -> Result<(), String> {
-    if !visited_sequences.insert(sequence.id) {
-        return Ok(());
-    }
-
-    for track in sequence.video_tracks.iter().chain(sequence.audio_tracks.iter()) {
-        for clip in &track.clips {
-            if clip.is_disabled {
-                continue;
-            }
-            if clip.is_nested_sequence() {
-                let Some(nested_sequence_id) = clip.nested_sequence_id else {
-                    return Err(format!("嵌套序列片段缺少序列引用: {}", clip.id));
-                };
-                let nested_sequence = sequences
-                    .iter()
-                    .find(|sequence| sequence.id == nested_sequence_id)
-                    .ok_or_else(|| format!("嵌套序列不存在: {nested_sequence_id}"))?;
-                collect_sequence_asset_ids(
-                    nested_sequence,
-                    sequences,
-                    visited_sequences,
-                    asset_ids,
-                )?;
-                continue;
-            }
-            asset_ids.insert(clip.asset_id);
-        }
-    }
-    Ok(())
 }
 
 fn default_output_filename(preset: &ExportPreset) -> String {
@@ -404,80 +296,4 @@ fn builtin_presets() -> Vec<(String, ExportPreset)> {
         ),
         ("代理文件 720p".to_owned(), ExportPreset::proxy_720p()),
     ]
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use mondrian_assets::AssetLibrary;
-    use mondrian_core::types::TimeCode;
-    use mondrian_timeline::{clip::Clip, sequence::Sequence};
-
-    #[test]
-    fn build_asset_paths_skips_synthetic_adjustment_assets() {
-        let mut state = AppState::default();
-        state.sequence = Some(Sequence::new("export-adjustment"));
-        let temp_root = std::env::temp_dir().join(format!(
-            "mondrian-export-adjustment-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system time")
-                .as_nanos()
-        ));
-        state.asset_library = Some(AssetLibrary::open(temp_root.clone()).expect("open library"));
-
-        let asset_id = state.create_adjustment_layer_asset(None).expect("create adjustment asset");
-        {
-            let seq = state.sequence.as_mut().expect("sequence should exist");
-            let tb = seq.time_base();
-            seq.video_tracks[0]
-                .add_clip(Clip::new_adjustment_layer(
-                    asset_id,
-                    TimeCode::new(0, tb),
-                    TimeCode::new(20, tb),
-                ))
-                .expect("add adjustment clip");
-        }
-
-        let seq = state.sequence.as_ref().expect("sequence should exist");
-        let (paths, color_spaces) =
-            collect_timeline_asset_paths(&state, seq, std::slice::from_ref(seq))
-                .expect("collect asset paths");
-        assert!(!paths.contains_key(&asset_id));
-        assert!(!color_spaces.contains_key(&asset_id));
-
-        let _ = std::fs::remove_dir_all(temp_root);
-    }
-
-    #[test]
-    fn collect_sequence_asset_ids_recurses_into_nested_sequences() {
-        let mut parent = Sequence::new("parent");
-        let mut child = Sequence::new("child");
-        let tb = parent.time_base();
-        let asset_id = mondrian_core::types::AssetId::new();
-
-        child.video_tracks[0]
-            .add_clip(Clip::new(
-                asset_id,
-                TimeCode::new(0, tb),
-                TimeCode::new(12, tb),
-            ))
-            .expect("add media");
-        parent.video_tracks[0]
-            .add_clip(Clip::new_nested_sequence(
-                child.id,
-                TimeCode::new(0, tb),
-                TimeCode::new(12, tb),
-                Some("child".to_string()),
-            ))
-            .expect("add nested");
-
-        let sequences = vec![parent.clone(), child];
-        let mut visited = HashSet::new();
-        let mut assets = HashSet::new();
-        collect_sequence_asset_ids(&parent, &sequences, &mut visited, &mut assets)
-            .expect("collect nested assets");
-
-        assert!(assets.contains(&asset_id));
-    }
 }

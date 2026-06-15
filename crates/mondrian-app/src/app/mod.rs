@@ -58,6 +58,7 @@ mod audio_rendering;
 mod bootstrap;
 mod chrome;
 mod clip_clipboard;
+pub(crate) mod exporting;
 mod new_project;
 mod playback;
 mod preferences;

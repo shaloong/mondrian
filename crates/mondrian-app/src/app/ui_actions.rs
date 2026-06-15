@@ -4,9 +4,10 @@
 //! to `Action::Custom` payloads before actions reach the app state layer.
 
 use mondrian_core::effect_data::EffectType;
-use mondrian_core::types::{AssetId, ClipId, EffectId, TrackId};
+use mondrian_core::types::{AssetId, ClipId, EffectId, SequenceId, TrackId};
 use mondrian_core::{ProjectSettings, Rational, Resolution};
 use mondrian_editor_state::Action;
+use mondrian_export::preset::{ExportPreset, TimelineExportRange};
 use mondrian_timeline::SequenceSettings;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -60,6 +61,12 @@ pub const ASSETS_NAMESPACE: &str = "ui.assets";
 
 /// Action name for preparing an asset for timeline drag/drop.
 pub const ASSETS_PREPARE_DRAG: &str = "prepare_drag";
+
+/// Custom action namespace for export operations.
+pub const EXPORT_NAMESPACE: &str = "ui.export";
+
+/// Action name for enqueueing a timeline export job.
+pub const EXPORT_ENQUEUE: &str = "enqueue";
 
 /// Custom action namespace for project lifecycle operations supplied by shell UI.
 pub const PROJECT_NAMESPACE: &str = "ui.project";
@@ -318,6 +325,19 @@ pub struct AssetsPrepareDragPayload {
     pub asset_id: AssetId,
 }
 
+/// Enqueue a timeline export job from a UI frontend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportEnqueuePayload {
+    /// Preset used for codec/container defaults.
+    pub preset: ExportPreset,
+    /// Sequence to export; absent means the active sequence.
+    pub sequence_id: Option<SequenceId>,
+    /// Timeline range to render.
+    pub range: TimelineExportRange,
+    /// Output media file path.
+    pub output_path: PathBuf,
+}
+
 /// Create a project at a user-selected path with explicit initial settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectCreateWithSettingsPayload {
@@ -435,6 +455,11 @@ pub fn assets_prepare_drag_action(payload: AssetsPrepareDragPayload) -> Action {
     custom_assets_action(ASSETS_PREPARE_DRAG, payload)
 }
 
+/// Build an action that enqueues a timeline export.
+pub fn export_enqueue_action(payload: ExportEnqueuePayload) -> Action {
+    custom_export_action(EXPORT_ENQUEUE, payload)
+}
+
 /// Build an action that creates a project from shell UI.
 pub fn project_create_with_settings_action(payload: ProjectCreateWithSettingsPayload) -> Action {
     custom_project_action(PROJECT_CREATE_WITH_SETTINGS, payload)
@@ -512,6 +537,14 @@ fn custom_effects_action<T: Serialize>(name: &'static str, payload: T) -> Action
 fn custom_assets_action<T: Serialize>(name: &'static str, payload: T) -> Action {
     Action::Custom {
         namespace: ASSETS_NAMESPACE.into(),
+        name: name.into(),
+        payload: serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
+    }
+}
+
+fn custom_export_action<T: Serialize>(name: &'static str, payload: T) -> Action {
+    Action::Custom {
+        namespace: EXPORT_NAMESPACE.into(),
         name: name.into(),
         payload: serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
     }

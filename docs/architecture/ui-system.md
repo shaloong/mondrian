@@ -124,6 +124,11 @@ app-shell dialog intents, the window entrypoint resolves them into concrete
 `SaveProjectAs(PathBuf)` actions, and `AppState` performs project lifecycle
 work plus status reporting. Widget code must not invent project paths or mutate
 project files directly.
+Export follows the same rule. UI frontends may collect a preset, sequence id,
+timeline range, and output path, then dispatch `ui.export.enqueue`; `AppState`
+owns timeline export request validation, recursive asset path collection,
+offline-asset checks, and `RenderJob` creation through
+`app::exporting::TimelineExportRequest`.
 Those app-shell dialog intents are built through `app::ui_actions` helpers so
 menus and self-hosted panels share the same stable custom-action ids. Shell
 local actions, such as About and close-modal, use the same helper boundary

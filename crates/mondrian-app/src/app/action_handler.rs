@@ -6,21 +6,22 @@
 //! 当前版本的 action_handler 以最简方式实现：只对已确定存在的方法做桥接，
 //! 其余 Action 记录日志后忽略。每个 Stage 逐步增加映射。
 
+use crate::app::exporting::TimelineExportRequest;
 use crate::app::selection::resolve_track_selection;
 use crate::app::timeline_editing::{
     find_clip, find_clip_mut, find_clip_track_lock, set_clip_disabled,
 };
 use crate::app::ui_actions::{
-    AssetsPrepareDragPayload, EffectsAddToClipPayload, InspectorClipTransformField,
-    InspectorRemoveEffectPayload, InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
-    InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+    AssetsPrepareDragPayload, EffectsAddToClipPayload, ExportEnqueuePayload,
+    InspectorClipTransformField, InspectorRemoveEffectPayload, InspectorSetClipCurvePayload,
+    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
     InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
     ProjectCreateWithSettingsPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
     TimelineDropAssetPayload, TimelineMoveClipPayload, TimelineMoveTrackPayload,
     TimelineSeekPayload, TimelineSelectClipPayload, TimelineSetTrackControlPayload,
     TimelineTrackControlPayloadKind, TimelineTrimClipPayload, TimelineTrimPayloadEdge,
-    ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE,
-    INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT, INSPECTOR_SET_CLIP_CURVE,
+    ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, EXPORT_ENQUEUE,
+    EXPORT_NAMESPACE, INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT, INSPECTOR_SET_CLIP_CURVE,
     INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY, INSPECTOR_SET_CLIP_TINT,
     INSPECTOR_SET_CLIP_TRANSFORM_FIELD, INSPECTOR_SET_EFFECT_ENABLED, PROJECT_CREATE_WITH_SETTINGS,
     PROJECT_NAMESPACE, TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET, TIMELINE_MOVE_CLIP,
@@ -177,6 +178,9 @@ impl AppState {
             }
             Action::Custom { namespace, name, payload } if namespace == ASSETS_NAMESPACE => {
                 self.dispatch_assets_ui_action(&name, payload)
+            }
+            Action::Custom { namespace, name, payload } if namespace == EXPORT_NAMESPACE => {
+                self.dispatch_export_ui_action(&name, payload)
             }
             Action::Custom { namespace, name, payload } if namespace == PROJECT_NAMESPACE => {
                 self.dispatch_project_ui_action(&name, payload)
@@ -809,6 +813,22 @@ impl AppState {
         }
     }
 
+    fn dispatch_export_ui_action(&mut self, name: &str, payload: serde_json::Value) -> Result<()> {
+        match name {
+            EXPORT_ENQUEUE => {
+                let payload =
+                    parse_ui_payload::<ExportEnqueuePayload>("export_ui_action", name, payload)?;
+                self.enqueue_timeline_export(TimelineExportRequest {
+                    preset: payload.preset,
+                    sequence_id: payload.sequence_id,
+                    range: payload.range,
+                    output_path: payload.output_path,
+                })
+            }
+            _ => Err(unknown_ui_action_error("export_ui_action", name)),
+        }
+    }
+
     fn dispatch_project_ui_action(&mut self, name: &str, payload: serde_json::Value) -> Result<()> {
         match name {
             PROJECT_CREATE_WITH_SETTINGS => {
@@ -1225,14 +1245,15 @@ fn clip_exists(seq: &mondrian_timeline::sequence::Sequence, clip_id: ClipId) -> 
 mod tests {
     use super::*;
     use crate::app::ui_actions::{
-        assets_prepare_drag_action, effects_add_to_clip_action, inspector_remove_effect_action,
-        inspector_set_clip_curve_action, inspector_set_clip_enabled_action,
-        inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
-        inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
-        project_create_with_settings_action, timeline_add_track_action, timeline_drop_asset_action,
-        timeline_move_clip_action, timeline_move_track_action, timeline_seek_action,
-        timeline_select_clip_action, timeline_set_track_control_action, timeline_trim_clip_action,
-        AssetsPrepareDragPayload, EffectsAddToClipPayload, InspectorClipRefPayload,
+        assets_prepare_drag_action, effects_add_to_clip_action, export_enqueue_action,
+        inspector_remove_effect_action, inspector_set_clip_curve_action,
+        inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
+        inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
+        inspector_set_effect_enabled_action, project_create_with_settings_action,
+        timeline_add_track_action, timeline_drop_asset_action, timeline_move_clip_action,
+        timeline_move_track_action, timeline_seek_action, timeline_select_clip_action,
+        timeline_set_track_control_action, timeline_trim_clip_action, AssetsPrepareDragPayload,
+        EffectsAddToClipPayload, ExportEnqueuePayload, InspectorClipRefPayload,
         InspectorClipTransformField, InspectorCurvePointPayload, InspectorRemoveEffectPayload,
         InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
         InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
@@ -1299,6 +1320,7 @@ mod tests {
             (INSPECTOR_NAMESPACE, "inspector_ui_action.unknown"),
             (EFFECTS_NAMESPACE, "effects_ui_action.unknown"),
             (ASSETS_NAMESPACE, "assets_ui_action.unknown"),
+            (EXPORT_NAMESPACE, "export_ui_action.unknown"),
             (PROJECT_NAMESPACE, "project_ui_action.unknown"),
         ] {
             let mut state = AppState::new();
@@ -1318,6 +1340,25 @@ mod tests {
                 other => panic!("expected unknown UI action workflow error, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn dispatch_export_ui_rejects_empty_output_path_without_queueing() {
+        let mut state = AppState::new();
+        state.sequence = Some(Sequence::new("export"));
+
+        let err = state
+            .dispatch_action(export_enqueue_action(ExportEnqueuePayload {
+                preset: mondrian_export::preset::ExportPreset::youtube_1080p(),
+                sequence_id: None,
+                range: mondrian_export::preset::TimelineExportRange::EntireSequence,
+                output_path: PathBuf::new(),
+            }))
+            .expect_err("empty output path should fail");
+
+        assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
+        assert!(state.render_queue.list_jobs().is_empty());
+        assert!(state.status_hint.as_ref().is_some_and(|(_, is_error)| *is_error));
     }
 
     #[test]
