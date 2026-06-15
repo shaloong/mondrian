@@ -1382,8 +1382,16 @@ fn clip_for_selection<'a>(
 }
 
 fn panel_list(model: &PanelListModel) -> PanelList {
-    let list = PanelList::new(model.title.clone(), model.items.clone())
+    let mut list = PanelList::new(model.title.clone(), model.items.clone())
         .with_subtitle(model.subtitle.clone());
+    if model.title == "Assets" {
+        list = list.on_drop(|payload, _position| match payload {
+            DragPayload::File(paths) if !paths.is_empty() => {
+                Some(Action::ImportMedia(paths.clone()))
+            }
+            _ => None,
+        });
+    }
     #[cfg(test)]
     if let Some(prefix) = model.demo_activate_prefix.clone() {
         return list.on_activate(move |index, item| {
@@ -2127,7 +2135,8 @@ mod tests {
     use mondrian_effects::EffectNodeExt;
     use mondrian_ui_core::tree::WidgetTreeView;
     use mondrian_ui_core::types::{
-        EventResult, KeyCode, LayoutConstraint, Modifiers, MouseButton, Point, Rect, Size, WidgetId,
+        DragPayload, EventResult, KeyCode, LayoutConstraint, Modifiers, MouseButton, Point, Rect,
+        Size, WidgetId,
     };
     use mondrian_ui_core::widget::{EventContext, EventRequests, PaintContext};
     use mondrian_ui_core::UiEvent;
@@ -2410,6 +2419,44 @@ mod tests {
         assert!(project_item(&model, "Import media...").disabled);
         assert!(project_item(&model, "Save project").disabled);
         assert!(project_item(&model, "Save project as...").disabled);
+    }
+
+    #[test]
+    fn assets_panel_file_drop_dispatches_import_media_action() {
+        let model = PanelListModel::new(
+            "Assets",
+            vec![PanelListItem::new("Drop target").with_subtitle("Project library")],
+        );
+        let mut list = panel_list(&model);
+        list.layout(Rect::new(0.0, 0.0, 320.0, 180.0));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        let path = PathBuf::from("E:/media/clip.mov");
+
+        let result = list.event(
+            &UiEvent::Drop {
+                payload: DragPayload::File(vec![path.clone()]),
+                position: Point::new(24.0, 76.0),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[Action::ImportMedia(vec![path])]
+        );
     }
 
     #[test]

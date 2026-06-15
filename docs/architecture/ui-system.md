@@ -669,7 +669,10 @@ OS file drag/drop enters the same UI event model as internal drags via
 `DragPayload::File`. Product windows route hovered/dropped files through the
 widget tree first; if no widget handles the final drop, the self-hosted app
 falls back to `Action::ImportMedia` so dropping media into the window remains a
-useful default workflow.
+useful default workflow. `PanelList` exposes a domain-light `on_drop` adapter;
+the self-hosted Assets panel maps file drops to `Action::ImportMedia` there,
+while other panels can opt into their own drop semantics without teaching the
+generic list widget about application state.
 Shell cursor selection is also centralized in the runtime. Entrypoints provide
 the current eyedropper, splitter, and focused-text state; the runtime resolves
 priority as eyedropper sampling, splitter resize affordance, focused text

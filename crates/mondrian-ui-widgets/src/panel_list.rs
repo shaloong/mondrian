@@ -17,6 +17,8 @@ const DRAG_START_DISTANCE: f32 = 6.0;
 
 /// Dynamic action factory used when a panel-list item changes state.
 pub type PanelListAction = dyn Fn(usize, &PanelListItem) -> Action;
+/// Dynamic action factory used when a payload is dropped on the panel list.
+pub type PanelListDropAction = dyn Fn(&DragPayload, Point) -> Option<Action>;
 
 /// Item rendered by [`PanelList`].
 #[derive(Debug, Clone)]
@@ -112,6 +114,7 @@ pub struct PanelList {
     focus_visible: bool,
     on_select: Option<Box<PanelListAction>>,
     on_activate: Option<Box<PanelListAction>>,
+    on_drop: Option<Box<PanelListDropAction>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -152,6 +155,7 @@ impl PanelList {
             focus_visible: false,
             on_select: None,
             on_activate: None,
+            on_drop: None,
         }
     }
 
@@ -185,6 +189,15 @@ impl PanelList {
         action: impl Fn(usize, &PanelListItem) -> Action + 'static,
     ) -> Self {
         self.on_activate = Some(Box::new(action));
+        self
+    }
+
+    /// Dispatch a dynamic action when a drag payload is dropped on the list.
+    pub fn on_drop(
+        mut self,
+        action: impl Fn(&DragPayload, Point) -> Option<Action> + 'static,
+    ) -> Self {
+        self.on_drop = Some(Box::new(action));
         self
     }
 
@@ -464,6 +477,15 @@ impl PanelList {
         }
     }
 
+    fn drop_payload(&self, payload: &DragPayload, position: Point, ctx: &mut EventContext) {
+        let Some(factory) = &self.on_drop else {
+            return;
+        };
+        if let Some(action) = factory(payload, position) {
+            (ctx.dispatch)(action);
+        }
+    }
+
     fn paint_row(&self, ctx: &mut PaintContext, index: usize, row: Rect) {
         let item = &self.items[index];
         let colors = &ctx.theme.colors;
@@ -655,6 +677,23 @@ impl Widget for PanelList {
                     return EventResult::Handled;
                 }
             }
+            UiEvent::DragEnter { position, .. } | UiEvent::DragOver { position, .. }
+                if self.on_drop.is_some() && self.bounds.contains(*position) =>
+            {
+                ctx.request_repaint();
+                return EventResult::Handled;
+            }
+            UiEvent::Drop { payload, position }
+                if self.on_drop.is_some() && self.bounds.contains(*position) =>
+            {
+                self.drop_payload(payload, *position, ctx);
+                ctx.request_repaint();
+                return EventResult::Handled;
+            }
+            UiEvent::DragLeave if self.on_drop.is_some() => {
+                ctx.request_repaint();
+                return EventResult::Handled;
+            }
             UiEvent::FocusGained => {
                 self.focused = true;
                 self.focus_visible = true;
@@ -776,6 +815,7 @@ mod tests {
     use super::*;
 
     use std::cell::RefCell;
+    use std::path::PathBuf;
 
     use mondrian_core::types::AssetId;
     use mondrian_platform::NoopPlatformService;
@@ -1011,6 +1051,48 @@ mod tests {
         assert_eq!(
             requests.drag,
             Some(DragRequest::Begin(DragPayload::Asset(asset_id)))
+        );
+        assert!(requests.repaint);
+    }
+
+    #[test]
+    fn dropping_payload_inside_list_dispatches_drop_action() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut list =
+            PanelList::new("Assets", sample_items()).on_drop(|payload, _position| match payload {
+                DragPayload::File(paths) if !paths.is_empty() => {
+                    Some(Action::ImportMedia(paths.clone()))
+                }
+                _ => None,
+            });
+        list.layout(Rect::new(0.0, 0.0, 240.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        let path = PathBuf::from("E:/media/clip.mov");
+
+        let result = list.event(
+            &UiEvent::Drop {
+                payload: DragPayload::File(vec![path.clone()]),
+                position: Point::new(32.0, 80.0),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[Action::ImportMedia(vec![path])]
         );
         assert!(requests.repaint);
     }
