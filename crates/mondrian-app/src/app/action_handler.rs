@@ -122,6 +122,14 @@ impl AppState {
             Action::DeleteSelection => self.delete_selection_from_ui(false),
             Action::RippleDeleteSelection => self.delete_selection_from_ui(true),
             Action::SplitClipAtPlayhead => self.split_at_playhead().map(|_| ()),
+            Action::MarkInAtPlayhead => {
+                self.mark_in_at_current_frame();
+                Ok(())
+            }
+            Action::MarkOutAtPlayhead => {
+                self.mark_out_at_current_frame();
+                Ok(())
+            }
             Action::NudgeClip { clip_id, delta_frames } => {
                 self.nudge_clip_from_action(clip_id, delta_frames)
             }
@@ -1941,6 +1949,24 @@ mod tests {
         assert_eq!(track.clips[0].position.frame, 20);
         assert!(state.selection.selected_clips.is_empty());
         assert!(state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_mark_in_out_actions_update_active_sequence_bounds() {
+        let (mut state, _, _) = state_with_two_video_tracks();
+        state.seek(42);
+        state
+            .dispatch_action(mondrian_editor_state::Action::MarkInAtPlayhead)
+            .expect("mark in");
+        state.seek(16);
+        state
+            .dispatch_action(mondrian_editor_state::Action::MarkOutAtPlayhead)
+            .expect("mark out");
+
+        let sequence = state.sequence.as_ref().expect("sequence");
+        assert_eq!(sequence.in_point_frame(), 42);
+        assert_eq!(sequence.out_point_frame(), Some(42));
+        assert!(!state.can_undo_action());
     }
 
     #[test]

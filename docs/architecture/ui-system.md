@@ -460,6 +460,9 @@ domain-light `TimelineEditCommand`s, and the app adapter maps them onto shared
 editor actions such as `Action::DeleteSelection` and
 `Action::RippleDeleteSelection`. Split-at-playhead uses the same path via
 `TimelineEditCommand::SplitAtPlayhead` and `Action::SplitClipAtPlayhead`.
+Mark In / Mark Out shortcuts use `TimelineEditCommand::MarkInAtPlayhead` and
+`TimelineEditCommand::MarkOutAtPlayhead`, then route through shared app actions
+so timeline and viewer shortcuts can converge on the same command boundary.
 Modified variants should get explicit semantic commands instead of reusing
 plain delete.
 Timeline structure mutations that can invalidate ids, such as removing tracks,

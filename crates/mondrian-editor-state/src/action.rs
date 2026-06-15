@@ -66,6 +66,8 @@ pub enum Action {
     DeleteSelection,
     RippleDeleteSelection,
     SplitClipAtPlayhead,
+    MarkInAtPlayhead,
+    MarkOutAtPlayhead,
     NudgeClip {
         clip_id: ClipId,
         delta_frames: i64,
@@ -260,6 +262,18 @@ mod tests {
         assert_eq!(
             round_trip(&Action::SplitClipAtPlayhead),
             Action::SplitClipAtPlayhead
+        );
+    }
+
+    #[test]
+    fn round_trip_mark_in_out_at_playhead() {
+        assert_eq!(
+            round_trip(&Action::MarkInAtPlayhead),
+            Action::MarkInAtPlayhead
+        );
+        assert_eq!(
+            round_trip(&Action::MarkOutAtPlayhead),
+            Action::MarkOutAtPlayhead
         );
     }
 

@@ -485,6 +485,8 @@ impl ViewerPanelModel {
 pub struct TimelinePanelModel {
     pub tracks: Vec<TimelineTrack>,
     pub playhead_frame: i64,
+    pub in_point_frame: i64,
+    pub out_point_frame: Option<i64>,
     track_refs: Vec<AppTimelineTrackRef>,
     clip_refs: Vec<Vec<ClipId>>,
 }
@@ -533,6 +535,8 @@ impl TimelinePanelModel {
         Self {
             tracks,
             playhead_frame: sequence.playhead.frame.max(0),
+            in_point_frame: sequence.in_point_frame(),
+            out_point_frame: sequence.out_point_frame(),
             track_refs,
             clip_refs,
         }
@@ -1227,6 +1231,7 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
         .enabled(!model.tracks.is_empty())
         .with_header_width(128.0)
         .with_playhead(model.playhead_frame)
+        .with_in_out_points(model.in_point_frame, model.out_point_frame)
         .on_clip_select({
             let action_model = action_model.clone();
             move |clip_ref, _clip| {
@@ -1269,6 +1274,8 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
             TimelineEditCommand::DeleteSelection => Action::DeleteSelection,
             TimelineEditCommand::RippleDeleteSelection => Action::RippleDeleteSelection,
             TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
+            TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
+            TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
         })
         .on_clip_move({
             let action_model = action_model.clone();
@@ -1826,6 +1833,8 @@ mod tests {
         let mut sequence = Sequence::new("edit");
         let tb = sequence.time_base();
         sequence.playhead = TimeCode::new(42, tb);
+        sequence.mark_in(12);
+        sequence.mark_out(64);
 
         let mut video = Clip::new(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(20, tb));
         video.label = Some("Interview".to_string());
@@ -1849,6 +1858,8 @@ mod tests {
         let model = TimelinePanelModel::from_sequence(&sequence, &[selected], &[selected_track_id]);
 
         assert_eq!(model.playhead_frame, 42);
+        assert_eq!(model.in_point_frame, 12);
+        assert_eq!(model.out_point_frame, Some(64));
         assert_eq!(
             model.tracks.len(),
             sequence.video_tracks.len() + sequence.audio_tracks.len()
@@ -2057,6 +2068,44 @@ mod tests {
 
         assert_eq!(result, EventResult::Handled);
         assert_eq!(actions.borrow().as_slice(), &[Action::SplitClipAtPlayhead]);
+    }
+
+    #[test]
+    fn timeline_panel_i_o_emit_shared_mark_actions() {
+        let model = demo_timeline_model();
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut panel = timeline_panel(&model);
+        panel.layout(mondrian_ui_core::types::Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        panel.event(&UiEvent::FocusGained, &mut ctx);
+        let in_result = panel.event(
+            &UiEvent::KeyDown { key: KeyCode::I, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        let out_result = panel.event(
+            &UiEvent::KeyDown { key: KeyCode::O, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+
+        assert_eq!(in_result, EventResult::Handled);
+        assert_eq!(out_result, EventResult::Handled);
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[Action::MarkInAtPlayhead, Action::MarkOutAtPlayhead]
+        );
     }
 
     #[test]

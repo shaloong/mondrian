@@ -103,6 +103,10 @@ pub enum TimelineEditCommand {
     RippleDeleteSelection,
     /// Split clips intersecting the playhead.
     SplitAtPlayhead,
+    /// Mark the current playhead frame as the sequence in point.
+    MarkInAtPlayhead,
+    /// Mark the current playhead frame as the sequence out point.
+    MarkOutAtPlayhead,
 }
 
 /// Clip view model rendered by [`TimelineView`].
@@ -247,6 +251,8 @@ pub struct TimelineView {
     hovered_track_control: Option<(TimelineTrackRef, TimelineTrackControl)>,
     hovered_track_add: Option<TimelineTrackKind>,
     playhead_frame: i64,
+    in_point_frame: i64,
+    out_point_frame: Option<i64>,
     pixels_per_frame: f32,
     scroll_x: f32,
     scroll_y: f32,
@@ -322,6 +328,8 @@ impl TimelineView {
             hovered_track_control: None,
             hovered_track_add: None,
             playhead_frame: 0,
+            in_point_frame: 0,
+            out_point_frame: None,
             pixels_per_frame: 4.0,
             scroll_x: 0.0,
             scroll_y: 0.0,
@@ -351,6 +359,13 @@ impl TimelineView {
     /// Set the current playhead frame.
     pub fn with_playhead(mut self, frame: i64) -> Self {
         self.playhead_frame = frame.max(0);
+        self
+    }
+
+    /// Set optional sequence in/out points in frame space.
+    pub fn with_in_out_points(mut self, in_point_frame: i64, out_point_frame: Option<i64>) -> Self {
+        self.in_point_frame = in_point_frame.max(0);
+        self.out_point_frame = out_point_frame.map(|frame| frame.max(self.in_point_frame));
         self
     }
 
@@ -476,6 +491,16 @@ impl TimelineView {
     /// Current playhead frame.
     pub fn playhead_frame(&self) -> i64 {
         self.playhead_frame
+    }
+
+    /// Current timeline in point frame.
+    pub fn in_point_frame(&self) -> i64 {
+        self.in_point_frame
+    }
+
+    /// Current timeline out point frame.
+    pub fn out_point_frame(&self) -> Option<i64> {
+        self.out_point_frame
     }
 
     /// Current horizontal scroll offset in pixels.
@@ -1079,6 +1104,12 @@ impl TimelineView {
             KeyCode::B if !modifiers.shift && (modifiers.ctrl || modifiers.meta) => {
                 TimelineEditCommand::SplitAtPlayhead
             }
+            KeyCode::I if !modifiers.ctrl && !modifiers.meta && !modifiers.shift => {
+                TimelineEditCommand::MarkInAtPlayhead
+            }
+            KeyCode::O if !modifiers.ctrl && !modifiers.meta && !modifiers.shift => {
+                TimelineEditCommand::MarkOutAtPlayhead
+            }
             KeyCode::Delete | KeyCode::Backspace if !modifiers.ctrl && !modifiers.meta => {
                 if modifiers.shift {
                     TimelineEditCommand::RippleDeleteSelection
@@ -1120,6 +1151,7 @@ impl TimelineView {
     fn paint_ruler(&self, ctx: &mut PaintContext) {
         let colors = &ctx.theme.colors;
         ctx.encoder.draw_rect(self.ruler_rect, colors.card, 0.0);
+        self.paint_in_out_ruler_region(ctx);
         let step = self.tick_step_frames();
         let start_frame = (self.scroll_x / self.pixels_per_frame).floor().max(0.0) as i64;
         let first_tick = start_frame - start_frame % step;
@@ -1305,6 +1337,7 @@ impl TimelineView {
                 colors.card
             };
             ctx.encoder.draw_rect(row, row_fill, 0.0);
+            self.paint_in_out_row_region(ctx, row);
             ctx.encoder.draw_line(
                 Point::new(self.bounds.x, y + self.track_height),
                 Point::new(self.bounds.x + self.bounds.width, y + self.track_height),
@@ -1358,6 +1391,68 @@ impl TimelineView {
                 {
                     self.paint_clip(ctx, drag.clip_ref, clip, rect, true);
                 }
+            }
+        }
+    }
+
+    fn in_out_visible_range(&self) -> Option<(f32, f32)> {
+        let out = self.out_point_frame?;
+        if out < self.in_point_frame {
+            return None;
+        }
+        let start = self.frame_to_x(self.in_point_frame);
+        let end = self.frame_to_x(out.saturating_add(1));
+        let x0 = start.max(self.body_rect.x);
+        let x1 = end.min(self.body_rect.x + self.body_rect.width);
+        (x1 > x0).then_some((x0, x1))
+    }
+
+    fn paint_in_out_ruler_region(&self, ctx: &mut PaintContext) {
+        let colors = &ctx.theme.colors;
+        if let Some((x0, x1)) = self.in_out_visible_range() {
+            let mut fill = colors.ring;
+            fill.a = 0.10;
+            ctx.encoder.draw_rect(
+                Rect::new(x0, self.ruler_rect.y, x1 - x0, self.ruler_rect.height),
+                fill,
+                0.0,
+            );
+        }
+        self.paint_in_out_marker_lines(ctx, self.ruler_rect);
+    }
+
+    fn paint_in_out_row_region(&self, ctx: &mut PaintContext, row: Rect) {
+        let colors = &ctx.theme.colors;
+        if let Some((x0, x1)) = self.in_out_visible_range() {
+            let mut fill = colors.ring;
+            fill.a = 0.055;
+            ctx.encoder.draw_rect(Rect::new(x0, row.y, x1 - x0, row.height), fill, 0.0);
+        }
+        self.paint_in_out_marker_lines(ctx, row);
+    }
+
+    fn paint_in_out_marker_lines(&self, ctx: &mut PaintContext, rect: Rect) {
+        let colors = &ctx.theme.colors;
+        let mut color = colors.ring;
+        color.a = 0.55;
+        let in_x = self.frame_to_x(self.in_point_frame);
+        if in_x >= rect.x && in_x <= rect.x + rect.width {
+            ctx.encoder.draw_line(
+                Point::new(in_x, rect.y),
+                Point::new(in_x, rect.y + rect.height),
+                1.0,
+                color,
+            );
+        }
+        if let Some(out) = self.out_point_frame {
+            let out_x = self.frame_to_x(out.saturating_add(1));
+            if out_x >= rect.x && out_x <= rect.x + rect.width {
+                ctx.encoder.draw_line(
+                    Point::new(out_x, rect.y),
+                    Point::new(out_x, rect.y + rect.height),
+                    1.0,
+                    color,
+                );
             }
         }
     }
@@ -3198,6 +3293,8 @@ mod tests {
                 TimelineEditCommand::DeleteSelection => Action::DeleteSelection,
                 TimelineEditCommand::RippleDeleteSelection => Action::RippleDeleteSelection,
                 TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
+                TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
+                TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
             }
         });
         view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
@@ -3270,6 +3367,84 @@ mod tests {
             &[TimelineEditCommand::SplitAtPlayhead]
         );
         assert_eq!(actions.borrow().as_slice(), &[Action::SplitClipAtPlayhead]);
+    }
+
+    #[test]
+    fn focused_i_and_o_dispatch_mark_in_out_commands() {
+        let actions = RefCell::new(Vec::new());
+        let commands = Rc::new(RefCell::new(Vec::new()));
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let command_log = Rc::clone(&commands);
+        let mut view = timeline().on_edit_command(move |command| {
+            command_log.borrow_mut().push(command);
+            match command {
+                TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
+                TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
+                _ => Action::NoOp,
+            }
+        });
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        view.event(&UiEvent::FocusGained, &mut ctx);
+        assert_eq!(
+            view.event(
+                &UiEvent::KeyDown { key: KeyCode::I, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            view.event(
+                &UiEvent::KeyDown { key: KeyCode::O, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(
+            commands.borrow().as_slice(),
+            &[
+                TimelineEditCommand::MarkInAtPlayhead,
+                TimelineEditCommand::MarkOutAtPlayhead,
+            ]
+        );
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[Action::MarkInAtPlayhead, Action::MarkOutAtPlayhead]
+        );
+    }
+
+    #[test]
+    fn in_out_points_are_normalized_and_painted() {
+        let mut view = timeline().with_in_out_points(40, Some(12));
+        assert_eq!(view.in_point_frame(), 40);
+        assert_eq!(view.out_point_frame(), Some(40));
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 520.0, 180.0),
+        };
+
+        view.paint(&mut ctx);
+
+        assert!(encoder.rects >= 8);
+        assert!(encoder.lines >= 7);
     }
 
     #[test]
