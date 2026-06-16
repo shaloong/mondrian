@@ -107,12 +107,23 @@ pub(crate) fn paint_menu_row(ctx: &mut PaintContext, rect: Rect, label: &str, st
     } else {
         tokens.muted_foreground
     };
-    ctx.encoder.draw_text(
-        label,
-        font_size,
-        Point::new(rect.x + if state.active { 12.0 } else { 6.0 }, rect.y + 5.0),
-        text_color,
+    let text_x = rect.x + MENU_ROW_PADDING_X;
+    let text_clip = Rect::new(
+        text_x,
+        rect.y,
+        (rect.x + rect.width - MENU_ROW_PADDING_X - text_x).max(0.0),
+        rect.height,
     );
+    if text_clip.width > 0.0 {
+        ctx.encoder.push_clip(text_clip);
+        ctx.encoder.draw_text(
+            label,
+            font_size,
+            Point::new(text_x, rect.y + 5.0),
+            text_color,
+        );
+        ctx.encoder.pop_clip();
+    }
 }
 
 pub(crate) fn paint_menu_separator(ctx: &mut PaintContext, rect: Rect) {
@@ -1344,6 +1355,29 @@ mod tests {
         d.paint_overlay(&mut ctx);
 
         assert!(encoder.texts.iter().any(|text| text == "Disabled"));
+        assert_eq!(encoder.lines, 0);
+    }
+
+    #[test]
+    fn menu_row_clips_label_to_padded_text_lane() {
+        let theme = mondrian_ui_theme::ThemePreset::Dark.build();
+        let clip_rect = Rect::new(0.0, 0.0, 120.0, 80.0);
+        let mut encoder = RecordingEncoder::default();
+
+        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        paint_menu_row(
+            &mut ctx,
+            Rect::new(10.0, 20.0, 64.0, 24.0),
+            "Disabled option with a very long label",
+            MenuRowPaint { enabled: false, active: false, hovered: false },
+        );
+
+        assert_eq!(
+            encoder.texts,
+            vec!["Disabled option with a very long label"]
+        );
+        assert_eq!(encoder.clips, vec![Rect::new(26.0, 20.0, 32.0, 24.0)]);
+        assert_eq!(encoder.clip_pops, 1);
         assert_eq!(encoder.lines, 0);
     }
 

@@ -380,6 +380,9 @@ shared paint helper so widgets do not drift in their interpretation of tokens.
 Dropdown trigger labels are clipped to the trigger text lane, reserving the
 arrow area when enabled, so constrained form rows do not let long labels paint
 over affordances or neighboring controls.
+Popup row labels are also clipped to their padded text lane; disabled rows and
+long labels must never bleed into separator geometry, scrollbars, or neighboring
+rows.
 Tooltip requests preserve their delay timer when the same tooltip is reported
 repeatedly during hover, and tooltip painting clamps to the current clip rect.
 
