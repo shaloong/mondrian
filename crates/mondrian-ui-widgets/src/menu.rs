@@ -27,6 +27,7 @@ const MENU_ARROW_SPACE: f32 = 24.0;
 const MENU_ROW_PADDING_X: f32 = 16.0;
 const MENU_ROW_ICON_SIZE: f32 = 16.0;
 const MENU_ROW_ICON_GAP: f32 = 8.0;
+const MENU_ROW_SHORTCUT_GAP: f32 = 24.0;
 const MENU_SCROLLBAR_SPACE: f32 = 8.0;
 
 pub(crate) fn paint_menu_trigger(ctx: &mut PaintContext, rect: Rect, label: &str, open: bool) {
@@ -81,6 +82,7 @@ pub(crate) fn paint_menu_row(
     ctx: &mut PaintContext,
     rect: Rect,
     label: &str,
+    shortcut: Option<&str>,
     icon: Option<&VectorIcon>,
     reserve_icon_lane: bool,
     state: MenuRowPaint,
@@ -136,12 +138,17 @@ pub(crate) fn paint_menu_row(
         0.0
     };
     let text_x = rect.x + MENU_ROW_PADDING_X + icon_lane_width;
-    let text_clip = Rect::new(
-        text_x,
-        rect.y,
-        (rect.x + rect.width - MENU_ROW_PADDING_X - text_x).max(0.0),
-        rect.height,
-    );
+    let shortcut_width = shortcut
+        .filter(|shortcut| !shortcut.is_empty())
+        .map(|shortcut| measure_single_line(shortcut, font_size).0)
+        .unwrap_or(0.0);
+    let shortcut_x = rect.x + rect.width - MENU_ROW_PADDING_X - shortcut_width;
+    let text_right = if shortcut_width > 0.0 {
+        (shortcut_x - MENU_ROW_SHORTCUT_GAP).max(text_x)
+    } else {
+        rect.x + rect.width - MENU_ROW_PADDING_X
+    };
+    let text_clip = Rect::new(text_x, rect.y, (text_right - text_x).max(0.0), rect.height);
     if text_clip.width > 0.0 {
         ctx.encoder.push_clip(text_clip);
         ctx.encoder.draw_text(
@@ -151,6 +158,24 @@ pub(crate) fn paint_menu_row(
             text_color,
         );
         ctx.encoder.pop_clip();
+    }
+    if let Some(shortcut) = shortcut.filter(|shortcut| !shortcut.is_empty()) {
+        let shortcut_clip = Rect::new(
+            shortcut_x.max(text_x),
+            rect.y,
+            (rect.x + rect.width - MENU_ROW_PADDING_X - shortcut_x).max(0.0),
+            rect.height,
+        );
+        if shortcut_clip.width > 0.0 {
+            ctx.encoder.push_clip(shortcut_clip);
+            ctx.encoder.draw_text(
+                shortcut,
+                font_size,
+                Point::new(shortcut_clip.x, rect.y + 5.0),
+                tokens.muted_foreground,
+            );
+            ctx.encoder.pop_clip();
+        }
     }
 }
 
@@ -227,6 +252,7 @@ pub struct MenuItem {
     pub enabled: bool,
     pub kind: MenuItemKind,
     pub icon: Option<VectorIcon>,
+    pub shortcut: Option<String>,
 }
 
 impl MenuItem {
@@ -237,6 +263,7 @@ impl MenuItem {
             enabled: true,
             kind: MenuItemKind::Action,
             icon: None,
+            shortcut: None,
         }
     }
 
@@ -248,12 +275,19 @@ impl MenuItem {
             enabled: false,
             kind: MenuItemKind::Separator,
             icon: None,
+            shortcut: None,
         }
     }
 
     /// Paint a vector icon before this item label.
     pub fn with_icon(mut self, icon: VectorIcon) -> Self {
         self.icon = Some(icon);
+        self
+    }
+
+    /// Paint a right-aligned keyboard shortcut hint for this item.
+    pub fn with_shortcut(mut self, shortcut: impl Into<String>) -> Self {
+        self.shortcut = Some(shortcut.into());
         self
     }
 
@@ -269,6 +303,14 @@ impl MenuItem {
     pub fn is_activatable(&self) -> bool {
         self.enabled && !self.is_separator()
     }
+}
+
+pub(crate) fn menu_item_text_width(item: &MenuItem) -> f32 {
+    let label_width = measure_single_line(&item.label, MENU_MEASURE_FONT_SIZE).0;
+    let Some(shortcut) = item.shortcut.as_deref().filter(|shortcut| !shortcut.is_empty()) else {
+        return label_width;
+    };
+    label_width + MENU_ROW_SHORTCUT_GAP + measure_single_line(shortcut, MENU_MEASURE_FONT_SIZE).0
 }
 
 /// Dropdown 菜单
@@ -388,7 +430,7 @@ impl Dropdown {
             .items
             .iter()
             .filter(|item| !item.is_separator())
-            .map(|item| measure_single_line(&item.label, MENU_MEASURE_FONT_SIZE).0)
+            .map(menu_item_text_width)
             .fold(0.0, f32::max);
         let scrollbar = if self.items.len() > self.max_visible_items {
             MENU_SCROLLBAR_SPACE
@@ -574,6 +616,7 @@ impl Dropdown {
                 ctx,
                 item_rect,
                 &item.label,
+                item.shortcut.as_deref(),
                 item.icon.as_ref(),
                 reserve_icon_lane,
                 MenuRowPaint {
@@ -1427,6 +1470,7 @@ mod tests {
             Rect::new(10.0, 20.0, 64.0, 24.0),
             "Disabled option with a very long label",
             None,
+            None,
             false,
             MenuRowPaint { enabled: false, active: false, hovered: false },
         );
@@ -1452,6 +1496,7 @@ mod tests {
             &mut ctx,
             Rect::new(10.0, 20.0, 128.0, 24.0),
             "Open",
+            None,
             Some(&icon),
             true,
             MenuRowPaint { enabled: true, active: false, hovered: false },
@@ -1461,6 +1506,32 @@ mod tests {
         assert_eq!(encoder.triangles, icon.triangle_count());
         assert_eq!(encoder.clips, vec![Rect::new(50.0, 20.0, 72.0, 24.0)]);
         assert_eq!(encoder.clip_pops, 1);
+    }
+
+    #[test]
+    fn menu_row_paints_shortcut_in_trailing_lane() {
+        let theme = mondrian_ui_theme::ThemePreset::Dark.build();
+        let clip_rect = Rect::new(0.0, 0.0, 220.0, 80.0);
+        let mut encoder = RecordingEncoder::default();
+
+        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        paint_menu_row(
+            &mut ctx,
+            Rect::new(10.0, 20.0, 160.0, 24.0),
+            "Save Project With Long Label",
+            Some("Ctrl+S"),
+            None,
+            false,
+            MenuRowPaint { enabled: true, active: false, hovered: false },
+        );
+
+        assert_eq!(
+            encoder.texts,
+            vec!["Save Project With Long Label", "Ctrl+S"]
+        );
+        assert_eq!(encoder.clips.len(), 2);
+        assert!(encoder.clips[0].x < encoder.clips[1].x);
+        assert_eq!(encoder.clip_pops, 2);
     }
 
     #[test]
@@ -1478,6 +1549,31 @@ mod tests {
         iconized.layout(Rect::new(0.0, 0.0, 120.0, 28.0));
 
         assert!(iconized.menu_rect().width > plain.menu_rect().width);
+    }
+
+    #[test]
+    fn dropdown_popup_width_reserves_shortcut_lane() {
+        let mut plain = Dropdown::new(
+            "File",
+            vec![MenuItem::new("Save Project", Action::SaveProject)],
+        );
+        let mut with_shortcut = Dropdown::new(
+            "File",
+            vec![MenuItem::new("Save Project", Action::SaveProject).with_shortcut("Ctrl+S")],
+        );
+        plain.layout(Rect::new(0.0, 0.0, 120.0, 28.0));
+        with_shortcut.layout(Rect::new(0.0, 0.0, 120.0, 28.0));
+
+        assert!(with_shortcut.menu_rect().width > plain.menu_rect().width);
+    }
+
+    #[test]
+    fn menu_item_shortcut_builder_preserves_action_semantics() {
+        let item = MenuItem::new("Save", Action::SaveProject).with_shortcut("Ctrl+S");
+
+        assert_eq!(item.action, Action::SaveProject);
+        assert_eq!(item.shortcut.as_deref(), Some("Ctrl+S"));
+        assert!(item.is_activatable());
     }
 
     #[test]

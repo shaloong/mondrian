@@ -386,6 +386,9 @@ rows.
 Menu items may carry optional `VectorIcon` geometry. If any item in a dropdown
 or context menu has an icon, the popup reserves one aligned icon lane for the
 whole menu while still keeping designer assets mapped at the app layer.
+Menu items may also carry a right-aligned shortcut hint; the shared menu row
+helper owns the shortcut lane and label clipping so shell menus, context menus,
+and internal selectors do not hand-place accelerator text differently.
 Tooltip requests preserve their delay timer when the same tooltip is reported
 repeatedly during hover, and tooltip painting clamps to the current clip rect.
 

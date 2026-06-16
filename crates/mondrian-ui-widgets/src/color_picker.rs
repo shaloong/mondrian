@@ -1372,6 +1372,7 @@ impl Widget for ColorPicker {
                 rect,
                 mode.label(),
                 None,
+                None,
                 false,
                 MenuRowPaint {
                     enabled: true,

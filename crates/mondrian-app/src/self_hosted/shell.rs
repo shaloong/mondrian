@@ -211,36 +211,55 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
             "File",
             vec![
                 menu_item_with_icon(
-                    MenuItem::new("New Project...", app_shell_new_project_dialog_action()),
+                    MenuItem::new("New Project...", app_shell_new_project_dialog_action())
+                        .with_shortcut("Ctrl+N"),
                     AppIcon::PlusFilled,
                 ),
                 menu_item_with_icon(
-                    MenuItem::new("Open Project...", app_shell_open_project_dialog_action()),
+                    MenuItem::new("Open Project...", app_shell_open_project_dialog_action())
+                        .with_shortcut("Ctrl+O"),
                     AppIcon::FolderOpenFilled,
                 ),
                 menu_item_with_icon(
-                    MenuItem::new("Import Media...", app_shell_import_media_dialog_action()),
+                    MenuItem::new("Import Media...", app_shell_import_media_dialog_action())
+                        .with_shortcut("Ctrl+I"),
                     AppIcon::Import,
                 ),
-                menu_item_with_icon(MenuItem::new("Save", Action::SaveProject), AppIcon::Save),
                 menu_item_with_icon(
-                    MenuItem::new("Save As...", app_shell_save_project_as_dialog_action()),
+                    MenuItem::new("Save", Action::SaveProject).with_shortcut("Ctrl+S"),
+                    AppIcon::Save,
+                ),
+                menu_item_with_icon(
+                    MenuItem::new("Save As...", app_shell_save_project_as_dialog_action())
+                        .with_shortcut("Ctrl+Shift+S"),
                     AppIcon::Save,
                 ),
                 MenuItem::separator(),
                 MenuItem::new("Close Project", Action::CloseProject),
-                MenuItem::new("Quit", app_shell_quit_action()),
+                MenuItem::new("Quit", app_shell_quit_action()).with_shortcut("Ctrl+Q"),
             ],
         ),
         (
             "Edit",
             vec![
-                menu_item_with_icon(MenuItem::new("Undo", Action::Undo), AppIcon::Undo),
-                menu_item_with_icon(MenuItem::new("Redo", Action::Redo), AppIcon::Redo),
-                menu_item_with_icon(MenuItem::new("Cut", Action::Cut), AppIcon::Cut),
-                menu_item_with_icon(MenuItem::new("Copy", Action::Copy), AppIcon::Copy),
                 menu_item_with_icon(
-                    MenuItem::new("Paste", Action::Paste),
+                    MenuItem::new("Undo", Action::Undo).with_shortcut("Ctrl+Z"),
+                    AppIcon::Undo,
+                ),
+                menu_item_with_icon(
+                    MenuItem::new("Redo", Action::Redo).with_shortcut("Ctrl+Shift+Z"),
+                    AppIcon::Redo,
+                ),
+                menu_item_with_icon(
+                    MenuItem::new("Cut", Action::Cut).with_shortcut("Ctrl+X"),
+                    AppIcon::Cut,
+                ),
+                menu_item_with_icon(
+                    MenuItem::new("Copy", Action::Copy).with_shortcut("Ctrl+C"),
+                    AppIcon::Copy,
+                ),
+                menu_item_with_icon(
+                    MenuItem::new("Paste", Action::Paste).with_shortcut("Ctrl+V"),
                     AppIcon::ClipboardText,
                 ),
             ],
@@ -249,11 +268,13 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
             "View",
             vec![
                 menu_item_with_icon(
-                    MenuItem::new("Viewer", Action::FocusPanel(PanelKind::Viewer)),
+                    MenuItem::new("Viewer", Action::FocusPanel(PanelKind::Viewer))
+                        .with_shortcut("Ctrl+Alt+V"),
                     AppIcon::FullScreen,
                 ),
                 menu_item_with_icon(
-                    MenuItem::new("Timeline", Action::FocusPanel(PanelKind::Timeline)),
+                    MenuItem::new("Timeline", Action::FocusPanel(PanelKind::Timeline))
+                        .with_shortcut("Ctrl+Alt+T"),
                     AppIcon::Clock,
                 ),
                 menu_item_with_icon(
@@ -262,32 +283,39 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
                 ),
                 MenuItem::separator(),
                 menu_item_with_icon(
-                    MenuItem::new("Assets", Action::FocusPanel(PanelKind::Assets)),
+                    MenuItem::new("Assets", Action::FocusPanel(PanelKind::Assets))
+                        .with_shortcut("Ctrl+Alt+A"),
                     AppIcon::Folder,
                 ),
                 menu_item_with_icon(
-                    MenuItem::new("Effects", Action::FocusPanel(PanelKind::Effects)),
+                    MenuItem::new("Effects", Action::FocusPanel(PanelKind::Effects))
+                        .with_shortcut("Ctrl+Alt+E"),
                     AppIcon::Effect,
                 ),
                 menu_item_with_icon(
-                    MenuItem::new("Project", Action::FocusPanel(PanelKind::Project)),
+                    MenuItem::new("Project", Action::FocusPanel(PanelKind::Project))
+                        .with_shortcut("Ctrl+Alt+P"),
                     AppIcon::FolderOpenFilled,
                 ),
                 menu_item_with_icon(
-                    MenuItem::new("Console", Action::FocusPanel(PanelKind::Console)),
+                    MenuItem::new("Console", Action::FocusPanel(PanelKind::Console))
+                        .with_shortcut("Ctrl+Alt+Backspace"),
                     AppIcon::Info,
                 ),
                 menu_item_with_icon(
-                    MenuItem::new("Node Graph", Action::FocusPanel(PanelKind::NodeGraph)),
+                    MenuItem::new("Node Graph", Action::FocusPanel(PanelKind::NodeGraph))
+                        .with_shortcut("Ctrl+Alt+G"),
                     AppIcon::Grid,
                 ),
                 menu_item_with_icon(
-                    MenuItem::new("Export", Action::FocusPanel(PanelKind::Export)),
+                    MenuItem::new("Export", Action::FocusPanel(PanelKind::Export))
+                        .with_shortcut("Ctrl+Alt+X"),
                     AppIcon::Export,
                 ),
                 MenuItem::separator(),
                 menu_item_with_icon(
-                    MenuItem::new("Toggle Fullscreen", Action::ToggleFullscreen),
+                    MenuItem::new("Toggle Fullscreen", Action::ToggleFullscreen)
+                        .with_shortcut("F11"),
                     AppIcon::FullScreen,
                 ),
             ],
@@ -296,26 +324,31 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
             "Workspace",
             vec![
                 menu_item_with_icon(
-                    MenuItem::new("Editing", Action::SwitchWorkspace(WorkspacePreset::Editing)),
+                    MenuItem::new("Editing", Action::SwitchWorkspace(WorkspacePreset::Editing))
+                        .with_shortcut("Ctrl+Alt+1"),
                     AppIcon::Cursor,
                 ),
                 menu_item_with_icon(
-                    MenuItem::new("Color", Action::SwitchWorkspace(WorkspacePreset::Color)),
+                    MenuItem::new("Color", Action::SwitchWorkspace(WorkspacePreset::Color))
+                        .with_shortcut("Ctrl+Alt+2"),
                     AppIcon::Circle,
                 ),
                 menu_item_with_icon(
-                    MenuItem::new("Audio", Action::SwitchWorkspace(WorkspacePreset::Audio)),
+                    MenuItem::new("Audio", Action::SwitchWorkspace(WorkspacePreset::Audio))
+                        .with_shortcut("Ctrl+Alt+3"),
                     AppIcon::Music,
                 ),
                 menu_item_with_icon(
                     MenuItem::new(
                         "Compositing",
                         Action::SwitchWorkspace(WorkspacePreset::Compositing),
-                    ),
+                    )
+                    .with_shortcut("Ctrl+Alt+4"),
                     AppIcon::Grid,
                 ),
                 menu_item_with_icon(
-                    MenuItem::new("Export", Action::SwitchWorkspace(WorkspacePreset::Export)),
+                    MenuItem::new("Export", Action::SwitchWorkspace(WorkspacePreset::Export))
+                        .with_shortcut("Ctrl+Alt+5"),
                     AppIcon::Export,
                 ),
             ],
@@ -1049,6 +1082,36 @@ mod tests {
             assert!(
                 item(menu_label, item_label).icon.is_some(),
                 "{menu_label}/{item_label} should carry a semantic icon"
+            );
+        }
+    }
+
+    #[test]
+    fn default_menu_items_show_registered_shortcut_hints() {
+        let menu_items = default_menu_items();
+        let item = |menu_label: &str, item_label: &str| {
+            menu_items
+                .iter()
+                .find_map(|(label, items)| (*label == menu_label).then_some(items))
+                .and_then(|items| items.iter().find(|item| item.label == item_label))
+                .unwrap_or_else(|| panic!("missing {menu_label}/{item_label} menu item"))
+        };
+
+        for (menu_label, item_label, shortcut) in [
+            ("File", "New Project...", "Ctrl+N"),
+            ("File", "Open Project...", "Ctrl+O"),
+            ("File", "Save", "Ctrl+S"),
+            ("Edit", "Undo", "Ctrl+Z"),
+            ("Edit", "Redo", "Ctrl+Shift+Z"),
+            ("Edit", "Copy", "Ctrl+C"),
+            ("View", "Timeline", "Ctrl+Alt+T"),
+            ("View", "Toggle Fullscreen", "F11"),
+            ("Workspace", "Editing", "Ctrl+Alt+1"),
+        ] {
+            assert_eq!(
+                item(menu_label, item_label).shortcut.as_deref(),
+                Some(shortcut),
+                "{menu_label}/{item_label} should show {shortcut}"
             );
         }
     }

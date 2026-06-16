@@ -7,9 +7,9 @@ use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
 use crate::menu::{
-    paint_menu_popup_chrome, paint_menu_row, paint_menu_separator, MenuItem, MenuRowPaint,
+    menu_item_text_width, paint_menu_popup_chrome, paint_menu_row, paint_menu_separator, MenuItem,
+    MenuRowPaint,
 };
-use crate::text_metrics::measure_single_line;
 
 /// 右键弹出菜单
 ///
@@ -25,7 +25,6 @@ pub struct ContextMenu {
     hovered: Option<usize>,
 }
 
-const CONTEXT_MENU_MEASURE_FONT_SIZE: f32 = 13.0;
 const CONTEXT_MENU_PADDING_X: f32 = 8.0;
 const CONTEXT_MENU_ROW_PADDING_X: f32 = 16.0;
 const CONTEXT_MENU_ICON_LANE_WIDTH: f32 = 24.0;
@@ -71,7 +70,7 @@ impl ContextMenu {
             .items
             .iter()
             .filter(|item| !item.is_separator())
-            .map(|item| measure_single_line(&item.label, CONTEXT_MENU_MEASURE_FONT_SIZE).0)
+            .map(menu_item_text_width)
             .fold(0.0, f32::max);
         self.min_width
             .max(longest_item + CONTEXT_MENU_ROW_PADDING_X * 2.0 + self.icon_lane_width())
@@ -219,6 +218,7 @@ impl Widget for ContextMenu {
                 ctx,
                 r,
                 &item.label,
+                item.shortcut.as_deref(),
                 item.icon.as_ref(),
                 reserve_icon_lane,
                 MenuRowPaint {
@@ -552,7 +552,8 @@ mod tests {
             Point::new(100.0, 100.0),
             vec![
                 MenuItem::new("Copy linked audio and video selection", Action::Copy)
-                    .with_icon(icon.clone()),
+                    .with_icon(icon.clone())
+                    .with_shortcut("Ctrl+C"),
             ],
         );
         let theme = mondrian_ui_theme::ThemePreset::Dark.build();
@@ -566,7 +567,10 @@ mod tests {
             iconized.measure(LayoutConstraint::LOOSE).width
                 > plain.measure(LayoutConstraint::LOOSE).width
         );
-        assert_eq!(encoder.texts, vec!["Copy linked audio and video selection"]);
+        assert_eq!(
+            encoder.texts,
+            vec!["Copy linked audio and video selection", "Ctrl+C"]
+        );
         assert_eq!(encoder.triangles, icon.triangle_count());
     }
 

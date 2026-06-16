@@ -493,10 +493,16 @@ impl Widget for GalleryWidget {
         if let UiEvent::MouseDown { position, button: MouseButton::Right, .. } = event {
             if self.bounds.contains(*position) {
                 let items = vec![
-                    with_demo_menu_icon(MenuItem::new("剪切", Action::Cut), AppIcon::Cut),
-                    with_demo_menu_icon(MenuItem::new("复制", Action::Copy), AppIcon::Copy),
                     with_demo_menu_icon(
-                        MenuItem::new("粘贴", Action::Paste),
+                        MenuItem::new("剪切", Action::Cut).with_shortcut("Ctrl+X"),
+                        AppIcon::Cut,
+                    ),
+                    with_demo_menu_icon(
+                        MenuItem::new("复制", Action::Copy).with_shortcut("Ctrl+C"),
+                        AppIcon::Copy,
+                    ),
+                    with_demo_menu_icon(
+                        MenuItem::new("粘贴", Action::Paste).with_shortcut("Ctrl+V"),
                         AppIcon::ClipboardText,
                     ),
                     MenuItem::separator(),
