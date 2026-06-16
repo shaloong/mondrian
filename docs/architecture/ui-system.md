@@ -392,6 +392,11 @@ whole menu while still keeping designer assets mapped at the app layer.
 Menu items may also carry a right-aligned shortcut hint; the shared menu row
 helper owns the shortcut lane and label clipping so shell menus, context menus,
 and internal selectors do not hand-place accelerator text differently.
+Self-hosted menu availability is applied in the `mondrian-app` shell adapter
+from the current `AppState` snapshot. The widgets crate owns disabled-row
+behavior and painting only; project availability, undo/redo availability, and
+native-dialog prerequisites stay at the app boundary so generic dropdowns do
+not learn domain state.
 Tooltip requests preserve their delay timer when the same tooltip is reported
 repeatedly during hover, and tooltip painting clamps to the current clip rect.
 

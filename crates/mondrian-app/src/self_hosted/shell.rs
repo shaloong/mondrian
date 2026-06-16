@@ -331,6 +331,53 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
     ]
 }
 
+/// Default Mondrian menu structure with application-state availability applied.
+///
+/// The semantic menu table stays stable; this adapter only disables rows that
+/// cannot produce a useful editor action for the supplied state snapshot.
+pub fn default_menu_items_for_app_state(state: &AppState) -> Vec<(&'static str, Vec<MenuItem>)> {
+    default_menu_items()
+        .into_iter()
+        .map(|(label, items)| {
+            (
+                label,
+                items
+                    .into_iter()
+                    .map(|item| apply_app_state_menu_availability(item, state))
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+fn apply_app_state_menu_availability(item: MenuItem, state: &AppState) -> MenuItem {
+    if item.is_separator() || menu_action_enabled_for_app_state(&item.action, state) {
+        item
+    } else {
+        item.disabled()
+    }
+}
+
+fn menu_action_enabled_for_app_state(action: &Action, state: &AppState) -> bool {
+    match action {
+        Action::SaveProject => state.has_open_project(),
+        Action::CloseProject => state.sequence.is_some() || state.current_project_path.is_some(),
+        Action::Undo => state.can_undo_action(),
+        Action::Redo => state.can_redo_action(),
+        Action::Custom { namespace, name, .. }
+            if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_IMPORT_MEDIA_DIALOG =>
+        {
+            state.asset_library.is_some()
+        }
+        Action::Custom { namespace, name, .. }
+            if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_SAVE_PROJECT_AS_DIALOG =>
+        {
+            state.sequence.is_some()
+        }
+        _ => true,
+    }
+}
+
 fn menu_item_with_icon(item: MenuItem, icon: AppIcon) -> MenuItem {
     menu_item_with_shortcut(item)
         .with_icon(icon.vector_icon().expect("bundled menu icon asset should parse"))
@@ -361,6 +408,11 @@ impl MenuBar {
     pub fn new(items: Vec<(&'static str, Vec<MenuItem>)>) -> Self {
         let menus = items.into_iter().map(|(label, items)| Dropdown::new(label, items)).collect();
         Self { id: WidgetId::new(), menus, bounds: Rect::ZERO }
+    }
+
+    /// Build a menu bar whose rows reflect the current application state.
+    pub fn for_app_state(state: &AppState) -> Self {
+        Self::new(default_menu_items_for_app_state(state))
     }
 
     fn open_menu_index(&self) -> Option<usize> {
@@ -478,7 +530,11 @@ pub struct SelfHostedAppRoot {
 impl SelfHostedAppRoot {
     /// Build a root widget from the current application state snapshot.
     pub fn from_app_state(state: &AppState) -> Self {
-        Self::from_models(SelfHostedPanelModels::from_app_state(state))
+        Self::new(
+            MenuBar::for_app_state(state),
+            SelfHostedPanelModels::from_app_state(state),
+            WorkspacePreset::Editing,
+        )
     }
 
     /// Build a root widget from app-facing panel models.
@@ -543,6 +599,7 @@ impl SelfHostedAppRoot {
 
     /// Refresh panel contents from the current application state snapshot.
     pub fn refresh_from_app_state(&mut self, state: &AppState) {
+        self.menu_bar = MenuBar::for_app_state(state);
         self.set_models(SelfHostedPanelModels::from_app_state(state));
     }
 
@@ -990,6 +1047,18 @@ mod tests {
         None
     }
 
+    fn menu_item<'a>(
+        menu_items: &'a [(&'static str, Vec<MenuItem>)],
+        menu_label: &str,
+        item_label: &str,
+    ) -> &'a MenuItem {
+        menu_items
+            .iter()
+            .find_map(|(label, items)| (*label == menu_label).then_some(items))
+            .and_then(|items| items.iter().find(|item| item.label == item_label))
+            .unwrap_or_else(|| panic!("missing {menu_label}/{item_label} menu item"))
+    }
+
     #[test]
     fn default_menu_bar_exposes_primary_menu_groups() {
         let menu = MenuBar::default();
@@ -1034,13 +1103,6 @@ mod tests {
     #[test]
     fn default_menu_items_use_semantic_vector_icons() {
         let menu_items = default_menu_items();
-        let item = |menu_label: &str, item_label: &str| {
-            menu_items
-                .iter()
-                .find_map(|(label, items)| (*label == menu_label).then_some(items))
-                .and_then(|items| items.iter().find(|item| item.label == item_label))
-                .unwrap_or_else(|| panic!("missing {menu_label}/{item_label} menu item"))
-        };
 
         for (menu_label, item_label) in [
             ("File", "New Project..."),
@@ -1056,7 +1118,7 @@ mod tests {
             ("Help", "About Mondrian"),
         ] {
             assert!(
-                item(menu_label, item_label).icon.is_some(),
+                menu_item(&menu_items, menu_label, item_label).icon.is_some(),
                 "{menu_label}/{item_label} should carry a semantic icon"
             );
         }
@@ -1065,13 +1127,6 @@ mod tests {
     #[test]
     fn default_menu_items_show_registered_shortcut_hints() {
         let menu_items = default_menu_items();
-        let item = |menu_label: &str, item_label: &str| {
-            menu_items
-                .iter()
-                .find_map(|(label, items)| (*label == menu_label).then_some(items))
-                .and_then(|items| items.iter().find(|item| item.label == item_label))
-                .unwrap_or_else(|| panic!("missing {menu_label}/{item_label} menu item"))
-        };
 
         for (menu_label, item_label, shortcut) in [
             ("File", "New Project...", "Ctrl+N"),
@@ -1088,11 +1143,81 @@ mod tests {
             ("Workspace", "Editing", "Ctrl+Alt+1"),
         ] {
             assert_eq!(
-                item(menu_label, item_label).shortcut.as_deref(),
+                menu_item(&menu_items, menu_label, item_label).shortcut.as_deref(),
                 Some(shortcut),
                 "{menu_label}/{item_label} should show {shortcut}"
             );
         }
+    }
+
+    #[test]
+    fn app_state_menu_items_disable_project_actions_without_project() {
+        let state = AppState::new();
+        let menu_items = default_menu_items_for_app_state(&state);
+
+        assert!(menu_item(&menu_items, "File", "New Project...").enabled);
+        assert!(menu_item(&menu_items, "File", "Open Project...").enabled);
+        assert!(!menu_item(&menu_items, "File", "Import Media...").enabled);
+        assert!(!menu_item(&menu_items, "File", "Save").enabled);
+        assert!(!menu_item(&menu_items, "File", "Save As...").enabled);
+        assert!(!menu_item(&menu_items, "File", "Close Project").enabled);
+        assert!(menu_item(&menu_items, "File", "Quit").enabled);
+        assert!(!menu_item(&menu_items, "Edit", "Undo").enabled);
+        assert!(!menu_item(&menu_items, "Edit", "Redo").enabled);
+    }
+
+    #[test]
+    fn app_state_menu_items_enable_draft_save_as_but_not_direct_save() {
+        let mut state = AppState::new();
+        state.sequence = Some(mondrian_timeline::sequence::Sequence::new("Draft"));
+
+        let menu_items = default_menu_items_for_app_state(&state);
+
+        assert!(!menu_item(&menu_items, "File", "Import Media...").enabled);
+        assert!(!menu_item(&menu_items, "File", "Save").enabled);
+        assert!(menu_item(&menu_items, "File", "Save As...").enabled);
+        assert!(menu_item(&menu_items, "File", "Close Project").enabled);
+    }
+
+    #[test]
+    fn app_state_menu_items_enable_project_file_actions_for_open_project() {
+        let mut state = AppState::new();
+        state.sequence = Some(mondrian_timeline::sequence::Sequence::new("Edit"));
+        state.current_project_path = Some(PathBuf::from("E:/projects/edit.mdp"));
+
+        let menu_items = default_menu_items_for_app_state(&state);
+
+        assert!(menu_item(&menu_items, "File", "Save").enabled);
+        assert!(menu_item(&menu_items, "File", "Save As...").enabled);
+        assert!(menu_item(&menu_items, "File", "Close Project").enabled);
+    }
+
+    #[test]
+    fn app_state_menu_items_track_undo_redo_history() {
+        let mut state = AppState::new();
+        let before = mondrian_timeline::sequence::Sequence::new("Edit");
+        let mut after = before.clone();
+        after.name = "Edit renamed".to_owned();
+        state.sequence = Some(after.clone());
+        state.cmd_history.record_executed(Box::new(
+            mondrian_timeline::command::SequenceSnapshotCommand::new(
+                "Rename sequence",
+                before,
+                after,
+            ),
+        ));
+
+        let menu_items = default_menu_items_for_app_state(&state);
+        assert!(menu_item(&menu_items, "Edit", "Undo").enabled);
+        assert!(!menu_item(&menu_items, "Edit", "Redo").enabled);
+
+        state
+            .cmd_history
+            .undo(state.sequence.as_mut().expect("sequence"))
+            .expect("undo should succeed");
+        let menu_items = default_menu_items_for_app_state(&state);
+        assert!(!menu_item(&menu_items, "Edit", "Undo").enabled);
+        assert!(menu_item(&menu_items, "Edit", "Redo").enabled);
     }
 
     #[test]
