@@ -235,8 +235,8 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
         (
             "Edit",
             vec![
-                MenuItem::new("Undo", Action::Undo),
-                MenuItem::new("Redo", Action::Redo),
+                menu_item_with_icon(MenuItem::new("Undo", Action::Undo), AppIcon::Undo),
+                menu_item_with_icon(MenuItem::new("Redo", Action::Redo), AppIcon::Redo),
                 menu_item_with_icon(MenuItem::new("Cut", Action::Cut), AppIcon::Cut),
                 menu_item_with_icon(MenuItem::new("Copy", Action::Copy), AppIcon::Copy),
                 menu_item_with_icon(
@@ -1036,6 +1036,8 @@ mod tests {
         for (menu_label, item_label) in [
             ("File", "New Project..."),
             ("File", "Save"),
+            ("Edit", "Undo"),
+            ("Edit", "Redo"),
             ("Edit", "Cut"),
             ("Edit", "Copy"),
             ("Edit", "Paste"),

@@ -79,6 +79,8 @@ pub enum AppIcon {
     PlusFilled,
     /// Rectangle shape icon.
     Rectangle,
+    /// Redo icon.
+    Redo,
     /// Next frame icon.
     RightFrameFilled,
     /// Search icon.
@@ -93,6 +95,8 @@ pub enum AppIcon {
     Stopwatch,
     /// Trash/delete icon.
     Trash,
+    /// Undo icon.
+    Undo,
     /// Unlock icon.
     Unlock,
     /// Warning triangle icon.
@@ -105,7 +109,7 @@ pub enum AppIcon {
 
 impl AppIcon {
     /// Every bundled product icon that should remain parseable by the custom UI.
-    pub const ALL: [Self; 46] = [
+    pub const ALL: [Self; 48] = [
         Self::Add,
         Self::Anchor,
         Self::ArrowDown,
@@ -141,6 +145,7 @@ impl AppIcon {
         Self::PlayFilled,
         Self::PlusFilled,
         Self::Rectangle,
+        Self::Redo,
         Self::RightFrameFilled,
         Self::Search,
         Self::Save,
@@ -148,6 +153,7 @@ impl AppIcon {
         Self::SpeakerMuted,
         Self::Stopwatch,
         Self::Trash,
+        Self::Undo,
         Self::Unlock,
         Self::Warning,
         Self::ZoomIn,
@@ -192,6 +198,7 @@ impl AppIcon {
             Self::PlayFilled => "app.play-filled",
             Self::PlusFilled => "app.plus-filled",
             Self::Rectangle => "app.rectangle",
+            Self::Redo => "app.redo",
             Self::RightFrameFilled => "app.right-frame-filled",
             Self::Search => "app.search",
             Self::Save => "app.save",
@@ -199,6 +206,7 @@ impl AppIcon {
             Self::SpeakerMuted => "app.speaker-muted",
             Self::Stopwatch => "app.stopwatch",
             Self::Trash => "app.trash",
+            Self::Undo => "app.undo",
             Self::Unlock => "app.unlock",
             Self::Warning => "app.warning",
             Self::ZoomIn => "app.zoom-in",
@@ -244,6 +252,7 @@ impl AppIcon {
             Self::PlayFilled => include_str!("../../assets/icons/play_fill.svg"),
             Self::PlusFilled => include_str!("../../assets/icons/plus_fill.svg"),
             Self::Rectangle => include_str!("../../assets/icons/rectangle.svg"),
+            Self::Redo => include_str!("../../assets/icons/redo.svg"),
             Self::RightFrameFilled => include_str!("../../assets/icons/right_frame_fill.svg"),
             Self::Search => include_str!("../../assets/icons/search.svg"),
             Self::Save => include_str!("../../assets/icons/save.svg"),
@@ -251,6 +260,7 @@ impl AppIcon {
             Self::SpeakerMuted => include_str!("../../assets/icons/speaker_muted.svg"),
             Self::Stopwatch => include_str!("../../assets/icons/stopwatch.svg"),
             Self::Trash => include_str!("../../assets/icons/trash.svg"),
+            Self::Undo => include_str!("../../assets/icons/undo.svg"),
             Self::Unlock => include_str!("../../assets/icons/unlock.svg"),
             Self::Warning => include_str!("../../assets/icons/warning.svg"),
             Self::ZoomIn => include_str!("../../assets/icons/zoom_in.svg"),
