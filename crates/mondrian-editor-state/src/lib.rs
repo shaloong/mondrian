@@ -10,9 +10,14 @@
 //! * **UI 无关** — 此 crate 不依赖任何 UI 框架（egui/wgpu/winit）
 
 pub mod action;
+pub mod animation_groups;
 pub mod dispatch;
 pub mod state;
 
 pub use action::Action;
+pub use animation_groups::{
+    property_display_name, property_group_meta, property_order, qualified_property_display_name,
+    AnimationGroupKind, AnimationGroupMeta,
+};
 pub use dispatch::EditorDispatch;
 pub use state::EditorState;

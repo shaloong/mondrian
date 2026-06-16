@@ -19,7 +19,7 @@ use mondrian_core::{
         KeyframeInterpolation, KeyframeTemporalFlags, PropertyHost, PropertyMutation,
         PropertyValue, TimeTicks, SUBFRAME_TICKS_PER_FRAME,
     },
-    types::{ClipId, ColorSpace, EffectId, KeyframeId, Rational, TimeCode},
+    types::{ClipId, EffectId, KeyframeId, Rational, TimeCode},
 };
 use mondrian_timeline::{
     clip::{AlphaInterpretation, Clip, ClipKind},
@@ -585,11 +585,6 @@ mod graph_helpers;
 pub(crate) use graph_helpers::*;
 mod graph;
 mod inspector;
-
-pub(crate) struct BlendModeOption {
-    label: &'static str,
-    value: &'static str,
-}
 
 mod labels;
 pub(crate) use labels::*;
