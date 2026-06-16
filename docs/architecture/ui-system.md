@@ -383,6 +383,9 @@ over affordances or neighboring controls.
 Popup row labels are also clipped to their padded text lane; disabled rows and
 long labels must never bleed into separator geometry, scrollbars, or neighboring
 rows.
+Menu items may carry optional `VectorIcon` geometry. If any item in a dropdown
+or context menu has an icon, the popup reserves one aligned icon lane for the
+whole menu while still keeping designer assets mapped at the app layer.
 Tooltip requests preserve their delay timer when the same tooltip is reported
 repeatedly during hover, and tooltip painting clamps to the current clip rect.
 

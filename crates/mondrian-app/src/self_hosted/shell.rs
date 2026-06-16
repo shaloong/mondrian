@@ -26,6 +26,7 @@ use crate::app::ui_actions::{
     APP_SHELL_SAVE_PROJECT_AS_DIALOG,
 };
 use crate::app::AppState;
+use crate::self_hosted::icons::AppIcon;
 use crate::self_hosted::modal::ShellModal;
 use crate::self_hosted::new_project_dialog::{
     default_project_file_name, SelfHostedNewProjectDraft,
@@ -209,11 +210,23 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
         (
             "File",
             vec![
-                MenuItem::new("New Project...", app_shell_new_project_dialog_action()),
-                MenuItem::new("Open Project...", app_shell_open_project_dialog_action()),
-                MenuItem::new("Import Media...", app_shell_import_media_dialog_action()),
-                MenuItem::new("Save", Action::SaveProject),
-                MenuItem::new("Save As...", app_shell_save_project_as_dialog_action()),
+                menu_item_with_icon(
+                    MenuItem::new("New Project...", app_shell_new_project_dialog_action()),
+                    AppIcon::PlusFilled,
+                ),
+                menu_item_with_icon(
+                    MenuItem::new("Open Project...", app_shell_open_project_dialog_action()),
+                    AppIcon::FolderOpenFilled,
+                ),
+                menu_item_with_icon(
+                    MenuItem::new("Import Media...", app_shell_import_media_dialog_action()),
+                    AppIcon::Import,
+                ),
+                menu_item_with_icon(MenuItem::new("Save", Action::SaveProject), AppIcon::Save),
+                menu_item_with_icon(
+                    MenuItem::new("Save As...", app_shell_save_project_as_dialog_action()),
+                    AppIcon::Save,
+                ),
                 MenuItem::separator(),
                 MenuItem::new("Close Project", Action::CloseProject),
                 MenuItem::new("Quit", app_shell_quit_action()),
@@ -224,46 +237,101 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
             vec![
                 MenuItem::new("Undo", Action::Undo),
                 MenuItem::new("Redo", Action::Redo),
-                MenuItem::new("Cut", Action::Cut),
-                MenuItem::new("Copy", Action::Copy),
-                MenuItem::new("Paste", Action::Paste),
+                menu_item_with_icon(MenuItem::new("Cut", Action::Cut), AppIcon::Cut),
+                menu_item_with_icon(MenuItem::new("Copy", Action::Copy), AppIcon::Copy),
+                menu_item_with_icon(
+                    MenuItem::new("Paste", Action::Paste),
+                    AppIcon::ClipboardText,
+                ),
             ],
         ),
         (
             "View",
             vec![
-                MenuItem::new("Viewer", Action::FocusPanel(PanelKind::Viewer)),
-                MenuItem::new("Timeline", Action::FocusPanel(PanelKind::Timeline)),
-                MenuItem::new("Inspector", Action::FocusPanel(PanelKind::Inspector)),
+                menu_item_with_icon(
+                    MenuItem::new("Viewer", Action::FocusPanel(PanelKind::Viewer)),
+                    AppIcon::FullScreen,
+                ),
+                menu_item_with_icon(
+                    MenuItem::new("Timeline", Action::FocusPanel(PanelKind::Timeline)),
+                    AppIcon::Clock,
+                ),
+                menu_item_with_icon(
+                    MenuItem::new("Inspector", Action::FocusPanel(PanelKind::Inspector)),
+                    AppIcon::List,
+                ),
                 MenuItem::separator(),
-                MenuItem::new("Assets", Action::FocusPanel(PanelKind::Assets)),
-                MenuItem::new("Effects", Action::FocusPanel(PanelKind::Effects)),
-                MenuItem::new("Project", Action::FocusPanel(PanelKind::Project)),
-                MenuItem::new("Console", Action::FocusPanel(PanelKind::Console)),
-                MenuItem::new("Node Graph", Action::FocusPanel(PanelKind::NodeGraph)),
-                MenuItem::new("Export", Action::FocusPanel(PanelKind::Export)),
+                menu_item_with_icon(
+                    MenuItem::new("Assets", Action::FocusPanel(PanelKind::Assets)),
+                    AppIcon::Folder,
+                ),
+                menu_item_with_icon(
+                    MenuItem::new("Effects", Action::FocusPanel(PanelKind::Effects)),
+                    AppIcon::Effect,
+                ),
+                menu_item_with_icon(
+                    MenuItem::new("Project", Action::FocusPanel(PanelKind::Project)),
+                    AppIcon::FolderOpenFilled,
+                ),
+                menu_item_with_icon(
+                    MenuItem::new("Console", Action::FocusPanel(PanelKind::Console)),
+                    AppIcon::Info,
+                ),
+                menu_item_with_icon(
+                    MenuItem::new("Node Graph", Action::FocusPanel(PanelKind::NodeGraph)),
+                    AppIcon::Grid,
+                ),
+                menu_item_with_icon(
+                    MenuItem::new("Export", Action::FocusPanel(PanelKind::Export)),
+                    AppIcon::Export,
+                ),
                 MenuItem::separator(),
-                MenuItem::new("Toggle Fullscreen", Action::ToggleFullscreen),
+                menu_item_with_icon(
+                    MenuItem::new("Toggle Fullscreen", Action::ToggleFullscreen),
+                    AppIcon::FullScreen,
+                ),
             ],
         ),
         (
             "Workspace",
             vec![
-                MenuItem::new("Editing", Action::SwitchWorkspace(WorkspacePreset::Editing)),
-                MenuItem::new("Color", Action::SwitchWorkspace(WorkspacePreset::Color)),
-                MenuItem::new("Audio", Action::SwitchWorkspace(WorkspacePreset::Audio)),
-                MenuItem::new(
-                    "Compositing",
-                    Action::SwitchWorkspace(WorkspacePreset::Compositing),
+                menu_item_with_icon(
+                    MenuItem::new("Editing", Action::SwitchWorkspace(WorkspacePreset::Editing)),
+                    AppIcon::Cursor,
                 ),
-                MenuItem::new("Export", Action::SwitchWorkspace(WorkspacePreset::Export)),
+                menu_item_with_icon(
+                    MenuItem::new("Color", Action::SwitchWorkspace(WorkspacePreset::Color)),
+                    AppIcon::Circle,
+                ),
+                menu_item_with_icon(
+                    MenuItem::new("Audio", Action::SwitchWorkspace(WorkspacePreset::Audio)),
+                    AppIcon::Music,
+                ),
+                menu_item_with_icon(
+                    MenuItem::new(
+                        "Compositing",
+                        Action::SwitchWorkspace(WorkspacePreset::Compositing),
+                    ),
+                    AppIcon::Grid,
+                ),
+                menu_item_with_icon(
+                    MenuItem::new("Export", Action::SwitchWorkspace(WorkspacePreset::Export)),
+                    AppIcon::Export,
+                ),
             ],
         ),
         (
             "Help",
-            vec![MenuItem::new("About Mondrian", app_shell_about_action())],
+            vec![menu_item_with_icon(
+                MenuItem::new("About Mondrian", app_shell_about_action()),
+                AppIcon::Info,
+            )],
         ),
     ]
+}
+
+fn menu_item_with_icon(item: MenuItem, icon: AppIcon) -> MenuItem {
+    item.with_icon(icon.vector_icon().expect("bundled menu icon asset should parse"))
 }
 
 /// Horizontal menu bar wrapping dropdown widgets.
@@ -950,6 +1018,35 @@ mod tests {
                     .iter()
                     .any(|item| item.action == Action::SwitchWorkspace(preset)),
                 "missing workspace menu item for {preset:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn default_menu_items_use_semantic_vector_icons() {
+        let menu_items = default_menu_items();
+        let item = |menu_label: &str, item_label: &str| {
+            menu_items
+                .iter()
+                .find_map(|(label, items)| (*label == menu_label).then_some(items))
+                .and_then(|items| items.iter().find(|item| item.label == item_label))
+                .unwrap_or_else(|| panic!("missing {menu_label}/{item_label} menu item"))
+        };
+
+        for (menu_label, item_label) in [
+            ("File", "New Project..."),
+            ("File", "Save"),
+            ("Edit", "Cut"),
+            ("Edit", "Copy"),
+            ("Edit", "Paste"),
+            ("View", "Timeline"),
+            ("View", "Effects"),
+            ("Workspace", "Audio"),
+            ("Help", "About Mondrian"),
+        ] {
+            assert!(
+                item(menu_label, item_label).icon.is_some(),
+                "{menu_label}/{item_label} should carry a semantic icon"
             );
         }
     }

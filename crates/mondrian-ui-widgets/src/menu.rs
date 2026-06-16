@@ -10,6 +10,7 @@ use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
 use crate::paint::{mix_color, paint_focus_ring, paint_shadow};
 use crate::text_metrics::measure_single_line;
+use crate::vector_icon::VectorIcon;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct MenuRowPaint {
@@ -24,6 +25,8 @@ const MENU_TRIGGER_HEIGHT: f32 = 28.0;
 const MENU_TRIGGER_PADDING_X: f32 = 8.0;
 const MENU_ARROW_SPACE: f32 = 24.0;
 const MENU_ROW_PADDING_X: f32 = 16.0;
+const MENU_ROW_ICON_SIZE: f32 = 16.0;
+const MENU_ROW_ICON_GAP: f32 = 8.0;
 const MENU_SCROLLBAR_SPACE: f32 = 8.0;
 
 pub(crate) fn paint_menu_trigger(ctx: &mut PaintContext, rect: Rect, label: &str, open: bool) {
@@ -74,7 +77,14 @@ pub(crate) fn paint_menu_popup_chrome(ctx: &mut PaintContext, rect: Rect) {
     ctx.encoder.draw_rect(rect.inset(1.0, 1.0), tokens.popover, spacing.radius_sm);
 }
 
-pub(crate) fn paint_menu_row(ctx: &mut PaintContext, rect: Rect, label: &str, state: MenuRowPaint) {
+pub(crate) fn paint_menu_row(
+    ctx: &mut PaintContext,
+    rect: Rect,
+    label: &str,
+    icon: Option<&VectorIcon>,
+    reserve_icon_lane: bool,
+    state: MenuRowPaint,
+) {
     let tokens = &ctx.theme.colors;
     let spacing = &ctx.theme.spacing;
     let font_size = ctx.theme.typography.body.font_size;
@@ -107,7 +117,25 @@ pub(crate) fn paint_menu_row(ctx: &mut PaintContext, rect: Rect, label: &str, st
     } else {
         tokens.muted_foreground
     };
-    let text_x = rect.x + MENU_ROW_PADDING_X;
+    if reserve_icon_lane {
+        if let Some(icon) = icon {
+            let icon_size = MENU_ROW_ICON_SIZE.min(rect.height).max(1.0);
+            let icon_rect = Rect::new(
+                rect.x + MENU_ROW_PADDING_X,
+                rect.y + (rect.height - icon_size).max(0.0) * 0.5,
+                icon_size,
+                icon_size,
+            );
+            icon.paint(ctx, icon_rect, text_color);
+        }
+    }
+
+    let icon_lane_width = if reserve_icon_lane {
+        MENU_ROW_ICON_SIZE + MENU_ROW_ICON_GAP
+    } else {
+        0.0
+    };
+    let text_x = rect.x + MENU_ROW_PADDING_X + icon_lane_width;
     let text_clip = Rect::new(
         text_x,
         rect.y,
@@ -198,6 +226,7 @@ pub struct MenuItem {
     pub action: Action,
     pub enabled: bool,
     pub kind: MenuItemKind,
+    pub icon: Option<VectorIcon>,
 }
 
 impl MenuItem {
@@ -207,6 +236,7 @@ impl MenuItem {
             action,
             enabled: true,
             kind: MenuItemKind::Action,
+            icon: None,
         }
     }
 
@@ -217,7 +247,14 @@ impl MenuItem {
             action: Action::DeselectAll,
             enabled: false,
             kind: MenuItemKind::Separator,
+            icon: None,
         }
+    }
+
+    /// Paint a vector icon before this item label.
+    pub fn with_icon(mut self, icon: VectorIcon) -> Self {
+        self.icon = Some(icon);
+        self
     }
 
     pub fn disabled(mut self) -> Self {
@@ -360,7 +397,15 @@ impl Dropdown {
         };
         self.preferred_trigger_width()
             .max(MENU_MIN_WIDTH)
-            .max(longest_item + MENU_ROW_PADDING_X * 2.0 + scrollbar)
+            .max(longest_item + MENU_ROW_PADDING_X * 2.0 + self.icon_lane_width() + scrollbar)
+    }
+
+    fn icon_lane_width(&self) -> f32 {
+        if self.items.iter().any(|item| item.icon.is_some()) {
+            MENU_ROW_ICON_SIZE + MENU_ROW_ICON_GAP
+        } else {
+            0.0
+        }
     }
 
     fn menu_width(&self) -> f32 {
@@ -512,6 +557,7 @@ impl Dropdown {
 
         paint_menu_popup_chrome(ctx, menu_bg);
         ctx.encoder.push_clip(menu_bg.inset(1.0, 1.0));
+        let reserve_icon_lane = self.icon_lane_width() > 0.0;
 
         for (i, item) in self.items.iter().enumerate() {
             let item_rect = self.item_rect(i);
@@ -528,6 +574,8 @@ impl Dropdown {
                 ctx,
                 item_rect,
                 &item.label,
+                item.icon.as_ref(),
+                reserve_icon_lane,
                 MenuRowPaint {
                     enabled: item.enabled,
                     active: false,
@@ -771,6 +819,15 @@ mod tests {
         fn push_translate(&mut self, _offset: glam::Vec2) {}
 
         fn pop_transform(&mut self) {}
+    }
+
+    fn test_icon() -> VectorIcon {
+        VectorIcon::from_svg_str(
+            r#"<svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+                <path d="M3 2L13 8L3 14Z" fill="black"/>
+            </svg>"#,
+        )
+        .expect("test icon should parse")
     }
 
     #[test]
@@ -1369,6 +1426,8 @@ mod tests {
             &mut ctx,
             Rect::new(10.0, 20.0, 64.0, 24.0),
             "Disabled option with a very long label",
+            None,
+            false,
             MenuRowPaint { enabled: false, active: false, hovered: false },
         );
 
@@ -1379,6 +1438,46 @@ mod tests {
         assert_eq!(encoder.clips, vec![Rect::new(26.0, 20.0, 32.0, 24.0)]);
         assert_eq!(encoder.clip_pops, 1);
         assert_eq!(encoder.lines, 0);
+    }
+
+    #[test]
+    fn menu_row_paints_optional_icon_and_aligns_label_after_icon_lane() {
+        let theme = mondrian_ui_theme::ThemePreset::Dark.build();
+        let clip_rect = Rect::new(0.0, 0.0, 180.0, 80.0);
+        let mut encoder = RecordingEncoder::default();
+        let icon = test_icon();
+
+        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        paint_menu_row(
+            &mut ctx,
+            Rect::new(10.0, 20.0, 128.0, 24.0),
+            "Open",
+            Some(&icon),
+            true,
+            MenuRowPaint { enabled: true, active: false, hovered: false },
+        );
+
+        assert_eq!(encoder.texts, vec!["Open"]);
+        assert_eq!(encoder.triangles, icon.triangle_count());
+        assert_eq!(encoder.clips, vec![Rect::new(50.0, 20.0, 72.0, 24.0)]);
+        assert_eq!(encoder.clip_pops, 1);
+    }
+
+    #[test]
+    fn dropdown_popup_width_reserves_icon_lane_when_items_have_icons() {
+        let label = "Compact menu item with enough text";
+        let mut plain = Dropdown::new(
+            "File",
+            vec![MenuItem::new(label, Action::OpenProject("".into()))],
+        );
+        let mut iconized = Dropdown::new(
+            "File",
+            vec![MenuItem::new(label, Action::OpenProject("".into())).with_icon(test_icon())],
+        );
+        plain.layout(Rect::new(0.0, 0.0, 120.0, 28.0));
+        iconized.layout(Rect::new(0.0, 0.0, 120.0, 28.0));
+
+        assert!(iconized.menu_rect().width > plain.menu_rect().width);
     }
 
     #[test]

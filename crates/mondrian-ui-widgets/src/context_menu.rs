@@ -28,6 +28,7 @@ pub struct ContextMenu {
 const CONTEXT_MENU_MEASURE_FONT_SIZE: f32 = 13.0;
 const CONTEXT_MENU_PADDING_X: f32 = 8.0;
 const CONTEXT_MENU_ROW_PADDING_X: f32 = 16.0;
+const CONTEXT_MENU_ICON_LANE_WIDTH: f32 = 24.0;
 
 impl ContextMenu {
     pub fn new(anchor: Point, items: Vec<MenuItem>) -> Self {
@@ -72,7 +73,16 @@ impl ContextMenu {
             .filter(|item| !item.is_separator())
             .map(|item| measure_single_line(&item.label, CONTEXT_MENU_MEASURE_FONT_SIZE).0)
             .fold(0.0, f32::max);
-        self.min_width.max(longest_item + CONTEXT_MENU_ROW_PADDING_X * 2.0)
+        self.min_width
+            .max(longest_item + CONTEXT_MENU_ROW_PADDING_X * 2.0 + self.icon_lane_width())
+    }
+
+    fn icon_lane_width(&self) -> f32 {
+        if self.items.iter().any(|item| item.icon.is_some()) {
+            CONTEXT_MENU_ICON_LANE_WIDTH
+        } else {
+            0.0
+        }
     }
 
     fn item_at(&self, position: Point) -> Option<usize> {
@@ -195,6 +205,7 @@ impl Widget for ContextMenu {
 
         let bg = self.bounds_rect();
         paint_menu_popup_chrome(ctx, bg);
+        let reserve_icon_lane = self.icon_lane_width() > 0.0;
 
         for (i, item) in self.items.iter().enumerate() {
             let r = self.item_rect(i);
@@ -208,6 +219,8 @@ impl Widget for ContextMenu {
                 ctx,
                 r,
                 &item.label,
+                item.icon.as_ref(),
+                reserve_icon_lane,
                 MenuRowPaint {
                     enabled: item.enabled,
                     active: false,
@@ -230,6 +243,7 @@ impl Widget for ContextMenu {
 mod tests {
     use super::*;
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use crate::vector_icon::VectorIcon;
     use mondrian_editor_state::Action;
     use mondrian_ui_core::widget::DrawCommandEncoder;
     use std::cell::RefCell;
@@ -240,6 +254,7 @@ mod tests {
         rects: Vec<Rect>,
         lines: usize,
         texts: Vec<String>,
+        triangles: usize,
     }
 
     impl DrawCommandEncoder for RecordingEncoder {
@@ -275,6 +290,19 @@ mod tests {
         fn push_translate(&mut self, _offset: glam::Vec2) {}
 
         fn pop_transform(&mut self) {}
+
+        fn draw_triangles(&mut self, vertices: &[Point], _color: mondrian_core::Color) {
+            self.triangles += vertices.len() / 3;
+        }
+    }
+
+    fn test_icon() -> VectorIcon {
+        VectorIcon::from_svg_str(
+            r#"<svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+                <path d="M3 2L13 8L3 14Z" fill="black"/>
+            </svg>"#,
+        )
+        .expect("test icon should parse")
     }
 
     #[test]
@@ -508,6 +536,38 @@ mod tests {
             long.bounds_rect().width,
             long.measure(LayoutConstraint::LOOSE).width
         );
+    }
+
+    #[test]
+    fn context_menu_icon_items_reserve_lane_and_paint_geometry() {
+        let plain = ContextMenu::new(
+            Point::new(100.0, 100.0),
+            vec![MenuItem::new(
+                "Copy linked audio and video selection",
+                Action::Copy,
+            )],
+        );
+        let icon = test_icon();
+        let iconized = ContextMenu::new(
+            Point::new(100.0, 100.0),
+            vec![
+                MenuItem::new("Copy linked audio and video selection", Action::Copy)
+                    .with_icon(icon.clone()),
+            ],
+        );
+        let theme = mondrian_ui_theme::ThemePreset::Dark.build();
+        let clip_rect = Rect::new(0.0, 0.0, 400.0, 300.0);
+        let mut encoder = RecordingEncoder::default();
+
+        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        iconized.paint_overlay(&mut ctx);
+
+        assert!(
+            iconized.measure(LayoutConstraint::LOOSE).width
+                > plain.measure(LayoutConstraint::LOOSE).width
+        );
+        assert_eq!(encoder.texts, vec!["Copy linked audio and video selection"]);
+        assert_eq!(encoder.triangles, icon.triangle_count());
     }
 
     #[test]

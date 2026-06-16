@@ -78,6 +78,10 @@ fn with_demo_icon(item: PanelListItem, icon: AppIcon) -> PanelListItem {
     item.with_icon(icon.vector_icon().expect("bundled ui_demo icon asset should parse"))
 }
 
+fn with_demo_menu_icon(item: MenuItem, icon: AppIcon) -> MenuItem {
+    item.with_icon(icon.vector_icon().expect("bundled ui_demo menu icon asset should parse"))
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Gallery Widget
 // ═══════════════════════════════════════════════════════════════════════════
@@ -118,15 +122,27 @@ struct GalleryWidget {
 impl GalleryWidget {
     fn new() -> Self {
         let dropdown_items = vec![
-            MenuItem::new("选项 Alpha", demo_action("alpha")),
-            MenuItem::new("选项 Beta", demo_action("beta")),
-            MenuItem::new("选项 Gamma", demo_action("gamma")),
+            with_demo_menu_icon(
+                MenuItem::new("选项 Alpha", demo_action("alpha")),
+                AppIcon::Info,
+            ),
+            with_demo_menu_icon(
+                MenuItem::new("选项 Beta", demo_action("beta")),
+                AppIcon::Effect,
+            ),
+            with_demo_menu_icon(
+                MenuItem::new("选项 Gamma", demo_action("gamma")),
+                AppIcon::Clock,
+            ),
             MenuItem::new("选项 Delta", demo_action("delta")),
             MenuItem::new("选项 Epsilon", demo_action("epsilon")),
             MenuItem::new("选项 Zeta", demo_action("zeta")),
             MenuItem::new("选项 Eta", demo_action("eta")),
             MenuItem::new("选项 Theta", demo_action("theta")),
-            MenuItem::new("选项 Iota (禁用)", demo_action("iota")).disabled(),
+            with_demo_menu_icon(
+                MenuItem::new("选项 Iota (禁用)", demo_action("iota")).disabled(),
+                AppIcon::Warning,
+            ),
             MenuItem::new("选项 Kappa", demo_action("kappa")),
         ];
         let list_items = vec![
@@ -477,11 +493,17 @@ impl Widget for GalleryWidget {
         if let UiEvent::MouseDown { position, button: MouseButton::Right, .. } = event {
             if self.bounds.contains(*position) {
                 let items = vec![
-                    MenuItem::new("剪切", Action::Cut),
-                    MenuItem::new("复制", Action::Copy),
-                    MenuItem::new("粘贴", Action::Paste),
+                    with_demo_menu_icon(MenuItem::new("剪切", Action::Cut), AppIcon::Cut),
+                    with_demo_menu_icon(MenuItem::new("复制", Action::Copy), AppIcon::Copy),
+                    with_demo_menu_icon(
+                        MenuItem::new("粘贴", Action::Paste),
+                        AppIcon::ClipboardText,
+                    ),
                     MenuItem::separator(),
-                    MenuItem::new("删除", demo_action("delete")),
+                    with_demo_menu_icon(
+                        MenuItem::new("删除", demo_action("delete")),
+                        AppIcon::Trash,
+                    ),
                 ];
                 self.context_menu = Some(ContextMenu::new(*position, items));
                 return EventResult::Handled;
