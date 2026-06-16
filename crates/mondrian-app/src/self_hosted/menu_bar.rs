@@ -344,3 +344,365 @@ impl Widget for MenuBar {
         self.menus.get_mut(index).map(|menu| menu as &mut dyn Widget)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::ui_actions::{APP_SHELL_ABOUT, APP_SHELL_QUIT};
+    use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use mondrian_ui_core::EventRequests;
+    use std::cell::RefCell;
+    use std::path::PathBuf;
+    use std::rc::Rc;
+
+    fn menu_mouse_down(
+        menu: &mut MenuBar,
+        ctx: &mut EventContext<'_>,
+        position: Point,
+    ) -> EventResult {
+        menu.event(
+            &UiEvent::MouseDown {
+                position,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            ctx,
+        )
+    }
+
+    fn menu_mouse_up(
+        menu: &mut MenuBar,
+        ctx: &mut EventContext<'_>,
+        position: Point,
+    ) -> EventResult {
+        menu.event(
+            &UiEvent::MouseUp {
+                position,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            ctx,
+        )
+    }
+
+    fn click_menu(menu: &mut MenuBar, ctx: &mut EventContext<'_>, position: Point) {
+        menu_mouse_down(menu, ctx, position);
+        menu_mouse_up(menu, ctx, position);
+    }
+
+    fn menu_item<'a>(
+        menu_items: &'a [(&'static str, Vec<MenuItem>)],
+        menu_label: &str,
+        item_label: &str,
+    ) -> &'a MenuItem {
+        menu_items
+            .iter()
+            .find_map(|(label, items)| (*label == menu_label).then_some(items))
+            .and_then(|items| items.iter().find(|item| item.label == item_label))
+            .unwrap_or_else(|| panic!("missing {menu_label}/{item_label} menu item"))
+    }
+
+    #[test]
+    fn default_menu_bar_exposes_primary_menu_groups() {
+        let menu = MenuBar::default();
+
+        assert_eq!(menu.child_count(), 5);
+    }
+
+    #[test]
+    fn default_menu_items_expose_all_panels_and_builtin_workspaces() {
+        let menu_items = default_menu_items();
+        let view_items = menu_items
+            .iter()
+            .find_map(|(label, items)| (*label == "View").then_some(items))
+            .expect("view menu");
+        let workspace_items = menu_items
+            .iter()
+            .find_map(|(label, items)| (*label == "Workspace").then_some(items))
+            .expect("workspace menu");
+
+        for panel in PanelKind::ALL {
+            assert!(
+                view_items.iter().any(|item| item.action == Action::FocusPanel(panel)),
+                "missing panel menu item for {panel:?}"
+            );
+        }
+        for preset in [
+            WorkspacePreset::Editing,
+            WorkspacePreset::Color,
+            WorkspacePreset::Audio,
+            WorkspacePreset::Compositing,
+            WorkspacePreset::Export,
+        ] {
+            assert!(
+                workspace_items
+                    .iter()
+                    .any(|item| item.action == Action::SwitchWorkspace(preset)),
+                "missing workspace menu item for {preset:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn default_menu_items_use_semantic_vector_icons() {
+        let menu_items = default_menu_items();
+
+        for (menu_label, item_label) in [
+            ("File", "New Project..."),
+            ("File", "Save"),
+            ("Edit", "Undo"),
+            ("Edit", "Redo"),
+            ("Edit", "Cut"),
+            ("Edit", "Copy"),
+            ("Edit", "Paste"),
+            ("View", "Timeline"),
+            ("View", "Effects"),
+            ("Workspace", "Audio"),
+            ("Help", "About Mondrian"),
+        ] {
+            assert!(
+                menu_item(&menu_items, menu_label, item_label).icon.is_some(),
+                "{menu_label}/{item_label} should carry a semantic icon"
+            );
+        }
+    }
+
+    #[test]
+    fn default_menu_items_show_registered_shortcut_hints() {
+        let menu_items = default_menu_items();
+
+        for (menu_label, item_label, shortcut) in [
+            ("File", "New Project...", "Ctrl+N"),
+            ("File", "Open Project...", "Ctrl+O"),
+            ("File", "Save", "Ctrl+S"),
+            ("File", "Close Project", "Ctrl+W"),
+            ("Edit", "Undo", "Ctrl+Z"),
+            ("Edit", "Redo", "Ctrl+Shift+Z"),
+            ("Edit", "Cut", "Ctrl+X"),
+            ("Edit", "Copy", "Ctrl+C"),
+            ("Edit", "Paste", "Ctrl+V"),
+            ("View", "Timeline", "Ctrl+Alt+T"),
+            ("View", "Toggle Fullscreen", "F11"),
+            ("Workspace", "Editing", "Ctrl+Alt+1"),
+        ] {
+            assert_eq!(
+                menu_item(&menu_items, menu_label, item_label).shortcut.as_deref(),
+                Some(shortcut),
+                "{menu_label}/{item_label} should show {shortcut}"
+            );
+        }
+    }
+
+    #[test]
+    fn app_state_menu_items_disable_project_actions_without_project() {
+        let state = AppState::new();
+        let menu_items = default_menu_items_for_app_state(&state);
+
+        assert!(menu_item(&menu_items, "File", "New Project...").enabled);
+        assert!(menu_item(&menu_items, "File", "Open Project...").enabled);
+        assert!(!menu_item(&menu_items, "File", "Import Media...").enabled);
+        assert!(!menu_item(&menu_items, "File", "Save").enabled);
+        assert!(!menu_item(&menu_items, "File", "Save As...").enabled);
+        assert!(!menu_item(&menu_items, "File", "Close Project").enabled);
+        assert!(menu_item(&menu_items, "File", "Quit").enabled);
+        assert!(!menu_item(&menu_items, "Edit", "Undo").enabled);
+        assert!(!menu_item(&menu_items, "Edit", "Redo").enabled);
+    }
+
+    #[test]
+    fn app_state_menu_items_enable_draft_save_as_but_not_direct_save() {
+        let mut state = AppState::new();
+        state.sequence = Some(mondrian_timeline::sequence::Sequence::new("Draft"));
+
+        let menu_items = default_menu_items_for_app_state(&state);
+
+        assert!(!menu_item(&menu_items, "File", "Import Media...").enabled);
+        assert!(!menu_item(&menu_items, "File", "Save").enabled);
+        assert!(menu_item(&menu_items, "File", "Save As...").enabled);
+        assert!(menu_item(&menu_items, "File", "Close Project").enabled);
+    }
+
+    #[test]
+    fn app_state_menu_items_enable_project_file_actions_for_open_project() {
+        let mut state = AppState::new();
+        state.sequence = Some(mondrian_timeline::sequence::Sequence::new("Edit"));
+        state.current_project_path = Some(PathBuf::from("E:/projects/edit.mdp"));
+
+        let menu_items = default_menu_items_for_app_state(&state);
+
+        assert!(menu_item(&menu_items, "File", "Save").enabled);
+        assert!(menu_item(&menu_items, "File", "Save As...").enabled);
+        assert!(menu_item(&menu_items, "File", "Close Project").enabled);
+    }
+
+    #[test]
+    fn app_state_menu_items_track_undo_redo_history() {
+        let mut state = AppState::new();
+        let before = mondrian_timeline::sequence::Sequence::new("Edit");
+        let mut after = before.clone();
+        after.name = "Edit renamed".to_owned();
+        state.sequence = Some(after.clone());
+        state.cmd_history.record_executed(Box::new(
+            mondrian_timeline::command::SequenceSnapshotCommand::new(
+                "Rename sequence",
+                before,
+                after,
+            ),
+        ));
+
+        let menu_items = default_menu_items_for_app_state(&state);
+        assert!(menu_item(&menu_items, "Edit", "Undo").enabled);
+        assert!(!menu_item(&menu_items, "Edit", "Redo").enabled);
+
+        state
+            .cmd_history
+            .undo(state.sequence.as_mut().expect("sequence"))
+            .expect("undo should succeed");
+        let menu_items = default_menu_items_for_app_state(&state);
+        assert!(!menu_item(&menu_items, "Edit", "Undo").enabled);
+        assert!(menu_item(&menu_items, "Edit", "Redo").enabled);
+    }
+
+    #[test]
+    fn menu_bar_switches_open_menu_on_trigger_click() {
+        let mut menu = MenuBar::default();
+        menu.layout(Rect::new(0.0, 0.0, 500.0, MENU_BAR_HEIGHT));
+        let dispatched = Rc::new(RefCell::new(Vec::new()));
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let dispatch = {
+            let dispatched = Rc::clone(&dispatched);
+            move |action| dispatched.borrow_mut().push(action)
+        };
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        click_menu(&mut menu, &mut ctx, Point::new(10.0, 10.0));
+        click_menu(&mut menu, &mut ctx, Point::new(410.0, 10.0));
+        click_menu(&mut menu, &mut ctx, Point::new(410.0, 42.0));
+
+        assert_eq!(dispatched.borrow().len(), 1);
+        let action = dispatched.borrow()[0].clone();
+        match &action {
+            Action::Custom { namespace, name, .. } => {
+                assert_eq!(namespace, APP_SHELL_NAMESPACE);
+                assert_eq!(name, APP_SHELL_ABOUT);
+            }
+            other => panic!("expected about action after menu switch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn menu_bar_switches_open_menu_on_trigger_hover() {
+        let mut menu = MenuBar::default();
+        menu.layout(Rect::new(0.0, 0.0, 500.0, MENU_BAR_HEIGHT));
+        let dispatched = Rc::new(RefCell::new(Vec::new()));
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let dispatch = {
+            let dispatched = Rc::clone(&dispatched);
+            move |action| dispatched.borrow_mut().push(action)
+        };
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        click_menu(&mut menu, &mut ctx, Point::new(10.0, 10.0));
+
+        assert_eq!(
+            menu.event(
+                &UiEvent::MouseMove {
+                    position: Point::new(410.0, 10.0),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        click_menu(&mut menu, &mut ctx, Point::new(410.0, 42.0));
+
+        assert_eq!(dispatched.borrow().len(), 1);
+        let action = dispatched.borrow()[0].clone();
+        match &action {
+            Action::Custom { namespace, name, .. } => {
+                assert_eq!(namespace, APP_SHELL_NAMESPACE);
+                assert_eq!(name, APP_SHELL_ABOUT);
+            }
+            other => panic!("expected about action after hover menu switch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn default_menu_items_use_stable_app_shell_about_action() {
+        let menu_items = default_menu_items();
+        let help_items = menu_items
+            .iter()
+            .find_map(|(label, items)| (*label == "Help").then_some(items))
+            .expect("help menu");
+        let about = help_items
+            .iter()
+            .find(|item| item.label == "About Mondrian")
+            .expect("about item");
+
+        match &about.action {
+            Action::Custom { namespace, name, payload } => {
+                assert_eq!(namespace, APP_SHELL_NAMESPACE);
+                assert_eq!(name, APP_SHELL_ABOUT);
+                assert!(payload.is_null());
+            }
+            other => panic!("expected app-shell about action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn default_menu_items_separate_close_project_from_quit() {
+        let menu_items = default_menu_items();
+        let file_items = menu_items
+            .iter()
+            .find_map(|(label, items)| (*label == "File").then_some(items))
+            .expect("file menu");
+        let close_project = file_items
+            .iter()
+            .find(|item| item.label == "Close Project")
+            .expect("close project item");
+        let quit = file_items.iter().find(|item| item.label == "Quit").expect("quit item");
+
+        assert_eq!(close_project.action, Action::CloseProject);
+        match &quit.action {
+            Action::Custom { namespace, name, payload } => {
+                assert_eq!(namespace, APP_SHELL_NAMESPACE);
+                assert_eq!(name, APP_SHELL_QUIT);
+                assert!(payload.is_null());
+            }
+            other => panic!("expected app-shell quit action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn default_menu_items_expose_window_fullscreen_command() {
+        let menu_items = default_menu_items();
+        let view_items = menu_items
+            .iter()
+            .find_map(|(label, items)| (*label == "View").then_some(items))
+            .expect("view menu");
+        let fullscreen = view_items
+            .iter()
+            .find(|item| item.label == "Toggle Fullscreen")
+            .expect("fullscreen item");
+
+        assert_eq!(fullscreen.action, Action::ToggleFullscreen);
+    }
+}
