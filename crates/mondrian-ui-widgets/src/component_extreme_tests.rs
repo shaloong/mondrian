@@ -12,7 +12,7 @@ use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip}
 use crate::{
     Checkbox, ColorPickerTrigger, ColorPickerTriggerOptions, ContextMenu, CurveEditor, CurvePoint,
     Dropdown, Label, MenuItem, PanelList, PanelListItem, ScrollView, Slider, TextInput,
-    TimelineClip, TimelineTrack, TimelineView, ViewerSurface,
+    TimelineClip, TimelineTrack, TimelineView, VectorIcon, ViewerSurface,
 };
 
 #[derive(Debug, Clone)]
@@ -178,6 +178,15 @@ fn custom_action(_name: &str) -> Action {
     Action::ToggleFullscreen
 }
 
+fn test_icon() -> VectorIcon {
+    VectorIcon::from_svg_str(
+        r#"<svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+            <rect x="2" y="2" width="12" height="12" fill="black"/>
+        </svg>"#,
+    )
+    .expect("test icon should parse")
+}
+
 #[test]
 fn extreme_sized_controls_paint_without_leaking_clip_or_nan_geometry() {
     let clip_rect = Rect::new(0.0, 0.0, 96.0, 64.0);
@@ -280,9 +289,12 @@ fn dropdown_overlay_scrolls_in_pc_direction_and_keeps_overlay_balanced() {
     let mut focus = DummyFocus;
     let mut shortcut = DummyShortcut;
     let mut tooltip = DummyTooltip;
-    let items = (0..8)
+    let mut items = (0..8)
         .map(|index| MenuItem::new(format!("Item {index}"), custom_action(&format!("i{index}"))))
         .collect::<Vec<_>>();
+    items[0] = MenuItem::new("Item 0", custom_action("i0"))
+        .with_icon(test_icon())
+        .with_shortcut("Ctrl+0");
     let mut dropdown = Dropdown::new("Menu", items).with_max_visible_items(3);
     dropdown.layout(Rect::new(8.0, 8.0, 60.0, 28.0));
     let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
@@ -305,6 +317,14 @@ fn dropdown_overlay_scrolls_in_pc_direction_and_keeps_overlay_balanced() {
     );
 
     let before = paint_widget(&dropdown, Rect::new(0.0, 0.0, 180.0, 180.0));
+    assert!(
+        before.triangle_batches.iter().any(|batch| batch.len() >= 6),
+        "iconized dropdown rows should paint SVG triangle geometry"
+    );
+    assert!(
+        before.texts.iter().any(|text| text.text == "Ctrl+0"),
+        "iconized dropdown rows should paint shortcut hints"
+    );
     let before_y = before
         .texts
         .iter()
@@ -459,7 +479,9 @@ fn overlay_and_scroll_container_extremes_keep_paint_and_event_state_stable() {
     let mut menu = ContextMenu::new(
         Point::new(-4.5, 3.25),
         vec![
-            MenuItem::new("Open with a very long menu label", custom_action("open")),
+            MenuItem::new("Open with a very long menu label", custom_action("open"))
+                .with_icon(test_icon())
+                .with_shortcut("Ctrl+O"),
             MenuItem::separator(),
             MenuItem::new("Disabled", custom_action("disabled")).disabled(),
             MenuItem::new("Reveal", custom_action("reveal")),
@@ -471,6 +493,14 @@ fn overlay_and_scroll_container_extremes_keep_paint_and_event_state_stable() {
     assert!(
         menu_paint.texts.iter().any(|text| text.text.contains("Open")),
         "context menu overlay should paint row labels through the shared menu helpers"
+    );
+    assert!(
+        menu_paint.texts.iter().any(|text| text.text == "Ctrl+O"),
+        "context menu overlay should paint shortcut hints"
+    );
+    assert!(
+        menu_paint.triangle_batches.iter().any(|batch| batch.len() >= 6),
+        "context menu overlay should paint icon geometry"
     );
     assert!(
         menu.overlay_hit_test(Point::new(90.0, 90.0)),
