@@ -324,9 +324,12 @@ impl PanelListModel {
         let Some(library) = library else {
             return PanelListModel::new(
                 "Assets",
-                vec![PanelListItem::new("No project library")
-                    .with_subtitle("Open or create a project to browse assets")
-                    .disabled(true)],
+                vec![with_app_icon(
+                    PanelListItem::new("No project library")
+                        .with_subtitle("Open or create a project to browse assets")
+                        .disabled(true),
+                    AppIcon::Folder,
+                )],
             )
             .with_subtitle("Project library");
         };
@@ -334,9 +337,12 @@ impl PanelListModel {
         match library.list_assets() {
             Ok(assets) if assets.is_empty() => PanelListModel::new(
                 "Assets",
-                vec![PanelListItem::new("No assets")
-                    .with_subtitle("Import media or create generated assets")
-                    .disabled(true)],
+                vec![with_app_icon(
+                    PanelListItem::new("No assets")
+                        .with_subtitle("Import media or create generated assets")
+                        .disabled(true),
+                    AppIcon::Folder,
+                )],
             )
             .with_subtitle("Project library"),
             Ok(assets) => PanelListModel::new(
@@ -346,9 +352,12 @@ impl PanelListModel {
             .with_subtitle("Project library"),
             Err(err) => PanelListModel::new(
                 "Assets",
-                vec![PanelListItem::new("Asset library unavailable")
-                    .with_subtitle(err.to_string())
-                    .disabled(true)],
+                vec![with_app_icon(
+                    PanelListItem::new("Asset library unavailable")
+                        .with_subtitle(err.to_string())
+                        .disabled(true),
+                    AppIcon::Warning,
+                )],
             )
             .with_subtitle("Project library"),
         }
@@ -440,13 +449,16 @@ impl PanelListModel {
     pub fn unsupported_panel(kind: SlotKind) -> Self {
         PanelListModel::new(
             kind.display_name(),
-            vec![PanelListItem::new("Panel not available")
-                .with_subtitle(format!(
-                    "{} is not mapped to the self-hosted UI yet",
-                    kind.display_name()
-                ))
-                .with_badge("Pending")
-                .disabled(true)],
+            vec![with_app_icon(
+                PanelListItem::new("Panel not available")
+                    .with_subtitle(format!(
+                        "{} is not mapped to the self-hosted UI yet",
+                        kind.display_name()
+                    ))
+                    .with_badge("Pending")
+                    .disabled(true),
+                AppIcon::Info,
+            )],
         )
         .with_subtitle("Self-hosted panel")
     }
@@ -1447,22 +1459,34 @@ fn demo_asset_model() -> PanelListModel {
     PanelListModel::new(
         "Assets",
         vec![
-            PanelListItem::new("Footage")
-                .with_subtitle("Imported camera clips")
-                .with_badge("12")
-                .with_select_action(demo_panel_action("assets.select.footage")),
-            PanelListItem::new("Audio")
-                .with_subtitle("Music, voiceover, and ambience")
-                .with_badge("5")
-                .with_select_action(demo_panel_action("assets.select.audio")),
-            PanelListItem::new("Images")
-                .with_subtitle("Still frames and references")
-                .with_badge("8")
-                .with_select_action(demo_panel_action("assets.select.images")),
-            PanelListItem::new("Sequences")
-                .with_subtitle("Nested edits and reusable timelines")
-                .with_badge("2")
-                .with_select_action(demo_panel_action("assets.select.sequences")),
+            with_app_icon(
+                PanelListItem::new("Footage")
+                    .with_subtitle("Imported camera clips")
+                    .with_badge("12")
+                    .with_select_action(demo_panel_action("assets.select.footage")),
+                AppIcon::Film,
+            ),
+            with_app_icon(
+                PanelListItem::new("Audio")
+                    .with_subtitle("Music, voiceover, and ambience")
+                    .with_badge("5")
+                    .with_select_action(demo_panel_action("assets.select.audio")),
+                AppIcon::Music,
+            ),
+            with_app_icon(
+                PanelListItem::new("Images")
+                    .with_subtitle("Still frames and references")
+                    .with_badge("8")
+                    .with_select_action(demo_panel_action("assets.select.images")),
+                AppIcon::Rectangle,
+            ),
+            with_app_icon(
+                PanelListItem::new("Sequences")
+                    .with_subtitle("Nested edits and reusable timelines")
+                    .with_badge("2")
+                    .with_select_action(demo_panel_action("assets.select.sequences")),
+                AppIcon::Film,
+            ),
         ],
     )
     .with_subtitle("Project library")
@@ -1474,12 +1498,20 @@ fn demo_console_model() -> PanelListModel {
     PanelListModel::new(
         "Console",
         vec![
-            PanelListItem::new("UI runtime ready").with_subtitle("Event router attached"),
-            PanelListItem::new("Renderer warm").with_subtitle("wgpu command encoder active"),
-            PanelListItem::new("Text atlas").with_subtitle("cosmic-text layout path"),
+            console_demo_item("UI runtime ready", "Event router attached"),
+            console_demo_item("Renderer warm", "wgpu command encoder active"),
+            console_demo_item("Text atlas", "cosmic-text layout path"),
         ],
     )
     .with_subtitle("Runtime messages")
+}
+
+#[cfg(test)]
+fn console_demo_item(title: impl Into<String>, subtitle: impl Into<String>) -> PanelListItem {
+    with_app_icon(
+        PanelListItem::new(title).with_subtitle(subtitle),
+        AppIcon::Info,
+    )
 }
 
 #[cfg(test)]
@@ -2318,8 +2350,10 @@ mod tests {
         assert_eq!(models.project.title, "Project");
         assert!(models.project.items.iter().any(|item| item.title == "Unsaved project"));
         assert!(!models.assets.items.is_empty());
+        assert!(models.assets.items.iter().all(|item| item.icon.is_some()));
         assert!(!models.effects.items.is_empty());
         assert!(!models.console.items.is_empty());
+        assert!(models.console.items.iter().all(|item| item.icon.is_some()));
         assert_eq!(models.viewer.title, "Demo edit");
         assert!(models.viewer.enabled);
         assert!(!models.timeline.tracks.is_empty());
@@ -2361,6 +2395,7 @@ mod tests {
         assert_eq!(models.project.items[0].title, "No project");
         assert!(models.project.items[0].disabled);
         assert_eq!(models.assets.items[0].title, "No project library");
+        assert!(models.assets.items[0].icon.is_some());
         assert!(models.assets.items[0].disabled);
         assert!(!models.effects.items.is_empty());
         assert_eq!(models.console.title, "Console");
@@ -3415,6 +3450,33 @@ mod tests {
         assert_eq!(payload.asset_id, asset_id);
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn asset_panel_empty_library_uses_icon_empty_state() {
+        let root = unique_temp_dir("asset-panel-empty-library");
+        let library = AssetLibrary::open(root.clone()).expect("open asset library");
+        let mut state = AppState::new();
+        state.asset_library = Some(library);
+
+        let models = SelfHostedPanelModels::from_app_state(&state);
+
+        assert_eq!(models.assets.items.len(), 1);
+        assert_eq!(models.assets.items[0].title, "No assets");
+        assert!(models.assets.items[0].icon.is_some());
+        assert!(models.assets.items[0].disabled);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unsupported_panel_fallback_uses_icon_empty_state() {
+        let model = PanelListModel::unsupported_panel(SlotKind::Inspector);
+
+        assert_eq!(model.items.len(), 1);
+        assert_eq!(model.items[0].title, "Panel not available");
+        assert!(model.items[0].icon.is_some());
+        assert!(model.items[0].disabled);
     }
 
     #[test]
