@@ -280,12 +280,7 @@ pub(crate) fn parse_mask_id_from_property_path(
 }
 
 pub(crate) fn parse_effect_id_from_property_path(path: &str) -> Option<EffectId> {
-    let mut segments = path.split('.');
-    if segments.next()? != "effect" {
-        return None;
-    }
-    let id_raw = segments.next()?;
-    uuid::Uuid::parse_str(id_raw).ok().map(EffectId)
+    mondrian_core::effect_data::parse_effect_id_from_property_path(path)
 }
 
 pub(crate) fn graph_channel_labels(value: &PropertyValue) -> &'static [&'static str] {

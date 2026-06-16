@@ -244,3 +244,54 @@ pub fn namespaced_effect_path(effect_id: EffectId, path: &str) -> String {
         format!("effect.{effect_id}.{path}")
     }
 }
+
+/// Parse an [`EffectId`] from a namespaced property path.
+///
+/// Effect property paths have the form `effect.<UUID>.<rest>`. This function
+/// extracts the UUID segment and parses it into an `EffectId`.
+///
+/// Returns `None` if the path does not start with `effect.` or the second
+/// segment is not a valid UUID.
+pub fn parse_effect_id_from_property_path(path: &str) -> Option<EffectId> {
+    let mut segments = path.split('.');
+    if segments.next()? != "effect" {
+        return None;
+    }
+    let id_raw = segments.next()?;
+    uuid::Uuid::parse_str(id_raw).ok().map(EffectId)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_effect_id_from_property_path_extracts_valid_uuid() {
+        let id = EffectId::new();
+        let path = format!("effect.{}.some.parameter", id);
+        let parsed = parse_effect_id_from_property_path(&path);
+        assert_eq!(parsed, Some(id));
+    }
+
+    #[test]
+    fn parse_effect_id_from_property_path_rejects_non_effect_prefix() {
+        assert_eq!(parse_effect_id_from_property_path("transform.position"), None);
+    }
+
+    #[test]
+    fn parse_effect_id_from_property_path_rejects_invalid_uuid() {
+        assert_eq!(
+            parse_effect_id_from_property_path("effect.not-a-uuid.param"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_effect_id_from_property_path_rejects_too_few_segments() {
+        assert_eq!(parse_effect_id_from_property_path("effect"), None);
+        assert_eq!(
+            parse_effect_id_from_property_path("effect.a1b2c3d4e5f6"),
+            None
+        );
+    }
+}
