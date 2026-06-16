@@ -678,6 +678,11 @@ timeline span so curve edits participate in undo/redo and render evaluation.
 Inspector clip mutations are validated at the AppState boundary, including
 locked-track protection; widgets stay domain-light and do not decide whether a
 clip can be edited.
+Inspector panel models still expose edit availability from the current
+`AppState` snapshot. When the selected clip's track is locked, the self-hosted
+Inspector remains readable but disables clip style, transform, timing, effect,
+property, and curve controls before they can dispatch actions. This is UI
+affordance only; `AppState` keeps the authoritative locked-track validation.
 Inspector panel models derive the displayed curve from those opacity keyframes,
 falling back to a flat curve at the evaluated opacity when no animation exists.
 When existing keyframes do not land on clip boundaries, the panel model

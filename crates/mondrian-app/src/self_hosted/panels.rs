@@ -741,6 +741,10 @@ impl TimelinePanelModel {
 pub struct InspectorPanelModel {
     /// Selected clip targeted by value edits, if the model is backed by app state.
     pub selected_clip: Option<SelectedClipRef>,
+    /// Whether inspector controls may dispatch mutations for the selected clip.
+    pub is_editable: bool,
+    /// Human-readable reason shown when a selected clip cannot be edited.
+    pub edit_disabled_reason: Option<String>,
     /// Whether the selected clip is enabled.
     pub enabled: bool,
     /// Opacity shown in UI percent units.
@@ -815,8 +819,12 @@ impl InspectorPanelModel {
         let opacity = (clip.transform.evaluate_opacity(time) * 100.0).clamp(0.0, 100.0);
         let position = clip.transform.get_position(time);
         let scale = clip.transform.get_scale(time);
+        let is_editable = !selected_clip_track_is_locked(state, resolved_selection);
         Self {
             selected_clip: Some(resolved_selection),
+            is_editable,
+            edit_disabled_reason: (!is_editable)
+                .then(|| "Selected clip track is locked".to_owned()),
             enabled: !clip.is_disabled,
             opacity,
             tint: clip
@@ -863,6 +871,8 @@ impl InspectorPanelModel {
     pub fn empty() -> Self {
         Self {
             selected_clip: None,
+            is_editable: false,
+            edit_disabled_reason: None,
             enabled: false,
             opacity: 100.0,
             tint: Color::from_rgba8(128, 128, 128, 255),
@@ -883,6 +893,8 @@ impl InspectorPanelModel {
     pub fn demo() -> Self {
         Self {
             selected_clip: None,
+            is_editable: false,
+            edit_disabled_reason: None,
             enabled: true,
             opacity: 72.0,
             tint: Color::from_rgba8(132, 180, 255, 220),
@@ -2006,25 +2018,31 @@ fn demo_panel_action(name: &str) -> Action {
 fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
     let selected_clip = model.selected_clip;
     let has_target = selected_clip.is_some();
-    let mut tint = ColorPickerTrigger::new(model.tint).enabled(has_target);
+    let can_edit = has_target && model.is_editable;
+    let subtitle = model.edit_disabled_reason.as_deref().unwrap_or(if has_target {
+        "Selected clip"
+    } else {
+        "No clip selected"
+    });
+    let mut tint = ColorPickerTrigger::new(model.tint).enabled(can_edit);
     tint.picker_mut().set_area_mode(model.tint_area_mode);
     let curve = CurveEditor::with_points(model.curve_points.clone())
-        .enabled(has_target)
+        .enabled(can_edit)
         .on_change(move |points| inspector_curve_action(selected_clip, points));
-    let mut panel = PropertyPanel::new("Inspector").with_subtitle("Selected clip").with_section(
+    let mut panel = PropertyPanel::new("Inspector").with_subtitle(subtitle).with_section(
         PropertySection::new("Clip Style")
             .with_row(PropertyRow::new(
                 "Enabled",
                 Box::new(
                     Checkbox::new("启用效果", model.enabled)
-                        .enabled(has_target)
+                        .enabled(can_edit)
                         .on_change(move |value| inspector_bool_action(selected_clip, value)),
                 ),
             ))
             .with_row(PropertyRow::new(
                 "Opacity",
                 Box::new(
-                    Slider::new(model.opacity, 0.0, 100.0).enabled(has_target).on_change(
+                    Slider::new(model.opacity, 0.0, 100.0).enabled(can_edit).on_change(
                         move |value| inspector_value_action(selected_clip, "opacity", value),
                     ),
                 ),
@@ -2040,7 +2058,7 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
             .with_row(PropertyRow::new(
                 "Position X",
                 Box::new(
-                    Slider::new(model.position_x, -4096.0, 4096.0).enabled(has_target).on_change(
+                    Slider::new(model.position_x, -4096.0, 4096.0).enabled(can_edit).on_change(
                         move |value| {
                             inspector_transform_action(
                                 selected_clip,
@@ -2054,7 +2072,7 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
             .with_row(PropertyRow::new(
                 "Position Y",
                 Box::new(
-                    Slider::new(model.position_y, -4096.0, 4096.0).enabled(has_target).on_change(
+                    Slider::new(model.position_y, -4096.0, 4096.0).enabled(can_edit).on_change(
                         move |value| {
                             inspector_transform_action(
                                 selected_clip,
@@ -2068,7 +2086,7 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
             .with_row(PropertyRow::new(
                 "Scale",
                 Box::new(
-                    Slider::new(model.scale_percent, 0.0, 400.0).enabled(has_target).on_change(
+                    Slider::new(model.scale_percent, 0.0, 400.0).enabled(can_edit).on_change(
                         move |value| {
                             inspector_transform_action(
                                 selected_clip,
@@ -2082,15 +2100,15 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
             .with_row(PropertyRow::new(
                 "Rotation",
                 Box::new(
-                    Slider::new(model.rotation_degrees, -180.0, 180.0)
-                        .enabled(has_target)
-                        .on_change(move |value| {
+                    Slider::new(model.rotation_degrees, -180.0, 180.0).enabled(can_edit).on_change(
+                        move |value| {
                             inspector_transform_action(
                                 selected_clip,
                                 InspectorClipTransformField::RotationDegrees,
                                 value,
                             )
-                        }),
+                        },
+                    ),
                 ),
             )),
     );
@@ -2100,29 +2118,29 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
             .with_row(PropertyRow::new(
                 "In",
                 Box::new(
-                    Slider::new(model.in_frame, 0.0, model.max_frame)
-                        .enabled(has_target)
-                        .on_change(move |value| {
+                    Slider::new(model.in_frame, 0.0, model.max_frame).enabled(can_edit).on_change(
+                        move |value| {
                             inspector_timing_action(
                                 selected_clip,
                                 TimelineTrimPayloadEdge::In,
                                 value,
                             )
-                        }),
+                        },
+                    ),
                 ),
             ))
             .with_row(PropertyRow::new(
                 "Out",
                 Box::new(
-                    Slider::new(model.out_frame, 0.0, model.max_frame)
-                        .enabled(has_target)
-                        .on_change(move |value| {
+                    Slider::new(model.out_frame, 0.0, model.max_frame).enabled(can_edit).on_change(
+                        move |value| {
                             inspector_timing_action(
                                 selected_clip,
                                 TimelineTrimPayloadEdge::Out,
                                 value,
                             )
-                        }),
+                        },
+                    ),
                 ),
             )),
     );
@@ -2131,22 +2149,24 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
         let mut section = PropertySection::new("Effects");
         for (index, effect) in model.effects.iter().enumerate() {
             let effect_id = effect.effect_id;
-            let can_move_up = has_target && index > 0;
-            let can_move_down = has_target && index + 1 < model.effects.len();
+            let can_move_up = can_edit && index > 0;
+            let can_move_down = can_edit && index + 1 < model.effects.len();
             section = section.with_row(PropertyRow::new(
                 effect.label.clone(),
                 Box::new(
                     FlexContainer::row(vec![
                         FlexChild::flex(
-                            Box::new(Checkbox::new("Enabled", effect.enabled).on_change(
-                                move |enabled| {
-                                    inspector_effect_enabled_action(
-                                        selected_clip,
-                                        effect_id,
-                                        enabled,
-                                    )
-                                },
-                            )),
+                            Box::new(
+                                Checkbox::new("Enabled", effect.enabled)
+                                    .enabled(can_edit)
+                                    .on_change(move |enabled| {
+                                        inspector_effect_enabled_action(
+                                            selected_clip,
+                                            effect_id,
+                                            enabled,
+                                        )
+                                    }),
+                            ),
                             1.0,
                         ),
                         FlexChild::fixed(Box::new(
@@ -2175,6 +2195,7 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                             AppIcon::Trash
                                 .text_button("Remove")
                                 .expect("bundled Trash icon asset should parse")
+                                .enabled(can_edit)
                                 .on_click(inspector_remove_effect_row_action(
                                     selected_clip,
                                     effect_id,
@@ -2190,7 +2211,7 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                     property.label.clone(),
                     effect_property_value_widget(
                         property,
-                        has_target,
+                        can_edit,
                         selected_clip,
                         effect_id,
                         path,
@@ -2364,17 +2385,16 @@ fn inspector_clip_payload(selection: SelectedClipRef) -> InspectorClipRefPayload
 /// through the existing inspector custom-action path.
 fn effect_property_value_widget(
     property: &InspectorEffectPropertyModel,
-    has_target: bool,
+    can_edit: bool,
     selection: Option<SelectedClipRef>,
     effect_id: EffectId,
     path: String,
 ) -> Box<dyn Widget> {
-    let enabled = has_target;
     match &property.value {
         PropertyValue::Bool(value) => {
             let selected_clip = selection;
             Box::new(
-                Checkbox::new(&property.label, *value).enabled(enabled).on_change(move |v| {
+                Checkbox::new(&property.label, *value).enabled(can_edit).on_change(move |v| {
                     inspector_effect_property_action(
                         selected_clip,
                         effect_id,
@@ -2390,7 +2410,7 @@ fn effect_property_value_widget(
             let selected_clip = selection;
             let path = path.clone();
             Box::new(
-                Slider::new(*value, min, max).enabled(enabled).on_change(move |v| {
+                Slider::new(*value, min, max).enabled(can_edit).on_change(move |v| {
                     inspector_effect_property_action(
                         selected_clip,
                         effect_id,
@@ -2406,7 +2426,7 @@ fn effect_property_value_widget(
             let selected_clip = selection;
             let path = path.clone();
             Box::new(
-                Slider::new(*value as f32, min, max).enabled(enabled).on_change(move |v: f32| {
+                Slider::new(*value as f32, min, max).enabled(can_edit).on_change(move |v: f32| {
                     inspector_effect_property_action(
                         selected_clip,
                         effect_id,
@@ -2422,7 +2442,7 @@ fn effect_property_value_widget(
             let selected_clip = selection;
             let path = path.clone();
             Box::new(
-                Slider::new(*value as f32, min, max).enabled(enabled).on_change(move |v: f32| {
+                Slider::new(*value as f32, min, max).enabled(can_edit).on_change(move |v: f32| {
                     inspector_effect_property_action(
                         selected_clip,
                         effect_id,
@@ -2435,7 +2455,7 @@ fn effect_property_value_widget(
         PropertyValue::Color(value) => {
             let selected_clip = selection;
             let path = path.clone();
-            let trigger = ColorPickerTrigger::new(*value).enabled(enabled);
+            let trigger = ColorPickerTrigger::new(*value).enabled(can_edit);
             Box::new(trigger.on_change(move |color| {
                 inspector_effect_property_action(
                     selected_clip,
@@ -2454,7 +2474,7 @@ fn effect_property_value_widget(
                 let selected_clip = selection;
                 let path = path.clone();
                 Box::new(
-                    TextInput::new(text).enabled(enabled).on_change(move |text| {
+                    TextInput::new(text).enabled(can_edit).on_change(move |text| {
                         inspector_effect_property_action(
                             selected_clip,
                             effect_id,
@@ -2643,6 +2663,8 @@ mod tests {
         assert!(!models.viewer.enabled);
         assert_eq!(models.viewer.resolution_label, "No signal");
         assert_eq!(models.inspector.selected_clip, None);
+        assert!(!models.inspector.is_editable);
+        assert_eq!(models.inspector.edit_disabled_reason, None);
         assert_eq!(models.inspector.opacity, 100.0);
         assert!(models.inspector.effects.is_empty());
         assert!(models.export.sequences.is_empty());
@@ -3518,6 +3540,8 @@ mod tests {
         assert_eq!(models.timeline.playhead_frame, 7);
         assert!(models.timeline.tracks[0].clips[0].selected);
         assert!(models.timeline.tracks[0].clips[0].disabled);
+        assert!(models.inspector.is_editable);
+        assert_eq!(models.inspector.edit_disabled_reason, None);
         assert!(!models.inspector.enabled);
         assert_eq!(models.inspector.opacity, 100.0);
         assert_eq!(
@@ -3787,6 +3811,36 @@ mod tests {
     }
 
     #[test]
+    fn app_state_models_mark_inspector_readonly_for_locked_selected_track() {
+        let mut state = AppState::new();
+        let mut sequence = Sequence::new("edit");
+        let tb = sequence.time_base();
+        let clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(30, tb));
+        let clip_id = clip.id;
+        let track_id = sequence.video_tracks[0].id;
+        sequence.video_tracks[0].add_clip(clip).expect("add video clip");
+        sequence.video_tracks[0].is_locked = true;
+        state.sequence = Some(sequence);
+        state.selection.selected_clips.push(SelectedClipRef {
+            track_id,
+            is_video_track: true,
+            clip_id,
+        });
+
+        let models = SelfHostedPanelModels::from_app_state(&state);
+
+        assert_eq!(
+            models.inspector.selected_clip,
+            Some(SelectedClipRef { track_id, is_video_track: true, clip_id })
+        );
+        assert!(!models.inspector.is_editable);
+        assert_eq!(
+            models.inspector.edit_disabled_reason.as_deref(),
+            Some("Selected clip track is locked")
+        );
+    }
+
+    #[test]
     fn demo_asset_model_is_the_only_dynamic_activation_fixture() {
         let model = demo_asset_model();
 
@@ -3891,6 +3945,71 @@ mod tests {
             inspector_curve_action(None, &[CurvePoint::new(0.0, 1.0)]),
             Action::NoOp
         );
+    }
+
+    #[test]
+    fn inspector_panel_locked_target_controls_do_not_dispatch() {
+        let selection = SelectedClipRef {
+            track_id: TrackId::new(),
+            is_video_track: true,
+            clip_id: ClipId::new(),
+        };
+        let model = InspectorPanelModel {
+            selected_clip: Some(selection),
+            is_editable: false,
+            edit_disabled_reason: Some("Selected clip track is locked".to_owned()),
+            enabled: true,
+            opacity: 100.0,
+            tint: Color::from_rgba8(64, 128, 192, 255),
+            position_x: 0.0,
+            position_y: 0.0,
+            scale_percent: 100.0,
+            rotation_degrees: 0.0,
+            in_frame: 0.0,
+            out_frame: 30.0,
+            max_frame: 60.0,
+            tint_area_mode: ColorPickerAreaMode::Wheel,
+            curve_points: vec![CurvePoint::new(0.0, 1.0), CurvePoint::new(1.0, 1.0)],
+            effects: Vec::new(),
+        };
+        let mut panel = inspector_panel(&model);
+        panel.layout(Rect::new(0.0, 0.0, 320.0, 220.0));
+
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        let enabled_checkbox_point = Point::new(132.0, 94.0);
+
+        let down = panel.event(
+            &UiEvent::MouseDown {
+                position: enabled_checkbox_point,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        let up = panel.event(
+            &UiEvent::MouseUp {
+                position: enabled_checkbox_point,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(down, EventResult::Ignored);
+        assert_eq!(up, EventResult::Ignored);
+        assert!(actions.borrow().is_empty());
     }
 
     #[test]
