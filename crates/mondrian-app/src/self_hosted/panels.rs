@@ -7,6 +7,7 @@
 
 use mondrian_assets::{AssetKind, AssetLibrary, AssetRecord};
 use mondrian_core::automation::timecode_to_ticks;
+use mondrian_core::automation::PropertyValue;
 use mondrian_core::effect_data::EffectType;
 #[cfg(test)]
 use mondrian_core::types::AssetId;
@@ -742,6 +743,25 @@ pub struct InspectorEffectModel {
     pub label: String,
     /// Whether the effect is enabled.
     pub enabled: bool,
+    /// Per-property editor values, one per row in the PropertyBag.
+    pub properties: Vec<InspectorEffectPropertyModel>,
+}
+
+/// One property row inside an effect inspector section.
+#[derive(Debug, Clone)]
+pub struct InspectorEffectPropertyModel {
+    /// Namespaced property path, e.g. `effect.<id>.exposure`.
+    pub path: String,
+    /// Human-readable property name from the descriptor.
+    pub label: String,
+    /// The evaluated value at the current playback time.
+    pub value: PropertyValue,
+    /// UI min/max bounds extracted from the descriptor.
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub step: Option<f64>,
+    /// Whether the property supports animation.
+    pub is_animatable: bool,
 }
 
 impl InspectorPanelModel {
@@ -780,10 +800,26 @@ impl InspectorPanelModel {
             effects: clip
                 .effects
                 .iter()
-                .map(|effect| InspectorEffectModel {
-                    effect_id: effect.id,
-                    label: effect_display_name(&effect.effect_type),
-                    enabled: effect.is_enabled,
+                .map(|effect| {
+                    let time_ticks = timecode_to_ticks(time);
+                    InspectorEffectModel {
+                        effect_id: effect.id,
+                        label: effect_display_name(&effect.effect_type),
+                        enabled: effect.is_enabled,
+                        properties: effect
+                            .properties
+                            .iter()
+                            .map(|(path, property)| InspectorEffectPropertyModel {
+                                path: path.to_string(),
+                                label: property.descriptor.display_name.clone(),
+                                value: property.evaluate(time_ticks),
+                                min: property.descriptor.ui_metadata.min,
+                                max: property.descriptor.ui_metadata.max,
+                                step: property.descriptor.ui_metadata.step,
+                                is_animatable: property.descriptor.is_animatable,
+                            })
+                            .collect(),
+                    }
                 })
                 .collect(),
         }
