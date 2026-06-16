@@ -81,6 +81,8 @@ pub enum AppIcon {
     RightFrameFilled,
     /// Search icon.
     Search,
+    /// Save/floppy icon.
+    Save,
     /// Speaker icon.
     Speaker,
     /// Muted speaker icon.
@@ -91,6 +93,8 @@ pub enum AppIcon {
     Trash,
     /// Unlock icon.
     Unlock,
+    /// Warning triangle icon.
+    Warning,
     /// Zoom in icon.
     ZoomIn,
     /// Zoom out icon.
@@ -99,7 +103,7 @@ pub enum AppIcon {
 
 impl AppIcon {
     /// Every bundled product icon that should remain parseable by the custom UI.
-    pub const ALL: [Self; 43] = [
+    pub const ALL: [Self; 45] = [
         Self::Add,
         Self::Anchor,
         Self::ArrowDown,
@@ -136,11 +140,13 @@ impl AppIcon {
         Self::Rectangle,
         Self::RightFrameFilled,
         Self::Search,
+        Self::Save,
         Self::Speaker,
         Self::SpeakerMuted,
         Self::Stopwatch,
         Self::Trash,
         Self::Unlock,
+        Self::Warning,
         Self::ZoomIn,
         Self::ZoomOut,
     ];
@@ -184,11 +190,13 @@ impl AppIcon {
             Self::Rectangle => "app.rectangle",
             Self::RightFrameFilled => "app.right-frame-filled",
             Self::Search => "app.search",
+            Self::Save => "app.save",
             Self::Speaker => "app.speaker",
             Self::SpeakerMuted => "app.speaker-muted",
             Self::Stopwatch => "app.stopwatch",
             Self::Trash => "app.trash",
             Self::Unlock => "app.unlock",
+            Self::Warning => "app.warning",
             Self::ZoomIn => "app.zoom-in",
             Self::ZoomOut => "app.zoom-out",
         }
@@ -233,11 +241,13 @@ impl AppIcon {
             Self::Rectangle => include_str!("../../assets/icons/rectangle.svg"),
             Self::RightFrameFilled => include_str!("../../assets/icons/right_frame_fill.svg"),
             Self::Search => include_str!("../../assets/icons/search.svg"),
+            Self::Save => include_str!("../../assets/icons/save.svg"),
             Self::Speaker => include_str!("../../assets/icons/speaker.svg"),
             Self::SpeakerMuted => include_str!("../../assets/icons/speaker_muted.svg"),
             Self::Stopwatch => include_str!("../../assets/icons/stopwatch.svg"),
             Self::Trash => include_str!("../../assets/icons/trash.svg"),
             Self::Unlock => include_str!("../../assets/icons/unlock.svg"),
+            Self::Warning => include_str!("../../assets/icons/warning.svg"),
             Self::ZoomIn => include_str!("../../assets/icons/zoom_in.svg"),
             Self::ZoomOut => include_str!("../../assets/icons/zoom_out.svg"),
         }

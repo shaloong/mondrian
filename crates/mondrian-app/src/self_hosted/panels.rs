@@ -199,62 +199,62 @@ impl PanelListModel {
         let mut items = Vec::new();
         if let Some(path) = &state.current_project_path {
             let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("Project");
-            items.push(
+            items.push(with_app_icon(
                 PanelListItem::new(name)
                     .with_subtitle(path.display().to_string())
                     .with_badge("Open"),
-            );
+                AppIcon::FolderOpenFilled,
+            ));
         } else if state.sequence.is_some() {
-            items.push(
+            items.push(with_app_icon(
                 PanelListItem::new("Unsaved project")
                     .with_subtitle("Save the current edit to create a project file")
                     .with_badge("Draft"),
-            );
+                AppIcon::Save,
+            ));
         } else {
-            items.push(
+            items.push(with_app_icon(
                 PanelListItem::new("No project")
                     .with_subtitle("Open or create a project to start editing")
                     .with_badge("Idle")
                     .disabled(true),
-            );
+                AppIcon::Info,
+            ));
         }
 
         if let Some(sequence) = &state.sequence {
             let track_count = sequence.video_tracks.len() + sequence.audio_tracks.len();
             let duration = sequence.total_duration().frame.max(0);
             let resolution = sequence.settings.resolution;
-            items.push(
+            items.push(with_app_icon(
                 PanelListItem::new(sequence.name.clone())
                     .with_subtitle(format!("{track_count} tracks, {duration} frames"))
                     .with_badge(format!("{}x{}", resolution.width, resolution.height)),
-            );
+                AppIcon::Film,
+            ));
         } else {
-            items.push(
+            items.push(with_app_icon(
                 PanelListItem::new("No sequence")
                     .with_subtitle("Project timeline is not loaded")
                     .with_badge("SEQ")
                     .disabled(true),
-            );
+                AppIcon::Film,
+            ));
         }
 
         if let Some((message, is_error)) = &state.status_hint {
-            let mut item = PanelListItem::new(if *is_error { "Error" } else { "Status" })
-                .with_subtitle(message.clone())
-                .with_badge(if *is_error { "!" } else { "OK" });
-            if *is_error {
-                item = item.with_accent(Color::from_hex(0xB91C1C));
-            }
-            items.push(item);
+            items.push(status_log_item(message.clone(), *is_error));
         } else {
-            items.push(
+            items.push(with_app_icon(
                 PanelListItem::new("Status")
                     .with_subtitle("Ready")
                     .with_badge("OK")
                     .disabled(true),
-            );
+                AppIcon::Info,
+            ));
         }
 
-        items.push(
+        items.push(with_app_icon(
             PanelListItem::new("Asset library")
                 .with_subtitle(if state.asset_library.is_some() {
                     "SQLite library connected"
@@ -267,7 +267,8 @@ impl PanelListModel {
                     "Off"
                 })
                 .disabled(state.asset_library.is_none()),
-        );
+            AppIcon::Folder,
+        ));
 
         let has_sequence = state.sequence.is_some();
         let has_project_path = state.current_project_path.is_some();
@@ -293,7 +294,7 @@ impl PanelListModel {
                 .disabled(state.asset_library.is_none()),
             AppIcon::Import,
         ));
-        items.push(
+        items.push(with_app_icon(
             PanelListItem::new("Save project")
                 .with_subtitle(if has_project_path {
                     "Write changes to the current project file"
@@ -303,14 +304,16 @@ impl PanelListModel {
                 .with_badge("Save")
                 .with_activate_action(Action::SaveProject)
                 .disabled(!has_sequence || !has_project_path),
-        );
-        items.push(
+            AppIcon::Save,
+        ));
+        items.push(with_app_icon(
             PanelListItem::new("Save project as...")
                 .with_subtitle("Choose a project file path")
                 .with_badge("As")
                 .with_activate_action(app_shell_save_project_as_dialog_action())
                 .disabled(!has_sequence),
-        );
+            AppIcon::Save,
+        ));
 
         PanelListModel::new("Project", items).with_subtitle("Project state")
     }
@@ -392,12 +395,13 @@ impl PanelListModel {
         }
 
         if items.is_empty() {
-            items.push(
+            items.push(with_app_icon(
                 PanelListItem::new("No messages")
                     .with_subtitle("Status history is empty")
                     .with_badge("OK")
                     .disabled(true),
-            );
+                AppIcon::Info,
+            ));
         }
 
         let sequence_label = state
@@ -405,22 +409,25 @@ impl PanelListModel {
             .as_ref()
             .map(|sequence| sequence.name.clone())
             .unwrap_or_else(|| "No sequence".to_string());
-        items.push(
+        items.push(with_app_icon(
             PanelListItem::new("Sequence")
                 .with_subtitle(sequence_label)
                 .with_badge(format!("F{}", state.current_frame().max(0))),
-        );
-        items.push(
+            AppIcon::Film,
+        ));
+        items.push(with_app_icon(
             PanelListItem::new("Timeline")
                 .with_subtitle(format!("End frame {}", state.last_content_frame().max(0))),
-        );
-        items.push(
+            AppIcon::Clock,
+        ));
+        items.push(with_app_icon(
             PanelListItem::new("Assets").with_subtitle(if state.asset_library.is_some() {
                 "Library connected"
             } else {
                 "Library disconnected"
             }),
-        );
+            AppIcon::Folder,
+        ));
 
         PanelListModel::new("Console", items).with_subtitle("Runtime messages")
     }
@@ -449,7 +456,14 @@ fn status_log_item(message: String, is_error: bool) -> PanelListItem {
     if is_error {
         item = item.with_accent(Color::from_hex(0xB91C1C));
     }
-    item
+    with_app_icon(
+        item,
+        if is_error {
+            AppIcon::Warning
+        } else {
+            AppIcon::Info
+        },
+    )
 }
 
 /// Viewer panel data independent from preview texture plumbing.
@@ -2349,6 +2363,7 @@ mod tests {
         assert_eq!(models.console.title, "Console");
         assert!(!models.console.items.is_empty());
         assert_eq!(models.console.items[0].title, "No messages");
+        assert!(models.console.items[0].icon.is_some());
         assert!(models.console.items[0].disabled);
         assert_eq!(models.viewer.title, "Viewer");
         assert!(!models.viewer.enabled);
@@ -2404,11 +2419,15 @@ mod tests {
         assert_eq!(model.title, "Console");
         assert_eq!(model.items[0].subtitle, "status 9");
         assert_eq!(model.items[0].badge.as_deref(), Some("OK"));
+        assert!(model.items[0].icon.is_some());
         assert_eq!(model.items[2].subtitle, "status 7");
         assert_eq!(model.items[2].badge.as_deref(), Some("ERR"));
         assert!(model.items[2].accent.is_some());
+        assert!(model.items[2].icon.is_some());
         assert!(!model.items.iter().any(|item| item.subtitle == "status 1"));
-        assert!(model.items.iter().any(|item| item.title == "Sequence"));
+        assert!(model.items.iter().any(|item| item.title == "Sequence" && item.icon.is_some()));
+        assert!(model.items.iter().any(|item| item.title == "Timeline" && item.icon.is_some()));
+        assert!(model.items.iter().any(|item| item.title == "Assets" && item.icon.is_some()));
     }
 
     #[test]
@@ -2459,9 +2478,10 @@ mod tests {
         assert_eq!(model.title, "Project");
         assert_eq!(model.items[0].title, "cut.mdp");
         assert_eq!(model.items[0].badge.as_deref(), Some("Open"));
+        assert!(model.items[0].icon.is_some());
         assert!(model.items[0].select_action.is_none());
-        assert!(model.items.iter().any(|item| item.title == "Demo edit"));
-        assert!(model.items.iter().any(|item| item.subtitle == "Saved"));
+        assert!(model.items.iter().any(|item| item.title == "Demo edit" && item.icon.is_some()));
+        assert!(model.items.iter().any(|item| item.subtitle == "Saved" && item.icon.is_some()));
     }
 
     #[test]
@@ -2490,12 +2510,13 @@ mod tests {
             project_item(&model, "Save project").activate_action.as_ref(),
             Some(&Action::SaveProject)
         );
-        assert!(project_item(&model, "Save project").icon.is_none());
+        assert!(project_item(&model, "Save project").icon.is_some());
         assert!(!project_item(&model, "Save project").disabled);
         assert_shell_action(
             project_item(&model, "Save project as...").activate_action.as_ref(),
             APP_SHELL_SAVE_PROJECT_AS_DIALOG,
         );
+        assert!(project_item(&model, "Save project as...").icon.is_some());
         assert!(!project_item(&model, "Save project as...").disabled);
     }
 
