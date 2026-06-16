@@ -12,6 +12,7 @@ use std::cell::Cell;
 use std::cell::RefCell;
 use std::sync::Arc;
 
+use mondrian_app::self_hosted::icons::AppIcon;
 use mondrian_app::self_hosted::rendering::SelfHostedFrameRenderer;
 use mondrian_app::self_hosted::runtime::{
     winit_cursor_icon_for_ui_state, winit_modifiers_to_ui_modifiers,
@@ -71,6 +72,10 @@ fn record_demo_action(action: Action) {
 
 fn take_demo_action() -> Option<String> {
     DEMO_LAST_ACTION.with(|last| last.borrow_mut().take())
+}
+
+fn with_demo_icon(item: PanelListItem, icon: AppIcon) -> PanelListItem {
+    item.with_icon(icon.vector_icon().expect("bundled ui_demo icon asset should parse"))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -728,13 +733,16 @@ fn slot_content_for_tab(kind: SlotKind, tab_index: usize) -> Box<dyn Widget> {
 fn demo_unsupported_panel(kind: SlotKind) -> PanelList {
     PanelList::new(
         kind.display_name(),
-        vec![PanelListItem::new("Demo panel not configured")
-            .with_subtitle(format!(
-                "{} has no dedicated ui_demo tab content yet",
-                kind.display_name()
-            ))
-            .with_badge("Pending")
-            .disabled(true)],
+        vec![with_demo_icon(
+            PanelListItem::new("Demo panel not configured")
+                .with_subtitle(format!(
+                    "{} has no dedicated ui_demo tab content yet",
+                    kind.display_name()
+                ))
+                .with_badge("Pending")
+                .disabled(true),
+            AppIcon::Info,
+        )],
     )
     .with_subtitle("UI demo coverage")
 }
@@ -788,22 +796,34 @@ fn demo_asset_panel() -> PanelList {
     PanelList::new(
         "Assets",
         vec![
-            PanelListItem::new("A001_Camera_Main.mov")
-                .with_subtitle("00:01:24:12 - Rec.709 - 4K")
-                .with_badge("Video")
-                .with_select_action(demo_action("assets.select.video")),
-            PanelListItem::new("VO_Take_03.wav")
-                .with_subtitle("48 kHz stereo - normalized")
-                .with_badge("Audio")
-                .with_select_action(demo_action("assets.select.audio")),
-            PanelListItem::new("Brand_Pack")
-                .with_subtitle("Logos, colors, and lower thirds")
-                .with_badge("Folder")
-                .with_select_action(demo_action("assets.select.folder")),
-            PanelListItem::new("Missing_Reference.psd")
-                .with_subtitle("Offline media placeholder")
-                .with_badge("Offline")
-                .disabled(true),
+            with_demo_icon(
+                PanelListItem::new("A001_Camera_Main.mov")
+                    .with_subtitle("00:01:24:12 - Rec.709 - 4K")
+                    .with_badge("Video")
+                    .with_select_action(demo_action("assets.select.video")),
+                AppIcon::Film,
+            ),
+            with_demo_icon(
+                PanelListItem::new("VO_Take_03.wav")
+                    .with_subtitle("48 kHz stereo - normalized")
+                    .with_badge("Audio")
+                    .with_select_action(demo_action("assets.select.audio")),
+                AppIcon::Music,
+            ),
+            with_demo_icon(
+                PanelListItem::new("Brand_Pack")
+                    .with_subtitle("Logos, colors, and lower thirds")
+                    .with_badge("Folder")
+                    .with_select_action(demo_action("assets.select.folder")),
+                AppIcon::Folder,
+            ),
+            with_demo_icon(
+                PanelListItem::new("Missing_Reference.psd")
+                    .with_subtitle("Offline media placeholder")
+                    .with_badge("Offline")
+                    .disabled(true),
+                AppIcon::Warning,
+            ),
         ],
     )
     .with_subtitle("Project media")
@@ -814,18 +834,27 @@ fn demo_library_panel() -> PanelList {
     PanelList::new(
         "Library",
         vec![
-            PanelListItem::new("Stock transitions")
-                .with_subtitle("Cross dissolve, dip to color, push")
-                .with_badge("12")
-                .with_select_action(demo_action("library.select.transitions")),
-            PanelListItem::new("Motion presets")
-                .with_subtitle("Position and scale keyframe templates")
-                .with_badge("9")
-                .with_select_action(demo_action("library.select.motion")),
-            PanelListItem::new("Team shared bins")
-                .with_subtitle("Network-backed media collection")
-                .with_badge("Beta")
-                .disabled(true),
+            with_demo_icon(
+                PanelListItem::new("Stock transitions")
+                    .with_subtitle("Cross dissolve, dip to color, push")
+                    .with_badge("12")
+                    .with_select_action(demo_action("library.select.transitions")),
+                AppIcon::Effect,
+            ),
+            with_demo_icon(
+                PanelListItem::new("Motion presets")
+                    .with_subtitle("Position and scale keyframe templates")
+                    .with_badge("9")
+                    .with_select_action(demo_action("library.select.motion")),
+                AppIcon::Anchor,
+            ),
+            with_demo_icon(
+                PanelListItem::new("Team shared bins")
+                    .with_subtitle("Network-backed media collection")
+                    .with_badge("Beta")
+                    .disabled(true),
+                AppIcon::Folder,
+            ),
         ],
     )
     .with_subtitle("Reusable resources")
@@ -835,18 +864,27 @@ fn demo_audio_panel() -> PanelList {
     PanelList::new(
         "Audio",
         vec![
-            PanelListItem::new("Dialogue")
-                .with_subtitle("Voice cleanup, EQ, dynamics")
-                .with_badge("A1")
-                .with_select_action(demo_action("audio.select.dialogue")),
-            PanelListItem::new("Music")
-                .with_subtitle("Ducking and stem balance")
-                .with_badge("A2")
-                .with_select_action(demo_action("audio.select.music")),
-            PanelListItem::new("Ambience")
-                .with_subtitle("Room tone and location beds")
-                .with_badge("A3")
-                .with_select_action(demo_action("audio.select.ambience")),
+            with_demo_icon(
+                PanelListItem::new("Dialogue")
+                    .with_subtitle("Voice cleanup, EQ, dynamics")
+                    .with_badge("A1")
+                    .with_select_action(demo_action("audio.select.dialogue")),
+                AppIcon::Speaker,
+            ),
+            with_demo_icon(
+                PanelListItem::new("Music")
+                    .with_subtitle("Ducking and stem balance")
+                    .with_badge("A2")
+                    .with_select_action(demo_action("audio.select.music")),
+                AppIcon::Music,
+            ),
+            with_demo_icon(
+                PanelListItem::new("Ambience")
+                    .with_subtitle("Room tone and location beds")
+                    .with_badge("A3")
+                    .with_select_action(demo_action("audio.select.ambience")),
+                AppIcon::SpeakerMuted,
+            ),
         ],
     )
     .with_subtitle("Track lanes")
@@ -954,22 +992,34 @@ fn demo_effect_panel() -> PanelList {
     PanelList::new(
         "Effects",
         vec![
-            PanelListItem::new("Color Balance")
-                .with_subtitle("Lift, gamma, gain")
-                .with_badge("GPU")
-                .with_select_action(demo_action("effects.select.color_balance")),
-            PanelListItem::new("Gaussian Blur")
-                .with_subtitle("Separable blur preview")
-                .with_badge("GPU")
-                .with_select_action(demo_action("effects.select.blur")),
-            PanelListItem::new("Transform")
-                .with_subtitle("Position, scale, rotation")
-                .with_badge("Core")
-                .with_select_action(demo_action("effects.select.transform")),
-            PanelListItem::new("Optical Flow")
-                .with_subtitle("Disabled row smoke test")
-                .with_badge("Soon")
-                .disabled(true),
+            with_demo_icon(
+                PanelListItem::new("Color Balance")
+                    .with_subtitle("Lift, gamma, gain")
+                    .with_badge("GPU")
+                    .with_select_action(demo_action("effects.select.color_balance")),
+                AppIcon::Effect,
+            ),
+            with_demo_icon(
+                PanelListItem::new("Gaussian Blur")
+                    .with_subtitle("Separable blur preview")
+                    .with_badge("GPU")
+                    .with_select_action(demo_action("effects.select.blur")),
+                AppIcon::Effect,
+            ),
+            with_demo_icon(
+                PanelListItem::new("Transform")
+                    .with_subtitle("Position, scale, rotation")
+                    .with_badge("Core")
+                    .with_select_action(demo_action("effects.select.transform")),
+                AppIcon::Anchor,
+            ),
+            with_demo_icon(
+                PanelListItem::new("Optical Flow")
+                    .with_subtitle("Disabled row smoke test")
+                    .with_badge("Soon")
+                    .disabled(true),
+                AppIcon::Warning,
+            ),
         ],
     )
     .with_subtitle("Apply to selected clip")
@@ -980,15 +1030,24 @@ fn demo_property_browser_panel() -> PanelList {
     PanelList::new(
         "Properties",
         vec![
-            PanelListItem::new("Clip metadata")
-                .with_subtitle("Name, labels, source path")
-                .with_select_action(demo_action("properties.select.metadata")),
-            PanelListItem::new("Playback")
-                .with_subtitle("Speed, reverse, frame sampling")
-                .with_select_action(demo_action("properties.select.playback")),
-            PanelListItem::new("Render cache")
-                .with_subtitle("Cache policy and invalidation")
-                .with_select_action(demo_action("properties.select.cache")),
+            with_demo_icon(
+                PanelListItem::new("Clip metadata")
+                    .with_subtitle("Name, labels, source path")
+                    .with_select_action(demo_action("properties.select.metadata")),
+                AppIcon::Info,
+            ),
+            with_demo_icon(
+                PanelListItem::new("Playback")
+                    .with_subtitle("Speed, reverse, frame sampling")
+                    .with_select_action(demo_action("properties.select.playback")),
+                AppIcon::PlayFilled,
+            ),
+            with_demo_icon(
+                PanelListItem::new("Render cache")
+                    .with_subtitle("Cache policy and invalidation")
+                    .with_select_action(demo_action("properties.select.cache")),
+                AppIcon::Clock,
+            ),
         ],
     )
     .with_subtitle("Inspector categories")
