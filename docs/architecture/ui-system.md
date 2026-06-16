@@ -312,6 +312,11 @@ globally so text input cannot accidentally toggle playback while typing.
 Self-hosted menu shortcut hints read from the same default shortcut descriptor
 table that registers router bindings, so displayed accelerators cannot drift
 from actual keyboard behavior.
+Shortcut-dispatched actions still pass through the self-hosted host's
+`AppState` availability gate before shell dialogs or editor dispatch run. This
+keeps keyboard shortcuts and disabled menu rows semantically aligned: an
+unavailable Import, Save, Undo, or Redo command is ignored before native dialogs
+or app mutations can start.
 Shortcut resolution receives a `ShortcutContext` from the router focus state and
 must search scopes in a fixed order: focused widget, focused panel, workspace,
 then global. Same-scope duplicate registrations replace the older binding so

@@ -351,17 +351,21 @@ pub fn default_menu_items_for_app_state(state: &AppState) -> Vec<(&'static str, 
 }
 
 fn apply_app_state_menu_availability(item: MenuItem, state: &AppState) -> MenuItem {
-    if item.is_separator() || menu_action_enabled_for_app_state(&item.action, state) {
+    if item.is_separator() || app_state_action_enabled(&item.action, state) {
         item
     } else {
         item.disabled()
     }
 }
 
-fn menu_action_enabled_for_app_state(action: &Action, state: &AppState) -> bool {
+/// Whether a shell-dispatched action can produce a useful editor operation for
+/// the supplied application state snapshot.
+pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
     match action {
         Action::SaveProject => state.has_open_project(),
+        Action::SaveProjectAs(_) => state.sequence.is_some(),
         Action::CloseProject => state.sequence.is_some() || state.current_project_path.is_some(),
+        Action::ImportMedia(_) => state.asset_library.is_some(),
         Action::Undo => state.can_undo_action(),
         Action::Redo => state.can_redo_action(),
         Action::Custom { namespace, name, .. }

@@ -13,7 +13,7 @@ use mondrian_ui_core::TreeWalker;
 use crate::app::ui_actions::{APP_SHELL_NAMESPACE, APP_SHELL_QUIT};
 use crate::app::AppState;
 use crate::self_hosted::action_queue::PendingUiActions;
-use crate::self_hosted::shell::SelfHostedAppRoot;
+use crate::self_hosted::shell::{app_state_action_enabled, SelfHostedAppRoot};
 use mondrian_editor_state::Action;
 
 /// Window-host commands produced while draining self-hosted UI actions.
@@ -94,6 +94,10 @@ impl SelfHostedUiHost {
             if take_shell_window_command(&mut commands, &action) {
                 continue;
             }
+            if !self.is_action_enabled(&action) {
+                tracing::debug!(?action, "disabled custom UI action ignored");
+                continue;
+            }
 
             let current_project_path = self.app_state.borrow().current_project_path.clone();
             let action = match self.root.try_handle_shell_action(
@@ -117,6 +121,10 @@ impl SelfHostedUiHost {
                 }
             };
 
+            if !self.is_action_enabled(&action) {
+                tracing::debug!(?action, "disabled resolved custom UI action ignored");
+                continue;
+            }
             tracing::debug!(?action, "custom UI action");
             if let Err(err) = self.app_state.borrow_mut().dispatch_action(action) {
                 tracing::warn!("custom UI action failed: {err}");
@@ -130,6 +138,10 @@ impl SelfHostedUiHost {
             TreeWalker::layout(&mut self.root, bounds);
         }
         commands
+    }
+
+    fn is_action_enabled(&self, action: &Action) -> bool {
+        app_state_action_enabled(action, &self.app_state.borrow())
     }
 }
 
@@ -154,14 +166,53 @@ mod tests {
     use super::*;
     use mondrian_core::types::AssetId;
     use mondrian_editor_state::Action;
-    use mondrian_platform::NoopPlatformService;
+    use mondrian_platform::{FileFilter, NoopPlatformService};
     use mondrian_ui_core::widget::{DrawCommandEncoder, PaintContext, Widget};
     use mondrian_ui_core::Point;
     use mondrian_ui_theme::ThemePreset;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Default)]
     struct RecordingEncoder {
         texts: Vec<String>,
+    }
+
+    #[derive(Default)]
+    struct CountingPlatform {
+        open_file_dialog_calls: AtomicUsize,
+    }
+
+    impl PlatformService for CountingPlatform {
+        fn clipboard_copy(&self, _text: &str) {}
+
+        fn clipboard_paste(&self) -> Option<String> {
+            None
+        }
+
+        fn open_file_dialog(&self, _title: &str, _filters: &[FileFilter]) -> Option<Vec<PathBuf>> {
+            self.open_file_dialog_calls.fetch_add(1, Ordering::Relaxed);
+            Some(vec![PathBuf::from("E:/media/a.mov")])
+        }
+
+        fn save_file_dialog(
+            &self,
+            _title: &str,
+            _default_name: &str,
+            _filters: &[FileFilter],
+        ) -> Option<PathBuf> {
+            None
+        }
+
+        fn open_folder_dialog(&self, _title: &str) -> Option<PathBuf> {
+            None
+        }
+
+        fn open_url(&self, _url: &str) {}
+
+        fn reveal_in_file_manager(&self, _path: &Path) {}
+
+        fn send_notification(&self, _title: &str, _body: &str) {}
     }
 
     impl DrawCommandEncoder for RecordingEncoder {
@@ -274,6 +325,39 @@ mod tests {
                 *is_error && message.contains("missing_command")
             })
         );
+    }
+
+    #[test]
+    fn host_ignores_unavailable_editor_actions_before_dispatch() {
+        let mut host = SelfHostedUiHost::new(AppState::new());
+        let pending = PendingUiActions::default();
+
+        pending.push(Action::ImportMedia(vec![PathBuf::from("E:/media/a.mov")]));
+        pending.push(Action::Undo);
+        let commands = host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+
+        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert!(host.app_state().status_hint.is_none());
+        assert!(!host.app_state().can_undo_action());
+    }
+
+    #[test]
+    fn host_ignores_unavailable_app_shell_dialogs_before_platform_access() {
+        let mut host = SelfHostedUiHost::new(AppState::new());
+        let pending = PendingUiActions::default();
+        let platform = CountingPlatform::default();
+
+        pending.push(crate::app::ui_actions::app_shell_import_media_dialog_action());
+        let commands =
+            host.drain_pending_actions(&pending, Rect::new(0.0, 0.0, 1280.0, 720.0), &platform);
+
+        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert_eq!(platform.open_file_dialog_calls.load(Ordering::Relaxed), 0);
+        assert!(host.app_state().status_hint.is_none());
     }
 
     #[test]
