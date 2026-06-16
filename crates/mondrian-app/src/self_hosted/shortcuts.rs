@@ -15,117 +15,154 @@ use crate::app::ui_actions::{
     app_shell_save_project_as_dialog_action,
 };
 
+/// A self-hosted shell shortcut together with its menu-facing display label.
+#[derive(Debug, Clone)]
+pub struct SelfHostedShortcut {
+    /// Key/modifier binding registered with the shortcut router.
+    pub binding: ShortcutBinding,
+    /// Editor or shell action dispatched by the binding.
+    pub action: Action,
+    /// Menu-facing shortcut label.
+    pub label: &'static str,
+}
+
+/// Default shortcut descriptors used by both the router and menu hints.
+pub fn default_shortcuts() -> Vec<SelfHostedShortcut> {
+    vec![
+        shortcut(
+            ShortcutBinding::ctrl(KeyCode::N),
+            app_shell_new_project_dialog_action(),
+            "Ctrl+N",
+        ),
+        shortcut(
+            ShortcutBinding::ctrl(KeyCode::O),
+            app_shell_open_project_dialog_action(),
+            "Ctrl+O",
+        ),
+        shortcut(
+            ShortcutBinding::ctrl(KeyCode::I),
+            app_shell_import_media_dialog_action(),
+            "Ctrl+I",
+        ),
+        shortcut(
+            ShortcutBinding::ctrl(KeyCode::S),
+            Action::SaveProject,
+            "Ctrl+S",
+        ),
+        shortcut(
+            ShortcutBinding::ctrl_shift(KeyCode::S),
+            app_shell_save_project_as_dialog_action(),
+            "Ctrl+Shift+S",
+        ),
+        shortcut(
+            ShortcutBinding::ctrl(KeyCode::Q),
+            app_shell_quit_action(),
+            "Ctrl+Q",
+        ),
+        shortcut(
+            ShortcutBinding::ctrl(KeyCode::W),
+            Action::CloseProject,
+            "Ctrl+W",
+        ),
+        shortcut(
+            ShortcutBinding::new(KeyCode::F11, Modifiers::none()),
+            Action::ToggleFullscreen,
+            "F11",
+        ),
+        shortcut(ShortcutBinding::ctrl(KeyCode::Z), Action::Undo, "Ctrl+Z"),
+        shortcut(
+            ShortcutBinding::ctrl_shift(KeyCode::Z),
+            Action::Redo,
+            "Ctrl+Shift+Z",
+        ),
+        shortcut(ShortcutBinding::ctrl(KeyCode::X), Action::Cut, "Ctrl+X"),
+        shortcut(ShortcutBinding::ctrl(KeyCode::C), Action::Copy, "Ctrl+C"),
+        shortcut(ShortcutBinding::ctrl(KeyCode::V), Action::Paste, "Ctrl+V"),
+        shortcut(
+            ShortcutBinding::new(KeyCode::Digit1, ctrl_alt()),
+            Action::SwitchWorkspace(WorkspacePreset::Editing),
+            "Ctrl+Alt+1",
+        ),
+        shortcut(
+            ShortcutBinding::new(KeyCode::Digit2, ctrl_alt()),
+            Action::SwitchWorkspace(WorkspacePreset::Color),
+            "Ctrl+Alt+2",
+        ),
+        shortcut(
+            ShortcutBinding::new(KeyCode::Digit3, ctrl_alt()),
+            Action::SwitchWorkspace(WorkspacePreset::Audio),
+            "Ctrl+Alt+3",
+        ),
+        shortcut(
+            ShortcutBinding::new(KeyCode::Digit4, ctrl_alt()),
+            Action::SwitchWorkspace(WorkspacePreset::Compositing),
+            "Ctrl+Alt+4",
+        ),
+        shortcut(
+            ShortcutBinding::new(KeyCode::Digit5, ctrl_alt()),
+            Action::SwitchWorkspace(WorkspacePreset::Export),
+            "Ctrl+Alt+5",
+        ),
+        shortcut(
+            ShortcutBinding::new(KeyCode::V, ctrl_alt()),
+            Action::FocusPanel(PanelKind::Viewer),
+            "Ctrl+Alt+V",
+        ),
+        shortcut(
+            ShortcutBinding::new(KeyCode::T, ctrl_alt()),
+            Action::FocusPanel(PanelKind::Timeline),
+            "Ctrl+Alt+T",
+        ),
+        shortcut(
+            ShortcutBinding::new(KeyCode::P, ctrl_alt()),
+            Action::FocusPanel(PanelKind::Project),
+            "Ctrl+Alt+P",
+        ),
+        shortcut(
+            ShortcutBinding::new(KeyCode::A, ctrl_alt()),
+            Action::FocusPanel(PanelKind::Assets),
+            "Ctrl+Alt+A",
+        ),
+        shortcut(
+            ShortcutBinding::new(KeyCode::E, ctrl_alt()),
+            Action::FocusPanel(PanelKind::Effects),
+            "Ctrl+Alt+E",
+        ),
+        shortcut(
+            ShortcutBinding::new(KeyCode::G, ctrl_alt()),
+            Action::FocusPanel(PanelKind::NodeGraph),
+            "Ctrl+Alt+G",
+        ),
+        shortcut(
+            ShortcutBinding::new(KeyCode::X, ctrl_alt()),
+            Action::FocusPanel(PanelKind::Export),
+            "Ctrl+Alt+X",
+        ),
+        shortcut(
+            ShortcutBinding::new(KeyCode::Backspace, ctrl_alt()),
+            Action::FocusPanel(PanelKind::Console),
+            "Ctrl+Alt+Backspace",
+        ),
+    ]
+}
+
+/// Shortcut hint shown for an action in self-hosted menus.
+pub fn shortcut_label_for_action(action: &Action) -> Option<&'static str> {
+    default_shortcuts()
+        .into_iter()
+        .find(|shortcut| shortcut.action == *action)
+        .map(|shortcut| shortcut.label)
+}
+
+fn shortcut(binding: ShortcutBinding, action: Action, label: &'static str) -> SelfHostedShortcut {
+    SelfHostedShortcut { binding, action, label }
+}
+
 /// Register the default global shortcuts for a self-hosted editor window.
 pub fn register_default_shortcuts(router: &mut EventRouter) {
-    register(
-        router,
-        ShortcutBinding::ctrl(KeyCode::N),
-        app_shell_new_project_dialog_action(),
-    );
-    register(
-        router,
-        ShortcutBinding::ctrl(KeyCode::O),
-        app_shell_open_project_dialog_action(),
-    );
-    register(
-        router,
-        ShortcutBinding::ctrl(KeyCode::I),
-        app_shell_import_media_dialog_action(),
-    );
-    register(
-        router,
-        ShortcutBinding::ctrl(KeyCode::S),
-        Action::SaveProject,
-    );
-    register(
-        router,
-        ShortcutBinding::ctrl_shift(KeyCode::S),
-        app_shell_save_project_as_dialog_action(),
-    );
-    register(
-        router,
-        ShortcutBinding::ctrl(KeyCode::Q),
-        app_shell_quit_action(),
-    );
-    register(
-        router,
-        ShortcutBinding::new(KeyCode::F11, Modifiers::none()),
-        Action::ToggleFullscreen,
-    );
-
-    register(router, ShortcutBinding::ctrl(KeyCode::Z), Action::Undo);
-    register(
-        router,
-        ShortcutBinding::ctrl_shift(KeyCode::Z),
-        Action::Redo,
-    );
-
-    register(
-        router,
-        ShortcutBinding::new(KeyCode::Digit1, ctrl_alt()),
-        Action::SwitchWorkspace(WorkspacePreset::Editing),
-    );
-    register(
-        router,
-        ShortcutBinding::new(KeyCode::Digit2, ctrl_alt()),
-        Action::SwitchWorkspace(WorkspacePreset::Color),
-    );
-    register(
-        router,
-        ShortcutBinding::new(KeyCode::Digit3, ctrl_alt()),
-        Action::SwitchWorkspace(WorkspacePreset::Audio),
-    );
-    register(
-        router,
-        ShortcutBinding::new(KeyCode::Digit4, ctrl_alt()),
-        Action::SwitchWorkspace(WorkspacePreset::Compositing),
-    );
-    register(
-        router,
-        ShortcutBinding::new(KeyCode::Digit5, ctrl_alt()),
-        Action::SwitchWorkspace(WorkspacePreset::Export),
-    );
-
-    register(
-        router,
-        ShortcutBinding::new(KeyCode::V, ctrl_alt()),
-        Action::FocusPanel(PanelKind::Viewer),
-    );
-    register(
-        router,
-        ShortcutBinding::new(KeyCode::T, ctrl_alt()),
-        Action::FocusPanel(PanelKind::Timeline),
-    );
-    register(
-        router,
-        ShortcutBinding::new(KeyCode::P, ctrl_alt()),
-        Action::FocusPanel(PanelKind::Project),
-    );
-    register(
-        router,
-        ShortcutBinding::new(KeyCode::A, ctrl_alt()),
-        Action::FocusPanel(PanelKind::Assets),
-    );
-    register(
-        router,
-        ShortcutBinding::new(KeyCode::E, ctrl_alt()),
-        Action::FocusPanel(PanelKind::Effects),
-    );
-    register(
-        router,
-        ShortcutBinding::new(KeyCode::G, ctrl_alt()),
-        Action::FocusPanel(PanelKind::NodeGraph),
-    );
-    register(
-        router,
-        ShortcutBinding::new(KeyCode::X, ctrl_alt()),
-        Action::FocusPanel(PanelKind::Export),
-    );
-    register(
-        router,
-        ShortcutBinding::new(KeyCode::Backspace, ctrl_alt()),
-        Action::FocusPanel(PanelKind::Console),
-    );
+    for shortcut in default_shortcuts() {
+        register(router, shortcut.binding, shortcut.action);
+    }
 }
 
 fn register(router: &mut EventRouter, binding: ShortcutBinding, action: Action) {
@@ -188,6 +225,51 @@ mod tests {
                 .shortcut_manager()
                 .resolve(KeyCode::T, ctrl_alt(), ShortcutContext::default()),
             Some(Action::FocusPanel(PanelKind::Timeline))
+        );
+        assert_eq!(
+            router.shortcut_manager().resolve(
+                KeyCode::C,
+                Modifiers::ctrl(),
+                ShortcutContext::default()
+            ),
+            Some(Action::Copy)
+        );
+        assert_eq!(
+            router.shortcut_manager().resolve(
+                KeyCode::X,
+                Modifiers::ctrl(),
+                ShortcutContext::default()
+            ),
+            Some(Action::Cut)
+        );
+        assert_eq!(
+            router.shortcut_manager().resolve(
+                KeyCode::V,
+                Modifiers::ctrl(),
+                ShortcutContext::default()
+            ),
+            Some(Action::Paste)
+        );
+        assert_eq!(
+            router.shortcut_manager().resolve(
+                KeyCode::W,
+                Modifiers::ctrl(),
+                ShortcutContext::default()
+            ),
+            Some(Action::CloseProject)
+        );
+    }
+
+    #[test]
+    fn shortcut_labels_share_the_default_descriptor_table() {
+        assert_eq!(
+            shortcut_label_for_action(&Action::SaveProject),
+            Some("Ctrl+S")
+        );
+        assert_eq!(shortcut_label_for_action(&Action::Copy), Some("Ctrl+C"));
+        assert_eq!(
+            shortcut_label_for_action(&Action::SwitchWorkspace(WorkspacePreset::Audio)),
+            Some("Ctrl+Alt+3")
         );
     }
 
