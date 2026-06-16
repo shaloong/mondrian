@@ -16,7 +16,8 @@ use crate::app::ui_actions::{
     ExportEnqueuePayload, InspectorClipTransformField, InspectorRemoveEffectPayload,
     InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
     InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
-    InspectorSetEffectEnabledPayload, ProjectCreateWithSettingsPayload, TimelineAddTrackKind,
+    InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload,
+    ProjectCreateWithSettingsPayload, TimelineAddTrackKind,
     TimelineAddTrackPayload, TimelineDropAssetPayload, TimelineMoveClipPayload,
     TimelineMoveTrackPayload, TimelineSeekPayload, TimelineSelectClipPayload,
     TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipPayload,
@@ -24,7 +25,7 @@ use crate::app::ui_actions::{
     EFFECTS_NAMESPACE, EXPORT_ENQUEUE, EXPORT_NAMESPACE, EXPORT_SET_DRAFT, INSPECTOR_NAMESPACE,
     INSPECTOR_REMOVE_EFFECT, INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_CLIP_ENABLED,
     INSPECTOR_SET_CLIP_OPACITY, INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD,
-    INSPECTOR_SET_EFFECT_ENABLED, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
+    INSPECTOR_SET_EFFECT_ENABLED, INSPECTOR_SET_EFFECT_PROPERTY, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
     TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET, TIMELINE_MOVE_CLIP, TIMELINE_MOVE_TRACK,
     TIMELINE_NAMESPACE, TIMELINE_SEEK, TIMELINE_SELECT_CLIP, TIMELINE_SET_TRACK_CONTROL,
     TIMELINE_TRIM_CLIP,
@@ -36,7 +37,7 @@ use mondrian_core::automation::{
     timecode_to_ticks, Keyframe, PropertyHost, PropertyMutation, PropertyValue,
 };
 use mondrian_core::events::AppEvent;
-use mondrian_core::types::{ClipId, TimeCode};
+use mondrian_core::types::{ClipId, EffectId, TimeCode};
 use mondrian_core::{MondrianError, Result};
 use mondrian_timeline::clip::{Clip, Transform2D, TrimEdge};
 use std::collections::BTreeMap;
@@ -774,6 +775,23 @@ impl AppState {
                 )
                 .map(|_| ())
             }
+            INSPECTOR_SET_EFFECT_PROPERTY => {
+                let payload = parse_ui_payload::<InspectorSetEffectPropertyPayload>(
+                    "inspector_ui_action",
+                    name,
+                    payload,
+                )?;
+                self.set_effect_property_from_ui(
+                    SelectedClipRef {
+                        track_id: payload.clip.track_id,
+                        is_video_track: payload.clip.is_video_track,
+                        clip_id: payload.clip.clip_id,
+                    },
+                    payload.effect_id,
+                    &payload.path,
+                    payload.value,
+                )
+            }
             _ => Err(unknown_ui_action_error("inspector_ui_action", name)),
         }
     }
@@ -924,6 +942,41 @@ impl AppState {
                 Err(err)
             }
         }
+    }
+
+    fn set_effect_property_from_ui(
+        &mut self,
+        selection: SelectedClipRef,
+        effect_id: EffectId,
+        path: &str,
+        value: PropertyValue,
+    ) -> Result<()> {
+        self.ensure_clip_track_unlocked("set_effect_property", selection.clip_id)?;
+        let Some(seq) = self.sequence.as_mut() else {
+            return Err(missing_sequence_error("set_effect_property"));
+        };
+        let before = seq.clone();
+        let changed = {
+            let clip = find_clip_mut(seq, selection.clip_id)
+                .ok_or_else(|| missing_clip_error("set_effect_property", selection.clip_id))?;
+            let effect =
+                clip.effects
+                    .iter_mut()
+                    .find(|e| e.id == effect_id)
+                    .ok_or_else(|| MondrianError::WorkflowStepFailed {
+                        step_id: "set_effect_property".to_string(),
+                        reason: format!("effect {effect_id} not found on clip"),
+                    })?;
+            effect.apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: path.to_string(),
+                value,
+            })?;
+            true
+        };
+        if changed {
+            self.record_timeline_edit_snapshot("调整特效属性", before);
+        }
+        Ok(())
     }
 
     fn set_clip_enabled_from_ui(&mut self, clip_id: ClipId, enabled: bool) -> Result<()> {

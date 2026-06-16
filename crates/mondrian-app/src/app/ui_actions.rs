@@ -49,6 +49,8 @@ pub const INSPECTOR_SET_CLIP_CURVE: &str = "set_clip_curve";
 pub const INSPECTOR_SET_EFFECT_ENABLED: &str = "set_effect_enabled";
 /// Action name for removing one effect from a selected clip.
 pub const INSPECTOR_REMOVE_EFFECT: &str = "remove_effect";
+/// Action name for changing one effect property value.
+pub const INSPECTOR_SET_EFFECT_PROPERTY: &str = "set_effect_property";
 
 /// Custom action namespace for effect browser operations.
 pub const EFFECTS_NAMESPACE: &str = "ui.effects";
@@ -315,6 +317,19 @@ pub struct InspectorRemoveEffectPayload {
     pub effect_id: EffectId,
 }
 
+/// Change one effect property value from an inspector panel.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InspectorSetEffectPropertyPayload {
+    /// Clip targeted by the inspector mutation.
+    pub clip: InspectorClipRefPayload,
+    /// Effect instance being edited.
+    pub effect_id: EffectId,
+    /// Namespaced property path on the effect.
+    pub path: String,
+    /// New property value to set.
+    pub value: mondrian_core::automation::PropertyValue,
+}
+
 /// Add an effect from the effect browser to a clip.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EffectsAddToClipPayload {
@@ -471,6 +486,13 @@ pub fn inspector_set_effect_enabled_action(payload: InspectorSetEffectEnabledPay
 /// Build an action that removes an effect from a selected clip.
 pub fn inspector_remove_effect_action(payload: InspectorRemoveEffectPayload) -> Action {
     custom_inspector_action(INSPECTOR_REMOVE_EFFECT, payload)
+}
+
+/// Build an action that changes one effect property value.
+pub fn inspector_set_effect_property_action(
+    payload: InspectorSetEffectPropertyPayload,
+) -> Action {
+    custom_inspector_action(INSPECTOR_SET_EFFECT_PROPERTY, payload)
 }
 
 /// Build an action that adds an effect to a selected clip.
