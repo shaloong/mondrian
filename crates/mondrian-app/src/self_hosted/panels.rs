@@ -359,9 +359,12 @@ impl PanelListModel {
         let effect_target = selected_clip.filter(|selection| selection.is_video_track);
         let effects = effect_library_types();
         let items = if effects.is_empty() {
-            vec![PanelListItem::new("No effects available")
-                .with_subtitle("Effect registry is empty")
-                .disabled(true)]
+            vec![with_app_icon(
+                PanelListItem::new("No effects available")
+                    .with_subtitle("Effect registry is empty")
+                    .disabled(true),
+                AppIcon::Effect,
+            )]
         } else {
             effects
                 .into_iter()
@@ -379,7 +382,7 @@ impl PanelListModel {
                             },
                         ));
                     }
-                    item
+                    with_app_icon(item, AppIcon::Effect)
                 })
                 .collect()
         };
@@ -3421,6 +3424,7 @@ mod tests {
         assert!(model.demo_activate_prefix.is_none());
         assert!(model.items.iter().all(|item| item.select_action.is_none()));
         assert!(model.items.iter().all(|item| item.activate_action.is_none()));
+        assert!(model.items.iter().all(|item| item.icon.is_some()));
     }
 
     #[test]
@@ -3436,6 +3440,7 @@ mod tests {
         let model = PanelListModel::from_effect_registry(Some(selection));
 
         assert!(model.demo_activate_prefix.is_none());
+        assert!(model.items.iter().all(|item| item.icon.is_some()));
         let action = model
             .items
             .iter()

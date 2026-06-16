@@ -35,6 +35,8 @@ pub enum AppIcon {
     Cut,
     /// Jump to sequence end icon.
     EndFrameFilled,
+    /// Effect browser icon.
+    Effect,
     /// Export icon.
     Export,
     /// Hidden eye icon.
@@ -103,7 +105,7 @@ pub enum AppIcon {
 
 impl AppIcon {
     /// Every bundled product icon that should remain parseable by the custom UI.
-    pub const ALL: [Self; 45] = [
+    pub const ALL: [Self; 46] = [
         Self::Add,
         Self::Anchor,
         Self::ArrowDown,
@@ -117,6 +119,7 @@ impl AppIcon {
         Self::CursorFilled,
         Self::Cut,
         Self::EndFrameFilled,
+        Self::Effect,
         Self::Export,
         Self::EyeHidden,
         Self::EyeVisible,
@@ -167,6 +170,7 @@ impl AppIcon {
             Self::CursorFilled => "app.cursor-filled",
             Self::Cut => "app.cut",
             Self::EndFrameFilled => "app.end-frame-filled",
+            Self::Effect => "app.effect",
             Self::Export => "app.export",
             Self::EyeHidden => "app.eye-hidden",
             Self::EyeVisible => "app.eye-visible",
@@ -218,6 +222,7 @@ impl AppIcon {
             Self::CursorFilled => include_str!("../../assets/icons/cursor_fill.svg"),
             Self::Cut => include_str!("../../assets/icons/cut.svg"),
             Self::EndFrameFilled => include_str!("../../assets/icons/end_frame_fill.svg"),
+            Self::Effect => include_str!("../../assets/icons/effect.svg"),
             Self::Export => include_str!("../../assets/icons/export.svg"),
             Self::EyeHidden => include_str!("../../assets/icons/eye_invisiable.svg"),
             Self::EyeVisible => include_str!("../../assets/icons/eye_visiable.svg"),
