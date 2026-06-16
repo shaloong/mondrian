@@ -1,6 +1,1 @@
-<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" width="24.000000" height="24.000000" fill="none">
-	<rect id="Icon/save" width="24.000000" height="24.000000" x="0.000000" y="0.000000" />
-	<path id="save-outline" d="M5 3L16.5 3C17.0304 3 17.5391 3.21071 17.9142 3.58579L20.4142 6.08579C20.7893 6.46086 21 6.96957 21 7.5L21 19C21 19.5304 20.7893 20.0391 20.4142 20.4142C20.0391 20.7893 19.5304 21 19 21L5 21C4.46957 21 3.96086 20.7893 3.58579 20.4142C3.21071 20.0391 3 19.5304 3 19L3 5C3 4.46957 3.21071 3.96086 3.58579 3.58579C3.96086 3.21071 4.46957 3 5 3Z" stroke="rgb(0,0,0)" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.000000" />
-	<path id="save-slot" d="M8 3L8 9L16 9L16 3" stroke="rgb(0,0,0)" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.000000" />
-	<path id="save-label" d="M8 21L8 15L16 15L16 21" stroke="rgb(0,0,0)" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.000000" />
-</svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="#000000" viewBox="0 0 256 256"><path d="M222.14,69.17,186.83,33.86A19.86,19.86,0,0,0,172.69,28H48A20,20,0,0,0,28,48V208a20,20,0,0,0,20,20H208a20,20,0,0,0,20-20V83.31A19.86,19.86,0,0,0,222.14,69.17ZM164,204H92V160h72Zm40,0H188V156a20,20,0,0,0-20-20H88a20,20,0,0,0-20,20v48H52V52H171l33,33ZM164,84a12,12,0,0,1-12,12H96a12,12,0,0,1,0-24h56A12,12,0,0,1,164,84Z"></path></svg>
