@@ -2833,6 +2833,45 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_inspector_ui_effect_enabled_noop_does_not_enter_undo_history() {
+        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+        let effect: mondrian_effects::EffectNode =
+            mondrian_effects::EffectNodeExt::with_defaults(EffectType::GaussianBlur);
+        let effect_id = effect.id;
+        state.sequence.as_mut().expect("sequence").video_tracks[0].clips[0].add_effect_node(effect);
+
+        state
+            .dispatch_action(inspector_set_effect_enabled_action(
+                InspectorSetEffectEnabledPayload {
+                    clip: inspector_clip_payload(track_id, clip_id),
+                    effect_id,
+                    enabled: true,
+                },
+            ))
+            .expect("dispatch no-op effect enabled");
+
+        assert!(!state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_inspector_ui_effect_enabled_rejects_missing_effect_without_undo() {
+        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+
+        let err = state
+            .dispatch_action(inspector_set_effect_enabled_action(
+                InspectorSetEffectEnabledPayload {
+                    clip: inspector_clip_payload(track_id, clip_id),
+                    effect_id: EffectId::new(),
+                    enabled: false,
+                },
+            ))
+            .expect_err("missing effect should reject mutation");
+
+        assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
+        assert!(!state.can_undo_action());
+    }
+
+    #[test]
     fn dispatch_inspector_ui_sets_effect_property_with_undo_snapshot() {
         let (mut state, track_id, clip_id) = state_with_two_video_tracks();
         let (effect_id, path, initial_value) =

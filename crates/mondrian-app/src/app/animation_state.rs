@@ -542,7 +542,6 @@ impl AppState {
                     reason: "当前无项目".to_string(),
                 }
             })?;
-            let before = seq.clone();
             let Some((track_id, _is_video, is_locked)) =
                 find_clip_track_lock(seq, selection.clip_id)
             else {
@@ -556,6 +555,23 @@ impl AppState {
                 });
             }
 
+            let clip = find_clip_by_selection(seq, selection).ok_or_else(|| {
+                mondrian_core::MondrianError::ClipNotFound {
+                    clip_id: selection.clip_id.to_string(),
+                }
+            })?;
+            let effect =
+                clip.effects.iter().find(|effect| effect.id == effect_id).ok_or_else(|| {
+                    mondrian_core::MondrianError::WorkflowStepFailed {
+                        step_id: "set_clip_effect_enabled".to_string(),
+                        reason: format!("effect {effect_id} not found on clip"),
+                    }
+                })?;
+            if effect.is_enabled == enabled {
+                return Ok(false);
+            }
+
+            let before = seq.clone();
             let clip = find_clip_mut_by_selection(seq, selection).ok_or_else(|| {
                 mondrian_core::MondrianError::ClipNotFound {
                     clip_id: selection.clip_id.to_string(),

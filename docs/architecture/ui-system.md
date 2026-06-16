@@ -206,7 +206,11 @@ directly rather than adding an inspector-specific custom action.
 Effects browser activation uses the same protocol family: when a video clip is
 selected, effect rows carry a `ui.effects` add-to-clip payload with the selected
 clip id and serialized `EffectType`, and `AppState` routes it through
-`add_effect_to_clip`.
+`add_effect_to_clip`. The Effects panel model is derived from the current
+`AppState` snapshot, not only from raw selection metadata, so rows are disabled
+when no video clip can receive an effect or when the selected clip's track is
+locked. The command layer still performs the authoritative locked-track and
+effect-target validation.
 This keeps reusable widgets index/value-based and UI-agnostic while avoiding
 string parsing in business logic.
 

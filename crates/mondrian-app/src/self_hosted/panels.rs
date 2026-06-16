@@ -84,7 +84,7 @@ impl SelfHostedPanelModels {
         Self {
             project: PanelListModel::from_project_status(state),
             assets: PanelListModel::from_asset_library(state.asset_library.as_deref()),
-            effects: PanelListModel::from_effect_registry(state.primary_selected_clip()),
+            effects: PanelListModel::from_app_effect_registry(state),
             console: PanelListModel::from_app_status(state),
             viewer: ViewerPanelModel::from_app_state(state),
             timeline: state
@@ -112,7 +112,7 @@ impl SelfHostedPanelModels {
         Self {
             project: PanelListModel::from_project_status(state),
             assets: demo_asset_model(),
-            effects: PanelListModel::from_effect_registry(state.primary_selected_clip()),
+            effects: PanelListModel::from_app_effect_registry(state),
             console: demo_console_model(),
             viewer: ViewerPanelModel::from_app_state(state),
             timeline: state
@@ -365,9 +365,40 @@ impl PanelListModel {
         }
     }
 
+    /// Build the visible effect browser from the current app state.
+    ///
+    /// The widget rows stay domain-light, but the model records app-level
+    /// availability so locked tracks and non-video selections do not advertise
+    /// actions that the command layer will reject.
+    pub fn from_app_effect_registry(state: &AppState) -> Self {
+        let target = state.primary_selected_clip().filter(|selection| selection.is_video_track);
+        let disabled_reason = match target {
+            Some(selection) if selected_clip_track_is_locked(state, selection) => {
+                Some("Selected clip track is locked")
+            }
+            Some(_) => None,
+            None => Some("Select a video clip to apply effects"),
+        };
+        let action_target = if disabled_reason.is_none() {
+            target
+        } else {
+            None
+        };
+        Self::effect_registry_model(action_target, disabled_reason)
+    }
+
     /// Build the visible effect browser from the shared effect registry.
     pub fn from_effect_registry(selected_clip: Option<SelectedClipRef>) -> Self {
         let effect_target = selected_clip.filter(|selection| selection.is_video_track);
+        let disabled_reason =
+            effect_target.is_none().then_some("Select a video clip to apply effects");
+        Self::effect_registry_model(effect_target, disabled_reason)
+    }
+
+    fn effect_registry_model(
+        effect_target: Option<SelectedClipRef>,
+        disabled_reason: Option<&'static str>,
+    ) -> Self {
         let effects = effect_library_types();
         let items = if effects.is_empty() {
             vec![with_app_icon(
@@ -382,10 +413,13 @@ impl PanelListModel {
                 .map(|effect_type| {
                     let name = effect_display_name(&effect_type);
                     let category = effect_type.category_path().join(" / ");
+                    let subtitle = disabled_reason.map(str::to_owned).unwrap_or(category);
                     let mut item = PanelListItem::new(name)
-                        .with_subtitle(category)
+                        .with_subtitle(subtitle)
                         .with_badge(effect_badge(&effect_type));
-                    if let Some(selection) = effect_target {
+                    if disabled_reason.is_some() {
+                        item = item.disabled(true);
+                    } else if let Some(selection) = effect_target {
                         item = item.with_activate_action(effects_add_to_clip_action(
                             EffectsAddToClipPayload {
                                 clip: inspector_clip_payload(selection),
@@ -1469,6 +1503,25 @@ fn clip_for_selection<'a>(
     }
 
     None
+}
+
+fn selected_clip_track_is_locked(state: &AppState, selection: SelectedClipRef) -> bool {
+    let Some(sequence) = state.sequence.as_ref() else {
+        return false;
+    };
+    if selection.is_video_track {
+        sequence
+            .video_tracks
+            .iter()
+            .find(|track| track.clips.iter().any(|clip| clip.id == selection.clip_id))
+            .is_some_and(|track| track.is_locked)
+    } else {
+        sequence
+            .audio_tracks
+            .iter()
+            .find(|track| track.clips.iter().any(|clip| clip.id == selection.clip_id))
+            .is_some_and(|track| track.is_locked)
+    }
 }
 
 fn panel_list(model: &PanelListModel) -> PanelList {
@@ -3670,6 +3723,7 @@ mod tests {
         assert!(model.items.iter().all(|item| item.select_action.is_none()));
         assert!(model.items.iter().all(|item| item.activate_action.is_none()));
         assert!(model.items.iter().all(|item| item.icon.is_some()));
+        assert!(model.items.iter().all(|item| item.disabled));
     }
 
     #[test]
@@ -3686,6 +3740,7 @@ mod tests {
 
         assert!(model.demo_activate_prefix.is_none());
         assert!(model.items.iter().all(|item| item.icon.is_some()));
+        assert!(model.items.iter().all(|item| !item.disabled));
         let action = model
             .items
             .iter()
@@ -3701,6 +3756,34 @@ mod tests {
         assert_eq!(payload.clip.clip_id, clip_id);
         assert_eq!(payload.clip.track_id, track_id);
         assert!(payload.clip.is_video_track);
+    }
+
+    #[test]
+    fn app_state_models_disable_effect_actions_for_locked_selected_track() {
+        let mut state = AppState::new();
+        let mut sequence = Sequence::new("edit");
+        let tb = sequence.time_base();
+        let clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(30, tb));
+        let clip_id = clip.id;
+        let track_id = sequence.video_tracks[0].id;
+        sequence.video_tracks[0].add_clip(clip).expect("add video clip");
+        sequence.video_tracks[0].is_locked = true;
+        state.sequence = Some(sequence);
+        state.selection.selected_clips.push(SelectedClipRef {
+            track_id,
+            is_video_track: true,
+            clip_id,
+        });
+
+        let models = SelfHostedPanelModels::from_app_state(&state);
+
+        assert!(models.effects.items.iter().all(|item| item.disabled));
+        assert!(models.effects.items.iter().all(|item| item.activate_action.is_none()));
+        assert!(models
+            .effects
+            .items
+            .iter()
+            .all(|item| item.subtitle == "Selected clip track is locked"));
     }
 
     #[test]
