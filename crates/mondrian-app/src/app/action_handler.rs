@@ -17,15 +17,15 @@ use crate::app::ui_actions::{
     InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
     InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
     InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload,
-    ProjectCreateWithSettingsPayload, TimelineAddTrackKind,
-    TimelineAddTrackPayload, TimelineDropAssetPayload, TimelineMoveClipPayload,
-    TimelineMoveTrackPayload, TimelineSeekPayload, TimelineSelectClipPayload,
-    TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipPayload,
-    TimelineTrimPayloadEdge, ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP,
-    EFFECTS_NAMESPACE, EXPORT_ENQUEUE, EXPORT_NAMESPACE, EXPORT_SET_DRAFT, INSPECTOR_NAMESPACE,
-    INSPECTOR_REMOVE_EFFECT, INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_CLIP_ENABLED,
-    INSPECTOR_SET_CLIP_OPACITY, INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD,
-    INSPECTOR_SET_EFFECT_ENABLED, INSPECTOR_SET_EFFECT_PROPERTY, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
+    ProjectCreateWithSettingsPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
+    TimelineDropAssetPayload, TimelineMoveClipPayload, TimelineMoveTrackPayload,
+    TimelineSeekPayload, TimelineSelectClipPayload, TimelineSetTrackControlPayload,
+    TimelineTrackControlPayloadKind, TimelineTrimClipPayload, TimelineTrimPayloadEdge,
+    ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, EXPORT_ENQUEUE,
+    EXPORT_NAMESPACE, EXPORT_SET_DRAFT, INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT,
+    INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY,
+    INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD, INSPECTOR_SET_EFFECT_ENABLED,
+    INSPECTOR_SET_EFFECT_PROPERTY, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
     TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET, TIMELINE_MOVE_CLIP, TIMELINE_MOVE_TRACK,
     TIMELINE_NAMESPACE, TIMELINE_SEEK, TIMELINE_SELECT_CLIP, TIMELINE_SET_TRACK_CONTROL,
     TIMELINE_TRIM_CLIP,
@@ -959,19 +959,27 @@ impl AppState {
         let changed = {
             let clip = find_clip_mut(seq, selection.clip_id)
                 .ok_or_else(|| missing_clip_error("set_effect_property", selection.clip_id))?;
-            let effect =
-                clip.effects
-                    .iter_mut()
-                    .find(|e| e.id == effect_id)
-                    .ok_or_else(|| MondrianError::WorkflowStepFailed {
-                        step_id: "set_effect_property".to_string(),
-                        reason: format!("effect {effect_id} not found on clip"),
-                    })?;
-            effect.apply_property_mutation(PropertyMutation::SetStaticValue {
-                path: path.to_string(),
-                value,
+            let effect = clip.effects.iter_mut().find(|e| e.id == effect_id).ok_or_else(|| {
+                MondrianError::WorkflowStepFailed {
+                    step_id: "set_effect_property".to_string(),
+                    reason: format!("effect {effect_id} not found on clip"),
+                }
             })?;
-            true
+            let property = effect.properties.property(path).ok_or_else(|| {
+                MondrianError::WorkflowStepFailed {
+                    step_id: "set_effect_property".to_string(),
+                    reason: format!("effect property not found: {path}"),
+                }
+            })?;
+            if property.static_value() == &value {
+                false
+            } else {
+                effect.apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: path.to_string(),
+                    value,
+                })?;
+                true
+            }
         };
         if changed {
             self.record_timeline_edit_snapshot("调整特效属性", before);
@@ -1323,21 +1331,22 @@ mod tests {
         export_set_draft_action, inspector_remove_effect_action, inspector_set_clip_curve_action,
         inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
         inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
-        inspector_set_effect_enabled_action, project_create_with_settings_action,
-        timeline_add_track_action, timeline_drop_asset_action, timeline_move_clip_action,
-        timeline_move_track_action, timeline_seek_action, timeline_select_clip_action,
-        timeline_set_track_control_action, timeline_trim_clip_action, AssetsPrepareDragPayload,
-        EffectsAddToClipPayload, ExportDraftUpdatePayload, ExportEnqueuePayload,
-        InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
-        InspectorRemoveEffectPayload, InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
-        InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
-        InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
+        inspector_set_effect_enabled_action, inspector_set_effect_property_action,
+        project_create_with_settings_action, timeline_add_track_action, timeline_drop_asset_action,
+        timeline_move_clip_action, timeline_move_track_action, timeline_seek_action,
+        timeline_select_clip_action, timeline_set_track_control_action, timeline_trim_clip_action,
+        AssetsPrepareDragPayload, EffectsAddToClipPayload, ExportDraftUpdatePayload,
+        ExportEnqueuePayload, InspectorClipRefPayload, InspectorClipTransformField,
+        InspectorCurvePointPayload, InspectorRemoveEffectPayload, InspectorSetClipCurvePayload,
+        InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
+        InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
+        InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload,
         ProjectCreateWithSettingsPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
         TimelineDropAssetPayload, TimelineMoveTrackPayload, TimelineSetTrackControlPayload,
         TimelineTrackControlPayloadKind,
     };
     use mondrian_assets::AssetLibrary;
-    use mondrian_core::types::{AssetId, MaskId, TimeCode, TrackId};
+    use mondrian_core::types::{AssetId, EffectId, MaskId, TimeCode, TrackId};
     use mondrian_core::Color;
     use mondrian_core::{ProjectSettings, Rational, Resolution};
     use mondrian_effects::EffectType;
@@ -1368,6 +1377,46 @@ mod tests {
         clip_id: mondrian_core::types::ClipId,
     ) -> InspectorClipRefPayload {
         InspectorClipRefPayload { track_id, is_video_track: true, clip_id }
+    }
+
+    fn add_default_effect_with_first_property(
+        state: &mut AppState,
+        effect_type: EffectType,
+    ) -> (EffectId, String, PropertyValue) {
+        let effect: mondrian_effects::EffectNode =
+            mondrian_effects::EffectNodeExt::with_defaults(effect_type);
+        let effect_id = effect.id;
+        let clip = &mut state.sequence.as_mut().expect("sequence").video_tracks[0].clips[0];
+        clip.add_effect_node(effect);
+        let effect = clip
+            .effects
+            .iter()
+            .find(|effect| effect.id == effect_id)
+            .expect("inserted effect");
+        let (path, property) = effect
+            .properties
+            .iter()
+            .next()
+            .expect("effect should expose at least one property");
+        (effect_id, path.to_string(), property.static_value().clone())
+    }
+
+    fn different_property_value(value: &PropertyValue) -> PropertyValue {
+        match value {
+            PropertyValue::Bool(value) => PropertyValue::Bool(!value),
+            PropertyValue::Int(value) => PropertyValue::Int(value.saturating_add(1)),
+            PropertyValue::Float(value) => PropertyValue::Float(*value + 0.5),
+            PropertyValue::Double(value) => PropertyValue::Double(*value + 0.5),
+            PropertyValue::Vec2(value) => PropertyValue::Vec2(*value + glam::Vec2::splat(0.5)),
+            PropertyValue::Vec3(value) => PropertyValue::Vec3(*value + glam::Vec3::splat(0.5)),
+            PropertyValue::Color(_) => PropertyValue::Color(Color::from_hex(0x44AAFF)),
+            PropertyValue::Vec4(value) => {
+                let mut changed = *value;
+                changed[0] += 0.5;
+                PropertyValue::Vec4(changed)
+            }
+            PropertyValue::Text(value) => PropertyValue::Text(format!("{value} edited")),
+        }
     }
 
     #[test]
@@ -2781,6 +2830,84 @@ mod tests {
         assert_eq!(effect.id, effect_id);
         assert!(!effect.is_enabled);
         assert!(state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_inspector_ui_sets_effect_property_with_undo_snapshot() {
+        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+        let (effect_id, path, initial_value) =
+            add_default_effect_with_first_property(&mut state, EffectType::GaussianBlur);
+        let next_value = different_property_value(&initial_value);
+
+        state
+            .dispatch_action(inspector_set_effect_property_action(
+                InspectorSetEffectPropertyPayload {
+                    clip: inspector_clip_payload(track_id, clip_id),
+                    effect_id,
+                    path: path.clone(),
+                    value: next_value.clone(),
+                },
+            ))
+            .expect("dispatch effect property");
+
+        let property = state.sequence.as_ref().expect("sequence").video_tracks[0].clips[0]
+            .effects
+            .iter()
+            .find(|effect| effect.id == effect_id)
+            .and_then(|effect| effect.properties.property(&path))
+            .expect("updated property");
+        assert_eq!(property.static_value(), &next_value);
+        assert!(state.can_undo_action());
+
+        assert!(state.undo_timeline().expect("undo effect property"));
+        let property = state.sequence.as_ref().expect("sequence").video_tracks[0].clips[0]
+            .effects
+            .iter()
+            .find(|effect| effect.id == effect_id)
+            .and_then(|effect| effect.properties.property(&path))
+            .expect("restored property");
+        assert_eq!(property.static_value(), &initial_value);
+    }
+
+    #[test]
+    fn dispatch_inspector_ui_effect_property_noop_does_not_enter_undo_history() {
+        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+        let (effect_id, path, initial_value) =
+            add_default_effect_with_first_property(&mut state, EffectType::GaussianBlur);
+
+        state
+            .dispatch_action(inspector_set_effect_property_action(
+                InspectorSetEffectPropertyPayload {
+                    clip: inspector_clip_payload(track_id, clip_id),
+                    effect_id,
+                    path,
+                    value: initial_value,
+                },
+            ))
+            .expect("dispatch no-op effect property");
+
+        assert!(!state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_inspector_ui_effect_property_rejects_missing_path_without_undo() {
+        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+        let (effect_id, _, initial_value) =
+            add_default_effect_with_first_property(&mut state, EffectType::GaussianBlur);
+
+        let err = state
+            .dispatch_action(inspector_set_effect_property_action(
+                InspectorSetEffectPropertyPayload {
+                    clip: inspector_clip_payload(track_id, clip_id),
+                    effect_id,
+                    path: format!("effect.{effect_id}.missing"),
+                    value: initial_value,
+                },
+            ))
+            .expect_err("missing effect property should reject mutation");
+
+        assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
+        assert!(!state.can_undo_action());
     }
 
     #[test]

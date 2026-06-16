@@ -189,8 +189,11 @@ track validation, linked-clip trim behavior, undo snapshots, and timeline
 modified events therefore stay centralized in the timeline command path.
 Inspector effect rows are read from the selected clip's effect instances and
 toggle or remove effect instances through `AppState::set_clip_effect_enabled`
-and `AppState::remove_effect_from_clip`; the widget layer sees only button /
-checkbox values plus stable effect ids.
+and `AppState::remove_effect_from_clip`; per-effect property edits dispatch
+`ui.inspector.set_effect_property` and route through the effect instance's
+`PropertyBag`. Static-value no-ops are ignored before recording undo history,
+so slider/text/color controls cannot add empty undo steps. The widget layer sees
+only button / checkbox / typed property values plus stable effect ids and paths.
 The generic `Action::RemoveEffect` resolves the clip id into the active sequence
 selection reference and reuses the same remove-effect command, so inspector
 buttons, shortcuts, scripts, and macros share locked-track validation and undo

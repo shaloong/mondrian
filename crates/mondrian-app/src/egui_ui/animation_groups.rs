@@ -14,10 +14,10 @@ pub use mondrian_editor_state::animation_groups::{
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mondrian_core::automation::AnimatedProperty;
     use mondrian_core::automation::{
         AnimatablePropertyUiMetadata, PropertyDescriptor, PropertyValue,
     };
-    use mondrian_core::automation::AnimatedProperty;
 
     fn property(path: &str, display_name: &str, group_name: Option<&str>) -> AnimatedProperty {
         let mut descriptor = PropertyDescriptor::new(path, display_name, PropertyValue::Float(0.0));
@@ -35,10 +35,7 @@ mod tests {
             "位置",
             None,
         );
-        let meta = property_group_meta(
-            mondrian_timeline::clip::Transform2D::POSITION_PATH,
-            &prop,
-        );
+        let meta = property_group_meta(mondrian_timeline::clip::Transform2D::POSITION_PATH, &prop);
         assert_eq!(meta.kind, AnimationGroupKind::Motion);
     }
 

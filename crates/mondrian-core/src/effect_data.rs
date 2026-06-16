@@ -275,7 +275,10 @@ mod tests {
 
     #[test]
     fn parse_effect_id_from_property_path_rejects_non_effect_prefix() {
-        assert_eq!(parse_effect_id_from_property_path("transform.position"), None);
+        assert_eq!(
+            parse_effect_id_from_property_path("transform.position"),
+            None
+        );
     }
 
     #[test]

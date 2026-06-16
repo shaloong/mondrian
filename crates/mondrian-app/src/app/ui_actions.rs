@@ -489,9 +489,7 @@ pub fn inspector_remove_effect_action(payload: InspectorRemoveEffectPayload) -> 
 }
 
 /// Build an action that changes one effect property value.
-pub fn inspector_set_effect_property_action(
-    payload: InspectorSetEffectPropertyPayload,
-) -> Action {
+pub fn inspector_set_effect_property_action(payload: InspectorSetEffectPropertyPayload) -> Action {
     custom_inspector_action(INSPECTOR_SET_EFFECT_PROPERTY, payload)
 }
 

@@ -33,7 +33,9 @@ pub fn blend_mode_options() -> &'static [BlendModeOption] {
         BlendModeOption { label: "变亮", value: "Lighten" },
         BlendModeOption { label: "滤色", value: "Screen" },
         BlendModeOption { label: "颜色减淡", value: "ColorDodge" },
-        BlendModeOption { label: "线性减淡(添加)", value: "LinearDodge" },
+        BlendModeOption {
+            label: "线性减淡(添加)", value: "LinearDodge"
+        },
         BlendModeOption { label: "浅色", value: "LighterColor" },
         BlendModeOption { label: "叠加", value: "Overlay" },
         BlendModeOption { label: "柔光", value: "SoftLight" },
@@ -337,7 +339,11 @@ mod tests {
 
     #[test]
     fn field_order_labels_are_unique() {
-        let all = [FieldOrder::Progressive, FieldOrder::UpperFirst, FieldOrder::LowerFirst];
+        let all = [
+            FieldOrder::Progressive,
+            FieldOrder::UpperFirst,
+            FieldOrder::LowerFirst,
+        ];
         let labels: Vec<&str> = all.iter().map(|&o| field_order_label(o)).collect();
         let mut unique = labels.clone();
         unique.sort();

@@ -45,16 +45,15 @@ use crate::app::ui_actions::{
     inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
     inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
     inspector_set_effect_enabled_action, inspector_set_effect_property_action,
-    timeline_add_track_action, timeline_drop_asset_action,
-    timeline_move_clip_action, timeline_move_track_action, timeline_seek_action,
-    timeline_select_clip_action, timeline_set_track_control_action, timeline_trim_clip_action,
-    AssetsPrepareDragPayload, EffectsAddToClipPayload, ExportDraftUpdatePayload,
-    ExportEnqueuePayload, ExportOutputDialogPayload, InspectorClipRefPayload,
-    InspectorClipTransformField, InspectorCurvePointPayload, InspectorRemoveEffectPayload,
-    InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
-    InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
-    InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload,
-    TimelineAddTrackKind, TimelineAddTrackPayload,
+    timeline_add_track_action, timeline_drop_asset_action, timeline_move_clip_action,
+    timeline_move_track_action, timeline_seek_action, timeline_select_clip_action,
+    timeline_set_track_control_action, timeline_trim_clip_action, AssetsPrepareDragPayload,
+    EffectsAddToClipPayload, ExportDraftUpdatePayload, ExportEnqueuePayload,
+    ExportOutputDialogPayload, InspectorClipRefPayload, InspectorClipTransformField,
+    InspectorCurvePointPayload, InspectorRemoveEffectPayload, InspectorSetClipCurvePayload,
+    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+    InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
+    InspectorSetEffectPropertyPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
     TimelineDropAssetPayload, TimelineMoveClipPayload, TimelineMoveTrackPayload,
     TimelineSelectClipPayload, TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind,
     TimelineTrimClipPayload, TimelineTrimPayloadEdge,
@@ -2134,11 +2133,10 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
             ));
             for property in &effect.properties {
                 let path = property.path.clone();
-                let effect_id = effect_id;
                 section = section.with_row(PropertyRow::new(
                     property.label.clone(),
                     effect_property_value_widget(
-                        &property,
+                        property,
                         has_target,
                         selected_clip,
                         effect_id,
@@ -2323,16 +2321,14 @@ fn effect_property_value_widget(
         PropertyValue::Bool(value) => {
             let selected_clip = selection;
             Box::new(
-                Checkbox::new(&property.label, *value)
-                    .enabled(enabled)
-                    .on_change(move |v| {
-                        inspector_effect_property_action(
-                            selected_clip,
-                            effect_id,
-                            &path,
-                            PropertyValue::Bool(v),
-                        )
-                    }),
+                Checkbox::new(&property.label, *value).enabled(enabled).on_change(move |v| {
+                    inspector_effect_property_action(
+                        selected_clip,
+                        effect_id,
+                        &path,
+                        PropertyValue::Bool(v),
+                    )
+                }),
             )
         }
         PropertyValue::Float(value) => {
@@ -2341,16 +2337,14 @@ fn effect_property_value_widget(
             let selected_clip = selection;
             let path = path.clone();
             Box::new(
-                Slider::new(*value, min, max)
-                    .enabled(enabled)
-                    .on_change(move |v| {
-                        inspector_effect_property_action(
-                            selected_clip,
-                            effect_id,
-                            &path,
-                            PropertyValue::Float(v.clamp(min, max)),
-                        )
-                    }),
+                Slider::new(*value, min, max).enabled(enabled).on_change(move |v| {
+                    inspector_effect_property_action(
+                        selected_clip,
+                        effect_id,
+                        &path,
+                        PropertyValue::Float(v.clamp(min, max)),
+                    )
+                }),
             )
         }
         PropertyValue::Double(value) => {
@@ -2359,16 +2353,14 @@ fn effect_property_value_widget(
             let selected_clip = selection;
             let path = path.clone();
             Box::new(
-                Slider::new(*value as f32, min, max)
-                    .enabled(enabled)
-                    .on_change(move |v: f32| {
-                        inspector_effect_property_action(
-                            selected_clip,
-                            effect_id,
-                            &path,
-                            PropertyValue::Double((v as f64).clamp(min as f64, max as f64)),
-                        )
-                    }),
+                Slider::new(*value as f32, min, max).enabled(enabled).on_change(move |v: f32| {
+                    inspector_effect_property_action(
+                        selected_clip,
+                        effect_id,
+                        &path,
+                        PropertyValue::Double((v as f64).clamp(min as f64, max as f64)),
+                    )
+                }),
             )
         }
         PropertyValue::Int(value) => {
@@ -2377,16 +2369,14 @@ fn effect_property_value_widget(
             let selected_clip = selection;
             let path = path.clone();
             Box::new(
-                Slider::new(*value as f32, min, max)
-                    .enabled(enabled)
-                    .on_change(move |v: f32| {
-                        inspector_effect_property_action(
-                            selected_clip,
-                            effect_id,
-                            &path,
-                            PropertyValue::Int((v as i64).clamp(min as i64, max as i64)),
-                        )
-                    }),
+                Slider::new(*value as f32, min, max).enabled(enabled).on_change(move |v: f32| {
+                    inspector_effect_property_action(
+                        selected_clip,
+                        effect_id,
+                        &path,
+                        PropertyValue::Int((v as i64).clamp(min as i64, max as i64)),
+                    )
+                }),
             )
         }
         PropertyValue::Color(value) => {
@@ -2411,16 +2401,14 @@ fn effect_property_value_widget(
                 let selected_clip = selection;
                 let path = path.clone();
                 Box::new(
-                    TextInput::new(text)
-                        .enabled(enabled)
-                        .on_change(move |text| {
-                            inspector_effect_property_action(
-                                selected_clip,
-                                effect_id,
-                                &path,
-                                PropertyValue::Text(text.to_string()),
-                            )
-                        }),
+                    TextInput::new(text).enabled(enabled).on_change(move |text| {
+                        inspector_effect_property_action(
+                            selected_clip,
+                            effect_id,
+                            &path,
+                            PropertyValue::Text(text.to_string()),
+                        )
+                    }),
                 )
             }
         }

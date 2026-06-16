@@ -522,7 +522,10 @@ mod tests {
         let id = sanitize_group_id("蒙版");
         // Each CJK character gets a hex representation
         assert!(!id.is_empty());
-        assert!(!id.contains('-'), "CJK-only should not produce trailing hyphens: {id}");
+        assert!(
+            !id.contains('-'),
+            "CJK-only should not produce trailing hyphens: {id}"
+        );
     }
 
     #[test]
@@ -545,18 +548,9 @@ mod tests {
         use std::collections::HashSet;
 
         let cases: [(&str, Option<&str>); 7] = [
-            (
-                mondrian_timeline::clip::Transform2D::POSITION_PATH,
-                None,
-            ),
-            (
-                mondrian_timeline::clip::Transform2D::OPACITY_PATH,
-                None,
-            ),
-            (
-                mondrian_timeline::clip::SpeedMap::MULTIPLIER_PATH,
-                None,
-            ),
+            (mondrian_timeline::clip::Transform2D::POSITION_PATH, None),
+            (mondrian_timeline::clip::Transform2D::OPACITY_PATH, None),
+            (mondrian_timeline::clip::SpeedMap::MULTIPLIER_PATH, None),
             ("effect.blur.amount", Some("模糊")),
             ("mask.abc.shape", Some("蒙版 A")),
             ("random.path", Some("Custom")),
