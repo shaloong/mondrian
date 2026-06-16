@@ -50,10 +50,12 @@ The self-hosted UI application adapter lives under
 application for reusable widgets. `self_hosted::rendering` owns the shared
 wgpu frame submission path for self-hosted windows, including cosmic-text glyph
 uploads, surface texture acquisition, present, and surface reconfigure on
-loss/outdating. `self_hosted::shell` owns reusable root-widget composition such
-as the menu bar plus dock tree; developer binaries should use `SelfHostedAppRoot`
-rather than defining shell widgets inline. `self_hosted::icons` owns the
-app-layer registry for bundled designer SVG icon assets and converts them into
+loss/outdating. `self_hosted::menu_bar` owns the product menu model, shortcut
+hints, state-aware item availability, and top menu widget. `self_hosted::shell`
+owns reusable root-widget composition such as the menu bar, dock tree, and modal
+layer; developer binaries should use `SelfHostedAppRoot` rather than defining
+shell widgets inline. `self_hosted::icons` owns the app-layer registry for
+bundled designer SVG icon assets and converts them into
 `mondrian-ui-widgets::VectorIcon` / `IconButton` values without depending on
 legacy egui theme types. `self_hosted::panels` owns panel adapters that map
 application-facing concepts into generic widget view models.

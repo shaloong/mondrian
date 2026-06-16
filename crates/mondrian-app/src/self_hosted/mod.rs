@@ -8,6 +8,7 @@ pub mod about_dialog;
 pub mod action_queue;
 pub mod host;
 pub mod icons;
+pub mod menu_bar;
 pub mod modal;
 pub mod new_project_dialog;
 pub mod panels;

@@ -13,7 +13,8 @@ use mondrian_ui_core::TreeWalker;
 use crate::app::ui_actions::{APP_SHELL_NAMESPACE, APP_SHELL_QUIT};
 use crate::app::AppState;
 use crate::self_hosted::action_queue::PendingUiActions;
-use crate::self_hosted::shell::{app_state_action_enabled, SelfHostedAppRoot};
+use crate::self_hosted::menu_bar::app_state_action_enabled;
+use crate::self_hosted::shell::SelfHostedAppRoot;
 use mondrian_editor_state::Action;
 
 /// Window-host commands produced while draining self-hosted UI actions.
