@@ -729,7 +729,10 @@ actions, card drag payloads start through the router, and file drops map to
 app-layer import actions. It also owns domain-light right-click context menus:
 the grid surface and individual cards receive plain `MenuItem`s, while the
 widget handles popup placement, overlay painting, dismissal, keyboard
-activation, and dispatch. The self-hosted app adapter maps the grid menu to
+activation, and dispatch. `AssetGrid` also exposes item-level drop callbacks:
+the widget reports the target card view model, while panel adapters decide
+whether a given payload means move, import, or no-op. The self-hosted app
+adapter maps the grid menu to
 `app_shell` import requests and `ui.assets` create actions for adjustment
 layers, solid-color assets, folders, and folder-aware imports. File drops
 inside the asset browser emit `ui.assets.import_files`; right-click import
@@ -754,6 +757,13 @@ selected folder subtree, unlinks assets assigned to any deleted folder, and
 publishes an asset-library reload through `AppState`. The self-hosted host then
 revalidates its shell-local browser folder id during refresh and returns to the
 root asset view if the current bin no longer exists.
+Asset and folder cards can be dragged within the asset browser. Dropping an
+asset on a folder card emits `ui.assets.move_asset` with that folder as the
+target; dropping a folder on another folder emits `ui.assets.move_folder`.
+Dropping either payload on empty browser space moves it to the currently viewed
+folder, or to the root view when browsing all assets. `AssetLibrary` validates
+missing targets and rejects folder cycles, so the widget layer never owns
+library graph integrity.
 Assets already assigned to a folder are counted on that folder card and appear
 only when the self-hosted shell is browsing that folder. Folder navigation is
 shell-local UI session state: folder cards emit `ui.assets.open_folder`, the

@@ -47,27 +47,28 @@ use crate::app::ui_actions::{
     app_shell_open_project_dialog_action, app_shell_save_project_as_dialog_action,
     assets_create_adjustment_layer_action, assets_create_folder_action,
     assets_create_solid_color_action, assets_delete_asset_action, assets_delete_folder_action,
-    assets_import_files_action, assets_open_folder_action, assets_prepare_drag_action,
-    effects_add_to_clip_action, export_enqueue_action, export_set_draft_action,
-    inspector_remove_effect_action, inspector_select_effect_action,
-    inspector_set_clip_curve_action, inspector_set_clip_enabled_action,
-    inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
-    inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
-    inspector_set_effect_property_action, timeline_add_track_action, timeline_drop_asset_action,
-    timeline_move_clip_action, timeline_move_track_action, timeline_seek_action,
-    timeline_select_clip_action, timeline_set_track_control_action, timeline_trim_clip_action,
-    AssetsCreateAssetPayload, AssetsCreateFolderPayload, AssetsDeleteAssetPayload,
-    AssetsDeleteFolderPayload, AssetsImportFilesPayload, AssetsOpenFolderPayload,
-    AssetsPrepareDragPayload, EffectsAddToClipPayload, ExportDraftUpdatePayload,
-    ExportEnqueuePayload, ExportOutputDialogPayload, ImportMediaDialogPayload,
-    InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
-    InspectorRemoveEffectPayload, InspectorSelectEffectPayload, InspectorSetClipCurvePayload,
-    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
-    InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
-    InspectorSetEffectPropertyPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
-    TimelineDropAssetPayload, TimelineMoveClipPayload, TimelineMoveTrackPayload,
-    TimelineSelectClipPayload, TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind,
-    TimelineTrimClipPayload, TimelineTrimPayloadEdge,
+    assets_import_files_action, assets_move_asset_action, assets_move_folder_action,
+    assets_open_folder_action, assets_prepare_drag_action, effects_add_to_clip_action,
+    export_enqueue_action, export_set_draft_action, inspector_remove_effect_action,
+    inspector_select_effect_action, inspector_set_clip_curve_action,
+    inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
+    inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
+    inspector_set_effect_enabled_action, inspector_set_effect_property_action,
+    timeline_add_track_action, timeline_drop_asset_action, timeline_move_clip_action,
+    timeline_move_track_action, timeline_seek_action, timeline_select_clip_action,
+    timeline_set_track_control_action, timeline_trim_clip_action, AssetsCreateAssetPayload,
+    AssetsCreateFolderPayload, AssetsDeleteAssetPayload, AssetsDeleteFolderPayload,
+    AssetsImportFilesPayload, AssetsMoveAssetPayload, AssetsMoveFolderPayload,
+    AssetsOpenFolderPayload, AssetsPrepareDragPayload, EffectsAddToClipPayload,
+    ExportDraftUpdatePayload, ExportEnqueuePayload, ExportOutputDialogPayload,
+    ImportMediaDialogPayload, InspectorClipRefPayload, InspectorClipTransformField,
+    InspectorCurvePointPayload, InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
+    InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
+    InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
+    InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload, TimelineAddTrackKind,
+    TimelineAddTrackPayload, TimelineDropAssetPayload, TimelineMoveClipPayload,
+    TimelineMoveTrackPayload, TimelineSelectClipPayload, TimelineSetTrackControlPayload,
+    TimelineTrackControlPayloadKind, TimelineTrimClipPayload, TimelineTrimPayloadEdge,
 };
 use crate::app::{AppState, SelectedClipRef};
 use crate::self_hosted::icons::AppIcon;
@@ -1713,6 +1714,7 @@ fn asset_grid_item_from_folder(folder: &FolderRecord, item_count: usize) -> Asse
         )
         .with_subtitle(subtitle)
         .with_badge("BIN")
+        .with_drag_payload(DragPayload::AssetFolder(folder_id.clone()))
         .with_activate_action(assets_open_folder_action(AssetsOpenFolderPayload {
             folder_id: Some(folder_id.clone()),
         }))
@@ -1892,7 +1894,41 @@ fn asset_grid(model: &AssetGridModel) -> AssetGrid {
                         folder_id: drop_folder_id.clone(),
                     }))
                 }
+                DragPayload::Asset(asset_id) => {
+                    Some(assets_move_asset_action(AssetsMoveAssetPayload {
+                        asset_id: *asset_id,
+                        folder_id: drop_folder_id.clone(),
+                    }))
+                }
+                DragPayload::AssetFolder(folder_id) => {
+                    Some(assets_move_folder_action(AssetsMoveFolderPayload {
+                        folder_id: folder_id.clone(),
+                        parent_folder_id: drop_folder_id.clone(),
+                    }))
+                }
                 _ => None,
+            })
+            .on_item_drop(|payload, _index, item| {
+                let target_folder_id = item.id.strip_prefix("folder:")?.to_string();
+                match payload {
+                    DragPayload::Asset(asset_id) => {
+                        Some(assets_move_asset_action(AssetsMoveAssetPayload {
+                            asset_id: *asset_id,
+                            folder_id: Some(target_folder_id),
+                        }))
+                    }
+                    DragPayload::AssetFolder(folder_id) => {
+                        if folder_id == &target_folder_id {
+                            Some(Action::NoOp)
+                        } else {
+                            Some(assets_move_folder_action(AssetsMoveFolderPayload {
+                                folder_id: folder_id.clone(),
+                                parent_folder_id: Some(target_folder_id),
+                            }))
+                        }
+                    }
+                    _ => None,
+                }
             })
             .with_context_menu(asset_grid_context_menu_items(
                 model.current_folder_id.as_deref(),
@@ -3066,15 +3102,16 @@ mod tests {
     use super::*;
     use crate::app::ui_actions::{
         AssetsCreateAssetPayload, AssetsCreateFolderPayload, AssetsDeleteAssetPayload,
-        AssetsDeleteFolderPayload, AssetsImportFilesPayload, AssetsOpenFolderPayload,
-        ImportMediaDialogPayload, APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE,
-        APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_OPEN_PROJECT_DIALOG,
-        APP_SHELL_SAVE_PROJECT_AS_DIALOG, ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER,
-        ASSETS_CREATE_SOLID_COLOR, ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_IMPORT_FILES,
-        ASSETS_NAMESPACE, ASSETS_OPEN_FOLDER, ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP,
-        EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE, INSPECTOR_SELECT_EFFECT, INSPECTOR_SET_CLIP_CURVE,
-        INSPECTOR_SET_EFFECT_PROPERTY, TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET,
-        TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_SELECT_CLIP,
+        AssetsDeleteFolderPayload, AssetsImportFilesPayload, AssetsMoveAssetPayload,
+        AssetsMoveFolderPayload, AssetsOpenFolderPayload, ImportMediaDialogPayload,
+        APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
+        APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
+        ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR,
+        ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_IMPORT_FILES, ASSETS_MOVE_ASSET,
+        ASSETS_MOVE_FOLDER, ASSETS_NAMESPACE, ASSETS_OPEN_FOLDER, ASSETS_PREPARE_DRAG,
+        EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE, INSPECTOR_SELECT_EFFECT,
+        INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_EFFECT_PROPERTY, TIMELINE_ADD_TRACK,
+        TIMELINE_DROP_ASSET, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_SELECT_CLIP,
     };
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
@@ -3464,6 +3501,100 @@ mod tests {
             serde_json::from_value(payload.clone()).expect("import files payload");
         assert_eq!(payload.paths, vec![path]);
         assert_eq!(payload.folder_id.as_deref(), Some("rushes"));
+    }
+
+    #[test]
+    fn assets_panel_card_drop_moves_asset_into_folder_card() {
+        let asset_id = AssetId::new();
+        let model = AssetGridModel::new(
+            "Assets",
+            vec![AssetGridItem::new(
+                "folder:rushes",
+                "Rushes",
+                current_theme().colors.secondary,
+            )],
+        )
+        .accepts_file_drop(true);
+        let mut grid = asset_grid(&model);
+        grid.layout(Rect::new(0.0, 0.0, 360.0, 240.0));
+        let card = grid.card_rect_for_index(0).expect("folder card");
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let result = grid.event(
+            &UiEvent::Drop {
+                payload: DragPayload::Asset(asset_id),
+                position: card.center(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        let actions = actions.borrow();
+        assert_eq!(actions.len(), 1);
+        let Action::Custom { namespace, name, payload } = &actions[0] else {
+            panic!("expected move asset custom action");
+        };
+        assert_eq!(namespace, ASSETS_NAMESPACE);
+        assert_eq!(name, ASSETS_MOVE_ASSET);
+        let payload: AssetsMoveAssetPayload =
+            serde_json::from_value(payload.clone()).expect("move asset payload");
+        assert_eq!(payload.asset_id, asset_id);
+        assert_eq!(payload.folder_id.as_deref(), Some("rushes"));
+    }
+
+    #[test]
+    fn assets_panel_grid_drop_moves_folder_to_current_folder() {
+        let model = AssetGridModel::new("Assets", Vec::new())
+            .accepts_file_drop(true)
+            .with_current_folder_id(Some("parent".to_owned()));
+        let mut grid = asset_grid(&model);
+        grid.layout(Rect::new(0.0, 0.0, 360.0, 240.0));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let result = grid.event(
+            &UiEvent::Drop {
+                payload: DragPayload::AssetFolder("child".to_owned()),
+                position: Point::new(24.0, 96.0),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        let actions = actions.borrow();
+        assert_eq!(actions.len(), 1);
+        let Action::Custom { namespace, name, payload } = &actions[0] else {
+            panic!("expected move folder custom action");
+        };
+        assert_eq!(namespace, ASSETS_NAMESPACE);
+        assert_eq!(name, ASSETS_MOVE_FOLDER);
+        let payload: AssetsMoveFolderPayload =
+            serde_json::from_value(payload.clone()).expect("move folder payload");
+        assert_eq!(payload.folder_id, "child");
+        assert_eq!(payload.parent_folder_id.as_deref(), Some("parent"));
     }
 
     #[test]
@@ -4637,7 +4768,10 @@ mod tests {
         assert_eq!(folder.subtitle, "Folder · 1 item");
         assert_eq!(folder.badge.as_deref(), Some("BIN"));
         assert!(folder.icon.is_some());
-        assert!(folder.drag_payload.is_none());
+        assert_eq!(
+            folder.drag_payload,
+            Some(DragPayload::AssetFolder(folder_id.clone()))
+        );
         assert_eq!(folder.context_menu_items.len(), 1);
         assert_eq!(folder.context_menu_items[0].label, "Delete folder");
         assert!(folder.context_menu_items[0].icon.is_some());
@@ -4734,6 +4868,10 @@ mod tests {
         assert_eq!(nested.id, format!("folder:{nested_id}"));
         assert_eq!(nested.title, "Selects");
         assert_eq!(nested.subtitle, "Folder · 1 item");
+        assert_eq!(
+            nested.drag_payload,
+            Some(DragPayload::AssetFolder(nested_id.clone()))
+        );
         assert_eq!(nested.context_menu_items.len(), 1);
         let Action::Custom { namespace, name, payload } = &nested.context_menu_items[0].action
         else {

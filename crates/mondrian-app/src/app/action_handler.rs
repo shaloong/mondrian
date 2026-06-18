@@ -13,20 +13,21 @@ use crate::app::timeline_editing::{
 };
 use crate::app::ui_actions::{
     AssetsCreateAssetPayload, AssetsCreateFolderPayload, AssetsDeleteAssetPayload,
-    AssetsDeleteFolderPayload, AssetsImportFilesPayload, AssetsPrepareDragPayload,
-    EffectsAddToClipPayload, ExportDraftUpdatePayload, ExportEnqueuePayload,
-    InspectorClipTransformField, InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
-    InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
-    InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
-    InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload,
-    ProjectCreateWithSettingsPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
-    TimelineDropAssetPayload, TimelineMoveClipPayload, TimelineMoveTrackPayload,
-    TimelineSeekPayload, TimelineSelectClipPayload, TimelineSetTrackControlPayload,
-    TimelineTrackControlPayloadKind, TimelineTrimClipPayload, TimelineTrimPayloadEdge,
-    ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR,
-    ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_IMPORT_FILES, ASSETS_NAMESPACE,
-    ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, EXPORT_ENQUEUE, EXPORT_NAMESPACE,
-    EXPORT_SET_DRAFT, INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT, INSPECTOR_SELECT_EFFECT,
+    AssetsDeleteFolderPayload, AssetsImportFilesPayload, AssetsMoveAssetPayload,
+    AssetsMoveFolderPayload, AssetsPrepareDragPayload, EffectsAddToClipPayload,
+    ExportDraftUpdatePayload, ExportEnqueuePayload, InspectorClipTransformField,
+    InspectorRemoveEffectPayload, InspectorSelectEffectPayload, InspectorSetClipCurvePayload,
+    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+    InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
+    InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload, TimelineAddTrackKind,
+    TimelineAddTrackPayload, TimelineDropAssetPayload, TimelineMoveClipPayload,
+    TimelineMoveTrackPayload, TimelineSeekPayload, TimelineSelectClipPayload,
+    TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipPayload,
+    TimelineTrimPayloadEdge, ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER,
+    ASSETS_CREATE_SOLID_COLOR, ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_IMPORT_FILES,
+    ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG,
+    EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, EXPORT_ENQUEUE, EXPORT_NAMESPACE, EXPORT_SET_DRAFT,
+    INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT, INSPECTOR_SELECT_EFFECT,
     INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY,
     INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD, INSPECTOR_SET_EFFECT_ENABLED,
     INSPECTOR_SET_EFFECT_PROPERTY, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
@@ -409,6 +410,70 @@ impl AppState {
             MondrianError::WorkflowStepFailed { step_id: "delete_folder".to_string(), reason }
         })?;
         self.set_status_hint(format!("已删除文件夹：{folder_name}"), false);
+        Ok(())
+    }
+
+    fn move_asset_from_ui(&mut self, payload: AssetsMoveAssetPayload) -> Result<()> {
+        let library = self.asset_library.clone().ok_or_else(|| {
+            let reason = "素材库未连接".to_string();
+            self.set_status_hint(format!("移动素材失败：{reason}"), true);
+            MondrianError::WorkflowStepFailed { step_id: "move_asset".to_string(), reason }
+        })?;
+        let asset_name = library
+            .get_asset(payload.asset_id)?
+            .map(|asset| asset.name)
+            .unwrap_or_else(|| payload.asset_id.to_string());
+        let target_name = match payload.folder_id.as_deref() {
+            Some(folder_id) => library
+                .list_folders()?
+                .into_iter()
+                .find(|folder| folder.id == folder_id)
+                .map(|folder| folder.name)
+                .unwrap_or_else(|| folder_id.to_string()),
+            None => "All assets".to_string(),
+        };
+
+        self.move_asset_in_library(payload.asset_id, payload.folder_id.as_deref())
+            .map_err(|err| {
+                let reason = err.to_string();
+                self.set_status_hint(format!("移动素材失败：{reason}"), true);
+                MondrianError::WorkflowStepFailed { step_id: "move_asset".to_string(), reason }
+            })?;
+        self.set_status_hint(format!("已移动素材：{asset_name} → {target_name}"), false);
+        Ok(())
+    }
+
+    fn move_folder_from_ui(&mut self, payload: AssetsMoveFolderPayload) -> Result<()> {
+        let library = self.asset_library.clone().ok_or_else(|| {
+            let reason = "素材库未连接".to_string();
+            self.set_status_hint(format!("移动文件夹失败：{reason}"), true);
+            MondrianError::WorkflowStepFailed { step_id: "move_folder".to_string(), reason }
+        })?;
+        let folders = library.list_folders()?;
+        let folder_name = folders
+            .iter()
+            .find(|folder| folder.id == payload.folder_id)
+            .map(|folder| folder.name.clone())
+            .unwrap_or_else(|| payload.folder_id.clone());
+        let target_name = match payload.parent_folder_id.as_deref() {
+            Some(parent_id) => folders
+                .iter()
+                .find(|folder| folder.id == parent_id)
+                .map(|folder| folder.name.clone())
+                .unwrap_or_else(|| parent_id.to_string()),
+            None => "All assets".to_string(),
+        };
+
+        self.move_folder_in_library(&payload.folder_id, payload.parent_folder_id.as_deref())
+            .map_err(|err| {
+                let reason = err.to_string();
+                self.set_status_hint(format!("移动文件夹失败：{reason}"), true);
+                MondrianError::WorkflowStepFailed { step_id: "move_folder".to_string(), reason }
+            })?;
+        self.set_status_hint(
+            format!("已移动文件夹：{folder_name} → {target_name}"),
+            false,
+        );
         Ok(())
     }
 
@@ -977,6 +1042,16 @@ impl AppState {
                 )?;
                 self.delete_folder_from_ui(payload)
             }
+            ASSETS_MOVE_ASSET => {
+                let payload =
+                    parse_ui_payload::<AssetsMoveAssetPayload>("assets_ui_action", name, payload)?;
+                self.move_asset_from_ui(payload)
+            }
+            ASSETS_MOVE_FOLDER => {
+                let payload =
+                    parse_ui_payload::<AssetsMoveFolderPayload>("assets_ui_action", name, payload)?;
+                self.move_folder_from_ui(payload)
+            }
             _ => Err(unknown_ui_action_error("assets_ui_action", name)),
         }
     }
@@ -1520,26 +1595,27 @@ mod tests {
     use crate::app::ui_actions::{
         assets_create_adjustment_layer_action, assets_create_folder_action,
         assets_create_solid_color_action, assets_delete_asset_action, assets_delete_folder_action,
-        assets_import_files_action, assets_prepare_drag_action, effects_add_to_clip_action,
-        export_enqueue_action, export_set_draft_action, inspector_remove_effect_action,
-        inspector_select_effect_action, inspector_set_clip_curve_action,
-        inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
-        inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
-        inspector_set_effect_enabled_action, inspector_set_effect_property_action,
-        project_create_with_settings_action, timeline_add_track_action, timeline_drop_asset_action,
-        timeline_move_clip_action, timeline_move_track_action, timeline_seek_action,
-        timeline_select_clip_action, timeline_set_track_control_action, timeline_trim_clip_action,
-        AssetsCreateAssetPayload, AssetsCreateFolderPayload, AssetsDeleteAssetPayload,
-        AssetsDeleteFolderPayload, AssetsImportFilesPayload, AssetsPrepareDragPayload,
-        EffectsAddToClipPayload, ExportDraftUpdatePayload, ExportEnqueuePayload,
-        InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
-        InspectorRemoveEffectPayload, InspectorSelectEffectPayload, InspectorSetClipCurvePayload,
-        InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
-        InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
-        InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload,
-        ProjectCreateWithSettingsPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
-        TimelineDropAssetPayload, TimelineMoveTrackPayload, TimelineSetTrackControlPayload,
-        TimelineTrackControlPayloadKind,
+        assets_import_files_action, assets_move_asset_action, assets_move_folder_action,
+        assets_prepare_drag_action, effects_add_to_clip_action, export_enqueue_action,
+        export_set_draft_action, inspector_remove_effect_action, inspector_select_effect_action,
+        inspector_set_clip_curve_action, inspector_set_clip_enabled_action,
+        inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
+        inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
+        inspector_set_effect_property_action, project_create_with_settings_action,
+        timeline_add_track_action, timeline_drop_asset_action, timeline_move_clip_action,
+        timeline_move_track_action, timeline_seek_action, timeline_select_clip_action,
+        timeline_set_track_control_action, timeline_trim_clip_action, AssetsCreateAssetPayload,
+        AssetsCreateFolderPayload, AssetsDeleteAssetPayload, AssetsDeleteFolderPayload,
+        AssetsImportFilesPayload, AssetsMoveAssetPayload, AssetsMoveFolderPayload,
+        AssetsPrepareDragPayload, EffectsAddToClipPayload, ExportDraftUpdatePayload,
+        ExportEnqueuePayload, InspectorClipRefPayload, InspectorClipTransformField,
+        InspectorCurvePointPayload, InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
+        InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
+        InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+        InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
+        InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload, TimelineAddTrackKind,
+        TimelineAddTrackPayload, TimelineDropAssetPayload, TimelineMoveTrackPayload,
+        TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind,
     };
     use mondrian_assets::AssetLibrary;
     use mondrian_core::types::{AssetId, EffectId, MaskId, TimeCode, TrackId};
@@ -2324,6 +2400,78 @@ mod tests {
 
         assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
         assert!(state.status_hint.as_ref().is_some_and(|(_, is_error)| *is_error));
+    }
+
+    #[test]
+    fn dispatch_assets_move_asset_updates_folder_and_publishes_reload() {
+        let mut state = AppState::new();
+        let library_root = unique_temp_path("assets-move-asset-action-library");
+        let library = AssetLibrary::open(library_root.clone()).expect("library");
+        let folder_id = library.create_folder("Rushes", None).expect("create folder");
+        let asset_id = library.create_solid_color_asset(Some("Plate")).expect("create asset");
+        state.asset_library = Some(library);
+        let events = state.event_bus.subscribe();
+
+        state
+            .dispatch_action(assets_move_asset_action(AssetsMoveAssetPayload {
+                asset_id,
+                folder_id: Some(folder_id.clone()),
+            }))
+            .expect("move asset");
+
+        let asset = state
+            .asset_library
+            .as_ref()
+            .expect("library")
+            .get_asset(asset_id)
+            .expect("get asset")
+            .expect("asset");
+        assert_eq!(asset.folder_id.as_deref(), Some(folder_id.as_str()));
+        assert!(state
+            .status_hint
+            .as_ref()
+            .is_some_and(|(message, is_error)| !*is_error && message.contains("Plate")));
+        assert!(events.try_iter().any(|event| matches!(event, AppEvent::AssetLibraryReloaded)));
+
+        remove_temp_path(&library_root);
+    }
+
+    #[test]
+    fn dispatch_assets_move_folder_reparents_and_rejects_cycles() {
+        let mut state = AppState::new();
+        let library_root = unique_temp_path("assets-move-folder-action-library");
+        let library = AssetLibrary::open(library_root.clone()).expect("library");
+        let parent_id = library.create_folder("Parent", None).expect("create parent");
+        let child_id = library.create_folder("Child", None).expect("create child");
+        state.asset_library = Some(library);
+
+        state
+            .dispatch_action(assets_move_folder_action(AssetsMoveFolderPayload {
+                folder_id: child_id.clone(),
+                parent_folder_id: Some(parent_id.clone()),
+            }))
+            .expect("move folder");
+        let folders = state.asset_library.as_ref().expect("library").list_folders().expect("list");
+        assert_eq!(
+            folders
+                .iter()
+                .find(|folder| folder.id == child_id)
+                .expect("child")
+                .parent_id
+                .as_deref(),
+            Some(parent_id.as_str())
+        );
+
+        let err = state
+            .dispatch_action(assets_move_folder_action(AssetsMoveFolderPayload {
+                folder_id: parent_id.clone(),
+                parent_folder_id: Some(child_id.clone()),
+            }))
+            .expect_err("moving parent into child should fail");
+        assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
+        assert!(state.status_hint.as_ref().is_some_and(|(_, is_error)| *is_error));
+
+        remove_temp_path(&library_root);
     }
 
     #[test]

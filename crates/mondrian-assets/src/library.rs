@@ -468,8 +468,8 @@ impl AssetLibrary {
                 })
             })
             .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<std::result::Result<_, _>>()
+            .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
         Ok(records)
     }
 
@@ -490,11 +490,92 @@ impl AssetLibrary {
 
     pub fn move_asset_to_folder(&self, asset_id: AssetId, folder_id: Option<&str>) -> Result<()> {
         let db = self.db.lock();
-        db.execute(
-            "UPDATE assets SET folder_id = ?1 WHERE id = ?2",
-            rusqlite::params![folder_id, asset_id.0.to_string()],
-        )
-        .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
+        if let Some(folder_id) = folder_id {
+            let exists = db
+                .query_row(
+                    "SELECT 1 FROM folders WHERE id = ?1 LIMIT 1",
+                    rusqlite::params![folder_id],
+                    |_| Ok(()),
+                )
+                .optional()
+                .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?
+                .is_some();
+            if !exists {
+                return Err(MondrianError::AssetDbError {
+                    reason: format!("目标文件夹不存在：{folder_id}"),
+                });
+            }
+        }
+        let changed = db
+            .execute(
+                "UPDATE assets SET folder_id = ?1 WHERE id = ?2",
+                rusqlite::params![folder_id, asset_id.0.to_string()],
+            )
+            .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
+        if changed == 0 {
+            return Err(MondrianError::AssetNotFound { asset_id: asset_id.to_string() });
+        }
+        Ok(())
+    }
+
+    pub fn move_folder(&self, folder_id: &str, parent_folder_id: Option<&str>) -> Result<()> {
+        let db = self.db.lock();
+        let mut stmt = db
+            .prepare("SELECT id, parent_id FROM folders")
+            .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
+        let folders: Vec<(String, Option<String>)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?
+            .collect::<std::result::Result<_, _>>()
+            .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
+        drop(stmt);
+
+        if !folders.iter().any(|(id, _)| id == folder_id) {
+            return Err(MondrianError::AssetDbError {
+                reason: format!("文件夹不存在：{folder_id}"),
+            });
+        }
+        if let Some(parent_id) = parent_folder_id {
+            if parent_id == folder_id {
+                return Err(MondrianError::AssetDbError {
+                    reason: "不能将文件夹移动到自身".to_string(),
+                });
+            }
+            if !folders.iter().any(|(id, _)| id == parent_id) {
+                return Err(MondrianError::AssetDbError {
+                    reason: format!("目标文件夹不存在：{parent_id}"),
+                });
+            }
+
+            let mut descendants = vec![folder_id.to_string()];
+            let mut index = 0usize;
+            while index < descendants.len() {
+                let current = descendants[index].clone();
+                for (id, parent) in &folders {
+                    if parent.as_deref() == Some(current.as_str()) && !descendants.contains(id) {
+                        descendants.push(id.clone());
+                    }
+                }
+                index += 1;
+            }
+            if descendants.iter().any(|id| id == parent_id) {
+                return Err(MondrianError::AssetDbError {
+                    reason: "不能将文件夹移动到自身的子文件夹".to_string(),
+                });
+            }
+        }
+
+        let changed = db
+            .execute(
+                "UPDATE folders SET parent_id = ?1, updated_at = ?2 WHERE id = ?3",
+                rusqlite::params![parent_folder_id, chrono::Utc::now().to_rfc3339(), folder_id],
+            )
+            .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
+        if changed == 0 {
+            return Err(MondrianError::AssetDbError {
+                reason: format!("文件夹不存在：{folder_id}"),
+            });
+        }
         Ok(())
     }
 
@@ -762,6 +843,39 @@ mod tests {
     }
 
     #[test]
+    fn move_asset_to_folder_updates_folder_id() {
+        let lib = open_test_library();
+        let folder_id = lib.create_folder("Bin", None).expect("create folder");
+        let id = lib.create_solid_color_asset(Some("Plate")).expect("create asset");
+
+        lib.move_asset_to_folder(id, Some(&folder_id)).expect("move into folder");
+        assert_eq!(
+            lib.get_asset(id).expect("get").expect("asset").folder_id.as_deref(),
+            Some(folder_id.as_str())
+        );
+        lib.move_asset_to_folder(id, None).expect("move to root");
+        assert_eq!(
+            lib.get_asset(id).expect("get").expect("asset").folder_id,
+            None
+        );
+    }
+
+    #[test]
+    fn move_asset_rejects_missing_asset_or_folder() {
+        let lib = open_test_library();
+        let id = lib.create_solid_color_asset(Some("Plate")).expect("create asset");
+
+        assert!(matches!(
+            lib.move_asset_to_folder(AssetId::new(), None).unwrap_err(),
+            MondrianError::AssetNotFound { .. }
+        ));
+        assert!(matches!(
+            lib.move_asset_to_folder(id, Some("missing-folder")).unwrap_err(),
+            MondrianError::AssetDbError { .. }
+        ));
+    }
+
+    #[test]
     fn delete_asset() {
         let lib = open_test_library();
         let id = lib.create_solid_color_asset(Some("Delete Me")).expect("create");
@@ -824,6 +938,47 @@ mod tests {
         lib.rename_folder(&id, "New").expect("rename");
         let folders = lib.list_folders().expect("list");
         assert_eq!(folders[0].name, "New");
+    }
+
+    #[test]
+    fn move_folder_reparents_and_moves_back_to_root() {
+        let lib = open_test_library();
+        let parent = lib.create_folder("Parent", None).expect("create parent");
+        let child = lib.create_folder("Child", None).expect("create child");
+
+        lib.move_folder(&child, Some(&parent)).expect("move under parent");
+        let folders = lib.list_folders().expect("list");
+        assert_eq!(
+            folders.iter().find(|folder| folder.id == child).unwrap().parent_id.as_deref(),
+            Some(parent.as_str())
+        );
+
+        lib.move_folder(&child, None).expect("move to root");
+        let folders = lib.list_folders().expect("list");
+        assert_eq!(
+            folders.iter().find(|folder| folder.id == child).unwrap().parent_id,
+            None
+        );
+    }
+
+    #[test]
+    fn move_folder_rejects_missing_or_descendant_targets() {
+        let lib = open_test_library();
+        let parent = lib.create_folder("Parent", None).expect("create parent");
+        let child = lib.create_folder("Child", Some(&parent)).expect("create child");
+
+        assert!(matches!(
+            lib.move_folder("missing-folder", None).unwrap_err(),
+            MondrianError::AssetDbError { .. }
+        ));
+        assert!(matches!(
+            lib.move_folder(&parent, Some("missing-folder")).unwrap_err(),
+            MondrianError::AssetDbError { .. }
+        ));
+        assert!(matches!(
+            lib.move_folder(&parent, Some(&child)).unwrap_err(),
+            MondrianError::AssetDbError { .. }
+        ));
     }
 
     #[test]

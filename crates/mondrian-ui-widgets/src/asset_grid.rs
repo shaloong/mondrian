@@ -37,6 +37,8 @@ const ICON_SIZE: f32 = 22.0;
 pub type AssetGridAction = dyn Fn(usize, &AssetGridItem) -> Action;
 /// Dynamic action factory for payloads dropped on an [`AssetGrid`].
 pub type AssetGridDropAction = dyn Fn(&DragPayload, Point) -> Option<Action>;
+/// Dynamic action factory for payloads dropped on one [`AssetGridItem`].
+pub type AssetGridItemDropAction = dyn Fn(&DragPayload, usize, &AssetGridItem) -> Option<Action>;
 
 /// Local browser state for preserving an [`AssetGrid`] across model refreshes.
 #[derive(Debug, Clone, PartialEq)]
@@ -157,6 +159,7 @@ pub struct AssetGrid {
     on_select: Option<Box<AssetGridAction>>,
     on_activate: Option<Box<AssetGridAction>>,
     on_drop: Option<Box<AssetGridDropAction>>,
+    on_item_drop: Option<Box<AssetGridItemDropAction>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -201,6 +204,7 @@ impl AssetGrid {
             on_select: None,
             on_activate: None,
             on_drop: None,
+            on_item_drop: None,
         }
     }
 
@@ -297,6 +301,15 @@ impl AssetGrid {
         action: impl Fn(&DragPayload, Point) -> Option<Action> + 'static,
     ) -> Self {
         self.on_drop = Some(Box::new(action));
+        self
+    }
+
+    /// Dispatch a dynamic action when a drag payload is dropped on a card.
+    pub fn on_item_drop(
+        mut self,
+        action: impl Fn(&DragPayload, usize, &AssetGridItem) -> Option<Action> + 'static,
+    ) -> Self {
+        self.on_item_drop = Some(Box::new(action));
         self
     }
 
@@ -578,10 +591,15 @@ impl AssetGrid {
     }
 
     fn drop_payload(&self, payload: &DragPayload, position: Point, ctx: &mut EventContext) {
-        let Some(factory) = &self.on_drop else {
-            return;
-        };
-        if let Some(action) = factory(payload, position) {
+        if let Some(index) = self.index_at(position) {
+            if let (Some(factory), Some(item)) = (&self.on_item_drop, self.items.get(index)) {
+                if let Some(action) = factory(payload, index, item) {
+                    (ctx.dispatch)(action);
+                    return;
+                }
+            }
+        }
+        if let Some(action) = self.on_drop.as_ref().and_then(|factory| factory(payload, position)) {
             (ctx.dispatch)(action);
         }
     }
@@ -882,7 +900,8 @@ impl Widget for AssetGrid {
                 }
             }
             UiEvent::DragEnter { position, .. } | UiEvent::DragOver { position, .. }
-                if self.on_drop.is_some() && self.bounds.contains(*position) =>
+                if (self.on_drop.is_some() || self.on_item_drop.is_some())
+                    && self.bounds.contains(*position) =>
             {
                 if !self.drop_hovered {
                     self.drop_hovered = true;
@@ -891,14 +910,15 @@ impl Widget for AssetGrid {
                 return EventResult::Handled;
             }
             UiEvent::Drop { payload, position }
-                if self.on_drop.is_some() && self.bounds.contains(*position) =>
+                if (self.on_drop.is_some() || self.on_item_drop.is_some())
+                    && self.bounds.contains(*position) =>
             {
                 self.drop_hovered = false;
                 self.drop_payload(payload, *position, ctx);
                 ctx.request_repaint();
                 return EventResult::Handled;
             }
-            UiEvent::DragLeave if self.on_drop.is_some() => {
+            UiEvent::DragLeave if self.on_drop.is_some() || self.on_item_drop.is_some() => {
                 if self.drop_hovered {
                     self.drop_hovered = false;
                     ctx.request_repaint();
@@ -1200,6 +1220,65 @@ mod tests {
         assert_eq!(
             actions.borrow().as_slice(),
             &[Action::ImportMedia(vec![path])]
+        );
+    }
+
+    #[test]
+    fn item_drop_dispatches_item_action_before_grid_action() {
+        let asset_id = AssetId::new();
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![item("folder:a", "Folder A"), item("folder:b", "Folder B")],
+        )
+        .on_drop(|_, _| Some(Action::DeselectAll))
+        .on_item_drop(|payload, _index, item| {
+            if item.id == "folder:a" && matches!(payload, DragPayload::Asset(_)) {
+                Some(Action::SelectAll)
+            } else {
+                None
+            }
+        });
+        grid.layout(Rect::new(0.0, 0.0, 420.0, 260.0));
+        let first = grid.card_rect_for_index(0).expect("first card");
+        let second = grid.card_rect_for_index(1).expect("second card");
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            grid.event(
+                &UiEvent::Drop {
+                    payload: DragPayload::Asset(asset_id),
+                    position: first.center(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            grid.event(
+                &UiEvent::Drop {
+                    payload: DragPayload::Asset(asset_id),
+                    position: second.center(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[Action::SelectAll, Action::DeselectAll]
         );
     }
 

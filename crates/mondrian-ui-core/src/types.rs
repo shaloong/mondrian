@@ -340,6 +340,7 @@ pub enum KeyCode {
 pub enum DragPayload {
     Clip(ClipId),
     Asset(AssetId),
+    AssetFolder(String),
     Effect(EffectId),
     Track(TrackId),
     File(Vec<std::path::PathBuf>),
