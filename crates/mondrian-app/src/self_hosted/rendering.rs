@@ -7,6 +7,22 @@
 use mondrian_ui_renderer::{DrawCommand, GlyphUpload, UiRenderer};
 use mondrian_ui_text::{resolve_text_commands, TextRenderer};
 
+/// Resource diagnostics observed while rendering a self-hosted UI frame.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SelfHostedFrameDiagnostics {
+    /// Text glyphs that failed rasterization or atlas allocation.
+    pub text_missing_glyphs: u32,
+    /// Raster images that failed upload or image-atlas allocation.
+    pub raster_image_failures: u32,
+}
+
+impl SelfHostedFrameDiagnostics {
+    /// Whether the frame rendered with any missing UI resource.
+    pub fn has_failures(self) -> bool {
+        self.text_missing_glyphs > 0 || self.raster_image_failures > 0
+    }
+}
+
 /// Result of submitting one self-hosted UI frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelfHostedFrameResult {
@@ -15,10 +31,8 @@ pub enum SelfHostedFrameResult {
         /// The frame uploaded atlas resources that should be visible on a
         /// deterministic follow-up frame across all backends.
         uploaded_resources: bool,
-        /// Text glyphs that failed rasterization or atlas allocation.
-        text_missing_glyphs: u32,
-        /// Raster images that failed upload or image-atlas allocation.
-        raster_image_failures: u32,
+        /// Resource diagnostics for this frame.
+        diagnostics: SelfHostedFrameDiagnostics,
     },
     /// The surface was temporarily unavailable and the frame was skipped.
     Skipped,
@@ -34,6 +48,41 @@ impl SelfHostedFrameResult {
             SelfHostedFrameResult::Reconfigured => true,
             SelfHostedFrameResult::Skipped => false,
         }
+    }
+
+    /// Resource diagnostics for presented frames.
+    pub fn diagnostics(self) -> SelfHostedFrameDiagnostics {
+        match self {
+            SelfHostedFrameResult::Presented { diagnostics, .. } => diagnostics,
+            SelfHostedFrameResult::Skipped | SelfHostedFrameResult::Reconfigured => {
+                SelfHostedFrameDiagnostics::default()
+            }
+        }
+    }
+}
+
+/// Emits render resource diagnostics once per changed failure count.
+#[derive(Debug, Default)]
+pub struct SelfHostedRenderDiagnosticReporter {
+    last_reported: Option<SelfHostedFrameDiagnostics>,
+}
+
+impl SelfHostedRenderDiagnosticReporter {
+    /// Return diagnostics that should be logged for this frame, if any.
+    pub fn changed_failure(
+        &mut self,
+        result: SelfHostedFrameResult,
+    ) -> Option<SelfHostedFrameDiagnostics> {
+        let diagnostics = result.diagnostics();
+        if !diagnostics.has_failures() {
+            self.last_reported = None;
+            return None;
+        }
+        if self.last_reported == Some(diagnostics) {
+            return None;
+        }
+        self.last_reported = Some(diagnostics);
+        Some(diagnostics)
     }
 }
 
@@ -85,8 +134,10 @@ impl SelfHostedFrameRenderer {
                 output.present();
                 SelfHostedFrameResult::Presented {
                     uploaded_resources: uploaded_glyphs || render_stats.uploaded_raster_images,
-                    text_missing_glyphs: text_stats.missing_glyphs,
-                    raster_image_failures: render_stats.failed_raster_images,
+                    diagnostics: SelfHostedFrameDiagnostics {
+                        text_missing_glyphs: text_stats.missing_glyphs,
+                        raster_image_failures: render_stats.failed_raster_images,
+                    },
                 }
             }
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
@@ -122,18 +173,57 @@ mod tests {
     fn frame_result_requests_follow_up_after_resource_upload_or_reconfigure() {
         assert!(!SelfHostedFrameResult::Presented {
             uploaded_resources: false,
-            text_missing_glyphs: 2,
-            raster_image_failures: 1,
+            diagnostics: SelfHostedFrameDiagnostics {
+                text_missing_glyphs: 2,
+                raster_image_failures: 1,
+            },
         }
         .needs_follow_up_redraw());
         assert!(SelfHostedFrameResult::Presented {
             uploaded_resources: true,
-            text_missing_glyphs: 0,
-            raster_image_failures: 0,
+            diagnostics: SelfHostedFrameDiagnostics::default(),
         }
         .needs_follow_up_redraw());
         assert!(SelfHostedFrameResult::Reconfigured.needs_follow_up_redraw());
         assert!(!SelfHostedFrameResult::Skipped.needs_follow_up_redraw());
+    }
+
+    #[test]
+    fn render_diagnostic_reporter_only_reports_changed_failures() {
+        let mut reporter = SelfHostedRenderDiagnosticReporter::default();
+        let failed = SelfHostedFrameResult::Presented {
+            uploaded_resources: false,
+            diagnostics: SelfHostedFrameDiagnostics {
+                text_missing_glyphs: 2,
+                raster_image_failures: 1,
+            },
+        };
+        let changed = SelfHostedFrameResult::Presented {
+            uploaded_resources: false,
+            diagnostics: SelfHostedFrameDiagnostics {
+                text_missing_glyphs: 3,
+                raster_image_failures: 1,
+            },
+        };
+        let healthy = SelfHostedFrameResult::Presented {
+            uploaded_resources: false,
+            diagnostics: SelfHostedFrameDiagnostics::default(),
+        };
+
+        assert_eq!(
+            reporter.changed_failure(failed),
+            Some(SelfHostedFrameDiagnostics { text_missing_glyphs: 2, raster_image_failures: 1 })
+        );
+        assert_eq!(reporter.changed_failure(failed), None);
+        assert_eq!(
+            reporter.changed_failure(changed),
+            Some(SelfHostedFrameDiagnostics { text_missing_glyphs: 3, raster_image_failures: 1 })
+        );
+        assert_eq!(reporter.changed_failure(healthy), None);
+        assert_eq!(
+            reporter.changed_failure(failed),
+            Some(SelfHostedFrameDiagnostics { text_missing_glyphs: 2, raster_image_failures: 1 })
+        );
     }
 
     #[test]

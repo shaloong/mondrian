@@ -13,7 +13,9 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 use mondrian_app::self_hosted::icons::AppIcon;
-use mondrian_app::self_hosted::rendering::SelfHostedFrameRenderer;
+use mondrian_app::self_hosted::rendering::{
+    SelfHostedFrameRenderer, SelfHostedRenderDiagnosticReporter,
+};
 use mondrian_app::self_hosted::runtime::{
     winit_cursor_icon_for_ui_state, winit_modifiers_to_ui_modifiers,
     winit_mouse_button_to_ui_button, winit_scroll_delta_to_ui_delta, WinitUiRuntime,
@@ -1302,6 +1304,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     surface.configure(&device, &config);
 
     let mut frame_renderer = SelfHostedFrameRenderer::new(&device, config.format);
+    let mut render_diagnostic_reporter = SelfHostedRenderDiagnosticReporter::default();
 
     let mut root = build_dock_tree();
     let bounds = Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
@@ -1402,6 +1405,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     (size.width, size.height),
                     encoder.finish(),
                 );
+                if let Some(diagnostics) = render_diagnostic_reporter.changed_failure(frame_result)
+                {
+                    tracing::warn!(
+                        "ui_demo render resource failures: missing_glyphs={}, raster_image_failures={}",
+                        diagnostics.text_missing_glyphs,
+                        diagnostics.raster_image_failures
+                    );
+                }
                 if frame_result.needs_follow_up_redraw() {
                     window.request_redraw();
                 }

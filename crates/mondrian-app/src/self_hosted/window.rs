@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::app::AppState;
 use crate::self_hosted::action_queue::PendingUiActions;
 use crate::self_hosted::host::{SelfHostedShellCommands, SelfHostedUiHost};
-use crate::self_hosted::rendering::SelfHostedFrameRenderer;
+use crate::self_hosted::rendering::{SelfHostedFrameRenderer, SelfHostedRenderDiagnosticReporter};
 use crate::self_hosted::runtime::{
     winit_cursor_icon_for_ui_state, winit_modifiers_to_ui_modifiers,
     winit_mouse_button_to_ui_button, winit_scroll_delta_to_ui_delta, WinitUiRuntime,
@@ -72,6 +72,7 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
     surface.configure(&device, &config);
 
     let mut frame_renderer = SelfHostedFrameRenderer::new(&device, config.format);
+    let mut render_diagnostic_reporter = SelfHostedRenderDiagnosticReporter::default();
 
     let mut host = SelfHostedUiHost::new(AppState::new());
     let bounds = Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
@@ -188,6 +189,14 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                     (size.width, size.height),
                     encoder.finish(),
                 );
+                if let Some(diagnostics) = render_diagnostic_reporter.changed_failure(frame_result)
+                {
+                    tracing::warn!(
+                        "self-hosted UI render resource failures: missing_glyphs={}, raster_image_failures={}",
+                        diagnostics.text_missing_glyphs,
+                        diagnostics.raster_image_failures
+                    );
+                }
                 if frame_result.needs_follow_up_redraw() {
                     window.request_redraw();
                 }

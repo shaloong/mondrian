@@ -1092,6 +1092,12 @@ the app can inspect `TextResolveStats`. Missing glyphs caused by rasterization
 or atlas allocation failures must be counted instead of silently disappearing;
 the shell may surface the counter, but missing glyphs should not trigger an
 unbounded redraw loop.
+`SelfHostedFrameRenderer` combines text and raster image diagnostics into
+`SelfHostedFrameDiagnostics`. Product and demo windows pass presented frame
+results through `SelfHostedRenderDiagnosticReporter`, which logs only changed
+failure counts and resets after a healthy frame. Render diagnostics should go to
+the developer-facing console/log path by default; the status bar is reserved for
+actionable project or editor-state messages.
 
 The renderer must flush draw batches when clip state changes and must apply the
 batch clip rect as a GPU scissor before drawing. A command emitted inside
