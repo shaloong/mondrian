@@ -62,6 +62,7 @@ pub struct AssetGridItem {
     pub select_action: Option<Action>,
     pub activate_action: Option<Action>,
     pub drag_payload: Option<DragPayload>,
+    pub context_menu_items: Vec<MenuItem>,
 }
 
 impl AssetGridItem {
@@ -78,6 +79,7 @@ impl AssetGridItem {
             select_action: None,
             activate_action: None,
             drag_payload: None,
+            context_menu_items: Vec::new(),
         }
     }
 
@@ -120,6 +122,12 @@ impl AssetGridItem {
     /// Start an internal UI drag with this payload after pointer movement.
     pub fn with_drag_payload(mut self, payload: DragPayload) -> Self {
         self.drag_payload = Some(payload);
+        self
+    }
+
+    /// Attach a card-specific right-click context menu.
+    pub fn with_context_menu(mut self, items: Vec<MenuItem>) -> Self {
+        self.context_menu_items = items;
         self
     }
 }
@@ -578,6 +586,13 @@ impl AssetGrid {
         }
     }
 
+    fn open_context_menu(&mut self, position: Point, items: Vec<MenuItem>, ctx: &mut EventContext) {
+        let mut menu = ContextMenu::new(position, items);
+        menu.layout(self.bounds);
+        self.context_menu = Some(menu);
+        ctx.request_repaint();
+    }
+
     fn card_rect_at_visible_position(&self, visible_position: usize) -> Rect {
         let columns = self.columns.max(1);
         let col = visible_position % columns;
@@ -802,13 +817,30 @@ impl Widget for AssetGrid {
 
         match event {
             UiEvent::MouseDown { position, button: MouseButton::Right, .. }
-                if self.bounds.contains(*position) && !self.context_menu_items.is_empty() =>
+                if self.bounds.contains(*position) =>
             {
-                let mut menu = ContextMenu::new(*position, self.context_menu_items.clone());
-                menu.layout(self.bounds);
-                self.context_menu = Some(menu);
-                ctx.request_repaint();
-                return EventResult::Handled;
+                self.focus_visible = false;
+                if let Some(index) = self.index_at(*position) {
+                    if self.is_enabled_index(index) {
+                        let items = self
+                            .items
+                            .get(index)
+                            .map(|item| item.context_menu_items.clone())
+                            .unwrap_or_default();
+                        if !items.is_empty() {
+                            if self.selected != Some(index) {
+                                self.selected = Some(index);
+                                self.dispatch_select(index, ctx);
+                            }
+                            self.open_context_menu(*position, items, ctx);
+                            return EventResult::Handled;
+                        }
+                    }
+                }
+                if !self.context_menu_items.is_empty() {
+                    self.open_context_menu(*position, self.context_menu_items.clone(), ctx);
+                    return EventResult::Handled;
+                }
             }
             UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
                 if self.filter_input.as_ref().is_some_and(|input| input.hit_test(*position)) {
@@ -1217,6 +1249,58 @@ mod tests {
 
         assert_eq!(actions.borrow().as_slice(), &[import_action]);
         assert!(!grid.overlay_hit_test(Point::new(900.0, 900.0)));
+    }
+
+    #[test]
+    fn right_click_card_context_menu_overrides_grid_menu_and_selects_card() {
+        let card_action = Action::ImportMedia(vec![PathBuf::from("E:/media/card.mov")]);
+        let grid_action = Action::DeselectAll;
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![
+                item("asset-a", "Asset A")
+                    .with_context_menu(vec![MenuItem::new("Delete asset", card_action.clone())]),
+                item("asset-b", "Asset B"),
+            ],
+        )
+        .with_context_menu(vec![MenuItem::new("New folder", grid_action)]);
+        grid.layout(Rect::new(0.0, 0.0, 420.0, 260.0));
+        let card = grid.card_rect_for_index(0).expect("card");
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            grid.event(
+                &UiEvent::MouseDown {
+                    position: card.center(),
+                    button: MouseButton::Right,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(grid.selected_index(), Some(0));
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(actions.borrow().as_slice(), &[card_action]);
     }
 
     #[test]

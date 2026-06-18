@@ -414,6 +414,8 @@ impl AppState {
             }
         })?;
         library.delete_asset(asset_id)?;
+        self.event_bus
+            .publish(mondrian_core::events::AppEvent::AssetDeleted { asset_id });
         let _ = self.save_project_file();
         Ok(())
     }

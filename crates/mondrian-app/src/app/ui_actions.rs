@@ -76,6 +76,8 @@ pub const ASSETS_CREATE_FOLDER: &str = "create_folder";
 pub const ASSETS_OPEN_FOLDER: &str = "open_folder";
 /// Action name for importing files into an asset-browser folder.
 pub const ASSETS_IMPORT_FILES: &str = "import_files";
+/// Action name for deleting one asset from the library.
+pub const ASSETS_DELETE_ASSET: &str = "delete_asset";
 
 /// Custom action namespace for export operations.
 pub const EXPORT_NAMESPACE: &str = "ui.export";
@@ -396,6 +398,13 @@ pub struct AssetsPrepareDragPayload {
     pub asset_id: AssetId,
 }
 
+/// Delete one asset-library record and any timeline clips that reference it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetsDeleteAssetPayload {
+    /// Asset to remove from the project library.
+    pub asset_id: AssetId,
+}
+
 /// Create a synthetic reusable asset in the selected folder, or at root.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssetsCreateAssetPayload {
@@ -593,6 +602,11 @@ pub fn effects_add_to_clip_action(payload: EffectsAddToClipPayload) -> Action {
 /// Build an action that prepares an asset for timeline drag/drop.
 pub fn assets_prepare_drag_action(payload: AssetsPrepareDragPayload) -> Action {
     custom_assets_action(ASSETS_PREPARE_DRAG, payload)
+}
+
+/// Build an action that deletes one asset from the library.
+pub fn assets_delete_asset_action(payload: AssetsDeleteAssetPayload) -> Action {
+    custom_assets_action(ASSETS_DELETE_ASSET, payload)
 }
 
 /// Build an action that creates an adjustment-layer asset in the library.

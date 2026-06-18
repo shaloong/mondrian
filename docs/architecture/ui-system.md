@@ -726,14 +726,15 @@ instead of the row-list surface. `AssetGrid` keeps the same framework-owned
 interaction contract as `PanelList`: filter input is a real `TextInput`, local
 selection is preserved through `AssetGridState`, cards can activate typed
 actions, card drag payloads start through the router, and file drops map to
-app-layer import actions. It also owns a domain-light right-click context menu:
-the widget receives plain `MenuItem`s, handles popup placement, overlay
-painting, dismissal, and keyboard activation, then dispatches the supplied
-actions. The self-hosted app adapter maps that menu to `app_shell` import
-requests and `ui.assets` create actions for adjustment layers, solid-color
-assets, folders, and folder-aware imports. File drops inside the asset browser
-emit `ui.assets.import_files`; right-click import dialogs carry the same target
-folder and resolve to that action after the native file picker returns.
+app-layer import actions. It also owns domain-light right-click context menus:
+the grid surface and individual cards receive plain `MenuItem`s, while the
+widget handles popup placement, overlay painting, dismissal, keyboard
+activation, and dispatch. The self-hosted app adapter maps the grid menu to
+`app_shell` import requests and `ui.assets` create actions for adjustment
+layers, solid-color assets, folders, and folder-aware imports. File drops
+inside the asset browser emit `ui.assets.import_files`; right-click import
+dialogs carry the same target folder and resolve to that action after the
+native file picker returns.
 Adjustment-layer and solid-color creation actions also carry the current
 browser folder id as `folder_id`, while folder creation uses `parent_folder_id`.
 Creating any asset-browser item inside a bin therefore remains an app-layer
@@ -744,6 +745,9 @@ folder context. The app adapter maps `AssetRecord` into `AssetGridItem` view
 data and semantic media color tokens; the widget crate does not depend on the
 asset library or editor domain. The root Assets view is not a flat dump of
 every database row: it shows top-level folders first, then root/unfiled assets.
+Asset cards expose `ui.assets.delete_asset` through their card-level context
+menu. `AppState` owns the actual deletion, including timeline cleanup for clips
+that referenced the asset, event publication, status hints, and project save.
 Assets already assigned to a folder are counted on that folder card and appear
 only when the self-hosted shell is browsing that folder. Folder navigation is
 shell-local UI session state: folder cards emit `ui.assets.open_folder`, the

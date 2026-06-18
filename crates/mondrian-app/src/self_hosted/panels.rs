@@ -46,16 +46,17 @@ use crate::app::ui_actions::{
     app_shell_import_media_dialog_action_with_target, app_shell_new_project_dialog_action,
     app_shell_open_project_dialog_action, app_shell_save_project_as_dialog_action,
     assets_create_adjustment_layer_action, assets_create_folder_action,
-    assets_create_solid_color_action, assets_import_files_action, assets_open_folder_action,
-    assets_prepare_drag_action, effects_add_to_clip_action, export_enqueue_action,
-    export_set_draft_action, inspector_remove_effect_action, inspector_select_effect_action,
-    inspector_set_clip_curve_action, inspector_set_clip_enabled_action,
-    inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
-    inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
-    inspector_set_effect_property_action, timeline_add_track_action, timeline_drop_asset_action,
-    timeline_move_clip_action, timeline_move_track_action, timeline_seek_action,
-    timeline_select_clip_action, timeline_set_track_control_action, timeline_trim_clip_action,
-    AssetsCreateAssetPayload, AssetsCreateFolderPayload, AssetsImportFilesPayload,
+    assets_create_solid_color_action, assets_delete_asset_action, assets_import_files_action,
+    assets_open_folder_action, assets_prepare_drag_action, effects_add_to_clip_action,
+    export_enqueue_action, export_set_draft_action, inspector_remove_effect_action,
+    inspector_select_effect_action, inspector_set_clip_curve_action,
+    inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
+    inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
+    inspector_set_effect_enabled_action, inspector_set_effect_property_action,
+    timeline_add_track_action, timeline_drop_asset_action, timeline_move_clip_action,
+    timeline_move_track_action, timeline_seek_action, timeline_select_clip_action,
+    timeline_set_track_control_action, timeline_trim_clip_action, AssetsCreateAssetPayload,
+    AssetsCreateFolderPayload, AssetsDeleteAssetPayload, AssetsImportFilesPayload,
     AssetsOpenFolderPayload, AssetsPrepareDragPayload, EffectsAddToClipPayload,
     ExportDraftUpdatePayload, ExportEnqueuePayload, ExportOutputDialogPayload,
     ImportMediaDialogPayload, InspectorClipRefPayload, InspectorClipTransformField,
@@ -1640,7 +1641,14 @@ fn asset_grid_item_from_asset(asset: AssetRecord) -> AssetGridItem {
             .with_drag_payload(DragPayload::Asset(asset.id))
             .with_activate_action(assets_prepare_drag_action(AssetsPrepareDragPayload {
                 asset_id: asset.id,
-            })),
+            }))
+            .with_context_menu(vec![asset_menu_item(
+                MenuItem::new(
+                    "Delete asset",
+                    assets_delete_asset_action(AssetsDeleteAssetPayload { asset_id: asset.id }),
+                ),
+                AppIcon::Trash,
+            )]),
         icon,
     )
 }
@@ -3048,11 +3056,12 @@ fn inspector_effect_property_action(
 mod tests {
     use super::*;
     use crate::app::ui_actions::{
-        AssetsCreateAssetPayload, AssetsCreateFolderPayload, AssetsImportFilesPayload,
-        AssetsOpenFolderPayload, ImportMediaDialogPayload, APP_SHELL_IMPORT_MEDIA_DIALOG,
-        APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_OPEN_PROJECT_DIALOG,
-        APP_SHELL_SAVE_PROJECT_AS_DIALOG, ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER,
-        ASSETS_CREATE_SOLID_COLOR, ASSETS_IMPORT_FILES, ASSETS_NAMESPACE, ASSETS_OPEN_FOLDER,
+        AssetsCreateAssetPayload, AssetsCreateFolderPayload, AssetsDeleteAssetPayload,
+        AssetsImportFilesPayload, AssetsOpenFolderPayload, ImportMediaDialogPayload,
+        APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
+        APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
+        ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR,
+        ASSETS_DELETE_ASSET, ASSETS_IMPORT_FILES, ASSETS_NAMESPACE, ASSETS_OPEN_FOLDER,
         ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE,
         INSPECTOR_SELECT_EFFECT, INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_EFFECT_PROPERTY,
         TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
@@ -3578,6 +3587,64 @@ mod tests {
 
         assert_eq!(actions.borrow().len(), 1);
         assert_shell_action(actions.borrow().first(), APP_SHELL_IMPORT_MEDIA_DIALOG);
+    }
+
+    #[test]
+    fn assets_panel_card_context_menu_dispatches_delete_asset() {
+        let root = unique_temp_dir("asset-panel-delete-menu");
+        let library = AssetLibrary::open(root.clone()).expect("open asset library");
+        let asset_id = library.create_solid_color_asset(Some("Temp Plate")).expect("create asset");
+        let mut state = AppState::new();
+        state.asset_library = Some(library);
+        let model = SelfHostedPanelModels::from_app_state(&state).assets;
+        let mut grid = asset_grid(&model);
+        grid.layout(Rect::new(0.0, 0.0, 360.0, 240.0));
+        let card = grid.card_rect_for_index(0).expect("asset card");
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            grid.event(
+                &UiEvent::MouseDown {
+                    position: card.center(),
+                    button: MouseButton::Right,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        let actions = actions.borrow();
+        assert_eq!(actions.len(), 1);
+        let Action::Custom { namespace, name, payload } = &actions[0] else {
+            panic!("expected asset delete action");
+        };
+        assert_eq!(namespace, ASSETS_NAMESPACE);
+        assert_eq!(name, ASSETS_DELETE_ASSET);
+        let payload: AssetsDeleteAssetPayload =
+            serde_json::from_value(payload.clone()).expect("delete payload");
+        assert_eq!(payload.asset_id, asset_id);
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -4460,6 +4527,17 @@ mod tests {
         let payload: AssetsPrepareDragPayload =
             serde_json::from_value(payload.clone()).expect("asset drag payload");
         assert_eq!(payload.asset_id, asset_id);
+        assert_eq!(item.context_menu_items.len(), 1);
+        assert_eq!(item.context_menu_items[0].label, "Delete asset");
+        assert!(item.context_menu_items[0].icon.is_some());
+        let Action::Custom { namespace, name, payload } = &item.context_menu_items[0].action else {
+            panic!("expected asset delete custom action");
+        };
+        assert_eq!(namespace, ASSETS_NAMESPACE);
+        assert_eq!(name, ASSETS_DELETE_ASSET);
+        let payload: AssetsDeleteAssetPayload =
+            serde_json::from_value(payload.clone()).expect("asset delete payload");
+        assert_eq!(payload.asset_id, asset_id);
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -4493,6 +4571,7 @@ mod tests {
         assert_eq!(folder.badge.as_deref(), Some("BIN"));
         assert!(folder.icon.is_some());
         assert!(folder.drag_payload.is_none());
+        assert!(folder.context_menu_items.is_empty());
         let action = folder.activate_action.as_ref().expect("folder activate action");
         let Action::Custom { namespace, name, payload } = action else {
             panic!("expected asset folder custom action, got {action:?}");
