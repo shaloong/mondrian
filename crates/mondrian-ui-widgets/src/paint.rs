@@ -24,22 +24,25 @@ pub(crate) fn paint_focus_ring(ctx: &mut PaintContext, bounds: Rect, radius: f32
 }
 
 pub(crate) fn paint_checkerboard(ctx: &mut PaintContext, rect: Rect, cell_size: f32, radius: f32) {
-    let vertices = checkerboard_vertices(rect, cell_size);
+    let colors = &ctx.theme.colors;
+    let vertices = checkerboard_vertices(
+        rect,
+        cell_size,
+        colors.checkerboard_light,
+        colors.checkerboard_dark,
+    );
     ctx.encoder.draw_colored_triangles_in_rect(&vertices, rect, radius);
 }
 
-pub(crate) fn checkerboard_colors() -> (Color, Color) {
-    (
-        Color { r: 0.75, g: 0.75, b: 0.78, a: 1.0 },
-        Color { r: 0.48, g: 0.48, b: 0.52, a: 1.0 },
-    )
-}
-
-pub(crate) fn checkerboard_vertices(rect: Rect, cell_size: f32) -> Vec<(Point, Color)> {
+pub(crate) fn checkerboard_vertices(
+    rect: Rect,
+    cell_size: f32,
+    light: Color,
+    dark: Color,
+) -> Vec<(Point, Color)> {
     let checker = checkerboard_cell_size(cell_size);
     let cols = (rect.width / checker).ceil() as i32;
     let rows = (rect.height / checker).ceil() as i32;
-    let (light, dark) = checkerboard_colors();
     let mut vertices = Vec::with_capacity((cols * rows).max(0) as usize * 6);
     for row in 0..rows {
         for col in 0..cols {
@@ -138,11 +141,15 @@ mod tests {
 
     struct RecordingEncoder {
         triangles_in_rect: Vec<(usize, Rect, f32)>,
+        triangle_colors: Vec<Color>,
     }
 
     impl RecordingEncoder {
         fn new() -> Self {
-            Self { triangles_in_rect: Vec::new() }
+            Self {
+                triangles_in_rect: Vec::new(),
+                triangle_colors: Vec::new(),
+            }
         }
     }
 
@@ -158,6 +165,7 @@ mod tests {
             corner_radius: f32,
         ) {
             self.triangles_in_rect.push((vertices.len(), mask_bounds, corner_radius));
+            self.triangle_colors.extend(vertices.iter().map(|(_, color)| *color));
         }
         fn draw_text(&mut self, _text: &str, _font_size: f32, _position: Point, _color: Color) {}
         fn push_translate(&mut self, _offset: Vec2) {}
@@ -227,7 +235,9 @@ mod tests {
 
     #[test]
     fn checkerboard_vertices_cover_partial_edge_cells() {
-        let vertices = checkerboard_vertices(Rect::new(10.0, 20.0, 10.0, 8.0), 6.0);
+        let light = Color::from_hex(0xFFFFFF);
+        let dark = Color::from_hex(0x000000);
+        let vertices = checkerboard_vertices(Rect::new(10.0, 20.0, 10.0, 8.0), 6.0, light, dark);
 
         assert_eq!(vertices.len(), 24);
         assert_eq!(vertices[18].0, Point::new(16.0, 26.0));
@@ -237,7 +247,12 @@ mod tests {
 
     #[test]
     fn checkerboard_cell_size_is_clamped_to_shared_maximum() {
-        let vertices = checkerboard_vertices(Rect::new(0.0, 0.0, 14.0, 7.0), 99.0);
+        let vertices = checkerboard_vertices(
+            Rect::new(0.0, 0.0, 14.0, 7.0),
+            99.0,
+            Color::WHITE,
+            Color::BLACK,
+        );
 
         assert_eq!(vertices.len(), 12);
         assert_eq!(vertices[6].0, Point::new(7.0, 0.0));
@@ -260,6 +275,25 @@ mod tests {
         }
 
         assert_eq!(encoder.triangles_in_rect, vec![(12, rect, 3.0)]);
+    }
+
+    #[test]
+    fn paint_checkerboard_uses_theme_tokens() {
+        let mut encoder = RecordingEncoder::new();
+        let theme = mondrian_ui_theme::ThemePreset::Dark.build();
+        let rect = Rect::new(4.0, 5.0, 12.0, 6.0);
+
+        {
+            let mut ctx = PaintContext {
+                encoder: &mut encoder,
+                theme: &theme,
+                clip_rect: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            };
+            paint_checkerboard(&mut ctx, rect, 6.0, 3.0);
+        }
+
+        assert_eq!(encoder.triangle_colors[0], theme.colors.checkerboard_light);
+        assert_eq!(encoder.triangle_colors[6], theme.colors.checkerboard_dark);
     }
 
     #[test]

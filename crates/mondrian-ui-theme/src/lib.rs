@@ -180,6 +180,8 @@ mod tests {
             assert!(colors.color_handle_strong_shadow.a >= colors.color_handle_shadow.a);
             assert_eq!(colors.color_handle_outer, mondrian_core::Color::WHITE);
             assert_eq!(colors.color_handle_inner, mondrian_core::Color::BLACK);
+            assert_ne!(colors.checkerboard_light, colors.checkerboard_dark);
+            assert!(colors.eyedropper_overlay.a > 0.0);
         }
     }
 

@@ -926,7 +926,9 @@ rectangles for its HSV area overlays, hue ramp, and alpha ramp. It uses a
 masked colored triangle fan for the optional hue/saturation wheel.
 Checkerboards are low-count deterministic colored-triangle geometry provided by
 the shared widget paint helpers, and use the same rounded mask path when they
-sit inside rounded swatches.
+sit inside rounded swatches. Checkerboard light/dark cells are semantic theme
+tokens, not widget-local literals, so transparent previews can be tuned for
+dark, light, and future high-contrast themes.
 The crosshair and slider handles use semantic color-handle tokens rather than
 local black/white literals, because they must remain legible over arbitrary
 sampled colors while still being adjustable per theme.
@@ -943,7 +945,9 @@ stays platform-neutral: it emits `EventRequests::eyedropper`, handles
 screen-capture or OS pointer APIs directly. Winit shells complete sampling via
 `mondrian_app::self_hosted::runtime::WinitUiRuntime`, which delegates platform work to
 `mondrian-platform::DesktopEyedropper` and routes the sampled color back as
-`UiEvent::EyedropperSample`.
+`UiEvent::EyedropperSample`. Shell-owned eyedropper overlay chrome uses theme
+tokens for its magnifier shell and contrast dot; the sampled preview color is
+the only dynamic fill.
 The trigger owns tree-level focus for its popup. Inner text fields are embedded
 editing state inside the picker; closing the popup must send them `FocusLost`
 and disable IME rather than leaving focus on an internal field id that is not a

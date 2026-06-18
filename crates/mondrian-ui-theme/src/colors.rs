@@ -57,6 +57,12 @@ pub struct ColorTokens {
     pub color_handle_outer: Color,
     /// 任意颜色背景上方控件把手的深色描边
     pub color_handle_inner: Color,
+    /// 透明颜色预览棋盘格的浅色格
+    pub checkerboard_light: Color,
+    /// 透明颜色预览棋盘格的深色格
+    pub checkerboard_dark: Color,
+    /// Shell 取色器放大镜外圈背景
+    pub eyedropper_overlay: Color,
 
     /// 危险/删除操作色
     pub destructive: Color,
@@ -115,6 +121,9 @@ impl ColorTokens {
             color_handle_strong_shadow: Color { r: 0.0, g: 0.0, b: 0.0, a: 0.8 },
             color_handle_outer: Color::WHITE,
             color_handle_inner: Color::BLACK,
+            checkerboard_light: Color::from_hex(0xBFC0C7),
+            checkerboard_dark: Color::from_hex(0x7A7A85),
+            eyedropper_overlay: Color::from_hex(0x1F1F24),
 
             destructive: Color::from_hex(0x7F1D1D),
             destructive_foreground: Color::from_hex(0xFCA5A5),
@@ -162,6 +171,9 @@ impl ColorTokens {
             color_handle_strong_shadow: Color { r: 0.0, g: 0.0, b: 0.0, a: 0.72 },
             color_handle_outer: Color::WHITE,
             color_handle_inner: Color::BLACK,
+            checkerboard_light: Color::from_hex(0xE5E7EB),
+            checkerboard_dark: Color::from_hex(0xA1A1AA),
+            eyedropper_overlay: Color::from_hex(0x1F1F24),
 
             destructive: Color::from_hex(0xFEE2E2),
             destructive_foreground: Color::from_hex(0x991B1B),

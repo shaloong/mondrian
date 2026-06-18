@@ -284,7 +284,7 @@ impl WinitUiRuntime {
         router: &EventRouter,
     ) {
         if self.eyedropper.is_active() {
-            paint_eyedropper_overlay(encoder, cursor, self.eyedropper.preview_color());
+            paint_eyedropper_overlay(encoder, theme, cursor, self.eyedropper.preview_color());
         }
 
         if let Some(state) = router.current_tooltip().cloned() {
@@ -509,12 +509,13 @@ fn printable_key_text(text: Option<&str>) -> Option<String> {
 /// Paint the shell-owned eyedropper magnifier.
 pub fn paint_eyedropper_overlay(
     encoder: &mut dyn DrawCommandEncoder,
+    theme: &Theme,
     cursor: Point,
     preview: Color,
 ) {
     encoder.draw_rect(
         Rect::new(cursor.x - 47.0, cursor.y - 67.0, 96.0, 96.0),
-        Color { r: 0.12, g: 0.12, b: 0.14, a: 1.0 },
+        theme.colors.eyedropper_overlay,
         48.0,
     );
     encoder.draw_rect(
@@ -524,7 +525,7 @@ pub fn paint_eyedropper_overlay(
     );
     encoder.draw_rect(
         Rect::new(cursor.x - 2.0, cursor.y - 62.0, 4.0, 4.0),
-        Color::BLACK,
+        theme.colors.color_handle_inner,
         2.0,
     );
 }
@@ -571,6 +572,26 @@ fn desktop_to_window_point(window: &winit::window::Window, point: DesktopPoint) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mondrian_ui_core::widget::DrawCommandEncoder;
+
+    #[derive(Default)]
+    struct RecordingEncoder {
+        rect_colors: Vec<Color>,
+    }
+
+    impl DrawCommandEncoder for RecordingEncoder {
+        fn push_clip(&mut self, _bounds: Rect) {}
+        fn pop_clip(&mut self) {}
+
+        fn draw_rect(&mut self, _bounds: Rect, color: Color, _corner_radius: f32) {
+            self.rect_colors.push(color);
+        }
+
+        fn draw_line(&mut self, _start: Point, _end: Point, _width: f32, _color: Color) {}
+        fn draw_text(&mut self, _text: &str, _font_size: f32, _position: Point, _color: Color) {}
+        fn push_translate(&mut self, _offset: glam::Vec2) {}
+        fn pop_transform(&mut self) {}
+    }
 
     #[test]
     fn maps_named_navigation_keys() {
@@ -716,5 +737,22 @@ mod tests {
             winit_cursor_icon_for_ui_state(false, None, false),
             winit::window::CursorIcon::Default
         );
+    }
+
+    #[test]
+    fn eyedropper_overlay_uses_theme_tokens_for_shell_chrome() {
+        let theme = mondrian_ui_theme::ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+
+        paint_eyedropper_overlay(
+            &mut encoder,
+            &theme,
+            Point::new(100.0, 120.0),
+            Color::from_hex(0x336699),
+        );
+
+        assert_eq!(encoder.rect_colors[0], theme.colors.eyedropper_overlay);
+        assert_eq!(encoder.rect_colors[1], Color::from_hex(0x336699));
+        assert_eq!(encoder.rect_colors[2], theme.colors.color_handle_inner);
     }
 }
