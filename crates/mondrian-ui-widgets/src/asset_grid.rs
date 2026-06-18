@@ -9,6 +9,7 @@ use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -51,6 +52,10 @@ pub struct AssetGridState {
     pub selected_item_id: Option<String>,
     /// Selected item by model index as a fallback.
     pub selected_index: Option<usize>,
+    /// Multi-selected item ids, preserved across model refreshes when possible.
+    pub selected_item_ids: Vec<String>,
+    /// Multi-selected item indices as a fallback when ids are unavailable.
+    pub selected_indices: Vec<usize>,
 }
 
 /// Non-image state for an [`AssetGridItem`] preview region.
@@ -184,6 +189,8 @@ pub struct AssetGrid {
     bounds: Rect,
     viewport: Rect,
     selected: Option<usize>,
+    selected_indices: BTreeSet<usize>,
+    selection_anchor: Option<usize>,
     hovered: Option<usize>,
     focused: bool,
     focus_visible: bool,
@@ -229,6 +236,8 @@ impl AssetGrid {
             bounds: Rect::ZERO,
             viewport: Rect::ZERO,
             selected: None,
+            selected_indices: BTreeSet::new(),
+            selection_anchor: None,
             hovered: None,
             focused: false,
             focus_visible: false,
@@ -300,13 +309,19 @@ impl AssetGrid {
                 .and_then(|index| self.items.get(index))
                 .map(|item| item.id.clone()),
             selected_index: self.selected,
+            selected_item_ids: self
+                .selected_indices
+                .iter()
+                .filter_map(|index| self.items.get(*index).map(|item| item.id.clone()))
+                .collect(),
+            selected_indices: self.selected_indices.iter().copied().collect(),
         }
     }
 
     /// Restore local browser state after replacing the backing model.
     pub fn restore_state(&mut self, state: &AssetGridState) {
         self.set_filter_query(state.filter_query.clone());
-        let selected = state
+        let primary = state
             .selected_item_id
             .as_ref()
             .and_then(|id| {
@@ -315,7 +330,35 @@ impl AssetGrid {
                     .position(|item| item.id == *id && self.item_matches_filter(item))
             })
             .or(state.selected_index);
-        self.set_selected(selected);
+        let mut selected_indices = BTreeSet::new();
+        for id in &state.selected_item_ids {
+            if let Some(index) = self
+                .items
+                .iter()
+                .position(|item| item.id == *id && self.item_matches_filter(item))
+                .filter(|index| self.is_enabled_index(*index))
+            {
+                selected_indices.insert(index);
+            }
+        }
+        if selected_indices.is_empty() {
+            selected_indices.extend(
+                state
+                    .selected_indices
+                    .iter()
+                    .copied()
+                    .filter(|index| self.is_enabled_index(*index))
+                    .filter(|index| self.visible_indices.contains(index)),
+            );
+        }
+        if let Some(primary) = primary.filter(|index| self.is_enabled_index(*index)) {
+            selected_indices.insert(primary);
+            self.selected = Some(primary);
+        } else {
+            self.selected = selected_indices.iter().next().copied();
+        }
+        self.selected_indices = selected_indices;
+        self.selection_anchor = self.selected;
     }
 
     /// Dispatch a dynamic action when selection changes.
@@ -353,13 +396,23 @@ impl AssetGrid {
 
     /// Set selected item without dispatching actions.
     pub fn set_selected(&mut self, index: Option<usize>) {
+        self.selected_indices.clear();
         self.selected =
             index.filter(|idx| self.is_enabled_index(*idx) && self.visible_indices.contains(idx));
+        if let Some(selected) = self.selected {
+            self.selected_indices.insert(selected);
+        }
+        self.selection_anchor = self.selected;
     }
 
     /// Currently selected item index.
     pub fn selected_index(&self) -> Option<usize> {
         self.selected
+    }
+
+    /// Currently selected item indices.
+    pub fn selected_indices(&self) -> Vec<usize> {
+        self.selected_indices.iter().copied().collect()
     }
 
     /// Number of columns computed during the last layout pass.
@@ -433,6 +486,21 @@ impl AssetGrid {
         self.rebuild_visible_indices();
         self.selected = self
             .selected
+            .filter(|index| self.is_enabled_index(*index) && self.visible_indices.contains(index));
+        let visible_indices = self.visible_indices.clone();
+        let enabled_indices: BTreeSet<usize> = visible_indices
+            .iter()
+            .copied()
+            .filter(|index| self.is_enabled_index(*index))
+            .collect();
+        self.selected_indices.retain(|index| enabled_indices.contains(index));
+        if let Some(selected) = self.selected {
+            self.selected_indices.insert(selected);
+        } else {
+            self.selected = self.selected_indices.iter().next().copied();
+        }
+        self.selection_anchor = self
+            .selection_anchor
             .filter(|index| self.is_enabled_index(*index) && self.visible_indices.contains(index));
         self.hovered = None;
         self.drag_candidate = None;
@@ -516,7 +584,9 @@ impl AssetGrid {
             };
         };
         if direction >= 0 {
-            visible.get((position + direction as usize).min(visible.len())).copied()
+            visible
+                .get((position + direction as usize).min(visible.len().saturating_sub(1)))
+                .copied()
         } else {
             position
                 .checked_sub(direction.unsigned_abs() as usize)
@@ -524,12 +594,58 @@ impl AssetGrid {
         }
     }
 
+    fn selected_range(&self, start: usize, end: usize) -> BTreeSet<usize> {
+        let Some(start_position) = self.visible_position_for_index(start) else {
+            return BTreeSet::new();
+        };
+        let Some(end_position) = self.visible_position_for_index(end) else {
+            return BTreeSet::new();
+        };
+        let (first, last) = if start_position <= end_position {
+            (start_position, end_position)
+        } else {
+            (end_position, start_position)
+        };
+        self.visible_indices[first..=last]
+            .iter()
+            .copied()
+            .filter(|index| self.is_enabled_index(*index))
+            .collect()
+    }
+
+    fn set_selection_set(&mut self, selected: BTreeSet<usize>, primary: usize) {
+        self.selected_indices = selected;
+        if self.is_enabled_index(primary) && self.visible_indices.contains(&primary) {
+            self.selected = Some(primary);
+            self.selected_indices.insert(primary);
+        } else {
+            self.selected = self.selected_indices.iter().next().copied();
+        }
+    }
+
     fn select_from_input(&mut self, index: usize, ctx: &mut EventContext) -> EventResult {
         if !self.is_enabled_index(index) {
             return EventResult::Handled;
         }
-        if self.selected != Some(index) {
-            self.selected = Some(index);
+        if self.selected != Some(index)
+            || self.selected_indices.len() != 1
+            || !self.selected_indices.contains(&index)
+        {
+            self.set_selected(Some(index));
+            self.dispatch_select(index, ctx);
+            ctx.request_repaint();
+        }
+        EventResult::Handled
+    }
+
+    fn extend_selection_from_input(&mut self, index: usize, ctx: &mut EventContext) -> EventResult {
+        if !self.is_enabled_index(index) {
+            return EventResult::Handled;
+        }
+        let anchor = self.selection_anchor.or(self.selected).unwrap_or(index);
+        let selected = self.selected_range(anchor, index);
+        if selected != self.selected_indices || self.selected != Some(index) {
+            self.set_selection_set(selected, index);
             self.dispatch_select(index, ctx);
             ctx.request_repaint();
         }
@@ -552,6 +668,7 @@ impl AssetGrid {
         &mut self,
         index: usize,
         position: Point,
+        modifiers: Modifiers,
         ctx: &mut EventContext,
     ) -> EventResult {
         if !self.is_enabled_index(index) {
@@ -559,10 +676,33 @@ impl AssetGrid {
             return EventResult::Handled;
         }
         let now = Instant::now();
-        let activate = self.click_is_activation(index, position, now);
+        let activate =
+            !modifiers.ctrl && !modifiers.shift && self.click_is_activation(index, position, now);
         self.last_click = Some(AssetGridClick { index, position, time: now });
-        if self.selected != Some(index) {
-            self.selected = Some(index);
+        if modifiers.shift {
+            return self.extend_selection_from_input(index, ctx);
+        }
+        if modifiers.ctrl {
+            if self.selected_indices.contains(&index) {
+                self.selected_indices.remove(&index);
+                self.selected = self.selected_indices.iter().next().copied();
+                if self.selection_anchor == Some(index) {
+                    self.selection_anchor = self.selected;
+                }
+            } else {
+                self.selected_indices.insert(index);
+                self.selected = Some(index);
+                self.selection_anchor.get_or_insert(index);
+            }
+            self.dispatch_select(index, ctx);
+            ctx.request_repaint();
+            return EventResult::Handled;
+        }
+        if self.selected != Some(index)
+            || self.selected_indices.len() != 1
+            || !self.selected_indices.contains(&index)
+        {
+            self.set_selected(Some(index));
             self.dispatch_select(index, ctx);
             ctx.request_repaint();
         }
@@ -709,7 +849,8 @@ impl AssetGrid {
         let item = &self.items[index];
         let colors = &ctx.theme.colors;
         let spacing = &ctx.theme.spacing;
-        let selected = self.selected == Some(index);
+        let primary_selected = self.selected == Some(index);
+        let selected = self.selected_indices.contains(&index);
         let hovered = self.hovered == Some(index) && !item.disabled;
         let base_fill = if selected {
             colors.accent
@@ -718,7 +859,7 @@ impl AssetGrid {
         } else {
             colors.card
         };
-        if selected && (self.focus_visible || self.focused) {
+        if primary_selected && (self.focus_visible || self.focused) {
             paint_focus_ring(ctx, rect, CARD_RADIUS);
         }
         ctx.encoder.draw_rect(rect, base_fill, CARD_RADIUS);
@@ -922,8 +1063,8 @@ impl Widget for AssetGrid {
                             .map(|item| item.context_menu_items.clone())
                             .unwrap_or_default();
                         if !items.is_empty() {
-                            if self.selected != Some(index) {
-                                self.selected = Some(index);
+                            if !self.selected_indices.contains(&index) {
+                                self.set_selected(Some(index));
                                 self.dispatch_select(index, ctx);
                             }
                             self.open_context_menu(*position, items, ctx);
@@ -936,7 +1077,7 @@ impl Widget for AssetGrid {
                     return EventResult::Handled;
                 }
             }
-            UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
+            UiEvent::MouseDown { position, button: MouseButton::Left, modifiers } => {
                 if self.filter_input.as_ref().is_some_and(|input| input.hit_test(*position)) {
                     return self
                         .route_filter_input_event(event, ctx)
@@ -945,7 +1086,8 @@ impl Widget for AssetGrid {
                 if self.bounds.contains(*position) {
                     self.focus_visible = false;
                     if let Some(index) = self.index_at(*position) {
-                        let result = self.select_or_activate_from_input(index, *position, ctx);
+                        let result =
+                            self.select_or_activate_from_input(index, *position, *modifiers, ctx);
                         if let Some(payload) =
                             self.items.get(index).and_then(|item| item.drag_payload.clone())
                         {
@@ -1018,39 +1160,70 @@ impl Widget for AssetGrid {
                 }
                 return EventResult::Handled;
             }
-            UiEvent::KeyDown { key: KeyCode::Right, .. } if self.focused => {
+            UiEvent::KeyDown { key: KeyCode::A, modifiers } if self.focused && modifiers.ctrl => {
+                self.selected_indices = self.visible_enabled_indices().into_iter().collect();
+                self.selected = self.selected_indices.iter().next().copied();
+                self.selection_anchor = self.selected;
+                ctx.request_repaint();
+                return EventResult::Handled;
+            }
+            UiEvent::KeyDown { key: KeyCode::Right, modifiers } if self.focused => {
                 if let Some(index) = self.move_selection(1) {
-                    return self.select_from_input(index, ctx);
+                    return if modifiers.shift {
+                        self.extend_selection_from_input(index, ctx)
+                    } else {
+                        self.select_from_input(index, ctx)
+                    };
                 }
                 return EventResult::Ignored;
             }
-            UiEvent::KeyDown { key: KeyCode::Left, .. } if self.focused => {
+            UiEvent::KeyDown { key: KeyCode::Left, modifiers } if self.focused => {
                 if let Some(index) = self.move_selection(-1) {
-                    return self.select_from_input(index, ctx);
+                    return if modifiers.shift {
+                        self.extend_selection_from_input(index, ctx)
+                    } else {
+                        self.select_from_input(index, ctx)
+                    };
                 }
                 return EventResult::Ignored;
             }
-            UiEvent::KeyDown { key: KeyCode::Down, .. } if self.focused => {
+            UiEvent::KeyDown { key: KeyCode::Down, modifiers } if self.focused => {
                 if let Some(index) = self.move_selection(self.columns as i32) {
-                    return self.select_from_input(index, ctx);
+                    return if modifiers.shift {
+                        self.extend_selection_from_input(index, ctx)
+                    } else {
+                        self.select_from_input(index, ctx)
+                    };
                 }
                 return EventResult::Ignored;
             }
-            UiEvent::KeyDown { key: KeyCode::Up, .. } if self.focused => {
+            UiEvent::KeyDown { key: KeyCode::Up, modifiers } if self.focused => {
                 if let Some(index) = self.move_selection(-(self.columns as i32)) {
-                    return self.select_from_input(index, ctx);
+                    return if modifiers.shift {
+                        self.extend_selection_from_input(index, ctx)
+                    } else {
+                        self.select_from_input(index, ctx)
+                    };
                 }
                 return EventResult::Ignored;
             }
-            UiEvent::KeyDown { key: KeyCode::Home, .. } if self.focused => {
+            UiEvent::KeyDown { key: KeyCode::Home, modifiers } if self.focused => {
                 if let Some(index) = self.first_enabled() {
-                    return self.select_from_input(index, ctx);
+                    return if modifiers.shift {
+                        self.extend_selection_from_input(index, ctx)
+                    } else {
+                        self.select_from_input(index, ctx)
+                    };
                 }
                 return EventResult::Ignored;
             }
-            UiEvent::KeyDown { key: KeyCode::End, .. } if self.focused => {
+            UiEvent::KeyDown { key: KeyCode::End, modifiers } if self.focused => {
                 if let Some(index) = self.last_enabled() {
-                    return self.select_from_input(index, ctx);
+                    return if modifiers.shift {
+                        self.extend_selection_from_input(index, ctx)
+                    } else {
+                        self.select_from_input(index, ctx)
+                    };
                 }
                 return EventResult::Ignored;
             }
@@ -1471,6 +1644,240 @@ mod tests {
 
         assert_eq!(rebuilt.filter_query(), "camera");
         assert_eq!(rebuilt.selected_index(), Some(0));
+    }
+
+    #[test]
+    fn ctrl_click_toggles_multi_selection_without_losing_primary_focus() {
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![item("a", "A"), item("b", "B"), item("c", "C")],
+        );
+        grid.layout(Rect::new(0.0, 0.0, 520.0, 260.0));
+        let first = grid.card_rect_for_index(0).expect("first").center();
+        let second = grid.card_rect_for_index(1).expect("second").center();
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            grid.event(
+                &UiEvent::MouseDown {
+                    position: first,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            grid.event(
+                &UiEvent::MouseDown {
+                    position: second,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::ctrl(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(grid.selected_index(), Some(1));
+        assert_eq!(grid.selected_indices(), vec![0, 1]);
+
+        assert_eq!(
+            grid.event(
+                &UiEvent::MouseDown {
+                    position: first,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::ctrl(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(grid.selected_index(), Some(1));
+        assert_eq!(grid.selected_indices(), vec![1]);
+    }
+
+    #[test]
+    fn shift_click_selects_visible_range_from_anchor() {
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![
+                item("a", "A"),
+                item("b", "B"),
+                item("c", "C"),
+                item("d", "D"),
+            ],
+        );
+        grid.layout(Rect::new(0.0, 0.0, 520.0, 320.0));
+        let first = grid.card_rect_for_index(0).expect("first").center();
+        let fourth = grid.card_rect_for_index(3).expect("fourth").center();
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let _ = grid.event(
+            &UiEvent::MouseDown {
+                position: first,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        let _ = grid.event(
+            &UiEvent::MouseDown {
+                position: fourth,
+                button: MouseButton::Left,
+                modifiers: Modifiers::shift(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(grid.selected_index(), Some(3));
+        assert_eq!(grid.selected_indices(), vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn multi_selection_state_restores_by_stable_ids() {
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![item("a", "A"), item("b", "B"), item("c", "C")],
+        );
+        grid.layout(Rect::new(0.0, 0.0, 520.0, 260.0));
+        let first = grid.card_rect_for_index(0).expect("first").center();
+        let third = grid.card_rect_for_index(2).expect("third").center();
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        let _ = grid.event(
+            &UiEvent::MouseDown {
+                position: first,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        let _ = grid.event(
+            &UiEvent::MouseDown {
+                position: third,
+                button: MouseButton::Left,
+                modifiers: Modifiers::ctrl(),
+            },
+            &mut ctx,
+        );
+        let state = grid.state();
+
+        let mut rebuilt = AssetGrid::new(
+            "Assets",
+            vec![item("c", "C"), item("b", "B"), item("a", "A")],
+        );
+        rebuilt.layout(Rect::new(0.0, 0.0, 520.0, 260.0));
+        rebuilt.restore_state(&state);
+
+        assert_eq!(rebuilt.selected_index(), Some(0));
+        assert_eq!(rebuilt.selected_indices(), vec![0, 2]);
+    }
+
+    #[test]
+    fn keyboard_navigation_clamps_at_last_visible_item() {
+        let mut grid = AssetGrid::new("Assets", vec![item("a", "A"), item("b", "B")]);
+        grid.layout(Rect::new(0.0, 0.0, 360.0, 220.0));
+        grid.set_selected(Some(1));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let _ = grid.event(&UiEvent::FocusGained, &mut ctx);
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(grid.selected_index(), Some(1));
+        assert_eq!(grid.selected_indices(), vec![1]);
+    }
+
+    #[test]
+    fn ctrl_a_selects_all_visible_enabled_cards() {
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![
+                item("a", "A"),
+                item("b", "B").disabled(true),
+                item("c", "C"),
+            ],
+        );
+        grid.layout(Rect::new(0.0, 0.0, 520.0, 260.0));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let _ = grid.event(&UiEvent::FocusGained, &mut ctx);
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(grid.selected_indices(), vec![0, 2]);
     }
 
     #[test]

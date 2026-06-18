@@ -771,6 +771,14 @@ layers, solid-color assets, folders, and folder-aware imports. File drops
 inside the asset browser emit `ui.assets.import_files`; right-click import
 dialogs carry the same target folder and resolve to that action after the
 native file picker returns.
+Asset selection is local browser state owned by `AssetGrid`. Single click
+selects one card, Ctrl-click toggles cards, Shift-click or Shift-key navigation
+selects a visible range from the anchor, and Ctrl+A selects all enabled cards in
+the current filtered view. `selected_index` remains the primary keyboard/focus
+item while `selected_indices` stores the multi-selection set. Batch asset
+drag/drop is intentionally a separate app protocol step: until `DragPayload`
+and timeline/assets handlers grow multi-asset payloads, card drags still carry
+the initiating card's single payload.
 Adjustment-layer and solid-color creation actions also carry the current
 browser folder id as `folder_id`, while folder creation uses `parent_folder_id`.
 Creating any asset-browser item inside a bin therefore remains an app-layer
