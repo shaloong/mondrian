@@ -24,7 +24,13 @@ use mondrian_ui_core::widget::PaintContext;
 use tiny_skia_path::{PathSegment as TinyPathSegment, Point as TinyPoint, Transform};
 
 const TESSELLATION_TOLERANCE: f32 = 0.08;
-const MAX_RASTER_ICON_SIZE: u32 = 256;
+/// Largest SVG icon edge rasterized into the renderer image atlas.
+///
+/// The UI image atlas is currently 2048x2048 with transparent padding around
+/// each allocation. 512px keeps designer-authored icons and medium empty-state
+/// glyphs on the browser-like resvg/tiny-skia path while still preventing a
+/// single oversized SVG from consuming a disproportionate atlas row.
+const MAX_RASTER_ICON_SIZE: u32 = 512;
 
 static STATIC_SVG_ICON_CACHE: OnceLock<Mutex<std::collections::HashMap<&'static str, VectorIcon>>> =
     OnceLock::new();
@@ -642,6 +648,25 @@ mod tests {
     }
 
     #[test]
+    fn medium_svg_icons_stay_on_raster_path_for_smooth_edges() {
+        let icon = VectorIcon::from_svg_str(
+            r#"<svg viewBox="0 0 24 24"><path d="M4 4L20 4L12 20Z" fill="black"/></svg>"#,
+        )
+        .expect("icon");
+        let mut recorder = PaintRecorder::default();
+        let mut ctx = paint_ctx(&mut recorder);
+
+        icon.paint(
+            &mut ctx,
+            Rect::new(0.0, 0.0, 512.0, 512.0),
+            Color::from_hex(0xFFFFFF),
+        );
+
+        assert_eq!(recorder.raster_images, 1);
+        assert_eq!(recorder.triangles, 0);
+    }
+
+    #[test]
     fn falls_back_to_tessellated_triangles_without_raster_source() {
         let mut icon = VectorIcon::from_svg_str(
             r#"<svg viewBox="0 0 24 24"><path d="M4 4L20 4L12 20Z" fill="black"/></svg>"#,
@@ -662,7 +687,7 @@ mod tests {
     }
 
     #[test]
-    fn falls_back_to_tessellated_triangles_for_large_icon_bounds() {
+    fn falls_back_to_tessellated_triangles_for_oversized_icon_bounds() {
         let icon = VectorIcon::from_svg_str(
             r#"<svg viewBox="0 0 24 24"><path d="M4 4L20 4L12 20Z" fill="black"/></svg>"#,
         )
@@ -672,7 +697,7 @@ mod tests {
 
         icon.paint(
             &mut ctx,
-            Rect::new(0.0, 0.0, 512.0, 512.0),
+            Rect::new(0.0, 0.0, 1024.0, 1024.0),
             Color::from_hex(0xFFFFFF),
         );
 

@@ -1028,6 +1028,9 @@ transforms become renderable path data. The icon keeps lyon-tessellated
 theme-tinted triangle meshes as a geometry fallback and metadata path, while
 normal small-icon painting rasterizes the SVG source with resvg/tiny-skia at the
 target pixel size and submits a stable raster-image key to the renderer.
+Rasterized SVG icons are kept on this high-quality path up to 512px per edge;
+larger bounds may fall back to the lyon mesh path so one oversized SVG does not
+consume a disproportionate slice of the shared 2048px image atlas.
 Text buttons that need command glyphs use the same optional leading
 `VectorIcon` path, so icon-only and icon-plus-label controls share parsing,
 caching, focus, disabled, and text clipping behavior.
