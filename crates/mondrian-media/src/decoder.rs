@@ -316,9 +316,8 @@ impl DecoderPool {
             }
         };
 
-        let decode_result = decode_result.map_err(|e| {
+        let decode_result = decode_result.inspect_err(|_| {
             self.metrics.decode_failures.fetch_add(1, Ordering::Relaxed);
-            e
         });
 
         self.metrics
@@ -429,9 +428,8 @@ impl DecoderPool {
             reason: e.to_string(),
         })
         .and_then(|r| r)
-        .map_err(|e| {
+        .inspect_err(|_| {
             self.metrics.decode_failures.fetch_add(1, Ordering::Relaxed);
-            e
         })?;
 
         self.metrics

@@ -2016,7 +2016,7 @@ impl TimelinePanel {
         }
 
         let painter = ui.painter_at(rect);
-        let lane_fill = if visual_row_index % 2 == 0 {
+        let lane_fill = if visual_row_index.is_multiple_of(2) {
             palette::bg_surface()
         } else {
             palette::bg_surface_raised()

@@ -439,7 +439,7 @@ fn record_gpu_compositor_result(success: bool) {
         counter.store(0, Ordering::Relaxed);
     } else {
         let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
-        if n % 60 == 0 {
+        if n.is_multiple_of(60) {
             tracing::warn!("GPU compositor failed {n} times consecutively, retrying...");
         }
     }

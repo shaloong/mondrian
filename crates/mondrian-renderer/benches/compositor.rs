@@ -14,8 +14,7 @@ use std::sync::Arc;
 const IDENTITY: [f32; 6] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
 
 fn solid_rgba(w: u32, h: u32, r: u8, g: u8, b: u8) -> Vec<u8> {
-    std::iter::repeat([r, g, b, 255u8])
-        .take(w as usize * h as usize)
+    std::iter::repeat_n([r, g, b, 255u8], w as usize * h as usize)
         .flatten()
         .collect()
 }

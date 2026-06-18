@@ -919,7 +919,7 @@ impl AppState {
     fn drop_asset_from_ui(&mut self, payload: TimelineDropAssetPayload) -> Result<()> {
         let needs_prepare = self
             .dragging_asset()
-            .map_or(true, |dragging| dragging.asset_id != payload.asset_id);
+            .is_none_or(|dragging| dragging.asset_id != payload.asset_id);
         if needs_prepare {
             self.prepare_asset_drag_from_ui(AssetsPrepareDragPayload {
                 asset_id: payload.asset_id,

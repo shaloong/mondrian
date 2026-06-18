@@ -148,7 +148,7 @@ impl FrameProfiler {
         if self.history.len() > self.max_history {
             self.history.remove(0);
         }
-        if self.frame_count % self.report_interval == 0 {
+        if self.frame_count.is_multiple_of(self.report_interval) {
             self.report();
         }
     }

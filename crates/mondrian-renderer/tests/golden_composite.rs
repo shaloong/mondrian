@@ -32,10 +32,7 @@ fn should_update() -> bool {
 }
 
 fn solid_rgba(w: u32, h: u32, r: u8, g: u8, b: u8, a: u8) -> Vec<u8> {
-    std::iter::repeat([r, g, b, a])
-        .take(w as usize * h as usize)
-        .flatten()
-        .collect()
+    std::iter::repeat_n([r, g, b, a], w as usize * h as usize).flatten().collect()
 }
 
 fn identity_graph() -> Arc<mondrian_effects::CompiledEffectGraph> {

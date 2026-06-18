@@ -372,7 +372,7 @@ pub fn color_palette_single(
                     ui.end_row();
                 }
             }
-            if palette.colors.len() % palette.columns != 0 {
+            if !palette.colors.len().is_multiple_of(palette.columns) {
                 ui.end_row();
             }
         });
@@ -419,7 +419,7 @@ pub fn color_palette_multi(
                     ui.end_row();
                 }
             }
-            if palette.colors.len() % palette.columns != 0 {
+            if !palette.colors.len().is_multiple_of(palette.columns) {
                 ui.end_row();
             }
         });
