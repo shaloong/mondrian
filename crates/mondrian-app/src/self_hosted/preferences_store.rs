@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use crate::app::app_data_dir;
 
 const SELF_HOSTED_PREFERENCES_FILE: &str = "self_hosted_preferences.json";
+/// Maximum number of recent projects kept by the self-hosted startup surface.
+pub const MAX_RECENT_PROJECTS: usize = 12;
 
 /// Versioned user preferences owned by the self-hosted shell.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,6 +26,8 @@ pub struct SelfHostedPreferences {
     pub theme_preset: ThemePreset,
     /// Built-in workspace preset restored when the self-hosted shell opens.
     pub workspace_preset: WorkspacePreset,
+    /// Most recently opened project files for the startup surface.
+    pub recent_projects: Vec<PathBuf>,
 }
 
 impl Default for SelfHostedPreferences {
@@ -32,7 +36,32 @@ impl Default for SelfHostedPreferences {
             version: 1,
             theme_preset: ThemePreset::Dark,
             workspace_preset: WorkspacePreset::Editing,
+            recent_projects: Vec::new(),
         }
+    }
+}
+
+impl SelfHostedPreferences {
+    /// Record a project path at the front of the recent list.
+    pub fn record_recent_project(&mut self, project_file: PathBuf) {
+        self.recent_projects.retain(|existing| existing != &project_file);
+        self.recent_projects.insert(0, project_file);
+        self.recent_projects.truncate(MAX_RECENT_PROJECTS);
+    }
+
+    fn sanitize_loaded(mut self) -> Self {
+        let mut sanitized = Vec::new();
+        for path in self.recent_projects {
+            if !path.exists() || sanitized.contains(&path) {
+                continue;
+            }
+            sanitized.push(path);
+            if sanitized.len() == MAX_RECENT_PROJECTS {
+                break;
+            }
+        }
+        self.recent_projects = sanitized;
+        self
     }
 }
 
@@ -52,7 +81,9 @@ pub fn load_self_hosted_preferences_from(path: &Path) -> SelfHostedPreferences {
     let Ok(bytes) = fs::read(path) else {
         return SelfHostedPreferences::default();
     };
-    serde_json::from_slice::<SelfHostedPreferences>(&bytes).unwrap_or_default()
+    serde_json::from_slice::<SelfHostedPreferences>(&bytes)
+        .map(SelfHostedPreferences::sanitize_loaded)
+        .unwrap_or_default()
 }
 
 /// Persist self-hosted preferences to the default product path.
@@ -108,15 +139,19 @@ mod tests {
     #[test]
     fn preferences_round_trip_to_disk() {
         let path = temp_preferences_path("round-trip-preferences");
+        let project_path = temp_preferences_path("round-trip-project").with_extension("mdp");
         let preferences = SelfHostedPreferences {
             version: 1,
             theme_preset: ThemePreset::Light,
             workspace_preset: WorkspacePreset::Compositing,
+            recent_projects: vec![project_path.clone()],
         };
 
+        fs::write(&project_path, b"project").expect("write recent project fixture");
         persist_self_hosted_preferences_to(&path, &preferences).expect("persist preferences");
         let loaded = load_self_hosted_preferences_from(&path);
         fs::remove_file(path).ok();
+        fs::remove_file(project_path).ok();
 
         assert_eq!(loaded, preferences);
     }
@@ -131,5 +166,48 @@ mod tests {
         fs::remove_file(path).ok();
 
         assert_eq!(preferences, SelfHostedPreferences::default());
+    }
+
+    #[test]
+    fn recording_recent_projects_deduplicates_and_truncates() {
+        let mut preferences = SelfHostedPreferences::default();
+
+        for index in 0..(MAX_RECENT_PROJECTS + 2) {
+            preferences.record_recent_project(PathBuf::from(format!("E:/projects/{index}.mdp")));
+        }
+        let repeated = PathBuf::from("E:/projects/4.mdp");
+        preferences.record_recent_project(repeated.clone());
+
+        assert_eq!(preferences.recent_projects.len(), MAX_RECENT_PROJECTS);
+        assert_eq!(preferences.recent_projects[0], repeated);
+        assert_eq!(
+            preferences.recent_projects.iter().filter(|path| **path == repeated).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn loading_preferences_filters_missing_recent_projects() {
+        let path = temp_preferences_path("recent-filter");
+        let existing = temp_preferences_path("recent-existing").with_extension("mdp");
+        let missing = temp_preferences_path("recent-missing").with_extension("mdp");
+        fs::write(&existing, b"project").expect("write existing recent project");
+        fs::write(
+            &path,
+            serde_json::to_vec(&SelfHostedPreferences {
+                version: 1,
+                theme_preset: ThemePreset::Dark,
+                workspace_preset: WorkspacePreset::Editing,
+                recent_projects: vec![missing, existing.clone(), existing.clone()],
+            })
+            .expect("serialize preferences"),
+        )
+        .expect("write preferences");
+
+        let preferences = load_self_hosted_preferences_from(&path);
+        fs::remove_file(path).ok();
+        fs::remove_file(&existing).ok();
+
+        assert_eq!(preferences.recent_projects, vec![existing]);
     }
 }

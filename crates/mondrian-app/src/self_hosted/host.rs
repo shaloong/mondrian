@@ -5,7 +5,7 @@
 //! refresh policy after widget-dispatched actions.
 
 use std::cell::{Cell, Ref, RefCell};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use mondrian_editor_state::state::WorkspacePreset;
 use mondrian_platform::PlatformService;
@@ -15,7 +15,7 @@ use mondrian_ui_theme::set_theme_preset;
 
 use crate::app::ui_actions::{
     AssetsOpenFolderPayload, PreferencesThemePayload, APP_SHELL_NAMESPACE,
-    APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_OPEN_PROJECT_DIALOG,
+    APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_OPEN_RECENT_PROJECT,
     APP_SHELL_PREFERENCES_THEME_CHANGED, APP_SHELL_QUIT, APP_SHELL_WINDOW_DRAG,
     APP_SHELL_WINDOW_MINIMIZE, APP_SHELL_WINDOW_TOGGLE_MAXIMIZE, ASSETS_NAMESPACE,
     ASSETS_OPEN_FOLDER,
@@ -28,7 +28,7 @@ use crate::self_hosted::preferences_store::{
     SelfHostedPreferences,
 };
 use crate::self_hosted::shell::{try_resolve_app_shell_action, SelfHostedAppRoot};
-use crate::self_hosted::startup::SelfHostedStartupScreen;
+use crate::self_hosted::startup::{SelfHostedStartupScreen, StartupRecentProject};
 use mondrian_editor_state::Action;
 
 /// Window-host commands produced while draining self-hosted UI actions.
@@ -92,8 +92,10 @@ impl SelfHostedUiHost {
         } else {
             SelfHostedUiMode::Startup
         };
+        let mut startup = SelfHostedStartupScreen::new();
+        startup.set_recent_projects(startup_recent_projects_from_preferences(&preferences));
         Self {
-            startup: SelfHostedStartupScreen::new(),
+            startup,
             root,
             app_state: RefCell::new(app_state),
             preferences,
@@ -232,7 +234,7 @@ impl SelfHostedUiHost {
                 continue;
             }
             tracing::debug!(?action, "custom UI action");
-            if let Err(err) = self.app_state.borrow_mut().dispatch_action(action) {
+            if let Err(err) = self.dispatch_editor_action(action) {
                 tracing::warn!("custom UI action failed: {err}");
             }
             self.mark_dirty();
@@ -295,7 +297,7 @@ impl SelfHostedUiHost {
 
         match try_resolve_app_shell_action(action.clone(), platform, None) {
             Ok(Some(resolved)) => {
-                if let Err(err) = self.app_state.borrow_mut().dispatch_action(resolved) {
+                if let Err(err) = self.dispatch_editor_action(resolved) {
                     tracing::warn!("startup action failed: {err}");
                 }
                 self.mark_dirty();
@@ -311,6 +313,39 @@ impl SelfHostedUiHost {
             }
         }
         true
+    }
+
+    fn dispatch_editor_action(&mut self, action: Action) -> mondrian_core::Result<()> {
+        let previous_project_path = self.app_state.borrow().current_project_path.clone();
+        let result = self.app_state.borrow_mut().dispatch_action(action);
+        if result.is_ok() {
+            let current_project_path = self.app_state.borrow().current_project_path.clone();
+            if current_project_path.is_some() && current_project_path != previous_project_path {
+                if let Some(path) = current_project_path {
+                    self.record_recent_project(path);
+                }
+            }
+        }
+        result
+    }
+
+    fn record_recent_project(&mut self, project_file: PathBuf) {
+        self.preferences.record_recent_project(project_file);
+        self.sync_startup_recent_projects();
+        if let Err(err) =
+            persist_self_hosted_preferences_to(&self.preferences_path, &self.preferences)
+        {
+            tracing::warn!("failed to persist self-hosted recent projects: {err}");
+            self.app_state
+                .borrow_mut()
+                .set_status_hint(format!("Recent projects could not be saved: {err}"), true);
+            self.mark_dirty();
+        }
+    }
+
+    fn sync_startup_recent_projects(&mut self) {
+        self.startup
+            .set_recent_projects(startup_recent_projects_from_preferences(&self.preferences));
     }
 
     fn take_preferences_update(&mut self, action: &Action, bounds: Rect) -> bool {
@@ -406,8 +441,42 @@ fn is_startup_project_action(action: &Action) -> bool {
         action,
         Action::Custom { namespace, name, .. }
             if namespace == APP_SHELL_NAMESPACE
-                && (name == APP_SHELL_NEW_PROJECT_DIALOG || name == APP_SHELL_OPEN_PROJECT_DIALOG)
+                && (name == APP_SHELL_NEW_PROJECT_DIALOG
+                    || name == APP_SHELL_OPEN_PROJECT_DIALOG
+                    || name == APP_SHELL_OPEN_RECENT_PROJECT)
     )
+}
+
+fn startup_recent_projects_from_preferences(
+    preferences: &SelfHostedPreferences,
+) -> Vec<StartupRecentProject> {
+    preferences
+        .recent_projects
+        .iter()
+        .map(|project_file| StartupRecentProject {
+            project_file: project_file.clone(),
+            title: recent_project_title(project_file),
+            subtitle: recent_project_subtitle(project_file),
+        })
+        .collect()
+}
+
+fn recent_project_title(project_file: &Path) -> String {
+    project_file
+        .file_stem()
+        .or_else(|| project_file.file_name())
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| project_file.display().to_string())
+}
+
+fn recent_project_subtitle(project_file: &Path) -> String {
+    project_file
+        .parent()
+        .map(|parent| parent.display().to_string())
+        .filter(|parent| !parent.trim().is_empty())
+        .unwrap_or_else(|| project_file.display().to_string())
 }
 
 fn take_shell_window_command(commands: &mut SelfHostedShellCommands, action: &Action) -> bool {
@@ -599,9 +668,14 @@ mod tests {
     fn startup_new_project_action_switches_to_workspace_mode() {
         let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
         let project_file = temp_preferences_path("startup-project").with_extension("mdp");
+        let preferences_path = temp_preferences_path("startup-project-preferences");
         let runtime_root = project_runtime_root_for_test(&project_file);
         let platform = StartupProjectPlatform { project_file: project_file.clone() };
-        let mut host = SelfHostedUiHost::new(AppState::new());
+        let mut host = SelfHostedUiHost::new_with_preferences_path(
+            AppState::new(),
+            SelfHostedPreferences::default(),
+            preferences_path.clone(),
+        );
         let pending = PendingUiActions::default();
 
         pending.push(crate::app::ui_actions::app_shell_new_project_dialog_action());
@@ -615,9 +689,36 @@ mod tests {
             host.app_state().current_project_path.as_deref(),
             Some(project_file.as_path())
         );
+        assert_eq!(
+            host.preferences().recent_projects,
+            vec![project_file.clone()]
+        );
+        assert_eq!(host.startup.recent_project_count(), 1);
+        assert_eq!(
+            load_self_hosted_preferences_from(&preferences_path).recent_projects,
+            vec![project_file.clone()]
+        );
 
         let _ = std::fs::remove_file(project_file);
+        let _ = std::fs::remove_file(preferences_path);
         let _ = std::fs::remove_dir_all(runtime_root);
+    }
+
+    #[test]
+    fn host_loads_startup_recent_projects_from_preferences() {
+        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let project_file = temp_preferences_path("startup-recent").with_extension("mdp");
+        let mut preferences = SelfHostedPreferences::default();
+        preferences.record_recent_project(project_file.clone());
+
+        let host = SelfHostedUiHost::new_with_preferences_path(
+            AppState::new(),
+            preferences,
+            temp_preferences_path("startup-recent-preferences"),
+        );
+
+        assert_eq!(host.mode(), SelfHostedUiMode::Startup);
+        assert_eq!(host.startup.recent_project_count(), 1);
     }
 
     #[test]
@@ -629,6 +730,7 @@ mod tests {
                 version: 1,
                 theme_preset: ThemePreset::Dark,
                 workspace_preset: WorkspacePreset::Compositing,
+                recent_projects: Vec::new(),
             },
             temp_preferences_path("initial-workspace"),
         );
@@ -749,6 +851,7 @@ mod tests {
                 version: 1,
                 theme_preset: ThemePreset::Dark,
                 workspace_preset: WorkspacePreset::Editing,
+                recent_projects: Vec::new(),
             },
             path.clone(),
         );

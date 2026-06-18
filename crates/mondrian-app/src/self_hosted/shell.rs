@@ -19,13 +19,14 @@ use std::path::Path;
 
 use crate::app::ui_actions::{
     assets_import_files_action, export_set_draft_action, project_create_with_settings_action,
-    AssetsImportFilesPayload, ExportDraftUpdatePayload, ExportOutputDialogPayload,
-    ImportMediaDialogPayload, NewProjectDraftUpdatePayload, PreferencesTabPayload, APP_SHELL_ABOUT,
-    APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
-    APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_EXPORT_OUTPUT_DIALOG,
+    AppShellOpenRecentProjectPayload, AssetsImportFilesPayload, ExportDraftUpdatePayload,
+    ExportOutputDialogPayload, ImportMediaDialogPayload, NewProjectDraftUpdatePayload,
+    PreferencesTabPayload, APP_SHELL_ABOUT, APP_SHELL_CANCEL_NEW_PROJECT_DIALOG,
+    APP_SHELL_CLOSE_MODAL, APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_EXPORT_OUTPUT_DIALOG,
     APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
-    APP_SHELL_NEW_PROJECT_DRAFT_CHANGED, APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_PREFERENCES,
-    APP_SHELL_PREFERENCES_TAB_CHANGED, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
+    APP_SHELL_NEW_PROJECT_DRAFT_CHANGED, APP_SHELL_OPEN_PROJECT_DIALOG,
+    APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PREFERENCES, APP_SHELL_PREFERENCES_TAB_CHANGED,
+    APP_SHELL_SAVE_PROJECT_AS_DIALOG,
 };
 use crate::app::AppState;
 use crate::self_hosted::menu_bar::MenuBar;
@@ -139,6 +140,13 @@ pub fn try_resolve_app_shell_action(
                 return Ok(None);
             };
             Ok(paths.into_iter().next().map(Action::OpenProject))
+        }
+        Action::Custom { namespace, name, payload }
+            if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_OPEN_RECENT_PROJECT =>
+        {
+            let payload: AppShellOpenRecentProjectPayload = serde_json::from_value(payload)
+                .map_err(|err| app_shell_action_error(&name, err))?;
+            Ok(Some(Action::OpenProject(payload.project_file)))
         }
         Action::Custom { namespace, name, payload }
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_IMPORT_MEDIA_DIALOG =>
@@ -398,6 +406,7 @@ impl SelfHostedAppRoot {
             version: 1,
             theme_preset: self.preferences_model.theme_preset,
             workspace_preset: self.workspace_preset,
+            recent_projects: Vec::new(),
         };
         self.refresh_from_app_state_with_preferences(state, &preferences);
     }
@@ -868,12 +877,13 @@ mod tests {
         app_shell_export_output_dialog_action, app_shell_import_media_dialog_action,
         app_shell_import_media_dialog_action_with_target, app_shell_new_project_dialog_action,
         app_shell_new_project_draft_changed_action, app_shell_open_project_dialog_action,
-        app_shell_preferences_action, app_shell_preferences_tab_changed_action,
-        app_shell_save_project_as_dialog_action, AssetsImportFilesPayload,
-        ExportDraftUpdatePayload, ExportOutputDialogPayload, ImportMediaDialogPayload,
-        NewProjectDraftUpdatePayload, PreferencesTabPayload, ProjectCreateWithSettingsPayload,
-        ASSETS_IMPORT_FILES, ASSETS_NAMESPACE, EXPORT_NAMESPACE, EXPORT_SET_DRAFT,
-        PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
+        app_shell_open_recent_project_action, app_shell_preferences_action,
+        app_shell_preferences_tab_changed_action, app_shell_save_project_as_dialog_action,
+        AppShellOpenRecentProjectPayload, AssetsImportFilesPayload, ExportDraftUpdatePayload,
+        ExportOutputDialogPayload, ImportMediaDialogPayload, NewProjectDraftUpdatePayload,
+        PreferencesTabPayload, ProjectCreateWithSettingsPayload, ASSETS_IMPORT_FILES,
+        ASSETS_NAMESPACE, EXPORT_NAMESPACE, EXPORT_SET_DRAFT, PROJECT_CREATE_WITH_SETTINGS,
+        PROJECT_NAMESPACE,
     };
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use glam::Vec2;
@@ -1356,6 +1366,22 @@ mod tests {
             action,
             Some(Action::OpenProject(PathBuf::from("E:/projects/cut.mdp")))
         );
+    }
+
+    #[test]
+    fn resolve_app_shell_open_recent_project_returns_open_action() {
+        let platform = FakePlatform { open_paths: None, save_path: None };
+        let project_file = PathBuf::from("E:/projects/recent.mdp");
+
+        let action = resolve_app_shell_action(
+            app_shell_open_recent_project_action(AppShellOpenRecentProjectPayload {
+                project_file: project_file.clone(),
+            }),
+            &platform,
+            None,
+        );
+
+        assert_eq!(action, Some(Action::OpenProject(project_file)));
     }
 
     #[test]

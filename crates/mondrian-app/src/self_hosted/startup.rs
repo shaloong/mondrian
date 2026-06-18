@@ -8,10 +8,12 @@ use mondrian_core::Color;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
+use std::path::PathBuf;
 
 use crate::app::ui_actions::{
     app_shell_new_project_dialog_action, app_shell_open_project_dialog_action,
-    app_shell_quit_action, app_shell_window_drag_action,
+    app_shell_open_recent_project_action, app_shell_quit_action, app_shell_window_drag_action,
+    AppShellOpenRecentProjectPayload,
 };
 
 /// Startup window logical size used by the self-hosted product entrypoint.
@@ -28,13 +30,27 @@ const CLOSE_MARGIN: f32 = 10.0;
 const ACTION_BUTTON_HEIGHT: f32 = 34.0;
 const ACTION_BUTTON_GAP: f32 = 10.0;
 const RECENT_ROW_HEIGHT: f32 = 44.0;
+const RECENT_ROW_GAP: f32 = 8.0;
+const MAX_VISIBLE_RECENT_PROJECTS: usize = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StartupHit {
     NewProject,
     OpenProject,
+    RecentProject(usize),
     Close,
     DragSurface,
+}
+
+/// One project row shown on the self-hosted startup surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartupRecentProject {
+    /// Project file opened when the row is activated.
+    pub project_file: PathBuf,
+    /// Primary row label.
+    pub title: String,
+    /// Secondary row label, typically the parent directory.
+    pub subtitle: String,
 }
 
 /// Startup screen shown before a project is opened.
@@ -46,6 +62,8 @@ pub struct SelfHostedStartupScreen {
     right_rect: Rect,
     new_project_rect: Rect,
     open_project_rect: Rect,
+    recent_rects: Vec<Rect>,
+    recent_projects: Vec<StartupRecentProject>,
     close_rect: Rect,
     hover: Option<StartupHit>,
     pressed: Option<StartupHit>,
@@ -62,10 +80,25 @@ impl SelfHostedStartupScreen {
             right_rect: Rect::ZERO,
             new_project_rect: Rect::ZERO,
             open_project_rect: Rect::ZERO,
+            recent_rects: Vec::new(),
+            recent_projects: Vec::new(),
             close_rect: Rect::ZERO,
             hover: None,
             pressed: None,
         }
+    }
+
+    /// Replace startup recent-project rows.
+    pub fn set_recent_projects(&mut self, recent_projects: Vec<StartupRecentProject>) {
+        self.recent_projects = recent_projects;
+        self.recent_rects.clear();
+        self.hover = None;
+        self.pressed = None;
+    }
+
+    /// Number of recent project rows currently shown.
+    pub fn recent_project_count(&self) -> usize {
+        self.recent_projects.len()
     }
 
     fn hit_region(&self, point: Point) -> Option<StartupHit> {
@@ -75,6 +108,10 @@ impl SelfHostedStartupScreen {
             Some(StartupHit::NewProject)
         } else if self.open_project_rect.contains(point) {
             Some(StartupHit::OpenProject)
+        } else if let Some((index, _)) =
+            self.recent_rects.iter().enumerate().find(|(_, rect)| rect.contains(point))
+        {
+            Some(StartupHit::RecentProject(index))
         } else if self.panel_rect.contains(point) {
             Some(StartupHit::DragSurface)
         } else {
@@ -86,6 +123,14 @@ impl SelfHostedStartupScreen {
         let action = match hit {
             StartupHit::NewProject => app_shell_new_project_dialog_action(),
             StartupHit::OpenProject => app_shell_open_project_dialog_action(),
+            StartupHit::RecentProject(index) => {
+                let Some(project) = self.recent_projects.get(index) else {
+                    return;
+                };
+                app_shell_open_recent_project_action(AppShellOpenRecentProjectPayload {
+                    project_file: project.project_file.clone(),
+                })
+            }
             StartupHit::Close => app_shell_quit_action(),
             StartupHit::DragSurface => app_shell_window_drag_action(),
         };
@@ -169,6 +214,19 @@ impl Widget for SelfHostedStartupScreen {
             button_width,
             ACTION_BUTTON_HEIGHT,
         );
+
+        let recent_y = self.new_project_rect.y + ACTION_BUTTON_HEIGHT + 34.0;
+        let first_row_y = recent_y + 24.0;
+        self.recent_rects.clear();
+        let row_count = self.recent_projects.len().min(MAX_VISIBLE_RECENT_PROJECTS);
+        for index in 0..row_count {
+            self.recent_rects.push(Rect::new(
+                content_x,
+                first_row_y + index as f32 * (RECENT_ROW_HEIGHT + RECENT_ROW_GAP),
+                content_width,
+                RECENT_ROW_HEIGHT,
+            ));
+        }
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
@@ -303,14 +361,45 @@ impl Widget for SelfHostedStartupScreen {
             Point::new(content_x, recent_y),
             colors.popover_foreground,
         );
-        let recent_rect = Rect::new(content_x, recent_y + 24.0, content_width, RECENT_ROW_HEIGHT);
-        ctx.encoder.draw_rect(recent_rect, colors.card, spacing.radius_md);
-        ctx.encoder.draw_text(
-            "暂无最近项目",
-            typography.body.font_size,
-            Point::new(recent_rect.x + 14.0, recent_rect.y + 17.0),
-            colors.muted_foreground,
-        );
+        if self.recent_projects.is_empty() {
+            let recent_rect =
+                Rect::new(content_x, recent_y + 24.0, content_width, RECENT_ROW_HEIGHT);
+            ctx.encoder.draw_rect(recent_rect, colors.card, spacing.radius_md);
+            ctx.encoder.draw_text(
+                "暂无最近项目",
+                typography.body.font_size,
+                Point::new(recent_rect.x + 14.0, recent_rect.y + 17.0),
+                colors.muted_foreground,
+            );
+        } else {
+            for (index, rect) in self.recent_rects.iter().enumerate() {
+                let hit = StartupHit::RecentProject(index);
+                let fill = if self.pressed == Some(hit) {
+                    colors.muted
+                } else if self.hover == Some(hit) {
+                    colors.card.lerp(colors.foreground, 0.06)
+                } else {
+                    colors.card
+                };
+                ctx.encoder.draw_rect(*rect, fill, spacing.radius_md);
+                if let Some(project) = self.recent_projects.get(index) {
+                    ctx.encoder.draw_text_box(
+                        &project.title,
+                        typography.body.font_size,
+                        Point::new(rect.x + 14.0, rect.y + 15.0),
+                        rect.width - 28.0,
+                        colors.card_foreground,
+                    );
+                    ctx.encoder.draw_text_box(
+                        &project.subtitle,
+                        typography.small.font_size,
+                        Point::new(rect.x + 14.0, rect.y + 32.0),
+                        rect.width - 28.0,
+                        colors.muted_foreground,
+                    );
+                }
+            }
+        }
 
         let close_bg = if self.hover == Some(StartupHit::Close) {
             colors.muted
@@ -377,7 +466,7 @@ mod tests {
     use super::*;
     use crate::app::ui_actions::{
         APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_OPEN_PROJECT_DIALOG,
-        APP_SHELL_QUIT, APP_SHELL_WINDOW_DRAG,
+        APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_QUIT, APP_SHELL_WINDOW_DRAG,
     };
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_editor_state::Action;
@@ -492,5 +581,35 @@ mod tests {
             action_name(&drag_actions[0]),
             (APP_SHELL_NAMESPACE, APP_SHELL_WINDOW_DRAG)
         );
+    }
+
+    #[test]
+    fn startup_screen_dispatches_recent_project_action() {
+        let mut screen = SelfHostedStartupScreen::new();
+        let project_file = PathBuf::from("E:/projects/recent.mdp");
+        screen.set_recent_projects(vec![StartupRecentProject {
+            project_file: project_file.clone(),
+            title: "recent".to_owned(),
+            subtitle: "E:/projects".to_owned(),
+        }]);
+        screen.layout(Rect::new(
+            0.0,
+            0.0,
+            STARTUP_WINDOW_WIDTH,
+            STARTUP_WINDOW_HEIGHT,
+        ));
+
+        let recent_point = screen.recent_rects[0].center();
+        let recent_actions = dispatch_click(&mut screen, recent_point);
+
+        assert_eq!(recent_actions.len(), 1);
+        let Action::Custom { namespace, name, payload } = &recent_actions[0] else {
+            panic!("expected recent custom action");
+        };
+        assert_eq!(namespace, APP_SHELL_NAMESPACE);
+        assert_eq!(name, APP_SHELL_OPEN_RECENT_PROJECT);
+        let payload: AppShellOpenRecentProjectPayload =
+            serde_json::from_value(payload.clone()).expect("recent payload");
+        assert_eq!(payload.project_file, project_file);
     }
 }

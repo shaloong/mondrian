@@ -112,6 +112,8 @@ pub const APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG: &str = "confirm_new_project_dial
 pub const APP_SHELL_CANCEL_NEW_PROJECT_DIALOG: &str = "cancel_new_project_dialog";
 /// App-shell request to open a platform project file dialog.
 pub const APP_SHELL_OPEN_PROJECT_DIALOG: &str = "open_project_dialog";
+/// App-shell request to open one project from the self-hosted recent list.
+pub const APP_SHELL_OPEN_RECENT_PROJECT: &str = "open_recent_project";
 /// App-shell request to open a platform media import dialog.
 pub const APP_SHELL_IMPORT_MEDIA_DIALOG: &str = "import_media_dialog";
 /// App-shell request to open a platform project save-as dialog.
@@ -151,6 +153,13 @@ pub enum PreferencesTabPayload {
 pub struct PreferencesThemePayload {
     /// Theme preset to apply and persist.
     pub preset: ThemePreset,
+}
+
+/// Project path selected from the self-hosted recent-project startup list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppShellOpenRecentProjectPayload {
+    /// Mondrian project file to open.
+    pub project_file: PathBuf,
 }
 
 /// Clip edge being trimmed by a timeline UI.
@@ -718,6 +727,11 @@ pub fn app_shell_cancel_new_project_dialog_action() -> Action {
 /// Build an app-shell request for opening a project dialog.
 pub fn app_shell_open_project_dialog_action() -> Action {
     custom_app_shell_action(APP_SHELL_OPEN_PROJECT_DIALOG)
+}
+
+/// Build an app-shell request for opening one recent project path.
+pub fn app_shell_open_recent_project_action(payload: AppShellOpenRecentProjectPayload) -> Action {
+    custom_app_shell_action_with_payload(APP_SHELL_OPEN_RECENT_PROJECT, payload)
 }
 
 /// Build an app-shell request for importing media files.

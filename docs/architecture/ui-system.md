@@ -97,6 +97,12 @@ workspace minimum size. Closing the project moves the host back to startup mode.
 Recent-project recovery, crash recovery, and future onboarding belong in the
 startup model and should be surfaced through app-layer actions rather than
 reintroducing a separate project browser or console panel.
+The self-hosted recent-project list is persisted in
+`self_hosted::preferences_store::SelfHostedPreferences`: it records only shell
+launch history, is filtered to existing files when loaded, and is rendered by
+`self_hosted::startup` through explicit view models. Startup rows emit
+`app.shell/open_recent_project`, which the shell resolves to `Action::OpenProject`;
+widgets must not read the filesystem or mutate editor state directly.
 
 Product top chrome is `self_hosted::title_bar::TitleBar`: it combines the
 product menu bar, a read-only project/sequence title, draggable titlebar space,
