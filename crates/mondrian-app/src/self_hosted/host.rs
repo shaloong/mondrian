@@ -132,6 +132,7 @@ impl SelfHostedUiHost {
         if !self.ui_dirty.replace(false) {
             return;
         }
+        self.normalize_asset_folder_selection();
         self.root.refresh_from_app_state_with_preferences_and_runtime_logs(
             &self.app_state.borrow(),
             &self.preferences,
@@ -320,6 +321,14 @@ impl SelfHostedUiHost {
                 .unwrap_or(false)
         };
         exists.then_some(folder_id)
+    }
+
+    fn normalize_asset_folder_selection(&mut self) {
+        let current = self.root.asset_folder_id().map(str::to_owned);
+        let valid = self.valid_asset_folder_id(current.clone());
+        if valid != current {
+            self.root.set_asset_folder_id(valid);
+        }
     }
 }
 
@@ -530,6 +539,7 @@ mod tests {
 
     #[test]
     fn host_drains_actions_and_refreshes_root() {
+        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
         let mut host = SelfHostedUiHost::new(AppState::new());
         let pending = PendingUiActions::default();
 
@@ -546,6 +556,7 @@ mod tests {
 
     #[test]
     fn host_returns_window_commands_without_dispatching_to_app_state() {
+        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
         let mut host = SelfHostedUiHost::new(AppState::new());
         let pending = PendingUiActions::default();
 
@@ -570,6 +581,7 @@ mod tests {
 
     #[test]
     fn host_returns_custom_chrome_window_commands() {
+        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
         let mut host = SelfHostedUiHost::new(AppState::new());
         let pending = PendingUiActions::default();
 
@@ -661,6 +673,7 @@ mod tests {
 
     #[test]
     fn host_reports_unknown_app_shell_actions_as_status_errors() {
+        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
         let mut host = SelfHostedUiHost::new(AppState::new());
         let pending = PendingUiActions::default();
 
@@ -685,6 +698,7 @@ mod tests {
 
     #[test]
     fn host_ignores_unavailable_editor_actions_before_dispatch() {
+        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
         let mut host = SelfHostedUiHost::new(AppState::new());
         let pending = PendingUiActions::default();
 
@@ -703,6 +717,7 @@ mod tests {
 
     #[test]
     fn host_ignores_unavailable_app_shell_dialogs_before_platform_access() {
+        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
         let mut host = SelfHostedUiHost::new(AppState::new());
         let pending = PendingUiActions::default();
         let platform = CountingPlatform::default();
@@ -718,6 +733,7 @@ mod tests {
 
     #[test]
     fn host_handles_asset_folder_navigation_as_shell_local_state() {
+        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
         let root = temp_asset_library_dir("asset-folder-navigation");
         let library = AssetLibrary::open(root.clone()).expect("open asset library");
         let folder_id = library.create_folder("Rushes", None).expect("create folder");
@@ -755,7 +771,49 @@ mod tests {
     }
 
     #[test]
+    fn host_clears_deleted_asset_folder_selection_after_dispatch() {
+        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let root = temp_asset_library_dir("asset-folder-delete-normalize");
+        let library = AssetLibrary::open(root.clone()).expect("open asset library");
+        let folder_id = library.create_folder("Rushes", None).expect("create folder");
+        let mut state = AppState::new();
+        state.asset_library = Some(library);
+        let mut host = SelfHostedUiHost::new(state);
+        let pending = PendingUiActions::default();
+
+        pending.push(crate::app::ui_actions::assets_open_folder_action(
+            crate::app::ui_actions::AssetsOpenFolderPayload { folder_id: Some(folder_id.clone()) },
+        ));
+        host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+        assert_eq!(host.root().asset_folder_id(), Some(folder_id.as_str()));
+
+        pending.push(crate::app::ui_actions::assets_delete_folder_action(
+            crate::app::ui_actions::AssetsDeleteFolderPayload { folder_id: folder_id.clone() },
+        ));
+        let commands = host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+
+        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert_eq!(host.root().asset_folder_id(), None);
+        assert!(host
+            .app_state()
+            .status_hint
+            .as_ref()
+            .is_some_and(|(message, is_error)| !*is_error && message.contains("Rushes")));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn host_refreshes_root_after_failed_editor_action() {
+        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
         let mut host = SelfHostedUiHost::new(AppState::new());
         let pending = PendingUiActions::default();
 

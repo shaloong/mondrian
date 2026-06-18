@@ -78,6 +78,8 @@ pub const ASSETS_OPEN_FOLDER: &str = "open_folder";
 pub const ASSETS_IMPORT_FILES: &str = "import_files";
 /// Action name for deleting one asset from the library.
 pub const ASSETS_DELETE_ASSET: &str = "delete_asset";
+/// Action name for deleting one folder/bin from the library.
+pub const ASSETS_DELETE_FOLDER: &str = "delete_folder";
 
 /// Custom action namespace for export operations.
 pub const EXPORT_NAMESPACE: &str = "ui.export";
@@ -405,6 +407,13 @@ pub struct AssetsDeleteAssetPayload {
     pub asset_id: AssetId,
 }
 
+/// Delete one asset-library folder/bin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetsDeleteFolderPayload {
+    /// Folder id to remove.
+    pub folder_id: String,
+}
+
 /// Create a synthetic reusable asset in the selected folder, or at root.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssetsCreateAssetPayload {
@@ -607,6 +616,11 @@ pub fn assets_prepare_drag_action(payload: AssetsPrepareDragPayload) -> Action {
 /// Build an action that deletes one asset from the library.
 pub fn assets_delete_asset_action(payload: AssetsDeleteAssetPayload) -> Action {
     custom_assets_action(ASSETS_DELETE_ASSET, payload)
+}
+
+/// Build an action that deletes one folder from the library.
+pub fn assets_delete_folder_action(payload: AssetsDeleteFolderPayload) -> Action {
+    custom_assets_action(ASSETS_DELETE_FOLDER, payload)
 }
 
 /// Build an action that creates an adjustment-layer asset in the library.

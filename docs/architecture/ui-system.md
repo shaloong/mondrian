@@ -748,6 +748,12 @@ every database row: it shows top-level folders first, then root/unfiled assets.
 Asset cards expose `ui.assets.delete_asset` through their card-level context
 menu. `AppState` owns the actual deletion, including timeline cleanup for clips
 that referenced the asset, event publication, status hints, and project save.
+Folder cards expose `ui.assets.delete_folder` through the same card-level menu
+surface. Folder deletion is an app/library mutation: `AssetLibrary` removes the
+selected folder subtree, unlinks assets assigned to any deleted folder, and
+publishes an asset-library reload through `AppState`. The self-hosted host then
+revalidates its shell-local browser folder id during refresh and returns to the
+root asset view if the current bin no longer exists.
 Assets already assigned to a folder are counted on that folder card and appear
 only when the self-hosted shell is browsing that folder. Folder navigation is
 shell-local UI session state: folder cards emit `ui.assets.open_folder`, the

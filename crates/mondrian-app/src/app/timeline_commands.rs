@@ -403,6 +403,20 @@ impl AppState {
         self.create_folder_in_library(&format!("文件夹 {next}"), parent_id)
     }
 
+    /// Delete one asset-library folder/bin and unlink assets assigned to it or its children.
+    pub fn delete_folder_from_library(&mut self, folder_id: &str) -> mondrian_core::Result<()> {
+        let library = self.asset_library.as_ref().ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "delete_folder".to_string(),
+                reason: "素材库未连接".to_string(),
+            }
+        })?;
+        library.delete_folder(folder_id)?;
+        self.event_bus.publish(mondrian_core::events::AppEvent::AssetLibraryReloaded);
+        let _ = self.save_project_file();
+        Ok(())
+    }
+
     pub fn delete_asset_from_library(&mut self, asset_id: AssetId) -> mondrian_core::Result<()> {
         // Remove clips referencing this asset from the timeline first,
         // then delete from the library. Order matters for borrow reasons.

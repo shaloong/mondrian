@@ -25,7 +25,7 @@ impl Drop for ThemeTestGuard {
 }
 
 pub(crate) fn theme_test_guard() -> ThemeTestGuard {
-    let lock = THEME_TEST_LOCK.lock().expect("theme test lock poisoned");
+    let lock = THEME_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     set_theme_preset(ThemePreset::Dark);
     ThemeTestGuard { _lock: lock }
 }

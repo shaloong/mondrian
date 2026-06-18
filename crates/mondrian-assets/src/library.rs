@@ -7,7 +7,7 @@ use mondrian_core::{
 };
 use mondrian_media::MediaInfo;
 use parking_lot::Mutex;
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -80,6 +80,8 @@ impl AssetLibrary {
         std::fs::create_dir_all(&root)?;
         let db_path = root.join("index.db");
         let conn = Connection::open(&db_path)
+            .map_err(|e| mondrian_core::MondrianError::AssetDbError { reason: e.to_string() })?;
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
             .map_err(|e| mondrian_core::MondrianError::AssetDbError { reason: e.to_string() })?;
         conn.execute_batch(INIT_SQL)
             .map_err(|e| mondrian_core::MondrianError::AssetDbError { reason: e.to_string() })?;
@@ -405,16 +407,42 @@ impl AssetLibrary {
 
     pub fn delete_folder(&self, folder_id: &str) -> Result<()> {
         let db = self.db.lock();
-        // Unlink assets from this folder before deleting.
+        let mut stmt = db
+            .prepare("SELECT id, parent_id FROM folders")
+            .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
+        let folders: Vec<(String, Option<String>)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?
+            .collect::<std::result::Result<_, _>>()
+            .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
+        drop(stmt);
+        if !folders.iter().any(|(id, _)| id == folder_id) {
+            return Err(MondrianError::AssetDbError {
+                reason: format!("文件夹不存在：{folder_id}"),
+            });
+        }
+
+        let mut folder_ids = vec![folder_id.to_string()];
+        let mut index = 0usize;
+        while index < folder_ids.len() {
+            let parent_id = folder_ids[index].clone();
+            for (id, parent) in &folders {
+                if parent.as_deref() == Some(parent_id.as_str()) && !folder_ids.contains(id) {
+                    folder_ids.push(id.clone());
+                }
+            }
+            index += 1;
+        }
+
+        let placeholders = std::iter::repeat_n("?", folder_ids.len()).collect::<Vec<_>>().join(",");
         db.execute(
-            "UPDATE assets SET folder_id = NULL WHERE folder_id = ?1",
-            rusqlite::params![folder_id],
+            &format!("UPDATE assets SET folder_id = NULL WHERE folder_id IN ({placeholders})"),
+            params_from_iter(folder_ids.iter()),
         )
         .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
-        // Child folders cascade via ON DELETE CASCADE.
         db.execute(
-            "DELETE FROM folders WHERE id = ?1",
-            rusqlite::params![folder_id],
+            &format!("DELETE FROM folders WHERE id IN ({placeholders})"),
+            params_from_iter(folder_ids.iter()),
         )
         .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
         Ok(())
@@ -802,12 +830,24 @@ mod tests {
     fn delete_folder_unlinks_assets() {
         let lib = open_test_library();
         let folder_id = lib.create_folder("Bin", None).expect("create folder");
+        let child_id = lib.create_folder("Child", Some(&folder_id)).expect("create child");
         let id = lib.create_adjustment_layer_asset(Some("In Bin")).expect("create asset");
-        // Move asset to folder by renaming with folder context — we just verify
-        // that deleting the folder does not panic or cascade-delete assets.
+        lib.move_asset_to_folder(id, Some(&child_id)).expect("move asset");
+
         lib.delete_folder(&folder_id).expect("delete folder");
-        // Asset should still exist (unlinked, not deleted)
-        assert!(lib.get_asset(id).expect("get").is_some());
+
+        let asset = lib.get_asset(id).expect("get").expect("asset kept");
+        assert_eq!(asset.folder_id, None);
+        assert!(!lib.folder_exists(&folder_id).expect("parent deleted"));
+        assert!(!lib.folder_exists(&child_id).expect("child deleted"));
+    }
+
+    #[test]
+    fn delete_nonexistent_folder_fails() {
+        let lib = open_test_library();
+        let err = lib.delete_folder("missing-folder").unwrap_err();
+
+        assert!(matches!(err, MondrianError::AssetDbError { .. }));
     }
 
     #[test]
