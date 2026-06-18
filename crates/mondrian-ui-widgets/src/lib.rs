@@ -2,6 +2,7 @@
 //!
 //! 提供基于 Widget trait 的可复用交互控件。
 
+pub mod asset_grid;
 pub mod button;
 pub mod checkbox;
 pub mod color_picker;
@@ -35,6 +36,7 @@ mod component_extreme_tests;
 #[cfg(test)]
 mod test_utils;
 
+pub use asset_grid::{AssetGrid, AssetGridAction, AssetGridItem, AssetGridState};
 pub use button::Button;
 pub use checkbox::Checkbox;
 pub use color_picker::{

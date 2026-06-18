@@ -697,29 +697,35 @@ therefore use the post-gutter width for measurement and painting, matching
 browser/native scroll containers and preventing glyphs from bleeding under the
 scrollbar lane.
 
-Browser-style panels should use `PanelList` / `PanelListItem` instead of
+Browser-style row panels should use `PanelList` / `PanelListItem` instead of
 ad-hoc colored placeholders or one-off row painting. `PanelList` owns local
 selection, disabled rows, keyboard navigation, activation, and internal
 positive-delta scrolling, but exposes static and value-aware action adapters
-plus optional `DragPayload`s so Assets, Effects, presets, and similar panels can
-bind to editor state outside the widget crate. Mouse single-click selects a row,
-a second click on the same row activates it, and keyboard Enter/Space uses the
-same activation path. Pointer movement beyond the drag threshold asks the
-router to begin an internal drag; the router, not the source widget, owns
-`DragEnter` / `DragOver` / `DragLeave` / `Drop` delivery so pointer capture from
-the source cannot block target panels. Searchable list panels should use
-`PanelList::with_filter`, which exposes its filter `TextInput` as a real widget
-tree child so focus, IME, and keyboard routing stay framework-owned. Filtering
-changes only visible row order; original item indices, row actions, drag
-payloads, badges, icons, and disabled state remain the item identity used for
-dispatch. The self-hosted Effects panel builds rows from the shared effect
-registry and, when a video clip is selected, activates rows through undoable
-`AppState::add_effect_to_clip` commands. The `mondrian` entrypoint and
-`ui_demo` Assets/Effects-style panels use this shared surface as the tracer
-bullet for migrating list-heavy egui panels. The self-hosted Project slot also
-uses `PanelListModel::from_project_status` to show project file, active
-sequence, asset-library, and current status-hint state instead of a colored
-placeholder.
+plus optional `DragPayload`s so Effects, presets, status rows, and similar
+panels can bind to editor state outside the widget crate. Mouse single-click
+selects a row, a second click on the same row activates it, and keyboard
+Enter/Space uses the same activation path. Pointer movement beyond the drag
+threshold asks the router to begin an internal drag; the router, not the source
+widget, owns `DragEnter` / `DragOver` / `DragLeave` / `Drop` delivery so pointer
+capture from the source cannot block target panels. Searchable list panels
+should use `PanelList::with_filter`, which exposes its filter `TextInput` as a
+real widget tree child so focus, IME, and keyboard routing stay
+framework-owned. Filtering changes only visible row order; original item
+indices, row actions, drag payloads, badges, icons, and disabled state remain
+the item identity used for dispatch. The self-hosted Effects panel builds rows
+from the shared effect registry and, when a video clip is selected, activates
+rows through undoable `AppState::add_effect_to_clip` commands. The
+self-hosted Project slot also uses `PanelListModel::from_project_status` to
+show project file, active sequence, asset-library, and current status-hint
+state instead of a colored placeholder.
+The self-hosted Assets panel uses the dedicated `AssetGrid` card browser
+instead of the row-list surface. `AssetGrid` keeps the same framework-owned
+interaction contract as `PanelList`: filter input is a real `TextInput`, local
+selection is preserved through `AssetGridState`, cards can activate typed
+actions, card drag payloads start through the router, and file drops map to
+app-layer import actions. The app adapter maps `AssetRecord` into
+`AssetGridItem` view data and semantic media color tokens; the widget crate
+does not depend on the asset library or editor domain.
 The adjacent Console tab reads `AppState::status_log`, a bounded history fed by
 `set_status_hint`, and shows recent messages newest-first before runtime
 summary rows. `clear_status_hint` clears only the transient bottom-bar hint; it
@@ -754,7 +760,7 @@ from the current `SelfHostedPanelModels` using a built-in preset while keeping
 panel models read-only and app/domain mutation in `AppState`. Refreshing panel
 models must preserve the selected workspace preset so live app snapshots do not
 silently reset the user's shell layout.
-The self-hosted Assets panel maps real library rows to `ui.assets.prepare_drag`;
+The self-hosted Assets panel maps real library cards to `ui.assets.prepare_drag`;
 `AppState` resolves the asset record and reuses the existing `begin_drag_asset`
 path so later Timeline drop handling stays shared with the egui implementation.
 The same left dock hosts the Effects browser as an `Effects` tab so effect
@@ -840,10 +846,10 @@ OS file drag/drop enters the same UI event model as internal drags via
 `DragPayload::File`. Product windows route hovered/dropped files through the
 widget tree first; if no widget handles the final drop, the self-hosted app
 falls back to `Action::ImportMedia` so dropping media into the window remains a
-useful default workflow. `PanelList` exposes a domain-light `on_drop` adapter;
-the self-hosted Assets panel maps file drops to `Action::ImportMedia` there,
-while other panels can opt into their own drop semantics without teaching the
-generic list widget about application state.
+useful default workflow. `PanelList` and `AssetGrid` expose domain-light
+`on_drop` adapters; the self-hosted Assets panel maps file drops to
+`Action::ImportMedia` through `AssetGrid`, while other panels can opt into their
+own drop semantics without teaching generic widgets about application state.
 Shell cursor selection is also centralized in the runtime. Entrypoints provide
 the current eyedropper, splitter, and focused-text state; the runtime resolves
 priority as eyedropper sampling, splitter resize affordance, focused text

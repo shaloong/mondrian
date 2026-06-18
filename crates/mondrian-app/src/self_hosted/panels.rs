@@ -28,12 +28,13 @@ use mondrian_ui_widgets::dock_splitter::DockSplitter;
 use mondrian_ui_widgets::dock_tab_bar::TabInfo;
 use mondrian_ui_widgets::panel_slot::SlotKind;
 use mondrian_ui_widgets::{
-    Checkbox, ColorPickerAreaMode, ColorPickerTrigger, CurveEditor, CurvePoint, DockPanel,
-    Dropdown, FlexChild, FlexContainer, Label, MenuItem, NodeGraphEdge, NodeGraphNode,
-    NodeGraphView, PanelList, PanelListItem, PropertyPanel, PropertyRow, PropertySection,
-    ScrollView, Slider, TextInput, TimelineAssetDrop, TimelineClip, TimelineClipMove,
-    TimelineClipRef, TimelineClipTrim, TimelineEditCommand, TimelineTrack, TimelineTrackControl,
-    TimelineTrackMove, TimelineTrackRef, TimelineTrimEdge, TimelineView, ViewerSurface,
+    AssetGrid, AssetGridItem, Checkbox, ColorPickerAreaMode, ColorPickerTrigger, CurveEditor,
+    CurvePoint, DockPanel, Dropdown, FlexChild, FlexContainer, Label, MenuItem, NodeGraphEdge,
+    NodeGraphNode, NodeGraphView, PanelList, PanelListItem, PropertyPanel, PropertyRow,
+    PropertySection, ScrollView, Slider, TextInput, TimelineAssetDrop, TimelineClip,
+    TimelineClipMove, TimelineClipRef, TimelineClipTrim, TimelineEditCommand, TimelineTrack,
+    TimelineTrackControl, TimelineTrackMove, TimelineTrackRef, TimelineTrimEdge, TimelineView,
+    ViewerSurface,
 };
 
 use mondrian_panel_console::tracing_layer::{LogBuffer, LogEntry};
@@ -69,7 +70,7 @@ use crate::self_hosted::icons::AppIcon;
 #[derive(Debug, Clone)]
 pub struct SelfHostedPanelModels {
     pub project: PanelListModel,
-    pub assets: PanelListModel,
+    pub assets: AssetGridModel,
     pub effects: PanelListModel,
     pub console: PanelListModel,
     pub viewer: ViewerPanelModel,
@@ -95,7 +96,7 @@ impl SelfHostedPanelModels {
     ) -> Self {
         Self {
             project: PanelListModel::from_project_status(state),
-            assets: PanelListModel::from_asset_library(state.asset_library.as_deref()),
+            assets: AssetGridModel::from_asset_library(state.asset_library.as_deref()),
             effects: PanelListModel::from_app_effect_registry(state),
             console: PanelListModel::from_app_status_and_logs(state, runtime_logs),
             viewer: ViewerPanelModel::from_app_state(state),
@@ -181,6 +182,109 @@ pub struct PanelListModel {
     pub filter_placeholder: Option<String>,
     #[cfg(test)]
     pub demo_activate_prefix: Option<String>,
+}
+
+/// Asset-browser card-grid data independent from a concrete widget instance.
+#[derive(Debug, Clone)]
+pub struct AssetGridModel {
+    pub title: String,
+    pub subtitle: String,
+    pub items: Vec<AssetGridItem>,
+    pub filter_placeholder: Option<String>,
+    pub accepts_file_drop: bool,
+    #[cfg(test)]
+    pub demo_activate_prefix: Option<String>,
+}
+
+impl AssetGridModel {
+    pub fn new(title: impl Into<String>, items: Vec<AssetGridItem>) -> Self {
+        Self {
+            title: title.into(),
+            subtitle: String::new(),
+            items,
+            filter_placeholder: None,
+            accepts_file_drop: false,
+            #[cfg(test)]
+            demo_activate_prefix: None,
+        }
+    }
+
+    pub fn with_subtitle(mut self, subtitle: impl Into<String>) -> Self {
+        self.subtitle = subtitle.into();
+        self
+    }
+
+    pub fn with_filter_placeholder(mut self, placeholder: impl Into<String>) -> Self {
+        self.filter_placeholder = Some(placeholder.into());
+        self
+    }
+
+    pub fn accepts_file_drop(mut self, accepts: bool) -> Self {
+        self.accepts_file_drop = accepts;
+        self
+    }
+
+    /// Attach a synthetic activation prefix for developer fixtures.
+    #[cfg(test)]
+    pub fn with_demo_activate_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.demo_activate_prefix = Some(prefix.into());
+        self
+    }
+
+    /// Build the project asset browser. Database read failures are represented
+    /// as disabled cards so the panel can render without owning app errors.
+    pub fn from_asset_library(library: Option<&AssetLibrary>) -> Self {
+        let colors = current_theme().colors.clone();
+        let Some(library) = library else {
+            return AssetGridModel::new(
+                "Assets",
+                vec![asset_empty_item(
+                    "asset-library-disconnected",
+                    "No project library",
+                    "Open or create a project to browse assets",
+                    colors.muted_foreground,
+                    AppIcon::Folder,
+                )],
+            )
+            .with_subtitle("Project library")
+            .with_filter_placeholder("Search assets");
+        };
+
+        match library.list_assets() {
+            Ok(assets) if assets.is_empty() => AssetGridModel::new(
+                "Assets",
+                vec![asset_empty_item(
+                    "asset-library-empty",
+                    "No assets",
+                    "Import media or create generated assets",
+                    colors.muted_foreground,
+                    AppIcon::Folder,
+                )],
+            )
+            .with_subtitle("Project library")
+            .with_filter_placeholder("Search assets")
+            .accepts_file_drop(true),
+            Ok(assets) => AssetGridModel::new(
+                "Assets",
+                assets.into_iter().map(asset_grid_item_from_asset).collect(),
+            )
+            .with_subtitle("Project library")
+            .with_filter_placeholder("Search assets")
+            .accepts_file_drop(true),
+            Err(err) => AssetGridModel::new(
+                "Assets",
+                vec![asset_empty_item(
+                    "asset-library-error",
+                    "Asset library unavailable",
+                    err.to_string(),
+                    colors.error,
+                    AppIcon::Warning,
+                )],
+            )
+            .with_subtitle("Project library")
+            .with_filter_placeholder("Search assets"),
+        }
+    }
 }
 
 impl PanelListModel {
@@ -339,55 +443,6 @@ impl PanelListModel {
         PanelListModel::new("Project", items)
             .with_subtitle("Project state")
             .with_filter_placeholder("Search project")
-    }
-
-    /// Build the project asset list. Database read failures are represented as
-    /// disabled rows so the panel can render without owning app error handling.
-    pub fn from_asset_library(library: Option<&AssetLibrary>) -> Self {
-        let Some(library) = library else {
-            return PanelListModel::new(
-                "Assets",
-                vec![with_app_icon(
-                    PanelListItem::new("No project library")
-                        .with_subtitle("Open or create a project to browse assets")
-                        .disabled(true),
-                    AppIcon::Folder,
-                )],
-            )
-            .with_subtitle("Project library")
-            .with_filter_placeholder("Search assets");
-        };
-
-        match library.list_assets() {
-            Ok(assets) if assets.is_empty() => PanelListModel::new(
-                "Assets",
-                vec![with_app_icon(
-                    PanelListItem::new("No assets")
-                        .with_subtitle("Import media or create generated assets")
-                        .disabled(true),
-                    AppIcon::Folder,
-                )],
-            )
-            .with_subtitle("Project library")
-            .with_filter_placeholder("Search assets"),
-            Ok(assets) => PanelListModel::new(
-                "Assets",
-                assets.into_iter().map(panel_item_from_asset).collect(),
-            )
-            .with_subtitle("Project library")
-            .with_filter_placeholder("Search assets"),
-            Err(err) => PanelListModel::new(
-                "Assets",
-                vec![with_app_icon(
-                    PanelListItem::new("Asset library unavailable")
-                        .with_subtitle(err.to_string())
-                        .disabled(true),
-                    AppIcon::Warning,
-                )],
-            )
-            .with_subtitle("Project library")
-            .with_filter_placeholder("Search assets"),
-        }
     }
 
     /// Build the visible effect browser from the current app state.
@@ -1341,7 +1396,7 @@ fn project_console_tabs() -> Vec<TabInfo> {
 
 fn panel_content_for_slot(kind: SlotKind, models: &SelfHostedPanelModels) -> Box<dyn Widget> {
     match kind {
-        SlotKind::Assets => Box::new(panel_list(&models.assets)),
+        SlotKind::Assets => Box::new(ScrollView::new(Some(Box::new(asset_grid(&models.assets))))),
         SlotKind::Effects => Box::new(panel_list(&models.effects)),
         SlotKind::Console => Box::new(panel_list(&models.console)),
         SlotKind::Viewer => Box::new(viewer_panel(&models.viewer)),
@@ -1490,22 +1545,38 @@ fn default_opacity_curve(opacity: f32) -> Vec<CurvePoint> {
     vec![CurvePoint::new(0.0, opacity), CurvePoint::new(1.0, opacity)]
 }
 
-fn panel_item_from_asset(asset: AssetRecord) -> PanelListItem {
+fn asset_grid_item_from_asset(asset: AssetRecord) -> AssetGridItem {
     let badge = asset_kind_badge(&asset.kind);
     let accent = asset_kind_accent(&asset.kind);
     let icon = asset_kind_icon(&asset.kind);
     let subtitle = asset.path.display().to_string();
-    with_app_icon(
-        PanelListItem::new(asset.name)
+    with_asset_icon(
+        AssetGridItem::new(asset.id.to_string(), asset.name, accent)
             .with_subtitle(subtitle)
             .with_badge(badge)
-            .with_accent(accent)
             .with_drag_payload(DragPayload::Asset(asset.id))
             .with_activate_action(assets_prepare_drag_action(AssetsPrepareDragPayload {
                 asset_id: asset.id,
             })),
         icon,
     )
+}
+
+fn asset_empty_item(
+    id: impl Into<String>,
+    title: impl Into<String>,
+    subtitle: impl Into<String>,
+    accent: Color,
+    icon: AppIcon,
+) -> AssetGridItem {
+    with_asset_icon(
+        AssetGridItem::new(id, title, accent).with_subtitle(subtitle).disabled(true),
+        icon,
+    )
+}
+
+fn with_asset_icon(item: AssetGridItem, icon: AppIcon) -> AssetGridItem {
+    item.with_icon(icon.vector_icon().expect("bundled asset grid icon asset should parse"))
 }
 
 fn with_app_icon(item: PanelListItem, icon: AppIcon) -> PanelListItem {
@@ -1648,34 +1719,58 @@ fn panel_list(model: &PanelListModel) -> PanelList {
     list
 }
 
+fn asset_grid(model: &AssetGridModel) -> AssetGrid {
+    let mut grid = AssetGrid::new(model.title.clone(), model.items.clone())
+        .with_subtitle(model.subtitle.clone());
+    if let Some(placeholder) = &model.filter_placeholder {
+        grid = grid.with_filter(placeholder.clone());
+    }
+    if model.accepts_file_drop {
+        grid = grid.on_drop(|payload, _position| match payload {
+            DragPayload::File(paths) if !paths.is_empty() => {
+                Some(Action::ImportMedia(paths.clone()))
+            }
+            _ => None,
+        });
+    }
+    #[cfg(test)]
+    if let Some(prefix) = model.demo_activate_prefix.clone() {
+        return grid.on_activate(move |index, item| {
+            demo_panel_action(&format!("{prefix}.{index}.{}", item.title))
+        });
+    }
+    grid
+}
+
 #[cfg(test)]
-fn demo_asset_model() -> PanelListModel {
-    PanelListModel::new(
+fn demo_asset_model() -> AssetGridModel {
+    let colors = current_theme().colors.clone();
+    AssetGridModel::new(
         "Assets",
         vec![
-            with_app_icon(
-                PanelListItem::new("Footage")
+            with_asset_icon(
+                AssetGridItem::new("demo-footage", "Footage", colors.media_video)
                     .with_subtitle("Imported camera clips")
                     .with_badge("12")
                     .with_select_action(demo_panel_action("assets.select.footage")),
                 AppIcon::Film,
             ),
-            with_app_icon(
-                PanelListItem::new("Audio")
+            with_asset_icon(
+                AssetGridItem::new("demo-audio", "Audio", colors.media_audio)
                     .with_subtitle("Music, voiceover, and ambience")
                     .with_badge("5")
                     .with_select_action(demo_panel_action("assets.select.audio")),
                 AppIcon::Music,
             ),
-            with_app_icon(
-                PanelListItem::new("Images")
+            with_asset_icon(
+                AssetGridItem::new("demo-images", "Images", colors.media_solid)
                     .with_subtitle("Still frames and references")
                     .with_badge("8")
                     .with_select_action(demo_panel_action("assets.select.images")),
                 AppIcon::Rectangle,
             ),
-            with_app_icon(
-                PanelListItem::new("Sequences")
+            with_asset_icon(
+                AssetGridItem::new("demo-sequences", "Sequences", colors.media_adjustment)
                     .with_subtitle("Nested edits and reusable timelines")
                     .with_badge("2")
                     .with_select_action(demo_panel_action("assets.select.sequences")),
@@ -1685,6 +1780,7 @@ fn demo_asset_model() -> PanelListModel {
     )
     .with_subtitle("Project library")
     .with_filter_placeholder("Search assets")
+    .accepts_file_drop(true)
     .with_demo_activate_prefix("assets.activate")
 }
 
@@ -3105,12 +3201,18 @@ mod tests {
 
     #[test]
     fn assets_panel_file_drop_dispatches_import_media_action() {
-        let model = PanelListModel::new(
+        let model = AssetGridModel::new(
             "Assets",
-            vec![PanelListItem::new("Drop target").with_subtitle("Project library")],
-        );
-        let mut list = panel_list(&model);
-        list.layout(Rect::new(0.0, 0.0, 320.0, 180.0));
+            vec![AssetGridItem::new(
+                "drop-target",
+                "Drop target",
+                current_theme().colors.media_video,
+            )
+            .with_subtitle("Project library")],
+        )
+        .accepts_file_drop(true);
+        let mut grid = asset_grid(&model);
+        grid.layout(Rect::new(0.0, 0.0, 320.0, 180.0));
         let actions = RefCell::new(Vec::<Action>::new());
         let dispatch = |action| actions.borrow_mut().push(action);
         let mut focus = DummyFocus;
@@ -3126,7 +3228,7 @@ mod tests {
         );
         let path = PathBuf::from("E:/media/clip.mov");
 
-        let result = list.event(
+        let result = grid.event(
             &UiEvent::Drop {
                 payload: DragPayload::File(vec![path.clone()]),
                 position: Point::new(24.0, 76.0),

@@ -12,7 +12,9 @@ use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, Widget};
 use mondrian_ui_widgets::dock_panel::DockPanel;
 use mondrian_ui_widgets::dock_splitter::DockSplitter;
-use mondrian_ui_widgets::{PanelList, PanelListState, ScrollView, ScrollViewState};
+use mondrian_ui_widgets::{
+    AssetGrid, AssetGridState, PanelList, PanelListState, ScrollView, ScrollViewState,
+};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -354,17 +356,20 @@ impl SelfHostedAppRoot {
     pub fn set_models(&mut self, models: SelfHostedPanelModels) {
         let layout = self.dock.layout_snapshot();
         let dock_panel_state = collect_dock_panel_state(&self.dock);
+        let asset_grid_state = collect_asset_grid_state(&self.dock);
         let panel_list_state = collect_panel_list_state(&self.dock);
         let panel_scroll_state = collect_panel_scroll_state(&self.dock);
         self.models = models;
         self.dock = build_dock_tree_for_preset(self.models.clone(), self.workspace_preset);
         self.dock.restore_layout(&layout);
         restore_dock_panel_state(&mut self.dock, &dock_panel_state);
+        restore_asset_grid_state(&mut self.dock, &asset_grid_state);
         restore_panel_list_state(&mut self.dock, &panel_list_state);
         restore_panel_scroll_state(&mut self.dock, &panel_scroll_state);
         if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
             self.layout(self.bounds);
             restore_dock_panel_state(&mut self.dock, &dock_panel_state);
+            restore_asset_grid_state(&mut self.dock, &asset_grid_state);
             restore_panel_list_state(&mut self.dock, &panel_list_state);
             restore_panel_scroll_state(&mut self.dock, &panel_scroll_state);
         }
@@ -642,6 +647,39 @@ fn restore_dock_panel_state(widget: &mut dyn Widget, states: &[DockPanelState]) 
     for index in 0..widget.child_count() {
         if let Some(child) = widget.child_mut(index) {
             restore_dock_panel_state(child, states);
+        }
+    }
+}
+
+fn collect_asset_grid_state(widget: &dyn Widget) -> BTreeMap<String, AssetGridState> {
+    let mut states = BTreeMap::new();
+    collect_asset_grid_state_into(widget, &mut states);
+    states
+}
+
+fn collect_asset_grid_state_into(
+    widget: &dyn Widget,
+    states: &mut BTreeMap<String, AssetGridState>,
+) {
+    if let Some(grid) = widget.as_any().and_then(|any| any.downcast_ref::<AssetGrid>()) {
+        states.insert(grid.title().to_owned(), grid.state());
+    }
+    for index in 0..widget.child_count() {
+        if let Some(child) = widget.child(index) {
+            collect_asset_grid_state_into(child, states);
+        }
+    }
+}
+
+fn restore_asset_grid_state(widget: &mut dyn Widget, states: &BTreeMap<String, AssetGridState>) {
+    if let Some(grid) = widget.as_any_mut().and_then(|any| any.downcast_mut::<AssetGrid>()) {
+        if let Some(state) = states.get(grid.title()) {
+            grid.restore_state(state);
+        }
+    }
+    for index in 0..widget.child_count() {
+        if let Some(child) = widget.child_mut(index) {
+            restore_asset_grid_state(child, states);
         }
     }
 }
@@ -1038,6 +1076,48 @@ mod tests {
             }
         }
         None
+    }
+
+    fn asset_grid_state_for_title(widget: &dyn Widget, title: &str) -> Option<AssetGridState> {
+        if let Some(grid) = widget.as_any().and_then(|any| any.downcast_ref::<AssetGrid>()) {
+            if grid.title() == title {
+                return Some(grid.state());
+            }
+        }
+        for index in 0..widget.child_count() {
+            if let Some(child) = widget.child(index) {
+                if let Some(state) = asset_grid_state_for_title(child, title) {
+                    return Some(state);
+                }
+            }
+        }
+        None
+    }
+
+    fn with_asset_grid_mut_for_title(
+        widget: &mut dyn Widget,
+        title: &str,
+        update: &mut dyn FnMut(&mut AssetGrid),
+    ) -> bool {
+        if widget
+            .as_any()
+            .and_then(|any| any.downcast_ref::<AssetGrid>())
+            .is_some_and(|grid| grid.title() == title)
+        {
+            if let Some(grid) = widget.as_any_mut().and_then(|any| any.downcast_mut::<AssetGrid>())
+            {
+                update(grid);
+                return true;
+            }
+        }
+        for index in 0..widget.child_count() {
+            if let Some(child) = widget.child_mut(index) {
+                if with_asset_grid_mut_for_title(child, title, update) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     fn with_panel_list_mut_for_title(
@@ -1801,23 +1881,23 @@ mod tests {
     }
 
     #[test]
-    fn set_models_preserves_panel_list_filter_and_selection() {
+    fn set_models_preserves_asset_grid_filter_and_selection() {
         let mut root = SelfHostedAppRoot::demo();
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
-        assert!(with_panel_list_mut_for_title(
+        assert!(with_asset_grid_mut_for_title(
             root.dock_mut(),
             "Assets",
-            &mut |list| {
-                list.set_filter_query("audio");
-                list.set_selected(Some(1));
+            &mut |grid| {
+                grid.set_filter_query("audio");
+                grid.set_selected(Some(1));
             },
         ));
 
         root.set_models(SelfHostedPanelModels::demo());
 
-        let state = panel_list_state_for_title(&root, "Assets").expect("assets state");
+        let state = asset_grid_state_for_title(&root, "Assets").expect("assets state");
         assert_eq!(state.filter_query, "audio");
-        assert_eq!(state.selected_item_title.as_deref(), Some("Audio"));
+        assert_eq!(state.selected_item_id.as_deref(), Some("demo-audio"));
         assert_eq!(state.selected_index, Some(1));
     }
 
