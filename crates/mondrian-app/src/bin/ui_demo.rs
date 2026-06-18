@@ -244,6 +244,74 @@ impl GalleryWidget {
         }
     }
 
+    fn child_hit_test(&self, index: usize, point: Point) -> bool {
+        match index {
+            0 => self.button_click.hit_test(point),
+            1 => self.button_no_action.hit_test(point),
+            2 => self.checkbox_a.hit_test(point),
+            3 => self.checkbox_b.hit_test(point),
+            4 => self.text_input.hit_test(point),
+            5 => self.slider.hit_test(point),
+            6 => self.dropdown.hit_test(point),
+            7 => self.list.hit_test(point),
+            8 => self.scroll_area.hit_test(point),
+            9 => self.color_picker.hit_test(point),
+            10 => self.color_trigger.hit_test(point),
+            11 => self.curve_editor.hit_test(point),
+            _ => false,
+        }
+    }
+
+    fn child_overlay_hit_test(&self, index: usize, point: Point) -> bool {
+        match index {
+            0 => self.button_click.overlay_hit_test(point),
+            1 => self.button_no_action.overlay_hit_test(point),
+            2 => self.checkbox_a.overlay_hit_test(point),
+            3 => self.checkbox_b.overlay_hit_test(point),
+            4 => self.text_input.overlay_hit_test(point),
+            5 => self.slider.overlay_hit_test(point),
+            6 => self.dropdown.overlay_hit_test(point),
+            7 => self.list.overlay_hit_test(point),
+            8 => self.scroll_area.overlay_hit_test(point),
+            9 => self.color_picker.overlay_hit_test(point),
+            10 => self.color_trigger.overlay_hit_test(point),
+            11 => self.curve_editor.overlay_hit_test(point),
+            _ => false,
+        }
+    }
+
+    fn event_position(event: &UiEvent) -> Option<Point> {
+        match event {
+            UiEvent::MouseDown { position, .. }
+            | UiEvent::MouseUp { position, .. }
+            | UiEvent::MouseMove { position, .. }
+            | UiEvent::MouseWheel { position, .. }
+            | UiEvent::DragEnter { position, .. }
+            | UiEvent::DragOver { position, .. }
+            | UiEvent::Drop { position, .. } => Some(*position),
+            _ => None,
+        }
+    }
+
+    fn event_target_children(&self, event: &UiEvent) -> Vec<usize> {
+        let Some(position) = Self::event_position(event) else {
+            return Vec::new();
+        };
+
+        let overlay_targets = (0..GALLERY_CHILD_COUNT)
+            .rev()
+            .filter(|index| self.child_overlay_hit_test(*index, position))
+            .collect::<Vec<_>>();
+        if !overlay_targets.is_empty() {
+            return overlay_targets;
+        }
+
+        (0..GALLERY_CHILD_COUNT)
+            .rev()
+            .filter(|index| self.child_hit_test(*index, position))
+            .collect()
+    }
+
     fn set_focused_child(&mut self, next: Option<usize>, ctx: &mut EventContext) {
         let next = next.filter(|index| Self::is_focusable_child(*index));
         if self.focused == next {
@@ -467,9 +535,11 @@ impl Widget for GalleryWidget {
             }
         }
 
-        // Normal event dispatch. On MouseDown, record which child captures.
+        // Normal pointer dispatch mirrors the framework router: open overlays
+        // get first priority, then the topmost normal hit-test target. This
+        // keeps scroll/dropdown/color-picker state isolated inside ui_demo.
         let mut handled = EventResult::Ignored;
-        for idx in 0..GALLERY_CHILD_COUNT {
+        for idx in self.event_target_children(event) {
             if self.child_event(idx, event, inner_ctx) == EventResult::Handled {
                 if matches!(event, UiEvent::MouseDown { .. }) {
                     self.captured = Some(idx);
@@ -1725,5 +1795,30 @@ impl Widget for ShapePanelWidget {
     }
     fn hit_test(&self, _p: Point) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+mod gallery_tests {
+    use super::*;
+
+    #[test]
+    fn gallery_pointer_dispatch_targets_only_hit_child() {
+        let mut gallery = GalleryWidget::new();
+        gallery.layout(Rect::new(0.0, 0.0, 500.0, 760.0));
+
+        let scroll_targets = gallery.event_target_children(&UiEvent::MouseWheel {
+            delta: 24.0,
+            position: Point::new(310.0, 260.0),
+            modifiers: Modifiers::none(),
+        });
+        let list_targets = gallery.event_target_children(&UiEvent::MouseDown {
+            position: Point::new(36.0, 260.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        });
+
+        assert_eq!(scroll_targets, vec![8]);
+        assert_eq!(list_targets, vec![7]);
     }
 }

@@ -868,6 +868,12 @@ event routing, then drain them after the root borrow ends. Shell-local actions
 such as the new-project dialog mutate `SelfHostedAppRoot`; only confirmed
 project creation emits the editor-facing `ui.project.create_with_settings`
 action consumed by `AppState`.
+Diagnostic/demo containers that manually route child events must still follow
+the same event contract as `EventRouter`: visible overlays get first priority,
+ordinary pointer events go only to hit-test targets, captured widgets receive
+their drag/move/up stream, and keyboard/text input follows focused widgets.
+They must not broadcast pointer events to every child, because that couples
+independent component state and hides real scroll/dropdown regressions.
 The pending queue lives in `self_hosted::action_queue`; `SelfHostedUiHost`
 drains it after routing and applies shell/AppState refresh policy. Entry
 binaries should use these types rather than open-coding shell/AppState
