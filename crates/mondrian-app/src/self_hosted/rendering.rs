@@ -11,7 +11,11 @@ use mondrian_ui_text::{resolve_text_commands, TextRenderer};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelfHostedFrameResult {
     /// The frame rendered and was presented to the surface.
-    Presented,
+    Presented {
+        /// The frame uploaded atlas resources that should be visible on a
+        /// deterministic follow-up frame across all backends.
+        uploaded_resources: bool,
+    },
     /// The surface was temporarily unavailable and the frame was skipped.
     Skipped,
     /// The surface was lost/outdated and was reconfigured for the next frame.
@@ -21,7 +25,11 @@ pub enum SelfHostedFrameResult {
 impl SelfHostedFrameResult {
     /// Whether the window should request another redraw immediately.
     pub fn needs_follow_up_redraw(self) -> bool {
-        matches!(self, SelfHostedFrameResult::Reconfigured)
+        match self {
+            SelfHostedFrameResult::Presented { uploaded_resources } => uploaded_resources,
+            SelfHostedFrameResult::Reconfigured => true,
+            SelfHostedFrameResult::Skipped => false,
+        }
     }
 }
 
@@ -52,7 +60,8 @@ impl SelfHostedFrameRenderer {
     ) -> SelfHostedFrameResult {
         let commands = resolve_text_commands(commands, &mut self.text_renderer);
         let pending = renderer_glyph_uploads(self.text_renderer.take_pending_uploads());
-        if !pending.is_empty() {
+        let uploaded_glyphs = !pending.is_empty();
+        if uploaded_glyphs {
             self.ui_renderer.upload_glyphs(queue, &pending);
         }
 
@@ -60,7 +69,7 @@ impl SelfHostedFrameRenderer {
             wgpu::CurrentSurfaceTexture::Success(output)
             | wgpu::CurrentSurfaceTexture::Suboptimal(output) => {
                 let view = output.texture.create_view(&Default::default());
-                self.ui_renderer.render_resolved_commands(
+                let render_stats = self.ui_renderer.render_resolved_commands(
                     device,
                     queue,
                     &view,
@@ -68,7 +77,9 @@ impl SelfHostedFrameRenderer {
                     screen_size,
                 );
                 output.present();
-                SelfHostedFrameResult::Presented
+                SelfHostedFrameResult::Presented {
+                    uploaded_resources: uploaded_glyphs || render_stats.uploaded_raster_images,
+                }
             }
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
                 SelfHostedFrameResult::Skipped
@@ -100,8 +111,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn frame_result_requests_follow_up_only_after_reconfigure() {
-        assert!(!SelfHostedFrameResult::Presented.needs_follow_up_redraw());
+    fn frame_result_requests_follow_up_after_resource_upload_or_reconfigure() {
+        assert!(
+            !SelfHostedFrameResult::Presented { uploaded_resources: false }
+                .needs_follow_up_redraw()
+        );
+        assert!(
+            SelfHostedFrameResult::Presented { uploaded_resources: true }.needs_follow_up_redraw()
+        );
         assert!(SelfHostedFrameResult::Reconfigured.needs_follow_up_redraw());
         assert!(!SelfHostedFrameResult::Skipped.needs_follow_up_redraw());
     }

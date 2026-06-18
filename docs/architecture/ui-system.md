@@ -1066,10 +1066,11 @@ content rects.
 Self-hosted windows share `SelfHostedFrameRenderer` for the text-atlas upload
 and surface-present path. `mondrian-ui-text` resolves text into glyph image
 commands and exposes pending glyph uploads before the frame is submitted, so the
-renderer can upload first-use glyphs and draw them in the same frame. Glyph
-uploads therefore do not request a compatibility redraw; the frame result only
-asks the window to redraw immediately when the surface was reconfigured and a
-fresh frame is still needed.
+renderer can upload first-use glyphs before drawing. The shared renderer still
+requests one deterministic follow-up redraw after first-use glyph or raster
+image uploads, because some backends make freshly written atlas texels visible
+one frame later. Window loops should depend on `SelfHostedFrameResult` for this
+warm-up redraw instead of adding entrypoint-specific repaint hacks.
 
 Line commands are expanded to quads with front-facing triangle winding for every
 orientation. This matters for splitter handles because the UI pipeline keeps

@@ -42,6 +42,13 @@ pub struct GlyphUpload {
     pub data: Vec<u8>,
 }
 
+/// Diagnostics produced while submitting one resolved UI frame.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UiRenderFrameStats {
+    /// The frame uploaded new raster images into the renderer-owned image atlas.
+    pub uploaded_raster_images: bool,
+}
+
 /// GPU 2D UI 渲染器
 pub struct UiRenderer {
     pipeline: UiPipeline,
@@ -285,18 +292,21 @@ impl UiRenderer {
         &mut self,
         queue: &wgpu::Queue,
         commands: &[DrawCommand],
-    ) -> Vec<DrawCommand> {
-        commands
+    ) -> (Vec<DrawCommand>, bool) {
+        let mut uploaded_raster_images = false;
+        let commands = commands
             .iter()
             .filter_map(|command| match command {
-                DrawCommand::RasterImage { key, bounds, width, height, rgba, tint } => {
-                    self.resolve_raster_image(queue, key, *width, *height, rgba).map(|uv_rect| {
+                DrawCommand::RasterImage { key, bounds, width, height, rgba, tint } => self
+                    .resolve_raster_image(queue, key, *width, *height, rgba)
+                    .map(|(uv_rect, uploaded)| {
+                        uploaded_raster_images |= uploaded;
                         DrawCommand::RasterAtlasImage { bounds: *bounds, uv_rect, tint: *tint }
-                    })
-                }
+                    }),
                 other => Some(other.clone()),
             })
-            .collect()
+            .collect();
+        (commands, uploaded_raster_images)
     }
 
     fn resolve_raster_image(
@@ -306,7 +316,7 @@ impl UiRenderer {
         width: u32,
         height: u32,
         rgba: &[u8],
-    ) -> Option<mondrian_ui_core::types::Rect> {
+    ) -> Option<(mondrian_ui_core::types::Rect, bool)> {
         let expected_len = width as usize * height as usize * 4;
         if width == 0 || height == 0 || rgba.len() != expected_len {
             return None;
@@ -314,7 +324,7 @@ impl UiRenderer {
 
         let cache_key = format!("{key}@{width}x{height}");
         if let Some(entry) = self.image_cache.get(&cache_key) {
-            return Some(entry.uv_rect);
+            return Some((entry.uv_rect, false));
         }
 
         let pad_twice = IMAGE_ATLAS_PAD.checked_mul(2)?;
@@ -353,7 +363,7 @@ impl UiRenderer {
         );
 
         self.image_cache.insert(cache_key, ImageCacheEntry { uv_rect });
-        Some(uv_rect)
+        Some((uv_rect, true))
     }
 
     /// Render draw commands that have already had text commands resolved to
@@ -369,12 +379,12 @@ impl UiRenderer {
         view: &wgpu::TextureView,
         commands: &[DrawCommand],
         screen_size: (u32, u32),
-    ) {
+    ) -> UiRenderFrameStats {
         debug_assert!(
             !commands.iter().any(|command| matches!(command, DrawCommand::Text { .. })),
             "UiRenderer::render_resolved_commands received unresolved text commands"
         );
-        let commands = self.resolve_raster_images(queue, commands);
+        let (commands, uploaded_raster_images) = self.resolve_raster_images(queue, commands);
         let batches = build_batches(&commands, screen_size);
         self.ensure_msaa_target(device, screen_size);
         let msaa_view = self.msaa_target.as_ref().map(|target| &target.view);
@@ -456,6 +466,7 @@ impl UiRenderer {
         }
 
         queue.submit(std::iter::once(encoder.finish()));
+        UiRenderFrameStats { uploaded_raster_images }
     }
 }
 
