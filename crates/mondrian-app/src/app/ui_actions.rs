@@ -401,6 +401,13 @@ pub struct AssetsOpenFolderPayload {
     pub folder_id: Option<String>,
 }
 
+/// Create an asset-library folder in the selected parent, or at root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetsCreateFolderPayload {
+    /// Parent folder for the new folder. `None` creates a root-level folder.
+    pub parent_folder_id: Option<String>,
+}
+
 /// Enqueue a timeline export job from a UI frontend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportEnqueuePayload {
@@ -574,8 +581,8 @@ pub fn assets_create_solid_color_action() -> Action {
 }
 
 /// Build an action that creates a folder in the library.
-pub fn assets_create_folder_action() -> Action {
-    custom_assets_action(ASSETS_CREATE_FOLDER, ())
+pub fn assets_create_folder_action(payload: AssetsCreateFolderPayload) -> Action {
+    custom_assets_action(ASSETS_CREATE_FOLDER, payload)
 }
 
 /// Build a shell-local action that opens an asset-browser folder.

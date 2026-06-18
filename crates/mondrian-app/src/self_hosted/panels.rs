@@ -54,16 +54,16 @@ use crate::app::ui_actions::{
     inspector_set_effect_property_action, timeline_add_track_action, timeline_drop_asset_action,
     timeline_move_clip_action, timeline_move_track_action, timeline_seek_action,
     timeline_select_clip_action, timeline_set_track_control_action, timeline_trim_clip_action,
-    AssetsOpenFolderPayload, AssetsPrepareDragPayload, EffectsAddToClipPayload,
-    ExportDraftUpdatePayload, ExportEnqueuePayload, ExportOutputDialogPayload,
-    InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
-    InspectorRemoveEffectPayload, InspectorSelectEffectPayload, InspectorSetClipCurvePayload,
-    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
-    InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
-    InspectorSetEffectPropertyPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
-    TimelineDropAssetPayload, TimelineMoveClipPayload, TimelineMoveTrackPayload,
-    TimelineSelectClipPayload, TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind,
-    TimelineTrimClipPayload, TimelineTrimPayloadEdge,
+    AssetsCreateFolderPayload, AssetsOpenFolderPayload, AssetsPrepareDragPayload,
+    EffectsAddToClipPayload, ExportDraftUpdatePayload, ExportEnqueuePayload,
+    ExportOutputDialogPayload, InspectorClipRefPayload, InspectorClipTransformField,
+    InspectorCurvePointPayload, InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
+    InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
+    InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
+    InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload, TimelineAddTrackKind,
+    TimelineAddTrackPayload, TimelineDropAssetPayload, TimelineMoveClipPayload,
+    TimelineMoveTrackPayload, TimelineSelectClipPayload, TimelineSetTrackControlPayload,
+    TimelineTrackControlPayloadKind, TimelineTrimClipPayload, TimelineTrimPayloadEdge,
 };
 use crate::app::{AppState, SelectedClipRef};
 use crate::self_hosted::icons::AppIcon;
@@ -206,6 +206,7 @@ pub struct AssetGridModel {
     pub items: Vec<AssetGridItem>,
     pub filter_placeholder: Option<String>,
     pub accepts_file_drop: bool,
+    pub current_folder_id: Option<String>,
     #[cfg(test)]
     pub demo_activate_prefix: Option<String>,
 }
@@ -218,6 +219,7 @@ impl AssetGridModel {
             items,
             filter_placeholder: None,
             accepts_file_drop: false,
+            current_folder_id: None,
             #[cfg(test)]
             demo_activate_prefix: None,
         }
@@ -312,6 +314,7 @@ impl AssetGridModel {
         let subtitle = current_folder
             .map(|folder| format!("Project library / {}", folder.name))
             .unwrap_or_else(|| "Project library".to_owned());
+        let current_folder_id = current_folder.map(|folder| folder.id.clone());
         let mut items = asset_grid_items_from_library_records(&folders, assets, current_folder);
         if current_folder.is_some() && items.len() == 1 {
             items.push(asset_empty_item(
@@ -348,13 +351,20 @@ impl AssetGridModel {
             )
             .with_subtitle(subtitle)
             .with_filter_placeholder("Search assets")
-            .accepts_file_drop(true);
+            .accepts_file_drop(true)
+            .with_current_folder_id(current_folder_id);
         }
 
         AssetGridModel::new("Assets", items)
             .with_subtitle(subtitle)
             .with_filter_placeholder("Search assets")
             .accepts_file_drop(true)
+            .with_current_folder_id(current_folder_id)
+    }
+
+    pub fn with_current_folder_id(mut self, folder_id: Option<String>) -> Self {
+        self.current_folder_id = folder_id;
+        self
     }
 }
 
@@ -1861,7 +1871,9 @@ fn asset_grid(model: &AssetGridModel) -> AssetGrid {
                 }
                 _ => None,
             })
-            .with_context_menu(asset_grid_context_menu_items());
+            .with_context_menu(asset_grid_context_menu_items(
+                model.current_folder_id.as_deref(),
+            ));
     }
     #[cfg(test)]
     if let Some(prefix) = model.demo_activate_prefix.clone() {
@@ -1872,7 +1884,7 @@ fn asset_grid(model: &AssetGridModel) -> AssetGrid {
     grid
 }
 
-fn asset_grid_context_menu_items() -> Vec<MenuItem> {
+fn asset_grid_context_menu_items(current_folder_id: Option<&str>) -> Vec<MenuItem> {
     vec![
         asset_menu_item(
             MenuItem::new("Import media...", app_shell_import_media_dialog_action()),
@@ -1891,7 +1903,12 @@ fn asset_grid_context_menu_items() -> Vec<MenuItem> {
             AppIcon::Rectangle,
         ),
         asset_menu_item(
-            MenuItem::new("New folder", assets_create_folder_action()),
+            MenuItem::new(
+                "New folder",
+                assets_create_folder_action(AssetsCreateFolderPayload {
+                    parent_folder_id: current_folder_id.map(str::to_owned),
+                }),
+            ),
             AppIcon::Folder,
         ),
     ]
@@ -3013,8 +3030,8 @@ fn inspector_effect_property_action(
 mod tests {
     use super::*;
     use crate::app::ui_actions::{
-        AssetsOpenFolderPayload, APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE,
-        APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_OPEN_PROJECT_DIALOG,
+        AssetsCreateFolderPayload, AssetsOpenFolderPayload, APP_SHELL_IMPORT_MEDIA_DIALOG,
+        APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_OPEN_PROJECT_DIALOG,
         APP_SHELL_SAVE_PROJECT_AS_DIALOG, ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER,
         ASSETS_CREATE_SOLID_COLOR, ASSETS_NAMESPACE, ASSETS_OPEN_FOLDER, ASSETS_PREPARE_DRAG,
         EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE, INSPECTOR_SELECT_EFFECT,
@@ -3405,7 +3422,7 @@ mod tests {
 
     #[test]
     fn assets_panel_context_menu_uses_shell_and_asset_actions() {
-        let items = asset_grid_context_menu_items();
+        let items = asset_grid_context_menu_items(None);
 
         assert_eq!(items.len(), 5);
         assert_shell_action(Some(&items[0].action), APP_SHELL_IMPORT_MEDIA_DIALOG);
@@ -3416,7 +3433,27 @@ mod tests {
         assert_assets_action(Some(&items[3].action), ASSETS_CREATE_SOLID_COLOR);
         assert!(items[3].icon.is_some());
         assert_assets_action(Some(&items[4].action), ASSETS_CREATE_FOLDER);
+        let Action::Custom { payload, .. } = &items[4].action else {
+            panic!("expected create-folder custom action");
+        };
+        let payload: AssetsCreateFolderPayload =
+            serde_json::from_value(payload.clone()).expect("create folder payload");
+        assert_eq!(payload.parent_folder_id, None);
         assert!(items[4].icon.is_some());
+    }
+
+    #[test]
+    fn assets_panel_context_menu_creates_folders_inside_current_folder() {
+        let items = asset_grid_context_menu_items(Some("rushes"));
+
+        let Action::Custom { namespace, name, payload } = &items[4].action else {
+            panic!("expected create-folder custom action");
+        };
+        assert_eq!(namespace, ASSETS_NAMESPACE);
+        assert_eq!(name, ASSETS_CREATE_FOLDER);
+        let payload: AssetsCreateFolderPayload =
+            serde_json::from_value(payload.clone()).expect("create folder payload");
+        assert_eq!(payload.parent_folder_id.as_deref(), Some("rushes"));
     }
 
     #[test]
@@ -4442,6 +4479,10 @@ mod tests {
         );
 
         assert_eq!(models.assets.subtitle, "Project library / Rushes");
+        assert_eq!(
+            models.assets.current_folder_id.as_deref(),
+            Some(folder_id.as_str())
+        );
         assert_eq!(models.assets.items.len(), 3);
 
         let parent = &models.assets.items[0];
@@ -5251,10 +5292,9 @@ mod tests {
 
     fn assert_assets_action(action: Option<&Action>, name: &str) {
         match action {
-            Some(Action::Custom { namespace, name: action_name, payload }) => {
+            Some(Action::Custom { namespace, name: action_name, .. }) => {
                 assert_eq!(namespace, ASSETS_NAMESPACE);
                 assert_eq!(action_name, name);
-                assert_eq!(payload, &serde_json::Value::Null);
             }
             other => panic!("expected assets action, got {other:?}"),
         }

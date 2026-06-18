@@ -363,21 +363,28 @@ impl AppState {
         Duration::from_secs_f64(secs.max(1.0 / fps.max(1.0)))
     }
 
-    pub fn create_folder_in_library(&mut self, name: &str) -> mondrian_core::Result<String> {
+    pub fn create_folder_in_library(
+        &mut self,
+        name: &str,
+        parent_id: Option<&str>,
+    ) -> mondrian_core::Result<String> {
         let library = self.asset_library.as_ref().ok_or_else(|| {
             mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "create_folder".to_string(),
                 reason: "素材库未连接".to_string(),
             }
         })?;
-        let folder_id = library.create_folder(name, None)?;
+        let folder_id = library.create_folder(name, parent_id)?;
         self.set_status_hint(format!("已新建文件夹：{}", name), false);
         let _ = self.save_project_file();
         Ok(folder_id)
     }
 
     /// Create a library folder using the next available default folder name.
-    pub fn create_default_folder_in_library(&mut self) -> mondrian_core::Result<String> {
+    pub fn create_default_folder_in_library(
+        &mut self,
+        parent_id: Option<&str>,
+    ) -> mondrian_core::Result<String> {
         let library = self.asset_library.as_ref().ok_or_else(|| {
             mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "create_folder".to_string(),
@@ -393,7 +400,7 @@ impl AppState {
                 }
             }
         }
-        self.create_folder_in_library(&format!("文件夹 {next}"))
+        self.create_folder_in_library(&format!("文件夹 {next}"), parent_id)
     }
 
     pub fn delete_asset_from_library(&mut self, asset_id: AssetId) -> mondrian_core::Result<()> {

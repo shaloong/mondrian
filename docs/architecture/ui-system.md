@@ -731,10 +731,13 @@ the widget receives plain `MenuItem`s, handles popup placement, overlay
 painting, dismissal, and keyboard activation, then dispatches the supplied
 actions. The self-hosted app adapter maps that menu to `app_shell` import
 requests and `ui.assets` create actions for adjustment layers, solid-color
-assets, and folders. The app adapter maps `AssetRecord` into `AssetGridItem`
-view data and semantic media color tokens; the widget crate does not depend on
-the asset library or editor domain. The root Assets view is not a flat dump of
-every database row: it shows top-level folders first, then root/unfiled assets.
+assets, and folders. Folder creation actions carry the current browser folder
+id as `parent_folder_id`, so creating a folder inside a bin remains an app-layer
+library mutation while the widget stays domain-light. The app adapter maps
+`AssetRecord` into `AssetGridItem` view data and semantic media color tokens;
+the widget crate does not depend on the asset library or editor domain. The root
+Assets view is not a flat dump of every database row: it shows top-level folders
+first, then root/unfiled assets.
 Assets already assigned to a folder are counted on that folder card and appear
 only when the self-hosted shell is browsing that folder. Folder navigation is
 shell-local UI session state: folder cards emit `ui.assets.open_folder`, the

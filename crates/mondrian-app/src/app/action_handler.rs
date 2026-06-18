@@ -12,10 +12,10 @@ use crate::app::timeline_editing::{
     find_clip, find_clip_mut, find_clip_track_lock, set_clip_disabled,
 };
 use crate::app::ui_actions::{
-    AssetsPrepareDragPayload, EffectsAddToClipPayload, ExportDraftUpdatePayload,
-    ExportEnqueuePayload, InspectorClipTransformField, InspectorRemoveEffectPayload,
-    InspectorSelectEffectPayload, InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
-    InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+    AssetsCreateFolderPayload, AssetsPrepareDragPayload, EffectsAddToClipPayload,
+    ExportDraftUpdatePayload, ExportEnqueuePayload, InspectorClipTransformField,
+    InspectorRemoveEffectPayload, InspectorSelectEffectPayload, InspectorSetClipCurvePayload,
+    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
     InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
     InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload, TimelineAddTrackKind,
     TimelineAddTrackPayload, TimelineDropAssetPayload, TimelineMoveClipPayload,
@@ -858,7 +858,15 @@ impl AppState {
             }
             ASSETS_CREATE_ADJUSTMENT_LAYER => self.create_adjustment_layer_asset(None).map(|_| ()),
             ASSETS_CREATE_SOLID_COLOR => self.create_solid_color_asset(None).map(|_| ()),
-            ASSETS_CREATE_FOLDER => self.create_default_folder_in_library().map(|_| ()),
+            ASSETS_CREATE_FOLDER => {
+                let payload = parse_ui_payload::<AssetsCreateFolderPayload>(
+                    "assets_ui_action",
+                    name,
+                    payload,
+                )?;
+                self.create_default_folder_in_library(payload.parent_folder_id.as_deref())
+                    .map(|_| ())
+            }
             _ => Err(unknown_ui_action_error("assets_ui_action", name)),
         }
     }
@@ -1379,10 +1387,10 @@ mod tests {
         project_create_with_settings_action, timeline_add_track_action, timeline_drop_asset_action,
         timeline_move_clip_action, timeline_move_track_action, timeline_seek_action,
         timeline_select_clip_action, timeline_set_track_control_action, timeline_trim_clip_action,
-        AssetsPrepareDragPayload, EffectsAddToClipPayload, ExportDraftUpdatePayload,
-        ExportEnqueuePayload, InspectorClipRefPayload, InspectorClipTransformField,
-        InspectorCurvePointPayload, InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
-        InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
+        AssetsCreateFolderPayload, AssetsPrepareDragPayload, EffectsAddToClipPayload,
+        ExportDraftUpdatePayload, ExportEnqueuePayload, InspectorClipRefPayload,
+        InspectorClipTransformField, InspectorCurvePointPayload, InspectorRemoveEffectPayload,
+        InspectorSelectEffectPayload, InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
         InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
         InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
         InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload, TimelineAddTrackKind,
@@ -2013,10 +2021,24 @@ mod tests {
             .dispatch_action(assets_create_solid_color_action())
             .expect("create solid color");
         state
-            .dispatch_action(assets_create_folder_action())
+            .dispatch_action(assets_create_folder_action(AssetsCreateFolderPayload {
+                parent_folder_id: None,
+            }))
             .expect("create first folder");
+        let first_folder_id = state
+            .asset_library
+            .as_ref()
+            .expect("library")
+            .list_folders()
+            .expect("list folders")
+            .into_iter()
+            .find(|folder| folder.name == "文件夹 1")
+            .expect("first folder")
+            .id;
         state
-            .dispatch_action(assets_create_folder_action())
+            .dispatch_action(assets_create_folder_action(AssetsCreateFolderPayload {
+                parent_folder_id: Some(first_folder_id.clone()),
+            }))
             .expect("create second folder");
 
         let library = state.asset_library.as_ref().expect("library");
@@ -2024,13 +2046,14 @@ mod tests {
         assert_eq!(assets.len(), 2);
         assert!(assets.iter().any(|asset| asset.kind == AssetKind::AdjustmentLayer));
         assert!(assets.iter().any(|asset| asset.kind == AssetKind::SolidColor));
-        let folder_names = library
-            .list_folders()
-            .expect("list folders")
-            .into_iter()
-            .map(|folder| folder.name)
-            .collect::<Vec<_>>();
+        let folders = library.list_folders().expect("list folders");
+        let folder_names = folders.iter().map(|folder| folder.name.clone()).collect::<Vec<_>>();
         assert_eq!(folder_names, vec!["文件夹 1", "文件夹 2"]);
+        assert_eq!(folders[0].parent_id, None);
+        assert_eq!(
+            folders[1].parent_id.as_deref(),
+            Some(first_folder_id.as_str())
+        );
         assert!(state
             .status_hint
             .as_ref()

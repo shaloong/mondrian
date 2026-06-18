@@ -167,7 +167,7 @@ impl LibraryPanel {
                     }
                     if ui.button("文件夹").clicked() {
                         let name = self.next_folder_name(state);
-                        if let Err(err) = state.create_folder_in_library(&name) {
+                        if let Err(err) = state.create_folder_in_library(&name, None) {
                             state.set_status_hint(format!("创建文件夹失败：{err}"), true);
                         }
                         ui.close();
