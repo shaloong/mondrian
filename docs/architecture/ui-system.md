@@ -810,6 +810,13 @@ blocking, a background worker decodes bounded RGBA frames through
 Asset cards expose `ui.assets.delete_asset` through their card-level context
 menu. `AppState` owns the actual deletion, including timeline cleanup for clips
 that referenced the asset, event publication, status hints, and project save.
+File-backed video/audio cards also expose `app.shell.reveal_in_file_manager`.
+That command is intentionally a shell/platform side effect: the card emits a
+stable app-shell payload containing the real filesystem path, the self-hosted
+shell resolves it through `PlatformService::reveal_in_file_manager`, and no
+editor action enters `AppState` or undo/redo. Synthetic assets such as solid
+colors and adjustment layers do not receive this menu item because they have no
+native file-manager target.
 Folder cards expose `ui.assets.delete_folder` through the same card-level menu
 surface. Folder deletion is an app/library mutation: `AssetLibrary` removes the
 selected folder subtree, unlinks assets assigned to any deleted folder, and

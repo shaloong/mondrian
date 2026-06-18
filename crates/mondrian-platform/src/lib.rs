@@ -10,6 +10,7 @@
 //! * Stage A 提供空实现，后续 Stage 逐步添加真实实现
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use mondrian_core::Color;
 
@@ -147,9 +148,43 @@ impl PlatformService for SystemPlatformService {
 
     fn open_url(&self, _url: &str) {}
 
-    fn reveal_in_file_manager(&self, _path: &Path) {}
+    fn reveal_in_file_manager(&self, path: &Path) {
+        reveal_path_in_file_manager(path);
+    }
 
     fn send_notification(&self, _title: &str, _body: &str) {}
+}
+
+fn reveal_path_in_file_manager(path: &Path) {
+    #[cfg(target_os = "windows")]
+    {
+        let target = if path.exists() {
+            path
+        } else {
+            path.parent().unwrap_or(path)
+        };
+        let _ = Command::new("explorer").arg(format!("/select,{}", target.display())).spawn();
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let target = if path.exists() {
+            path
+        } else {
+            path.parent().unwrap_or(path)
+        };
+        let _ = Command::new("open").arg("-R").arg(target).spawn();
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let target = if path.is_dir() {
+            path
+        } else {
+            path.parent().unwrap_or(path)
+        };
+        let _ = Command::new("xdg-open").arg(target).spawn();
+    }
 }
 
 fn configured_file_dialog(title: &str, filters: &[FileFilter]) -> rfd::FileDialog {

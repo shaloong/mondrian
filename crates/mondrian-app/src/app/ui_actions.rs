@@ -124,6 +124,8 @@ pub const APP_SHELL_OPEN_RECENT_PROJECT: &str = "open_recent_project";
 pub const APP_SHELL_RECOVER_PROJECT: &str = "recover_project";
 /// App-shell request to open a platform media import dialog.
 pub const APP_SHELL_IMPORT_MEDIA_DIALOG: &str = "import_media_dialog";
+/// App-shell request to reveal one real file in the platform file manager.
+pub const APP_SHELL_REVEAL_IN_FILE_MANAGER: &str = "reveal_in_file_manager";
 /// App-shell request to open a platform project save-as dialog.
 pub const APP_SHELL_SAVE_PROJECT_AS_DIALOG: &str = "save_project_as_dialog";
 /// App-shell request to choose a timeline export output file.
@@ -177,6 +179,13 @@ pub struct ProjectRecoverFromAutosavePayload {
     pub project_file: PathBuf,
     /// Autosave snapshot archive to recover.
     pub autosave_file: PathBuf,
+}
+
+/// File-system path to reveal through the native file manager.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppShellRevealInFileManagerPayload {
+    /// File or directory to reveal.
+    pub path: PathBuf,
 }
 
 /// Clip edge being trimmed by a timeline UI.
@@ -799,6 +808,13 @@ pub fn app_shell_import_media_dialog_action_with_target(
     payload: ImportMediaDialogPayload,
 ) -> Action {
     custom_app_shell_action_with_payload(APP_SHELL_IMPORT_MEDIA_DIALOG, payload)
+}
+
+/// Build an app-shell request for revealing a file in the native file manager.
+pub fn app_shell_reveal_in_file_manager_action(
+    payload: AppShellRevealInFileManagerPayload,
+) -> Action {
+    custom_app_shell_action_with_payload(APP_SHELL_REVEAL_IN_FILE_MANAGER, payload)
 }
 
 /// Build an app-shell request for saving the current project to a chosen path.

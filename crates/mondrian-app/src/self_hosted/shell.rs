@@ -20,14 +20,15 @@ use std::path::Path;
 use crate::app::ui_actions::{
     assets_import_files_action, export_set_draft_action, project_create_with_settings_action,
     project_recover_from_autosave_action, AppShellOpenRecentProjectPayload,
-    AssetsImportFilesPayload, ExportDraftUpdatePayload, ExportOutputDialogPayload,
-    ImportMediaDialogPayload, NewProjectDraftUpdatePayload, PreferencesTabPayload,
-    ProjectRecoverFromAutosavePayload, APP_SHELL_ABOUT, APP_SHELL_CANCEL_NEW_PROJECT_DIALOG,
-    APP_SHELL_CLOSE_MODAL, APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_EXPORT_OUTPUT_DIALOG,
+    AppShellRevealInFileManagerPayload, AssetsImportFilesPayload, ExportDraftUpdatePayload,
+    ExportOutputDialogPayload, ImportMediaDialogPayload, NewProjectDraftUpdatePayload,
+    PreferencesTabPayload, ProjectRecoverFromAutosavePayload, APP_SHELL_ABOUT,
+    APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
+    APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_EXPORT_OUTPUT_DIALOG,
     APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
     APP_SHELL_NEW_PROJECT_DRAFT_CHANGED, APP_SHELL_OPEN_PROJECT_DIALOG,
     APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PREFERENCES, APP_SHELL_PREFERENCES_TAB_CHANGED,
-    APP_SHELL_RECOVER_PROJECT, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
+    APP_SHELL_RECOVER_PROJECT, APP_SHELL_REVEAL_IN_FILE_MANAGER, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
 };
 use crate::app::AppState;
 use crate::self_hosted::menu_bar::MenuBar;
@@ -180,6 +181,14 @@ pub fn try_resolve_app_shell_action(
                     Action::ImportMedia(paths)
                 }
             }))
+        }
+        Action::Custom { namespace, name, payload }
+            if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_REVEAL_IN_FILE_MANAGER =>
+        {
+            let payload: AppShellRevealInFileManagerPayload = serde_json::from_value(payload)
+                .map_err(|err| app_shell_action_error(&name, err))?;
+            platform.reveal_in_file_manager(&payload.path);
+            Ok(None)
         }
         Action::Custom { namespace, name, .. }
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_SAVE_PROJECT_AS_DIALOG =>
@@ -915,7 +924,8 @@ mod tests {
         app_shell_new_project_draft_changed_action, app_shell_open_project_dialog_action,
         app_shell_open_recent_project_action, app_shell_preferences_action,
         app_shell_preferences_tab_changed_action, app_shell_recover_project_action,
-        app_shell_save_project_as_dialog_action, AppShellOpenRecentProjectPayload,
+        app_shell_reveal_in_file_manager_action, app_shell_save_project_as_dialog_action,
+        AppShellOpenRecentProjectPayload, AppShellRevealInFileManagerPayload,
         AssetsImportFilesPayload, ExportDraftUpdatePayload, ExportOutputDialogPayload,
         ImportMediaDialogPayload, NewProjectDraftUpdatePayload, PreferencesTabPayload,
         ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload, ASSETS_IMPORT_FILES,
@@ -932,6 +942,7 @@ mod tests {
     use mondrian_ui_core::Widget;
     use mondrian_ui_events::hit_test::hit_test_deepest;
     use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
 
     #[derive(Default)]
     struct PaintOrderRecorder {
@@ -984,6 +995,7 @@ mod tests {
     struct FakePlatform {
         open_paths: Option<Vec<PathBuf>>,
         save_path: Option<PathBuf>,
+        revealed_paths: Mutex<Vec<PathBuf>>,
     }
 
     impl PlatformService for FakePlatform {
@@ -1012,7 +1024,9 @@ mod tests {
 
         fn open_url(&self, _url: &str) {}
 
-        fn reveal_in_file_manager(&self, _path: &Path) {}
+        fn reveal_in_file_manager(&self, path: &Path) {
+            self.revealed_paths.lock().expect("revealed path lock").push(path.to_path_buf());
+        }
 
         fn send_notification(&self, _title: &str, _body: &str) {}
     }
@@ -1393,7 +1407,7 @@ mod tests {
     fn resolve_app_shell_open_project_dialog_returns_open_action() {
         let platform = FakePlatform {
             open_paths: Some(vec![PathBuf::from("E:/projects/cut.mdp")]),
-            save_path: None,
+            ..FakePlatform::default()
         };
 
         let action =
@@ -1407,7 +1421,7 @@ mod tests {
 
     #[test]
     fn resolve_app_shell_open_recent_project_returns_open_action() {
-        let platform = FakePlatform { open_paths: None, save_path: None };
+        let platform = FakePlatform::default();
         let project_file = PathBuf::from("E:/projects/recent.mdp");
 
         let action = resolve_app_shell_action(
@@ -1423,7 +1437,7 @@ mod tests {
 
     #[test]
     fn resolve_app_shell_recover_project_returns_project_recovery_action() {
-        let platform = FakePlatform { open_paths: None, save_path: None };
+        let platform = FakePlatform::default();
         let payload = ProjectRecoverFromAutosavePayload {
             project_file: PathBuf::from("E:/projects/recover.mdp"),
             autosave_file: PathBuf::from("E:/runtime/autosave/project.autosave.mdp"),
@@ -1453,6 +1467,7 @@ mod tests {
         let platform = FakePlatform {
             open_paths: None,
             save_path: Some(PathBuf::from("E:/projects/My Cut.mdp")),
+            ..FakePlatform::default()
         };
 
         let action =
@@ -1479,6 +1494,7 @@ mod tests {
         let platform = FakePlatform {
             open_paths: None,
             save_path: Some(PathBuf::from("E:/projects/Rough Cut.mdp")),
+            ..FakePlatform::default()
         };
         let mut root = SelfHostedAppRoot::demo();
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
@@ -1529,6 +1545,7 @@ mod tests {
         let platform = FakePlatform {
             open_paths: None,
             save_path: Some(PathBuf::from("E:/projects/UHD.mdp")),
+            ..FakePlatform::default()
         };
         let mut root = SelfHostedAppRoot::demo();
 
@@ -1722,7 +1739,10 @@ mod tests {
             PathBuf::from("E:/media/a.mov"),
             PathBuf::from("E:/media/b.wav"),
         ];
-        let platform = FakePlatform { open_paths: Some(paths.clone()), save_path: None };
+        let platform = FakePlatform {
+            open_paths: Some(paths.clone()),
+            ..FakePlatform::default()
+        };
 
         let action =
             resolve_app_shell_action(app_shell_import_media_dialog_action(), &platform, None);
@@ -1736,7 +1756,10 @@ mod tests {
             PathBuf::from("E:/media/a.mov"),
             PathBuf::from("E:/media/b.wav"),
         ];
-        let platform = FakePlatform { open_paths: Some(paths.clone()), save_path: None };
+        let platform = FakePlatform {
+            open_paths: Some(paths.clone()),
+            ..FakePlatform::default()
+        };
 
         let action = resolve_app_shell_action(
             app_shell_import_media_dialog_action_with_target(ImportMediaDialogPayload {
@@ -1758,10 +1781,32 @@ mod tests {
     }
 
     #[test]
+    fn try_resolve_app_shell_reveal_file_manager_invokes_platform_only() {
+        let platform = FakePlatform::default();
+        let target = PathBuf::from("E:/media/a.mp4");
+
+        let action = try_resolve_app_shell_action(
+            app_shell_reveal_in_file_manager_action(AppShellRevealInFileManagerPayload {
+                path: target.clone(),
+            }),
+            &platform,
+            None,
+        )
+        .expect("resolve reveal action");
+
+        assert_eq!(action, None);
+        assert_eq!(
+            platform.revealed_paths.lock().expect("revealed path lock").as_slice(),
+            &[target]
+        );
+    }
+
+    #[test]
     fn resolve_app_shell_save_as_dialog_returns_save_action() {
         let platform = FakePlatform {
             open_paths: None,
             save_path: Some(PathBuf::from("E:/projects/out.mdp")),
+            ..FakePlatform::default()
         };
 
         let action = resolve_app_shell_action(
@@ -1781,6 +1826,7 @@ mod tests {
         let platform = FakePlatform {
             open_paths: None,
             save_path: Some(PathBuf::from("E:/renders/deliverable.mp4")),
+            ..FakePlatform::default()
         };
 
         let action = resolve_app_shell_action(
