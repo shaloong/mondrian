@@ -55,17 +55,17 @@ use crate::app::ui_actions::{
     inspector_set_effect_property_action, timeline_add_track_action, timeline_drop_asset_action,
     timeline_move_clip_action, timeline_move_track_action, timeline_seek_action,
     timeline_select_clip_action, timeline_set_track_control_action, timeline_trim_clip_action,
-    AssetsCreateFolderPayload, AssetsImportFilesPayload, AssetsOpenFolderPayload,
-    AssetsPrepareDragPayload, EffectsAddToClipPayload, ExportDraftUpdatePayload,
-    ExportEnqueuePayload, ExportOutputDialogPayload, ImportMediaDialogPayload,
-    InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
-    InspectorRemoveEffectPayload, InspectorSelectEffectPayload, InspectorSetClipCurvePayload,
-    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
-    InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
-    InspectorSetEffectPropertyPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
-    TimelineDropAssetPayload, TimelineMoveClipPayload, TimelineMoveTrackPayload,
-    TimelineSelectClipPayload, TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind,
-    TimelineTrimClipPayload, TimelineTrimPayloadEdge,
+    AssetsCreateAssetPayload, AssetsCreateFolderPayload, AssetsImportFilesPayload,
+    AssetsOpenFolderPayload, AssetsPrepareDragPayload, EffectsAddToClipPayload,
+    ExportDraftUpdatePayload, ExportEnqueuePayload, ExportOutputDialogPayload,
+    ImportMediaDialogPayload, InspectorClipRefPayload, InspectorClipTransformField,
+    InspectorCurvePointPayload, InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
+    InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
+    InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
+    InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload, TimelineAddTrackKind,
+    TimelineAddTrackPayload, TimelineDropAssetPayload, TimelineMoveClipPayload,
+    TimelineMoveTrackPayload, TimelineSelectClipPayload, TimelineSetTrackControlPayload,
+    TimelineTrackControlPayloadKind, TimelineTrimClipPayload, TimelineTrimPayloadEdge,
 };
 use crate::app::{AppState, SelectedClipRef};
 use crate::self_hosted::icons::AppIcon;
@@ -1905,12 +1905,19 @@ fn asset_grid_context_menu_items(current_folder_id: Option<&str>) -> Vec<MenuIte
         asset_menu_item(
             MenuItem::new(
                 "New adjustment layer",
-                assets_create_adjustment_layer_action(),
+                assets_create_adjustment_layer_action(AssetsCreateAssetPayload {
+                    folder_id: current_folder_id.map(str::to_owned),
+                }),
             ),
             AppIcon::Grid,
         ),
         asset_menu_item(
-            MenuItem::new("New solid color", assets_create_solid_color_action()),
+            MenuItem::new(
+                "New solid color",
+                assets_create_solid_color_action(AssetsCreateAssetPayload {
+                    folder_id: current_folder_id.map(str::to_owned),
+                }),
+            ),
             AppIcon::Rectangle,
         ),
         asset_menu_item(
@@ -3041,9 +3048,9 @@ fn inspector_effect_property_action(
 mod tests {
     use super::*;
     use crate::app::ui_actions::{
-        AssetsCreateFolderPayload, AssetsImportFilesPayload, AssetsOpenFolderPayload,
-        ImportMediaDialogPayload, APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE,
-        APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_OPEN_PROJECT_DIALOG,
+        AssetsCreateAssetPayload, AssetsCreateFolderPayload, AssetsImportFilesPayload,
+        AssetsOpenFolderPayload, ImportMediaDialogPayload, APP_SHELL_IMPORT_MEDIA_DIALOG,
+        APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_OPEN_PROJECT_DIALOG,
         APP_SHELL_SAVE_PROJECT_AS_DIALOG, ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER,
         ASSETS_CREATE_SOLID_COLOR, ASSETS_IMPORT_FILES, ASSETS_NAMESPACE, ASSETS_OPEN_FOLDER,
         ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE,
@@ -3456,8 +3463,20 @@ mod tests {
         assert!(items[0].icon.is_some());
         assert!(items[1].is_separator());
         assert_assets_action(Some(&items[2].action), ASSETS_CREATE_ADJUSTMENT_LAYER);
+        let Action::Custom { payload, .. } = &items[2].action else {
+            panic!("expected adjustment custom action");
+        };
+        let payload: AssetsCreateAssetPayload =
+            serde_json::from_value(payload.clone()).expect("adjustment payload");
+        assert_eq!(payload.folder_id, None);
         assert!(items[2].icon.is_some());
         assert_assets_action(Some(&items[3].action), ASSETS_CREATE_SOLID_COLOR);
+        let Action::Custom { payload, .. } = &items[3].action else {
+            panic!("expected solid custom action");
+        };
+        let payload: AssetsCreateAssetPayload =
+            serde_json::from_value(payload.clone()).expect("solid payload");
+        assert_eq!(payload.folder_id, None);
         assert!(items[3].icon.is_some());
         assert_assets_action(Some(&items[4].action), ASSETS_CREATE_FOLDER);
         let Action::Custom { payload, .. } = &items[4].action else {
@@ -3480,6 +3499,24 @@ mod tests {
         assert_eq!(name, APP_SHELL_IMPORT_MEDIA_DIALOG);
         let payload: ImportMediaDialogPayload =
             serde_json::from_value(payload.clone()).expect("import dialog payload");
+        assert_eq!(payload.folder_id.as_deref(), Some("rushes"));
+
+        let Action::Custom { namespace, name, payload } = &items[2].action else {
+            panic!("expected adjustment custom action");
+        };
+        assert_eq!(namespace, ASSETS_NAMESPACE);
+        assert_eq!(name, ASSETS_CREATE_ADJUSTMENT_LAYER);
+        let payload: AssetsCreateAssetPayload =
+            serde_json::from_value(payload.clone()).expect("adjustment payload");
+        assert_eq!(payload.folder_id.as_deref(), Some("rushes"));
+
+        let Action::Custom { namespace, name, payload } = &items[3].action else {
+            panic!("expected solid custom action");
+        };
+        assert_eq!(namespace, ASSETS_NAMESPACE);
+        assert_eq!(name, ASSETS_CREATE_SOLID_COLOR);
+        let payload: AssetsCreateAssetPayload =
+            serde_json::from_value(payload.clone()).expect("solid payload");
         assert_eq!(payload.folder_id.as_deref(), Some("rushes"));
 
         let Action::Custom { namespace, name, payload } = &items[4].action else {

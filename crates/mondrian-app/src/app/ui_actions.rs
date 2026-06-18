@@ -396,6 +396,13 @@ pub struct AssetsPrepareDragPayload {
     pub asset_id: AssetId,
 }
 
+/// Create a synthetic reusable asset in the selected folder, or at root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetsCreateAssetPayload {
+    /// Target folder for the new asset. `None` creates it in the root/unfiled view.
+    pub folder_id: Option<String>,
+}
+
 /// Open one folder in the self-hosted asset browser, or the root view.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssetsOpenFolderPayload {
@@ -589,13 +596,13 @@ pub fn assets_prepare_drag_action(payload: AssetsPrepareDragPayload) -> Action {
 }
 
 /// Build an action that creates an adjustment-layer asset in the library.
-pub fn assets_create_adjustment_layer_action() -> Action {
-    custom_assets_action(ASSETS_CREATE_ADJUSTMENT_LAYER, ())
+pub fn assets_create_adjustment_layer_action(payload: AssetsCreateAssetPayload) -> Action {
+    custom_assets_action(ASSETS_CREATE_ADJUSTMENT_LAYER, payload)
 }
 
 /// Build an action that creates a solid-color asset in the library.
-pub fn assets_create_solid_color_action() -> Action {
-    custom_assets_action(ASSETS_CREATE_SOLID_COLOR, ())
+pub fn assets_create_solid_color_action(payload: AssetsCreateAssetPayload) -> Action {
+    custom_assets_action(ASSETS_CREATE_SOLID_COLOR, payload)
 }
 
 /// Build an action that creates a folder in the library.

@@ -421,6 +421,7 @@ impl AppState {
     fn create_adjustment_layer_asset_internal(
         &mut self,
         name: Option<&str>,
+        folder_id: Option<&str>,
         announce: bool,
     ) -> mondrian_core::Result<(AssetId, String)> {
         let library = self.asset_library.as_ref().ok_or_else(|| {
@@ -430,7 +431,17 @@ impl AppState {
             }
         })?;
 
+        if let Some(folder_id) = folder_id {
+            if !library.folder_exists(folder_id)? {
+                return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "create_adjustment_layer_asset".to_string(),
+                    reason: format!("目标素材文件夹不存在：{folder_id}"),
+                });
+            }
+        }
+
         let asset_id = library.create_adjustment_layer_asset(name)?;
+        library.move_asset_to_folder(asset_id, folder_id)?;
         let asset_name = library
             .get_asset(asset_id)?
             .map(|asset| asset.name)
@@ -449,7 +460,16 @@ impl AppState {
         &mut self,
         name: Option<&str>,
     ) -> mondrian_core::Result<AssetId> {
-        self.create_adjustment_layer_asset_internal(name, true)
+        self.create_adjustment_layer_asset_in_folder(name, None)
+    }
+
+    /// Create a reusable adjustment-layer asset in an optional asset-library folder.
+    pub fn create_adjustment_layer_asset_in_folder(
+        &mut self,
+        name: Option<&str>,
+        folder_id: Option<&str>,
+    ) -> mondrian_core::Result<AssetId> {
+        self.create_adjustment_layer_asset_internal(name, folder_id, true)
             .map(|(asset_id, _)| asset_id)
     }
 
@@ -457,13 +477,31 @@ impl AppState {
         &mut self,
         name: Option<&str>,
     ) -> mondrian_core::Result<AssetId> {
+        self.create_solid_color_asset_in_folder(name, None)
+    }
+
+    /// Create a reusable solid-color asset in an optional asset-library folder.
+    pub fn create_solid_color_asset_in_folder(
+        &mut self,
+        name: Option<&str>,
+        folder_id: Option<&str>,
+    ) -> mondrian_core::Result<AssetId> {
         let library = self.asset_library.as_ref().ok_or_else(|| {
             mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "create_solid_color_asset".to_string(),
                 reason: "素材库未连接".to_string(),
             }
         })?;
+        if let Some(folder_id) = folder_id {
+            if !library.folder_exists(folder_id)? {
+                return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "create_solid_color_asset".to_string(),
+                    reason: format!("目标素材文件夹不存在：{folder_id}"),
+                });
+            }
+        }
         let asset_id = library.create_solid_color_asset(name)?;
+        library.move_asset_to_folder(asset_id, folder_id)?;
         let asset_name = library
             .get_asset(asset_id)?
             .map(|asset| asset.name)
@@ -488,7 +526,8 @@ impl AppState {
         let start_frame = timeline_frame
             .or(selection_start)
             .unwrap_or_else(|| self.current_frame().max(0));
-        let (asset_id, asset_name) = self.create_adjustment_layer_asset_internal(None, false)?;
+        let (asset_id, asset_name) =
+            self.create_adjustment_layer_asset_internal(None, None, false)?;
         self.begin_drag_asset(
             asset_id,
             asset_name.clone(),

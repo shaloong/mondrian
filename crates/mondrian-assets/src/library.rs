@@ -445,6 +445,21 @@ impl AssetLibrary {
         Ok(records)
     }
 
+    /// Return whether a folder id exists in the library.
+    pub fn folder_exists(&self, folder_id: &str) -> Result<bool> {
+        let db = self.db.lock();
+        let exists = db
+            .query_row(
+                "SELECT 1 FROM folders WHERE id = ?1 LIMIT 1",
+                rusqlite::params![folder_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?
+            .is_some();
+        Ok(exists)
+    }
+
     pub fn move_asset_to_folder(&self, asset_id: AssetId, folder_id: Option<&str>) -> Result<()> {
         let db = self.db.lock();
         db.execute(
@@ -763,6 +778,15 @@ mod tests {
             folders.iter().find(|f| f.id == child).unwrap().parent_id.as_deref(),
             Some(parent.as_str())
         );
+    }
+
+    #[test]
+    fn folder_exists_reports_real_folder_ids_only() {
+        let lib = open_test_library();
+        let folder_id = lib.create_folder("Bin", None).expect("create folder");
+
+        assert!(lib.folder_exists(&folder_id).expect("existing folder"));
+        assert!(!lib.folder_exists("missing-folder").expect("missing folder"));
     }
 
     #[test]

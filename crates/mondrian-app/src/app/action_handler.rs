@@ -12,22 +12,22 @@ use crate::app::timeline_editing::{
     find_clip, find_clip_mut, find_clip_track_lock, set_clip_disabled,
 };
 use crate::app::ui_actions::{
-    AssetsCreateFolderPayload, AssetsImportFilesPayload, AssetsPrepareDragPayload,
-    EffectsAddToClipPayload, ExportDraftUpdatePayload, ExportEnqueuePayload,
-    InspectorClipTransformField, InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
-    InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
-    InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
-    InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload,
-    ProjectCreateWithSettingsPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
-    TimelineDropAssetPayload, TimelineMoveClipPayload, TimelineMoveTrackPayload,
-    TimelineSeekPayload, TimelineSelectClipPayload, TimelineSetTrackControlPayload,
-    TimelineTrackControlPayloadKind, TimelineTrimClipPayload, TimelineTrimPayloadEdge,
-    ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR,
-    ASSETS_IMPORT_FILES, ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP,
-    EFFECTS_NAMESPACE, EXPORT_ENQUEUE, EXPORT_NAMESPACE, EXPORT_SET_DRAFT, INSPECTOR_NAMESPACE,
-    INSPECTOR_REMOVE_EFFECT, INSPECTOR_SELECT_EFFECT, INSPECTOR_SET_CLIP_CURVE,
-    INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY, INSPECTOR_SET_CLIP_TINT,
-    INSPECTOR_SET_CLIP_TRANSFORM_FIELD, INSPECTOR_SET_EFFECT_ENABLED,
+    AssetsCreateAssetPayload, AssetsCreateFolderPayload, AssetsImportFilesPayload,
+    AssetsPrepareDragPayload, EffectsAddToClipPayload, ExportDraftUpdatePayload,
+    ExportEnqueuePayload, InspectorClipTransformField, InspectorRemoveEffectPayload,
+    InspectorSelectEffectPayload, InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
+    InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+    InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
+    InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload, TimelineAddTrackKind,
+    TimelineAddTrackPayload, TimelineDropAssetPayload, TimelineMoveClipPayload,
+    TimelineMoveTrackPayload, TimelineSeekPayload, TimelineSelectClipPayload,
+    TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipPayload,
+    TimelineTrimPayloadEdge, ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER,
+    ASSETS_CREATE_SOLID_COLOR, ASSETS_IMPORT_FILES, ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG,
+    EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, EXPORT_ENQUEUE, EXPORT_NAMESPACE, EXPORT_SET_DRAFT,
+    INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT, INSPECTOR_SELECT_EFFECT,
+    INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY,
+    INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD, INSPECTOR_SET_EFFECT_ENABLED,
     INSPECTOR_SET_EFFECT_PROPERTY, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
     TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET, TIMELINE_MOVE_CLIP, TIMELINE_MOVE_TRACK,
     TIMELINE_NAMESPACE, TIMELINE_SEEK, TIMELINE_SELECT_CLIP, TIMELINE_SET_TRACK_CONTROL,
@@ -300,8 +300,7 @@ impl AppState {
         })?;
 
         if let Some(folder_id) = folder_id {
-            let folder_exists = library.list_folders()?.iter().any(|folder| folder.id == folder_id);
-            if !folder_exists {
+            if !library.folder_exists(folder_id)? {
                 let reason = format!("目标素材文件夹不存在：{folder_id}");
                 self.set_status_hint(format!("导入失败：{reason}"), true);
                 return Err(MondrianError::WorkflowStepFailed {
@@ -881,8 +880,24 @@ impl AppState {
                 )?;
                 self.prepare_asset_drag_from_ui(payload)
             }
-            ASSETS_CREATE_ADJUSTMENT_LAYER => self.create_adjustment_layer_asset(None).map(|_| ()),
-            ASSETS_CREATE_SOLID_COLOR => self.create_solid_color_asset(None).map(|_| ()),
+            ASSETS_CREATE_ADJUSTMENT_LAYER => {
+                let payload = parse_ui_payload::<AssetsCreateAssetPayload>(
+                    "assets_ui_action",
+                    name,
+                    payload,
+                )?;
+                self.create_adjustment_layer_asset_in_folder(None, payload.folder_id.as_deref())
+                    .map(|_| ())
+            }
+            ASSETS_CREATE_SOLID_COLOR => {
+                let payload = parse_ui_payload::<AssetsCreateAssetPayload>(
+                    "assets_ui_action",
+                    name,
+                    payload,
+                )?;
+                self.create_solid_color_asset_in_folder(None, payload.folder_id.as_deref())
+                    .map(|_| ())
+            }
             ASSETS_CREATE_FOLDER => {
                 let payload = parse_ui_payload::<AssetsCreateFolderPayload>(
                     "assets_ui_action",
@@ -1454,16 +1469,17 @@ mod tests {
         inspector_set_effect_property_action, project_create_with_settings_action,
         timeline_add_track_action, timeline_drop_asset_action, timeline_move_clip_action,
         timeline_move_track_action, timeline_seek_action, timeline_select_clip_action,
-        timeline_set_track_control_action, timeline_trim_clip_action, AssetsCreateFolderPayload,
-        AssetsImportFilesPayload, AssetsPrepareDragPayload, EffectsAddToClipPayload,
-        ExportDraftUpdatePayload, ExportEnqueuePayload, InspectorClipRefPayload,
-        InspectorClipTransformField, InspectorCurvePointPayload, InspectorRemoveEffectPayload,
-        InspectorSelectEffectPayload, InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
-        InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
-        InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
-        InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload, TimelineAddTrackKind,
-        TimelineAddTrackPayload, TimelineDropAssetPayload, TimelineMoveTrackPayload,
-        TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind,
+        timeline_set_track_control_action, timeline_trim_clip_action, AssetsCreateAssetPayload,
+        AssetsCreateFolderPayload, AssetsImportFilesPayload, AssetsPrepareDragPayload,
+        EffectsAddToClipPayload, ExportDraftUpdatePayload, ExportEnqueuePayload,
+        InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
+        InspectorRemoveEffectPayload, InspectorSelectEffectPayload, InspectorSetClipCurvePayload,
+        InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
+        InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
+        InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload,
+        ProjectCreateWithSettingsPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
+        TimelineDropAssetPayload, TimelineMoveTrackPayload, TimelineSetTrackControlPayload,
+        TimelineTrackControlPayloadKind,
     };
     use mondrian_assets::AssetLibrary;
     use mondrian_core::types::{AssetId, EffectId, MaskId, TimeCode, TrackId};
@@ -2143,10 +2159,14 @@ mod tests {
         state.asset_library = Some(AssetLibrary::open(library_root.clone()).expect("library"));
 
         state
-            .dispatch_action(assets_create_adjustment_layer_action())
+            .dispatch_action(assets_create_adjustment_layer_action(
+                AssetsCreateAssetPayload { folder_id: None },
+            ))
             .expect("create adjustment layer");
         state
-            .dispatch_action(assets_create_solid_color_action())
+            .dispatch_action(assets_create_solid_color_action(AssetsCreateAssetPayload {
+                folder_id: None,
+            }))
             .expect("create solid color");
         state
             .dispatch_action(assets_create_folder_action(AssetsCreateFolderPayload {
@@ -2186,6 +2206,65 @@ mod tests {
             .status_hint
             .as_ref()
             .is_some_and(|(message, is_error)| { !*is_error && message.contains("文件夹 2") }));
+
+        remove_temp_path(&library_root);
+    }
+
+    #[test]
+    fn dispatch_assets_create_actions_place_assets_in_target_folder() {
+        let mut state = AppState::new();
+        let library_root = unique_temp_path("assets-create-in-folder-library");
+        let library = AssetLibrary::open(library_root.clone()).expect("library");
+        let folder_id = library.create_folder("Generated", None).expect("create folder");
+        state.asset_library = Some(library);
+
+        state
+            .dispatch_action(assets_create_adjustment_layer_action(
+                AssetsCreateAssetPayload { folder_id: Some(folder_id.clone()) },
+            ))
+            .expect("create adjustment in folder");
+        state
+            .dispatch_action(assets_create_solid_color_action(AssetsCreateAssetPayload {
+                folder_id: Some(folder_id.clone()),
+            }))
+            .expect("create solid in folder");
+
+        let assets = state
+            .asset_library
+            .as_ref()
+            .expect("library")
+            .list_assets()
+            .expect("list assets");
+        assert_eq!(assets.len(), 2);
+        assert!(assets
+            .iter()
+            .all(|asset| asset.folder_id.as_deref() == Some(folder_id.as_str())));
+        assert!(assets.iter().any(|asset| asset.kind == AssetKind::AdjustmentLayer));
+        assert!(assets.iter().any(|asset| asset.kind == AssetKind::SolidColor));
+
+        remove_temp_path(&library_root);
+    }
+
+    #[test]
+    fn dispatch_assets_create_actions_reject_missing_target_folder_without_asset() {
+        let mut state = AppState::new();
+        let library_root = unique_temp_path("assets-create-missing-folder-library");
+        state.asset_library = Some(AssetLibrary::open(library_root.clone()).expect("library"));
+
+        let err = state
+            .dispatch_action(assets_create_solid_color_action(AssetsCreateAssetPayload {
+                folder_id: Some("deleted-folder".to_owned()),
+            }))
+            .expect_err("missing folder should fail");
+
+        assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
+        assert!(state
+            .asset_library
+            .as_ref()
+            .expect("library")
+            .list_assets()
+            .expect("list assets")
+            .is_empty());
 
         remove_temp_path(&library_root);
     }
