@@ -354,7 +354,9 @@ nearest ancestor widget that exposes `Widget::panel_kind()`. `PanelSlot` is the
 normal boundary that returns a panel kind. Leaf controls request only widget
 focus through `FocusManager::request_focus(widget)`; they must not hardcode
 panel identities. The router normalizes focused-panel state after widget events
-so panel shortcuts follow the actual dock location.
+and at the start of routing, so panel shortcuts follow the actual dock location
+even after a panel tree rebuild leaves the focused widget alive under a
+different panel boundary.
 
 ## Pointer Capture
 

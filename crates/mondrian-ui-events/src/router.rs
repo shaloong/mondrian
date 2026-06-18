@@ -597,6 +597,7 @@ impl EventRouter {
                 }
             }
         }
+        normalize_focused_panel(&mut self.focus_mgr, tree);
         self.focused = self.focus_mgr.focused_widget();
     }
 
@@ -1555,6 +1556,36 @@ mod tests {
             .expect("unfocusable focused widget should disable IME");
         assert!(!ime.enabled);
         assert_eq!(ime.cursor_area, None);
+    }
+
+    #[test]
+    fn router_normalizes_stale_focused_panel_before_routing() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let parent =
+            PanelBoundaryWidget::new(Rect::new(0.0, 0.0, 200.0, 120.0), PanelKind::Timeline);
+        let child = RecordingWidget::new(Rect::new(20.0, 20.0, 80.0, 30.0), Rc::clone(&log));
+        let child_id = child.id();
+        let mut tree = TestTree::parent_child(parent, child);
+        let mut router = EventRouter::new(tree.root_id());
+        router
+            .focus_manager_mut()
+            .set_focused_widget(Some(child_id), Some(PanelKind::Console));
+
+        let result = router.route(
+            UiEvent::KeyDown {
+                key: KeyCode::F1,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(router.focused(), Some(child_id));
+        assert_eq!(
+            router.focus_manager().focused_panel(),
+            Some(PanelKind::Timeline)
+        );
     }
 
     #[test]
