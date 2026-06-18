@@ -263,9 +263,9 @@ fn paint_button_label(
     color: mondrian_core::Color,
 ) {
     let ty = clip.y + (clip.height - font_size * 1.3).max(0.0) * 0.5;
-    ctx.encoder.push_clip(clip);
+    ctx.push_clip(clip);
     ctx.encoder.draw_text(label, font_size, Point::new(text_x, ty), color);
-    ctx.encoder.pop_clip();
+    ctx.pop_clip();
 }
 
 #[cfg(test)]

@@ -170,7 +170,7 @@ impl Widget for Label {
                 self.bounds.y + self.padding.y,
             );
             let color = self.resolved_color(ctx);
-            ctx.encoder.push_clip(content);
+            ctx.push_clip(content);
             if self.wrap {
                 let content_width = (self.bounds.width - self.padding.x * 2.0).max(1.0);
                 let max_width = self.max_width.unwrap_or(content_width).min(content_width);
@@ -179,7 +179,7 @@ impl Widget for Label {
             } else {
                 ctx.encoder.draw_text(&self.text, self.font_size, position, color);
             }
-            ctx.encoder.pop_clip();
+            ctx.pop_clip();
         }
     }
 
@@ -270,12 +270,16 @@ mod tests {
     }
 
     fn paint_label_recording(label: &Label, theme: &mondrian_ui_theme::Theme) -> Recorder {
+        paint_label_recording_clipped(label, theme, Rect::new(0.0, 0.0, 200.0, 100.0))
+    }
+
+    fn paint_label_recording_clipped(
+        label: &Label,
+        theme: &mondrian_ui_theme::Theme,
+        clip_rect: Rect,
+    ) -> Recorder {
         let mut recorder = Recorder::default();
-        let mut ctx = PaintContext {
-            encoder: &mut recorder,
-            theme,
-            clip_rect: Rect::new(0.0, 0.0, 200.0, 100.0),
-        };
+        let mut ctx = PaintContext { encoder: &mut recorder, theme, clip_rect };
         label.paint(&mut ctx);
         recorder
     }
@@ -361,6 +365,19 @@ mod tests {
             }]
         );
         assert_eq!(recorder.clips, vec![Rect::new(13.0, 22.0, 34.0, 14.0)]);
+        assert_eq!(recorder.clip_pops, 1);
+    }
+
+    #[test]
+    fn label_text_clip_is_narrowed_by_root_paint_clip() {
+        let theme = ThemePreset::Dark.build();
+        let mut label = Label::new("Root clipped text").with_padding(0.0, 0.0);
+        label.layout(Rect::new(10.0, 20.0, 100.0, 24.0));
+
+        let recorder =
+            paint_label_recording_clipped(&label, &theme, Rect::new(30.0, 25.0, 50.0, 10.0));
+
+        assert_eq!(recorder.clips, vec![Rect::new(30.0, 25.0, 50.0, 10.0)]);
         assert_eq!(recorder.clip_pops, 1);
     }
 

@@ -94,14 +94,14 @@ pub(crate) fn paint_menu_trigger_label(
         text_width,
         rect.height,
     );
-    ctx.encoder.push_clip(clip);
+    ctx.push_clip(clip);
     ctx.encoder.draw_text(
         label,
         ctx.theme.typography.body.font_size,
         Point::new(rect.x + MENU_TRIGGER_PADDING_X, rect.y + 5.0),
         color,
     );
-    ctx.encoder.pop_clip();
+    ctx.pop_clip();
 }
 
 pub(crate) fn paint_menu_popup_chrome(ctx: &mut PaintContext, rect: Rect) {
@@ -184,14 +184,14 @@ pub(crate) fn paint_menu_row(
     };
     let text_clip = Rect::new(text_x, rect.y, (text_right - text_x).max(0.0), rect.height);
     if text_clip.width > 0.0 {
-        ctx.encoder.push_clip(text_clip);
+        ctx.push_clip(text_clip);
         ctx.encoder.draw_text(
             label,
             font_size,
             Point::new(text_x, rect.y + 5.0),
             text_color,
         );
-        ctx.encoder.pop_clip();
+        ctx.pop_clip();
     }
     if let Some(shortcut) = shortcut.filter(|shortcut| !shortcut.is_empty()) {
         let shortcut_clip = Rect::new(
@@ -201,14 +201,14 @@ pub(crate) fn paint_menu_row(
             rect.height,
         );
         if shortcut_clip.width > 0.0 {
-            ctx.encoder.push_clip(shortcut_clip);
+            ctx.push_clip(shortcut_clip);
             ctx.encoder.draw_text(
                 shortcut,
                 font_size,
                 Point::new(shortcut_clip.x, rect.y + 5.0),
                 tokens.muted_foreground,
             );
-            ctx.encoder.pop_clip();
+            ctx.pop_clip();
         }
     }
 }
@@ -635,7 +635,7 @@ impl Dropdown {
         let menu_bg = self.menu_rect();
 
         paint_menu_popup_chrome(ctx, menu_bg);
-        ctx.encoder.push_clip(menu_bg.inset(1.0, 1.0));
+        ctx.push_clip(menu_bg.inset(1.0, 1.0));
         let reserve_icon_lane = self.icon_lane_width() > 0.0;
 
         for (i, item) in self.items.iter().enumerate() {
@@ -663,7 +663,7 @@ impl Dropdown {
                 },
             );
         }
-        ctx.encoder.pop_clip();
+        ctx.pop_clip();
 
         paint_menu_scrollbar(
             ctx,

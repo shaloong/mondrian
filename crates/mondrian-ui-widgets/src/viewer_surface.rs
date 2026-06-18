@@ -173,7 +173,7 @@ impl Widget for ViewerSurface {
         ctx.encoder.draw_rect(badge, soft_border(colors.border), spacing.radius_sm);
         ctx.encoder
             .draw_rect(badge.inset(1.0, 1.0), badge_fill, spacing.radius_sm - 1.0);
-        ctx.encoder.push_clip(badge.inset(4.0, 0.0));
+        ctx.push_clip(badge.inset(4.0, 0.0));
         ctx.encoder.draw_text(
             &self.status,
             typography.small.font_size,
@@ -184,7 +184,7 @@ impl Widget for ViewerSurface {
                 colors.muted_foreground
             },
         );
-        ctx.encoder.pop_clip();
+        ctx.pop_clip();
 
         ctx.encoder.draw_rect(
             canvas.inset(-1.0, -1.0),

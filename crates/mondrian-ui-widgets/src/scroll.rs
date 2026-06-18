@@ -558,7 +558,7 @@ impl Widget for ScrollView {
         let previous_clip = ctx.clip_rect;
         let viewport_clip = previous_clip.intersection(&self.bounds);
         ctx.clip_rect = viewport_clip;
-        ctx.encoder.push_clip(viewport_clip);
+        ctx.push_clip(viewport_clip);
         if let Some(ref child) = self.child {
             child.paint(ctx);
         }
@@ -620,7 +620,7 @@ impl Widget for ScrollView {
             ctx.encoder.draw_rect(sb_rect, thumb_color, ctx.theme.spacing.radius_full);
         }
 
-        ctx.encoder.pop_clip();
+        ctx.pop_clip();
     }
 
     fn paint_overlay(&self, ctx: &mut PaintContext) {

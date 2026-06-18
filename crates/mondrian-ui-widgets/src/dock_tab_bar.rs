@@ -139,9 +139,9 @@ impl Widget for DockTabBar {
                 let tx = centered_text_x(inset.x, inset.width, &tab.label, font_size);
                 let ty = inset.y + (inset.height - font_size * 1.3).max(0.0) * 0.5;
                 let pos = mondrian_ui_core::types::snap_point(Point::new(tx, ty));
-                ctx.encoder.push_clip(inset);
+                ctx.push_clip(inset);
                 ctx.encoder.draw_text(&tab.label, font_size, pos, tokens.foreground);
-                ctx.encoder.pop_clip();
+                ctx.pop_clip();
             }
 
             if is_active {

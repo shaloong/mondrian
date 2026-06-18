@@ -546,7 +546,10 @@ children, not just push a renderer clip command. Text and paragraph widgets use
 that paint-time clip for width decisions, so the component layer and renderer
 clip stack must describe the same viewport. `ScrollView` therefore pushes the
 same effective viewport clip that it stores in `PaintContext.clip_rect`, namely
-the intersection of its bounds and the incoming parent clip.
+the intersection of its bounds and the incoming parent clip. Widget code should
+push local clips through `PaintContext::push_clip()` / `pop_clip()` rather than
+calling the encoder directly, because the helper intersects local clips with the
+current root/window clip before they become renderer scissor state.
 Clip rectangles are snapped conservatively by flooring their top-left and
 ceiling their bottom-right edge before GPU scissoring. Ordinary shape, image,
 line, and vector geometry keeps subpixel coordinates so SDF antialiasing, MSAA,

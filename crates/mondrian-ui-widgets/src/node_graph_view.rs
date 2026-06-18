@@ -404,7 +404,7 @@ impl Widget for NodeGraphView {
             } else {
                 colors.foreground
             };
-            ctx.encoder.push_clip(rect.inset(12.0, 8.0));
+            ctx.push_clip(rect.inset(12.0, 8.0));
             ctx.encoder.draw_text_box(
                 &node.title,
                 typography.body.font_size,
@@ -421,7 +421,7 @@ impl Widget for NodeGraphView {
                     color_with_alpha(colors.muted_foreground, disabled_alpha),
                 );
             }
-            ctx.encoder.pop_clip();
+            ctx.pop_clip();
         }
     }
 

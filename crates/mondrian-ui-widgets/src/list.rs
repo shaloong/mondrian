@@ -205,9 +205,9 @@ impl Widget for List {
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
-        ctx.encoder.push_clip(self.bounds);
+        ctx.push_clip(self.bounds);
         self.scroll.paint(ctx);
-        ctx.encoder.pop_clip();
+        ctx.pop_clip();
         if self.focus_visible {
             paint_focus_ring(ctx, self.bounds, ctx.theme.spacing.radius_sm);
         }
@@ -361,14 +361,14 @@ impl Widget for ListRow {
                 (self.bounds.width - LIST_ROW_TEXT_PADDING_X * 2.0).max(0.0),
                 self.bounds.height,
             );
-            ctx.encoder.push_clip(text_clip);
+            ctx.push_clip(text_clip);
             ctx.encoder.draw_text(
                 &self.label,
                 font_size,
                 Point::new(text_clip.x, self.bounds.y + 5.0),
                 tokens.foreground,
             );
-            ctx.encoder.pop_clip();
+            ctx.pop_clip();
         }
     }
 

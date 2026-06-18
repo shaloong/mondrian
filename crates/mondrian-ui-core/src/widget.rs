@@ -181,6 +181,23 @@ pub struct PaintContext<'a> {
     pub clip_rect: Rect,
 }
 
+impl PaintContext<'_> {
+    /// Push a renderer clip narrowed by the currently active paint clip.
+    ///
+    /// Widget code should use this helper instead of calling
+    /// [`DrawCommandEncoder::push_clip`] directly. `TreeWalker::paint_clipped`
+    /// stores the root/window clip in `PaintContext.clip_rect`; intersecting
+    /// here keeps widget-local clips, root clips, and renderer scissors aligned.
+    pub fn push_clip(&mut self, bounds: Rect) {
+        self.encoder.push_clip(self.clip_rect.intersection(&bounds));
+    }
+
+    /// Pop the most recent clip pushed through [`Self::push_clip`].
+    pub fn pop_clip(&mut self) {
+        self.encoder.pop_clip();
+    }
+}
+
 /// 绘制命令编码器 trait —— 打破 mondrian-ui-core ↔ mondrian-ui-renderer 循环依赖
 ///
 /// `mondrian-ui-renderer::command::DrawEncoder` 实现此 trait。

@@ -722,7 +722,7 @@ impl Widget for TextInput {
 
         // Clip text content to padded area
         let clip = self.content_clip_rect();
-        ctx.encoder.push_clip(clip);
+        ctx.push_clip(clip);
 
         let sx = self.scroll_x.get();
         let text_x = self.content_left() - sx;
@@ -798,7 +798,7 @@ impl Widget for TextInput {
             }
         }
 
-        ctx.encoder.pop_clip();
+        ctx.pop_clip();
     }
 
     fn hit_test(&self, point: Point) -> bool {

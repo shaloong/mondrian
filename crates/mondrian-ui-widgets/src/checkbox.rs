@@ -224,7 +224,7 @@ impl Widget for Checkbox {
             );
             let tx = text_clip.x;
             let ty = self.bounds.y + (self.bounds.height - font_size * 1.3).max(0.0) * 0.5;
-            ctx.encoder.push_clip(text_clip);
+            ctx.push_clip(text_clip);
             ctx.encoder.draw_text(
                 &self.label,
                 font_size,
@@ -235,7 +235,7 @@ impl Widget for Checkbox {
                     tokens.muted_foreground
                 },
             );
-            ctx.encoder.pop_clip();
+            ctx.pop_clip();
         }
     }
 

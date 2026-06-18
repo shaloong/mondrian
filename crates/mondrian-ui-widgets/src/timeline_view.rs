@@ -1924,7 +1924,7 @@ impl TimelineView {
             ctx.encoder.draw_rect(rect.inset(-1.5, -1.5), ring, spacing.radius_sm + 1.5);
         }
         ctx.encoder.draw_rect(rect, fill, spacing.radius_sm);
-        ctx.encoder.push_clip(rect.inset(6.0, 2.0));
+        ctx.push_clip(rect.inset(6.0, 2.0));
         ctx.encoder.draw_text_box(
             &clip.label,
             ctx.theme.typography.body.font_size,
@@ -1932,7 +1932,7 @@ impl TimelineView {
             (rect.width - 16.0).max(0.0),
             colors.foreground,
         );
-        ctx.encoder.pop_clip();
+        ctx.pop_clip();
     }
 
     fn paint_playhead(&self, ctx: &mut PaintContext) {
@@ -2336,26 +2336,26 @@ impl Widget for TimelineView {
         }
         self.paint_timeline_corner(ctx);
 
-        ctx.encoder.push_clip(self.ruler_rect);
+        ctx.push_clip(self.ruler_rect);
         self.paint_ruler(ctx);
-        ctx.encoder.pop_clip();
+        ctx.pop_clip();
 
-        ctx.encoder.push_clip(self.body_rect);
+        ctx.push_clip(self.body_rect);
         self.paint_tracks(ctx);
-        ctx.encoder.pop_clip();
+        ctx.pop_clip();
 
-        ctx.encoder.push_clip(Rect::new(
+        ctx.push_clip(Rect::new(
             self.ruler_rect.x,
             self.ruler_rect.y,
             self.ruler_rect.width,
             self.ruler_rect.height + self.body_rect.height,
         ));
         self.paint_playhead(ctx);
-        ctx.encoder.pop_clip();
+        ctx.pop_clip();
 
-        ctx.encoder.push_clip(self.body_rect);
+        ctx.push_clip(self.body_rect);
         self.paint_scrollbars(ctx);
-        ctx.encoder.pop_clip();
+        ctx.pop_clip();
     }
 
     fn hit_test(&self, point: Point) -> bool {

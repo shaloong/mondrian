@@ -743,7 +743,7 @@ impl PanelList {
         };
         let mut text_x = row.x + 22.0;
 
-        ctx.encoder.push_clip(row.inset(4.0, 2.0));
+        ctx.push_clip(row.inset(4.0, 2.0));
         if let Some(icon) = &item.icon {
             let icon_size = ctx.theme.spacing.icon_size.clamp(1.0, ROW_ICON_SIZE);
             let icon_rect = Rect::new(
@@ -772,19 +772,19 @@ impl PanelList {
                 colors.muted_foreground,
             );
         }
-        ctx.encoder.pop_clip();
+        ctx.pop_clip();
 
         if let Some(badge) = &item.badge {
             let badge_rect = Rect::new(row.x + row.width - 54.0, row.y + 13.0, 44.0, 22.0);
             ctx.encoder.draw_rect(badge_rect, colors.secondary, spacing.radius_sm);
-            ctx.encoder.push_clip(badge_rect);
+            ctx.push_clip(badge_rect);
             ctx.encoder.draw_text(
                 badge,
                 ctx.theme.typography.small.font_size,
                 snap_point(Point::new(badge_rect.x + 8.0, badge_rect.y + 4.0)),
                 colors.secondary_foreground,
             );
-            ctx.encoder.pop_clip();
+            ctx.pop_clip();
         }
     }
 }
@@ -1034,7 +1034,7 @@ impl Widget for PanelList {
             colors.border,
         );
 
-        ctx.encoder.push_clip(self.viewport);
+        ctx.push_clip(self.viewport);
         let visible = &self.visible_indices;
         let first = (self.scroll_y / self.row_height).floor().max(0.0) as usize;
         let last = ((self.scroll_y + self.viewport.height) / self.row_height).ceil() as usize + 1;
@@ -1063,7 +1063,7 @@ impl Widget for PanelList {
                 colors.muted_foreground,
             );
         }
-        ctx.encoder.pop_clip();
+        ctx.pop_clip();
 
         if let Some(thumb) = self.scrollbar_thumb_rect() {
             let mut thumb_color = colors.scrollbar_thumb;
