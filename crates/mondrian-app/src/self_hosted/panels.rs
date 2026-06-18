@@ -2879,12 +2879,12 @@ mod tests {
     struct AssetTimelineDragHarness {
         id: WidgetId,
         bounds: Rect,
-        assets: PanelList,
+        assets: AssetGrid,
         timeline: TimelineView,
     }
 
     impl AssetTimelineDragHarness {
-        fn new(assets: PanelList, timeline: TimelineView) -> Self {
+        fn new(assets: AssetGrid, timeline: TimelineView) -> Self {
             Self {
                 id: WidgetId::new(),
                 bounds: Rect::ZERO,
@@ -3611,26 +3611,31 @@ mod tests {
     }
 
     #[test]
-    fn router_drags_panel_list_asset_to_timeline_drop_action() {
+    fn router_drags_asset_grid_card_to_timeline_drop_action() {
         let model = demo_timeline_model();
         let target = model.track_identity(TimelineTrackRef { track_index: 0 }).expect("track");
         let asset_id = AssetId::new();
         let actions = RefCell::new(Vec::<Action>::new());
         let dispatch = |action| actions.borrow_mut().push(action);
-        let assets = PanelList::new(
+        let assets = AssetGrid::new(
             "Assets",
-            vec![PanelListItem::new("Clip A").with_drag_payload(DragPayload::Asset(asset_id))],
+            vec![
+                AssetGridItem::new("clip-a", "Clip A", current_theme().colors.media_video)
+                    .with_drag_payload(DragPayload::Asset(asset_id)),
+            ],
         );
         let timeline = timeline_panel(&model);
         let mut root = AssetTimelineDragHarness::new(assets, timeline);
         root.layout(Rect::new(0.0, 0.0, 840.0, 240.0));
+        let asset_card = root.assets.card_rect_for_index(0).expect("asset card");
+        let drag_start = asset_card.center();
         let mut router = EventRouter::new(root.id());
 
         {
             let mut tree = WidgetTreeView::new(&mut root);
             router.route(
                 UiEvent::MouseDown {
-                    position: Point::new(30.0, 60.0),
+                    position: drag_start,
                     button: MouseButton::Left,
                     modifiers: Modifiers::default(),
                 },
@@ -3642,7 +3647,7 @@ mod tests {
             let mut tree = WidgetTreeView::new(&mut root);
             router.route(
                 UiEvent::MouseMove {
-                    position: Point::new(42.0, 60.0),
+                    position: Point::new(drag_start.x + 12.0, drag_start.y),
                     modifiers: Modifiers::default(),
                 },
                 &mut tree,
