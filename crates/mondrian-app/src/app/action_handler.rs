@@ -15,10 +15,10 @@ use crate::app::ui_actions::{
     AssetsCreateAssetPayload, AssetsCreateFolderPayload, AssetsDeleteAssetPayload,
     AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload, AssetsImportFilesPayload,
     AssetsMoveAssetPayload, AssetsMoveFolderPayload, AssetsMoveSelectionPayload,
-    AssetsPrepareDragPayload, EffectsAddToClipPayload, ExportDraftUpdatePayload,
-    ExportEnqueuePayload, InspectorClipTransformField, InspectorRemoveEffectPayload,
-    InspectorSelectEffectPayload, InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
-    InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+    AssetsPrepareDragPayload, AssetsRelinkAssetPayload, EffectsAddToClipPayload,
+    ExportDraftUpdatePayload, ExportEnqueuePayload, InspectorClipTransformField,
+    InspectorRemoveEffectPayload, InspectorSelectEffectPayload, InspectorSetClipCurvePayload,
+    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
     InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
     InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload,
     ProjectRecoverFromAutosavePayload, TimelineAddTrackKind, TimelineAddTrackPayload,
@@ -28,10 +28,11 @@ use crate::app::ui_actions::{
     ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR,
     ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_DELETE_SELECTION, ASSETS_IMPORT_FILES,
     ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE,
-    ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, EXPORT_ENQUEUE, EXPORT_NAMESPACE,
-    EXPORT_SET_DRAFT, INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT, INSPECTOR_SELECT_EFFECT,
-    INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY,
-    INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD, INSPECTOR_SET_EFFECT_ENABLED,
+    ASSETS_PREPARE_DRAG, ASSETS_RELINK_ASSET, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE,
+    EXPORT_ENQUEUE, EXPORT_NAMESPACE, EXPORT_SET_DRAFT, INSPECTOR_NAMESPACE,
+    INSPECTOR_REMOVE_EFFECT, INSPECTOR_SELECT_EFFECT, INSPECTOR_SET_CLIP_CURVE,
+    INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY, INSPECTOR_SET_CLIP_TINT,
+    INSPECTOR_SET_CLIP_TRANSFORM_FIELD, INSPECTOR_SET_EFFECT_ENABLED,
     INSPECTOR_SET_EFFECT_PROPERTY, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
     PROJECT_RECOVER_FROM_AUTOSAVE, TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET, TIMELINE_MOVE_CLIP,
     TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_SEEK, TIMELINE_SELECT_CLIP,
@@ -415,6 +416,30 @@ impl AppState {
             MondrianError::WorkflowStepFailed { step_id: "delete_asset".to_string(), reason }
         })?;
         self.set_status_hint(format!("已删除素材：{asset_name}"), false);
+        Ok(())
+    }
+
+    fn relink_asset_from_ui(&mut self, payload: AssetsRelinkAssetPayload) -> Result<()> {
+        let library = self.asset_library.clone().ok_or_else(|| {
+            let reason = "素材库未连接".to_string();
+            self.set_status_hint(format!("重新链接素材失败：{reason}"), true);
+            MondrianError::WorkflowStepFailed { step_id: "relink_asset".to_string(), reason }
+        })?;
+        let asset_name = library
+            .get_asset(payload.asset_id)?
+            .map(|asset| asset.name)
+            .unwrap_or_else(|| payload.asset_id.to_string());
+
+        self.relink_asset(payload.asset_id, &payload.path).map_err(|err| {
+            let reason = err.to_string();
+            self.set_status_hint(format!("重新链接素材失败：{reason}"), true);
+            MondrianError::WorkflowStepFailed { step_id: "relink_asset".to_string(), reason }
+        })?;
+        self.event_bus.publish(mondrian_core::events::AppEvent::AssetLibraryReloaded);
+        self.set_status_hint(
+            format!("已重新链接素材：{asset_name} → {}", payload.path.display()),
+            false,
+        );
         Ok(())
     }
 
@@ -1176,6 +1201,14 @@ impl AppState {
                     payload.folder_id.as_deref(),
                 )
             }
+            ASSETS_RELINK_ASSET => {
+                let payload = parse_ui_payload::<AssetsRelinkAssetPayload>(
+                    "assets_ui_action",
+                    name,
+                    payload,
+                )?;
+                self.relink_asset_from_ui(payload)
+            }
             ASSETS_DELETE_ASSET => {
                 let payload = parse_ui_payload::<AssetsDeleteAssetPayload>(
                     "assets_ui_action",
@@ -1771,8 +1804,8 @@ mod tests {
         assets_create_solid_color_action, assets_delete_asset_action, assets_delete_folder_action,
         assets_delete_selection_action, assets_import_files_action, assets_move_asset_action,
         assets_move_folder_action, assets_move_selection_action, assets_prepare_drag_action,
-        effects_add_to_clip_action, export_enqueue_action, export_set_draft_action,
-        inspector_remove_effect_action, inspector_select_effect_action,
+        assets_relink_asset_action, effects_add_to_clip_action, export_enqueue_action,
+        export_set_draft_action, inspector_remove_effect_action, inspector_select_effect_action,
         inspector_set_clip_curve_action, inspector_set_clip_enabled_action,
         inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
         inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
@@ -1783,16 +1816,16 @@ mod tests {
         timeline_trim_clip_action, AssetsCreateAssetPayload, AssetsCreateFolderPayload,
         AssetsDeleteAssetPayload, AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload,
         AssetsImportFilesPayload, AssetsMoveAssetPayload, AssetsMoveFolderPayload,
-        AssetsMoveSelectionPayload, AssetsPrepareDragPayload, EffectsAddToClipPayload,
-        ExportDraftUpdatePayload, ExportEnqueuePayload, InspectorClipRefPayload,
-        InspectorClipTransformField, InspectorCurvePointPayload, InspectorRemoveEffectPayload,
-        InspectorSelectEffectPayload, InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
-        InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
-        InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
-        InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload,
-        ProjectRecoverFromAutosavePayload, TimelineAddTrackKind, TimelineAddTrackPayload,
-        TimelineDropAssetPayload, TimelineMoveTrackPayload, TimelineSetTrackControlPayload,
-        TimelineTrackControlPayloadKind,
+        AssetsMoveSelectionPayload, AssetsPrepareDragPayload, AssetsRelinkAssetPayload,
+        EffectsAddToClipPayload, ExportDraftUpdatePayload, ExportEnqueuePayload,
+        InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
+        InspectorRemoveEffectPayload, InspectorSelectEffectPayload, InspectorSetClipCurvePayload,
+        InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
+        InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
+        InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload,
+        ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload, TimelineAddTrackKind,
+        TimelineAddTrackPayload, TimelineDropAssetPayload, TimelineMoveTrackPayload,
+        TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind,
     };
     use mondrian_assets::AssetLibrary;
     use mondrian_core::types::{AssetId, EffectId, MaskId, TimeCode, TrackId};
@@ -2524,6 +2557,25 @@ mod tests {
 
         assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
         assert!(state.status_hint.as_ref().is_some_and(|(_, is_error)| *is_error));
+    }
+
+    #[test]
+    fn dispatch_assets_relink_asset_reports_missing_library() {
+        let mut state = AppState::new();
+
+        let err = state
+            .dispatch_action(assets_relink_asset_action(AssetsRelinkAssetPayload {
+                asset_id: AssetId::new(),
+                path: PathBuf::from("E:/media/relinked.mov"),
+            }))
+            .expect_err("missing library should fail");
+
+        assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
+        assert!(
+            state.status_hint.as_ref().is_some_and(|(message, is_error)| {
+                *is_error && message.contains("重新链接素材失败")
+            })
+        );
     }
 
     #[test]

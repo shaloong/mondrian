@@ -18,17 +18,19 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::app::ui_actions::{
-    assets_import_files_action, export_set_draft_action, project_create_with_settings_action,
-    project_recover_from_autosave_action, AppShellOpenRecentProjectPayload,
-    AppShellRevealInFileManagerPayload, AssetsImportFilesPayload, ExportDraftUpdatePayload,
-    ExportOutputDialogPayload, ImportMediaDialogPayload, NewProjectDraftUpdatePayload,
-    PreferencesTabPayload, ProjectRecoverFromAutosavePayload, APP_SHELL_ABOUT,
-    APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
+    assets_import_files_action, assets_relink_asset_action, export_set_draft_action,
+    project_create_with_settings_action, project_recover_from_autosave_action,
+    AppShellOpenRecentProjectPayload, AppShellRelinkAssetDialogPayload,
+    AppShellRevealInFileManagerPayload, AssetsImportFilesPayload, AssetsRelinkAssetPayload,
+    ExportDraftUpdatePayload, ExportOutputDialogPayload, ImportMediaDialogPayload,
+    NewProjectDraftUpdatePayload, PreferencesTabPayload, ProjectRecoverFromAutosavePayload,
+    APP_SHELL_ABOUT, APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
     APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_EXPORT_OUTPUT_DIALOG,
     APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
     APP_SHELL_NEW_PROJECT_DRAFT_CHANGED, APP_SHELL_OPEN_PROJECT_DIALOG,
     APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PREFERENCES, APP_SHELL_PREFERENCES_TAB_CHANGED,
-    APP_SHELL_RECOVER_PROJECT, APP_SHELL_REVEAL_IN_FILE_MANAGER, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
+    APP_SHELL_RECOVER_PROJECT, APP_SHELL_RELINK_ASSET_DIALOG, APP_SHELL_REVEAL_IN_FILE_MANAGER,
+    APP_SHELL_SAVE_PROJECT_AS_DIALOG,
 };
 use crate::app::AppState;
 use crate::self_hosted::menu_bar::MenuBar;
@@ -189,6 +191,22 @@ pub fn try_resolve_app_shell_action(
                 .map_err(|err| app_shell_action_error(&name, err))?;
             platform.reveal_in_file_manager(&payload.path);
             Ok(None)
+        }
+        Action::Custom { namespace, name, payload }
+            if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_RELINK_ASSET_DIALOG =>
+        {
+            let payload: AppShellRelinkAssetDialogPayload = serde_json::from_value(payload)
+                .map_err(|err| app_shell_action_error(&name, err))?;
+            let Some(paths) = platform.open_file_dialog("Relink Media", &media_import_filters())
+            else {
+                return Ok(None);
+            };
+            Ok(paths.into_iter().next().map(|path| {
+                assets_relink_asset_action(AssetsRelinkAssetPayload {
+                    asset_id: payload.asset_id,
+                    path,
+                })
+            }))
         }
         Action::Custom { namespace, name, .. }
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_SAVE_PROJECT_AS_DIALOG =>
@@ -924,16 +942,19 @@ mod tests {
         app_shell_new_project_draft_changed_action, app_shell_open_project_dialog_action,
         app_shell_open_recent_project_action, app_shell_preferences_action,
         app_shell_preferences_tab_changed_action, app_shell_recover_project_action,
-        app_shell_reveal_in_file_manager_action, app_shell_save_project_as_dialog_action,
-        AppShellOpenRecentProjectPayload, AppShellRevealInFileManagerPayload,
-        AssetsImportFilesPayload, ExportDraftUpdatePayload, ExportOutputDialogPayload,
-        ImportMediaDialogPayload, NewProjectDraftUpdatePayload, PreferencesTabPayload,
-        ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload, ASSETS_IMPORT_FILES,
-        ASSETS_NAMESPACE, EXPORT_NAMESPACE, EXPORT_SET_DRAFT, PROJECT_CREATE_WITH_SETTINGS,
-        PROJECT_NAMESPACE, PROJECT_RECOVER_FROM_AUTOSAVE,
+        app_shell_relink_asset_dialog_action, app_shell_reveal_in_file_manager_action,
+        app_shell_save_project_as_dialog_action, AppShellOpenRecentProjectPayload,
+        AppShellRelinkAssetDialogPayload, AppShellRevealInFileManagerPayload,
+        AssetsImportFilesPayload, AssetsRelinkAssetPayload, ExportDraftUpdatePayload,
+        ExportOutputDialogPayload, ImportMediaDialogPayload, NewProjectDraftUpdatePayload,
+        PreferencesTabPayload, ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload,
+        ASSETS_IMPORT_FILES, ASSETS_NAMESPACE, ASSETS_RELINK_ASSET, EXPORT_NAMESPACE,
+        EXPORT_SET_DRAFT, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
+        PROJECT_RECOVER_FROM_AUTOSAVE,
     };
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use glam::Vec2;
+    use mondrian_core::types::AssetId;
     use mondrian_core::{Rational, Resolution};
     use mondrian_timeline::sequence::PreviewRenderFormat;
     use mondrian_ui_core::tree::WidgetTreeView;
@@ -1778,6 +1799,32 @@ mod tests {
             serde_json::from_value(payload).expect("assets import payload");
         assert_eq!(payload.paths, paths);
         assert_eq!(payload.folder_id.as_deref(), Some("rushes"));
+    }
+
+    #[test]
+    fn resolve_app_shell_relink_dialog_returns_asset_relink_action() {
+        let asset_id = AssetId::new();
+        let replacement = PathBuf::from("E:/media/relinked.mov");
+        let platform = FakePlatform {
+            open_paths: Some(vec![replacement.clone()]),
+            ..FakePlatform::default()
+        };
+
+        let action = resolve_app_shell_action(
+            app_shell_relink_asset_dialog_action(AppShellRelinkAssetDialogPayload { asset_id }),
+            &platform,
+            None,
+        );
+
+        let Some(Action::Custom { namespace, name, payload }) = action else {
+            panic!("expected assets relink action");
+        };
+        assert_eq!(namespace, ASSETS_NAMESPACE);
+        assert_eq!(name, ASSETS_RELINK_ASSET);
+        let payload: AssetsRelinkAssetPayload =
+            serde_json::from_value(payload).expect("assets relink payload");
+        assert_eq!(payload.asset_id, asset_id);
+        assert_eq!(payload.path, replacement);
     }
 
     #[test]

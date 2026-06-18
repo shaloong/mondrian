@@ -76,6 +76,8 @@ pub const ASSETS_CREATE_FOLDER: &str = "create_folder";
 pub const ASSETS_OPEN_FOLDER: &str = "open_folder";
 /// Action name for importing files into an asset-browser folder.
 pub const ASSETS_IMPORT_FILES: &str = "import_files";
+/// Action name for relinking one asset-library record to a new media path.
+pub const ASSETS_RELINK_ASSET: &str = "relink_asset";
 /// Action name for deleting one asset from the library.
 pub const ASSETS_DELETE_ASSET: &str = "delete_asset";
 /// Action name for deleting one folder/bin from the library.
@@ -126,6 +128,8 @@ pub const APP_SHELL_RECOVER_PROJECT: &str = "recover_project";
 pub const APP_SHELL_IMPORT_MEDIA_DIALOG: &str = "import_media_dialog";
 /// App-shell request to reveal one real file in the platform file manager.
 pub const APP_SHELL_REVEAL_IN_FILE_MANAGER: &str = "reveal_in_file_manager";
+/// App-shell request to choose a replacement media file for one asset.
+pub const APP_SHELL_RELINK_ASSET_DIALOG: &str = "relink_asset_dialog";
 /// App-shell request to open a platform project save-as dialog.
 pub const APP_SHELL_SAVE_PROJECT_AS_DIALOG: &str = "save_project_as_dialog";
 /// App-shell request to choose a timeline export output file.
@@ -186,6 +190,13 @@ pub struct ProjectRecoverFromAutosavePayload {
 pub struct AppShellRevealInFileManagerPayload {
     /// File or directory to reveal.
     pub path: PathBuf,
+}
+
+/// Asset selected for a native relink file dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppShellRelinkAssetDialogPayload {
+    /// Asset whose media path should be replaced.
+    pub asset_id: AssetId,
 }
 
 /// Clip edge being trimmed by a timeline UI.
@@ -521,6 +532,15 @@ pub struct AssetsImportFilesPayload {
     pub folder_id: Option<String>,
 }
 
+/// Relink one asset-library record to a replacement file selected by the shell.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetsRelinkAssetPayload {
+    /// Asset to relink.
+    pub asset_id: AssetId,
+    /// Replacement media path.
+    pub path: PathBuf,
+}
+
 /// Platform file-dialog target for importing media.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImportMediaDialogPayload {
@@ -738,6 +758,11 @@ pub fn assets_import_files_action(payload: AssetsImportFilesPayload) -> Action {
     custom_assets_action(ASSETS_IMPORT_FILES, payload)
 }
 
+/// Build an action that relinks one asset to a replacement file.
+pub fn assets_relink_asset_action(payload: AssetsRelinkAssetPayload) -> Action {
+    custom_assets_action(ASSETS_RELINK_ASSET, payload)
+}
+
 /// Build a shell-local action that opens an asset-browser folder.
 pub fn assets_open_folder_action(payload: AssetsOpenFolderPayload) -> Action {
     custom_assets_action(ASSETS_OPEN_FOLDER, payload)
@@ -815,6 +840,11 @@ pub fn app_shell_reveal_in_file_manager_action(
     payload: AppShellRevealInFileManagerPayload,
 ) -> Action {
     custom_app_shell_action_with_payload(APP_SHELL_REVEAL_IN_FILE_MANAGER, payload)
+}
+
+/// Build an app-shell request for choosing a replacement file for one asset.
+pub fn app_shell_relink_asset_dialog_action(payload: AppShellRelinkAssetDialogPayload) -> Action {
+    custom_app_shell_action_with_payload(APP_SHELL_RELINK_ASSET_DIALOG, payload)
 }
 
 /// Build an app-shell request for saving the current project to a chosen path.

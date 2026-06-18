@@ -817,6 +817,11 @@ shell resolves it through `PlatformService::reveal_in_file_manager`, and no
 editor action enters `AppState` or undo/redo. Synthetic assets such as solid
 colors and adjustment layers do not receive this menu item because they have no
 native file-manager target.
+Offline video/audio cards additionally expose `app.shell.relink_asset_dialog`.
+The shell owns the native replacement-file picker, then converts the selected
+path into `ui.assets.relink_asset`. `AppState` owns the actual asset-library
+mutation, project save, reload event, and status hint; widgets never call media
+probing or filesystem mutation APIs directly.
 Folder cards expose `ui.assets.delete_folder` through the same card-level menu
 surface. Folder deletion is an app/library mutation: `AssetLibrary` removes the
 selected folder subtree, unlinks assets assigned to any deleted folder, and

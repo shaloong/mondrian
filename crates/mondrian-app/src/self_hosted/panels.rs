@@ -41,28 +41,28 @@ use mondrian_ui_widgets::{
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
 use crate::app::ui_actions::{
     app_shell_export_output_dialog_action, app_shell_import_media_dialog_action_with_target,
-    app_shell_reveal_in_file_manager_action, assets_create_adjustment_layer_action,
-    assets_create_folder_action, assets_create_solid_color_action, assets_delete_asset_action,
-    assets_delete_folder_action, assets_delete_selection_action, assets_import_files_action,
-    assets_move_asset_action, assets_move_folder_action, assets_move_selection_action,
-    assets_open_folder_action, assets_prepare_drag_action, effects_add_to_clip_action,
-    export_enqueue_action, export_set_draft_action, inspector_remove_effect_action,
-    inspector_select_effect_action, inspector_set_clip_curve_action,
-    inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
-    inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
-    inspector_set_effect_enabled_action, inspector_set_effect_property_action,
-    timeline_add_track_action, timeline_drop_asset_action, timeline_move_clip_action,
-    timeline_move_track_action, timeline_seek_action, timeline_select_clip_action,
-    timeline_set_track_control_action, timeline_trim_clip_action,
-    AppShellRevealInFileManagerPayload, AssetsCreateAssetPayload, AssetsCreateFolderPayload,
-    AssetsDeleteAssetPayload, AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload,
-    AssetsImportFilesPayload, AssetsMoveAssetPayload, AssetsMoveFolderPayload,
-    AssetsMoveSelectionPayload, AssetsOpenFolderPayload, AssetsPrepareDragPayload,
-    EffectsAddToClipPayload, ExportDraftUpdatePayload, ExportEnqueuePayload,
-    ExportOutputDialogPayload, ImportMediaDialogPayload, InspectorClipRefPayload,
-    InspectorClipTransformField, InspectorCurvePointPayload, InspectorRemoveEffectPayload,
-    InspectorSelectEffectPayload, InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
-    InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+    app_shell_relink_asset_dialog_action, app_shell_reveal_in_file_manager_action,
+    assets_create_adjustment_layer_action, assets_create_folder_action,
+    assets_create_solid_color_action, assets_delete_asset_action, assets_delete_folder_action,
+    assets_delete_selection_action, assets_import_files_action, assets_move_asset_action,
+    assets_move_folder_action, assets_move_selection_action, assets_open_folder_action,
+    assets_prepare_drag_action, effects_add_to_clip_action, export_enqueue_action,
+    export_set_draft_action, inspector_remove_effect_action, inspector_select_effect_action,
+    inspector_set_clip_curve_action, inspector_set_clip_enabled_action,
+    inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
+    inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
+    inspector_set_effect_property_action, timeline_add_track_action, timeline_drop_asset_action,
+    timeline_move_clip_action, timeline_move_track_action, timeline_seek_action,
+    timeline_select_clip_action, timeline_set_track_control_action, timeline_trim_clip_action,
+    AppShellRelinkAssetDialogPayload, AppShellRevealInFileManagerPayload, AssetsCreateAssetPayload,
+    AssetsCreateFolderPayload, AssetsDeleteAssetPayload, AssetsDeleteFolderPayload,
+    AssetsDeleteSelectionPayload, AssetsImportFilesPayload, AssetsMoveAssetPayload,
+    AssetsMoveFolderPayload, AssetsMoveSelectionPayload, AssetsOpenFolderPayload,
+    AssetsPrepareDragPayload, EffectsAddToClipPayload, ExportDraftUpdatePayload,
+    ExportEnqueuePayload, ExportOutputDialogPayload, ImportMediaDialogPayload,
+    InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
+    InspectorRemoveEffectPayload, InspectorSelectEffectPayload, InspectorSetClipCurvePayload,
+    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
     InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
     InspectorSetEffectPropertyPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
     TimelineDropAssetPayload, TimelineMoveClipPayload, TimelineMoveTrackPayload,
@@ -1453,6 +1453,17 @@ fn asset_grid_asset_context_menu_items(asset: &AssetRecord) -> Vec<MenuItem> {
             ),
             AppIcon::FolderOpenFilled,
         ));
+        if asset_is_offline(asset) {
+            items.push(asset_menu_item(
+                MenuItem::new(
+                    "Relink Media...",
+                    app_shell_relink_asset_dialog_action(AppShellRelinkAssetDialogPayload {
+                        asset_id: asset.id,
+                    }),
+                ),
+                AppIcon::Import,
+            ));
+        }
         items.push(MenuItem::separator());
     }
     items.push(asset_menu_item(
@@ -1467,6 +1478,10 @@ fn asset_grid_asset_context_menu_items(asset: &AssetRecord) -> Vec<MenuItem> {
 
 fn asset_has_file_manager_target(asset: &AssetRecord) -> bool {
     matches!(asset.kind, AssetKind::Video | AssetKind::Audio)
+}
+
+fn asset_is_offline(asset: &AssetRecord) -> bool {
+    asset_has_file_manager_target(asset) && !asset.path.exists()
 }
 
 fn asset_grid_items_from_library_records(
@@ -2947,11 +2962,12 @@ fn inspector_effect_property_action(
 mod tests {
     use super::*;
     use crate::app::ui_actions::{
-        AppShellRevealInFileManagerPayload, AssetsCreateAssetPayload, AssetsCreateFolderPayload,
-        AssetsDeleteAssetPayload, AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload,
-        AssetsImportFilesPayload, AssetsMoveAssetPayload, AssetsMoveFolderPayload,
-        AssetsMoveSelectionPayload, AssetsOpenFolderPayload, ImportMediaDialogPayload,
-        APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_REVEAL_IN_FILE_MANAGER,
+        AppShellRelinkAssetDialogPayload, AppShellRevealInFileManagerPayload,
+        AssetsCreateAssetPayload, AssetsCreateFolderPayload, AssetsDeleteAssetPayload,
+        AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload, AssetsImportFilesPayload,
+        AssetsMoveAssetPayload, AssetsMoveFolderPayload, AssetsMoveSelectionPayload,
+        AssetsOpenFolderPayload, ImportMediaDialogPayload, APP_SHELL_IMPORT_MEDIA_DIALOG,
+        APP_SHELL_NAMESPACE, APP_SHELL_RELINK_ASSET_DIALOG, APP_SHELL_REVEAL_IN_FILE_MANAGER,
         ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR,
         ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_DELETE_SELECTION, ASSETS_IMPORT_FILES,
         ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE,
@@ -3552,20 +3568,7 @@ mod tests {
     fn assets_panel_file_card_context_menu_dispatches_reveal_first() {
         let asset_id = AssetId::new();
         let path = PathBuf::from("E:/media/shot.mov");
-        let item = asset_grid_item_from_asset(
-            AssetRecord {
-                id: asset_id,
-                name: "shot.mov".to_owned(),
-                kind: AssetKind::Video,
-                path: path.clone(),
-                source: None,
-                folder_id: None,
-                media_info: mondrian_media::MediaInfo::synthetic_adjustment_layer(),
-                created_at: "2026-06-19T00:00:00Z".to_owned(),
-                updated_at: "2026-06-19T00:00:00Z".to_owned(),
-            },
-            None,
-        );
+        let item = asset_grid_item_from_asset(test_video_asset(asset_id, path.clone()), None);
         let model = AssetGridModel::new("Assets", vec![item]);
         let mut grid = asset_grid(&model);
         grid.layout(Rect::new(0.0, 0.0, 360.0, 240.0));
@@ -3613,6 +3616,29 @@ mod tests {
         let payload: AppShellRevealInFileManagerPayload =
             serde_json::from_value(payload.clone()).expect("reveal payload");
         assert_eq!(payload.path, path);
+    }
+
+    #[test]
+    fn assets_panel_offline_file_card_context_menu_includes_relink() {
+        let asset_id = AssetId::new();
+        let item = asset_grid_item_from_asset(
+            test_video_asset(asset_id, PathBuf::from("E:/missing/shot.mov")),
+            None,
+        );
+
+        assert_eq!(item.context_menu_items.len(), 4);
+        assert_eq!(item.context_menu_items[0].label, "Reveal in File Manager");
+        assert_eq!(item.context_menu_items[1].label, "Relink Media...");
+        assert!(item.context_menu_items[2].is_separator());
+        assert_eq!(item.context_menu_items[3].label, "Delete asset");
+        let Action::Custom { namespace, name, payload } = &item.context_menu_items[1].action else {
+            panic!("expected relink shell action");
+        };
+        assert_eq!(namespace, APP_SHELL_NAMESPACE);
+        assert_eq!(name, APP_SHELL_RELINK_ASSET_DIALOG);
+        let payload: AppShellRelinkAssetDialogPayload =
+            serde_json::from_value(payload.clone()).expect("relink payload");
+        assert_eq!(payload.asset_id, asset_id);
     }
 
     #[test]
@@ -5629,6 +5655,20 @@ mod tests {
             .expect("system time after epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("mondrian-{prefix}-{suffix}"))
+    }
+
+    fn test_video_asset(asset_id: AssetId, path: PathBuf) -> AssetRecord {
+        AssetRecord {
+            id: asset_id,
+            name: path.file_name().and_then(|name| name.to_str()).unwrap_or("shot.mov").to_owned(),
+            kind: AssetKind::Video,
+            path,
+            source: None,
+            folder_id: None,
+            media_info: mondrian_media::MediaInfo::synthetic_adjustment_layer(),
+            created_at: "2026-06-19T00:00:00Z".to_owned(),
+            updated_at: "2026-06-19T00:00:00Z".to_owned(),
+        }
     }
 
     fn assert_shell_action(action: Option<&Action>, name: &str) {
