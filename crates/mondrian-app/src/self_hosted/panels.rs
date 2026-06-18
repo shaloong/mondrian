@@ -5,6 +5,7 @@
 //! factories so real `AppState` / `EditorState` adapters can replace it without
 //! changing dock layout or widget construction.
 
+use mondrian_assets::library::FolderRecord;
 use mondrian_assets::{AssetKind, AssetLibrary, AssetRecord};
 use mondrian_core::automation::timecode_to_ticks;
 use mondrian_core::automation::PropertyValue;
@@ -251,8 +252,44 @@ impl AssetGridModel {
             .with_filter_placeholder("Search assets");
         };
 
-        match library.list_assets() {
-            Ok(assets) if assets.is_empty() => AssetGridModel::new(
+        let folders = match library.list_folders() {
+            Ok(folders) => folders,
+            Err(err) => {
+                return AssetGridModel::new(
+                    "Assets",
+                    vec![asset_empty_item(
+                        "asset-library-error",
+                        "Asset library unavailable",
+                        err.to_string(),
+                        colors.error,
+                        AppIcon::Warning,
+                    )],
+                )
+                .with_subtitle("Project library")
+                .with_filter_placeholder("Search assets");
+            }
+        };
+        let assets = match library.list_assets() {
+            Ok(assets) => assets,
+            Err(err) => {
+                return AssetGridModel::new(
+                    "Assets",
+                    vec![asset_empty_item(
+                        "asset-library-error",
+                        "Asset library unavailable",
+                        err.to_string(),
+                        colors.error,
+                        AppIcon::Warning,
+                    )],
+                )
+                .with_subtitle("Project library")
+                .with_filter_placeholder("Search assets");
+            }
+        };
+
+        let items = asset_grid_items_from_library_records(folders, assets);
+        if items.is_empty() {
+            return AssetGridModel::new(
                 "Assets",
                 vec![asset_empty_item(
                     "asset-library-empty",
@@ -264,27 +301,13 @@ impl AssetGridModel {
             )
             .with_subtitle("Project library")
             .with_filter_placeholder("Search assets")
-            .accepts_file_drop(true),
-            Ok(assets) => AssetGridModel::new(
-                "Assets",
-                assets.into_iter().map(asset_grid_item_from_asset).collect(),
-            )
+            .accepts_file_drop(true);
+        }
+
+        AssetGridModel::new("Assets", items)
             .with_subtitle("Project library")
             .with_filter_placeholder("Search assets")
-            .accepts_file_drop(true),
-            Err(err) => AssetGridModel::new(
-                "Assets",
-                vec![asset_empty_item(
-                    "asset-library-error",
-                    "Asset library unavailable",
-                    err.to_string(),
-                    colors.error,
-                    AppIcon::Warning,
-                )],
-            )
-            .with_subtitle("Project library")
-            .with_filter_placeholder("Search assets"),
-        }
+            .accepts_file_drop(true)
     }
 }
 
@@ -1560,6 +1583,45 @@ fn asset_grid_item_from_asset(asset: AssetRecord) -> AssetGridItem {
                 asset_id: asset.id,
             })),
         icon,
+    )
+}
+
+fn asset_grid_items_from_library_records(
+    folders: Vec<FolderRecord>,
+    assets: Vec<AssetRecord>,
+) -> Vec<AssetGridItem> {
+    let mut items = Vec::with_capacity(folders.len() + assets.len());
+    for folder in folders.into_iter().filter(|folder| folder.parent_id.is_none()) {
+        let item_count = assets
+            .iter()
+            .filter(|asset| asset.folder_id.as_deref() == Some(folder.id.as_str()))
+            .count();
+        items.push(asset_grid_item_from_folder(folder, item_count));
+    }
+    items.extend(
+        assets
+            .into_iter()
+            .filter(|asset| asset.folder_id.is_none())
+            .map(asset_grid_item_from_asset),
+    );
+    items
+}
+
+fn asset_grid_item_from_folder(folder: FolderRecord, item_count: usize) -> AssetGridItem {
+    let subtitle = if item_count == 1 {
+        "Folder · 1 item".to_owned()
+    } else {
+        format!("Folder · {item_count} items")
+    };
+    with_asset_icon(
+        AssetGridItem::new(
+            format!("folder:{}", folder.id),
+            folder.name,
+            current_theme().colors.secondary,
+        )
+        .with_subtitle(subtitle)
+        .with_badge("BIN"),
+        AppIcon::Folder,
     )
 }
 
@@ -4215,6 +4277,53 @@ mod tests {
         let payload: AssetsPrepareDragPayload =
             serde_json::from_value(payload.clone()).expect("asset drag payload");
         assert_eq!(payload.asset_id, asset_id);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn asset_panel_model_shows_top_level_folders_before_root_assets() {
+        let root = unique_temp_dir("asset-panel-folders");
+        let library = AssetLibrary::open(root.clone()).expect("open asset library");
+        let folder_id = library.create_folder("Rushes", None).expect("create folder");
+        let _nested_id =
+            library.create_folder("Nested", Some(&folder_id)).expect("create nested folder");
+        let filed_asset_id = library
+            .create_solid_color_asset(Some("Filed Solid"))
+            .expect("create filed solid");
+        library
+            .move_asset_to_folder(filed_asset_id, Some(&folder_id))
+            .expect("move into folder");
+        let root_asset_id = library
+            .create_adjustment_layer_asset(Some("Root Adjustment"))
+            .expect("create root adjustment");
+        let mut state = AppState::new();
+        state.asset_library = Some(library);
+
+        let models = SelfHostedPanelModels::from_app_state(&state);
+
+        assert_eq!(models.assets.items.len(), 2);
+        let folder = &models.assets.items[0];
+        assert_eq!(folder.id, format!("folder:{folder_id}"));
+        assert_eq!(folder.title, "Rushes");
+        assert_eq!(folder.subtitle, "Folder · 1 item");
+        assert_eq!(folder.badge.as_deref(), Some("BIN"));
+        assert!(folder.icon.is_some());
+        assert!(folder.drag_payload.is_none());
+        assert!(folder.activate_action.is_none());
+
+        let asset = &models.assets.items[1];
+        assert_eq!(asset.title, "Root Adjustment");
+        assert_eq!(asset.badge.as_deref(), Some("ADJ"));
+        assert_eq!(asset.drag_payload, Some(DragPayload::Asset(root_asset_id)));
+        assert!(
+            !models.assets.items.iter().any(|item| item.title == "Nested"),
+            "root asset view should not flatten nested folders"
+        );
+        assert!(
+            !models.assets.items.iter().any(|item| item.title == "Filed Solid"),
+            "root asset view should not flatten assets inside folders"
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }

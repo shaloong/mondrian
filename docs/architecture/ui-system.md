@@ -730,7 +730,10 @@ actions. The self-hosted app adapter maps that menu to `app_shell` import
 requests and `ui.assets` create actions for adjustment layers, solid-color
 assets, and folders. The app adapter maps `AssetRecord` into `AssetGridItem`
 view data and semantic media color tokens; the widget crate does not depend on
-the asset library or editor domain.
+the asset library or editor domain. The root Assets view is not a flat dump of
+every database row: it shows top-level folders first, then root/unfiled assets.
+Assets already assigned to a folder are counted on that folder card and should
+only appear inside that folder once folder navigation is implemented.
 The adjacent Console tab reads `AppState::status_log`, a bounded history fed by
 `set_status_hint`, and shows recent messages newest-first before runtime
 summary rows. `clear_status_hint` clears only the transient bottom-bar hint; it
