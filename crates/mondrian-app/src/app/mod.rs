@@ -71,7 +71,7 @@ pub mod ui_actions;
 
 use audio_rendering::*;
 use exporting::TimelineExportDraft;
-pub use selection::{SelectedClipRef, SelectedTrackRef};
+pub use selection::{SelectedClipRef, SelectedEffectRef, SelectedTrackRef};
 use timeline_editing::*;
 
 // ─────────────────────────────────────────────
@@ -122,6 +122,8 @@ pub struct SelectionState {
     pub selected_track_ids: Vec<TrackId>,
     /// Selected clips (supports multi-select from timeline).
     pub selected_clips: Vec<SelectedClipRef>,
+    /// Selected effect inside the primary clip, shared by Inspector and graph views.
+    pub selected_effect: Option<SelectedEffectRef>,
     /// Currently selected mask (canvas → effect controls).
     pub selected_mask: Option<(MaskId, ClipId, TrackId)>,
 }

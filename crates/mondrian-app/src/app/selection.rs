@@ -1,5 +1,5 @@
 use super::AppState;
-use mondrian_core::types::{ClipId, TrackId};
+use mondrian_core::types::{ClipId, EffectId, TrackId};
 use mondrian_timeline::sequence::Sequence;
 use std::collections::{HashMap, HashSet};
 
@@ -22,6 +22,13 @@ pub struct SelectedTrackRef {
     pub is_video_track: bool,
 }
 
+/// UI-agnostic reference to an effect selected inside a clip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SelectedEffectRef {
+    pub clip: SelectedClipRef,
+    pub effect_id: EffectId,
+}
+
 impl AppState {
     /// The primary selected clip, used by single-target panels such as the
     /// Inspector and Effects browser.
@@ -34,6 +41,13 @@ impl AppState {
     /// All selected clips in app selection order.
     pub fn selected_clips(&self) -> &[SelectedClipRef] {
         &self.selection.selected_clips
+    }
+
+    /// The selected effect inside the primary clip, if any.
+    pub fn primary_selected_effect(&self) -> Option<SelectedEffectRef> {
+        let selection = self.selection.selected_effect?;
+        let sequence = self.sequence.as_ref()?;
+        resolve_effect_selection(sequence, selection.clip.clip_id, selection.effect_id)
     }
 
     /// All selected timeline tracks in visible track order.
@@ -49,6 +63,7 @@ impl AppState {
     pub fn clear_selection(&mut self) {
         self.selection.selected_track_ids.clear();
         self.selection.selected_clips.clear();
+        self.selection.selected_effect = None;
         self.selection.selected_mask = None;
         self.clear_animation_selection();
     }
@@ -93,6 +108,24 @@ impl AppState {
         })
     }
 
+    /// Select an effect by stable ids in the active sequence.
+    pub fn select_effect_by_id(
+        &mut self,
+        clip_id: ClipId,
+        effect_id: EffectId,
+    ) -> Option<SelectedEffectRef> {
+        let selection = self
+            .sequence
+            .as_ref()
+            .and_then(|sequence| resolve_effect_selection(sequence, clip_id, effect_id))?;
+        self.selection.selected_track_ids.clear();
+        self.selection.selected_clips = vec![selection.clip];
+        self.selection.selected_effect = Some(selection);
+        self.selection.selected_mask = None;
+        self.clear_animation_selection();
+        Some(selection)
+    }
+
     /// Select every track in the active sequence in visible track order.
     pub fn select_all_tracks(&mut self) {
         let Some(sequence) = self.sequence.as_ref() else {
@@ -108,6 +141,7 @@ impl AppState {
     pub fn replace_clip_selection(&mut self, selections: Vec<SelectedClipRef>) {
         self.selection.selected_track_ids.clear();
         self.selection.selected_clips = selections;
+        self.selection.selected_effect = None;
         self.selection.selected_mask = None;
         self.clear_animation_selection();
     }
@@ -116,6 +150,7 @@ impl AppState {
     pub fn replace_track_selection(&mut self, track_ids: Vec<TrackId>) {
         self.selection.selected_track_ids = track_ids;
         self.selection.selected_clips.clear();
+        self.selection.selected_effect = None;
         self.selection.selected_mask = None;
         self.clear_animation_selection();
     }
@@ -180,6 +215,9 @@ impl AppState {
                     .get(&clip_id)
                     .map(|selection| (mask_id, clip_id, selection.track_id))
             });
+        self.selection.selected_effect = self.selection.selected_effect.and_then(|selection| {
+            resolve_effect_selection(sequence, selection.clip.clip_id, selection.effect_id)
+        });
 
         if self
             .animation_selection
@@ -268,4 +306,23 @@ pub fn resolve_clip_selection(sequence: &Sequence, clip_id: ClipId) -> Option<Se
     }
 
     None
+}
+
+/// Resolve an effect id to its current clip-backed selection reference.
+pub fn resolve_effect_selection(
+    sequence: &Sequence,
+    clip_id: ClipId,
+    effect_id: EffectId,
+) -> Option<SelectedEffectRef> {
+    let clip_selection = resolve_clip_selection(sequence, clip_id)?;
+    let clip = sequence
+        .video_tracks
+        .iter()
+        .flat_map(|track| track.clips.iter())
+        .chain(sequence.audio_tracks.iter().flat_map(|track| track.clips.iter()))
+        .find(|clip| clip.id == clip_id)?;
+    clip.effects
+        .iter()
+        .any(|effect| effect.id == effect_id)
+        .then_some(SelectedEffectRef { clip: clip_selection, effect_id })
 }

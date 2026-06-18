@@ -41,17 +41,18 @@ use crate::app::ui_actions::{
     app_shell_new_project_dialog_action, app_shell_open_project_dialog_action,
     app_shell_save_project_as_dialog_action, assets_prepare_drag_action,
     effects_add_to_clip_action, export_enqueue_action, export_set_draft_action,
-    inspector_remove_effect_action, inspector_set_clip_curve_action,
-    inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
-    inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
-    inspector_set_effect_enabled_action, inspector_set_effect_property_action,
-    timeline_add_track_action, timeline_drop_asset_action, timeline_move_clip_action,
-    timeline_move_track_action, timeline_seek_action, timeline_select_clip_action,
-    timeline_set_track_control_action, timeline_trim_clip_action, AssetsPrepareDragPayload,
-    EffectsAddToClipPayload, ExportDraftUpdatePayload, ExportEnqueuePayload,
-    ExportOutputDialogPayload, InspectorClipRefPayload, InspectorClipTransformField,
-    InspectorCurvePointPayload, InspectorRemoveEffectPayload, InspectorSetClipCurvePayload,
-    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+    inspector_remove_effect_action, inspector_select_effect_action,
+    inspector_set_clip_curve_action, inspector_set_clip_enabled_action,
+    inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
+    inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
+    inspector_set_effect_property_action, timeline_add_track_action, timeline_drop_asset_action,
+    timeline_move_clip_action, timeline_move_track_action, timeline_seek_action,
+    timeline_select_clip_action, timeline_set_track_control_action, timeline_trim_clip_action,
+    AssetsPrepareDragPayload, EffectsAddToClipPayload, ExportDraftUpdatePayload,
+    ExportEnqueuePayload, ExportOutputDialogPayload, InspectorClipRefPayload,
+    InspectorClipTransformField, InspectorCurvePointPayload, InspectorRemoveEffectPayload,
+    InspectorSelectEffectPayload, InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
+    InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
     InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
     InspectorSetEffectPropertyPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
     TimelineDropAssetPayload, TimelineMoveClipPayload, TimelineMoveTrackPayload,
@@ -756,6 +757,8 @@ impl TimelinePanelModel {
 pub struct InspectorPanelModel {
     /// Selected clip targeted by value edits, if the model is backed by app state.
     pub selected_clip: Option<SelectedClipRef>,
+    /// Selected effect nested inside the selected clip.
+    pub selected_effect_id: Option<EffectId>,
     /// Whether inspector controls may dispatch mutations for the selected clip.
     pub is_editable: bool,
     /// Human-readable reason shown when a selected clip cannot be edited.
@@ -837,6 +840,10 @@ impl InspectorPanelModel {
         let is_editable = !selected_clip_track_is_locked(state, resolved_selection);
         Self {
             selected_clip: Some(resolved_selection),
+            selected_effect_id: state.primary_selected_effect().and_then(|selection| {
+                (selection.clip.clip_id == resolved_selection.clip_id)
+                    .then_some(selection.effect_id)
+            }),
             is_editable,
             edit_disabled_reason: (!is_editable)
                 .then(|| "Selected clip track is locked".to_owned()),
@@ -886,6 +893,7 @@ impl InspectorPanelModel {
     pub fn empty() -> Self {
         Self {
             selected_clip: None,
+            selected_effect_id: None,
             is_editable: false,
             edit_disabled_reason: None,
             enabled: false,
@@ -908,6 +916,7 @@ impl InspectorPanelModel {
     pub fn demo() -> Self {
         Self {
             selected_clip: None,
+            selected_effect_id: None,
             is_editable: false,
             edit_disabled_reason: None,
             enabled: true,
@@ -967,7 +976,23 @@ pub struct NodeGraphPanelModel {
     pub selected_clip: Option<SelectedClipRef>,
     pub nodes: Vec<NodeGraphNode>,
     pub edges: Vec<NodeGraphEdge>,
+    pub node_targets: Vec<NodeGraphNodeTarget>,
     pub selected_node_id: Option<String>,
+}
+
+/// Application target attached to one domain-light graph node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeGraphNodeTarget {
+    pub node_id: String,
+    pub target: NodeGraphTarget,
+}
+
+/// Semantic target for a node graph item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeGraphTarget {
+    Clip,
+    Effect(EffectId),
+    Output,
 }
 
 impl NodeGraphPanelModel {
@@ -983,10 +1008,17 @@ impl NodeGraphPanelModel {
         };
 
         let clip_label = clip.label.clone().unwrap_or_else(|| default_clip_label(clip));
+        let selected_effect_id = state.primary_selected_effect().and_then(|selection| {
+            (selection.clip.clip_id == selected_clip.clip_id).then_some(selection.effect_id)
+        });
         let mut nodes = vec![NodeGraphNode::new("source", "Source")
             .with_subtitle(clip_source_subtitle(clip))
             .with_accent(Color::from_hex(0x4B7BE5))
             .disabled(clip.is_disabled)];
+        let mut node_targets = vec![NodeGraphNodeTarget {
+            node_id: "source".to_owned(),
+            target: NodeGraphTarget::Clip,
+        }];
         let mut edges = Vec::new();
         let mut previous_id = "source".to_owned();
 
@@ -1002,6 +1034,10 @@ impl NodeGraphPanelModel {
                     .with_accent(effect_node_accent(&effect.effect_type))
                     .disabled(!effect.is_enabled),
             );
+            node_targets.push(NodeGraphNodeTarget {
+                node_id: id.clone(),
+                target: NodeGraphTarget::Effect(effect.id),
+            });
             edges.push(NodeGraphEdge::new(previous_id, id.clone()));
             previous_id = id;
         }
@@ -1011,6 +1047,10 @@ impl NodeGraphPanelModel {
                 .with_subtitle("Composite")
                 .with_accent(Color::from_hex(0x22C55E)),
         );
+        node_targets.push(NodeGraphNodeTarget {
+            node_id: "output".to_owned(),
+            target: NodeGraphTarget::Output,
+        });
         edges.push(NodeGraphEdge::new(previous_id, "output"));
 
         Self {
@@ -1019,7 +1059,10 @@ impl NodeGraphPanelModel {
             selected_clip: Some(selected_clip),
             nodes,
             edges,
-            selected_node_id: Some("source".to_owned()),
+            node_targets,
+            selected_node_id: selected_effect_id
+                .map(|effect_id| format!("effect:{effect_id}"))
+                .or_else(|| Some("source".to_owned())),
         }
     }
 
@@ -1030,6 +1073,7 @@ impl NodeGraphPanelModel {
             selected_clip: None,
             nodes: Vec::new(),
             edges: Vec::new(),
+            node_targets: Vec::new(),
             selected_node_id: None,
         }
     }
@@ -1830,10 +1874,11 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
 
 fn node_graph_panel(model: &NodeGraphPanelModel) -> NodeGraphView {
     let selected_clip = model.selected_clip;
+    let node_targets = model.node_targets.clone();
     let mut graph = NodeGraphView::new(model.nodes.clone(), model.edges.clone())
         .with_title(model.title.clone())
         .with_subtitle(model.subtitle.clone())
-        .on_select(move |_node_id| node_graph_clip_action(selected_clip));
+        .on_select(move |node_id| node_graph_node_action(selected_clip, &node_targets, node_id));
     if let Some(selected_node_id) = &model.selected_node_id {
         graph = graph.with_selected_node(selected_node_id.clone());
     }
@@ -2165,65 +2210,66 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
     );
 
     if !model.effects.is_empty() {
-        let mut section = PropertySection::new("Effects");
         for (index, effect) in model.effects.iter().enumerate() {
             let effect_id = effect.effect_id;
             let can_move_up = can_edit && index > 0;
             let can_move_down = can_edit && index + 1 < model.effects.len();
-            section = section.with_row(PropertyRow::new(
-                effect.label.clone(),
-                Box::new(
-                    FlexContainer::row(vec![
-                        FlexChild::flex(
-                            Box::new(
-                                Checkbox::new("Enabled", effect.enabled)
-                                    .enabled(can_edit)
-                                    .on_change(move |enabled| {
-                                        inspector_effect_enabled_action(
-                                            selected_clip,
-                                            effect_id,
-                                            enabled,
-                                        )
-                                    }),
+            let mut section = PropertySection::new(effect.label.clone())
+                .selected(model.selected_effect_id == Some(effect_id))
+                .with_row(PropertyRow::new(
+                    "Controls",
+                    Box::new(
+                        FlexContainer::row(vec![
+                            FlexChild::flex(
+                                Box::new(
+                                    Checkbox::new("Enabled", effect.enabled)
+                                        .enabled(can_edit)
+                                        .on_change(move |enabled| {
+                                            inspector_effect_enabled_action(
+                                                selected_clip,
+                                                effect_id,
+                                                enabled,
+                                            )
+                                        }),
+                                ),
+                                1.0,
                             ),
-                            1.0,
-                        ),
-                        FlexChild::fixed(Box::new(
-                            AppIcon::ArrowUp
-                                .icon_button()
-                                .expect("bundled ArrowUp icon asset should parse")
-                                .enabled(can_move_up)
-                                .on_click(inspector_reorder_effect_action(
-                                    selected_clip,
-                                    index,
-                                    index.saturating_sub(1),
-                                )),
-                        )),
-                        FlexChild::fixed(Box::new(
-                            AppIcon::ArrowDown
-                                .icon_button()
-                                .expect("bundled ArrowDown icon asset should parse")
-                                .enabled(can_move_down)
-                                .on_click(inspector_reorder_effect_action(
-                                    selected_clip,
-                                    index,
-                                    (index + 1).min(model.effects.len().saturating_sub(1)),
-                                )),
-                        )),
-                        FlexChild::fixed(Box::new(
-                            AppIcon::Trash
-                                .text_button("Remove")
-                                .expect("bundled Trash icon asset should parse")
-                                .enabled(can_edit)
-                                .on_click(inspector_remove_effect_row_action(
-                                    selected_clip,
-                                    effect_id,
-                                )),
-                        )),
-                    ])
-                    .with_gap(8.0),
-                ),
-            ));
+                            FlexChild::fixed(Box::new(
+                                AppIcon::ArrowUp
+                                    .icon_button()
+                                    .expect("bundled ArrowUp icon asset should parse")
+                                    .enabled(can_move_up)
+                                    .on_click(inspector_reorder_effect_action(
+                                        selected_clip,
+                                        index,
+                                        index.saturating_sub(1),
+                                    )),
+                            )),
+                            FlexChild::fixed(Box::new(
+                                AppIcon::ArrowDown
+                                    .icon_button()
+                                    .expect("bundled ArrowDown icon asset should parse")
+                                    .enabled(can_move_down)
+                                    .on_click(inspector_reorder_effect_action(
+                                        selected_clip,
+                                        index,
+                                        (index + 1).min(model.effects.len().saturating_sub(1)),
+                                    )),
+                            )),
+                            FlexChild::fixed(Box::new(
+                                AppIcon::Trash
+                                    .text_button("Remove")
+                                    .expect("bundled Trash icon asset should parse")
+                                    .enabled(can_edit)
+                                    .on_click(inspector_remove_effect_row_action(
+                                        selected_clip,
+                                        effect_id,
+                                    )),
+                            )),
+                        ])
+                        .with_gap(8.0),
+                    ),
+                ));
             for property in &effect.properties {
                 section = section.with_row(effect_property_row(
                     property,
@@ -2232,8 +2278,8 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                     effect_id,
                 ));
             }
+            panel = panel.with_section(section);
         }
-        panel = panel.with_section(section);
     }
 
     panel.with_section(
@@ -2370,6 +2416,31 @@ fn inspector_curve_action(selection: Option<SelectedClipRef>, points: &[CurvePoi
         });
     }
     Action::NoOp
+}
+
+fn node_graph_node_action(
+    selection: Option<SelectedClipRef>,
+    targets: &[NodeGraphNodeTarget],
+    node_id: &str,
+) -> Action {
+    let Some(selection) = selection else {
+        return Action::NoOp;
+    };
+    match targets
+        .iter()
+        .find_map(|entry| (entry.node_id == node_id).then_some(entry.target))
+    {
+        Some(NodeGraphTarget::Effect(effect_id)) => {
+            inspector_select_effect_action(InspectorSelectEffectPayload {
+                clip: inspector_clip_payload(selection),
+                effect_id,
+            })
+        }
+        Some(NodeGraphTarget::Clip | NodeGraphTarget::Output) => {
+            node_graph_clip_action(Some(selection))
+        }
+        None => Action::NoOp,
+    }
 }
 
 fn node_graph_clip_action(selection: Option<SelectedClipRef>) -> Action {
@@ -2660,8 +2731,9 @@ mod tests {
         APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
         APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_SAVE_PROJECT_AS_DIALOG, ASSETS_NAMESPACE,
         ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE,
-        INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_EFFECT_PROPERTY, TIMELINE_ADD_TRACK,
-        TIMELINE_DROP_ASSET, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_SELECT_CLIP,
+        INSPECTOR_SELECT_EFFECT, INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_EFFECT_PROPERTY,
+        TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
+        TIMELINE_SELECT_CLIP,
     };
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
@@ -3669,11 +3741,10 @@ mod tests {
         let track_id = sequence.video_tracks[0].id;
         sequence.video_tracks[0].add_clip(clip).expect("add solid clip");
         state.sequence = Some(sequence);
-        state.selection.selected_clips.push(SelectedClipRef {
-            track_id,
-            is_video_track: true,
-            clip_id,
-        });
+        assert!(
+            state.select_effect_by_id(clip_id, effect_id).is_some(),
+            "seed selected effect"
+        );
         state.seek(7);
 
         let models = SelfHostedPanelModels::from_app_state(&state);
@@ -3701,6 +3772,7 @@ mod tests {
         assert_eq!(models.inspector.out_frame, 22.0);
         assert_eq!(models.inspector.max_frame, 22.0);
         assert_eq!(models.inspector.effects.len(), 1);
+        assert_eq!(models.inspector.selected_effect_id, Some(effect_id));
         assert_eq!(models.inspector.effects[0].effect_id, effect_id);
         assert_eq!(
             models.inspector.effects[0].label,
@@ -3715,6 +3787,27 @@ mod tests {
         assert_eq!(models.node_graph.edges.len(), 2);
         assert_eq!(models.node_graph.nodes[0].id, "source");
         assert_eq!(models.node_graph.nodes[1].id, format!("effect:{effect_id}"));
+        assert_eq!(
+            models.node_graph.selected_node_id,
+            Some(format!("effect:{effect_id}"))
+        );
+        assert_eq!(
+            models.node_graph.node_targets,
+            vec![
+                NodeGraphNodeTarget {
+                    node_id: "source".to_owned(),
+                    target: NodeGraphTarget::Clip,
+                },
+                NodeGraphNodeTarget {
+                    node_id: format!("effect:{effect_id}"),
+                    target: NodeGraphTarget::Effect(effect_id),
+                },
+                NodeGraphNodeTarget {
+                    node_id: "output".to_owned(),
+                    target: NodeGraphTarget::Output,
+                },
+            ]
+        );
         assert_eq!(
             models.node_graph.nodes[1].title,
             effect_display_name(&EffectType::GaussianBlur)
@@ -4318,6 +4411,7 @@ mod tests {
         };
         let model = InspectorPanelModel {
             selected_clip: Some(selection),
+            selected_effect_id: None,
             is_editable: false,
             edit_disabled_reason: Some("Selected clip track is locked".to_owned()),
             enabled: true,
@@ -4417,6 +4511,47 @@ mod tests {
     }
 
     #[test]
+    fn node_graph_effect_node_action_selects_effect_scope() {
+        let selection = SelectedClipRef {
+            track_id: TrackId::new(),
+            is_video_track: true,
+            clip_id: ClipId::new(),
+        };
+        let effect_id = EffectId::new();
+        let targets = vec![
+            NodeGraphNodeTarget {
+                node_id: "source".to_owned(),
+                target: NodeGraphTarget::Clip,
+            },
+            NodeGraphNodeTarget {
+                node_id: "effect-node".to_owned(),
+                target: NodeGraphTarget::Effect(effect_id),
+            },
+        ];
+
+        match node_graph_node_action(Some(selection), &targets, "effect-node") {
+            Action::Custom { namespace, name, payload } => {
+                assert_eq!(namespace, INSPECTOR_NAMESPACE);
+                assert_eq!(name, INSPECTOR_SELECT_EFFECT);
+                let payload: InspectorSelectEffectPayload =
+                    serde_json::from_value(payload).expect("inspector select effect payload");
+                assert_eq!(payload.clip.clip_id, selection.clip_id);
+                assert_eq!(payload.effect_id, effect_id);
+            }
+            other => panic!("expected inspector select effect action, got {other:?}"),
+        }
+
+        assert_eq!(
+            node_graph_node_action(Some(selection), &targets, "missing-node"),
+            Action::NoOp
+        );
+        assert_eq!(
+            node_graph_node_action(None, &targets, "effect-node"),
+            Action::NoOp
+        );
+    }
+
+    #[test]
     fn node_graph_panel_dispatches_clip_selection_from_keyboard() {
         let selection = SelectedClipRef {
             track_id: TrackId::new(),
@@ -4432,6 +4567,16 @@ mod tests {
                 NodeGraphNode::new("output", "Output"),
             ],
             edges: vec![NodeGraphEdge::new("source", "output")],
+            node_targets: vec![
+                NodeGraphNodeTarget {
+                    node_id: "source".to_owned(),
+                    target: NodeGraphTarget::Clip,
+                },
+                NodeGraphNodeTarget {
+                    node_id: "output".to_owned(),
+                    target: NodeGraphTarget::Output,
+                },
+            ],
             selected_node_id: Some("source".to_owned()),
         };
         let mut panel = node_graph_panel(&model);

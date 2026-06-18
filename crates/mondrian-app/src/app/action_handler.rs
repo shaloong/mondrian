@@ -14,17 +14,18 @@ use crate::app::timeline_editing::{
 use crate::app::ui_actions::{
     AssetsPrepareDragPayload, EffectsAddToClipPayload, ExportDraftUpdatePayload,
     ExportEnqueuePayload, InspectorClipTransformField, InspectorRemoveEffectPayload,
-    InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
-    InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
-    InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload,
-    ProjectCreateWithSettingsPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
-    TimelineDropAssetPayload, TimelineMoveClipPayload, TimelineMoveTrackPayload,
-    TimelineSeekPayload, TimelineSelectClipPayload, TimelineSetTrackControlPayload,
-    TimelineTrackControlPayloadKind, TimelineTrimClipPayload, TimelineTrimPayloadEdge,
-    ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, EXPORT_ENQUEUE,
-    EXPORT_NAMESPACE, EXPORT_SET_DRAFT, INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT,
-    INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY,
-    INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD, INSPECTOR_SET_EFFECT_ENABLED,
+    InspectorSelectEffectPayload, InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
+    InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+    InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
+    InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload, TimelineAddTrackKind,
+    TimelineAddTrackPayload, TimelineDropAssetPayload, TimelineMoveClipPayload,
+    TimelineMoveTrackPayload, TimelineSeekPayload, TimelineSelectClipPayload,
+    TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipPayload,
+    TimelineTrimPayloadEdge, ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP,
+    EFFECTS_NAMESPACE, EXPORT_ENQUEUE, EXPORT_NAMESPACE, EXPORT_SET_DRAFT, INSPECTOR_NAMESPACE,
+    INSPECTOR_REMOVE_EFFECT, INSPECTOR_SELECT_EFFECT, INSPECTOR_SET_CLIP_CURVE,
+    INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY, INSPECTOR_SET_CLIP_TINT,
+    INSPECTOR_SET_CLIP_TRANSFORM_FIELD, INSPECTOR_SET_EFFECT_ENABLED,
     INSPECTOR_SET_EFFECT_PROPERTY, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
     TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET, TIMELINE_MOVE_CLIP, TIMELINE_MOVE_TRACK,
     TIMELINE_NAMESPACE, TIMELINE_SEEK, TIMELINE_SELECT_CLIP, TIMELINE_SET_TRACK_CONTROL,
@@ -530,6 +531,20 @@ impl AppState {
             .ok_or_else(|| missing_clip_error(step_id, clip_id))
     }
 
+    fn select_effect_for_action(
+        &mut self,
+        step_id: &'static str,
+        clip_id: ClipId,
+        effect_id: EffectId,
+    ) -> Result<()> {
+        if self.sequence.is_none() {
+            return Err(missing_sequence_error(step_id));
+        }
+        self.select_effect_by_id(clip_id, effect_id)
+            .map(|_| ())
+            .ok_or_else(|| missing_effect_error(step_id, clip_id, effect_id))
+    }
+
     fn delete_selection_from_ui(&mut self, ripple: bool) -> Result<()> {
         let selections = self
             .selection
@@ -741,6 +756,18 @@ impl AppState {
                     payload,
                 )?;
                 self.set_clip_curve_from_ui(payload)
+            }
+            INSPECTOR_SELECT_EFFECT => {
+                let payload = parse_ui_payload::<InspectorSelectEffectPayload>(
+                    "inspector_ui_action",
+                    name,
+                    payload,
+                )?;
+                self.select_effect_for_action(
+                    "inspector_select_effect",
+                    payload.clip.clip_id,
+                    payload.effect_id,
+                )
             }
             INSPECTOR_SET_EFFECT_ENABLED => {
                 let payload = parse_ui_payload::<InspectorSetEffectEnabledPayload>(
@@ -1313,6 +1340,17 @@ fn missing_clip_error(step_id: &'static str, clip_id: ClipId) -> MondrianError {
     }
 }
 
+fn missing_effect_error(
+    step_id: &'static str,
+    clip_id: ClipId,
+    effect_id: EffectId,
+) -> MondrianError {
+    MondrianError::WorkflowStepFailed {
+        step_id: step_id.to_string(),
+        reason: format!("效果不存在: clip={clip_id}, effect={effect_id}"),
+    }
+}
+
 fn clip_exists(seq: &mondrian_timeline::sequence::Sequence, clip_id: ClipId) -> bool {
     seq.video_tracks
         .iter()
@@ -1328,16 +1366,17 @@ mod tests {
     use super::*;
     use crate::app::ui_actions::{
         assets_prepare_drag_action, effects_add_to_clip_action, export_enqueue_action,
-        export_set_draft_action, inspector_remove_effect_action, inspector_set_clip_curve_action,
-        inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
-        inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
-        inspector_set_effect_enabled_action, inspector_set_effect_property_action,
-        project_create_with_settings_action, timeline_add_track_action, timeline_drop_asset_action,
-        timeline_move_clip_action, timeline_move_track_action, timeline_seek_action,
-        timeline_select_clip_action, timeline_set_track_control_action, timeline_trim_clip_action,
-        AssetsPrepareDragPayload, EffectsAddToClipPayload, ExportDraftUpdatePayload,
-        ExportEnqueuePayload, InspectorClipRefPayload, InspectorClipTransformField,
-        InspectorCurvePointPayload, InspectorRemoveEffectPayload, InspectorSetClipCurvePayload,
+        export_set_draft_action, inspector_remove_effect_action, inspector_select_effect_action,
+        inspector_set_clip_curve_action, inspector_set_clip_enabled_action,
+        inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
+        inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
+        inspector_set_effect_property_action, project_create_with_settings_action,
+        timeline_add_track_action, timeline_drop_asset_action, timeline_move_clip_action,
+        timeline_move_track_action, timeline_seek_action, timeline_select_clip_action,
+        timeline_set_track_control_action, timeline_trim_clip_action, AssetsPrepareDragPayload,
+        EffectsAddToClipPayload, ExportDraftUpdatePayload, ExportEnqueuePayload,
+        InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
+        InspectorRemoveEffectPayload, InspectorSelectEffectPayload, InspectorSetClipCurvePayload,
         InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
         InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
         InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload,
@@ -2805,6 +2844,47 @@ mod tests {
         assert_eq!(clip.effects.len(), 1);
         assert_eq!(clip.effects[0].effect_type, EffectType::GaussianBlur);
         assert!(state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_inspector_ui_selects_effect_without_undo_history() {
+        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+        let effect: mondrian_effects::EffectNode =
+            mondrian_effects::EffectNodeExt::with_defaults(EffectType::GaussianBlur);
+        let effect_id = effect.id;
+        state.sequence.as_mut().expect("sequence").video_tracks[0].clips[0].add_effect_node(effect);
+
+        state
+            .dispatch_action(inspector_select_effect_action(
+                InspectorSelectEffectPayload {
+                    clip: inspector_clip_payload(track_id, clip_id),
+                    effect_id,
+                },
+            ))
+            .expect("dispatch select effect");
+
+        let selected = state.primary_selected_effect().expect("selected effect");
+        assert_eq!(selected.clip.clip_id, clip_id);
+        assert_eq!(selected.effect_id, effect_id);
+        assert!(!state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_inspector_ui_select_effect_rejects_missing_effect_without_undo() {
+        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+
+        let err = state
+            .dispatch_action(inspector_select_effect_action(
+                InspectorSelectEffectPayload {
+                    clip: inspector_clip_payload(track_id, clip_id),
+                    effect_id: EffectId::new(),
+                },
+            ))
+            .expect_err("missing effect should reject selection");
+
+        assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
+        assert!(state.primary_selected_effect().is_none());
+        assert!(!state.can_undo_action());
     }
 
     #[test]

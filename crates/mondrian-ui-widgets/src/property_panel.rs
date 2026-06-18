@@ -7,6 +7,7 @@ use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
+use crate::paint::color_with_alpha;
 use crate::{FormLayout, FormRowOptions, Label};
 
 /// Layout options for [`PropertyPanel`].
@@ -92,6 +93,7 @@ impl PropertyRow {
 pub struct PropertySection {
     title: Label,
     rows: Vec<PropertyRow>,
+    selected: bool,
     bounds: Rect,
     header_position: Point,
 }
@@ -102,6 +104,7 @@ impl PropertySection {
         Self {
             title: Label::new(title.into()).muted().with_font_size(11.0).with_padding(0.0, 0.0),
             rows: Vec::new(),
+            selected: false,
             bounds: Rect::ZERO,
             header_position: Point::ZERO,
         }
@@ -110,6 +113,12 @@ impl PropertySection {
     /// Append one row and return the section for builder-style construction.
     pub fn with_row(mut self, row: PropertyRow) -> Self {
         self.rows.push(row);
+        self
+    }
+
+    /// Set whether this section represents the active nested selection.
+    pub fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
         self
     }
 
@@ -313,7 +322,20 @@ impl Widget for PropertyPanel {
 
         for section in &self.sections {
             if section.bounds.height > 0.0 {
-                ctx.encoder.draw_rect(section.bounds, colors.popover, spacing.radius_md);
+                if section.selected {
+                    ctx.encoder.draw_rect(
+                        section.bounds,
+                        color_with_alpha(colors.ring, 0.45),
+                        spacing.radius_md,
+                    );
+                    ctx.encoder.draw_rect(
+                        section.bounds.inset(1.0, 1.0),
+                        colors.popover,
+                        (spacing.radius_md - 1.0).max(0.0),
+                    );
+                } else {
+                    ctx.encoder.draw_rect(section.bounds, colors.popover, spacing.radius_md);
+                }
             }
             if !section.title().is_empty() {
                 section.title.paint(ctx);
@@ -590,5 +612,31 @@ mod tests {
         assert!(encoder.texts.contains(&"Inspector".to_string()));
         assert!(encoder.texts.contains(&"Clip".to_string()));
         assert!(encoder.texts.contains(&"Opacity".to_string()));
+    }
+
+    #[test]
+    fn selected_property_section_paints_selection_chrome() {
+        let handled = Rc::new(Cell::new(false));
+        let mut panel = PropertyPanel::new("Inspector").with_section(
+            PropertySection::new("Effect").selected(true).with_row(PropertyRow::new(
+                "Enabled",
+                Box::new(ProbeWidget::new(handled)),
+            )),
+        );
+        panel.layout(Rect::new(0.0, 0.0, 300.0, 160.0));
+        let mut encoder = RecordingEncoder::default();
+        let theme = ThemePreset::Dark.build();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 300.0, 160.0),
+        };
+
+        panel.paint(&mut ctx);
+
+        assert!(
+            encoder.rects >= 3,
+            "selected section should paint panel, selection ring, and section fill"
+        );
     }
 }

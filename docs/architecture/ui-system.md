@@ -1060,3 +1060,13 @@ back-face culling enabled. Filled triangle-list commands are also normalized to
 front-facing winding after the pixel-to-NDC y flip. Checkbox checkmarks use one
 filled triangle-list shape on the 16px checkbox grid instead of two independent
 line strokes, so the elbow has a single joined fill and cannot form a visual X.
+
+Node graph widgets stay domain-light: `mondrian-ui-widgets::NodeGraphView`
+only knows stable node ids, screen-space layout, and selection chrome. The app
+adapter owns the semantic mapping from graph node id to editor target (`Clip`,
+`Effect`, or `Output`) and dispatches typed app actions from that mapping. Clip
+selection remains timeline-scoped, while effect selection is a nested
+`SelectionState::selected_effect` value validated against the active sequence
+and pruned with stale clips/effects. Selecting an effect is navigation state and
+must not enter timeline undo history; mutating, reordering, or removing effects
+continues to use undoable editor actions.

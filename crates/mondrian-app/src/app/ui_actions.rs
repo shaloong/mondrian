@@ -46,6 +46,8 @@ pub const INSPECTOR_SET_CLIP_TINT: &str = "set_clip_tint";
 pub const INSPECTOR_SET_CLIP_TRANSFORM_FIELD: &str = "set_clip_transform_field";
 /// Action name for changing a selected clip's animation curve draft.
 pub const INSPECTOR_SET_CLIP_CURVE: &str = "set_clip_curve";
+/// Action name for selecting one effect inside the selected clip.
+pub const INSPECTOR_SELECT_EFFECT: &str = "select_effect";
 /// Action name for toggling one effect on a selected clip.
 pub const INSPECTOR_SET_EFFECT_ENABLED: &str = "set_effect_enabled";
 /// Action name for removing one effect from a selected clip.
@@ -320,6 +322,15 @@ pub struct InspectorSetClipCurvePayload {
     pub points: Vec<InspectorCurvePointPayload>,
 }
 
+/// Select one effect instance inside a clip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InspectorSelectEffectPayload {
+    /// Clip that owns the effect.
+    pub clip: InspectorClipRefPayload,
+    /// Effect instance to make active in the inspector scope.
+    pub effect_id: EffectId,
+}
+
 /// Toggle a clip effect enabled state from an inspector panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InspectorSetEffectEnabledPayload {
@@ -499,6 +510,11 @@ pub fn inspector_set_clip_transform_field_action(
 /// Build an action that changes a clip curve from an inspector panel.
 pub fn inspector_set_clip_curve_action(payload: InspectorSetClipCurvePayload) -> Action {
     custom_inspector_action(INSPECTOR_SET_CLIP_CURVE, payload)
+}
+
+/// Build an action that selects an effect in the inspector scope.
+pub fn inspector_select_effect_action(payload: InspectorSelectEffectPayload) -> Action {
+    custom_inspector_action(INSPECTOR_SELECT_EFFECT, payload)
 }
 
 /// Build an action that toggles an effect on a selected clip.
