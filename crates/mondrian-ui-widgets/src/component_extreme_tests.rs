@@ -563,7 +563,7 @@ fn overlay_and_scroll_container_extremes_keep_paint_and_event_state_stable() {
     let scroll_paint = paint_widget(&scroll, Rect::new(0.0, 0.0, 48.0, 24.0));
     assert_eq!(
         scroll_paint.clips.first().copied(),
-        Some(Rect::new(0.0, 0.0, 48.0, 24.0)),
+        Some(Rect::new(0.0, 0.0, 40.0, 24.0)),
         "scroll view must establish its viewport clip before painting child content"
     );
     assert!(

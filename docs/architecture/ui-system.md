@@ -681,6 +681,12 @@ Inspector/Export-style panels from snapping back to the top. Scroll state is
 matched by owning `PanelKind` plus per-panel scroll ordinal so future panels can
 contain multiple scroll surfaces without relying on widget ids or legacy
 compatibility shims.
+`ScrollView` keeps its content viewport separate from its scrollbar chrome: when
+scrollbars are needed, the child is remeasured and laid out inside the reduced
+viewport, while thumbs/tracks paint in the reserved gutter. Wrapped text must
+therefore use the post-gutter width for measurement and painting, matching
+browser/native scroll containers and preventing glyphs from bleeding under the
+scrollbar lane.
 
 Browser-style panels should use `PanelList` / `PanelListItem` instead of
 ad-hoc colored placeholders or one-off row painting. `PanelList` owns local

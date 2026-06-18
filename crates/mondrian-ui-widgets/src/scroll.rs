@@ -45,6 +45,7 @@ pub struct ScrollView {
     id: WidgetId,
     child: Option<Box<dyn Widget>>,
     bounds: Rect,
+    viewport_size: Size,
     content_size: Size,
     scroll_offset: Vec2,
     axes: ScrollAxes,
@@ -61,6 +62,7 @@ impl ScrollView {
             id: WidgetId::new(),
             child,
             bounds: Rect::ZERO,
+            viewport_size: Size::ZERO,
             content_size: Size::ZERO,
             scroll_offset: Vec2::ZERO,
             axes: ScrollAxes::Vertical,
@@ -87,6 +89,15 @@ impl ScrollView {
 
     pub fn scroll_offset(&self) -> Vec2 {
         self.scroll_offset
+    }
+
+    fn viewport_rect(&self) -> Rect {
+        Rect::new(
+            self.bounds.x,
+            self.bounds.y,
+            self.viewport_size.width,
+            self.viewport_size.height,
+        )
     }
 
     /// Return the scroll state needed to restore this view after rebuilding.
@@ -145,7 +156,7 @@ impl ScrollView {
 
     fn max_scroll_y(&self) -> f32 {
         if self.axes.vertical() {
-            (self.content_size.height - self.bounds.height).max(0.0)
+            (self.content_size.height - self.viewport_size.height).max(0.0)
         } else {
             0.0
         }
@@ -153,18 +164,18 @@ impl ScrollView {
 
     fn max_scroll_x(&self) -> f32 {
         if self.axes.horizontal() {
-            (self.content_size.width - self.bounds.width).max(0.0)
+            (self.content_size.width - self.viewport_size.width).max(0.0)
         } else {
             0.0
         }
     }
 
     fn has_vertical_scrollbar(&self) -> bool {
-        self.max_scroll_y() > 0.0 && self.bounds.height > 0.0
+        self.max_scroll_y() > 0.0 && self.viewport_size.height > 0.0
     }
 
     fn has_horizontal_scrollbar(&self) -> bool {
-        self.max_scroll_x() > 0.0 && self.bounds.width > 0.0
+        self.max_scroll_x() > 0.0 && self.viewport_size.width > 0.0
     }
 
     fn clamp_scroll_offset(&mut self) {
@@ -172,8 +183,7 @@ impl ScrollView {
         self.scroll_offset.y = self.scroll_offset.y.clamp(0.0, self.max_scroll_y());
     }
 
-    fn normalized_content_size(&self, measured: Size) -> Size {
-        let viewport = Size::new(self.bounds.width.max(0.0), self.bounds.height.max(0.0));
+    fn normalized_content_size(&self, measured: Size, viewport: Size) -> Size {
         Size::new(
             if self.axes.horizontal() {
                 measured.width.max(viewport.width)
@@ -186,6 +196,62 @@ impl ScrollView {
                 viewport.height
             },
         )
+    }
+
+    fn measure_child_for_viewport(child: &dyn Widget, axes: ScrollAxes, viewport: Size) -> Size {
+        child.measure(LayoutConstraint {
+            min: Size::ZERO,
+            max: Size::new(
+                if axes.horizontal() {
+                    f32::MAX
+                } else {
+                    viewport.width.max(1.0)
+                },
+                if axes.vertical() {
+                    f32::MAX
+                } else {
+                    viewport.height.max(1.0)
+                },
+            ),
+        })
+    }
+
+    fn resolve_viewport_and_content_size(&self, child: &dyn Widget) -> (Size, Size) {
+        let bounds_size = Size::new(self.bounds.width.max(0.0), self.bounds.height.max(0.0));
+        let mut reserve_vertical = false;
+        let mut reserve_horizontal = false;
+        let mut viewport = bounds_size;
+        let mut content = bounds_size;
+
+        for _ in 0..3 {
+            viewport = Size::new(
+                (bounds_size.width
+                    - if reserve_vertical {
+                        self.scrollbar_width
+                    } else {
+                        0.0
+                    })
+                .max(0.0),
+                (bounds_size.height
+                    - if reserve_horizontal {
+                        self.scrollbar_width
+                    } else {
+                        0.0
+                    })
+                .max(0.0),
+            );
+            let measured = Self::measure_child_for_viewport(child, self.axes, viewport);
+            content = self.normalized_content_size(measured, viewport);
+            let next_vertical = self.axes.vertical() && content.height > viewport.height + 0.01;
+            let next_horizontal = self.axes.horizontal() && content.width > viewport.width + 0.01;
+            if next_vertical == reserve_vertical && next_horizontal == reserve_horizontal {
+                break;
+            }
+            reserve_vertical = next_vertical;
+            reserve_horizontal = next_horizontal;
+        }
+
+        (viewport, content)
     }
 
     fn set_scroll_x(&mut self, x: f32) -> bool {
@@ -250,33 +316,23 @@ impl ScrollView {
     }
 
     fn should_forward_pointer_to_child(&self, point: Point) -> bool {
-        self.bounds.contains(point) || self.child_overlay_hit_test(point)
+        self.viewport_rect().contains(point) || self.child_overlay_hit_test(point)
     }
 
     fn vertical_scrollbar_track_rect(&self) -> Rect {
-        let bottom_reserved = if self.has_horizontal_scrollbar() {
-            self.scrollbar_width
-        } else {
-            0.0
-        };
         Rect::new(
             self.bounds.x + self.bounds.width - self.scrollbar_width + 2.0,
             self.bounds.y,
             (self.scrollbar_width - 4.0).max(1.0),
-            (self.bounds.height - bottom_reserved).max(0.0),
+            self.viewport_size.height.max(0.0),
         )
     }
 
     fn horizontal_scrollbar_track_rect(&self) -> Rect {
-        let right_reserved = if self.has_vertical_scrollbar() {
-            self.scrollbar_width
-        } else {
-            0.0
-        };
         Rect::new(
             self.bounds.x,
             self.bounds.y + self.bounds.height - self.scrollbar_width + 2.0,
-            (self.bounds.width - right_reserved).max(0.0),
+            self.viewport_size.width.max(0.0),
             (self.scrollbar_width - 4.0).max(1.0),
         )
     }
@@ -286,7 +342,7 @@ impl ScrollView {
             return None;
         }
         let track = self.vertical_scrollbar_track_rect();
-        let thumb_h = (track.height * (self.bounds.height / self.content_size.height))
+        let thumb_h = (track.height * (self.viewport_size.height / self.content_size.height))
             .max(16.0)
             .min(track.height);
         let thumb_range = (track.height - thumb_h).max(0.0);
@@ -303,7 +359,7 @@ impl ScrollView {
         if track.width <= 0.0 {
             return None;
         }
-        let thumb_w = (track.width * (self.bounds.width / self.content_size.width))
+        let thumb_w = (track.width * (self.viewport_size.width / self.content_size.width))
             .max(16.0)
             .min(track.width);
         let thumb_range = (track.width - thumb_w).max(0.0);
@@ -338,7 +394,7 @@ impl ScrollView {
                 let Some(thumb) = self.vertical_scrollbar_thumb_rect() else {
                     return false;
                 };
-                let page = (self.bounds.height - thumb.height).max(1.0);
+                let page = (self.viewport_size.height - thumb.height).max(1.0);
                 if position.y < thumb.y {
                     self.set_scroll_y(self.scroll_offset.y - page)
                 } else if position.y > thumb.y + thumb.height {
@@ -351,7 +407,7 @@ impl ScrollView {
                 let Some(thumb) = self.horizontal_scrollbar_thumb_rect() else {
                     return false;
                 };
-                let page = (self.bounds.width - thumb.width).max(1.0);
+                let page = (self.viewport_size.width - thumb.width).max(1.0);
                 if position.x < thumb.x {
                     self.set_scroll_x(self.scroll_offset.x - page)
                 } else if position.x > thumb.x + thumb.width {
@@ -413,25 +469,17 @@ impl Widget for ScrollView {
 
     fn layout(&mut self, bounds: Rect) {
         self.bounds = bounds;
-        if let Some(child) = &mut self.child {
-            let measured = child.measure(LayoutConstraint {
-                min: Size::ZERO,
-                max: Size::new(
-                    if self.axes.horizontal() {
-                        f32::MAX
-                    } else {
-                        bounds.width.max(0.0)
-                    },
-                    if self.axes.vertical() {
-                        f32::MAX
-                    } else {
-                        bounds.height.max(0.0)
-                    },
-                ),
-            });
-            self.content_size = self.normalized_content_size(measured);
+        if let Some(child) = self.child.as_ref() {
+            let (viewport_size, content_size) =
+                self.resolve_viewport_and_content_size(child.as_ref());
+            self.viewport_size = viewport_size;
+            self.content_size = content_size;
             self.clamp_scroll_offset();
             self.layout_child();
+        } else {
+            self.viewport_size = Size::new(bounds.width.max(0.0), bounds.height.max(0.0));
+            self.content_size = self.viewport_size;
+            self.scroll_offset = Vec2::ZERO;
         }
     }
 
@@ -556,12 +604,14 @@ impl Widget for ScrollView {
 
     fn paint(&self, ctx: &mut PaintContext) {
         let previous_clip = ctx.clip_rect;
-        let viewport_clip = previous_clip.intersection(&self.bounds);
+        let viewport_clip = previous_clip.intersection(&self.viewport_rect());
         ctx.clip_rect = viewport_clip;
         ctx.push_clip(viewport_clip);
         if let Some(ref child) = self.child {
             child.paint(ctx);
         }
+        ctx.pop_clip();
+        ctx.clip_rect = previous_clip;
 
         if let Some(mut sb_rect) = self.vertical_scrollbar_thumb_rect() {
             let dragging = self.dragging_thumb == Some(ScrollbarAxis::Vertical);
@@ -618,9 +668,6 @@ impl Widget for ScrollView {
             };
             ctx.encoder.draw_rect(sb_rect, thumb_color, ctx.theme.spacing.radius_full);
         }
-
-        ctx.pop_clip();
-        ctx.clip_rect = previous_clip;
     }
 
     fn paint_overlay(&self, ctx: &mut PaintContext) {
@@ -638,7 +685,7 @@ impl Widget for ScrollView {
     }
 
     fn child_hit_test_clip(&self) -> Option<Rect> {
-        Some(self.bounds)
+        Some(self.viewport_rect())
     }
 
     fn children(&self) -> &[Box<dyn Widget>] {
@@ -919,9 +966,10 @@ mod tests {
 
         assert_eq!(
             *last_layout.borrow(),
-            Some(Rect::new(20.0, 30.0, 300.0, 800.0))
+            Some(Rect::new(20.0, 30.0, 292.0, 800.0))
         );
-        assert_eq!(sv.content_size, Size::new(300.0, 800.0));
+        assert_eq!(sv.viewport_rect(), Rect::new(20.0, 30.0, 292.0, 200.0));
+        assert_eq!(sv.content_size, Size::new(292.0, 800.0));
     }
 
     #[test]
@@ -940,9 +988,50 @@ mod tests {
 
         assert_eq!(
             *last_layout.borrow(),
-            Some(Rect::new(20.0, 30.0, 900.0, 200.0))
+            Some(Rect::new(20.0, 30.0, 900.0, 192.0))
         );
-        assert_eq!(sv.content_size, Size::new(900.0, 200.0));
+        assert_eq!(sv.viewport_rect(), Rect::new(20.0, 30.0, 300.0, 192.0));
+        assert_eq!(sv.content_size, Size::new(900.0, 192.0));
+    }
+
+    #[test]
+    fn scroll_view_remeasures_wrapped_content_after_vertical_gutter_appears() {
+        struct WidthSensitiveChild {
+            id: WidgetId,
+            last_constraint_width: Rc<RefCell<Option<f32>>>,
+        }
+
+        impl Widget for WidthSensitiveChild {
+            fn id(&self) -> WidgetId {
+                self.id
+            }
+
+            fn measure(&self, constraint: LayoutConstraint) -> Size {
+                *self.last_constraint_width.borrow_mut() = Some(constraint.max.width);
+                Size::new(constraint.max.width, 320.0)
+            }
+
+            fn layout(&mut self, _bounds: Rect) {}
+
+            fn event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+                EventResult::Ignored
+            }
+
+            fn paint(&self, _ctx: &mut PaintContext) {}
+        }
+
+        let last_constraint_width = Rc::new(RefCell::new(None));
+        let child = WidthSensitiveChild {
+            id: WidgetId::new(),
+            last_constraint_width: Rc::clone(&last_constraint_width),
+        };
+        let mut sv = ScrollView::new(Some(Box::new(child)));
+
+        sv.layout(Rect::new(0.0, 0.0, 120.0, 80.0));
+
+        assert_eq!(sv.viewport_rect(), Rect::new(0.0, 0.0, 112.0, 80.0));
+        assert_eq!(*last_constraint_width.borrow(), Some(112.0));
+        assert_eq!(sv.content_size, Size::new(112.0, 320.0));
     }
 
     #[test]
@@ -1025,7 +1114,7 @@ mod tests {
         assert_eq!(sv.scroll_offset().y, 0.0);
         assert_eq!(
             *last_layout.borrow(),
-            Some(Rect::new(-20.0, 30.0, 800.0, 200.0))
+            Some(Rect::new(-20.0, 30.0, 800.0, 192.0))
         );
         assert!(ctx.requests.repaint);
     }
@@ -1167,7 +1256,7 @@ mod tests {
         sv.layout(Rect::new(20.0, 30.0, 300.0, 300.0));
         assert_eq!(
             *last_layout.borrow(),
-            Some(Rect::new(20.0, 30.0, 300.0, 800.0))
+            Some(Rect::new(20.0, 30.0, 292.0, 800.0))
         );
 
         let mut f = DummyFocus;
@@ -1185,7 +1274,7 @@ mod tests {
         );
         assert_eq!(
             *last_layout.borrow(),
-            Some(Rect::new(20.0, -10.0, 300.0, 800.0))
+            Some(Rect::new(20.0, -10.0, 292.0, 800.0))
         );
         sv.event(
             &UiEvent::MouseDown {
