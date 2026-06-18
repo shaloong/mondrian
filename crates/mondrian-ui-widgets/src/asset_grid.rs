@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::paint::{color_with_alpha, mix_color, paint_focus_ring, soft_border};
+use crate::text_metrics::measure_single_line;
 use crate::vector_icon::VectorIcon;
 use crate::ContextMenu;
 use crate::MenuItem;
@@ -80,7 +81,7 @@ pub struct AssetGridItem {
     pub id: String,
     pub title: String,
     pub subtitle: String,
-    pub badge: Option<String>,
+    pub badges: Vec<String>,
     pub accent: Color,
     pub icon: Option<VectorIcon>,
     pub thumbnail: Option<RasterImage>,
@@ -100,7 +101,7 @@ impl AssetGridItem {
             id: id.into(),
             title: title.into(),
             subtitle: String::new(),
-            badge: None,
+            badges: Vec::new(),
             accent,
             icon: None,
             thumbnail: None,
@@ -120,9 +121,15 @@ impl AssetGridItem {
         self
     }
 
-    /// Set a compact kind/status badge.
+    /// Append a compact kind/status badge.
     pub fn with_badge(mut self, badge: impl Into<String>) -> Self {
-        self.badge = Some(badge.into());
+        self.badges.push(badge.into());
+        self
+    }
+
+    /// Set all compact kind/status badges.
+    pub fn with_badges(mut self, badges: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.badges = badges.into_iter().map(Into::into).collect();
         self
     }
 
@@ -509,7 +516,7 @@ impl AssetGrid {
         }
         item.title.to_lowercase().contains(query)
             || item.subtitle.to_lowercase().contains(query)
-            || item.badge.as_ref().is_some_and(|badge| badge.to_lowercase().contains(query))
+            || item.badges.iter().any(|badge| badge.to_lowercase().contains(query))
     }
 
     fn item_matches_filter(&self, item: &AssetGridItem) -> bool {
@@ -1014,6 +1021,46 @@ impl AssetGrid {
         }
     }
 
+    fn paint_badges(
+        &self,
+        ctx: &mut PaintContext,
+        item: &AssetGridItem,
+        preview: Rect,
+        text_color: Color,
+    ) {
+        if item.badges.is_empty() {
+            return;
+        }
+        let font_size = ctx.theme.typography.small.font_size;
+        let min_x = preview.x + 6.0;
+        let mut x = preview.x + preview.width - 8.0;
+        let max_badge_width = (preview.width - 12.0).max(24.0);
+        for badge in item.badges.iter().rev() {
+            let text_width = measure_single_line(badge, font_size).0;
+            let desired_width = (text_width + 12.0).clamp(24.0, max_badge_width);
+            let available_width = x - min_x;
+            if available_width < 22.0 {
+                break;
+            }
+            let badge_width = desired_width.min(available_width);
+            let badge_rect = Rect::new(x - badge_width, preview.y + 6.0, badge_width, 18.0);
+            ctx.encoder.draw_rect(
+                badge_rect,
+                color_with_alpha(ctx.theme.colors.background, 0.56),
+                5.0,
+            );
+            ctx.push_clip(badge_rect.inset(4.0, 1.0));
+            ctx.encoder.draw_text(
+                badge,
+                font_size,
+                snap_point(Point::new(badge_rect.x + 6.0, badge_rect.y + 3.0)),
+                text_color,
+            );
+            ctx.pop_clip();
+            x = badge_rect.x - 4.0;
+        }
+    }
+
     fn paint_empty_state(&self, ctx: &mut PaintContext) {
         let colors = &ctx.theme.colors;
         let center = self.viewport.center();
@@ -1145,24 +1192,7 @@ impl AssetGrid {
                 }
             }
         }
-        if let Some(badge) = &item.badge {
-            let badge_rect = Rect::new(
-                preview.x + preview.width - 44.0,
-                preview.y + 6.0,
-                36.0,
-                18.0,
-            );
-            ctx.encoder
-                .draw_rect(badge_rect, color_with_alpha(colors.background, 0.56), 5.0);
-            ctx.push_clip(badge_rect.inset(4.0, 1.0));
-            ctx.encoder.draw_text(
-                badge,
-                ctx.theme.typography.small.font_size,
-                snap_point(Point::new(badge_rect.x + 6.0, badge_rect.y + 3.0)),
-                text_color,
-            );
-            ctx.pop_clip();
-        }
+        self.paint_badges(ctx, item, preview, text_color);
 
         let text_clip = Rect::new(
             rect.x + 8.0,
@@ -2005,6 +2035,46 @@ mod tests {
 
         assert!(encoder.raster_images.is_empty());
         assert!(encoder.rects.len() >= 3);
+    }
+
+    #[test]
+    fn multiple_badges_are_searchable_and_paint_inside_preview() {
+        let grid = AssetGrid::new(
+            "Assets",
+            vec![item("clip-a", "Clip A").with_badges(["VID", "OFFLINE"])],
+        );
+        assert!(AssetGrid::item_matches_query(&grid.items[0], "offline"));
+
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 320.0, 240.0),
+        };
+        let card = Rect::new(20.0, 30.0, 158.0, 118.0);
+        let preview = Rect::new(
+            card.x + 6.0,
+            card.y + 6.0,
+            card.width - 12.0,
+            THUMBNAIL_HEIGHT,
+        );
+
+        grid.paint_card(&mut ctx, 0, card);
+
+        assert!(encoder.texts.iter().any(|text| text == "VID"));
+        assert!(encoder.texts.iter().any(|text| text == "OFFLINE"));
+        let badge_clips: Vec<Rect> = encoder
+            .clips
+            .iter()
+            .copied()
+            .filter(|rect| rect.y >= preview.y && rect.y < preview.y + 28.0)
+            .collect();
+        assert_eq!(badge_clips.len(), 2);
+        for clip in badge_clips {
+            assert!(preview.contains(Point::new(clip.x, clip.y)));
+            assert!(preview.contains(Point::new(clip.x + clip.width, clip.y + clip.height)));
+        }
     }
 
     #[test]

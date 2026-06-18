@@ -1430,6 +1430,8 @@ fn asset_grid_item_from_asset(
     let subtitle = asset.path.display().to_string();
     let thumbnail_state = thumbnails.map(|source| source.thumbnail_for_asset(&asset));
     let context_menu_items = asset_grid_asset_context_menu_items(&asset, proxy_mode);
+    let offline = asset_is_offline(&asset);
+    let proxied = proxy_mode && matches!(asset.kind, AssetKind::Video);
     let mut item = AssetGridItem::new(asset.id.to_string(), asset.name, accent)
         .with_subtitle(subtitle)
         .with_badge(badge)
@@ -1439,6 +1441,11 @@ fn asset_grid_item_from_asset(
         }))
         .with_context_menu(context_menu_items)
         .renamable(true);
+    if offline {
+        item = item.with_badge("OFFLINE");
+    } else if proxied {
+        item = item.with_badge("PROXY");
+    }
     if let Some(state) = thumbnail_state {
         item = match state {
             AssetThumbnailState::Unavailable => item,
@@ -3754,6 +3761,7 @@ mod tests {
             false,
         );
 
+        assert_eq!(item.badges, ["VID", "OFFLINE"]);
         assert_eq!(item.context_menu_items.len(), 4);
         assert_eq!(item.context_menu_items[0].label, "Reveal in File Manager");
         assert_eq!(item.context_menu_items[1].label, "Relink Media...");
@@ -3779,6 +3787,7 @@ mod tests {
         let item =
             asset_grid_item_from_asset(test_video_asset(asset_id, media_path.clone()), None, false);
 
+        assert_eq!(item.badges, ["VID"]);
         assert_eq!(item.context_menu_items.len(), 4);
         assert_eq!(item.context_menu_items[0].label, "Reveal in File Manager");
         assert_eq!(item.context_menu_items[1].label, "Enable Proxy Mode");
@@ -3795,6 +3804,7 @@ mod tests {
 
         let proxied =
             asset_grid_item_from_asset(test_video_asset(asset_id, media_path), None, true);
+        assert_eq!(proxied.badges, ["VID", "PROXY"]);
         assert_eq!(proxied.context_menu_items[1].label, "Disable Proxy Mode");
         let Action::Custom { payload, .. } = &proxied.context_menu_items[1].action else {
             panic!("expected proxy mode custom action");
@@ -4808,7 +4818,7 @@ mod tests {
         assert!(models.assets.demo_activate_prefix.is_none());
         let item = &models.assets.items[0];
         assert_eq!(item.title, "Brand Purple");
-        assert_eq!(item.badge.as_deref(), Some("CLR"));
+        assert_eq!(item.badges, ["CLR"]);
         assert!(item.icon.is_some());
         assert!(item.select_action.is_none());
         assert_eq!(item.drag_payload, Some(DragPayload::Asset(asset_id)));
@@ -4942,7 +4952,7 @@ mod tests {
         assert_eq!(folder.id, format!("folder:{folder_id}"));
         assert_eq!(folder.title, "Rushes");
         assert_eq!(folder.subtitle, "Folder · 1 item");
-        assert_eq!(folder.badge.as_deref(), Some("BIN"));
+        assert_eq!(folder.badges, ["BIN"]);
         assert!(folder.icon.is_some());
         assert_eq!(
             folder.drag_payload,
@@ -4972,7 +4982,7 @@ mod tests {
 
         let asset = &models.assets.items[1];
         assert_eq!(asset.title, "Root Adjustment");
-        assert_eq!(asset.badge.as_deref(), Some("ADJ"));
+        assert_eq!(asset.badges, ["ADJ"]);
         assert_eq!(asset.drag_payload, Some(DragPayload::Asset(root_asset_id)));
         assert!(
             !models.assets.items.iter().any(|item| item.title == "Nested"),
