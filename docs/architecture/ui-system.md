@@ -542,11 +542,16 @@ and linear texture filtering behave like browser/native UI renderers instead of
 rounding designer-authored geometry into visibly rough edges.
 
 `ScrollView` defaults to vertical-only scrolling so inspector/property panels
-continue to wrap and measure against their panel width. Components that truly
-need overflow in the other direction must opt into `ScrollAxes::Horizontal` or
-`ScrollAxes::Both`; horizontal scrolling then uses Shift+wheel and a draggable
-bottom scrollbar. Dual-axis scrollbars reserve the bottom-right corner from one
-another, but remain overlay affordances and do not reserve child layout width.
+continue to wrap and measure against their panel width. Scroll content fills the
+viewport on the non-scrolling axis: vertical views lay the child out at viewport
+width, horizontal views at viewport height, and dual-axis views clamp each axis
+to at least the viewport size. This avoids narrow natural-size children causing
+unstable text wrapping, clipping, or hit-test geometry inside panels.
+Components that truly need overflow in the other direction must opt into
+`ScrollAxes::Horizontal` or `ScrollAxes::Both`; horizontal scrolling then uses
+Shift+wheel and a draggable bottom scrollbar. Dual-axis scrollbars reserve the
+bottom-right corner from one another, but remain overlay affordances and do not
+reserve child layout width.
 Thumb drags request pointer capture, map thumb-track movement back to content
 scroll offset, and release capture on mouse up. Clicking the scrollbar track
 outside the thumb pages the viewport by one visible span. Compound widgets that

@@ -145,6 +145,22 @@ impl ScrollView {
         self.scroll_offset.y = self.scroll_offset.y.clamp(0.0, self.max_scroll_y());
     }
 
+    fn normalized_content_size(&self, measured: Size) -> Size {
+        let viewport = Size::new(self.bounds.width.max(0.0), self.bounds.height.max(0.0));
+        Size::new(
+            if self.axes.horizontal() {
+                measured.width.max(viewport.width)
+            } else {
+                viewport.width
+            },
+            if self.axes.vertical() {
+                measured.height.max(viewport.height)
+            } else {
+                viewport.height
+            },
+        )
+    }
+
     fn set_scroll_x(&mut self, x: f32) -> bool {
         let old = self.scroll_offset.x;
         self.scroll_offset.x = x;
@@ -386,7 +402,7 @@ impl Widget for ScrollView {
                     },
                 ),
             });
-            self.content_size = measured;
+            self.content_size = self.normalized_content_size(measured);
             self.clamp_scroll_offset();
             self.layout_child();
         }
@@ -771,6 +787,48 @@ mod tests {
     }
 
     #[test]
+    fn vertical_scroll_view_lays_out_child_to_fill_viewport_width() {
+        let last_mouse_down = Rc::new(RefCell::new(None));
+        let last_layout = Rc::new(RefCell::new(None));
+        let child = RecordingChild {
+            id: WidgetId::new(),
+            preferred: Size::new(40.0, 800.0),
+            last_mouse_down,
+            last_layout: Rc::clone(&last_layout),
+        };
+        let mut sv = ScrollView::new(Some(Box::new(child)));
+
+        sv.layout(Rect::new(20.0, 30.0, 300.0, 200.0));
+
+        assert_eq!(
+            *last_layout.borrow(),
+            Some(Rect::new(20.0, 30.0, 300.0, 800.0))
+        );
+        assert_eq!(sv.content_size, Size::new(300.0, 800.0));
+    }
+
+    #[test]
+    fn horizontal_scroll_view_lays_out_child_to_fill_viewport_height() {
+        let last_mouse_down = Rc::new(RefCell::new(None));
+        let last_layout = Rc::new(RefCell::new(None));
+        let child = RecordingChild {
+            id: WidgetId::new(),
+            preferred: Size::new(900.0, 40.0),
+            last_mouse_down,
+            last_layout: Rc::clone(&last_layout),
+        };
+        let mut sv = ScrollView::new(Some(Box::new(child))).with_axes(ScrollAxes::Horizontal);
+
+        sv.layout(Rect::new(20.0, 30.0, 300.0, 200.0));
+
+        assert_eq!(
+            *last_layout.borrow(),
+            Some(Rect::new(20.0, 30.0, 900.0, 200.0))
+        );
+        assert_eq!(sv.content_size, Size::new(900.0, 200.0));
+    }
+
+    #[test]
     fn scroll_view_mouse_wheel_updates_offset() {
         let child = Spacer::new(200.0, 800.0);
         let mut sv = ScrollView::new(Some(Box::new(child)));
@@ -992,7 +1050,7 @@ mod tests {
         sv.layout(Rect::new(20.0, 30.0, 300.0, 300.0));
         assert_eq!(
             *last_layout.borrow(),
-            Some(Rect::new(20.0, 30.0, 200.0, 800.0))
+            Some(Rect::new(20.0, 30.0, 300.0, 800.0))
         );
 
         let mut f = DummyFocus;
@@ -1010,7 +1068,7 @@ mod tests {
         );
         assert_eq!(
             *last_layout.borrow(),
-            Some(Rect::new(20.0, -10.0, 200.0, 800.0))
+            Some(Rect::new(20.0, -10.0, 300.0, 800.0))
         );
         sv.event(
             &UiEvent::MouseDown {
