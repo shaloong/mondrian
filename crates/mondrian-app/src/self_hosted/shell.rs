@@ -35,7 +35,9 @@ use crate::self_hosted::modal::ShellModal;
 use crate::self_hosted::new_project_dialog::{
     default_project_file_name, SelfHostedNewProjectDraft,
 };
-use crate::self_hosted::panels::{build_dock_tree_for_preset, SelfHostedPanelModels};
+use crate::self_hosted::panels::{
+    build_dock_tree_for_preset, AssetThumbnailSource, SelfHostedPanelModels,
+};
 use crate::self_hosted::preferences_dialog::{PreferencesDialogTab, SelfHostedPreferencesModel};
 use crate::self_hosted::preferences_store::SelfHostedPreferences;
 use crate::self_hosted::title_bar::{TitleBar, TITLE_BAR_HEIGHT};
@@ -291,12 +293,24 @@ impl SelfHostedAppRoot {
         state: &AppState,
         preferences: &SelfHostedPreferences,
     ) -> Self {
+        Self::from_app_state_with_preferences_and_thumbnails(state, preferences, None)
+    }
+
+    /// Build a root widget from app state, preferences, and an optional asset
+    /// thumbnail source.
+    pub fn from_app_state_with_preferences_and_thumbnails(
+        state: &AppState,
+        preferences: &SelfHostedPreferences,
+        thumbnails: Option<&dyn AssetThumbnailSource>,
+    ) -> Self {
         Self::new_with_preferences(
             TitleBar::new(
                 window_title_for_app_state(state),
                 MenuBar::for_app_state(state),
             ),
-            SelfHostedPanelModels::from_app_state(state),
+            SelfHostedPanelModels::from_app_state_with_asset_folder_and_thumbnails(
+                state, None, thumbnails,
+            ),
             SelfHostedPreferencesModel::from_app_state(
                 state,
                 preferences.workspace_preset,
@@ -426,14 +440,28 @@ impl SelfHostedAppRoot {
         state: &AppState,
         preferences: &SelfHostedPreferences,
     ) {
+        self.refresh_from_app_state_with_preferences_and_thumbnails(state, preferences, None);
+    }
+
+    /// Refresh panel contents and preferences with an optional asset thumbnail
+    /// source.
+    pub fn refresh_from_app_state_with_preferences_and_thumbnails(
+        &mut self,
+        state: &AppState,
+        preferences: &SelfHostedPreferences,
+        thumbnails: Option<&dyn AssetThumbnailSource>,
+    ) {
         self.title_bar = TitleBar::new(
             window_title_for_app_state(state),
             MenuBar::for_app_state(state),
         );
-        self.set_models(SelfHostedPanelModels::from_app_state_with_asset_folder(
-            state,
-            self.asset_folder_id.as_deref(),
-        ));
+        self.set_models(
+            SelfHostedPanelModels::from_app_state_with_asset_folder_and_thumbnails(
+                state,
+                self.asset_folder_id.as_deref(),
+                thumbnails,
+            ),
+        );
         let preferences_model = SelfHostedPreferencesModel::from_app_state(
             state,
             self.workspace_preset,

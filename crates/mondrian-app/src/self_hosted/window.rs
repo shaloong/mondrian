@@ -417,6 +417,10 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
 
             Event::AboutToWait => {
                 ui_runtime.drive_timers(&window, &mut router, elwt);
+                if host.poll_background_tasks(current_bounds.get()) {
+                    window.request_redraw();
+                    elwt.set_control_flow(ControlFlow::Poll);
+                }
                 if pending_initial_redraw {
                     window.request_redraw();
                     elwt.set_control_flow(ControlFlow::Poll);

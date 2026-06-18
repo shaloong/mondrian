@@ -25,6 +25,7 @@ use crate::app::ui_actions::{
 };
 use crate::app::{discover_crash_recovery_candidates, AppState, CrashRecoveryCandidate};
 use crate::self_hosted::action_queue::PendingUiActions;
+use crate::self_hosted::asset_thumbnails::AssetThumbnailCache;
 use crate::self_hosted::menu_bar::app_state_action_enabled;
 use crate::self_hosted::preferences_store::{
     load_self_hosted_preferences, persist_self_hosted_preferences_to, self_hosted_preferences_path,
@@ -71,6 +72,7 @@ pub struct SelfHostedUiHost {
     preferences: SelfHostedPreferences,
     preferences_path: PathBuf,
     recovery_candidates: Vec<CrashRecoveryCandidate>,
+    asset_thumbnails: AssetThumbnailCache,
     mode: SelfHostedUiMode,
     ui_dirty: Cell<bool>,
 }
@@ -92,7 +94,12 @@ impl SelfHostedUiHost {
         preferences_path: PathBuf,
     ) -> Self {
         set_theme_preset(preferences.theme_preset);
-        let root = SelfHostedAppRoot::from_app_state_with_preferences(&app_state, &preferences);
+        let asset_thumbnails = AssetThumbnailCache::new();
+        let root = SelfHostedAppRoot::from_app_state_with_preferences_and_thumbnails(
+            &app_state,
+            &preferences,
+            Some(&asset_thumbnails),
+        );
         let mode = if app_state.has_open_project() {
             SelfHostedUiMode::Workspace
         } else {
@@ -111,6 +118,7 @@ impl SelfHostedUiHost {
             preferences,
             preferences_path,
             recovery_candidates,
+            asset_thumbnails,
             mode,
             ui_dirty: Cell::new(false),
         }
@@ -169,10 +177,24 @@ impl SelfHostedUiHost {
             return;
         }
         self.normalize_asset_folder_selection();
-        self.root
-            .refresh_from_app_state_with_preferences(&self.app_state.borrow(), &self.preferences);
+        self.root.refresh_from_app_state_with_preferences_and_thumbnails(
+            &self.app_state.borrow(),
+            &self.preferences,
+            Some(&self.asset_thumbnails),
+        );
         self.sync_mode_from_app_state(bounds);
         TreeWalker::layout(self.active_root_mut(), bounds);
+    }
+
+    /// Poll background host tasks. Returns true when a repaint was requested by
+    /// refreshed model data.
+    pub fn poll_background_tasks(&mut self, bounds: Rect) -> bool {
+        if !self.asset_thumbnails.poll_finished() {
+            return false;
+        }
+        self.mark_dirty();
+        self.refresh_if_dirty(bounds);
+        true
     }
 
     /// Drain queued widget actions through shell-local handling and `AppState`.
@@ -267,9 +289,10 @@ impl SelfHostedUiHost {
         };
         if self.mode != next {
             self.mode = next;
-            self.root.refresh_from_app_state_with_preferences(
+            self.root.refresh_from_app_state_with_preferences_and_thumbnails(
                 &self.app_state.borrow(),
                 &self.preferences,
+                Some(&self.asset_thumbnails),
             );
             TreeWalker::layout(self.active_root_mut(), bounds);
         }
@@ -410,9 +433,10 @@ impl SelfHostedUiHost {
                         .borrow_mut()
                         .set_status_hint(format!("Preferences could not be saved: {err}"), true);
                 }
-                self.root.refresh_from_app_state_with_preferences(
+                self.root.refresh_from_app_state_with_preferences_and_thumbnails(
                     &self.app_state.borrow(),
                     &self.preferences,
+                    Some(&self.asset_thumbnails),
                 );
                 TreeWalker::layout(&mut self.root, bounds);
                 true
@@ -436,9 +460,10 @@ impl SelfHostedUiHost {
             Ok(payload) => {
                 let folder_id = self.valid_asset_folder_id(payload.folder_id);
                 self.root.set_asset_folder_id(folder_id);
-                self.root.refresh_from_app_state_with_preferences(
+                self.root.refresh_from_app_state_with_preferences_and_thumbnails(
                     &self.app_state.borrow(),
                     &self.preferences,
+                    Some(&self.asset_thumbnails),
                 );
                 TreeWalker::layout(&mut self.root, bounds);
                 true

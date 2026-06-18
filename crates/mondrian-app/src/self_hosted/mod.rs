@@ -6,6 +6,7 @@
 
 pub mod about_dialog;
 pub mod action_queue;
+pub mod asset_thumbnails;
 pub mod host;
 pub mod icons;
 pub mod menu_bar;

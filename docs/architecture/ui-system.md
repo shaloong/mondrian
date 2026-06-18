@@ -789,7 +789,10 @@ filesystem metadata remain in app/media layers so the project media library
 does not become a filesystem browser or media decoder. The self-hosted panel
 adapter accepts thumbnails through `AssetThumbnailSource`, which lets a
 host-owned cache or future background thumbnail queue feed cards without adding
-media dependencies to `mondrian-ui-widgets`.
+media dependencies to `mondrian-ui-widgets`. `SelfHostedUiHost` owns the
+current `AssetThumbnailCache`: model refreshes request missing video thumbnails
+without blocking, a background worker decodes bounded RGBA frames through
+`mondrian-media`, and the window event loop polls completions before repainting.
 Asset cards expose `ui.assets.delete_asset` through their card-level context
 menu. `AppState` owns the actual deletion, including timeline cleanup for clips
 that referenced the asset, event publication, status hints, and project save.
