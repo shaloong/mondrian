@@ -786,7 +786,10 @@ an already-decoded RGBA payload with a stable atlas key; `AssetGrid` only
 validates dimensions, clips it to the card preview region, and forwards it to
 the renderer. Asset discovery, video-frame decoding, cache invalidation, and
 filesystem metadata remain in app/media layers so the project media library
-does not become a filesystem browser or media decoder.
+does not become a filesystem browser or media decoder. The self-hosted panel
+adapter accepts thumbnails through `AssetThumbnailSource`, which lets a
+host-owned cache or future background thumbnail queue feed cards without adding
+media dependencies to `mondrian-ui-widgets`.
 Asset cards expose `ui.assets.delete_asset` through their card-level context
 menu. `AppState` owns the actual deletion, including timeline cleanup for clips
 that referenced the asset, event publication, status hints, and project save.

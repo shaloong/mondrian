@@ -32,7 +32,7 @@ use mondrian_ui_widgets::{
     AssetGrid, AssetGridItem, Checkbox, ColorPickerAreaMode, ColorPickerTrigger, CurveEditor,
     CurvePoint, DockPanel, Dropdown, FlexChild, FlexContainer, Label, MenuItem, NodeGraphEdge,
     NodeGraphNode, NodeGraphView, PanelList, PanelListItem, PropertyPanel, PropertyRow,
-    PropertySection, ScrollView, Slider, TextInput, TimelineAssetDrop, TimelineClip,
+    PropertySection, RasterImage, ScrollView, Slider, TextInput, TimelineAssetDrop, TimelineClip,
     TimelineClipMove, TimelineClipRef, TimelineClipTrim, TimelineEditCommand, TimelineTrack,
     TimelineTrackControl, TimelineTrackMove, TimelineTrackRef, TimelineTrimEdge, TimelineView,
     ViewerFrameImage, ViewerSurface,
@@ -69,6 +69,17 @@ use crate::app::ui_actions::{
 use crate::app::{AppState, SelectedClipRef};
 use crate::self_hosted::icons::AppIcon;
 
+/// Supplies already-decoded thumbnails for asset-grid cards.
+///
+/// Implementations may cache, schedule background work, or return `None` while
+/// a thumbnail is unavailable. The panel adapter stays read-only and never
+/// decodes media directly.
+pub trait AssetThumbnailSource {
+    /// Return a render-ready thumbnail for an asset, if one is already
+    /// available.
+    fn thumbnail_for_asset(&self, asset: &AssetRecord) -> Option<RasterImage>;
+}
+
 /// Complete set of view models needed by the self-hosted panel shell.
 #[derive(Debug, Clone)]
 pub struct SelfHostedPanelModels {
@@ -95,10 +106,20 @@ impl SelfHostedPanelModels {
         state: &AppState,
         asset_folder_id: Option<&str>,
     ) -> Self {
+        Self::from_app_state_with_asset_folder_and_thumbnails(state, asset_folder_id, None)
+    }
+
+    /// Snapshot app state with an optional thumbnail source for asset cards.
+    pub fn from_app_state_with_asset_folder_and_thumbnails(
+        state: &AppState,
+        asset_folder_id: Option<&str>,
+        thumbnails: Option<&dyn AssetThumbnailSource>,
+    ) -> Self {
         Self {
-            assets: AssetGridModel::from_asset_library_in_folder(
+            assets: AssetGridModel::from_asset_library_in_folder_with_thumbnails(
                 state.asset_library.as_deref(),
                 asset_folder_id,
+                thumbnails,
             ),
             effects: PanelListModel::from_app_effect_registry(state),
             viewer: ViewerPanelModel::from_app_state(state),
@@ -244,6 +265,16 @@ impl AssetGridModel {
         library: Option<&AssetLibrary>,
         current_folder_id: Option<&str>,
     ) -> Self {
+        Self::from_asset_library_in_folder_with_thumbnails(library, current_folder_id, None)
+    }
+
+    /// Build the project asset browser for a shell-local folder selection,
+    /// optionally attaching already-decoded thumbnails.
+    pub fn from_asset_library_in_folder_with_thumbnails(
+        library: Option<&AssetLibrary>,
+        current_folder_id: Option<&str>,
+        thumbnails: Option<&dyn AssetThumbnailSource>,
+    ) -> Self {
         let colors = current_theme().colors.clone();
         let Some(library) = library else {
             return AssetGridModel::new(
@@ -301,7 +332,8 @@ impl AssetGridModel {
             .map(|folder| format!("Project library / {}", folder.name))
             .unwrap_or_else(|| "Project library".to_owned());
         let current_folder_id = current_folder.map(|folder| folder.id.clone());
-        let mut items = asset_grid_items_from_library_records(&folders, assets, current_folder);
+        let mut items =
+            asset_grid_items_from_library_records(&folders, assets, current_folder, thumbnails);
         if current_folder.is_some() && items.len() == 1 {
             items.push(asset_empty_item(
                 "asset-folder-empty",
@@ -1365,34 +1397,40 @@ fn default_opacity_curve(opacity: f32) -> Vec<CurvePoint> {
     vec![CurvePoint::new(0.0, opacity), CurvePoint::new(1.0, opacity)]
 }
 
-fn asset_grid_item_from_asset(asset: AssetRecord) -> AssetGridItem {
+fn asset_grid_item_from_asset(
+    asset: AssetRecord,
+    thumbnails: Option<&dyn AssetThumbnailSource>,
+) -> AssetGridItem {
     let badge = asset_kind_badge(&asset.kind);
     let accent = asset_kind_accent(&asset.kind);
     let icon = asset_kind_icon(&asset.kind);
     let subtitle = asset.path.display().to_string();
-    with_asset_icon(
-        AssetGridItem::new(asset.id.to_string(), asset.name, accent)
-            .with_subtitle(subtitle)
-            .with_badge(badge)
-            .with_drag_payload(DragPayload::Asset(asset.id))
-            .with_activate_action(assets_prepare_drag_action(AssetsPrepareDragPayload {
-                asset_id: asset.id,
-            }))
-            .with_context_menu(vec![asset_menu_item(
-                MenuItem::new(
-                    "Delete asset",
-                    assets_delete_asset_action(AssetsDeleteAssetPayload { asset_id: asset.id }),
-                ),
-                AppIcon::Trash,
-            )]),
-        icon,
-    )
+    let thumbnail = thumbnails.and_then(|source| source.thumbnail_for_asset(&asset));
+    let mut item = AssetGridItem::new(asset.id.to_string(), asset.name, accent)
+        .with_subtitle(subtitle)
+        .with_badge(badge)
+        .with_drag_payload(DragPayload::Asset(asset.id))
+        .with_activate_action(assets_prepare_drag_action(AssetsPrepareDragPayload {
+            asset_id: asset.id,
+        }))
+        .with_context_menu(vec![asset_menu_item(
+            MenuItem::new(
+                "Delete asset",
+                assets_delete_asset_action(AssetsDeleteAssetPayload { asset_id: asset.id }),
+            ),
+            AppIcon::Trash,
+        )]);
+    if let Some(thumbnail) = thumbnail {
+        item = item.with_thumbnail(thumbnail);
+    }
+    with_asset_icon(item, icon)
 }
 
 fn asset_grid_items_from_library_records(
     folders: &[FolderRecord],
     assets: Vec<AssetRecord>,
     current_folder: Option<&FolderRecord>,
+    thumbnails: Option<&dyn AssetThumbnailSource>,
 ) -> Vec<AssetGridItem> {
     let mut items =
         Vec::with_capacity(folders.len() + assets.len() + usize::from(current_folder.is_some()));
@@ -1411,7 +1449,7 @@ fn asset_grid_items_from_library_records(
         assets
             .into_iter()
             .filter(|asset| asset.folder_id.as_deref() == parent_id)
-            .map(asset_grid_item_from_asset),
+            .map(|asset| asset_grid_item_from_asset(asset, thumbnails)),
     );
     items
 }
@@ -4306,6 +4344,42 @@ mod tests {
         let payload: AssetsDeleteAssetPayload =
             serde_json::from_value(payload.clone()).expect("asset delete payload");
         assert_eq!(payload.asset_id, asset_id);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn asset_panel_model_attaches_available_thumbnails_to_asset_cards() {
+        struct TestThumbnails;
+
+        impl AssetThumbnailSource for TestThumbnails {
+            fn thumbnail_for_asset(&self, asset: &AssetRecord) -> Option<RasterImage> {
+                RasterImage::new(
+                    format!("test-thumb:{}", asset.id),
+                    2,
+                    2,
+                    vec![0, 0, 0, 255, 80, 0, 0, 255, 0, 80, 0, 255, 0, 0, 80, 255],
+                )
+            }
+        }
+
+        let root = unique_temp_dir("asset-panel-thumbnails");
+        let library = AssetLibrary::open(root.clone()).expect("open asset library");
+        let asset_id = library
+            .create_solid_color_asset(Some("Brand Purple"))
+            .expect("create solid color asset");
+        let mut state = AppState::new();
+        state.asset_library = Some(library);
+
+        let models = SelfHostedPanelModels::from_app_state_with_asset_folder_and_thumbnails(
+            &state,
+            None,
+            Some(&TestThumbnails),
+        );
+
+        let thumbnail = models.assets.items[0].thumbnail.as_ref().expect("thumbnail");
+        assert_eq!(thumbnail.key, format!("test-thumb:{asset_id}"));
+        assert_eq!((thumbnail.width, thumbnail.height), (2, 2));
 
         let _ = std::fs::remove_dir_all(root);
     }
