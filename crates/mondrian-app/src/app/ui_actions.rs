@@ -80,6 +80,8 @@ pub const ASSETS_IMPORT_FILES: &str = "import_files";
 pub const ASSETS_DELETE_ASSET: &str = "delete_asset";
 /// Action name for deleting one folder/bin from the library.
 pub const ASSETS_DELETE_FOLDER: &str = "delete_folder";
+/// Action name for deleting multiple asset-browser items together.
+pub const ASSETS_DELETE_SELECTION: &str = "delete_selection";
 /// Action name for moving one asset between folders.
 pub const ASSETS_MOVE_ASSET: &str = "move_asset";
 /// Action name for moving one folder/bin between parents.
@@ -442,6 +444,15 @@ pub struct AssetsDeleteFolderPayload {
     pub folder_id: String,
 }
 
+/// Delete multiple asset-library items.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetsDeleteSelectionPayload {
+    /// Asset ids to delete.
+    pub asset_ids: Vec<AssetId>,
+    /// Folder ids to delete.
+    pub folder_ids: Vec<String>,
+}
+
 /// Move one asset-library item into a folder, or to the root view.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssetsMoveAssetPayload {
@@ -678,6 +689,10 @@ pub fn assets_delete_asset_action(payload: AssetsDeleteAssetPayload) -> Action {
 /// Build an action that deletes one folder from the library.
 pub fn assets_delete_folder_action(payload: AssetsDeleteFolderPayload) -> Action {
     custom_assets_action(ASSETS_DELETE_FOLDER, payload)
+}
+
+pub fn assets_delete_selection_action(payload: AssetsDeleteSelectionPayload) -> Action {
+    custom_assets_action(ASSETS_DELETE_SELECTION, payload)
 }
 
 /// Build an action that moves one asset to another folder.

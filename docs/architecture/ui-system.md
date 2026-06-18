@@ -816,6 +816,11 @@ selected folder subtree, unlinks assets assigned to any deleted folder, and
 publishes an asset-library reload through `AppState`. The self-hosted host then
 revalidates its shell-local browser folder id during refresh and returns to the
 root asset view if the current bin no longer exists.
+When multiple asset/folder cards are selected, `AssetGrid` asks the app adapter
+for a selection context menu. The self-hosted Assets adapter maps that menu to
+`ui.assets.delete_selection`, so bulk deletion keeps timeline cleanup, asset
+events, one library reload, project save, and status reporting in `AppState`
+rather than dispatching a burst of widget-owned single-item commands.
 Asset and folder cards can be dragged within the asset browser. Dropping an
 asset on a folder card emits `ui.assets.move_asset` with that folder as the
 target; dropping a folder on another folder emits `ui.assets.move_folder`.

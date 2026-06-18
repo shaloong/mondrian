@@ -42,6 +42,8 @@ pub type AssetGridAction = dyn Fn(usize, &AssetGridItem) -> Action;
 pub type AssetGridDropAction = dyn Fn(&DragPayload, Point) -> Option<Action>;
 /// Dynamic action factory for payloads dropped on one [`AssetGridItem`].
 pub type AssetGridItemDropAction = dyn Fn(&DragPayload, usize, &AssetGridItem) -> Option<Action>;
+/// Dynamic menu factory for the current asset-grid selection.
+pub type AssetGridSelectionMenu = dyn Fn(&[usize], &[&AssetGridItem]) -> Vec<MenuItem>;
 
 /// Local browser state for preserving an [`AssetGrid`] across model refreshes.
 #[derive(Debug, Clone, PartialEq)]
@@ -200,6 +202,7 @@ pub struct AssetGrid {
     columns: usize,
     card_width: f32,
     context_menu_items: Vec<MenuItem>,
+    selection_context_menu: Option<Box<AssetGridSelectionMenu>>,
     context_menu: Option<ContextMenu>,
     on_select: Option<Box<AssetGridAction>>,
     on_activate: Option<Box<AssetGridAction>>,
@@ -247,6 +250,7 @@ impl AssetGrid {
             columns: 1,
             card_width: CARD_TARGET_WIDTH,
             context_menu_items: Vec::new(),
+            selection_context_menu: None,
             context_menu: None,
             on_select: None,
             on_activate: None,
@@ -262,6 +266,15 @@ impl AssetGrid {
     /// navigation, and dismissal.
     pub fn with_context_menu(mut self, items: Vec<MenuItem>) -> Self {
         self.context_menu_items = items;
+        self
+    }
+
+    /// Attach a dynamic context menu for the current selection.
+    pub fn with_selection_context_menu(
+        mut self,
+        menu: impl Fn(&[usize], &[&AssetGridItem]) -> Vec<MenuItem> + 'static,
+    ) -> Self {
+        self.selection_context_menu = Some(Box::new(menu));
         self
     }
 
@@ -809,6 +822,19 @@ impl AssetGrid {
         ctx.request_repaint();
     }
 
+    fn selection_context_menu_items(&self) -> Vec<MenuItem> {
+        let Some(factory) = &self.selection_context_menu else {
+            return Vec::new();
+        };
+        let indices: Vec<usize> = self.selected_indices.iter().copied().collect();
+        let items: Vec<&AssetGridItem> =
+            indices.iter().filter_map(|index| self.items.get(*index)).collect();
+        if items.is_empty() {
+            return Vec::new();
+        }
+        factory(&indices, &items)
+    }
+
     fn card_rect_at_visible_position(&self, visible_position: usize) -> Rect {
         let columns = self.columns.max(1);
         let col = visible_position % columns;
@@ -1077,6 +1103,14 @@ impl Widget for AssetGrid {
                 self.focus_visible = false;
                 if let Some(index) = self.index_at(*position) {
                     if self.is_enabled_index(index) {
+                        if self.selected_indices.contains(&index) && self.selected_indices.len() > 1
+                        {
+                            let items = self.selection_context_menu_items();
+                            if !items.is_empty() {
+                                self.open_context_menu(*position, items, ctx);
+                                return EventResult::Handled;
+                            }
+                        }
                         let items = self
                             .items
                             .get(index)
@@ -2098,6 +2132,81 @@ mod tests {
         );
 
         assert_eq!(actions.borrow().as_slice(), &[card_action]);
+    }
+
+    #[test]
+    fn right_click_multi_selection_uses_selection_context_menu() {
+        let selection_action = Action::DeleteSelection;
+        let single_action = Action::DeselectAll;
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![
+                item("asset-a", "Asset A")
+                    .with_context_menu(vec![MenuItem::new("Delete asset", single_action.clone())]),
+                item("asset-b", "Asset B")
+                    .with_context_menu(vec![MenuItem::new("Delete asset", single_action)]),
+            ],
+        )
+        .with_selection_context_menu(move |indices, _items| {
+            if indices.len() > 1 {
+                vec![MenuItem::new("Delete selected", selection_action.clone())]
+            } else {
+                Vec::new()
+            }
+        });
+        grid.layout(Rect::new(0.0, 0.0, 420.0, 260.0));
+        let first = grid.card_rect_for_index(0).expect("first").center();
+        let second = grid.card_rect_for_index(1).expect("second").center();
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let _ = grid.event(
+            &UiEvent::MouseDown {
+                position: first,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        let _ = grid.event(
+            &UiEvent::MouseDown {
+                position: second,
+                button: MouseButton::Left,
+                modifiers: Modifiers::ctrl(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(
+            grid.event(
+                &UiEvent::MouseDown {
+                    position: second,
+                    button: MouseButton::Right,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(actions.borrow().as_slice(), &[Action::DeleteSelection]);
     }
 
     #[test]

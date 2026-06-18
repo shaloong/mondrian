@@ -43,10 +43,10 @@ use crate::app::ui_actions::{
     app_shell_export_output_dialog_action, app_shell_import_media_dialog_action_with_target,
     assets_create_adjustment_layer_action, assets_create_folder_action,
     assets_create_solid_color_action, assets_delete_asset_action, assets_delete_folder_action,
-    assets_import_files_action, assets_move_asset_action, assets_move_folder_action,
-    assets_move_selection_action, assets_open_folder_action, assets_prepare_drag_action,
-    effects_add_to_clip_action, export_enqueue_action, export_set_draft_action,
-    inspector_remove_effect_action, inspector_select_effect_action,
+    assets_delete_selection_action, assets_import_files_action, assets_move_asset_action,
+    assets_move_folder_action, assets_move_selection_action, assets_open_folder_action,
+    assets_prepare_drag_action, effects_add_to_clip_action, export_enqueue_action,
+    export_set_draft_action, inspector_remove_effect_action, inspector_select_effect_action,
     inspector_set_clip_curve_action, inspector_set_clip_enabled_action,
     inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
     inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
@@ -54,18 +54,18 @@ use crate::app::ui_actions::{
     timeline_move_clip_action, timeline_move_track_action, timeline_seek_action,
     timeline_select_clip_action, timeline_set_track_control_action, timeline_trim_clip_action,
     AssetsCreateAssetPayload, AssetsCreateFolderPayload, AssetsDeleteAssetPayload,
-    AssetsDeleteFolderPayload, AssetsImportFilesPayload, AssetsMoveAssetPayload,
-    AssetsMoveFolderPayload, AssetsMoveSelectionPayload, AssetsOpenFolderPayload,
-    AssetsPrepareDragPayload, EffectsAddToClipPayload, ExportDraftUpdatePayload,
-    ExportEnqueuePayload, ExportOutputDialogPayload, ImportMediaDialogPayload,
-    InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
-    InspectorRemoveEffectPayload, InspectorSelectEffectPayload, InspectorSetClipCurvePayload,
-    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
-    InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
-    InspectorSetEffectPropertyPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
-    TimelineDropAssetPayload, TimelineMoveClipPayload, TimelineMoveTrackPayload,
-    TimelineSelectClipPayload, TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind,
-    TimelineTrimClipPayload, TimelineTrimPayloadEdge,
+    AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload, AssetsImportFilesPayload,
+    AssetsMoveAssetPayload, AssetsMoveFolderPayload, AssetsMoveSelectionPayload,
+    AssetsOpenFolderPayload, AssetsPrepareDragPayload, EffectsAddToClipPayload,
+    ExportDraftUpdatePayload, ExportEnqueuePayload, ExportOutputDialogPayload,
+    ImportMediaDialogPayload, InspectorClipRefPayload, InspectorClipTransformField,
+    InspectorCurvePointPayload, InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
+    InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
+    InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
+    InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload, TimelineAddTrackKind,
+    TimelineAddTrackPayload, TimelineDropAssetPayload, TimelineMoveClipPayload,
+    TimelineMoveTrackPayload, TimelineSelectClipPayload, TimelineSetTrackControlPayload,
+    TimelineTrackControlPayloadKind, TimelineTrimClipPayload, TimelineTrimPayloadEdge,
 };
 use crate::app::{AppState, SelectedClipRef};
 use crate::self_hosted::icons::AppIcon;
@@ -1728,7 +1728,8 @@ fn asset_grid(model: &AssetGridModel) -> AssetGrid {
             })
             .with_context_menu(asset_grid_context_menu_items(
                 model.current_folder_id.as_deref(),
-            ));
+            ))
+            .with_selection_context_menu(asset_grid_selection_context_menu_items);
     }
     #[cfg(test)]
     if let Some(prefix) = model.demo_activate_prefix.clone() {
@@ -1737,6 +1738,31 @@ fn asset_grid(model: &AssetGridModel) -> AssetGrid {
         });
     }
     grid
+}
+
+fn asset_grid_selection_context_menu_items(
+    _indices: &[usize],
+    items: &[&AssetGridItem],
+) -> Vec<MenuItem> {
+    let mut asset_ids = Vec::new();
+    let mut folder_ids = Vec::new();
+    for item in items {
+        match item.drag_payload.as_ref() {
+            Some(DragPayload::Asset(asset_id)) => asset_ids.push(*asset_id),
+            Some(DragPayload::AssetFolder(folder_id)) => folder_ids.push(folder_id.clone()),
+            _ => {}
+        }
+    }
+    if asset_ids.is_empty() && folder_ids.is_empty() {
+        return Vec::new();
+    }
+    vec![asset_menu_item(
+        MenuItem::new(
+            "Delete selected",
+            assets_delete_selection_action(AssetsDeleteSelectionPayload { asset_ids, folder_ids }),
+        ),
+        AppIcon::Trash,
+    )]
 }
 
 fn move_asset_selection_action(
@@ -2897,16 +2923,16 @@ mod tests {
     use super::*;
     use crate::app::ui_actions::{
         AssetsCreateAssetPayload, AssetsCreateFolderPayload, AssetsDeleteAssetPayload,
-        AssetsDeleteFolderPayload, AssetsImportFilesPayload, AssetsMoveAssetPayload,
-        AssetsMoveFolderPayload, AssetsMoveSelectionPayload, AssetsOpenFolderPayload,
-        ImportMediaDialogPayload, APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE,
-        ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR,
-        ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_IMPORT_FILES, ASSETS_MOVE_ASSET,
-        ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE, ASSETS_OPEN_FOLDER,
-        ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE,
-        INSPECTOR_SELECT_EFFECT, INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_EFFECT_PROPERTY,
-        TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
-        TIMELINE_SELECT_CLIP,
+        AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload, AssetsImportFilesPayload,
+        AssetsMoveAssetPayload, AssetsMoveFolderPayload, AssetsMoveSelectionPayload,
+        AssetsOpenFolderPayload, ImportMediaDialogPayload, APP_SHELL_IMPORT_MEDIA_DIALOG,
+        APP_SHELL_NAMESPACE, ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER,
+        ASSETS_CREATE_SOLID_COLOR, ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER,
+        ASSETS_DELETE_SELECTION, ASSETS_IMPORT_FILES, ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER,
+        ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE, ASSETS_OPEN_FOLDER, ASSETS_PREPARE_DRAG,
+        EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE, INSPECTOR_SELECT_EFFECT,
+        INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_EFFECT_PROPERTY, TIMELINE_ADD_TRACK,
+        TIMELINE_DROP_ASSET, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_SELECT_CLIP,
     };
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
@@ -3550,6 +3576,83 @@ mod tests {
         let payload: AssetsDeleteFolderPayload =
             serde_json::from_value(payload.clone()).expect("delete folder payload");
         assert_eq!(payload.folder_id, folder_id);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn assets_panel_multi_selection_context_menu_dispatches_delete_selection() {
+        let root = unique_temp_dir("asset-panel-delete-selection-menu");
+        let library = AssetLibrary::open(root.clone()).expect("open asset library");
+        let folder_id = library.create_folder("Rushes", None).expect("create folder");
+        let asset_id = library.create_solid_color_asset(Some("Temp Plate")).expect("create asset");
+        let mut state = AppState::new();
+        state.asset_library = Some(library);
+        let model = SelfHostedPanelModels::from_app_state(&state).assets;
+        let mut grid = asset_grid(&model);
+        grid.layout(Rect::new(0.0, 0.0, 520.0, 260.0));
+        let first = grid.card_rect_for_index(0).expect("first card").center();
+        let second = grid.card_rect_for_index(1).expect("second card").center();
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let _ = grid.event(
+            &UiEvent::MouseDown {
+                position: first,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        let _ = grid.event(
+            &UiEvent::MouseDown {
+                position: second,
+                button: MouseButton::Left,
+                modifiers: Modifiers::ctrl(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(
+            grid.event(
+                &UiEvent::MouseDown {
+                    position: second,
+                    button: MouseButton::Right,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        let actions = actions.borrow();
+        assert_eq!(actions.len(), 1);
+        let Action::Custom { namespace, name, payload } = &actions[0] else {
+            panic!("expected delete selection action");
+        };
+        assert_eq!(namespace, ASSETS_NAMESPACE);
+        assert_eq!(name, ASSETS_DELETE_SELECTION);
+        let payload: AssetsDeleteSelectionPayload =
+            serde_json::from_value(payload.clone()).expect("delete selection payload");
+        assert_eq!(payload.folder_ids, vec![folder_id]);
+        assert_eq!(payload.asset_ids, vec![asset_id]);
 
         let _ = std::fs::remove_dir_all(root);
     }
