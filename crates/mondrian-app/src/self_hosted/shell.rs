@@ -29,7 +29,7 @@ use crate::self_hosted::new_project_dialog::{
     default_project_file_name, SelfHostedNewProjectDraft,
 };
 use crate::self_hosted::panels::{build_dock_tree_for_preset, SelfHostedPanelModels};
-use crate::self_hosted::preferences_dialog::PreferencesDialogTab;
+use crate::self_hosted::preferences_dialog::{PreferencesDialogTab, SelfHostedPreferencesModel};
 use mondrian_core::{MondrianError, Result};
 
 /// Default file extension for Mondrian project containers.
@@ -205,6 +205,7 @@ pub struct SelfHostedAppRoot {
     menu_bar: MenuBar,
     dock: DockSplitter,
     models: SelfHostedPanelModels,
+    preferences_model: SelfHostedPreferencesModel,
     workspace_preset: WorkspacePreset,
     modal: Option<ShellModal>,
     bounds: Rect,
@@ -213,9 +214,10 @@ pub struct SelfHostedAppRoot {
 impl SelfHostedAppRoot {
     /// Build a root widget from the current application state snapshot.
     pub fn from_app_state(state: &AppState) -> Self {
-        Self::new(
+        Self::new_with_preferences(
             MenuBar::for_app_state(state),
             SelfHostedPanelModels::from_app_state(state),
+            SelfHostedPreferencesModel::from_app_state(state, WorkspacePreset::Editing),
             WorkspacePreset::Editing,
         )
     }
@@ -241,12 +243,27 @@ impl SelfHostedAppRoot {
         models: SelfHostedPanelModels,
         workspace_preset: WorkspacePreset,
     ) -> Self {
+        Self::new_with_preferences(
+            menu_bar,
+            models,
+            SelfHostedPreferencesModel::default(),
+            workspace_preset,
+        )
+    }
+
+    fn new_with_preferences(
+        menu_bar: MenuBar,
+        models: SelfHostedPanelModels,
+        preferences_model: SelfHostedPreferencesModel,
+        workspace_preset: WorkspacePreset,
+    ) -> Self {
         let dock = build_dock_tree_for_preset(models.clone(), workspace_preset);
         Self {
             id: WidgetId::new(),
             menu_bar,
             dock,
             models,
+            preferences_model,
             workspace_preset,
             modal: None,
             bounds: Rect::ZERO,
@@ -284,6 +301,12 @@ impl SelfHostedAppRoot {
     pub fn refresh_from_app_state(&mut self, state: &AppState) {
         self.menu_bar = MenuBar::for_app_state(state);
         self.set_models(SelfHostedPanelModels::from_app_state(state));
+        let preferences_model =
+            SelfHostedPreferencesModel::from_app_state(state, self.workspace_preset);
+        self.preferences_model = preferences_model.clone();
+        if let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_preferences_mut) {
+            dialog.set_model(preferences_model);
+        }
     }
 
     /// Activate a dock panel or grouped tab in the default self-hosted layout.
@@ -301,6 +324,7 @@ impl SelfHostedAppRoot {
     /// current shell models.
     pub fn switch_workspace(&mut self, preset: WorkspacePreset) {
         self.workspace_preset = preset;
+        self.preferences_model.workspace = preset.display_name().to_owned();
         self.dock = build_dock_tree_for_preset(self.models.clone(), preset);
         if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
             self.layout(self.bounds);
@@ -406,7 +430,7 @@ impl SelfHostedAppRoot {
             Action::Custom { namespace, name, .. }
                 if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_PREFERENCES =>
             {
-                self.modal = Some(ShellModal::preferences());
+                self.modal = Some(ShellModal::preferences(self.preferences_model()));
                 if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
                     self.layout(self.bounds);
                 }
@@ -422,7 +446,10 @@ impl SelfHostedAppRoot {
                 if let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_preferences_mut) {
                     dialog.set_active_tab(tab);
                 } else {
-                    self.modal = Some(ShellModal::preferences_with_tab(tab));
+                    self.modal = Some(ShellModal::preferences_with_tab(
+                        self.preferences_model(),
+                        tab,
+                    ));
                     if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
                         self.layout(self.bounds);
                     }
@@ -437,6 +464,10 @@ impl SelfHostedAppRoot {
             }
             action => try_resolve_app_shell_action(action, platform, current_project_path),
         }
+    }
+
+    fn preferences_model(&self) -> SelfHostedPreferencesModel {
+        self.preferences_model.clone()
     }
 }
 
@@ -1124,6 +1155,28 @@ mod tests {
             .and_then(ShellModal::as_preferences)
             .expect("preferences dialog");
         assert_eq!(dialog.active_tab(), PreferencesDialogTab::Shortcuts);
+    }
+
+    #[test]
+    fn app_root_refresh_updates_open_preferences_model() {
+        let platform = FakePlatform::default();
+        let mut root = SelfHostedAppRoot::demo();
+        root.handle_shell_action(app_shell_preferences_action(), &platform, None);
+
+        let mut state = AppState::new();
+        state.current_project_path = Some(PathBuf::from("E:/projects/live.mdp"));
+        state.sequence = Some(mondrian_timeline::sequence::Sequence::new("Live"));
+        state.auto_proxy_enabled = true;
+        root.refresh_from_app_state(&state);
+
+        let dialog = root
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_preferences)
+            .expect("preferences dialog");
+        assert!(dialog.model().project_status.contains("live.mdp"));
+        assert!(dialog.model().sequence_summary.contains("Live"));
+        assert_eq!(dialog.model().proxy_mode, "Enabled");
     }
 
     #[test]

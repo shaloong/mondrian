@@ -4,6 +4,8 @@
 //! deliberately depends on app-shell actions instead of legacy egui preference
 //! state so each preference can be migrated into a clean, typed boundary.
 
+use mondrian_editor_state::state::WorkspacePreset;
+use mondrian_export::preset::TimelineExportRange;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, Widget};
@@ -12,7 +14,9 @@ use mondrian_ui_widgets::{Button, DialogSurface, Label};
 use crate::app::ui_actions::{
     app_shell_close_modal_action, app_shell_preferences_tab_changed_action, PreferencesTabPayload,
 };
+use crate::app::AppState;
 use crate::self_hosted::shortcuts::default_shortcuts;
+use crate::self_hosted::window::{DEFAULT_SELF_HOSTED_LOG_FILTER, SELF_HOSTED_BACKGROUND_WORKERS};
 
 const CARD_MIN_WIDTH: f32 = 480.0;
 const CARD_WIDTH: f32 = 680.0;
@@ -29,6 +33,82 @@ const ROW_HEIGHT: f32 = 28.0;
 const BUTTON_WIDTH: f32 = 84.0;
 const BUTTON_HEIGHT: f32 = 32.0;
 const BUTTON_BOTTOM_INSET: f32 = 20.0;
+
+/// Read-only settings/status snapshot shown by the self-hosted preferences UI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelfHostedPreferencesModel {
+    pub project_status: String,
+    pub workspace: String,
+    pub sequence_summary: String,
+    pub proxy_mode: String,
+    pub audio_clock: String,
+    pub audio_sample_rate: String,
+    pub export_range: String,
+    pub export_output: String,
+    pub console_capture: String,
+    pub log_filter: String,
+    pub background_workers: String,
+}
+
+impl SelfHostedPreferencesModel {
+    /// Build the preferences model from the state actually owned by the
+    /// self-hosted product shell.
+    pub fn from_app_state(state: &AppState, workspace: WorkspacePreset) -> Self {
+        let project_status = state
+            .current_project_path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "No project open".to_owned());
+        let sequence_summary = state
+            .sequence
+            .as_ref()
+            .map(|sequence| {
+                format!(
+                    "{} · {}x{} · {} fps",
+                    sequence.name,
+                    sequence.settings.resolution.width,
+                    sequence.settings.resolution.height,
+                    sequence.settings.frame_rate
+                )
+            })
+            .unwrap_or_else(|| "No active sequence".to_owned());
+        Self {
+            project_status,
+            workspace: workspace.display_name().to_owned(),
+            sequence_summary,
+            proxy_mode: enabled_label(state.auto_proxy_enabled),
+            audio_clock: format!("{:?}", state.audio_sync.role),
+            audio_sample_rate: format!("{} Hz", state.audio_sample_rate),
+            export_range: export_range_label(state.export_draft.range).to_owned(),
+            export_output: if state.export_draft.output_path.trim().is_empty() {
+                "Not selected".to_owned()
+            } else {
+                state.export_draft.output_path.clone()
+            },
+            console_capture: "Enabled".to_owned(),
+            log_filter: format!("RUST_LOG / {DEFAULT_SELF_HOSTED_LOG_FILTER}"),
+            background_workers: SELF_HOSTED_BACKGROUND_WORKERS.to_string(),
+        }
+    }
+}
+
+impl Default for SelfHostedPreferencesModel {
+    fn default() -> Self {
+        Self {
+            project_status: "No project open".to_owned(),
+            workspace: WorkspacePreset::Editing.display_name().to_owned(),
+            sequence_summary: "No active sequence".to_owned(),
+            proxy_mode: enabled_label(false),
+            audio_clock: "AudioMaster".to_owned(),
+            audio_sample_rate: "48000 Hz".to_owned(),
+            export_range: export_range_label(TimelineExportRange::SequenceInOut).to_owned(),
+            export_output: "Not selected".to_owned(),
+            console_capture: "Enabled".to_owned(),
+            log_filter: format!("RUST_LOG / {DEFAULT_SELF_HOSTED_LOG_FILTER}"),
+            background_workers: SELF_HOSTED_BACKGROUND_WORKERS.to_string(),
+        }
+    }
+}
 
 /// Product preferences section shown by the self-hosted shell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +156,7 @@ impl From<PreferencesTabPayload> for PreferencesDialogTab {
 pub struct PreferencesDialog {
     id: WidgetId,
     active_tab: PreferencesDialogTab,
+    model: SelfHostedPreferencesModel,
     surface: DialogSurface,
     bounds: Rect,
     card: Rect,
@@ -89,11 +170,19 @@ pub struct PreferencesDialog {
 impl PreferencesDialog {
     /// Build the preferences dialog with the default General tab.
     pub fn new() -> Self {
-        Self::with_tab(PreferencesDialogTab::General)
+        Self::with_model(SelfHostedPreferencesModel::default())
     }
 
-    /// Build the preferences dialog with an explicit active tab.
-    pub fn with_tab(active_tab: PreferencesDialogTab) -> Self {
+    /// Build the preferences dialog from an explicit model.
+    pub fn with_model(model: SelfHostedPreferencesModel) -> Self {
+        Self::with_model_and_tab(model, PreferencesDialogTab::General)
+    }
+
+    /// Build the preferences dialog from an explicit model and active tab.
+    pub fn with_model_and_tab(
+        model: SelfHostedPreferencesModel,
+        active_tab: PreferencesDialogTab,
+    ) -> Self {
         let nav_buttons = PreferencesDialogTab::ALL
             .into_iter()
             .map(|tab| {
@@ -104,6 +193,7 @@ impl PreferencesDialog {
         let mut dialog = Self {
             id: WidgetId::new(),
             active_tab,
+            model,
             surface: DialogSurface::new(
                 Size::new(CARD_MIN_WIDTH, CARD_MIN_HEIGHT),
                 Size::new(CARD_WIDTH, CARD_HEIGHT),
@@ -135,6 +225,23 @@ impl PreferencesDialog {
         self.active_tab
     }
 
+    /// Current settings/status snapshot backing the dialog.
+    pub fn model(&self) -> &SelfHostedPreferencesModel {
+        &self.model
+    }
+
+    /// Update the backing settings/status snapshot without replacing widget ids.
+    pub fn set_model(&mut self, model: SelfHostedPreferencesModel) {
+        if self.model == model {
+            return;
+        }
+        self.model = model;
+        self.rebuild_content();
+        if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
+            self.layout(self.bounds);
+        }
+    }
+
     /// Select one preferences section and rebuild its view model.
     pub fn set_active_tab(&mut self, tab: PreferencesDialogTab) {
         if self.active_tab == tab {
@@ -148,7 +255,7 @@ impl PreferencesDialog {
     }
 
     fn rebuild_content(&mut self) {
-        self.content_labels = content_rows_for_tab(self.active_tab)
+        self.content_labels = content_rows_for_tab(self.active_tab, &self.model)
             .into_iter()
             .map(|row| {
                 if row.heading {
@@ -364,23 +471,27 @@ fn detail(text: impl Into<String>) -> ContentRow {
     ContentRow { text: text.into(), heading: false }
 }
 
-fn content_rows_for_tab(tab: PreferencesDialogTab) -> Vec<ContentRow> {
+fn content_rows_for_tab(
+    tab: PreferencesDialogTab,
+    model: &SelfHostedPreferencesModel,
+) -> Vec<ContentRow> {
     match tab {
         PreferencesDialogTab::General => vec![
-            heading("Appearance"),
-            detail("Theme: System"),
-            detail("Interface density: Compact"),
-            heading("Project safety"),
-            detail("Autosave: Enabled"),
-            detail("Recovery retention: 10 snapshots"),
+            heading("Workspace"),
+            detail(format!("Active workspace: {}", model.workspace)),
+            heading("Project"),
+            detail(format!("Project: {}", model.project_status)),
+            detail(format!("Sequence: {}", model.sequence_summary)),
         ],
         PreferencesDialogTab::Media => vec![
             heading("Preview"),
-            detail("Decode backend: Auto"),
-            detail("Proxy generation: Project default"),
-            heading("Color management"),
-            detail("Display transform: Project default"),
-            detail("Viewer background: Neutral"),
+            detail(format!("Auto proxy: {}", model.proxy_mode)),
+            heading("Audio"),
+            detail(format!("Clock: {}", model.audio_clock)),
+            detail(format!("Sample rate: {}", model.audio_sample_rate)),
+            heading("Export draft"),
+            detail(format!("Range: {}", model.export_range)),
+            detail(format!("Output: {}", model.export_output)),
         ],
         PreferencesDialogTab::Shortcuts => {
             let mut rows = vec![
@@ -396,12 +507,23 @@ fn content_rows_for_tab(tab: PreferencesDialogTab) -> Vec<ContentRow> {
         }
         PreferencesDialogTab::Developer => vec![
             heading("Diagnostics"),
-            detail("Console capture: Enabled"),
-            detail("GPU diagnostics: Warning and errors"),
+            detail(format!("Console capture: {}", model.console_capture)),
+            detail(format!("Log filter: {}", model.log_filter)),
             heading("Runtime"),
-            detail("Background workers: 4"),
-            detail("Log filter: RUST_LOG"),
+            detail(format!("Background workers: {}", model.background_workers)),
         ],
+    }
+}
+
+fn enabled_label(enabled: bool) -> String {
+    if enabled { "Enabled" } else { "Disabled" }.to_owned()
+}
+
+fn export_range_label(range: TimelineExportRange) -> &'static str {
+    match range {
+        TimelineExportRange::EntireSequence => "Entire sequence",
+        TimelineExportRange::SequenceInOut => "Sequence in/out",
+        TimelineExportRange::WorkArea { .. } => "Work area",
     }
 }
 
@@ -433,10 +555,32 @@ mod tests {
 
     #[test]
     fn preferences_dialog_rebuilds_shortcut_rows_from_registry() {
-        let dialog = PreferencesDialog::with_tab(PreferencesDialogTab::Shortcuts);
+        let dialog = PreferencesDialog::with_model_and_tab(
+            SelfHostedPreferencesModel::default(),
+            PreferencesDialogTab::Shortcuts,
+        );
 
         assert_eq!(dialog.active_tab(), PreferencesDialogTab::Shortcuts);
         assert!(dialog.content_labels.len() > default_shortcuts().len());
+    }
+
+    #[test]
+    fn preferences_model_reads_real_app_state_values() {
+        let mut state = AppState::new();
+        state.current_project_path = Some("E:/projects/edit.mdp".into());
+        state.sequence = Some(mondrian_timeline::sequence::Sequence::new("Cut"));
+        state.auto_proxy_enabled = true;
+        state.export_draft.range = TimelineExportRange::EntireSequence;
+        state.export_draft.output_path = "E:/renders/cut.mp4".to_owned();
+
+        let model = SelfHostedPreferencesModel::from_app_state(&state, WorkspacePreset::Color);
+
+        assert_eq!(model.workspace, WorkspacePreset::Color.display_name());
+        assert!(model.project_status.contains("edit.mdp"));
+        assert!(model.sequence_summary.contains("Cut"));
+        assert_eq!(model.proxy_mode, "Enabled");
+        assert_eq!(model.export_range, "Entire sequence");
+        assert_eq!(model.export_output, "E:/renders/cut.mp4");
     }
 
     #[test]

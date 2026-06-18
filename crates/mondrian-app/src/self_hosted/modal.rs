@@ -10,7 +10,9 @@ use mondrian_ui_core::{EventResult, Widget};
 
 use crate::self_hosted::about_dialog::AboutDialog;
 use crate::self_hosted::new_project_dialog::{NewProjectDialog, SelfHostedNewProjectDraft};
-use crate::self_hosted::preferences_dialog::{PreferencesDialog, PreferencesDialogTab};
+use crate::self_hosted::preferences_dialog::{
+    PreferencesDialog, PreferencesDialogTab, SelfHostedPreferencesModel,
+};
 
 /// Shell-local modal dialog.
 pub enum ShellModal {
@@ -31,13 +33,16 @@ impl ShellModal {
     }
 
     /// Build the product preferences modal.
-    pub fn preferences() -> Self {
-        Self::Preferences(Box::default())
+    pub fn preferences(model: SelfHostedPreferencesModel) -> Self {
+        Self::Preferences(Box::new(PreferencesDialog::with_model(model)))
     }
 
     /// Build the product preferences modal with one selected section.
-    pub fn preferences_with_tab(tab: PreferencesDialogTab) -> Self {
-        Self::Preferences(Box::new(PreferencesDialog::with_tab(tab)))
+    pub fn preferences_with_tab(
+        model: SelfHostedPreferencesModel,
+        tab: PreferencesDialogTab,
+    ) -> Self {
+        Self::Preferences(Box::new(PreferencesDialog::with_model_and_tab(model, tab)))
     }
 
     /// Access the product about modal when it is active.

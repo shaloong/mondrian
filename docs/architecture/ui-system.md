@@ -86,9 +86,12 @@ that same boundary after dispatched actions. Component fixtures remain in
 Shell-local modals, such as New Project, Preferences, and About, live in their
 own `self_hosted::*_dialog` modules and are hosted by `self_hosted::modal`.
 They emit stable `app.shell` custom actions defined in `app::ui_actions`.
-Preferences UI must migrate settings through typed app preference DTOs as those
-settings are exposed to the self-hosted shell; it must not read or duplicate
-legacy egui-only dialog state.
+Preferences reads a `SelfHostedPreferencesModel` snapshot produced from the
+`AppState` and current workspace preset. Editable or persisted preferences must
+migrate through typed app preference DTOs as those settings are exposed to the
+self-hosted shell; the preferences surface must not read or duplicate legacy
+egui-only dialog state, and it must not show static placeholder values for
+state the self-hosted shell does not actually own.
 
 `mondrian-editor-ui` owns the long-lived editor panel contract. Panel instances
 are created with `PanelInitContext`, which is limited to stable services such as

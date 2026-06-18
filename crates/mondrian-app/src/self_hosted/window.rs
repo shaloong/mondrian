@@ -31,8 +31,9 @@ use tracing_subscriber::EnvFilter;
 // ═══════════════════════════════════════════════════════════════════════════
 
 const SELF_HOSTED_CONSOLE_LOG_LINES: usize = 500;
-const DEFAULT_SELF_HOSTED_LOG_FILTER: &str = "info,wgpu_core=warn,wgpu_hal=warn,naga=warn";
-const SELF_HOSTED_BACKGROUND_WORKERS: usize = 4;
+pub(crate) const DEFAULT_SELF_HOSTED_LOG_FILTER: &str =
+    "info,wgpu_core=warn,wgpu_hal=warn,naga=warn";
+pub(crate) const SELF_HOSTED_BACKGROUND_WORKERS: usize = 4;
 
 /// Run the self-hosted Mondrian editor window.
 pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
