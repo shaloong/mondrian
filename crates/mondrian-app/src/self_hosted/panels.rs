@@ -23,6 +23,7 @@ use mondrian_timeline::track::Track;
 use mondrian_ui_core::types::SplitDirection;
 use mondrian_ui_core::DragPayload;
 use mondrian_ui_core::Widget;
+use mondrian_ui_theme::current_theme;
 use mondrian_ui_widgets::dock_splitter::DockSplitter;
 use mondrian_ui_widgets::dock_tab_bar::TabInfo;
 use mondrian_ui_widgets::panel_slot::SlotKind;
@@ -502,7 +503,7 @@ fn status_log_item(message: String, is_error: bool) -> PanelListItem {
         .with_subtitle(message)
         .with_badge(if is_error { "ERR" } else { "OK" });
     if is_error {
-        item = item.with_accent(Color::from_hex(0xB91C1C));
+        item = item.with_accent(current_theme().colors.error);
     }
     with_app_icon(
         item,
@@ -833,7 +834,7 @@ impl InspectorPanelModel {
             tint: clip
                 .solid_color
                 .or_else(|| timeline_clip_color(clip, resolved_selection.is_video_track))
-                .unwrap_or_else(|| Color::from_hex(0x84B4FF)),
+                .unwrap_or_else(|| current_theme().colors.media_video),
             position_x: position.x,
             position_y: position.y,
             scale_percent: scale.x * 100.0,
@@ -994,7 +995,7 @@ impl NodeGraphPanelModel {
         });
         let mut nodes = vec![NodeGraphNode::new("source", "Source")
             .with_subtitle(clip_source_subtitle(clip))
-            .with_accent(Color::from_hex(0x4B7BE5))
+            .with_accent(current_theme().colors.node_source)
             .disabled(clip.is_disabled)];
         let mut node_targets = vec![NodeGraphNodeTarget {
             node_id: "source".to_owned(),
@@ -1026,7 +1027,7 @@ impl NodeGraphPanelModel {
         nodes.push(
             NodeGraphNode::new("output", "Output")
                 .with_subtitle("Composite")
-                .with_accent(Color::from_hex(0x22C55E)),
+                .with_accent(current_theme().colors.node_output),
         );
         node_targets.push(NodeGraphNodeTarget {
             node_id: "output".to_owned(),
@@ -1381,14 +1382,15 @@ fn timeline_clip_color(clip: &Clip, is_video_track: bool) -> Option<Color> {
     if let Some(color) = clip.solid_color {
         return Some(color);
     }
+    let colors = current_theme().colors.clone();
     if clip.is_adjustment_layer() {
-        Some(Color::from_hex(0x6D5DD3))
+        Some(colors.media_adjustment)
     } else if clip.is_nested_sequence() {
-        Some(Color::from_hex(0x4B7BE5))
+        Some(colors.media_video)
     } else if is_video_track {
-        Some(Color::from_hex(0x1E3A5F))
+        Some(colors.timeline_clip_video)
     } else {
-        Some(Color::from_hex(0x1D587B))
+        Some(colors.timeline_clip_audio)
     }
 }
 
@@ -1475,11 +1477,12 @@ fn asset_kind_badge(kind: &AssetKind) -> &'static str {
 }
 
 fn asset_kind_accent(kind: &AssetKind) -> Color {
+    let colors = current_theme().colors.clone();
     match kind {
-        AssetKind::Video => Color::from_hex(0x4B7BE5),
-        AssetKind::Audio => Color::from_hex(0x1D587B),
-        AssetKind::AdjustmentLayer => Color::from_hex(0x6D5DD3),
-        AssetKind::SolidColor => Color::from_hex(0xD946EF),
+        AssetKind::Video => colors.media_video,
+        AssetKind::Audio => colors.media_audio,
+        AssetKind::AdjustmentLayer => colors.media_adjustment,
+        AssetKind::SolidColor => colors.media_solid,
     }
 }
 
@@ -1503,12 +1506,13 @@ fn effect_badge(effect_type: &EffectType) -> &'static str {
 }
 
 fn effect_node_accent(effect_type: &EffectType) -> Color {
+    let colors = current_theme().colors.clone();
     match effect_type {
-        EffectType::Plugin(_) => Color::from_hex(0xD946EF),
-        EffectType::GaussianBlur | EffectType::Sharpen => Color::from_hex(0x3B82F6),
-        EffectType::Lut3D => Color::from_hex(0x22C55E),
-        EffectType::ChromaKey | EffectType::LumaKey => Color::from_hex(0xF59E0B),
-        _ => Color::from_hex(0x8B5CF6),
+        EffectType::Plugin(_) => colors.effect_plugin,
+        EffectType::GaussianBlur | EffectType::Sharpen => colors.effect_filter,
+        EffectType::Lut3D => colors.effect_lut,
+        EffectType::ChromaKey | EffectType::LumaKey => colors.effect_key,
+        _ => colors.effect_default,
     }
 }
 
@@ -3696,6 +3700,7 @@ mod tests {
 
     #[test]
     fn app_state_models_map_sequence_selection_and_basic_inspector_values() {
+        mondrian_ui_theme::set_theme_preset(mondrian_ui_theme::ThemePreset::Dark);
         let mut state = AppState::new();
         let mut sequence = Sequence::new("edit");
         let tb = sequence.time_base();
@@ -3729,6 +3734,7 @@ mod tests {
         state.seek(7);
 
         let models = SelfHostedPanelModels::from_app_state(&state);
+        let colors = current_theme().colors.clone();
 
         assert_eq!(models.viewer.title, "edit");
         assert_eq!(models.viewer.frame_label, "F7");
@@ -3767,7 +3773,12 @@ mod tests {
         assert_eq!(models.node_graph.nodes.len(), 3);
         assert_eq!(models.node_graph.edges.len(), 2);
         assert_eq!(models.node_graph.nodes[0].id, "source");
+        assert_eq!(models.node_graph.nodes[0].accent, Some(colors.node_source));
         assert_eq!(models.node_graph.nodes[1].id, format!("effect:{effect_id}"));
+        assert_eq!(
+            models.node_graph.nodes[1].accent,
+            Some(colors.effect_filter)
+        );
         assert_eq!(
             models.node_graph.selected_node_id,
             Some(format!("effect:{effect_id}"))
@@ -3795,6 +3806,7 @@ mod tests {
         );
         assert!(models.node_graph.nodes[1].disabled);
         assert_eq!(models.node_graph.nodes[2].id, "output");
+        assert_eq!(models.node_graph.nodes[2].accent, Some(colors.node_output));
         assert_eq!(
             models.node_graph.edges[0],
             NodeGraphEdge::new("source", format!("effect:{effect_id}"))
@@ -4304,6 +4316,97 @@ mod tests {
             model.tracks[0].clips[0].color.map(|c| c.to_rgba8()),
             Some(color.to_rgba8())
         );
+    }
+
+    #[test]
+    fn timeline_clip_fallback_colors_use_theme_tokens() {
+        mondrian_ui_theme::set_theme_preset(mondrian_ui_theme::ThemePreset::Light);
+        let mut sequence = Sequence::new("edit");
+        let tb = sequence.time_base();
+        sequence.video_tracks[0]
+            .add_clip(Clip::new(
+                AssetId::new(),
+                TimeCode::new(0, tb),
+                TimeCode::new(30, tb),
+            ))
+            .expect("add video clip");
+        sequence.video_tracks[0]
+            .add_clip(Clip::new_adjustment_layer(
+                AssetId::new(),
+                TimeCode::new(40, tb),
+                TimeCode::new(30, tb),
+            ))
+            .expect("add adjustment clip");
+        sequence.audio_tracks[0]
+            .add_clip(Clip::new(
+                AssetId::new(),
+                TimeCode::new(0, tb),
+                TimeCode::new(30, tb),
+            ))
+            .expect("add audio clip");
+
+        let model = TimelinePanelModel::from_sequence(&sequence, &[], &[]);
+        let colors = current_theme().colors.clone();
+        let first_audio_track = sequence.video_tracks.len();
+
+        assert_eq!(
+            model.tracks[0].clips[0].color,
+            Some(colors.timeline_clip_video)
+        );
+        assert_eq!(
+            model.tracks[0].clips[1].color,
+            Some(colors.media_adjustment)
+        );
+        assert_eq!(
+            model.tracks[first_audio_track].clips[0].color,
+            Some(colors.timeline_clip_audio)
+        );
+        mondrian_ui_theme::set_theme_preset(mondrian_ui_theme::ThemePreset::Dark);
+    }
+
+    #[test]
+    fn panel_domain_accents_use_theme_tokens() {
+        mondrian_ui_theme::set_theme_preset(mondrian_ui_theme::ThemePreset::Light);
+        let colors = current_theme().colors.clone();
+
+        assert_eq!(asset_kind_accent(&AssetKind::Video), colors.media_video);
+        assert_eq!(asset_kind_accent(&AssetKind::Audio), colors.media_audio);
+        assert_eq!(
+            asset_kind_accent(&AssetKind::AdjustmentLayer),
+            colors.media_adjustment
+        );
+        assert_eq!(
+            asset_kind_accent(&AssetKind::SolidColor),
+            colors.media_solid
+        );
+        assert_eq!(
+            effect_node_accent(&EffectType::Plugin("demo.plugin".to_owned())),
+            colors.effect_plugin
+        );
+        assert_eq!(
+            effect_node_accent(&EffectType::GaussianBlur),
+            colors.effect_filter
+        );
+        assert_eq!(
+            effect_node_accent(&EffectType::Sharpen),
+            colors.effect_filter
+        );
+        assert_eq!(effect_node_accent(&EffectType::Lut3D), colors.effect_lut);
+        assert_eq!(
+            effect_node_accent(&EffectType::ChromaKey),
+            colors.effect_key
+        );
+        assert_eq!(effect_node_accent(&EffectType::LumaKey), colors.effect_key);
+        assert_eq!(
+            effect_node_accent(&EffectType::Vignette),
+            colors.effect_default
+        );
+        assert_eq!(
+            status_log_item("failed".to_owned(), true).accent,
+            Some(colors.error)
+        );
+        assert_eq!(status_log_item("ok".to_owned(), false).accent, None);
+        mondrian_ui_theme::set_theme_preset(mondrian_ui_theme::ThemePreset::Dark);
     }
 
     #[test]

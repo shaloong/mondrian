@@ -703,6 +703,12 @@ does not erase Console history.
 Real product panels keep single-click row selection local to the widget unless
 the app has a stable domain selection to update; file commands, asset drags,
 and effect insertion are emitted only through activation actions.
+Product-shell accent colors for asset kinds, timeline fallback clip colors,
+effect categories, status errors, and node-graph source/output nodes are
+semantic `ColorTokens`. Panel adapters may map domain enums such as
+`AssetKind` or `EffectType` onto those tokens, but should not introduce
+panel-local hex literals for UI chrome. Demo fixture colors that represent
+clip media content may remain fixture data, because they are not theme chrome.
 `PanelListModel::demo_activate_prefix` is compiled only for tests and exists
 for synthetic fixture commands; product panel models must attach explicit
 stable actions to rows instead of deriving commands from titles or indices.

@@ -87,6 +87,30 @@ pub struct ColorTokens {
     pub timeline_clip_audio: Color,
     pub timeline_playhead: Color,
 
+    // ── 编辑器领域强调色 (Editor Domain Accents) ─────────────────────────
+    /// 视频素材、嵌套序列等媒体对象的强调色
+    pub media_video: Color,
+    /// 音频素材的强调色
+    pub media_audio: Color,
+    /// 调整图层的强调色
+    pub media_adjustment: Color,
+    /// 纯色层/色彩素材的强调色
+    pub media_solid: Color,
+    /// 滤镜/模糊类效果的强调色
+    pub effect_filter: Color,
+    /// LUT / 调色查找表效果的强调色
+    pub effect_lut: Color,
+    /// 抠像效果的强调色
+    pub effect_key: Color,
+    /// 插件效果的强调色
+    pub effect_plugin: Color,
+    /// 默认效果节点强调色
+    pub effect_default: Color,
+    /// 节点图 source 节点强调色
+    pub node_source: Color,
+    /// 节点图 output 节点强调色
+    pub node_output: Color,
+
     // ── 画布 (Canvas) ─────────────────────────────────────────────────────
     pub canvas: Color,
     /// 画布上的叠加层（安全区域、参考线）
@@ -139,6 +163,17 @@ impl ColorTokens {
             timeline_clip_video: Color::from_hex(0x1E3A5F),
             timeline_clip_audio: Color::from_hex(0x1D587B),
             timeline_playhead: Color::from_hex(0x3B82F6),
+            media_video: Color::from_hex(0x4B7BE5),
+            media_audio: Color::from_hex(0x1D587B),
+            media_adjustment: Color::from_hex(0x6D5DD3),
+            media_solid: Color::from_hex(0xD946EF),
+            effect_filter: Color::from_hex(0x3B82F6),
+            effect_lut: Color::from_hex(0x22C55E),
+            effect_key: Color::from_hex(0xF59E0B),
+            effect_plugin: Color::from_hex(0xD946EF),
+            effect_default: Color::from_hex(0x8B5CF6),
+            node_source: Color::from_hex(0x4B7BE5),
+            node_output: Color::from_hex(0x22C55E),
 
             canvas: Color::BLACK,
             canvas_overlay: Color { r: 1.0, g: 1.0, b: 1.0, a: 0.08 },
@@ -189,6 +224,17 @@ impl ColorTokens {
             timeline_clip_video: Color::from_hex(0xDBEAFE),
             timeline_clip_audio: Color::from_hex(0xE0F2FE),
             timeline_playhead: Color::from_hex(0x2563EB),
+            media_video: Color::from_hex(0x2563EB),
+            media_audio: Color::from_hex(0x0284C7),
+            media_adjustment: Color::from_hex(0x7C3AED),
+            media_solid: Color::from_hex(0xC026D3),
+            effect_filter: Color::from_hex(0x2563EB),
+            effect_lut: Color::from_hex(0x16A34A),
+            effect_key: Color::from_hex(0xD97706),
+            effect_plugin: Color::from_hex(0xC026D3),
+            effect_default: Color::from_hex(0x7C3AED),
+            node_source: Color::from_hex(0x2563EB),
+            node_output: Color::from_hex(0x16A34A),
 
             canvas: Color::from_hex(0x0B0B0E),
             canvas_overlay: Color { r: 0.0, g: 0.0, b: 0.0, a: 0.06 },

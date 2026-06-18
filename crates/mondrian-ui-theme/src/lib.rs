@@ -186,6 +186,31 @@ mod tests {
     }
 
     #[test]
+    fn editor_domain_accent_tokens_are_available_per_theme() {
+        for preset in ThemePreset::ALL {
+            let colors = preset.build().colors;
+            let accents = [
+                colors.media_video,
+                colors.media_audio,
+                colors.media_adjustment,
+                colors.media_solid,
+                colors.effect_filter,
+                colors.effect_lut,
+                colors.effect_key,
+                colors.effect_plugin,
+                colors.effect_default,
+                colors.node_source,
+                colors.node_output,
+            ];
+
+            assert!(accents.iter().all(|color| color.a > 0.0));
+            assert_ne!(colors.media_video, colors.media_audio);
+            assert_ne!(colors.effect_filter, colors.effect_key);
+            assert_ne!(colors.node_source, colors.node_output);
+        }
+    }
+
+    #[test]
     fn theme_can_be_sent_between_threads() {
         let theme = ThemePreset::Dark.build();
         std::thread::spawn(move || {
