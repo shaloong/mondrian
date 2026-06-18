@@ -35,6 +35,10 @@ back into the widget tree.
 
 `mondrian-app/src/main.rs` is the product entrypoint and launches the
 self-hosted winit/wgpu editor shell through `self_hosted::window`.
+The window runner is responsible for process-level UI bootstrap only: it
+installs tracing with the self-hosted console log capture, honors `RUST_LOG`
+through `EnvFilter`, enters the shared Tokio background runtime used by app
+actions, and then owns the native winit event loop.
 `mondrian-app/src/bin` is reserved for developer-only binaries: widget
 galleries, pipeline smoke tests, and visual diagnostics. Binaries in `src/bin`
 must stay thin; reusable runtime, panel, or mapping logic belongs in library

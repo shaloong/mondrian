@@ -53,7 +53,7 @@ mondrian-panel-console = { workspace = true }
 
 tracing-subscriber = { workspace = true }
 
-# UI（Phase 1: egui）
+# Legacy egui migration reference. The product UI entrypoint is self-hosted.
 egui      = "0.34"
 eframe    = { version = "0.34", features = ["wgpu"] }
 egui-wgpu = "0.34"

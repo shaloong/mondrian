@@ -16,7 +16,7 @@ use crate::self_hosted::runtime::{
     winit_mouse_button_to_ui_button, winit_scroll_delta_to_ui_delta, WinitUiRuntime,
 };
 use crate::self_hosted::shortcuts::register_default_shortcuts;
-use mondrian_panel_console::tracing_layer::ConsoleLogLayer;
+use mondrian_panel_console::tracing_layer::{ConsoleLogLayer, LogBuffer};
 use mondrian_platform::SystemPlatformService;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::{TreeWalker, Widget};
@@ -24,20 +24,23 @@ use mondrian_ui_events::EventRouter;
 use mondrian_ui_renderer::command::DrawEncoder;
 use mondrian_ui_tooltip::TooltipManagerImpl;
 use tracing_subscriber::prelude::*;
+use tracing_subscriber::EnvFilter;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Main
 // ═══════════════════════════════════════════════════════════════════════════
 
+const SELF_HOSTED_CONSOLE_LOG_LINES: usize = 500;
+const DEFAULT_SELF_HOSTED_LOG_FILTER: &str = "info,wgpu_core=warn,wgpu_hal=warn,naga=warn";
+const SELF_HOSTED_BACKGROUND_WORKERS: usize = 4;
+
 /// Run the self-hosted Mondrian editor window.
 pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
-    let (console_layer, _log_buffer) = ConsoleLogLayer::new(500);
-    tracing_subscriber::registry()
-        .with(console_layer)
-        .with(tracing_subscriber::filter::LevelFilter::INFO)
-        .init();
+    let _background_runtime = build_self_hosted_background_runtime()?;
+    let _background_runtime_guard = _background_runtime.enter();
+    let _console_log_buffer = init_self_hosted_tracing();
 
-    tracing::info!("Mondrian UI App starting");
+    tracing::info!("Mondrian self-hosted UI starting");
 
     use winit::event_loop::EventLoop;
     let event_loop = EventLoop::new()?;
@@ -383,6 +386,35 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn init_self_hosted_tracing() -> LogBuffer {
+    let (console_layer, log_buffer) = ConsoleLogLayer::new(SELF_HOSTED_CONSOLE_LOG_LINES);
+    let filter = self_hosted_log_filter();
+    if tracing_subscriber::registry()
+        .with(filter)
+        .with(console_layer)
+        .try_init()
+        .is_err()
+    {
+        tracing::debug!(
+            "tracing subscriber already initialized; self-hosted console layer skipped"
+        );
+    }
+    log_buffer
+}
+
+fn self_hosted_log_filter() -> EnvFilter {
+    EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(DEFAULT_SELF_HOSTED_LOG_FILTER))
+}
+
+fn build_self_hosted_background_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(SELF_HOSTED_BACKGROUND_WORKERS)
+        .thread_name("mondrian-bg")
+        .enable_all()
+        .build()
+}
+
 fn apply_shell_commands(
     commands: SelfHostedShellCommands,
     window: &winit::window::Window,
@@ -403,5 +435,24 @@ fn toggle_window_fullscreen(window: &winit::window::Window) {
         window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(
             window.current_monitor(),
         )));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_log_filter_keeps_noisy_gpu_crates_at_warning() {
+        assert!(DEFAULT_SELF_HOSTED_LOG_FILTER.contains("wgpu_core=warn"));
+        assert!(DEFAULT_SELF_HOSTED_LOG_FILTER.contains("wgpu_hal=warn"));
+        assert!(DEFAULT_SELF_HOSTED_LOG_FILTER.contains("naga=warn"));
+    }
+
+    #[test]
+    fn background_runtime_uses_product_worker_count() {
+        assert_eq!(SELF_HOSTED_BACKGROUND_WORKERS, 4);
+        let runtime = build_self_hosted_background_runtime().expect("runtime should build");
+        runtime.block_on(async {});
     }
 }
