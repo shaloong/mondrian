@@ -78,14 +78,17 @@ impl GlyphAtlas {
             return None;
         }
 
-        // Allocate atlas space with padding
-        let alloc_w = bmp_w + self.pad * 2;
-        let alloc_h = bmp_h + self.pad * 2;
+        // Allocate and upload a transparent border around the glyph. The UV rect
+        // still points at the inner glyph bitmap, but linear filtering can now
+        // sample the border without bleeding from uninitialized or adjacent texels.
+        let pad_twice = self.pad.checked_mul(2)?;
+        let alloc_w = bmp_w.checked_add(pad_twice)?;
+        let alloc_h = bmp_h.checked_add(pad_twice)?;
         let alloc_key = format!("glyph_{cache_key:?}");
-        let uv = self.atlas.allocate(&alloc_key, alloc_w, alloc_h)?;
+        let allocation = self.atlas.allocate_pixels(&alloc_key, alloc_w, alloc_h)?;
 
-        let px = (uv.x * self.atlas.width as f32) as u32 + self.pad;
-        let py = (uv.y * self.atlas.height as f32) as u32 + self.pad;
+        let px = allocation.x + self.pad;
+        let py = allocation.y + self.pad;
 
         let uv_rect = Rect::new(
             px as f32 / self.atlas.width as f32,
@@ -95,12 +98,13 @@ impl GlyphAtlas {
         );
 
         self.glyph_map.insert(cache_key, (uv_rect, bmp_w, bmp_h, top, left));
+        let padded_alpha = alpha_with_transparent_padding(&alpha, bmp_w, bmp_h, self.pad)?;
         self.pending_uploads.push(GlyphUpload {
-            x: px,
-            y: py,
-            width: bmp_w,
-            height: bmp_h,
-            data: alpha,
+            x: allocation.x,
+            y: allocation.y,
+            width: alloc_w,
+            height: alloc_h,
+            data: padded_alpha,
         });
 
         None
@@ -112,6 +116,34 @@ impl GlyphAtlas {
     pub fn has_pending(&self) -> bool {
         !self.pending_uploads.is_empty()
     }
+}
+
+fn alpha_with_transparent_padding(
+    alpha: &[u8],
+    width: u32,
+    height: u32,
+    pad: u32,
+) -> Option<Vec<u8>> {
+    let expected_len = width.checked_mul(height)? as usize;
+    if alpha.len() != expected_len {
+        return None;
+    }
+
+    let pad_twice = pad.checked_mul(2)?;
+    let padded_width = width.checked_add(pad_twice)?;
+    let padded_height = height.checked_add(pad_twice)?;
+    let mut padded = vec![0; padded_width.checked_mul(padded_height)? as usize];
+
+    let width_usize = width as usize;
+    let padded_width_usize = padded_width as usize;
+    for row in 0..height as usize {
+        let src_start = row * width_usize;
+        let dst_start = (row + pad as usize) * padded_width_usize + pad as usize;
+        padded[dst_start..dst_start + width_usize]
+            .copy_from_slice(&alpha[src_start..src_start + width_usize]);
+    }
+
+    Some(padded)
 }
 
 /// Convert swash Image to R8 alpha bitmap. Returns (width, height, top, left, data).
@@ -154,6 +186,23 @@ mod tests {
         let atlas = GlyphAtlas::new(1024);
         assert!(!atlas.has_pending());
         assert_eq!(atlas.size(), (1024, 1024));
+    }
+
+    #[test]
+    fn alpha_padding_adds_transparent_border() {
+        let source = vec![10, 20, 30, 40, 50, 60];
+        let padded = alpha_with_transparent_padding(&source, 3, 2, 1).unwrap();
+
+        assert_eq!(padded.len(), 5 * 4);
+        assert_eq!(&padded[0..5], &[0, 0, 0, 0, 0]);
+        assert_eq!(&padded[5..10], &[0, 10, 20, 30, 0]);
+        assert_eq!(&padded[10..15], &[0, 40, 50, 60, 0]);
+        assert_eq!(&padded[15..20], &[0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn alpha_padding_rejects_mismatched_source_length() {
+        assert!(alpha_with_transparent_padding(&[1, 2, 3], 2, 2, 1).is_none());
     }
 
     #[test]
@@ -214,6 +263,33 @@ mod tests {
             upload.height,
             upload.data.len()
         );
+    }
+
+    #[test]
+    fn atlas_rasterize_upload_includes_padding_while_uv_stays_inner() {
+        let mut atlas = GlyphAtlas::new(1024);
+        let mut mgr = FontManager::new();
+        let attrs = cosmic_text::Attrs::new();
+        let layout =
+            crate::layout::TextLayout::new_single_line(&mut mgr.font_system, "M", attrs, 24.0);
+        let glyph = layout.glyphs().into_iter().next().expect("glyph");
+
+        let _ = atlas.get_or_rasterize(&mut mgr.font_system, &glyph, 0.0);
+        let (uv, bitmap_width, bitmap_height, _top, _left) =
+            atlas.get_or_rasterize(&mut mgr.font_system, &glyph, 0.0).expect("cached glyph");
+        let upload = atlas.pending_uploads.first().expect("glyph upload");
+
+        assert_eq!(upload.width, bitmap_width + 2);
+        assert_eq!(upload.height, bitmap_height + 2);
+        assert_eq!(uv.x, (upload.x + 1) as f32 / atlas.size().0 as f32);
+        assert_eq!(uv.y, (upload.y + 1) as f32 / atlas.size().1 as f32);
+        assert_eq!(uv.width, bitmap_width as f32 / atlas.size().0 as f32);
+        assert_eq!(uv.height, bitmap_height as f32 / atlas.size().1 as f32);
+
+        let row_width = upload.width as usize;
+        assert!(upload.data[..row_width].iter().all(|alpha| *alpha == 0));
+        assert!(upload.data[upload.data.len() - row_width..].iter().all(|alpha| *alpha == 0));
+        assert!(upload.data.chunks(row_width).all(|row| row[0] == 0 && row[row.len() - 1] == 0));
     }
 
     #[test]

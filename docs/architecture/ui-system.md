@@ -968,6 +968,11 @@ resvg/tiny-skia without sharing mutable atlas state with text glyphs. Text
 positions are left to the text renderer and caller-side layout policy, and image
 UVs remain unsnapped because they are texture coordinates rather than
 screen-space geometry.
+Linear-sampled atlas entries must upload their full allocated rectangle,
+including transparent padding around the inner content UV. Padding is not just
+reserved packing space: it is sampled by the GPU at fractional edges, so leaving
+it unwritten can produce dirty borders or neighbor bleeding on glyphs, SVG
+icons, thumbnails, and checkerboard-backed color previews.
 
 Text uses cosmic-text layout and swash grayscale alpha masks in the glyph atlas.
 The atlas cache intentionally ignores subpixel bins for the default UI text path

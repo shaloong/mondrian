@@ -84,6 +84,37 @@ fn scissor_rect_for_clip(
     }
 }
 
+fn rgba_with_transparent_padding(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    pad: u32,
+) -> Option<(u32, u32, Vec<u8>)> {
+    let pixel_count = width.checked_mul(height)?;
+    let expected_len = pixel_count.checked_mul(4)? as usize;
+    if rgba.len() != expected_len {
+        return None;
+    }
+
+    let pad_twice = pad.checked_mul(2)?;
+    let padded_width = width.checked_add(pad_twice)?;
+    let padded_height = height.checked_add(pad_twice)?;
+    let padded_len = padded_width.checked_mul(padded_height)?.checked_mul(4)? as usize;
+    let mut padded = vec![0; padded_len];
+
+    let src_row_bytes = width as usize * 4;
+    let dst_row_bytes = padded_width as usize * 4;
+    let pad_bytes = pad as usize * 4;
+    for row in 0..height as usize {
+        let src_start = row * src_row_bytes;
+        let dst_start = (row + pad as usize) * dst_row_bytes + pad_bytes;
+        padded[dst_start..dst_start + src_row_bytes]
+            .copy_from_slice(&rgba[src_start..src_start + src_row_bytes]);
+    }
+
+    Some((padded_width, padded_height, padded))
+}
+
 impl UiRenderer {
     pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
         let pipeline = UiPipeline::new(device, surface_format, UI_SAMPLE_COUNT);
@@ -223,9 +254,11 @@ impl UiRenderer {
             if upload.data.len() != pixel_count {
                 continue;
             }
-            // Convert alpha-only to RGBA: each pixel becomes [255, 255, 255, alpha]
-            let rgba: Vec<u8> =
-                upload.data.iter().flat_map(|&a| vec![255u8, 255, 255, a]).collect();
+            // Convert alpha-only to RGBA: each pixel becomes [255, 255, 255, alpha].
+            let mut rgba = Vec::with_capacity(pixel_count * 4);
+            for &alpha in &upload.data {
+                rgba.extend_from_slice(&[255, 255, 255, alpha]);
+            }
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &self.glyph_texture,
@@ -284,32 +317,39 @@ impl UiRenderer {
             return Some(entry.uv_rect);
         }
 
-        let alloc_w = width.checked_add(IMAGE_ATLAS_PAD * 2)?;
-        let alloc_h = height.checked_add(IMAGE_ATLAS_PAD * 2)?;
-        let allocated = self.image_atlas.allocate(&cache_key, alloc_w, alloc_h)?;
-        let px = (allocated.x * ATLAS_SIZE as f32) as u32 + IMAGE_ATLAS_PAD;
-        let py = (allocated.y * ATLAS_SIZE as f32) as u32 + IMAGE_ATLAS_PAD;
+        let pad_twice = IMAGE_ATLAS_PAD.checked_mul(2)?;
+        let alloc_w = width.checked_add(pad_twice)?;
+        let alloc_h = height.checked_add(pad_twice)?;
+        let allocated = self.image_atlas.allocate_pixels(&cache_key, alloc_w, alloc_h)?;
+        let px = allocated.x + IMAGE_ATLAS_PAD;
+        let py = allocated.y + IMAGE_ATLAS_PAD;
         let uv_rect = mondrian_ui_core::types::Rect::new(
             px as f32 / ATLAS_SIZE as f32,
             py as f32 / ATLAS_SIZE as f32,
             width as f32 / ATLAS_SIZE as f32,
             height as f32 / ATLAS_SIZE as f32,
         );
+        let (upload_width, upload_height, padded_rgba) =
+            rgba_with_transparent_padding(rgba, width, height, IMAGE_ATLAS_PAD)?;
 
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.image_texture,
                 mip_level: 0,
-                origin: wgpu::Origin3d { x: px, y: py, z: 0 },
+                origin: wgpu::Origin3d { x: allocated.x, y: allocated.y, z: 0 },
                 aspect: wgpu::TextureAspect::All,
             },
-            rgba,
+            &padded_rgba,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(width * 4),
-                rows_per_image: Some(height),
+                bytes_per_row: Some(upload_width * 4),
+                rows_per_image: Some(upload_height),
             },
-            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: upload_width,
+                height: upload_height,
+                depth_or_array_layers: 1,
+            },
         );
 
         self.image_cache.insert(cache_key, ImageCacheEntry { uv_rect });
@@ -436,5 +476,45 @@ mod tests {
             scissor_rect_for_clip(Some(Rect::new(120.0, 10.0, 20.0, 20.0)), (100, 50)),
             None
         );
+    }
+
+    #[test]
+    fn rgba_padding_adds_transparent_border_and_preserves_inner_pixels() {
+        let source = vec![
+            10, 11, 12, 13, //
+            20, 21, 22, 23, //
+            30, 31, 32, 33, //
+            40, 41, 42, 43,
+        ];
+        let (width, height, padded) = rgba_with_transparent_padding(&source, 2, 2, 1).unwrap();
+
+        assert_eq!((width, height), (4, 4));
+        assert_eq!(padded.len(), 4 * 4 * 4);
+
+        let transparent = [0, 0, 0, 0];
+        for x in 0..4 {
+            let top = x * 4;
+            let bottom = (3 * 4 + x) * 4;
+            assert_eq!(&padded[top..top + 4], &transparent);
+            assert_eq!(&padded[bottom..bottom + 4], &transparent);
+        }
+        for y in 0..4 {
+            let left = y * 4 * 4;
+            let right = left + 3 * 4;
+            assert_eq!(&padded[left..left + 4], &transparent);
+            assert_eq!(&padded[right..right + 4], &transparent);
+        }
+
+        let row_stride = 4 * 4;
+        assert_eq!(&padded[row_stride + 4..row_stride + 12], &source[0..8]);
+        assert_eq!(
+            &padded[row_stride * 2 + 4..row_stride * 2 + 12],
+            &source[8..16]
+        );
+    }
+
+    #[test]
+    fn rgba_padding_rejects_mismatched_payload() {
+        assert!(rgba_with_transparent_padding(&[1, 2, 3], 1, 1, 1).is_none());
     }
 }

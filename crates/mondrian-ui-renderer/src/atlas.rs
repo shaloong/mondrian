@@ -7,11 +7,29 @@ use std::collections::HashMap;
 
 use mondrian_ui_core::types::Rect;
 
-/// 图集中的一个条目
-#[derive(Debug, Clone)]
-pub struct AtlasEntry {
-    pub rect: Rect,
-    pub allocated: bool,
+/// Pixel-space allocation returned by [`TextureAtlas`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AtlasAllocation {
+    /// Left pixel coordinate in the atlas texture.
+    pub x: u32,
+    /// Top pixel coordinate in the atlas texture.
+    pub y: u32,
+    /// Allocated width in pixels.
+    pub width: u32,
+    /// Allocated height in pixels.
+    pub height: u32,
+}
+
+impl AtlasAllocation {
+    /// Convert this allocation to normalized atlas UV coordinates.
+    pub fn uv_rect(self, atlas_width: u32, atlas_height: u32) -> Rect {
+        Rect::new(
+            self.x as f32 / atlas_width as f32,
+            self.y as f32 / atlas_height as f32,
+            self.width as f32 / atlas_width as f32,
+            self.height as f32 / atlas_height as f32,
+        )
+    }
 }
 
 /// 简易纹理图集
@@ -22,7 +40,7 @@ pub struct AtlasEntry {
 pub struct TextureAtlas {
     pub width: u32,
     pub height: u32,
-    entries: HashMap<String, AtlasEntry>,
+    entries: HashMap<String, AtlasAllocation>,
     next_x: u32,
     next_y: u32,
     row_height: u32,
@@ -40,10 +58,15 @@ impl TextureAtlas {
         }
     }
 
-    /// 分配一个图集槽位，返回其 UV 坐标
-    pub fn allocate(&mut self, key: &str, item_width: u32, item_height: u32) -> Option<Rect> {
+    /// 分配一个图集槽位，返回其像素坐标。
+    pub fn allocate_pixels(
+        &mut self,
+        key: &str,
+        item_width: u32,
+        item_height: u32,
+    ) -> Option<AtlasAllocation> {
         if self.entries.contains_key(key) {
-            return self.entries.get(key).map(|e| e.rect);
+            return self.entries.get(key).copied();
         }
 
         // 简单行式打包
@@ -57,23 +80,23 @@ impl TextureAtlas {
             return None; // 图集已满
         }
 
-        let x = self.next_x as f32 / self.width as f32;
-        let y = self.next_y as f32 / self.height as f32;
-        let w = item_width as f32 / self.width as f32;
-        let h = item_height as f32 / self.height as f32;
+        let allocation = AtlasAllocation {
+            x: self.next_x,
+            y: self.next_y,
+            width: item_width,
+            height: item_height,
+        };
 
-        let entry = AtlasEntry { rect: Rect::new(x, y, w, h), allocated: true };
-
-        self.entries.insert(key.to_string(), entry);
+        self.entries.insert(key.to_string(), allocation);
         self.next_x += item_width;
         self.row_height = self.row_height.max(item_height);
 
-        Some(Rect::new(x, y, w, h))
+        Some(allocation)
     }
 
     /// 查询某个条目
-    pub fn get(&self, key: &str) -> Option<Rect> {
-        self.entries.get(key).map(|e| e.rect)
+    pub fn get_pixels(&self, key: &str) -> Option<AtlasAllocation> {
+        self.entries.get(key).copied()
     }
 
     /// 图集总尺寸
@@ -98,9 +121,12 @@ mod tests {
     }
 
     #[test]
-    fn atlas_allocate_returns_uv_coords() {
+    fn atlas_allocation_can_convert_to_uv_coords() {
         let mut atlas = TextureAtlas::new(1024, 1024);
-        let uv = atlas.allocate("test", 256, 256).unwrap();
+        let uv = atlas
+            .allocate_pixels("test", 256, 256)
+            .unwrap()
+            .uv_rect(atlas.width, atlas.height);
         // UV should be in [0, 1] range
         assert!(uv.x >= 0.0 && uv.x <= 1.0);
         assert!(uv.y >= 0.0 && uv.y <= 1.0);
@@ -109,11 +135,25 @@ mod tests {
     }
 
     #[test]
+    fn atlas_allocate_pixels_returns_exact_pixel_coords() {
+        let mut atlas = TextureAtlas::new(1024, 1024);
+        let first = atlas.allocate_pixels("a", 17, 19).unwrap();
+        let second = atlas.allocate_pixels("b", 23, 29).unwrap();
+
+        assert_eq!(first, AtlasAllocation { x: 0, y: 0, width: 17, height: 19 });
+        assert_eq!(
+            second,
+            AtlasAllocation { x: 17, y: 0, width: 23, height: 29 }
+        );
+        assert_eq!(Some(first), atlas.get_pixels("a"));
+    }
+
+    #[test]
     fn atlas_allocate_multiple_items() {
         let mut atlas = TextureAtlas::new(1024, 1024);
         for i in 0..4 {
-            let uv = atlas.allocate(&format!("item_{i}"), 256, 256);
-            assert!(uv.is_some());
+            let allocation = atlas.allocate_pixels(&format!("item_{i}"), 256, 256);
+            assert!(allocation.is_some());
         }
         assert_eq!(atlas.entry_count(), 4);
     }
@@ -121,34 +161,33 @@ mod tests {
     #[test]
     fn atlas_allocate_same_key_returns_cached() {
         let mut atlas = TextureAtlas::new(1024, 1024);
-        let uv1 = atlas.allocate("same", 128, 128).unwrap();
-        let uv2 = atlas.allocate("same", 256, 256).unwrap(); // different size, same key
-        assert_eq!(uv1, uv2);
+        let first = atlas.allocate_pixels("same", 128, 128).unwrap();
+        let second = atlas.allocate_pixels("same", 256, 256).unwrap(); // different size, same key
+        assert_eq!(first, second);
         assert_eq!(atlas.entry_count(), 1);
     }
 
     #[test]
-    fn atlas_get_returns_uv_for_existing() {
+    fn atlas_get_returns_pixels_for_existing() {
         let mut atlas = TextureAtlas::new(1024, 1024);
-        atlas.allocate("glyph", 64, 64).unwrap();
-        let uv = atlas.get("glyph");
-        assert!(uv.is_some());
+        let allocation = atlas.allocate_pixels("glyph", 64, 64).unwrap();
+        assert_eq!(Some(allocation), atlas.get_pixels("glyph"));
     }
 
     #[test]
     fn atlas_get_returns_none_for_missing() {
         let atlas = TextureAtlas::new(1024, 1024);
-        assert!(atlas.get("missing").is_none());
+        assert!(atlas.get_pixels("missing").is_none());
     }
 
     #[test]
     fn atlas_row_wraps_when_full_width() {
         let mut atlas = TextureAtlas::new(256, 512);
         // First item takes 200px → next_x = 200
-        atlas.allocate("a", 200, 50).unwrap();
+        atlas.allocate_pixels("a", 200, 50).unwrap();
         // Second item (100px) won't fit in remaining 56px → wraps to next row
-        let uv = atlas.allocate("b", 100, 50);
-        assert!(uv.is_some(), "Should wrap to next row");
+        let allocation = atlas.allocate_pixels("b", 100, 50);
+        assert!(allocation.is_some(), "Should wrap to next row");
         assert_eq!(atlas.entry_count(), 2);
     }
 
@@ -156,10 +195,10 @@ mod tests {
     fn atlas_returns_none_when_full() {
         let mut atlas = TextureAtlas::new(64, 64);
         // Fill the atlas with one item
-        let uv = atlas.allocate("big", 64, 64);
-        assert!(uv.is_some());
+        let allocation = atlas.allocate_pixels("big", 64, 64);
+        assert!(allocation.is_some());
         // Next item should fail
-        let uv2 = atlas.allocate("overflow", 1, 1);
-        assert!(uv2.is_none());
+        let overflow = atlas.allocate_pixels("overflow", 1, 1);
+        assert!(overflow.is_none());
     }
 }
