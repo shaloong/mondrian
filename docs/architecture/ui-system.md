@@ -1002,6 +1002,13 @@ where practical. Disabled controls must not dispatch actions, request pointer
 capture, or participate in focus traversal, and should render with muted theme
 tokens rather than panel-local color constants.
 
+Pixel alignment is applied selectively, not as a global transform. Text,
+animated content, and continuous editor geometry may keep subpixel positions;
+hard UI chrome such as 1px separators, modal outlines, and splitter strokes
+should use `mondrian-ui-widgets::paint` stroke helpers so stroke edges land on
+device-pixel boundaries. Components should not hand-roll `round()` formulas for
+new chrome.
+
 `mondrian-ui-widgets` keeps extreme interaction and visual-command stability in
 normal Rust tests. The component stress suite drives edge-size layouts, long
 text, dropdown wheel scrolling, pointer-captured slider drags, color-picker

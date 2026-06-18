@@ -9,7 +9,7 @@ use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use std::cell::Cell;
 
-use crate::paint::{mix_color, paint_focus_ring, paint_shadow};
+use crate::paint::{horizontal_stroke_rect, mix_color, paint_focus_ring, paint_shadow};
 use crate::text_metrics::measure_single_line;
 use crate::vector_icon::VectorIcon;
 
@@ -215,10 +215,10 @@ pub(crate) fn paint_menu_row(
 
 pub(crate) fn paint_menu_separator(ctx: &mut PaintContext, rect: Rect) {
     let tokens = &ctx.theme.colors;
-    let line = Rect::new(
+    let line = horizontal_stroke_rect(
+        rect.y + rect.height * 0.5,
         rect.x + 8.0,
-        rect.y + (rect.height * 0.5).floor(),
-        (rect.width - 16.0).max(1.0),
+        rect.width - 16.0,
         1.0,
     );
     ctx.encoder.draw_rect(line, tokens.border, 0.0);

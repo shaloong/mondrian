@@ -6,6 +6,8 @@ use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
+use crate::paint::{horizontal_stroke_rect, vertical_stroke_rect};
+
 /// DockSplitter —— 可拖拽调整比例的双子节点分割容器
 ///
 /// 视觉分割线为 1px，但拖拽热区为 `grab_zone`（默认 6px），
@@ -317,50 +319,28 @@ impl Widget for DockSplitter {
         let (hx, hy) = (self.grab_rect.center().x, self.grab_rect.center().y);
         match self.direction {
             SplitDirection::Horizontal => {
-                let x = hx.round();
                 ctx.encoder.draw_rect(
-                    Rect::new(
-                        x - base_width * 0.5,
-                        self.bounds.y,
-                        base_width,
-                        self.bounds.height,
-                    ),
+                    vertical_stroke_rect(hx, self.bounds.y, self.bounds.height, base_width),
                     base_color,
                     0.0,
                 );
                 if active_width > 0.0 {
                     ctx.encoder.draw_rect(
-                        Rect::new(
-                            x - active_width * 0.5,
-                            self.bounds.y,
-                            active_width,
-                            self.bounds.height,
-                        ),
+                        vertical_stroke_rect(hx, self.bounds.y, self.bounds.height, active_width),
                         active_color,
                         active_width * 0.5,
                     );
                 }
             }
             SplitDirection::Vertical => {
-                let y = hy.round();
                 ctx.encoder.draw_rect(
-                    Rect::new(
-                        self.bounds.x,
-                        y - base_width * 0.5,
-                        self.bounds.width,
-                        base_width,
-                    ),
+                    horizontal_stroke_rect(hy, self.bounds.x, self.bounds.width, base_width),
                     base_color,
                     0.0,
                 );
                 if active_width > 0.0 {
                     ctx.encoder.draw_rect(
-                        Rect::new(
-                            self.bounds.x,
-                            y - active_width * 0.5,
-                            self.bounds.width,
-                            active_width,
-                        ),
+                        horizontal_stroke_rect(hy, self.bounds.x, self.bounds.width, active_width),
                         active_color,
                         active_width * 0.5,
                     );

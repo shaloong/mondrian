@@ -80,6 +80,31 @@ pub(crate) fn soft_border(color: Color) -> Color {
     color_with_alpha(color, 0.72)
 }
 
+pub(crate) fn snap_stroke_center(coord: f32, stroke_width: f32) -> f32 {
+    if !coord.is_finite() {
+        return coord;
+    }
+    let stroke_width = normalized_stroke_width(stroke_width);
+    (coord - stroke_width * 0.5).round() + stroke_width * 0.5
+}
+
+pub(crate) fn vertical_stroke_rect(x: f32, y: f32, height: f32, stroke_width: f32) -> Rect {
+    let stroke_width = normalized_stroke_width(stroke_width);
+    let center = snap_stroke_center(x, stroke_width);
+    Rect::new(
+        center - stroke_width * 0.5,
+        y,
+        stroke_width,
+        height.max(0.0),
+    )
+}
+
+pub(crate) fn horizontal_stroke_rect(y: f32, x: f32, width: f32, stroke_width: f32) -> Rect {
+    let stroke_width = normalized_stroke_width(stroke_width);
+    let center = snap_stroke_center(y, stroke_width);
+    Rect::new(x, center - stroke_width * 0.5, width.max(0.0), stroke_width)
+}
+
 pub(crate) fn shadow_rect(bounds: Rect, shadow: &ShadowToken) -> Rect {
     Rect::new(
         bounds.x + shadow.offset_x - shadow.spread,
@@ -113,6 +138,14 @@ pub(crate) fn focus_ring_color(color: Color) -> Color {
 fn checkerboard_cell_size(cell_size: f32) -> f32 {
     if cell_size.is_finite() {
         cell_size.clamp(1.0, CHECKERBOARD_MAX_CELL)
+    } else {
+        1.0
+    }
+}
+
+fn normalized_stroke_width(stroke_width: f32) -> f32 {
+    if stroke_width.is_finite() && stroke_width > 0.0 {
+        stroke_width
     } else {
         1.0
     }
@@ -322,6 +355,26 @@ mod tests {
         assert_eq!(
             soft_border(color),
             Color { r: 0.2, g: 0.4, b: 0.6, a: 0.36 }
+        );
+    }
+
+    #[test]
+    fn snap_stroke_center_aligns_edges_to_device_pixels() {
+        assert_eq!(snap_stroke_center(10.2, 1.0), 10.5);
+        assert_eq!(snap_stroke_center(10.8, 1.0), 10.5);
+        assert_eq!(snap_stroke_center(10.2, 2.0), 10.0);
+        assert_eq!(snap_stroke_center(10.8, 2.0), 11.0);
+    }
+
+    #[test]
+    fn stroke_rect_helpers_snap_axis_aligned_lines() {
+        assert_eq!(
+            vertical_stroke_rect(10.2, 3.0, 20.0, 1.0),
+            Rect::new(10.0, 3.0, 1.0, 20.0)
+        );
+        assert_eq!(
+            horizontal_stroke_rect(10.8, 4.0, 30.0, 2.0),
+            Rect::new(4.0, 10.0, 30.0, 2.0)
         );
     }
 }

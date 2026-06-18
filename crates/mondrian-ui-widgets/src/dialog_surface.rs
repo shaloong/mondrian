@@ -7,6 +7,8 @@ use mondrian_core::Color;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::PaintContext;
 
+use crate::paint::{horizontal_stroke_rect, vertical_stroke_rect};
+
 /// Theme-aware modal surface geometry and chrome.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DialogSurface {
@@ -83,14 +85,26 @@ impl DialogSurface {
 }
 
 fn paint_rect_outline(ctx: &mut PaintContext, rect: Rect, width: f32, color: Color) {
-    let top_left = Point::new(rect.x, rect.y);
-    let top_right = Point::new(rect.x + rect.width, rect.y);
-    let bottom_left = Point::new(rect.x, rect.y + rect.height);
-    let bottom_right = Point::new(rect.x + rect.width, rect.y + rect.height);
-    ctx.encoder.draw_line(top_left, top_right, width, color);
-    ctx.encoder.draw_line(bottom_left, bottom_right, width, color);
-    ctx.encoder.draw_line(top_left, bottom_left, width, color);
-    ctx.encoder.draw_line(top_right, bottom_right, width, color);
+    ctx.encoder.draw_rect(
+        horizontal_stroke_rect(rect.y, rect.x, rect.width, width),
+        color,
+        0.0,
+    );
+    ctx.encoder.draw_rect(
+        horizontal_stroke_rect(rect.y + rect.height, rect.x, rect.width, width),
+        color,
+        0.0,
+    );
+    ctx.encoder.draw_rect(
+        vertical_stroke_rect(rect.x, rect.y, rect.height, width),
+        color,
+        0.0,
+    );
+    ctx.encoder.draw_rect(
+        vertical_stroke_rect(rect.x + rect.width, rect.y, rect.height, width),
+        color,
+        0.0,
+    );
 }
 
 #[cfg(test)]
