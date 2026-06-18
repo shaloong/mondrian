@@ -112,6 +112,12 @@ pub const APP_SHELL_PREFERENCES_THEME_CHANGED: &str = "preferences_theme_changed
 pub const APP_SHELL_CLOSE_MODAL: &str = "close_modal";
 /// App-shell request to quit the native application window.
 pub const APP_SHELL_QUIT: &str = "quit";
+/// App-shell request to minimize the native application window.
+pub const APP_SHELL_WINDOW_MINIMIZE: &str = "window_minimize";
+/// App-shell request to toggle the native application window maximized state.
+pub const APP_SHELL_WINDOW_TOGGLE_MAXIMIZE: &str = "window_toggle_maximize";
+/// App-shell request to begin native window dragging from custom chrome.
+pub const APP_SHELL_WINDOW_DRAG: &str = "window_drag";
 
 /// Self-hosted preferences section selected by the shell-local preferences UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -628,6 +634,21 @@ pub fn app_shell_close_modal_action() -> Action {
 /// Build an app-shell request for quitting the native application window.
 pub fn app_shell_quit_action() -> Action {
     custom_app_shell_action(APP_SHELL_QUIT)
+}
+
+/// Build an app-shell request for minimizing the native application window.
+pub fn app_shell_window_minimize_action() -> Action {
+    custom_app_shell_action(APP_SHELL_WINDOW_MINIMIZE)
+}
+
+/// Build an app-shell request for toggling the native application window maximized state.
+pub fn app_shell_window_toggle_maximize_action() -> Action {
+    custom_app_shell_action(APP_SHELL_WINDOW_TOGGLE_MAXIMIZE)
+}
+
+/// Build an app-shell request for beginning native window drag from custom chrome.
+pub fn app_shell_window_drag_action() -> Action {
+    custom_app_shell_action(APP_SHELL_WINDOW_DRAG)
 }
 
 fn custom_timeline_action<T: Serialize>(name: &'static str, payload: T) -> Action {

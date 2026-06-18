@@ -86,6 +86,15 @@ actions. The official `mondrian` entrypoint starts from a real empty
 that same boundary after dispatched actions. Component fixtures remain in
 `ui_demo` and explicit `SelfHostedPanelModels::demo()` tests only.
 
+Product top chrome is `self_hosted::title_bar::TitleBar`: it combines the
+product menu bar, a read-only project/sequence title, draggable titlebar space,
+and geometric window controls in one row. Window controls emit app-shell custom
+actions only; `SelfHostedUiHost` converts them into `SelfHostedShellCommands`
+and `self_hosted::window` applies native minimize, maximize, drag, fullscreen,
+or quit side effects after widget and `AppState` borrows end. These commands
+must not be added to the editor-state core action enum unless they mutate
+portable editor data.
+
 Shell-local modals, such as New Project, Preferences, and About, live in their
 own `self_hosted::*_dialog` modules and are hosted by `self_hosted::modal`.
 They emit stable `app.shell` custom actions defined in `app::ui_actions`.

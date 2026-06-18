@@ -16,7 +16,8 @@ use mondrian_ui_theme::set_theme_preset;
 
 use crate::app::ui_actions::{
     PreferencesThemePayload, APP_SHELL_NAMESPACE, APP_SHELL_PREFERENCES_THEME_CHANGED,
-    APP_SHELL_QUIT,
+    APP_SHELL_QUIT, APP_SHELL_WINDOW_DRAG, APP_SHELL_WINDOW_MINIMIZE,
+    APP_SHELL_WINDOW_TOGGLE_MAXIMIZE,
 };
 use crate::app::AppState;
 use crate::self_hosted::action_queue::PendingUiActions;
@@ -38,6 +39,12 @@ pub struct SelfHostedShellCommands {
     pub quit: bool,
     /// The native window should toggle fullscreen mode.
     pub toggle_fullscreen: bool,
+    /// The native window should minimize.
+    pub minimize: bool,
+    /// The native window should toggle maximized state.
+    pub toggle_maximize: bool,
+    /// The native window should begin an OS-level drag move.
+    pub begin_window_drag: bool,
 }
 
 /// Product-facing self-hosted UI session state.
@@ -277,6 +284,24 @@ fn take_shell_window_command(commands: &mut SelfHostedShellCommands, action: &Ac
             commands.quit = true;
             true
         }
+        Action::Custom { namespace, name, .. }
+            if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_WINDOW_MINIMIZE =>
+        {
+            commands.minimize = true;
+            true
+        }
+        Action::Custom { namespace, name, .. }
+            if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_WINDOW_TOGGLE_MAXIMIZE =>
+        {
+            commands.toggle_maximize = true;
+            true
+        }
+        Action::Custom { namespace, name, .. }
+            if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_WINDOW_DRAG =>
+        {
+            commands.begin_window_drag = true;
+            true
+        }
         _ => false,
     }
 }
@@ -465,7 +490,37 @@ mod tests {
 
         assert_eq!(
             commands,
-            SelfHostedShellCommands { quit: true, toggle_fullscreen: true }
+            SelfHostedShellCommands {
+                quit: true,
+                toggle_fullscreen: true,
+                ..SelfHostedShellCommands::default()
+            }
+        );
+        assert!(!host.app_state().has_open_project());
+    }
+
+    #[test]
+    fn host_returns_custom_chrome_window_commands() {
+        let mut host = SelfHostedUiHost::new(AppState::new());
+        let pending = PendingUiActions::default();
+
+        pending.push(crate::app::ui_actions::app_shell_window_minimize_action());
+        pending.push(crate::app::ui_actions::app_shell_window_toggle_maximize_action());
+        pending.push(crate::app::ui_actions::app_shell_window_drag_action());
+        let commands = host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+
+        assert_eq!(
+            commands,
+            SelfHostedShellCommands {
+                minimize: true,
+                toggle_maximize: true,
+                begin_window_drag: true,
+                ..SelfHostedShellCommands::default()
+            }
         );
         assert!(!host.app_state().has_open_project());
     }

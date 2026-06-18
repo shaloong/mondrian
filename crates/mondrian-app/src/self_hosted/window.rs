@@ -437,6 +437,15 @@ fn apply_shell_commands(
     if commands.toggle_fullscreen {
         toggle_window_fullscreen(window);
     }
+    if commands.toggle_maximize {
+        window.set_maximized(!window.is_maximized());
+    }
+    if commands.minimize {
+        window.set_minimized(true);
+    }
+    if commands.begin_window_drag {
+        let _ = window.drag_window();
+    }
     if commands.quit {
         elwt.exit();
     }

@@ -26,7 +26,7 @@ use crate::app::ui_actions::{
     APP_SHELL_PREFERENCES_TAB_CHANGED, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
 };
 use crate::app::AppState;
-use crate::self_hosted::menu_bar::{MenuBar, MENU_BAR_HEIGHT};
+use crate::self_hosted::menu_bar::MenuBar;
 use crate::self_hosted::modal::ShellModal;
 use crate::self_hosted::new_project_dialog::{
     default_project_file_name, SelfHostedNewProjectDraft,
@@ -34,6 +34,7 @@ use crate::self_hosted::new_project_dialog::{
 use crate::self_hosted::panels::{build_dock_tree_for_preset, SelfHostedPanelModels};
 use crate::self_hosted::preferences_dialog::{PreferencesDialogTab, SelfHostedPreferencesModel};
 use crate::self_hosted::preferences_store::SelfHostedPreferences;
+use crate::self_hosted::title_bar::{TitleBar, TITLE_BAR_HEIGHT};
 use mondrian_core::{MondrianError, Result};
 
 /// Default file extension for Mondrian project containers.
@@ -216,10 +217,27 @@ fn normalized_export_default_file_name(default_file_name: &str, extension: &str)
     }
 }
 
+fn window_title_for_app_state(state: &AppState) -> String {
+    let project = state
+        .current_project_path
+        .as_ref()
+        .and_then(|path| path.file_stem())
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or("Untitled");
+    let sequence = state.sequence.as_ref().map(|sequence| sequence.name.as_str());
+    match sequence {
+        Some(sequence) if !sequence.trim().is_empty() => {
+            format!("{project} - {sequence} - Mondrian")
+        }
+        _ => format!("{project} - Mondrian"),
+    }
+}
+
 /// Root widget for the self-hosted editor window.
 pub struct SelfHostedAppRoot {
     id: WidgetId,
-    menu_bar: MenuBar,
+    title_bar: TitleBar,
     dock: DockSplitter,
     models: SelfHostedPanelModels,
     preferences_model: SelfHostedPreferencesModel,
@@ -250,7 +268,10 @@ impl SelfHostedAppRoot {
         runtime_logs: Option<&LogBuffer>,
     ) -> Self {
         Self::new_with_preferences(
-            MenuBar::for_app_state(state),
+            TitleBar::new(
+                window_title_for_app_state(state),
+                MenuBar::for_app_state(state),
+            ),
             SelfHostedPanelModels::from_app_state_with_runtime_logs(state, runtime_logs),
             SelfHostedPreferencesModel::from_app_state(
                 state,
@@ -263,14 +284,18 @@ impl SelfHostedAppRoot {
 
     /// Build a root widget from app-facing panel models.
     pub fn from_models(models: SelfHostedPanelModels) -> Self {
-        Self::new(MenuBar::default(), models, WorkspacePreset::Editing)
+        Self::new(
+            TitleBar::new("Mondrian", MenuBar::default()),
+            models,
+            WorkspacePreset::Editing,
+        )
     }
 
     /// Build a root widget using test-only demo fixtures.
     #[cfg(test)]
     pub fn demo() -> Self {
         Self::new(
-            MenuBar::default(),
+            TitleBar::new("Mondrian", MenuBar::default()),
             SelfHostedPanelModels::demo(),
             WorkspacePreset::Editing,
         )
@@ -278,12 +303,12 @@ impl SelfHostedAppRoot {
 
     /// Build a root widget from explicit shell parts.
     pub fn new(
-        menu_bar: MenuBar,
+        title_bar: TitleBar,
         models: SelfHostedPanelModels,
         workspace_preset: WorkspacePreset,
     ) -> Self {
         Self::new_with_preferences(
-            menu_bar,
+            title_bar,
             models,
             SelfHostedPreferencesModel::default(),
             workspace_preset,
@@ -291,7 +316,7 @@ impl SelfHostedAppRoot {
     }
 
     fn new_with_preferences(
-        menu_bar: MenuBar,
+        title_bar: TitleBar,
         models: SelfHostedPanelModels,
         preferences_model: SelfHostedPreferencesModel,
         workspace_preset: WorkspacePreset,
@@ -299,7 +324,7 @@ impl SelfHostedAppRoot {
         let dock = build_dock_tree_for_preset(models.clone(), workspace_preset);
         Self {
             id: WidgetId::new(),
-            menu_bar,
+            title_bar,
             dock,
             models,
             preferences_model,
@@ -372,7 +397,10 @@ impl SelfHostedAppRoot {
         preferences: &SelfHostedPreferences,
         runtime_logs: Option<&LogBuffer>,
     ) {
-        self.menu_bar = MenuBar::for_app_state(state);
+        self.title_bar = TitleBar::new(
+            window_title_for_app_state(state),
+            MenuBar::for_app_state(state),
+        );
         self.set_models(SelfHostedPanelModels::from_app_state_with_runtime_logs(
             state,
             runtime_logs,
@@ -722,13 +750,17 @@ impl Widget for SelfHostedAppRoot {
 
     fn layout(&mut self, bounds: Rect) {
         self.bounds = bounds;
-        self.menu_bar
-            .layout(Rect::new(bounds.x, bounds.y, bounds.width, MENU_BAR_HEIGHT));
+        self.title_bar.layout(Rect::new(
+            bounds.x,
+            bounds.y,
+            bounds.width,
+            TITLE_BAR_HEIGHT,
+        ));
         self.dock.layout(Rect::new(
             bounds.x,
-            bounds.y + MENU_BAR_HEIGHT,
+            bounds.y + TITLE_BAR_HEIGHT,
             bounds.width,
-            (bounds.height - MENU_BAR_HEIGHT).max(0.0),
+            (bounds.height - TITLE_BAR_HEIGHT).max(0.0),
         ));
         if let Some(modal) = &mut self.modal {
             modal.layout(bounds);
@@ -742,7 +774,7 @@ impl Widget for SelfHostedAppRoot {
             }
             return EventResult::Handled;
         }
-        if self.menu_bar.event(event, ctx) == EventResult::Handled {
+        if self.title_bar.event(event, ctx) == EventResult::Handled {
             return EventResult::Handled;
         }
         self.dock.event(event, ctx)
@@ -750,7 +782,7 @@ impl Widget for SelfHostedAppRoot {
 
     fn paint(&self, ctx: &mut PaintContext) {
         self.dock.paint(ctx);
-        self.menu_bar.paint(ctx);
+        self.title_bar.paint(ctx);
         if let Some(modal) = &self.modal {
             modal.paint(ctx);
         }
@@ -767,7 +799,7 @@ impl Widget for SelfHostedAppRoot {
     fn child(&self, index: usize) -> Option<&dyn Widget> {
         match index {
             0 => Some(&self.dock),
-            1 => Some(&self.menu_bar),
+            1 => Some(&self.title_bar),
             2 => self.modal.as_ref().map(|modal| modal as &dyn Widget),
             _ => None,
         }
@@ -776,7 +808,7 @@ impl Widget for SelfHostedAppRoot {
     fn child_mut(&mut self, index: usize) -> Option<&mut dyn Widget> {
         match index {
             0 => Some(&mut self.dock),
-            1 => Some(&mut self.menu_bar),
+            1 => Some(&mut self.title_bar),
             2 => self.modal.as_mut().map(|modal| modal as &mut dyn Widget),
             _ => None,
         }
@@ -1618,16 +1650,19 @@ mod tests {
     }
 
     #[test]
-    fn app_root_layout_reserves_top_menu_height_for_dock() {
+    fn app_root_layout_reserves_title_bar_height_for_dock() {
         let mut root = SelfHostedAppRoot::demo();
 
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
 
         let zones = root.dock().collect_grab_zones();
 
-        assert_eq!(root.menu_bar.bounds(), Rect::new(0.0, 0.0, 1280.0, 28.0));
-        assert_eq!(zones[0].0.y, MENU_BAR_HEIGHT);
-        assert_eq!(zones[0].0.height, 720.0 - MENU_BAR_HEIGHT);
+        assert_eq!(
+            root.title_bar.bounds(),
+            Rect::new(0.0, 0.0, 1280.0, TITLE_BAR_HEIGHT)
+        );
+        assert_eq!(zones[0].0.y, TITLE_BAR_HEIGHT);
+        assert_eq!(zones[0].0.height, 720.0 - TITLE_BAR_HEIGHT);
         assert_eq!(root.child_count(), 2);
     }
 
@@ -1637,7 +1672,7 @@ mod tests {
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
 
         assert_eq!(root.child(0).map(Widget::id), Some(root.dock.id()));
-        assert_eq!(root.child(1).map(Widget::id), Some(root.menu_bar.id()));
+        assert_eq!(root.child(1).map(Widget::id), Some(root.title_bar.id()));
 
         let platform = FakePlatform::default();
         let action = root.handle_shell_action(app_shell_about_action(), &platform, None);
@@ -1717,7 +1752,11 @@ mod tests {
             &dispatch,
         );
 
-        click_menu(&mut root.menu_bar, &mut ctx, Point::new(20.0, 14.0));
+        click_menu(
+            root.title_bar.menu_bar_mut(),
+            &mut ctx,
+            Point::new(118.0, 14.0),
+        );
         let platform = FakePlatform::default();
         root.handle_shell_action(app_shell_about_action(), &platform, None);
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
@@ -1736,7 +1775,14 @@ mod tests {
 
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
 
-        assert_eq!(root.menu_bar.bounds(), Rect::new(0.0, 0.0, 1280.0, 28.0));
+        assert_eq!(
+            root.title_bar.bounds(),
+            Rect::new(0.0, 0.0, 1280.0, TITLE_BAR_HEIGHT)
+        );
+        assert_eq!(
+            root.title_bar.menu_bar().bounds().height,
+            crate::self_hosted::menu_bar::MENU_BAR_HEIGHT
+        );
         assert!(!root.dock().collect_grab_zones().is_empty());
     }
 

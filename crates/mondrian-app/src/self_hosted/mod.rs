@@ -20,4 +20,5 @@ pub mod shell;
 pub mod shortcuts;
 #[cfg(test)]
 pub(crate) mod test_utils;
+pub mod title_bar;
 pub mod window;
