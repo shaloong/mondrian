@@ -84,6 +84,8 @@ pub const ASSETS_DELETE_FOLDER: &str = "delete_folder";
 pub const ASSETS_MOVE_ASSET: &str = "move_asset";
 /// Action name for moving one folder/bin between parents.
 pub const ASSETS_MOVE_FOLDER: &str = "move_folder";
+/// Action name for moving multiple asset-browser items together.
+pub const ASSETS_MOVE_SELECTION: &str = "move_selection";
 
 /// Custom action namespace for export operations.
 pub const EXPORT_NAMESPACE: &str = "ui.export";
@@ -458,6 +460,17 @@ pub struct AssetsMoveFolderPayload {
     pub parent_folder_id: Option<String>,
 }
 
+/// Move multiple asset-library items into a folder, or to the root view.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetsMoveSelectionPayload {
+    /// Asset ids to move.
+    pub asset_ids: Vec<AssetId>,
+    /// Folder ids to reparent.
+    pub folder_ids: Vec<String>,
+    /// Destination folder/parent. `None` moves to the root level.
+    pub target_folder_id: Option<String>,
+}
+
 /// Create a synthetic reusable asset in the selected folder, or at root.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssetsCreateAssetPayload {
@@ -675,6 +688,10 @@ pub fn assets_move_asset_action(payload: AssetsMoveAssetPayload) -> Action {
 /// Build an action that moves one folder to another parent.
 pub fn assets_move_folder_action(payload: AssetsMoveFolderPayload) -> Action {
     custom_assets_action(ASSETS_MOVE_FOLDER, payload)
+}
+
+pub fn assets_move_selection_action(payload: AssetsMoveSelectionPayload) -> Action {
+    custom_assets_action(ASSETS_MOVE_SELECTION, payload)
 }
 
 /// Build an action that creates an adjustment-layer asset in the library.

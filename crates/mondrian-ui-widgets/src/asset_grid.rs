@@ -731,9 +731,29 @@ impl AssetGrid {
             return EventResult::Ignored;
         }
         self.drag_candidate = None;
-        ctx.begin_drag(candidate.payload);
+        ctx.begin_drag(self.drag_payload_for_index(candidate.index, candidate.payload));
         ctx.request_repaint();
         EventResult::Handled
+    }
+
+    fn drag_payload_for_index(&self, index: usize, fallback: DragPayload) -> DragPayload {
+        if !self.selected_indices.contains(&index) || self.selected_indices.len() <= 1 {
+            return fallback;
+        }
+        let mut assets = Vec::new();
+        let mut folders = Vec::new();
+        for selected in &self.selected_indices {
+            match self.items.get(*selected).and_then(|item| item.drag_payload.as_ref()) {
+                Some(DragPayload::Asset(asset_id)) => assets.push(*asset_id),
+                Some(DragPayload::AssetFolder(folder_id)) => folders.push(folder_id.clone()),
+                Some(_) | None => return fallback,
+            }
+        }
+        if assets.len() + folders.len() <= 1 {
+            fallback
+        } else {
+            DragPayload::AssetSelection { assets, folders }
+        }
     }
 
     fn activate_selected(&self, ctx: &mut EventContext) -> EventResult {
@@ -2130,6 +2150,69 @@ mod tests {
             requests.drag,
             Some(mondrian_ui_core::widget::DragRequest::Begin(
                 DragPayload::Asset(asset_id)
+            ))
+        );
+    }
+
+    #[test]
+    fn dragging_selected_asset_cards_starts_asset_selection_drag() {
+        let first_id = AssetId::new();
+        let second_id = AssetId::new();
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![
+                item("first", "First").with_drag_payload(DragPayload::Asset(first_id)),
+                item("second", "Second").with_drag_payload(DragPayload::Asset(second_id)),
+            ],
+        );
+        grid.layout(Rect::new(0.0, 0.0, 420.0, 260.0));
+        let first = grid.card_rect_for_index(0).expect("first").center();
+        let second = grid.card_rect_for_index(1).expect("second").center();
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let _ = grid.event(
+            &UiEvent::MouseDown {
+                position: first,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        let _ = grid.event(
+            &UiEvent::MouseDown {
+                position: second,
+                button: MouseButton::Left,
+                modifiers: Modifiers::ctrl(),
+            },
+            &mut ctx,
+        );
+        let _ = grid.event(
+            &UiEvent::MouseMove {
+                position: Point::new(second.x + 12.0, second.y),
+                modifiers: Modifiers::ctrl(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(
+            requests.drag,
+            Some(mondrian_ui_core::widget::DragRequest::Begin(
+                DragPayload::AssetSelection {
+                    assets: vec![first_id, second_id],
+                    folders: Vec::new()
+                }
             ))
         );
     }

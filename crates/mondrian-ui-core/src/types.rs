@@ -341,6 +341,10 @@ pub enum DragPayload {
     Clip(ClipId),
     Asset(AssetId),
     AssetFolder(String),
+    AssetSelection {
+        assets: Vec<AssetId>,
+        folders: Vec<String>,
+    },
     Effect(EffectId),
     Track(TrackId),
     File(Vec<std::path::PathBuf>),

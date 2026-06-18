@@ -14,23 +14,23 @@ use crate::app::timeline_editing::{
 use crate::app::ui_actions::{
     AssetsCreateAssetPayload, AssetsCreateFolderPayload, AssetsDeleteAssetPayload,
     AssetsDeleteFolderPayload, AssetsImportFilesPayload, AssetsMoveAssetPayload,
-    AssetsMoveFolderPayload, AssetsPrepareDragPayload, EffectsAddToClipPayload,
-    ExportDraftUpdatePayload, ExportEnqueuePayload, InspectorClipTransformField,
-    InspectorRemoveEffectPayload, InspectorSelectEffectPayload, InspectorSetClipCurvePayload,
-    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
-    InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
-    InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload,
-    ProjectRecoverFromAutosavePayload, TimelineAddTrackKind, TimelineAddTrackPayload,
-    TimelineDropAssetPayload, TimelineMoveClipPayload, TimelineMoveTrackPayload,
-    TimelineSeekPayload, TimelineSelectClipPayload, TimelineSetTrackControlPayload,
-    TimelineTrackControlPayloadKind, TimelineTrimClipPayload, TimelineTrimPayloadEdge,
-    ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR,
-    ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_IMPORT_FILES, ASSETS_MOVE_ASSET,
-    ASSETS_MOVE_FOLDER, ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP,
-    EFFECTS_NAMESPACE, EXPORT_ENQUEUE, EXPORT_NAMESPACE, EXPORT_SET_DRAFT, INSPECTOR_NAMESPACE,
-    INSPECTOR_REMOVE_EFFECT, INSPECTOR_SELECT_EFFECT, INSPECTOR_SET_CLIP_CURVE,
-    INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY, INSPECTOR_SET_CLIP_TINT,
-    INSPECTOR_SET_CLIP_TRANSFORM_FIELD, INSPECTOR_SET_EFFECT_ENABLED,
+    AssetsMoveFolderPayload, AssetsMoveSelectionPayload, AssetsPrepareDragPayload,
+    EffectsAddToClipPayload, ExportDraftUpdatePayload, ExportEnqueuePayload,
+    InspectorClipTransformField, InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
+    InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
+    InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
+    InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload,
+    ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload, TimelineAddTrackKind,
+    TimelineAddTrackPayload, TimelineDropAssetPayload, TimelineMoveClipPayload,
+    TimelineMoveTrackPayload, TimelineSeekPayload, TimelineSelectClipPayload,
+    TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipPayload,
+    TimelineTrimPayloadEdge, ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER,
+    ASSETS_CREATE_SOLID_COLOR, ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_IMPORT_FILES,
+    ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE,
+    ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, EXPORT_ENQUEUE, EXPORT_NAMESPACE,
+    EXPORT_SET_DRAFT, INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT, INSPECTOR_SELECT_EFFECT,
+    INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY,
+    INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD, INSPECTOR_SET_EFFECT_ENABLED,
     INSPECTOR_SET_EFFECT_PROPERTY, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
     PROJECT_RECOVER_FROM_AUTOSAVE, TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET, TIMELINE_MOVE_CLIP,
     TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_SEEK, TIMELINE_SELECT_CLIP,
@@ -498,6 +498,69 @@ impl AppState {
             })?;
         self.set_status_hint(
             format!("已移动文件夹：{folder_name} → {target_name}"),
+            false,
+        );
+        Ok(())
+    }
+
+    fn move_selection_from_ui(&mut self, payload: AssetsMoveSelectionPayload) -> Result<()> {
+        let library = self.asset_library.clone().ok_or_else(|| {
+            let reason = "素材库未连接".to_string();
+            self.set_status_hint(format!("移动素材选择失败：{reason}"), true);
+            MondrianError::WorkflowStepFailed {
+                step_id: "move_asset_selection".to_string(),
+                reason,
+            }
+        })?;
+        let target_name = match payload.target_folder_id.as_deref() {
+            Some(folder_id) => library
+                .list_folders()?
+                .into_iter()
+                .find(|folder| folder.id == folder_id)
+                .map(|folder| folder.name)
+                .unwrap_or_else(|| folder_id.to_string()),
+            None => "All assets".to_string(),
+        };
+        let mut moved_assets = 0usize;
+        let mut moved_folders = 0usize;
+
+        for asset_id in &payload.asset_ids {
+            library
+                .move_asset_to_folder(*asset_id, payload.target_folder_id.as_deref())
+                .map_err(|err| {
+                    let reason = err.to_string();
+                    self.set_status_hint(format!("移动素材选择失败：{reason}"), true);
+                    MondrianError::WorkflowStepFailed {
+                        step_id: "move_asset_selection".to_string(),
+                        reason,
+                    }
+                })?;
+            moved_assets += 1;
+        }
+        for folder_id in &payload.folder_ids {
+            if Some(folder_id.as_str()) == payload.target_folder_id.as_deref() {
+                continue;
+            }
+            library
+                .move_folder(folder_id, payload.target_folder_id.as_deref())
+                .map_err(|err| {
+                    let reason = err.to_string();
+                    self.set_status_hint(format!("移动素材选择失败：{reason}"), true);
+                    MondrianError::WorkflowStepFailed {
+                        step_id: "move_asset_selection".to_string(),
+                        reason,
+                    }
+                })?;
+            moved_folders += 1;
+        }
+
+        if moved_assets + moved_folders == 0 {
+            return Ok(());
+        }
+        self.event_bus.publish(mondrian_core::events::AppEvent::AssetLibraryReloaded);
+        let _ = self.save_project_file();
+        self.set_status_hint(
+            format!("已移动 {moved_assets} 个素材、{moved_folders} 个文件夹 → {target_name}"),
             false,
         );
         Ok(())
@@ -1078,6 +1141,14 @@ impl AppState {
                     parse_ui_payload::<AssetsMoveFolderPayload>("assets_ui_action", name, payload)?;
                 self.move_folder_from_ui(payload)
             }
+            ASSETS_MOVE_SELECTION => {
+                let payload = parse_ui_payload::<AssetsMoveSelectionPayload>(
+                    "assets_ui_action",
+                    name,
+                    payload,
+                )?;
+                self.move_selection_from_ui(payload)
+            }
             _ => Err(unknown_ui_action_error("assets_ui_action", name)),
         }
     }
@@ -1630,27 +1701,28 @@ mod tests {
         assets_create_adjustment_layer_action, assets_create_folder_action,
         assets_create_solid_color_action, assets_delete_asset_action, assets_delete_folder_action,
         assets_import_files_action, assets_move_asset_action, assets_move_folder_action,
-        assets_prepare_drag_action, effects_add_to_clip_action, export_enqueue_action,
-        export_set_draft_action, inspector_remove_effect_action, inspector_select_effect_action,
-        inspector_set_clip_curve_action, inspector_set_clip_enabled_action,
-        inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
-        inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
-        inspector_set_effect_property_action, project_create_with_settings_action,
-        project_recover_from_autosave_action, timeline_add_track_action,
-        timeline_drop_asset_action, timeline_move_clip_action, timeline_move_track_action,
-        timeline_seek_action, timeline_select_clip_action, timeline_set_track_control_action,
-        timeline_trim_clip_action, AssetsCreateAssetPayload, AssetsCreateFolderPayload,
-        AssetsDeleteAssetPayload, AssetsDeleteFolderPayload, AssetsImportFilesPayload,
-        AssetsMoveAssetPayload, AssetsMoveFolderPayload, AssetsPrepareDragPayload,
-        EffectsAddToClipPayload, ExportDraftUpdatePayload, ExportEnqueuePayload,
-        InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
-        InspectorRemoveEffectPayload, InspectorSelectEffectPayload, InspectorSetClipCurvePayload,
-        InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
-        InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
-        InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload,
-        ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload, TimelineAddTrackKind,
-        TimelineAddTrackPayload, TimelineDropAssetPayload, TimelineMoveTrackPayload,
-        TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind,
+        assets_move_selection_action, assets_prepare_drag_action, effects_add_to_clip_action,
+        export_enqueue_action, export_set_draft_action, inspector_remove_effect_action,
+        inspector_select_effect_action, inspector_set_clip_curve_action,
+        inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
+        inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
+        inspector_set_effect_enabled_action, inspector_set_effect_property_action,
+        project_create_with_settings_action, project_recover_from_autosave_action,
+        timeline_add_track_action, timeline_drop_asset_action, timeline_move_clip_action,
+        timeline_move_track_action, timeline_seek_action, timeline_select_clip_action,
+        timeline_set_track_control_action, timeline_trim_clip_action, AssetsCreateAssetPayload,
+        AssetsCreateFolderPayload, AssetsDeleteAssetPayload, AssetsDeleteFolderPayload,
+        AssetsImportFilesPayload, AssetsMoveAssetPayload, AssetsMoveFolderPayload,
+        AssetsMoveSelectionPayload, AssetsPrepareDragPayload, EffectsAddToClipPayload,
+        ExportDraftUpdatePayload, ExportEnqueuePayload, InspectorClipRefPayload,
+        InspectorClipTransformField, InspectorCurvePointPayload, InspectorRemoveEffectPayload,
+        InspectorSelectEffectPayload, InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
+        InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+        InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
+        InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload,
+        ProjectRecoverFromAutosavePayload, TimelineAddTrackKind, TimelineAddTrackPayload,
+        TimelineDropAssetPayload, TimelineMoveTrackPayload, TimelineSetTrackControlPayload,
+        TimelineTrackControlPayloadKind,
     };
     use mondrian_assets::AssetLibrary;
     use mondrian_core::types::{AssetId, EffectId, MaskId, TimeCode, TrackId};
@@ -2505,6 +2577,57 @@ mod tests {
             .expect_err("moving parent into child should fail");
         assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
         assert!(state.status_hint.as_ref().is_some_and(|(_, is_error)| *is_error));
+
+        remove_temp_path(&library_root);
+    }
+
+    #[test]
+    fn dispatch_assets_move_selection_batches_assets_and_folders() {
+        let mut state = AppState::new();
+        let library_root = unique_temp_path("assets-move-selection-action-library");
+        let library = AssetLibrary::open(library_root.clone()).expect("library");
+        let target_id = library.create_folder("Target", None).expect("create target");
+        let folder_id = library.create_folder("Bin", None).expect("create folder");
+        let first_asset = library.create_solid_color_asset(Some("Plate A")).expect("asset a");
+        let second_asset = library.create_solid_color_asset(Some("Plate B")).expect("asset b");
+        state.asset_library = Some(library);
+        let events = state.event_bus.subscribe();
+
+        state
+            .dispatch_action(assets_move_selection_action(AssetsMoveSelectionPayload {
+                asset_ids: vec![first_asset, second_asset],
+                folder_ids: vec![folder_id.clone()],
+                target_folder_id: Some(target_id.clone()),
+            }))
+            .expect("move selection");
+
+        let library = state.asset_library.as_ref().expect("library");
+        for asset_id in [first_asset, second_asset] {
+            let asset = library.get_asset(asset_id).expect("get asset").expect("asset");
+            assert_eq!(asset.folder_id.as_deref(), Some(target_id.as_str()));
+        }
+        let folders = library.list_folders().expect("list folders");
+        assert_eq!(
+            folders
+                .iter()
+                .find(|folder| folder.id == folder_id)
+                .expect("moved folder")
+                .parent_id
+                .as_deref(),
+            Some(target_id.as_str())
+        );
+        assert!(
+            state.status_hint.as_ref().is_some_and(|(message, is_error)| {
+                !*is_error && message.contains("2 个素材") && message.contains("1 个文件夹")
+            })
+        );
+        assert_eq!(
+            events
+                .try_iter()
+                .filter(|event| matches!(event, AppEvent::AssetLibraryReloaded))
+                .count(),
+            1
+        );
 
         remove_temp_path(&library_root);
     }
