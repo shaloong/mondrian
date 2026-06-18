@@ -173,7 +173,7 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                 TreeWalker::paint(host.root(), &mut encoder, &theme);
                 ui_runtime.paint_shell_overlays(&mut encoder, &theme, b, last_cursor, &router);
                 let size = window.inner_size();
-                let _ = frame_renderer.render_draw_commands(
+                let frame_result = frame_renderer.render_draw_commands(
                     &device,
                     &queue,
                     &surface,
@@ -181,6 +181,9 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                     (size.width, size.height),
                     encoder.finish(),
                 );
+                if frame_result.needs_follow_up_redraw() {
+                    window.request_redraw();
+                }
             }
 
             Event::WindowEvent { event: WindowEvent::Resized(new_size), .. } => {

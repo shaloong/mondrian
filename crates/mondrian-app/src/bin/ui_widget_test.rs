@@ -95,7 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sz = w.inner_size();
     let mut cfg = surf.get_default_config(&adap, sz.width, sz.height).unwrap();
     surf.configure(&dev, &cfg);
-    let renderer = UiRenderer::new(&dev, cfg.format);
+    let mut renderer = UiRenderer::new(&dev, cfg.format);
 
     // Build widget tree: RootFill containing 2 ColoredBox children
     // Red box at (50,50) 300x400, Blue box at (450,50) 300x400

@@ -26,7 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Use our real pipeline from mondrian-ui-renderer
     use mondrian_ui_renderer::{DrawEncoder, UiRenderer};
-    let renderer = UiRenderer::new(&dev, cfg.format);
+    let mut renderer = UiRenderer::new(&dev, cfg.format);
 
     el.run(move |ev, elwt| {
         use winit::event::{Event, WindowEvent};

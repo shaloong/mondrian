@@ -362,9 +362,12 @@ impl Widget for PropertyPanel {
 mod tests {
     use super::*;
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use crate::Slider;
+    use mondrian_editor_state::Action;
     use mondrian_ui_core::widget::DrawCommandEncoder;
     use mondrian_ui_theme::ThemePreset;
     use std::cell::Cell;
+    use std::cell::RefCell;
     use std::rc::Rc;
 
     struct ProbeWidget {
@@ -504,6 +507,63 @@ mod tests {
 
         assert_eq!(result, EventResult::Handled);
         assert!(handled.get());
+    }
+
+    #[test]
+    fn property_panel_slider_row_drags_after_mouse_down() {
+        let last_value = Rc::new(Cell::new(0.0));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch);
+        let mut panel = PropertyPanel::new("Inspector").with_section(
+            PropertySection::new("Clip").with_row(PropertyRow::new(
+                "Opacity",
+                Box::new({
+                    let last_value = Rc::clone(&last_value);
+                    Slider::new(0.0, 0.0, 100.0).on_change(move |value| {
+                        last_value.set(value);
+                        Action::NoOp
+                    })
+                }),
+            )),
+        );
+        panel.layout(Rect::new(0.0, 0.0, 320.0, 200.0));
+
+        let slider_point = Point::new(128.0, 79.0);
+        let slider_end = Point::new(300.0, 79.0);
+        let down = panel.event(
+            &UiEvent::MouseDown {
+                position: slider_point,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        let drag = panel.event(
+            &UiEvent::MouseMove { position: slider_end, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        let up = panel.event(
+            &UiEvent::MouseUp {
+                position: slider_end,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(down, EventResult::Handled);
+        assert_eq!(drag, EventResult::Handled);
+        assert_eq!(up, EventResult::Handled);
+        assert!(
+            last_value.get() > 95.0,
+            "slider value was {}",
+            last_value.get()
+        );
+        assert_eq!(actions.borrow().as_slice(), &[Action::NoOp, Action::NoOp]);
     }
 
     #[test]

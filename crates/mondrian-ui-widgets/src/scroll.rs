@@ -1,6 +1,6 @@
 //! ScrollView 控件
 //!
-//! 虚拟滚动容器。用 PushTranslate/PopTransform + PushClip/PopClip 实现裁剪和偏移。
+//! 虚拟滚动容器。子内容按滚动后的屏幕坐标布局，绘制阶段只负责裁剪。
 
 use glam::Vec2;
 use mondrian_ui_core::types::*;
@@ -44,6 +44,7 @@ impl ScrollView {
     pub fn scroll_to_bottom(&mut self) {
         let max_y = (self.content_size.height - self.bounds.height).max(0.0);
         self.scroll_offset.y = max_y;
+        self.layout_child();
     }
 
     pub fn is_at_bottom(&self) -> bool {
@@ -68,7 +69,11 @@ impl ScrollView {
         let old = self.scroll_offset.y;
         self.scroll_offset.y = y;
         self.clamp_scroll_offset();
-        (self.scroll_offset.y - old).abs() > 0.01
+        let changed = (self.scroll_offset.y - old).abs() > 0.01;
+        if changed {
+            self.layout_child();
+        }
+        changed
     }
 
     fn set_thumb_hovered(&mut self, position: Point) -> bool {
@@ -80,38 +85,28 @@ impl ScrollView {
         changed
     }
 
-    fn point_to_child(&self, point: Point) -> Point {
-        Point::new(
-            point.x - self.bounds.x + self.scroll_offset.x,
-            point.y - self.bounds.y + self.scroll_offset.y,
+    fn child_bounds(&self) -> Rect {
+        Rect::new(
+            self.bounds.x - self.scroll_offset.x,
+            self.bounds.y - self.scroll_offset.y,
+            self.content_size.width,
+            self.content_size.height,
         )
     }
 
-    fn translate_event_to_child(&self, event: &mut UiEvent) {
-        match event {
-            UiEvent::MouseDown { position, .. }
-            | UiEvent::MouseUp { position, .. }
-            | UiEvent::MouseMove { position, .. }
-            | UiEvent::MouseWheel { position, .. }
-            | UiEvent::DragEnter { position, .. }
-            | UiEvent::DragOver { position }
-            | UiEvent::Drop { position, .. } => {
-                *position = self.point_to_child(*position);
-            }
-            _ => {}
+    fn layout_child(&mut self) {
+        let child_bounds = self.child_bounds();
+        if let Some(child) = &mut self.child {
+            child.layout(child_bounds);
         }
     }
 
     fn child_hit_test(&self, point: Point) -> bool {
-        self.child
-            .as_ref()
-            .is_some_and(|child| child.hit_test(self.point_to_child(point)))
+        self.child.as_ref().is_some_and(|child| child.hit_test(point))
     }
 
     fn child_overlay_hit_test(&self, point: Point) -> bool {
-        self.child
-            .as_ref()
-            .is_some_and(|child| child.overlay_hit_test(self.point_to_child(point)))
+        self.child.as_ref().is_some_and(|child| child.overlay_hit_test(point))
     }
 
     fn vertical_scrollbar_track_rect(&self) -> Rect {
@@ -173,9 +168,8 @@ impl Widget for ScrollView {
                 max: Size::new(bounds.width.max(0.0), f32::MAX),
             });
             self.content_size = measured;
-            let child_bounds = Rect::new(0.0, 0.0, measured.width, measured.height);
-            child.layout(child_bounds);
             self.clamp_scroll_offset();
+            self.layout_child();
         }
     }
 
@@ -213,10 +207,8 @@ impl Widget for ScrollView {
                     return EventResult::Handled;
                 }
 
-                let mut offset_event = event.clone();
-                self.translate_event_to_child(&mut offset_event);
                 if let Some(ref mut child) = self.child {
-                    child.event(&offset_event, ctx)
+                    child.event(event, ctx)
                 } else {
                     EventResult::Ignored
                 }
@@ -242,10 +234,8 @@ impl Widget for ScrollView {
                     return EventResult::Handled;
                 }
 
-                let mut offset_event = event.clone();
-                self.translate_event_to_child(&mut offset_event);
                 if let Some(ref mut child) = self.child {
-                    child.event(&offset_event, ctx)
+                    child.event(event, ctx)
                 } else {
                     EventResult::Ignored
                 }
@@ -253,10 +243,8 @@ impl Widget for ScrollView {
             UiEvent::MouseWheel { delta, position, .. } => {
                 if !self.bounds.contains(*position) {
                     if self.child_hit_test(*position) || self.child_overlay_hit_test(*position) {
-                        let mut offset_event = event.clone();
-                        self.translate_event_to_child(&mut offset_event);
                         if let Some(ref mut child) = self.child {
-                            return child.event(&offset_event, ctx);
+                            return child.event(event, ctx);
                         }
                     }
                     return EventResult::Ignored;
@@ -267,10 +255,8 @@ impl Widget for ScrollView {
                 EventResult::Handled
             }
             _ => {
-                let mut offset_event = event.clone();
-                self.translate_event_to_child(&mut offset_event);
                 if let Some(ref mut child) = self.child {
-                    child.event(&offset_event, ctx)
+                    child.event(event, ctx)
                 } else {
                     EventResult::Ignored
                 }
@@ -280,15 +266,9 @@ impl Widget for ScrollView {
 
     fn paint(&self, ctx: &mut PaintContext) {
         ctx.encoder.push_clip(self.bounds);
-        // Translate child from (0,0) to scroll view's screen position, minus scroll offset.
-        ctx.encoder.push_translate(Vec2::new(
-            self.bounds.x - self.scroll_offset.x,
-            self.bounds.y - self.scroll_offset.y,
-        ));
         if let Some(ref child) = self.child {
             child.paint(ctx);
         }
-        ctx.encoder.pop_transform();
 
         if let Some(mut sb_rect) = self.vertical_scrollbar_thumb_rect() {
             let active = self.dragging_vertical_thumb || self.hovered_vertical_thumb;
@@ -321,12 +301,7 @@ impl Widget for ScrollView {
 
     fn paint_overlay(&self, ctx: &mut PaintContext) {
         if let Some(ref child) = self.child {
-            ctx.encoder.push_translate(Vec2::new(
-                self.bounds.x - self.scroll_offset.x,
-                self.bounds.y - self.scroll_offset.y,
-            ));
             child.paint_overlay(ctx);
-            ctx.encoder.pop_transform();
         }
     }
 
@@ -370,6 +345,7 @@ mod tests {
         id: WidgetId,
         preferred: Size,
         last_mouse_down: Rc<RefCell<Option<Point>>>,
+        last_layout: Rc<RefCell<Option<Rect>>>,
     }
 
     impl Widget for RecordingChild {
@@ -381,7 +357,9 @@ mod tests {
             self.preferred
         }
 
-        fn layout(&mut self, _bounds: Rect) {}
+        fn layout(&mut self, bounds: Rect) {
+            *self.last_layout.borrow_mut() = Some(bounds);
+        }
 
         fn event(&mut self, event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
             if let UiEvent::MouseDown { position, .. } = event {
@@ -623,15 +601,21 @@ mod tests {
     }
 
     #[test]
-    fn scroll_view_translates_pointer_events_to_child_content_space() {
+    fn scroll_view_lays_out_child_in_scrolled_screen_space_and_forwards_events() {
         let last_mouse_down = Rc::new(RefCell::new(None));
+        let last_layout = Rc::new(RefCell::new(None));
         let child = RecordingChild {
             id: WidgetId::new(),
             preferred: Size::new(200.0, 800.0),
             last_mouse_down: Rc::clone(&last_mouse_down),
+            last_layout: Rc::clone(&last_layout),
         };
         let mut sv = ScrollView::new(Some(Box::new(child)));
         sv.layout(Rect::new(20.0, 30.0, 300.0, 300.0));
+        assert_eq!(
+            *last_layout.borrow(),
+            Some(Rect::new(20.0, 30.0, 200.0, 800.0))
+        );
 
         let mut f = DummyFocus;
         let mut s = DummyShortcut;
@@ -646,6 +630,10 @@ mod tests {
             },
             &mut ctx,
         );
+        assert_eq!(
+            *last_layout.borrow(),
+            Some(Rect::new(20.0, -10.0, 200.0, 800.0))
+        );
         sv.event(
             &UiEvent::MouseDown {
                 position: Point::new(50.0, 70.0),
@@ -655,11 +643,11 @@ mod tests {
             &mut ctx,
         );
 
-        assert_eq!(*last_mouse_down.borrow(), Some(Point::new(30.0, 80.0)));
+        assert_eq!(*last_mouse_down.borrow(), Some(Point::new(50.0, 70.0)));
     }
 
     #[test]
-    fn scroll_view_overlay_hit_test_translates_overlay_points_to_child_space() {
+    fn scroll_view_overlay_hit_test_uses_screen_space() {
         let last_hit = Rc::new(RefCell::new(None));
         let last_wheel = Rc::new(RefCell::new(None));
         let overlay_painted = Rc::new(RefCell::new(false));
@@ -675,11 +663,11 @@ mod tests {
 
         assert!(!sv.hit_test(Point::new(250.0, 300.0)));
         assert!(sv.overlay_hit_test(Point::new(250.0, 300.0)));
-        assert_eq!(*last_hit.borrow(), Some(Point::new(240.0, 580.0)));
+        assert_eq!(*last_hit.borrow(), Some(Point::new(250.0, 300.0)));
     }
 
     #[test]
-    fn scroll_view_paint_overlay_uses_child_content_transform_without_clip() {
+    fn scroll_view_paint_overlay_uses_child_screen_layout_without_clip() {
         let last_hit = Rc::new(RefCell::new(None));
         let last_wheel = Rc::new(RefCell::new(None));
         let overlay_painted = Rc::new(RefCell::new(false));
@@ -703,7 +691,7 @@ mod tests {
 
         sv.paint_overlay(&mut ctx);
 
-        assert_eq!(encoder.translations, vec![Vec2::new(10.0, -280.0)]);
+        assert!(encoder.translations.is_empty());
         assert!(*overlay_painted.borrow());
     }
 
@@ -738,7 +726,7 @@ mod tests {
         );
 
         assert_eq!(result, EventResult::Handled);
-        assert_eq!(*last_wheel.borrow(), Some(Point::new(240.0, 580.0)));
+        assert_eq!(*last_wheel.borrow(), Some(Point::new(250.0, 300.0)));
     }
 
     #[test]

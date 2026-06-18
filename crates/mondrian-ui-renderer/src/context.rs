@@ -17,6 +17,13 @@ struct Uniforms {
     _pad: [f32; 2],
 }
 
+const UI_SAMPLE_COUNT: u32 = 4;
+
+struct MsaaTarget {
+    size: (u32, u32),
+    view: wgpu::TextureView,
+}
+
 /// 字形上传数据
 pub struct GlyphUpload {
     pub x: u32,
@@ -31,6 +38,8 @@ pub struct UiRenderer {
     pipeline: UiPipeline,
     glyph_texture: wgpu::Texture,
     glyph_bind_group: wgpu::BindGroup,
+    surface_format: wgpu::TextureFormat,
+    msaa_target: Option<MsaaTarget>,
 }
 
 fn scissor_rect_for_clip(
@@ -64,7 +73,7 @@ fn scissor_rect_for_clip(
 
 impl UiRenderer {
     pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
-        let pipeline = UiPipeline::new(device, surface_format);
+        let pipeline = UiPipeline::new(device, surface_format, UI_SAMPLE_COUNT);
 
         let atlas_size: u32 = 2048;
         let glyph_texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -108,7 +117,45 @@ impl UiRenderer {
             ],
         });
 
-        Self { pipeline, glyph_texture, glyph_bind_group }
+        Self {
+            pipeline,
+            glyph_texture,
+            glyph_bind_group,
+            surface_format,
+            msaa_target: None,
+        }
+    }
+
+    fn ensure_msaa_target(&mut self, device: &wgpu::Device, screen_size: (u32, u32)) {
+        if UI_SAMPLE_COUNT <= 1 || screen_size.0 == 0 || screen_size.1 == 0 {
+            self.msaa_target = None;
+            return;
+        }
+
+        let needs_recreate = match self.msaa_target.as_ref() {
+            Some(target) => target.size != screen_size,
+            None => true,
+        };
+        if needs_recreate {
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("ui_msaa_target"),
+                size: wgpu::Extent3d {
+                    width: screen_size.0,
+                    height: screen_size.1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: UI_SAMPLE_COUNT,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.surface_format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            self.msaa_target = Some(MsaaTarget {
+                size: screen_size,
+                view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
+            });
+        }
     }
 
     /// 上传字形 bitmap 到 GPU 图集纹理（alpha→Rgba8 格式转换）
@@ -147,7 +194,7 @@ impl UiRenderer {
     }
 
     pub fn render(
-        &self,
+        &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         view: &wgpu::TextureView,
@@ -155,6 +202,8 @@ impl UiRenderer {
         screen_size: (u32, u32),
     ) {
         let batches = build_batches(commands, screen_size);
+        self.ensure_msaa_target(device, screen_size);
+        let msaa_view = self.msaa_target.as_ref().map(|target| &target.view);
 
         let uniform_data = Uniforms {
             screen_size: [screen_size.0 as f32, screen_size.1 as f32],
@@ -179,11 +228,16 @@ impl UiRenderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("ui_encoder") });
 
         {
+            let (attachment_view, resolve_target) = if let Some(msaa_view) = msaa_view {
+                (msaa_view, Some(view))
+            } else {
+                (view, None)
+            };
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("ui_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view,
-                    resolve_target: None,
+                    view: attachment_view,
+                    resolve_target,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }),
                         store: wgpu::StoreOp::Store,

@@ -220,11 +220,7 @@ impl DrawEncoder {
             return;
         }
 
-        let vertices = vertices
-            .iter()
-            .take(triangle_vertex_count)
-            .map(|point| snap_point(*point))
-            .collect();
+        let vertices = vertices.iter().take(triangle_vertex_count).copied().collect();
         self.commands.push(DrawCommand::Triangles { vertices, color });
     }
 
@@ -234,11 +230,7 @@ impl DrawEncoder {
             return;
         }
 
-        let vertices = vertices
-            .iter()
-            .take(triangle_vertex_count)
-            .map(|(point, color)| (snap_point(*point), *color))
-            .collect();
+        let vertices = vertices.iter().take(triangle_vertex_count).copied().collect();
         self.commands.push(DrawCommand::ColoredTriangles { vertices, mask: None });
     }
 
@@ -253,11 +245,7 @@ impl DrawEncoder {
             return;
         }
 
-        let vertices = vertices
-            .iter()
-            .take(triangle_vertex_count)
-            .map(|(point, color)| (snap_point(*point), *color))
-            .collect();
+        let vertices = vertices.iter().take(triangle_vertex_count).copied().collect();
         self.commands.push(DrawCommand::ColoredTriangles {
             vertices,
             mask: Some(ShapeMask { bounds: snap_rect(mask_bounds), corner_radius }),
@@ -437,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn encoder_draw_triangles_snaps_and_drops_incomplete_tail() {
+    fn encoder_draw_triangles_preserves_subpixel_vertices_and_drops_incomplete_tail() {
         let mut enc = DrawEncoder::new();
         enc.draw_triangles(
             &[
@@ -454,16 +442,16 @@ mod tests {
         match &commands[0] {
             DrawCommand::Triangles { vertices, .. } => {
                 assert_eq!(vertices.len(), 3);
-                assert_eq!(vertices[0], Point::new(0.0, 1.0));
-                assert_eq!(vertices[1], Point::new(10.0, 0.0));
-                assert_eq!(vertices[2], Point::new(0.0, 11.0));
+                assert_eq!(vertices[0], Point::new(0.2, 0.8));
+                assert_eq!(vertices[1], Point::new(10.1, 0.1));
+                assert_eq!(vertices[2], Point::new(0.4, 10.7));
             }
             other => panic!("expected triangles command, got {other:?}"),
         }
     }
 
     #[test]
-    fn encoder_draw_colored_triangles_snaps_and_drops_incomplete_tail() {
+    fn encoder_draw_colored_triangles_preserves_subpixel_vertices_and_drops_incomplete_tail() {
         let mut enc = DrawEncoder::new();
         enc.draw_colored_triangles(&[
             (Point::new(0.2, 0.8), Color::WHITE),
@@ -478,8 +466,40 @@ mod tests {
             DrawCommand::ColoredTriangles { vertices, mask } => {
                 assert!(mask.is_none());
                 assert_eq!(vertices.len(), 3);
-                assert_eq!(vertices[0].0, Point::new(0.0, 1.0));
+                assert_eq!(vertices[0].0, Point::new(0.2, 0.8));
+                assert_eq!(vertices[1].0, Point::new(10.1, 0.1));
                 assert_eq!(vertices[1].1, Color::BLACK);
+            }
+            other => panic!("expected colored triangles command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn encoder_draw_masked_colored_triangles_preserves_vertices_but_snaps_mask() {
+        let mut enc = DrawEncoder::new();
+        enc.draw_colored_triangles_in_rect(
+            &[
+                (Point::new(0.2, 0.8), Color::WHITE),
+                (Point::new(10.1, 0.1), Color::BLACK),
+                (Point::new(0.4, 10.7), Color::TRANSPARENT),
+            ],
+            Rect::new(1.4, 2.6, 24.2, 25.7),
+            6.0,
+        );
+
+        let commands = enc.finish();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            DrawCommand::ColoredTriangles { vertices, mask } => {
+                assert_eq!(vertices[0].0, Point::new(0.2, 0.8));
+                assert_eq!(vertices[1].0, Point::new(10.1, 0.1));
+                assert_eq!(
+                    *mask,
+                    Some(ShapeMask {
+                        bounds: Rect::new(1.0, 3.0, 24.0, 26.0),
+                        corner_radius: 6.0,
+                    })
+                );
             }
             other => panic!("expected colored triangles command, got {other:?}"),
         }

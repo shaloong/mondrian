@@ -482,12 +482,15 @@ routed to the owning widget.
 
 ## Scroll Views
 
-Scroll containers translate pointer events from screen coordinates into child
-content coordinates using `screen - viewport_origin + scroll_offset`, matching
-the inverse of their paint transform. Wheel events are handled only inside the
-viewport and offsets are clamped after wheel input and layout. Offset-changing
-wheel, track, thumb drag, and scrollbar hover transitions request repaint
-through `EventRequests`.
+Scroll containers lay their child content out in scrolled screen coordinates:
+`child_origin = viewport_origin - scroll_offset`. Painting only pushes the
+viewport clip and does not add a private content transform. This keeps widget
+tree hit-testing, pointer capture, overlay routing, and child widget events in a
+single screen-coordinate model; controls inside a scrolled inspector or list
+therefore drag the same way as controls outside the scroll view. Wheel events
+are handled only inside the viewport and offsets are clamped after wheel input
+and layout. Offset-changing wheel, track, thumb drag, and scrollbar hover
+transitions request repaint through `EventRequests`.
 
 `ScrollView` exposes a draggable vertical scrollbar thumb when content
 overflows. The scrollbar is an overlay affordance and does not reserve child
@@ -931,15 +934,26 @@ vocabulary.
 recording time: rectangle bounds, line endpoints, clip bounds, image bounds,
 and translate offsets. This keeps rounded-rect circles, slider thumbs,
 splitter handles, and scrollbar thumbs visually stable after window resizing.
-Text positions are left to the text renderer and caller-side layout policy, and
-image UVs remain unsnapped because they are texture coordinates rather than
-screen-space geometry.
+Arbitrary triangle geometry, including SVG icons, filled checkmarks, and color
+wheel meshes, preserves subpixel vertices so lyon-tessellated curves and
+diagonals do not lose shape quality before the GPU rasterizer sees them. The
+GPU UI pass renders through a cached 4x MSAA target and resolves into the
+surface view, giving arbitrary triangle-list icons and meshes the same
+anti-aliased edge treatment as the rest of the UI pass. Text positions are left
+to the text renderer and caller-side layout policy, and image UVs remain
+unsnapped because they are texture coordinates rather than screen-space
+geometry.
 
 The renderer must flush draw batches when clip state changes and must apply the
 batch clip rect as a GPU scissor before drawing. A command emitted inside
 `PushClip`/`PopClip` must not share a batch with unclipped geometry, otherwise
 glyph images and other later-resolved commands can bleed outside their widget
 content rects.
+Self-hosted windows share `SelfHostedFrameRenderer` for the text-atlas upload
+and surface-present path. If a frame resolves new glyphs and uploads atlas
+entries, the returned frame result asks the window to schedule one immediate
+follow-up redraw so the first stable visual frame does not depend on a later
+mouse move or resize event.
 
 Line commands are expanded to quads with front-facing triangle winding for every
 orientation. This matters for splitter handles because the UI pipeline keeps

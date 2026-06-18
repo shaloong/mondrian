@@ -17,7 +17,11 @@ pub struct UiPipeline {
 }
 
 impl UiPipeline {
-    pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        surface_format: wgpu::TextureFormat,
+        sample_count: u32,
+    ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("ui_shader"),
             source: wgpu::ShaderSource::Wgsl(UI_VERTEX_SHADER.into()),
@@ -94,7 +98,7 @@ impl UiPipeline {
                 cull_mode: Some(wgpu::Face::Back),
                 ..Default::default()
             },
-            multisample: wgpu::MultisampleState::default(),
+            multisample: wgpu::MultisampleState { count: sample_count, ..Default::default() },
             depth_stencil: None,
             multiview_mask: None,
             cache: None,
