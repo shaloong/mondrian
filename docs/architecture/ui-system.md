@@ -509,11 +509,18 @@ the active parent viewport clip before batching and applying the GPU scissor.
 Nested clips must never replace their parent clip; otherwise text glyph images
 inside a scrolled child can bleed over sibling controls outside the viewport.
 
-`ScrollView` exposes a draggable vertical scrollbar thumb when content
-overflows. The scrollbar is an overlay affordance and does not reserve child
-layout width. Thumb drags request pointer capture, map thumb-track movement
-back to content scroll offset, and release capture on mouse up. Clicking the
-scrollbar track outside the thumb pages the viewport by one visible span.
+`ScrollView` defaults to vertical-only scrolling so inspector/property panels
+continue to wrap and measure against their panel width. Components that truly
+need overflow in the other direction must opt into `ScrollAxes::Horizontal` or
+`ScrollAxes::Both`; horizontal scrolling then uses Shift+wheel and a draggable
+bottom scrollbar. Dual-axis scrollbars reserve the bottom-right corner from one
+another, but remain overlay affordances and do not reserve child layout width.
+Thumb drags request pointer capture, map thumb-track movement back to content
+scroll offset, and release capture on mouse up. Clicking the scrollbar track
+outside the thumb pages the viewport by one visible span. Compound widgets that
+embed a private `ScrollView` must translate its pointer-capture requests to the
+outer widget id, because the inner scroll view is not present as an independent
+node in the event tree.
 
 ## Panel Migration
 

@@ -5,7 +5,7 @@
 
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
-use mondrian_ui_core::widget::{EventContext, PaintContext};
+use mondrian_ui_core::widget::{EventContext, PaintContext, PointerCaptureRequest};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
 use crate::paint::paint_focus_ring;
@@ -73,10 +73,12 @@ impl List {
     }
 
     fn rebuild_content(&mut self) {
+        let scroll_offset = self.scroll.scroll_offset();
         let content = build_list_column(&self.items, self.selected, self.hovered, self.row_height);
         self.scroll = ScrollView::new(Some(content));
         if self.bounds.width > 0.0 || self.bounds.height > 0.0 {
             self.scroll.layout(self.bounds);
+            self.scroll.set_scroll_offset(scroll_offset);
         }
     }
 
@@ -89,6 +91,21 @@ impl List {
         } else {
             None
         }
+    }
+
+    fn forward_to_scroll(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        let scroll_id = self.scroll.id();
+        let result = self.scroll.event(event, ctx);
+        match ctx.requests.pointer_capture {
+            Some(PointerCaptureRequest::Capture(id)) if id == scroll_id => {
+                ctx.request_pointer_capture(self.id);
+            }
+            Some(PointerCaptureRequest::Release(id)) if id == scroll_id => {
+                ctx.release_pointer_capture(self.id);
+            }
+            _ => {}
+        }
+        result
     }
 }
 
@@ -108,6 +125,18 @@ impl Widget for List {
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        let scrollbar_pointer = match event {
+            UiEvent::MouseDown { position, button: MouseButton::Left, .. }
+            | UiEvent::MouseMove { position, .. }
+            | UiEvent::MouseUp { position, button: MouseButton::Left, .. } => Some(*position),
+            _ => None,
+        };
+        if let Some(position) = scrollbar_pointer {
+            if self.scroll.is_scrollbar_dragging() || self.scroll.scrollbar_hit_test(position) {
+                return self.forward_to_scroll(event, ctx);
+            }
+        }
+
         match event {
             UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
                 if self.bounds.contains(*position) {
@@ -172,7 +201,7 @@ impl Widget for List {
             _ => {}
         }
 
-        self.scroll.event(event, ctx)
+        self.forward_to_scroll(event, ctx)
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
@@ -353,7 +382,9 @@ mod tests {
     use super::*;
 
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
-    use mondrian_ui_core::widget::DrawCommandEncoder;
+    use glam::Vec2;
+    use mondrian_platform::NoopPlatformService;
+    use mondrian_ui_core::widget::{DrawCommandEncoder, EventRequests};
     use mondrian_ui_theme::ThemePreset;
 
     #[derive(Default)]
@@ -450,6 +481,66 @@ mod tests {
             &mut ctx,
         );
         assert_eq!(list.selected_index(), None);
+    }
+
+    #[test]
+    fn list_scrollbar_mouse_down_does_not_select_row_and_translates_capture() {
+        let mut list = List::new((0..20).map(|i| ListItem::new(format!("Item {i}"))).collect());
+        list.layout(Rect::new(0.0, 0.0, 200.0, 100.0));
+        let scrollbar_point = Point::new(197.0, 12.0);
+        assert!(list.scroll.scrollbar_hit_test(scrollbar_point));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let dispatch = |_| {};
+        let mut requests = EventRequests::default();
+        let platform = NoopPlatformService;
+        let mut ctx = EventContext {
+            focus: &mut f,
+            shortcut: &mut s,
+            tooltip: &mut t,
+            dispatch: &dispatch,
+            platform: &platform,
+            requests: &mut requests,
+        };
+
+        let result = list.event(
+            &UiEvent::MouseDown {
+                position: scrollbar_point,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(list.selected_index(), None);
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Capture(list.id))
+        );
+    }
+
+    #[test]
+    fn list_rebuild_content_preserves_scroll_offset() {
+        let mut list = List::new((0..20).map(|i| ListItem::new(format!("Item {i}"))).collect());
+        list.layout(Rect::new(0.0, 0.0, 200.0, 100.0));
+        list.scroll.set_scroll_offset(Vec2::new(0.0, 80.0));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = event_ctx(&mut f, &mut s, &mut t, &|_| {});
+        list.event(
+            &UiEvent::MouseMove {
+                position: Point::new(20.0, 30.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(list.scroll.scroll_offset().y, 80.0);
     }
 
     #[test]
