@@ -731,13 +731,18 @@ the widget receives plain `MenuItem`s, handles popup placement, overlay
 painting, dismissal, and keyboard activation, then dispatches the supplied
 actions. The self-hosted app adapter maps that menu to `app_shell` import
 requests and `ui.assets` create actions for adjustment layers, solid-color
-assets, and folders. Folder creation actions carry the current browser folder
-id as `parent_folder_id`, so creating a folder inside a bin remains an app-layer
-library mutation while the widget stays domain-light. The app adapter maps
-`AssetRecord` into `AssetGridItem` view data and semantic media color tokens;
-the widget crate does not depend on the asset library or editor domain. The root
-Assets view is not a flat dump of every database row: it shows top-level folders
-first, then root/unfiled assets.
+assets, folders, and folder-aware imports. File drops inside the asset browser
+emit `ui.assets.import_files`; right-click import dialogs carry the same target
+folder and resolve to that action after the native file picker returns. Folder
+creation actions carry the current browser folder id as `parent_folder_id`, so
+creating a folder inside a bin remains an app-layer library mutation while the
+widget stays domain-light. Global imports from the File menu or window-level
+drop fallback still use `Action::ImportMedia` and import into the root/unfiled
+view because they have no active asset-browser folder context. The app adapter
+maps `AssetRecord` into `AssetGridItem` view data and semantic media color
+tokens; the widget crate does not depend on the asset library or editor domain.
+The root Assets view is not a flat dump of every database row: it shows
+top-level folders first, then root/unfiled assets.
 Assets already assigned to a folder are counted on that folder card and appear
 only when the self-hosted shell is browsing that folder. Folder navigation is
 shell-local UI session state: folder cards emit `ui.assets.open_folder`, the
@@ -867,8 +872,9 @@ widget tree first; if no widget handles the final drop, the self-hosted app
 falls back to `Action::ImportMedia` so dropping media into the window remains a
 useful default workflow. `PanelList` and `AssetGrid` expose domain-light
 `on_drop` adapters; the self-hosted Assets panel maps file drops to
-`Action::ImportMedia` through `AssetGrid`, while other panels can opt into their
-own drop semantics without teaching generic widgets about application state.
+`ui.assets.import_files` through `AssetGrid`, including the current asset-folder
+target. Other panels can opt into their own drop semantics without teaching
+generic widgets about application state.
 The same boundary applies to asset-browser creation commands: context menu
 items dispatch `ui.assets.create_adjustment_layer`, `ui.assets.create_solid_color`,
 or `ui.assets.create_folder`, and `AppState` performs the actual library writes,

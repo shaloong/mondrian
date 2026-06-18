@@ -19,9 +19,10 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::app::ui_actions::{
-    export_set_draft_action, project_create_with_settings_action, ExportDraftUpdatePayload,
-    ExportOutputDialogPayload, NewProjectDraftUpdatePayload, PreferencesTabPayload,
-    APP_SHELL_ABOUT, APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
+    assets_import_files_action, export_set_draft_action, project_create_with_settings_action,
+    AssetsImportFilesPayload, ExportDraftUpdatePayload, ExportOutputDialogPayload,
+    ImportMediaDialogPayload, NewProjectDraftUpdatePayload, PreferencesTabPayload, APP_SHELL_ABOUT,
+    APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
     APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_EXPORT_OUTPUT_DIALOG,
     APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
     APP_SHELL_NEW_PROJECT_DRAFT_CHANGED, APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_PREFERENCES,
@@ -140,14 +141,28 @@ pub fn try_resolve_app_shell_action(
             };
             Ok(paths.into_iter().next().map(Action::OpenProject))
         }
-        Action::Custom { namespace, name, .. }
+        Action::Custom { namespace, name, payload }
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_IMPORT_MEDIA_DIALOG =>
         {
+            let payload = if payload.is_null() {
+                ImportMediaDialogPayload { folder_id: None }
+            } else {
+                serde_json::from_value(payload).map_err(|err| app_shell_action_error(&name, err))?
+            };
             let Some(paths) = platform.open_file_dialog("Import Media", &media_import_filters())
             else {
                 return Ok(None);
             };
-            Ok((!paths.is_empty()).then_some(Action::ImportMedia(paths)))
+            Ok((!paths.is_empty()).then(|| {
+                if payload.folder_id.is_some() {
+                    assets_import_files_action(AssetsImportFilesPayload {
+                        paths,
+                        folder_id: payload.folder_id,
+                    })
+                } else {
+                    Action::ImportMedia(paths)
+                }
+            }))
         }
         Action::Custom { namespace, name, .. }
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_SAVE_PROJECT_AS_DIALOG =>
@@ -875,12 +890,14 @@ mod tests {
         app_shell_about_action, app_shell_cancel_new_project_dialog_action,
         app_shell_close_modal_action, app_shell_confirm_new_project_dialog_action,
         app_shell_export_output_dialog_action, app_shell_import_media_dialog_action,
-        app_shell_new_project_dialog_action, app_shell_new_project_draft_changed_action,
-        app_shell_open_project_dialog_action, app_shell_preferences_action,
-        app_shell_preferences_tab_changed_action, app_shell_save_project_as_dialog_action,
-        ExportDraftUpdatePayload, ExportOutputDialogPayload, NewProjectDraftUpdatePayload,
-        PreferencesTabPayload, ProjectCreateWithSettingsPayload, EXPORT_NAMESPACE,
-        EXPORT_SET_DRAFT, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
+        app_shell_import_media_dialog_action_with_target, app_shell_new_project_dialog_action,
+        app_shell_new_project_draft_changed_action, app_shell_open_project_dialog_action,
+        app_shell_preferences_action, app_shell_preferences_tab_changed_action,
+        app_shell_save_project_as_dialog_action, AssetsImportFilesPayload,
+        ExportDraftUpdatePayload, ExportOutputDialogPayload, ImportMediaDialogPayload,
+        NewProjectDraftUpdatePayload, PreferencesTabPayload, ProjectCreateWithSettingsPayload,
+        ASSETS_IMPORT_FILES, ASSETS_NAMESPACE, EXPORT_NAMESPACE, EXPORT_SET_DRAFT,
+        PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
     };
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use glam::Vec2;
@@ -1648,6 +1665,33 @@ mod tests {
             resolve_app_shell_action(app_shell_import_media_dialog_action(), &platform, None);
 
         assert_eq!(action, Some(Action::ImportMedia(paths)));
+    }
+
+    #[test]
+    fn resolve_app_shell_import_dialog_with_folder_returns_asset_import_action() {
+        let paths = vec![
+            PathBuf::from("E:/media/a.mov"),
+            PathBuf::from("E:/media/b.wav"),
+        ];
+        let platform = FakePlatform { open_paths: Some(paths.clone()), save_path: None };
+
+        let action = resolve_app_shell_action(
+            app_shell_import_media_dialog_action_with_target(ImportMediaDialogPayload {
+                folder_id: Some("rushes".to_owned()),
+            }),
+            &platform,
+            None,
+        );
+
+        let Some(Action::Custom { namespace, name, payload }) = action else {
+            panic!("expected assets import action");
+        };
+        assert_eq!(namespace, ASSETS_NAMESPACE);
+        assert_eq!(name, ASSETS_IMPORT_FILES);
+        let payload: AssetsImportFilesPayload =
+            serde_json::from_value(payload).expect("assets import payload");
+        assert_eq!(payload.paths, paths);
+        assert_eq!(payload.folder_id.as_deref(), Some("rushes"));
     }
 
     #[test]

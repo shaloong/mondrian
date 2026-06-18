@@ -74,6 +74,8 @@ pub const ASSETS_CREATE_SOLID_COLOR: &str = "create_solid_color";
 pub const ASSETS_CREATE_FOLDER: &str = "create_folder";
 /// Action name for opening an asset-browser folder in the self-hosted shell.
 pub const ASSETS_OPEN_FOLDER: &str = "open_folder";
+/// Action name for importing files into an asset-browser folder.
+pub const ASSETS_IMPORT_FILES: &str = "import_files";
 
 /// Custom action namespace for export operations.
 pub const EXPORT_NAMESPACE: &str = "ui.export";
@@ -408,6 +410,22 @@ pub struct AssetsCreateFolderPayload {
     pub parent_folder_id: Option<String>,
 }
 
+/// Import media files into an asset-library folder, or into the root view.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetsImportFilesPayload {
+    /// Media file paths selected by the user or dropped onto the asset browser.
+    pub paths: Vec<PathBuf>,
+    /// Target folder for imported assets. `None` imports into the root/unfiled view.
+    pub folder_id: Option<String>,
+}
+
+/// Platform file-dialog target for importing media.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportMediaDialogPayload {
+    /// Target folder for selected media. `None` imports into the root/unfiled view.
+    pub folder_id: Option<String>,
+}
+
 /// Enqueue a timeline export job from a UI frontend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportEnqueuePayload {
@@ -585,6 +603,11 @@ pub fn assets_create_folder_action(payload: AssetsCreateFolderPayload) -> Action
     custom_assets_action(ASSETS_CREATE_FOLDER, payload)
 }
 
+/// Build an action that imports media files into an asset-library folder.
+pub fn assets_import_files_action(payload: AssetsImportFilesPayload) -> Action {
+    custom_assets_action(ASSETS_IMPORT_FILES, payload)
+}
+
 /// Build a shell-local action that opens an asset-browser folder.
 pub fn assets_open_folder_action(payload: AssetsOpenFolderPayload) -> Action {
     custom_assets_action(ASSETS_OPEN_FOLDER, payload)
@@ -632,7 +655,14 @@ pub fn app_shell_open_project_dialog_action() -> Action {
 
 /// Build an app-shell request for importing media files.
 pub fn app_shell_import_media_dialog_action() -> Action {
-    custom_app_shell_action(APP_SHELL_IMPORT_MEDIA_DIALOG)
+    app_shell_import_media_dialog_action_with_target(ImportMediaDialogPayload { folder_id: None })
+}
+
+/// Build an app-shell request for importing media files into a target folder.
+pub fn app_shell_import_media_dialog_action_with_target(
+    payload: ImportMediaDialogPayload,
+) -> Action {
+    custom_app_shell_action_with_payload(APP_SHELL_IMPORT_MEDIA_DIALOG, payload)
 }
 
 /// Build an app-shell request for saving the current project to a chosen path.

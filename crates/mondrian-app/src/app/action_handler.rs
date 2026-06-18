@@ -12,17 +12,18 @@ use crate::app::timeline_editing::{
     find_clip, find_clip_mut, find_clip_track_lock, set_clip_disabled,
 };
 use crate::app::ui_actions::{
-    AssetsCreateFolderPayload, AssetsPrepareDragPayload, EffectsAddToClipPayload,
-    ExportDraftUpdatePayload, ExportEnqueuePayload, InspectorClipTransformField,
-    InspectorRemoveEffectPayload, InspectorSelectEffectPayload, InspectorSetClipCurvePayload,
-    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
-    InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
-    InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload, TimelineAddTrackKind,
-    TimelineAddTrackPayload, TimelineDropAssetPayload, TimelineMoveClipPayload,
-    TimelineMoveTrackPayload, TimelineSeekPayload, TimelineSelectClipPayload,
-    TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipPayload,
-    TimelineTrimPayloadEdge, ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER,
-    ASSETS_CREATE_SOLID_COLOR, ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP,
+    AssetsCreateFolderPayload, AssetsImportFilesPayload, AssetsPrepareDragPayload,
+    EffectsAddToClipPayload, ExportDraftUpdatePayload, ExportEnqueuePayload,
+    InspectorClipTransformField, InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
+    InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
+    InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
+    InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload,
+    ProjectCreateWithSettingsPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
+    TimelineDropAssetPayload, TimelineMoveClipPayload, TimelineMoveTrackPayload,
+    TimelineSeekPayload, TimelineSelectClipPayload, TimelineSetTrackControlPayload,
+    TimelineTrackControlPayloadKind, TimelineTrimClipPayload, TimelineTrimPayloadEdge,
+    ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR,
+    ASSETS_IMPORT_FILES, ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP,
     EFFECTS_NAMESPACE, EXPORT_ENQUEUE, EXPORT_NAMESPACE, EXPORT_SET_DRAFT, INSPECTOR_NAMESPACE,
     INSPECTOR_REMOVE_EFFECT, INSPECTOR_SELECT_EFFECT, INSPECTOR_SET_CLIP_CURVE,
     INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY, INSPECTOR_SET_CLIP_TINT,
@@ -280,6 +281,14 @@ impl AppState {
     }
 
     fn import_media_from_action(&mut self, paths: Vec<PathBuf>) -> Result<()> {
+        self.import_media_into_folder_from_action(paths, None)
+    }
+
+    fn import_media_into_folder_from_action(
+        &mut self,
+        paths: Vec<PathBuf>,
+        folder_id: Option<&str>,
+    ) -> Result<()> {
         if paths.is_empty() {
             return Ok(());
         }
@@ -290,6 +299,18 @@ impl AppState {
             MondrianError::WorkflowStepFailed { step_id: "import_media".to_string(), reason }
         })?;
 
+        if let Some(folder_id) = folder_id {
+            let folder_exists = library.list_folders()?.iter().any(|folder| folder.id == folder_id);
+            if !folder_exists {
+                let reason = format!("目标素材文件夹不存在：{folder_id}");
+                self.set_status_hint(format!("导入失败：{reason}"), true);
+                return Err(MondrianError::WorkflowStepFailed {
+                    step_id: "import_media".to_string(),
+                    reason,
+                });
+            }
+        }
+
         self.clear_status_hint();
         let mut imported_count = 0usize;
         let mut proxy_count = 0usize;
@@ -298,6 +319,10 @@ impl AppState {
         for path in paths {
             match library.import_media_file(&path) {
                 Ok(asset_id) => {
+                    if let Err(err) = library.move_asset_to_folder(asset_id, folder_id) {
+                        failures.push(format!("{}: {err}", path.display()));
+                        continue;
+                    }
                     imported_count += 1;
                     let mut proxy_started = false;
                     if self.auto_proxy_enabled {
@@ -867,6 +892,17 @@ impl AppState {
                 self.create_default_folder_in_library(payload.parent_folder_id.as_deref())
                     .map(|_| ())
             }
+            ASSETS_IMPORT_FILES => {
+                let payload = parse_ui_payload::<AssetsImportFilesPayload>(
+                    "assets_ui_action",
+                    name,
+                    payload,
+                )?;
+                self.import_media_into_folder_from_action(
+                    payload.paths,
+                    payload.folder_id.as_deref(),
+                )
+            }
             _ => Err(unknown_ui_action_error("assets_ui_action", name)),
         }
     }
@@ -1320,6 +1356,37 @@ fn remove_temp_path(path: &std::path::Path) {
     }
 }
 
+#[cfg(test)]
+fn write_minimal_wav(path: &std::path::Path) {
+    let sample_rate = 8_000u32;
+    let channels = 1u16;
+    let bits_per_sample = 16u16;
+    let samples = [0i16; 16];
+    let data_size = (samples.len() * std::mem::size_of::<i16>()) as u32;
+    let byte_rate = sample_rate * channels as u32 * bits_per_sample as u32 / 8;
+    let block_align = channels * bits_per_sample / 8;
+    let mut bytes = Vec::with_capacity(44 + data_size as usize);
+
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + data_size).to_le_bytes());
+    bytes.extend_from_slice(b"WAVE");
+    bytes.extend_from_slice(b"fmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&channels.to_le_bytes());
+    bytes.extend_from_slice(&sample_rate.to_le_bytes());
+    bytes.extend_from_slice(&byte_rate.to_le_bytes());
+    bytes.extend_from_slice(&block_align.to_le_bytes());
+    bytes.extend_from_slice(&bits_per_sample.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data_size.to_le_bytes());
+    for sample in samples {
+        bytes.extend_from_slice(&sample.to_le_bytes());
+    }
+
+    std::fs::write(path, bytes).expect("write wav fixture");
+}
+
 fn parse_ui_payload<T: serde::de::DeserializeOwned>(
     step_prefix: &str,
     name: &str,
@@ -1378,16 +1445,17 @@ mod tests {
     use super::*;
     use crate::app::ui_actions::{
         assets_create_adjustment_layer_action, assets_create_folder_action,
-        assets_create_solid_color_action, assets_prepare_drag_action, effects_add_to_clip_action,
-        export_enqueue_action, export_set_draft_action, inspector_remove_effect_action,
-        inspector_select_effect_action, inspector_set_clip_curve_action,
-        inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
-        inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
-        inspector_set_effect_enabled_action, inspector_set_effect_property_action,
-        project_create_with_settings_action, timeline_add_track_action, timeline_drop_asset_action,
-        timeline_move_clip_action, timeline_move_track_action, timeline_seek_action,
-        timeline_select_clip_action, timeline_set_track_control_action, timeline_trim_clip_action,
-        AssetsCreateFolderPayload, AssetsPrepareDragPayload, EffectsAddToClipPayload,
+        assets_create_solid_color_action, assets_import_files_action, assets_prepare_drag_action,
+        effects_add_to_clip_action, export_enqueue_action, export_set_draft_action,
+        inspector_remove_effect_action, inspector_select_effect_action,
+        inspector_set_clip_curve_action, inspector_set_clip_enabled_action,
+        inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
+        inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
+        inspector_set_effect_property_action, project_create_with_settings_action,
+        timeline_add_track_action, timeline_drop_asset_action, timeline_move_clip_action,
+        timeline_move_track_action, timeline_seek_action, timeline_select_clip_action,
+        timeline_set_track_control_action, timeline_trim_clip_action, AssetsCreateFolderPayload,
+        AssetsImportFilesPayload, AssetsPrepareDragPayload, EffectsAddToClipPayload,
         ExportDraftUpdatePayload, ExportEnqueuePayload, InspectorClipRefPayload,
         InspectorClipTransformField, InspectorCurvePointPayload, InspectorRemoveEffectPayload,
         InspectorSelectEffectPayload, InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
@@ -1959,6 +2027,66 @@ mod tests {
             .list_assets()
             .expect("list assets");
         assert!(assets.is_empty());
+
+        remove_temp_path(&library_root);
+    }
+
+    #[test]
+    fn dispatch_assets_import_files_places_media_in_target_folder() {
+        let mut state = AppState::new();
+        let library_root = unique_temp_path("assets-import-folder-library");
+        let media_root = unique_temp_path("assets-import-folder-media");
+        std::fs::create_dir_all(&media_root).expect("media root");
+        let media_path = media_root.join("tone.wav");
+        write_minimal_wav(&media_path);
+
+        let library = AssetLibrary::open(library_root.clone()).expect("library");
+        let folder_id = library.create_folder("Rushes", None).expect("create folder");
+        state.asset_library = Some(library);
+
+        state
+            .dispatch_action(assets_import_files_action(AssetsImportFilesPayload {
+                paths: vec![media_path.clone()],
+                folder_id: Some(folder_id.clone()),
+            }))
+            .expect("import media into folder");
+
+        let library = state.asset_library.as_ref().expect("library");
+        let assets = library.list_assets().expect("list assets");
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].name, "tone.wav");
+        assert_eq!(assets[0].folder_id.as_deref(), Some(folder_id.as_str()));
+        assert!(state
+            .status_hint
+            .as_ref()
+            .is_some_and(|(message, is_error)| !*is_error && message.contains("已导入 1")));
+
+        remove_temp_path(&library_root);
+        remove_temp_path(&media_root);
+    }
+
+    #[test]
+    fn dispatch_assets_import_files_rejects_missing_target_folder_before_importing() {
+        let mut state = AppState::new();
+        let library_root = unique_temp_path("assets-import-missing-folder-library");
+        state.asset_library = Some(AssetLibrary::open(library_root.clone()).expect("library"));
+
+        let err = state
+            .dispatch_action(assets_import_files_action(AssetsImportFilesPayload {
+                paths: vec![PathBuf::from("E:/media/missing.wav")],
+                folder_id: Some("deleted-folder".to_owned()),
+            }))
+            .expect_err("missing folder should fail");
+
+        assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
+        assert!(state.status_hint.as_ref().is_some_and(|(_, is_error)| *is_error));
+        assert!(state
+            .asset_library
+            .as_ref()
+            .expect("library")
+            .list_assets()
+            .expect("list assets")
+            .is_empty());
 
         remove_temp_path(&library_root);
     }

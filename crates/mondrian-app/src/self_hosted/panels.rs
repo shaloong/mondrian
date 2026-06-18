@@ -43,9 +43,10 @@ use mondrian_panel_console::tracing_layer::{LogBuffer, LogEntry};
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
 use crate::app::ui_actions::{
     app_shell_export_output_dialog_action, app_shell_import_media_dialog_action,
-    app_shell_new_project_dialog_action, app_shell_open_project_dialog_action,
-    app_shell_save_project_as_dialog_action, assets_create_adjustment_layer_action,
-    assets_create_folder_action, assets_create_solid_color_action, assets_open_folder_action,
+    app_shell_import_media_dialog_action_with_target, app_shell_new_project_dialog_action,
+    app_shell_open_project_dialog_action, app_shell_save_project_as_dialog_action,
+    assets_create_adjustment_layer_action, assets_create_folder_action,
+    assets_create_solid_color_action, assets_import_files_action, assets_open_folder_action,
     assets_prepare_drag_action, effects_add_to_clip_action, export_enqueue_action,
     export_set_draft_action, inspector_remove_effect_action, inspector_select_effect_action,
     inspector_set_clip_curve_action, inspector_set_clip_enabled_action,
@@ -54,16 +55,17 @@ use crate::app::ui_actions::{
     inspector_set_effect_property_action, timeline_add_track_action, timeline_drop_asset_action,
     timeline_move_clip_action, timeline_move_track_action, timeline_seek_action,
     timeline_select_clip_action, timeline_set_track_control_action, timeline_trim_clip_action,
-    AssetsCreateFolderPayload, AssetsOpenFolderPayload, AssetsPrepareDragPayload,
-    EffectsAddToClipPayload, ExportDraftUpdatePayload, ExportEnqueuePayload,
-    ExportOutputDialogPayload, InspectorClipRefPayload, InspectorClipTransformField,
-    InspectorCurvePointPayload, InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
-    InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
-    InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
-    InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload, TimelineAddTrackKind,
-    TimelineAddTrackPayload, TimelineDropAssetPayload, TimelineMoveClipPayload,
-    TimelineMoveTrackPayload, TimelineSelectClipPayload, TimelineSetTrackControlPayload,
-    TimelineTrackControlPayloadKind, TimelineTrimClipPayload, TimelineTrimPayloadEdge,
+    AssetsCreateFolderPayload, AssetsImportFilesPayload, AssetsOpenFolderPayload,
+    AssetsPrepareDragPayload, EffectsAddToClipPayload, ExportDraftUpdatePayload,
+    ExportEnqueuePayload, ExportOutputDialogPayload, ImportMediaDialogPayload,
+    InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
+    InspectorRemoveEffectPayload, InspectorSelectEffectPayload, InspectorSetClipCurvePayload,
+    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+    InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
+    InspectorSetEffectPropertyPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
+    TimelineDropAssetPayload, TimelineMoveClipPayload, TimelineMoveTrackPayload,
+    TimelineSelectClipPayload, TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind,
+    TimelineTrimClipPayload, TimelineTrimPayloadEdge,
 };
 use crate::app::{AppState, SelectedClipRef};
 use crate::self_hosted::icons::AppIcon;
@@ -1864,10 +1866,14 @@ fn asset_grid(model: &AssetGridModel) -> AssetGrid {
         grid = grid.with_filter(placeholder.clone());
     }
     if model.accepts_file_drop {
+        let drop_folder_id = model.current_folder_id.clone();
         grid = grid
-            .on_drop(|payload, _position| match payload {
+            .on_drop(move |payload, _position| match payload {
                 DragPayload::File(paths) if !paths.is_empty() => {
-                    Some(Action::ImportMedia(paths.clone()))
+                    Some(assets_import_files_action(AssetsImportFilesPayload {
+                        paths: paths.clone(),
+                        folder_id: drop_folder_id.clone(),
+                    }))
                 }
                 _ => None,
             })
@@ -1887,7 +1893,12 @@ fn asset_grid(model: &AssetGridModel) -> AssetGrid {
 fn asset_grid_context_menu_items(current_folder_id: Option<&str>) -> Vec<MenuItem> {
     vec![
         asset_menu_item(
-            MenuItem::new("Import media...", app_shell_import_media_dialog_action()),
+            MenuItem::new(
+                "Import media...",
+                app_shell_import_media_dialog_action_with_target(ImportMediaDialogPayload {
+                    folder_id: current_folder_id.map(str::to_owned),
+                }),
+            ),
             AppIcon::Import,
         ),
         MenuItem::separator(),
@@ -3030,13 +3041,15 @@ fn inspector_effect_property_action(
 mod tests {
     use super::*;
     use crate::app::ui_actions::{
-        AssetsCreateFolderPayload, AssetsOpenFolderPayload, APP_SHELL_IMPORT_MEDIA_DIALOG,
-        APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_OPEN_PROJECT_DIALOG,
+        AssetsCreateFolderPayload, AssetsImportFilesPayload, AssetsOpenFolderPayload,
+        ImportMediaDialogPayload, APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE,
+        APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_OPEN_PROJECT_DIALOG,
         APP_SHELL_SAVE_PROJECT_AS_DIALOG, ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER,
-        ASSETS_CREATE_SOLID_COLOR, ASSETS_NAMESPACE, ASSETS_OPEN_FOLDER, ASSETS_PREPARE_DRAG,
-        EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE, INSPECTOR_SELECT_EFFECT,
-        INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_EFFECT_PROPERTY, TIMELINE_ADD_TRACK,
-        TIMELINE_DROP_ASSET, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_SELECT_CLIP,
+        ASSETS_CREATE_SOLID_COLOR, ASSETS_IMPORT_FILES, ASSETS_NAMESPACE, ASSETS_OPEN_FOLDER,
+        ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE,
+        INSPECTOR_SELECT_EFFECT, INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_EFFECT_PROPERTY,
+        TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
+        TIMELINE_SELECT_CLIP,
     };
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
@@ -3377,7 +3390,7 @@ mod tests {
     }
 
     #[test]
-    fn assets_panel_file_drop_dispatches_import_media_action() {
+    fn assets_panel_file_drop_dispatches_import_files_action_for_current_folder() {
         let model = AssetGridModel::new(
             "Assets",
             vec![AssetGridItem::new(
@@ -3387,7 +3400,8 @@ mod tests {
             )
             .with_subtitle("Project library")],
         )
-        .accepts_file_drop(true);
+        .accepts_file_drop(true)
+        .with_current_folder_id(Some("rushes".to_owned()));
         let mut grid = asset_grid(&model);
         grid.layout(Rect::new(0.0, 0.0, 320.0, 180.0));
         let actions = RefCell::new(Vec::<Action>::new());
@@ -3414,10 +3428,17 @@ mod tests {
         );
 
         assert_eq!(result, EventResult::Handled);
-        assert_eq!(
-            actions.borrow().as_slice(),
-            &[Action::ImportMedia(vec![path])]
-        );
+        let actions = actions.borrow();
+        assert_eq!(actions.len(), 1);
+        let Action::Custom { namespace, name, payload } = &actions[0] else {
+            panic!("expected import-files custom action");
+        };
+        assert_eq!(namespace, ASSETS_NAMESPACE);
+        assert_eq!(name, ASSETS_IMPORT_FILES);
+        let payload: AssetsImportFilesPayload =
+            serde_json::from_value(payload.clone()).expect("import files payload");
+        assert_eq!(payload.paths, vec![path]);
+        assert_eq!(payload.folder_id.as_deref(), Some("rushes"));
     }
 
     #[test]
@@ -3426,6 +3447,12 @@ mod tests {
 
         assert_eq!(items.len(), 5);
         assert_shell_action(Some(&items[0].action), APP_SHELL_IMPORT_MEDIA_DIALOG);
+        let Action::Custom { payload, .. } = &items[0].action else {
+            panic!("expected import dialog custom action");
+        };
+        let payload: ImportMediaDialogPayload =
+            serde_json::from_value(payload.clone()).expect("import dialog payload");
+        assert_eq!(payload.folder_id, None);
         assert!(items[0].icon.is_some());
         assert!(items[1].is_separator());
         assert_assets_action(Some(&items[2].action), ASSETS_CREATE_ADJUSTMENT_LAYER);
@@ -3445,6 +3472,15 @@ mod tests {
     #[test]
     fn assets_panel_context_menu_creates_folders_inside_current_folder() {
         let items = asset_grid_context_menu_items(Some("rushes"));
+
+        let Action::Custom { namespace, name, payload } = &items[0].action else {
+            panic!("expected import dialog custom action");
+        };
+        assert_eq!(namespace, APP_SHELL_NAMESPACE);
+        assert_eq!(name, APP_SHELL_IMPORT_MEDIA_DIALOG);
+        let payload: ImportMediaDialogPayload =
+            serde_json::from_value(payload.clone()).expect("import dialog payload");
+        assert_eq!(payload.folder_id.as_deref(), Some("rushes"));
 
         let Action::Custom { namespace, name, payload } = &items[4].action else {
             panic!("expected create-folder custom action");
@@ -5281,10 +5317,9 @@ mod tests {
 
     fn assert_shell_action(action: Option<&Action>, name: &str) {
         match action {
-            Some(Action::Custom { namespace, name: action_name, payload }) => {
+            Some(Action::Custom { namespace, name: action_name, .. }) => {
                 assert_eq!(namespace, APP_SHELL_NAMESPACE);
                 assert_eq!(action_name, name);
-                assert!(payload.is_null());
             }
             other => panic!("expected app shell action, got {other:?}"),
         }
