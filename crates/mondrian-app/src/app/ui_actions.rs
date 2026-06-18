@@ -66,6 +66,12 @@ pub const ASSETS_NAMESPACE: &str = "ui.assets";
 
 /// Action name for preparing an asset for timeline drag/drop.
 pub const ASSETS_PREPARE_DRAG: &str = "prepare_drag";
+/// Action name for creating an adjustment-layer asset in the library.
+pub const ASSETS_CREATE_ADJUSTMENT_LAYER: &str = "create_adjustment_layer";
+/// Action name for creating a solid-color asset in the library.
+pub const ASSETS_CREATE_SOLID_COLOR: &str = "create_solid_color";
+/// Action name for creating a folder in the library.
+pub const ASSETS_CREATE_FOLDER: &str = "create_folder";
 
 /// Custom action namespace for export operations.
 pub const EXPORT_NAMESPACE: &str = "ui.export";
@@ -546,6 +552,21 @@ pub fn effects_add_to_clip_action(payload: EffectsAddToClipPayload) -> Action {
 /// Build an action that prepares an asset for timeline drag/drop.
 pub fn assets_prepare_drag_action(payload: AssetsPrepareDragPayload) -> Action {
     custom_assets_action(ASSETS_PREPARE_DRAG, payload)
+}
+
+/// Build an action that creates an adjustment-layer asset in the library.
+pub fn assets_create_adjustment_layer_action() -> Action {
+    custom_assets_action(ASSETS_CREATE_ADJUSTMENT_LAYER, ())
+}
+
+/// Build an action that creates a solid-color asset in the library.
+pub fn assets_create_solid_color_action() -> Action {
+    custom_assets_action(ASSETS_CREATE_SOLID_COLOR, ())
+}
+
+/// Build an action that creates a folder in the library.
+pub fn assets_create_folder_action() -> Action {
+    custom_assets_action(ASSETS_CREATE_FOLDER, ())
 }
 
 /// Build an action that enqueues a timeline export.

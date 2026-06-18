@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 
 use crate::paint::{color_with_alpha, mix_color, paint_focus_ring};
 use crate::vector_icon::VectorIcon;
+use crate::ContextMenu;
+use crate::MenuItem;
 use crate::TextInput;
 
 const DOUBLE_CLICK_MAX_AGE: Duration = Duration::from_millis(500);
@@ -142,6 +144,8 @@ pub struct AssetGrid {
     drag_candidate: Option<AssetGridDragCandidate>,
     columns: usize,
     card_width: f32,
+    context_menu_items: Vec<MenuItem>,
+    context_menu: Option<ContextMenu>,
     on_select: Option<Box<AssetGridAction>>,
     on_activate: Option<Box<AssetGridAction>>,
     on_drop: Option<Box<AssetGridDropAction>>,
@@ -184,10 +188,22 @@ impl AssetGrid {
             drag_candidate: None,
             columns: 1,
             card_width: CARD_TARGET_WIDTH,
+            context_menu_items: Vec::new(),
+            context_menu: None,
             on_select: None,
             on_activate: None,
             on_drop: None,
         }
+    }
+
+    /// Attach a right-click context menu to the grid surface.
+    ///
+    /// The menu stays domain-light: items carry already-mapped app actions,
+    /// while `AssetGrid` only owns popup placement, overlay painting, keyboard
+    /// navigation, and dismissal.
+    pub fn with_context_menu(mut self, items: Vec<MenuItem>) -> Self {
+        self.context_menu_items = items;
+        self
     }
 
     /// Set a small explanatory subtitle below the title.
@@ -752,6 +768,9 @@ impl Widget for AssetGrid {
                 input.layout(rect);
             }
         }
+        if let Some(menu) = &mut self.context_menu {
+            menu.layout(bounds);
+        }
         let header = self.header_height();
         let viewport_width = (bounds.width - CONTENT_PADDING * 2.0).max(0.0);
         self.columns = grid_columns_for_width(viewport_width);
@@ -767,7 +786,30 @@ impl Widget for AssetGrid {
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if let Some(menu) = &mut self.context_menu {
+            if menu.is_visible() {
+                let result = menu.event(event, ctx);
+                if !menu.is_visible() {
+                    self.context_menu = None;
+                }
+                if result == EventResult::Handled {
+                    return EventResult::Handled;
+                }
+            } else {
+                self.context_menu = None;
+            }
+        }
+
         match event {
+            UiEvent::MouseDown { position, button: MouseButton::Right, .. }
+                if self.bounds.contains(*position) && !self.context_menu_items.is_empty() =>
+            {
+                let mut menu = ContextMenu::new(*position, self.context_menu_items.clone());
+                menu.layout(self.bounds);
+                self.context_menu = Some(menu);
+                ctx.request_repaint();
+                return EventResult::Handled;
+            }
             UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
                 if self.filter_input.as_ref().is_some_and(|input| input.hit_test(*position)) {
                     return self
@@ -842,6 +884,7 @@ impl Widget for AssetGrid {
                 self.drag_candidate = None;
                 self.drop_hovered = false;
                 self.last_click = None;
+                self.context_menu = None;
                 if let Some(input) = &mut self.filter_input {
                     let _ = input.event(event, ctx);
                 }
@@ -950,6 +993,16 @@ impl Widget for AssetGrid {
                 ctx.theme.spacing.radius_md,
             );
         }
+    }
+
+    fn paint_overlay(&self, ctx: &mut PaintContext) {
+        if let Some(menu) = &self.context_menu {
+            menu.paint_overlay(ctx);
+        }
+    }
+
+    fn overlay_hit_test(&self, point: Point) -> bool {
+        self.context_menu.as_ref().is_some_and(|menu| menu.overlay_hit_test(point))
     }
 
     fn hit_test(&self, point: Point) -> bool {
@@ -1116,6 +1169,54 @@ mod tests {
             actions.borrow().as_slice(),
             &[Action::ImportMedia(vec![path])]
         );
+    }
+
+    #[test]
+    fn right_click_context_menu_dispatches_actions_as_overlay() {
+        let import_action = Action::ImportMedia(Vec::new());
+        let mut grid =
+            AssetGrid::new("Assets", vec![item("asset", "Asset")]).with_context_menu(vec![
+                MenuItem::new("Import media", import_action.clone()),
+                MenuItem::separator(),
+                MenuItem::new("New folder", Action::DeselectAll),
+            ]);
+        grid.layout(Rect::new(0.0, 0.0, 320.0, 220.0));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            grid.event(
+                &UiEvent::MouseDown {
+                    position: Point::new(32.0, 72.0),
+                    button: MouseButton::Right,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert!(grid.overlay_hit_test(Point::new(900.0, 900.0)));
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(actions.borrow().as_slice(), &[import_action]);
+        assert!(!grid.overlay_hit_test(Point::new(900.0, 900.0)));
     }
 
     #[test]

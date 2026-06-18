@@ -43,7 +43,8 @@ use crate::app::exporting::{builtin_export_presets, export_preset_extension};
 use crate::app::ui_actions::{
     app_shell_export_output_dialog_action, app_shell_import_media_dialog_action,
     app_shell_new_project_dialog_action, app_shell_open_project_dialog_action,
-    app_shell_save_project_as_dialog_action, assets_prepare_drag_action,
+    app_shell_save_project_as_dialog_action, assets_create_adjustment_layer_action,
+    assets_create_folder_action, assets_create_solid_color_action, assets_prepare_drag_action,
     effects_add_to_clip_action, export_enqueue_action, export_set_draft_action,
     inspector_remove_effect_action, inspector_select_effect_action,
     inspector_set_clip_curve_action, inspector_set_clip_enabled_action,
@@ -1702,14 +1703,6 @@ fn panel_list(model: &PanelListModel) -> PanelList {
     if let Some(placeholder) = &model.filter_placeholder {
         list = list.with_filter(placeholder.clone());
     }
-    if model.title == "Assets" {
-        list = list.on_drop(|payload, _position| match payload {
-            DragPayload::File(paths) if !paths.is_empty() => {
-                Some(Action::ImportMedia(paths.clone()))
-            }
-            _ => None,
-        });
-    }
     #[cfg(test)]
     if let Some(prefix) = model.demo_activate_prefix.clone() {
         return list.on_activate(move |index, item| {
@@ -1726,12 +1719,14 @@ fn asset_grid(model: &AssetGridModel) -> AssetGrid {
         grid = grid.with_filter(placeholder.clone());
     }
     if model.accepts_file_drop {
-        grid = grid.on_drop(|payload, _position| match payload {
-            DragPayload::File(paths) if !paths.is_empty() => {
-                Some(Action::ImportMedia(paths.clone()))
-            }
-            _ => None,
-        });
+        grid = grid
+            .on_drop(|payload, _position| match payload {
+                DragPayload::File(paths) if !paths.is_empty() => {
+                    Some(Action::ImportMedia(paths.clone()))
+                }
+                _ => None,
+            })
+            .with_context_menu(asset_grid_context_menu_items());
     }
     #[cfg(test)]
     if let Some(prefix) = model.demo_activate_prefix.clone() {
@@ -1740,6 +1735,35 @@ fn asset_grid(model: &AssetGridModel) -> AssetGrid {
         });
     }
     grid
+}
+
+fn asset_grid_context_menu_items() -> Vec<MenuItem> {
+    vec![
+        asset_menu_item(
+            MenuItem::new("Import media...", app_shell_import_media_dialog_action()),
+            AppIcon::Import,
+        ),
+        MenuItem::separator(),
+        asset_menu_item(
+            MenuItem::new(
+                "New adjustment layer",
+                assets_create_adjustment_layer_action(),
+            ),
+            AppIcon::Grid,
+        ),
+        asset_menu_item(
+            MenuItem::new("New solid color", assets_create_solid_color_action()),
+            AppIcon::Rectangle,
+        ),
+        asset_menu_item(
+            MenuItem::new("New folder", assets_create_folder_action()),
+            AppIcon::Folder,
+        ),
+    ]
+}
+
+fn asset_menu_item(item: MenuItem, icon: AppIcon) -> MenuItem {
+    item.with_icon(icon.vector_icon().expect("bundled asset menu icon asset should parse"))
 }
 
 #[cfg(test)]
@@ -2855,11 +2879,12 @@ mod tests {
     use super::*;
     use crate::app::ui_actions::{
         APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
-        APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_SAVE_PROJECT_AS_DIALOG, ASSETS_NAMESPACE,
-        ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE,
-        INSPECTOR_SELECT_EFFECT, INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_EFFECT_PROPERTY,
-        TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
-        TIMELINE_SELECT_CLIP,
+        APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
+        ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR,
+        ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE,
+        INSPECTOR_NAMESPACE, INSPECTOR_SELECT_EFFECT, INSPECTOR_SET_CLIP_CURVE,
+        INSPECTOR_SET_EFFECT_PROPERTY, TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET,
+        TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_SELECT_CLIP,
     };
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
@@ -3241,6 +3266,73 @@ mod tests {
             actions.borrow().as_slice(),
             &[Action::ImportMedia(vec![path])]
         );
+    }
+
+    #[test]
+    fn assets_panel_context_menu_uses_shell_and_asset_actions() {
+        let items = asset_grid_context_menu_items();
+
+        assert_eq!(items.len(), 5);
+        assert_shell_action(Some(&items[0].action), APP_SHELL_IMPORT_MEDIA_DIALOG);
+        assert!(items[0].icon.is_some());
+        assert!(items[1].is_separator());
+        assert_assets_action(Some(&items[2].action), ASSETS_CREATE_ADJUSTMENT_LAYER);
+        assert!(items[2].icon.is_some());
+        assert_assets_action(Some(&items[3].action), ASSETS_CREATE_SOLID_COLOR);
+        assert!(items[3].icon.is_some());
+        assert_assets_action(Some(&items[4].action), ASSETS_CREATE_FOLDER);
+        assert!(items[4].icon.is_some());
+    }
+
+    #[test]
+    fn assets_panel_context_menu_dispatches_import_from_grid_overlay() {
+        let model = AssetGridModel::new(
+            "Assets",
+            vec![AssetGridItem::new(
+                "context-target",
+                "Context target",
+                current_theme().colors.media_video,
+            )],
+        )
+        .accepts_file_drop(true);
+        let mut grid = asset_grid(&model);
+        grid.layout(Rect::new(0.0, 0.0, 320.0, 180.0));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            grid.event(
+                &UiEvent::MouseDown {
+                    position: Point::new(24.0, 76.0),
+                    button: MouseButton::Right,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert!(grid.overlay_hit_test(Point::new(640.0, 480.0)));
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(actions.borrow().len(), 1);
+        assert_shell_action(actions.borrow().first(), APP_SHELL_IMPORT_MEDIA_DIALOG);
     }
 
     #[test]
@@ -4895,6 +4987,17 @@ mod tests {
                 assert!(payload.is_null());
             }
             other => panic!("expected app shell action, got {other:?}"),
+        }
+    }
+
+    fn assert_assets_action(action: Option<&Action>, name: &str) {
+        match action {
+            Some(Action::Custom { namespace, name: action_name, payload }) => {
+                assert_eq!(namespace, ASSETS_NAMESPACE);
+                assert_eq!(action_name, name);
+                assert_eq!(payload, &serde_json::Value::Null);
+            }
+            other => panic!("expected assets action, got {other:?}"),
         }
     }
 }

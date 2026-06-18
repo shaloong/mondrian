@@ -376,6 +376,26 @@ impl AppState {
         Ok(folder_id)
     }
 
+    /// Create a library folder using the next available default folder name.
+    pub fn create_default_folder_in_library(&mut self) -> mondrian_core::Result<String> {
+        let library = self.asset_library.as_ref().ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "create_folder".to_string(),
+                reason: "素材库未连接".to_string(),
+            }
+        })?;
+        let folders = library.list_folders()?;
+        let mut next = 1usize;
+        for folder in &folders {
+            if let Some(suffix) = folder.name.strip_prefix("文件夹 ") {
+                if let Ok(number) = suffix.trim().parse::<usize>() {
+                    next = next.max(number + 1);
+                }
+            }
+        }
+        self.create_folder_in_library(&format!("文件夹 {next}"))
+    }
+
     pub fn delete_asset_from_library(&mut self, asset_id: AssetId) -> mondrian_core::Result<()> {
         // Remove clips referencing this asset from the timeline first,
         // then delete from the library. Order matters for borrow reasons.

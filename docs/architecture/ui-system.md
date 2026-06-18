@@ -723,9 +723,14 @@ instead of the row-list surface. `AssetGrid` keeps the same framework-owned
 interaction contract as `PanelList`: filter input is a real `TextInput`, local
 selection is preserved through `AssetGridState`, cards can activate typed
 actions, card drag payloads start through the router, and file drops map to
-app-layer import actions. The app adapter maps `AssetRecord` into
-`AssetGridItem` view data and semantic media color tokens; the widget crate
-does not depend on the asset library or editor domain.
+app-layer import actions. It also owns a domain-light right-click context menu:
+the widget receives plain `MenuItem`s, handles popup placement, overlay
+painting, dismissal, and keyboard activation, then dispatches the supplied
+actions. The self-hosted app adapter maps that menu to `app_shell` import
+requests and `ui.assets` create actions for adjustment layers, solid-color
+assets, and folders. The app adapter maps `AssetRecord` into `AssetGridItem`
+view data and semantic media color tokens; the widget crate does not depend on
+the asset library or editor domain.
 The adjacent Console tab reads `AppState::status_log`, a bounded history fed by
 `set_status_hint`, and shows recent messages newest-first before runtime
 summary rows. `clear_status_hint` clears only the transient bottom-bar hint; it
@@ -850,6 +855,10 @@ useful default workflow. `PanelList` and `AssetGrid` expose domain-light
 `on_drop` adapters; the self-hosted Assets panel maps file drops to
 `Action::ImportMedia` through `AssetGrid`, while other panels can opt into their
 own drop semantics without teaching generic widgets about application state.
+The same boundary applies to asset-browser creation commands: context menu
+items dispatch `ui.assets.create_adjustment_layer`, `ui.assets.create_solid_color`,
+or `ui.assets.create_folder`, and `AppState` performs the actual library writes,
+default naming, persistence, event publication, and status hints.
 Shell cursor selection is also centralized in the runtime. Entrypoints provide
 the current eyedropper, splitter, and focused-text state; the runtime resolves
 priority as eyedropper sampling, splitter resize affordance, focused text
