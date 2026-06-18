@@ -1081,8 +1081,10 @@ actions and widget models remain disk-I/O free.
 
 Panel model refreshes must not erase local panel interaction state. Reusable
 widgets expose small explicit state snapshots for UI-local affordances such as
-`PanelList` filters, selection, and scroll offsets. `SelfHostedAppRoot` captures
-those snapshots before rebuilding dock content from fresh `AppState` models and
-restores them afterward, while splitter layout restoration remains owned by
-`DockSplitter`. This keeps app-state data replacement separate from ephemeral
-user navigation state.
+`PanelList` filters, selection, and scroll offsets. Dock containers expose their
+active tab through widget APIs, and `SelfHostedAppRoot` captures that shell-local
+navigation state before rebuilding dock content from fresh `AppState` models.
+It restores active tabs before list state so grouped panels such as
+Assets/Effects and Project/Console/Export keep showing the surface the user was
+working in. Splitter layout restoration remains owned by `DockSplitter`. This
+keeps app-state data replacement separate from ephemeral user navigation state.

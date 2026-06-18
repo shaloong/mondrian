@@ -38,6 +38,12 @@ use mondrian_core::{MondrianError, Result};
 /// Default file extension for Mondrian project containers.
 pub const PROJECT_FILE_EXTENSION: &str = "mdp";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DockPanelState {
+    owner: PanelKind,
+    active_index: usize,
+}
+
 /// File dialog filters for project file commands.
 pub fn project_file_filters() -> Vec<FileFilter> {
     vec![FileFilter::new(
@@ -305,13 +311,16 @@ impl SelfHostedAppRoot {
     /// root widget id and menu state.
     pub fn set_models(&mut self, models: SelfHostedPanelModels) {
         let layout = self.dock.layout_snapshot();
+        let dock_panel_state = collect_dock_panel_state(&self.dock);
         let panel_list_state = collect_panel_list_state(&self.dock);
         self.models = models;
         self.dock = build_dock_tree_for_preset(self.models.clone(), self.workspace_preset);
         self.dock.restore_layout(&layout);
+        restore_dock_panel_state(&mut self.dock, &dock_panel_state);
         restore_panel_list_state(&mut self.dock, &panel_list_state);
         if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
             self.layout(self.bounds);
+            restore_dock_panel_state(&mut self.dock, &dock_panel_state);
             restore_panel_list_state(&mut self.dock, &panel_list_state);
         }
     }
@@ -541,6 +550,39 @@ fn activate_panel_in_widget(
         }
     }
     false
+}
+
+fn collect_dock_panel_state(widget: &dyn Widget) -> Vec<DockPanelState> {
+    let mut states = Vec::new();
+    collect_dock_panel_state_into(widget, &mut states);
+    states
+}
+
+fn collect_dock_panel_state_into(widget: &dyn Widget, states: &mut Vec<DockPanelState>) {
+    if let Some(panel) = widget.as_any().and_then(|any| any.downcast_ref::<DockPanel>()) {
+        states.push(DockPanelState {
+            owner: panel.kind(),
+            active_index: panel.active_index(),
+        });
+    }
+    for index in 0..widget.child_count() {
+        if let Some(child) = widget.child(index) {
+            collect_dock_panel_state_into(child, states);
+        }
+    }
+}
+
+fn restore_dock_panel_state(widget: &mut dyn Widget, states: &[DockPanelState]) {
+    if let Some(panel) = widget.as_any_mut().and_then(|any| any.downcast_mut::<DockPanel>()) {
+        if let Some(state) = states.iter().find(|state| state.owner == panel.kind()) {
+            panel.set_active_index(state.active_index);
+        }
+    }
+    for index in 0..widget.child_count() {
+        if let Some(child) = widget.child_mut(index) {
+            restore_dock_panel_state(child, states);
+        }
+    }
 }
 
 fn collect_panel_list_state(widget: &dyn Widget) -> BTreeMap<String, PanelListState> {
@@ -1595,6 +1637,34 @@ mod tests {
         assert_eq!(state.filter_query, "audio");
         assert_eq!(state.selected_item_title.as_deref(), Some("Audio"));
         assert_eq!(state.selected_index, Some(1));
+    }
+
+    #[test]
+    fn set_models_preserves_grouped_panel_active_tab_and_visible_list_state() {
+        let platform = FakePlatform::default();
+        let mut root = SelfHostedAppRoot::demo();
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        root.handle_shell_action(Action::FocusPanel(PanelKind::Effects), &platform, None);
+        assert_eq!(
+            active_index_for_dock_panel(&root, PanelKind::Assets),
+            Some(1)
+        );
+        assert!(with_panel_list_mut_for_title(
+            root.dock_mut(),
+            "Effects",
+            &mut |list| {
+                list.set_filter_query("blur");
+            },
+        ));
+
+        root.set_models(SelfHostedPanelModels::demo());
+
+        assert_eq!(
+            active_index_for_dock_panel(&root, PanelKind::Assets),
+            Some(1)
+        );
+        let state = panel_list_state_for_title(&root, "Effects").expect("effects state");
+        assert_eq!(state.filter_query, "blur");
     }
 
     #[test]
