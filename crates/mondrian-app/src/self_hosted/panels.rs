@@ -2457,14 +2457,16 @@ fn effect_property_value_widget(
             let selected_clip = selection;
             let path = path.clone();
             Box::new(
-                Slider::new(*value, min, max).enabled(can_edit).on_change(move |v| {
-                    inspector_effect_property_action(
-                        selected_clip,
-                        effect_id,
-                        &path,
-                        PropertyValue::Float(v.clamp(min, max)),
-                    )
-                }),
+                effect_property_slider(*value, min, max, property.step, None)
+                    .enabled(can_edit)
+                    .on_change(move |v| {
+                        inspector_effect_property_action(
+                            selected_clip,
+                            effect_id,
+                            &path,
+                            PropertyValue::Float(v.clamp(min, max)),
+                        )
+                    }),
             )
         }
         PropertyValue::Double(value) => {
@@ -2473,14 +2475,16 @@ fn effect_property_value_widget(
             let selected_clip = selection;
             let path = path.clone();
             Box::new(
-                Slider::new(*value as f32, min, max).enabled(can_edit).on_change(move |v: f32| {
-                    inspector_effect_property_action(
-                        selected_clip,
-                        effect_id,
-                        &path,
-                        PropertyValue::Double((v as f64).clamp(min as f64, max as f64)),
-                    )
-                }),
+                effect_property_slider(*value as f32, min, max, property.step, None)
+                    .enabled(can_edit)
+                    .on_change(move |v: f32| {
+                        inspector_effect_property_action(
+                            selected_clip,
+                            effect_id,
+                            &path,
+                            PropertyValue::Double((v as f64).clamp(min as f64, max as f64)),
+                        )
+                    }),
             )
         }
         PropertyValue::Int(value) => {
@@ -2489,14 +2493,16 @@ fn effect_property_value_widget(
             let selected_clip = selection;
             let path = path.clone();
             Box::new(
-                Slider::new(*value as f32, min, max).enabled(can_edit).on_change(move |v: f32| {
-                    inspector_effect_property_action(
-                        selected_clip,
-                        effect_id,
-                        &path,
-                        PropertyValue::Int((v as i64).clamp(min as i64, max as i64)),
-                    )
-                }),
+                effect_property_slider(*value as f32, min, max, property.step, Some(1.0))
+                    .enabled(can_edit)
+                    .on_change(move |v: f32| {
+                        inspector_effect_property_action(
+                            selected_clip,
+                            effect_id,
+                            &path,
+                            PropertyValue::Int((v.round() as i64).clamp(min as i64, max as i64)),
+                        )
+                    }),
             )
         }
         PropertyValue::Color(value) => {
@@ -2585,16 +2591,18 @@ fn vector_property_widget(
             let base_values = values.to_vec();
             let selected_clip = selection;
             let path = path.clone();
-            let slider = Slider::new(*value, min, max).enabled(can_edit).on_change(move |v| {
-                let mut next_values = base_values.clone();
-                next_values[component_index] = v.clamp(min, max);
-                inspector_effect_property_action(
-                    selected_clip,
-                    effect_id,
-                    &path,
-                    build_value(&next_values),
-                )
-            });
+            let slider = effect_property_slider(*value, min, max, property.step, None)
+                .enabled(can_edit)
+                .on_change(move |v| {
+                    let mut next_values = base_values.clone();
+                    next_values[component_index] = v.clamp(min, max);
+                    inspector_effect_property_action(
+                        selected_clip,
+                        effect_id,
+                        &path,
+                        build_value(&next_values),
+                    )
+                });
             FlexChild::fixed(Box::new(
                 FlexContainer::row(vec![
                     FlexChild::fixed(Box::new(
@@ -2607,6 +2615,25 @@ fn vector_property_widget(
         })
         .collect();
     Box::new(FlexContainer::column(rows).with_gap(4.0))
+}
+
+fn effect_property_slider(
+    value: f32,
+    min: f32,
+    max: f32,
+    descriptor_step: Option<f64>,
+    fallback_step: Option<f32>,
+) -> Slider {
+    let slider = Slider::new(value, min, max);
+    let step = descriptor_step
+        .filter(|step| step.is_finite() && *step > 0.0)
+        .map(|step| step as f32)
+        .or(fallback_step)
+        .filter(|step| step.is_finite() && *step > 0.0);
+    match step {
+        Some(step) => slider.with_step(step),
+        None => slider,
+    }
 }
 
 fn inspector_effect_property_action(
@@ -3989,6 +4016,132 @@ mod tests {
             value.z > 0.3,
             "clicking the third component slider should update z, got {value:?}"
         );
+    }
+
+    #[test]
+    fn inspector_effect_float_property_slider_honors_descriptor_step() {
+        let effect_id = EffectId::new();
+        let selection = SelectedClipRef {
+            track_id: TrackId::new(),
+            is_video_track: true,
+            clip_id: ClipId::new(),
+        };
+        let property = InspectorEffectPropertyModel {
+            path: "color.exposure".to_string(),
+            label: "Exposure".to_string(),
+            value: PropertyValue::Float(0.2),
+            min: Some(0.0),
+            max: Some(1.0),
+            step: Some(0.25),
+            is_animatable: true,
+        };
+        let mut widget = effect_property_value_widget(
+            &property,
+            true,
+            Some(selection),
+            effect_id,
+            property.path.clone(),
+        );
+        widget.layout(Rect::new(0.0, 0.0, 220.0, 24.0));
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            widget.event(&UiEvent::FocusGained, &mut ctx),
+            EventResult::Handled
+        );
+        let result = widget.event(
+            &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        let recorded = actions.borrow();
+        assert_eq!(recorded.len(), 1);
+        let Action::Custom { payload, .. } = &recorded[0] else {
+            panic!("expected inspector custom action, got {:?}", recorded[0]);
+        };
+        let payload: InspectorSetEffectPropertyPayload =
+            serde_json::from_value(payload.clone()).expect("set effect property payload");
+        assert_eq!(payload.path, "color.exposure");
+        let PropertyValue::Float(value) = payload.value else {
+            panic!("expected Float payload");
+        };
+        assert!(
+            (value - 0.5).abs() <= 0.0001,
+            "expected stepped value 0.5, got {value}"
+        );
+    }
+
+    #[test]
+    fn inspector_effect_int_property_slider_defaults_to_unit_step() {
+        let effect_id = EffectId::new();
+        let selection = SelectedClipRef {
+            track_id: TrackId::new(),
+            is_video_track: true,
+            clip_id: ClipId::new(),
+        };
+        let property = InspectorEffectPropertyModel {
+            path: "levels.iterations".to_string(),
+            label: "Iterations".to_string(),
+            value: PropertyValue::Int(10),
+            min: Some(0.0),
+            max: Some(1000.0),
+            step: None,
+            is_animatable: false,
+        };
+        let mut widget = effect_property_value_widget(
+            &property,
+            true,
+            Some(selection),
+            effect_id,
+            property.path.clone(),
+        );
+        widget.layout(Rect::new(0.0, 0.0, 220.0, 24.0));
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            widget.event(&UiEvent::FocusGained, &mut ctx),
+            EventResult::Handled
+        );
+        let result = widget.event(
+            &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        let recorded = actions.borrow();
+        assert_eq!(recorded.len(), 1);
+        let Action::Custom { payload, .. } = &recorded[0] else {
+            panic!("expected inspector custom action, got {:?}", recorded[0]);
+        };
+        let payload: InspectorSetEffectPropertyPayload =
+            serde_json::from_value(payload.clone()).expect("set effect property payload");
+        assert_eq!(payload.path, "levels.iterations");
+        assert_eq!(payload.value, PropertyValue::Int(11));
     }
 
     #[test]

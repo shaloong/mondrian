@@ -23,6 +23,7 @@ pub struct Slider {
     focus_visible: bool,
     track_height: f32,
     thumb_size: f32,
+    step: Option<f32>,
     on_change: Option<Box<SliderChangeAction>>,
 }
 
@@ -41,6 +42,7 @@ impl Slider {
             focus_visible: false,
             track_height: 6.0,
             thumb_size: 14.0,
+            step: None,
             on_change: None,
         }
     }
@@ -53,6 +55,16 @@ impl Slider {
     /// Dispatch an action whenever user input changes the value.
     pub fn on_change(mut self, action: impl Fn(f32) -> Action + 'static) -> Self {
         self.on_change = Some(Box::new(action));
+        self
+    }
+
+    /// Quantize user-edited values to a fixed step.
+    ///
+    /// The current value is left unchanged when this builder is called, so
+    /// snapshots from app state stay exact. Pointer and keyboard edits are
+    /// snapped to `min + n * step` and clamped to the slider bounds.
+    pub fn with_step(mut self, step: f32) -> Self {
+        self.step = (step.is_finite() && step > 0.0).then_some(step);
         self
     }
 
@@ -115,8 +127,23 @@ impl Slider {
         Rect::new(x, y, thumb_size, thumb_size)
     }
 
+    fn quantize_value(&self, value: f32) -> f32 {
+        let clamped = value.clamp(self.min, self.max);
+        let Some(step) = self.step else {
+            return clamped;
+        };
+        if clamped <= self.min {
+            return self.min;
+        }
+        if clamped >= self.max {
+            return self.max;
+        }
+        let steps = ((clamped - self.min) / step).round();
+        (self.min + steps * step).clamp(self.min, self.max)
+    }
+
     fn set_value(&mut self, value: f32) -> bool {
-        let next = value.clamp(self.min, self.max);
+        let next = self.quantize_value(value);
         if (next - self.value).abs() <= f32::EPSILON {
             return false;
         }
@@ -140,13 +167,21 @@ impl Slider {
     }
 
     fn keyboard_step(&self, modifiers: Modifiers) -> f32 {
-        let range = self.range().abs();
-        if modifiers.alt {
-            range / 1000.0
+        let base = self.step.unwrap_or_else(|| self.range().abs() / 100.0);
+        if modifiers.alt && self.step.is_none() {
+            self.range().abs() / 1000.0
         } else if modifiers.shift {
-            range / 10.0
+            base * 10.0
         } else {
-            range / 100.0
+            base
+        }
+    }
+
+    fn page_step(&self) -> f32 {
+        if let Some(step) = self.step {
+            step * 10.0
+        } else {
+            self.range().abs() / 10.0
         }
     }
 
@@ -222,8 +257,8 @@ impl Widget for Slider {
                 match key {
                     KeyCode::Left | KeyCode::Down => self.nudge(-step, ctx),
                     KeyCode::Right | KeyCode::Up => self.nudge(step, ctx),
-                    KeyCode::PageDown => self.nudge(-(self.range().abs() / 10.0), ctx),
-                    KeyCode::PageUp => self.nudge(self.range().abs() / 10.0, ctx),
+                    KeyCode::PageDown => self.nudge(-self.page_step(), ctx),
+                    KeyCode::PageUp => self.nudge(self.page_step(), ctx),
                     KeyCode::Home => {
                         if self.set_value_from_input(self.min, ctx) {
                             EventResult::Handled
@@ -373,6 +408,13 @@ mod tests {
         }
     }
 
+    fn assert_close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() <= 0.0001,
+            "expected {expected}, got {actual}"
+        );
+    }
+
     #[test]
     fn slider_new_value_clamped() {
         let s = Slider::new(150.0, 0.0, 100.0);
@@ -383,6 +425,13 @@ mod tests {
     fn slider_new_value_in_range() {
         let s = Slider::new(50.0, 0.0, 100.0);
         assert_eq!(s.value(), 50.0);
+    }
+
+    #[test]
+    fn slider_with_step_does_not_quantize_initial_snapshot() {
+        let s = Slider::new(0.23, 0.0, 1.0).with_step(0.1);
+
+        assert_close(s.value(), 0.23);
     }
 
     #[test]
@@ -401,6 +450,25 @@ mod tests {
             &mut ctx,
         );
         assert_eq!(s.value(), 50.0);
+    }
+
+    #[test]
+    fn slider_mouse_input_quantizes_to_step() {
+        let mut s = Slider::new(0.0, 0.0, 100.0).with_step(25.0);
+        s.layout(Rect::new(0.0, 0.0, 200.0, 20.0));
+        let track = s.track_rect();
+        let mut ctx = event_ctx();
+
+        s.event(
+            &UiEvent::MouseDown {
+                position: Point::new(track.x + track.width * 0.62, 10.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_close(s.value(), 50.0);
     }
 
     #[test]
@@ -597,6 +665,25 @@ mod tests {
     }
 
     #[test]
+    fn slider_keyboard_uses_configured_step() {
+        let mut s = Slider::new(0.2, 0.0, 1.0).with_step(0.25);
+        let mut ctx = event_ctx();
+
+        s.event(&UiEvent::FocusGained, &mut ctx);
+        s.event(
+            &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_close(s.value(), 0.5);
+
+        s.event(
+            &UiEvent::KeyDown { key: KeyCode::Left, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_close(s.value(), 0.25);
+    }
+
+    #[test]
     fn slider_keyboard_shift_uses_large_step() {
         let mut s = Slider::new(50.0, 0.0, 100.0);
         let mut ctx = event_ctx();
@@ -608,6 +695,34 @@ mod tests {
         );
 
         assert_eq!(s.value(), 60.0);
+    }
+
+    #[test]
+    fn slider_keyboard_shift_scales_configured_step() {
+        let mut s = Slider::new(10.0, 0.0, 100.0).with_step(2.0);
+        let mut ctx = event_ctx();
+
+        s.event(&UiEvent::FocusGained, &mut ctx);
+        s.event(
+            &UiEvent::KeyDown { key: KeyCode::Up, modifiers: Modifiers::shift() },
+            &mut ctx,
+        );
+
+        assert_close(s.value(), 30.0);
+    }
+
+    #[test]
+    fn slider_invalid_step_keeps_default_keyboard_step() {
+        let mut s = Slider::new(50.0, 0.0, 100.0).with_step(0.0);
+        let mut ctx = event_ctx();
+
+        s.event(&UiEvent::FocusGained, &mut ctx);
+        s.event(
+            &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+
+        assert_eq!(s.value(), 51.0);
     }
 
     #[test]

@@ -721,7 +721,10 @@ Effect property rows are adapter-owned: bools, scalar numbers, colors, text,
 and Vec2/Vec3/Vec4 values render as typed controls in the self-hosted Inspector,
 then dispatch `ui.inspector.set_effect_property` with the full `PropertyValue`.
 Vector rows use stacked component sliders and preserve untouched components in
-the emitted payload.
+the emitted payload. Numeric effect rows pass descriptor min/max/step metadata
+into `Slider`; integer properties default to unit steps so keyboard nudges and
+dragged values stay on the same grid as the underlying effect property rather
+than relying on lossy float-to-int truncation.
 Inspector clip mutations are validated at the AppState boundary, including
 locked-track protection; widgets stay domain-light and do not decide whether a
 clip can be edited.
