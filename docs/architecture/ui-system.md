@@ -485,7 +485,8 @@ movement. Tooltips use a low-emphasis border token, not primary/ring colors.
 Tooltip text uses `draw_text_box` and `mondrian-ui-text` paragraph measurement
 before painting its background. The text layer uses cosmic-text wrapping with
 word breaks and glyph fallback for overlong tokens, so tooltip widgets do not
-own line-breaking logic.
+own line-breaking logic. Tooltip fill and border geometry must both be clamped
+to the root clip rect so edge-adjacent popovers do not bleed outside the window.
 
 ## Overlay Contract
 

@@ -120,7 +120,7 @@ impl Widget for TooltipWidget {
         let max_width = spacing.tooltip_max_width.min(ctx.clip_rect.width.max(1.0));
         let layout = self.text_layout(font_size, max_width);
         let bg = self.clamped_rect(font_size, max_width, spacing.tooltip_offset, ctx.clip_rect);
-        let border_rect = bg.inset(-1.0, -1.0);
+        let border_rect = clamp_rect_to_clip(bg.inset(-1.0, -1.0), ctx.clip_rect);
         ctx.encoder.draw_rect(border_rect, tokens.border, spacing.radius_sm + 1.0);
         ctx.encoder.draw_rect(bg, tokens.popover, spacing.radius_sm);
 
@@ -145,6 +145,14 @@ impl Widget for TooltipWidget {
 
 fn measure_text_box(text: &str, font_size: f32, max_width: f32) -> (f32, f32) {
     TEXT_MEASURER.with_borrow_mut(|renderer| renderer.measure_text_box(text, font_size, max_width))
+}
+
+fn clamp_rect_to_clip(rect: Rect, clip: Rect) -> Rect {
+    let left = rect.x.max(clip.x);
+    let top = rect.y.max(clip.y);
+    let right = (rect.x + rect.width).min(clip.x + clip.width);
+    let bottom = (rect.y + rect.height).min(clip.y + clip.height);
+    Rect::new(left, top, (right - left).max(0.0), (bottom - top).max(0.0))
 }
 
 impl Default for TooltipWidget {
@@ -255,6 +263,30 @@ mod tests {
         assert!(fill.y + fill.height <= clip_rect.y + clip_rect.height + 0.1);
         assert_eq!(encoder.rects.len(), 2);
         assert_eq!(encoder.text_boxes.len(), 1);
+    }
+
+    #[test]
+    fn paint_clamps_tooltip_border_inside_clip_rect() {
+        let mut widget = TooltipWidget::new();
+        widget.update_state(TooltipState {
+            text: "edge tooltip".into(),
+            position: Point::new(218.0, 118.0),
+            visible: true,
+        });
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let clip_rect = Rect::new(0.0, 0.0, 220.0, 120.0);
+
+        {
+            let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+            widget.paint_overlay(&mut ctx);
+        }
+
+        let border = encoder.rects.first().expect("paint should draw border");
+        assert!(border.x >= clip_rect.x);
+        assert!(border.y >= clip_rect.y);
+        assert!(border.x + border.width <= clip_rect.x + clip_rect.width + 0.1);
+        assert!(border.y + border.height <= clip_rect.y + clip_rect.height + 0.1);
     }
 
     #[test]
