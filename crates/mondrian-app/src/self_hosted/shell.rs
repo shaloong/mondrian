@@ -15,12 +15,12 @@ use std::path::Path;
 
 use crate::app::ui_actions::{
     export_set_draft_action, project_create_with_settings_action, ExportDraftUpdatePayload,
-    ExportOutputDialogPayload, NewProjectDraftUpdatePayload, APP_SHELL_ABOUT,
-    APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
+    ExportOutputDialogPayload, NewProjectDraftUpdatePayload, PreferencesTabPayload,
+    APP_SHELL_ABOUT, APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
     APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_EXPORT_OUTPUT_DIALOG,
     APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
-    APP_SHELL_NEW_PROJECT_DRAFT_CHANGED, APP_SHELL_OPEN_PROJECT_DIALOG,
-    APP_SHELL_SAVE_PROJECT_AS_DIALOG,
+    APP_SHELL_NEW_PROJECT_DRAFT_CHANGED, APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_PREFERENCES,
+    APP_SHELL_PREFERENCES_TAB_CHANGED, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
 };
 use crate::app::AppState;
 use crate::self_hosted::menu_bar::{MenuBar, MENU_BAR_HEIGHT};
@@ -29,6 +29,7 @@ use crate::self_hosted::new_project_dialog::{
     default_project_file_name, SelfHostedNewProjectDraft,
 };
 use crate::self_hosted::panels::{build_dock_tree_for_preset, SelfHostedPanelModels};
+use crate::self_hosted::preferences_dialog::PreferencesDialogTab;
 use mondrian_core::{MondrianError, Result};
 
 /// Default file extension for Mondrian project containers.
@@ -403,6 +404,32 @@ impl SelfHostedAppRoot {
                 Ok(None)
             }
             Action::Custom { namespace, name, .. }
+                if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_PREFERENCES =>
+            {
+                self.modal = Some(ShellModal::preferences());
+                if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
+                    self.layout(self.bounds);
+                }
+                Ok(None)
+            }
+            Action::Custom { namespace, name, payload }
+                if namespace == APP_SHELL_NAMESPACE
+                    && name == APP_SHELL_PREFERENCES_TAB_CHANGED =>
+            {
+                let tab_payload: PreferencesTabPayload = serde_json::from_value(payload)
+                    .map_err(|err| app_shell_action_error(&name, err))?;
+                let tab = PreferencesDialogTab::from(tab_payload);
+                if let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_preferences_mut) {
+                    dialog.set_active_tab(tab);
+                } else {
+                    self.modal = Some(ShellModal::preferences_with_tab(tab));
+                    if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
+                        self.layout(self.bounds);
+                    }
+                }
+                Ok(None)
+            }
+            Action::Custom { namespace, name, .. }
                 if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_CLOSE_MODAL =>
             {
                 self.modal = None;
@@ -528,10 +555,11 @@ mod tests {
         app_shell_close_modal_action, app_shell_confirm_new_project_dialog_action,
         app_shell_export_output_dialog_action, app_shell_import_media_dialog_action,
         app_shell_new_project_dialog_action, app_shell_new_project_draft_changed_action,
-        app_shell_open_project_dialog_action, app_shell_save_project_as_dialog_action,
+        app_shell_open_project_dialog_action, app_shell_preferences_action,
+        app_shell_preferences_tab_changed_action, app_shell_save_project_as_dialog_action,
         ExportDraftUpdatePayload, ExportOutputDialogPayload, NewProjectDraftUpdatePayload,
-        ProjectCreateWithSettingsPayload, EXPORT_NAMESPACE, EXPORT_SET_DRAFT,
-        PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
+        PreferencesTabPayload, ProjectCreateWithSettingsPayload, EXPORT_NAMESPACE,
+        EXPORT_SET_DRAFT, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
     };
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::{Rational, Resolution};
@@ -1062,6 +1090,40 @@ mod tests {
         assert_eq!(action, None);
         assert!(root.modal.as_ref().and_then(ShellModal::as_about).is_some());
         assert_eq!(root.child_count(), 3);
+    }
+
+    #[test]
+    fn app_root_handles_preferences_action_as_shell_modal() {
+        let platform = FakePlatform::default();
+        let mut root = SelfHostedAppRoot::demo();
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+
+        let action = root.handle_shell_action(app_shell_preferences_action(), &platform, None);
+
+        assert_eq!(action, None);
+        assert!(root.modal.as_ref().and_then(ShellModal::as_preferences).is_some());
+        assert_eq!(root.child_count(), 3);
+    }
+
+    #[test]
+    fn app_root_switches_preferences_tab_without_editor_action() {
+        let platform = FakePlatform::default();
+        let mut root = SelfHostedAppRoot::demo();
+
+        root.handle_shell_action(app_shell_preferences_action(), &platform, None);
+        let action = root.handle_shell_action(
+            app_shell_preferences_tab_changed_action(PreferencesTabPayload::Shortcuts),
+            &platform,
+            None,
+        );
+
+        assert_eq!(action, None);
+        let dialog = root
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_preferences)
+            .expect("preferences dialog");
+        assert_eq!(dialog.active_tab(), PreferencesDialogTab::Shortcuts);
     }
 
     #[test]

@@ -15,8 +15,8 @@ use mondrian_ui_widgets::menu::{Dropdown, MenuItem};
 use crate::app::ui_actions::{
     app_shell_about_action, app_shell_import_media_dialog_action,
     app_shell_new_project_dialog_action, app_shell_open_project_dialog_action,
-    app_shell_quit_action, app_shell_save_project_as_dialog_action, APP_SHELL_IMPORT_MEDIA_DIALOG,
-    APP_SHELL_NAMESPACE, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
+    app_shell_preferences_action, app_shell_quit_action, app_shell_save_project_as_dialog_action,
+    APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
 };
 use crate::app::AppState;
 use crate::self_hosted::icons::AppIcon;
@@ -63,6 +63,11 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
                 menu_item_with_icon(
                     MenuItem::new("Paste", Action::Paste),
                     AppIcon::ClipboardText,
+                ),
+                MenuItem::separator(),
+                menu_item_with_icon(
+                    MenuItem::new("Preferences...", app_shell_preferences_action()),
+                    AppIcon::List,
                 ),
             ],
         ),
@@ -455,6 +460,7 @@ mod tests {
             ("Edit", "Cut"),
             ("Edit", "Copy"),
             ("Edit", "Paste"),
+            ("Edit", "Preferences..."),
             ("View", "Timeline"),
             ("View", "Effects"),
             ("Workspace", "Audio"),
@@ -664,6 +670,21 @@ mod tests {
                 assert!(payload.is_null());
             }
             other => panic!("expected app-shell about action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn default_menu_items_use_stable_app_shell_preferences_action() {
+        let menu_items = default_menu_items();
+        let preferences = menu_item(&menu_items, "Edit", "Preferences...");
+
+        match &preferences.action {
+            Action::Custom { namespace, name, payload } => {
+                assert_eq!(namespace, APP_SHELL_NAMESPACE);
+                assert_eq!(name, crate::app::ui_actions::APP_SHELL_PREFERENCES);
+                assert!(payload.is_null());
+            }
+            other => panic!("expected app-shell preferences action, got {other:?}"),
         }
     }
 

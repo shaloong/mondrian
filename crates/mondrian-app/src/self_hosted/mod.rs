@@ -12,6 +12,7 @@ pub mod menu_bar;
 pub mod modal;
 pub mod new_project_dialog;
 pub mod panels;
+pub mod preferences_dialog;
 pub mod rendering;
 pub mod runtime;
 pub mod shell;

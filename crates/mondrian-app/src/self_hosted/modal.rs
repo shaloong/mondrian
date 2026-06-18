@@ -10,11 +10,13 @@ use mondrian_ui_core::{EventResult, Widget};
 
 use crate::self_hosted::about_dialog::AboutDialog;
 use crate::self_hosted::new_project_dialog::{NewProjectDialog, SelfHostedNewProjectDraft};
+use crate::self_hosted::preferences_dialog::{PreferencesDialog, PreferencesDialogTab};
 
 /// Shell-local modal dialog.
 pub enum ShellModal {
     About(Box<AboutDialog>),
     NewProject(Box<NewProjectDialog>),
+    Preferences(Box<PreferencesDialog>),
 }
 
 impl ShellModal {
@@ -26,6 +28,16 @@ impl ShellModal {
     /// Build the new-project modal from an initial draft.
     pub fn new_project(draft: SelfHostedNewProjectDraft) -> Self {
         Self::NewProject(Box::new(NewProjectDialog::new(draft)))
+    }
+
+    /// Build the product preferences modal.
+    pub fn preferences() -> Self {
+        Self::Preferences(Box::default())
+    }
+
+    /// Build the product preferences modal with one selected section.
+    pub fn preferences_with_tab(tab: PreferencesDialogTab) -> Self {
+        Self::Preferences(Box::new(PreferencesDialog::with_tab(tab)))
     }
 
     /// Access the product about modal when it is active.
@@ -51,6 +63,22 @@ impl ShellModal {
             _ => None,
         }
     }
+
+    /// Access the preferences modal when it is active.
+    pub fn as_preferences(&self) -> Option<&PreferencesDialog> {
+        match self {
+            Self::Preferences(dialog) => Some(dialog.as_ref()),
+            _ => None,
+        }
+    }
+
+    /// Mutably access the preferences modal when it is active.
+    pub fn as_preferences_mut(&mut self) -> Option<&mut PreferencesDialog> {
+        match self {
+            Self::Preferences(dialog) => Some(dialog.as_mut()),
+            _ => None,
+        }
+    }
 }
 
 impl Widget for ShellModal {
@@ -58,6 +86,7 @@ impl Widget for ShellModal {
         match self {
             Self::About(dialog) => dialog.id(),
             Self::NewProject(dialog) => dialog.id(),
+            Self::Preferences(dialog) => dialog.id(),
         }
     }
 
@@ -65,6 +94,7 @@ impl Widget for ShellModal {
         match self {
             Self::About(dialog) => dialog.measure(constraint),
             Self::NewProject(dialog) => dialog.measure(constraint),
+            Self::Preferences(dialog) => dialog.measure(constraint),
         }
     }
 
@@ -72,6 +102,7 @@ impl Widget for ShellModal {
         match self {
             Self::About(dialog) => dialog.layout(bounds),
             Self::NewProject(dialog) => dialog.layout(bounds),
+            Self::Preferences(dialog) => dialog.layout(bounds),
         }
     }
 
@@ -79,6 +110,7 @@ impl Widget for ShellModal {
         match self {
             Self::About(dialog) => dialog.event(event, ctx),
             Self::NewProject(dialog) => dialog.event(event, ctx),
+            Self::Preferences(dialog) => dialog.event(event, ctx),
         }
     }
 
@@ -86,6 +118,7 @@ impl Widget for ShellModal {
         match self {
             Self::About(dialog) => dialog.paint(ctx),
             Self::NewProject(dialog) => dialog.paint(ctx),
+            Self::Preferences(dialog) => dialog.paint(ctx),
         }
     }
 
@@ -93,6 +126,7 @@ impl Widget for ShellModal {
         match self {
             Self::About(dialog) => dialog.hit_test(point),
             Self::NewProject(dialog) => dialog.hit_test(point),
+            Self::Preferences(dialog) => dialog.hit_test(point),
         }
     }
 
@@ -104,6 +138,7 @@ impl Widget for ShellModal {
         match self {
             Self::About(dialog) => dialog.child_count(),
             Self::NewProject(dialog) => dialog.child_count(),
+            Self::Preferences(dialog) => dialog.child_count(),
         }
     }
 
@@ -111,6 +146,7 @@ impl Widget for ShellModal {
         match self {
             Self::About(dialog) => dialog.child(index),
             Self::NewProject(dialog) => dialog.child(index),
+            Self::Preferences(dialog) => dialog.child(index),
         }
     }
 
@@ -118,6 +154,7 @@ impl Widget for ShellModal {
         match self {
             Self::About(dialog) => dialog.child_mut(index),
             Self::NewProject(dialog) => dialog.child_mut(index),
+            Self::Preferences(dialog) => dialog.child_mut(index),
         }
     }
 }

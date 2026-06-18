@@ -99,10 +99,23 @@ pub const APP_SHELL_SAVE_PROJECT_AS_DIALOG: &str = "save_project_as_dialog";
 pub const APP_SHELL_EXPORT_OUTPUT_DIALOG: &str = "export_output_dialog";
 /// App-shell request to show product about information.
 pub const APP_SHELL_ABOUT: &str = "about";
+/// App-shell request to show self-hosted preferences.
+pub const APP_SHELL_PREFERENCES: &str = "preferences";
+/// App-shell request to switch the active self-hosted preferences tab.
+pub const APP_SHELL_PREFERENCES_TAB_CHANGED: &str = "preferences_tab_changed";
 /// App-shell request to close the current shell-local modal.
 pub const APP_SHELL_CLOSE_MODAL: &str = "close_modal";
 /// App-shell request to quit the native application window.
 pub const APP_SHELL_QUIT: &str = "quit";
+
+/// Self-hosted preferences section selected by the shell-local preferences UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PreferencesTabPayload {
+    General,
+    Media,
+    Shortcuts,
+    Developer,
+}
 
 /// Clip edge being trimmed by a timeline UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -561,6 +574,16 @@ pub fn app_shell_export_output_dialog_action(payload: ExportOutputDialogPayload)
 /// Build an app-shell request for showing product about information.
 pub fn app_shell_about_action() -> Action {
     custom_app_shell_action(APP_SHELL_ABOUT)
+}
+
+/// Build an app-shell request for showing preferences.
+pub fn app_shell_preferences_action() -> Action {
+    custom_app_shell_action(APP_SHELL_PREFERENCES)
+}
+
+/// Build an app-shell request for selecting one preferences tab.
+pub fn app_shell_preferences_tab_changed_action(payload: PreferencesTabPayload) -> Action {
+    custom_app_shell_action_with_payload(APP_SHELL_PREFERENCES_TAB_CHANGED, payload)
 }
 
 /// Build an app-shell request for closing the current shell-local modal.

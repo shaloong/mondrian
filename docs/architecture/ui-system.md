@@ -83,6 +83,13 @@ actions. The official `mondrian` entrypoint starts from a real empty
 that same boundary after dispatched actions. Component fixtures remain in
 `ui_demo` and explicit `SelfHostedPanelModels::demo()` tests only.
 
+Shell-local modals, such as New Project, Preferences, and About, live in their
+own `self_hosted::*_dialog` modules and are hosted by `self_hosted::modal`.
+They emit stable `app.shell` custom actions defined in `app::ui_actions`.
+Preferences UI must migrate settings through typed app preference DTOs as those
+settings are exposed to the self-hosted shell; it must not read or duplicate
+legacy egui-only dialog state.
+
 `mondrian-editor-ui` owns the long-lived editor panel contract. Panel instances
 are created with `PanelInitContext`, which is limited to stable services such as
 the shared `EventBus`. Widget-tree rebuilds receive `PanelBuildContext`, which
