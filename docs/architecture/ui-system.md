@@ -927,17 +927,20 @@ manually wrapped inside individual widgets. Tooltip widgets draw border, fill,
 and text commands in that order. Standard focus-visible outer rings use the
 shared widget paint helper so their alpha, outset, and corner-radius expansion
 stay consistent across buttons, dropdowns, pickers, lists, and other controls.
-Icon-only buttons paint `VectorIcon` geometry rather than text glyphs. SVG is an
+Icon-only buttons paint `VectorIcon` assets rather than text glyphs. SVG is an
 import format for designers: the widget layer normalizes SVG documents through
 usvg so basic shapes, inherited paint, relative path commands, arcs, and
-transforms become renderable path data, then uses lyon to tessellate fills and
-strokes into cached theme-tinted triangle meshes.
+transforms become renderable path data. The icon keeps lyon-tessellated
+theme-tinted triangle meshes as a geometry fallback and metadata path, while
+normal small-icon painting rasterizes the SVG source with resvg/tiny-skia at the
+target pixel size and submits a stable raster-image key to the renderer.
 Text buttons that need command glyphs use the same optional leading
 `VectorIcon` path, so icon-only and icon-plus-label controls share parsing,
 caching, focus, disabled, and text clipping behavior.
 Bundled SVGs should be loaded through `VectorIcon::from_static_svg` with a
-stable icon id so parsing and lyon tessellation happen once; repeated widget-tree
-construction must clone cached geometry rather than reparsing XML.
+stable icon id so parsing, lyon tessellation, and target-size raster cache reuse
+stay deterministic; repeated widget-tree construction must clone cached geometry
+rather than reparsing XML.
 Product-level bundled icons should enter the custom UI through
 `self_hosted::icons::AppIcon` so panel migration code does not duplicate
 `include_str!()` paths or depend on legacy egui icon enums.
@@ -949,15 +952,16 @@ vocabulary.
 recording time: rectangle bounds, line endpoints, clip bounds, image bounds,
 and translate offsets. This keeps rounded-rect circles, slider thumbs,
 splitter handles, and scrollbar thumbs visually stable after window resizing.
-Arbitrary triangle geometry, including SVG icons, filled checkmarks, and color
-wheel meshes, preserves subpixel vertices so lyon-tessellated curves and
-diagonals do not lose shape quality before the GPU rasterizer sees them. The
-GPU UI pass renders through a cached 4x MSAA target and resolves into the
-surface view, giving arbitrary triangle-list icons and meshes the same
-anti-aliased edge treatment as the rest of the UI pass. Text positions are left
-to the text renderer and caller-side layout policy, and image UVs remain
-unsnapped because they are texture coordinates rather than screen-space
-geometry.
+Arbitrary triangle geometry, including filled checkmarks, fallback SVG meshes,
+and color wheel meshes, preserves subpixel vertices so lyon-tessellated curves
+and diagonals do not lose shape quality before the GPU rasterizer sees them.
+The GPU UI pass renders through a cached 4x MSAA target and resolves into the
+surface view. Raster icon images use a separate renderer-owned image atlas with
+linear sampling so small SVG icons receive browser-like coverage from
+resvg/tiny-skia without sharing mutable atlas state with text glyphs. Text
+positions are left to the text renderer and caller-side layout policy, and image
+UVs remain unsnapped because they are texture coordinates rather than
+screen-space geometry.
 
 The renderer must flush draw batches when clip state changes and must apply the
 batch clip rect as a GPU scissor before drawing. A command emitted inside

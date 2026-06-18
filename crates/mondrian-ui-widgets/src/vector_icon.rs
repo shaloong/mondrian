@@ -1,11 +1,15 @@
 //! SVG-backed vector icon geometry.
 //!
 //! SVG is the designer-facing authoring format. Runtime widgets consume a
-//! cached `VectorIcon` mesh. SVG documents are normalized through usvg, then
-//! tessellated by lyon, and finally emitted as existing triangle draw commands
-//! during paint.
+//! cached `VectorIcon` asset. SVG documents are normalized through usvg and
+//! tessellated by lyon for geometry metadata and fallback painting. Normal icon
+//! painting uses resvg/tiny-skia to rasterize the source SVG at the target pixel
+//! size, then submits the result to the renderer image atlas.
 
+use std::collections::hash_map::DefaultHasher;
 use std::fmt;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
 
 use lyon::math::{point, Point as LyonPoint};
@@ -20,8 +24,11 @@ use mondrian_ui_core::widget::PaintContext;
 use tiny_skia_path::{PathSegment as TinyPathSegment, Point as TinyPoint, Transform};
 
 const TESSELLATION_TOLERANCE: f32 = 0.08;
+const MAX_RASTER_ICON_SIZE: u32 = 256;
 
 static STATIC_SVG_ICON_CACHE: OnceLock<Mutex<std::collections::HashMap<&'static str, VectorIcon>>> =
+    OnceLock::new();
+static RASTER_ICON_CACHE: OnceLock<Mutex<std::collections::HashMap<RasterIconKey, RasterIcon>>> =
     OnceLock::new();
 
 /// Parsed, tessellated icon geometry ready for widget painting.
@@ -29,11 +36,32 @@ static STATIC_SVG_ICON_CACHE: OnceLock<Mutex<std::collections::HashMap<&'static 
 pub struct VectorIcon {
     view_box: Rect,
     meshes: Vec<VectorIconMesh>,
+    raster_source: Option<VectorIconRasterSource>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 struct VectorIconMesh {
     triangles: Vec<[Point; 3]>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct VectorIconRasterSource {
+    id: Arc<str>,
+    svg: Arc<str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RasterIconKey {
+    id: Arc<str>,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct RasterIcon {
+    width: u32,
+    height: u32,
+    rgba: Arc<[u8]>,
 }
 
 /// Error returned when SVG icon data cannot be converted to icon geometry.
@@ -83,7 +111,15 @@ impl VectorIcon {
             ));
         }
 
-        Ok(Self { view_box, meshes })
+        let source_id = format!("svg:{:016x}", hash_str(svg));
+        Ok(Self {
+            view_box,
+            meshes,
+            raster_source: Some(VectorIconRasterSource {
+                id: Arc::from(source_id),
+                svg: Arc::from(svg),
+            }),
+        })
     }
 
     /// Parse static SVG data once per `id` and return cached geometry clones.
@@ -103,7 +139,9 @@ impl VectorIcon {
             }
         }
 
-        let icon = Self::from_svg_str(svg)?;
+        let mut icon = Self::from_svg_str(svg)?;
+        icon.raster_source =
+            Some(VectorIconRasterSource { id: Arc::from(id), svg: Arc::from(svg) });
         let mut guard = cache
             .lock()
             .map_err(|_| VectorIconError::new("static SVG icon cache is poisoned"))?;
@@ -113,7 +151,19 @@ impl VectorIcon {
 
     /// Paint the icon into a square or rectangular viewport using one theme color.
     pub fn paint(&self, ctx: &mut PaintContext, bounds: Rect, color: Color) {
-        let fitted = fit_view_box(self.view_box, bounds);
+        let fitted = fit_view_box(self.view_box, bounds).pixel_aligned();
+        if let Some((key, raster)) = self.raster_icon_for_bounds(fitted) {
+            ctx.encoder.draw_raster_image(
+                &key,
+                fitted,
+                raster.width,
+                raster.height,
+                raster.rgba.clone(),
+                color,
+            );
+            return;
+        }
+
         for mesh in &self.meshes {
             let mut vertices = Vec::with_capacity(mesh.triangles.len() * 3);
             for triangle in &mesh.triangles {
@@ -139,6 +189,76 @@ impl VectorIcon {
     pub fn triangle_count(&self) -> usize {
         self.meshes.iter().map(|mesh| mesh.triangles.len()).sum()
     }
+
+    fn raster_icon_for_bounds(&self, bounds: Rect) -> Option<(String, RasterIcon)> {
+        let source = self.raster_source.as_ref()?;
+        let width = bounds.width.round().max(1.0);
+        let height = bounds.height.round().max(1.0);
+        if width > MAX_RASTER_ICON_SIZE as f32 || height > MAX_RASTER_ICON_SIZE as f32 {
+            return None;
+        }
+        let width = width as u32;
+        let height = height as u32;
+
+        let key = RasterIconKey { id: source.id.clone(), width, height };
+        let cache = RASTER_ICON_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+        {
+            let guard = cache.lock().ok()?;
+            if let Some(icon) = guard.get(&key) {
+                return Some((raster_draw_key(&key), icon.clone()));
+            }
+        }
+
+        let raster = rasterize_svg_to_alpha_rgba(&source.svg, width, height)?;
+        let mut guard = cache.lock().ok()?;
+        let raster = guard.entry(key.clone()).or_insert(raster).clone();
+        Some((raster_draw_key(&key), raster))
+    }
+}
+
+trait PixelAlignRect {
+    fn pixel_aligned(self) -> Self;
+}
+
+impl PixelAlignRect for Rect {
+    fn pixel_aligned(self) -> Self {
+        Rect::new(
+            self.x.round(),
+            self.y.round(),
+            self.width.round().max(1.0),
+            self.height.round().max(1.0),
+        )
+    }
+}
+
+fn hash_str(value: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn raster_draw_key(key: &RasterIconKey) -> String {
+    format!("vector-icon:{}:{}x{}", key.id, key.width, key.height)
+}
+
+fn rasterize_svg_to_alpha_rgba(svg: &str, width: u32, height: u32) -> Option<RasterIcon> {
+    let tree = usvg::Tree::from_data(svg.as_bytes(), &usvg::Options::default()).ok()?;
+    let source_size = tree.size();
+    let scale_x = width as f32 / source_size.width().max(1.0);
+    let scale_y = height as f32 / source_size.height().max(1.0);
+    let mut pixmap = tiny_skia::Pixmap::new(width, height)?;
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::from_scale(scale_x, scale_y),
+        &mut pixmap.as_mut(),
+    );
+
+    let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
+    for pixel in pixmap.data().chunks_exact(4) {
+        rgba.extend_from_slice(&[255, 255, 255, pixel[3]]);
+    }
+
+    Some(RasterIcon { width, height, rgba: Arc::from(rgba) })
 }
 
 fn collect_usvg_group(
@@ -367,6 +487,7 @@ mod tests {
     #[derive(Default)]
     struct PaintRecorder {
         triangles: usize,
+        raster_images: usize,
     }
 
     impl DrawCommandEncoder for PaintRecorder {
@@ -376,6 +497,17 @@ mod tests {
         fn draw_line(&mut self, _start: Point, _end: Point, _width: f32, _color: Color) {}
         fn draw_triangles(&mut self, vertices: &[Point], _color: Color) {
             self.triangles += vertices.len();
+        }
+        fn draw_raster_image(
+            &mut self,
+            _key: &str,
+            _bounds: Rect,
+            _width: u32,
+            _height: u32,
+            _rgba: std::sync::Arc<[u8]>,
+            _tint: Color,
+        ) {
+            self.raster_images += 1;
         }
         fn draw_text(&mut self, _text: &str, _font_size: f32, _position: Point, _color: Color) {}
         fn push_translate(&mut self, _offset: glam::Vec2) {}
@@ -435,7 +567,7 @@ mod tests {
             Color::from_hex(0xFFFFFF),
         );
 
-        assert!(recorder.triangles > 0);
+        assert_eq!(recorder.raster_images, 1);
     }
 
     #[test]
@@ -491,7 +623,7 @@ mod tests {
     }
 
     #[test]
-    fn paints_closed_fill_as_tessellated_triangles() {
+    fn paints_svg_icons_as_cached_raster_images_for_browser_like_aa() {
         let icon = VectorIcon::from_svg_str(
             r#"<svg viewBox="0 0 24 24"><path d="M4 4L20 4L12 20Z" fill="black"/></svg>"#,
         )
@@ -505,7 +637,67 @@ mod tests {
             Color::from_hex(0xFFFFFF),
         );
 
+        assert_eq!(recorder.raster_images, 1);
+        assert_eq!(recorder.triangles, 0);
+    }
+
+    #[test]
+    fn falls_back_to_tessellated_triangles_without_raster_source() {
+        let mut icon = VectorIcon::from_svg_str(
+            r#"<svg viewBox="0 0 24 24"><path d="M4 4L20 4L12 20Z" fill="black"/></svg>"#,
+        )
+        .expect("icon");
+        icon.raster_source = None;
+        let mut recorder = PaintRecorder::default();
+        let mut ctx = paint_ctx(&mut recorder);
+
+        icon.paint(
+            &mut ctx,
+            Rect::new(0.0, 0.0, 24.0, 24.0),
+            Color::from_hex(0xFFFFFF),
+        );
+
         assert!(recorder.triangles >= 3);
+        assert_eq!(recorder.raster_images, 0);
+    }
+
+    #[test]
+    fn falls_back_to_tessellated_triangles_for_large_icon_bounds() {
+        let icon = VectorIcon::from_svg_str(
+            r#"<svg viewBox="0 0 24 24"><path d="M4 4L20 4L12 20Z" fill="black"/></svg>"#,
+        )
+        .expect("icon");
+        let mut recorder = PaintRecorder::default();
+        let mut ctx = paint_ctx(&mut recorder);
+
+        icon.paint(
+            &mut ctx,
+            Rect::new(0.0, 0.0, 512.0, 512.0),
+            Color::from_hex(0xFFFFFF),
+        );
+
+        assert!(recorder.triangles >= 3);
+        assert_eq!(recorder.raster_images, 0);
+    }
+
+    #[test]
+    fn raster_icon_cache_is_keyed_by_output_size() {
+        let icon = VectorIcon::from_static_svg(
+            "test.triangle.cache",
+            r#"<svg viewBox="0 0 24 24"><path d="M4 4L20 4L12 20Z" fill="black"/></svg>"#,
+        )
+        .expect("icon");
+
+        let (_, small) = icon
+            .raster_icon_for_bounds(Rect::new(0.2, 0.3, 15.7, 16.1))
+            .expect("small raster");
+        let (_, large) = icon
+            .raster_icon_for_bounds(Rect::new(0.0, 0.0, 32.0, 32.0))
+            .expect("large raster");
+
+        assert_eq!((small.width, small.height), (16, 16));
+        assert_eq!((large.width, large.height), (32, 32));
+        assert_ne!(small.rgba.len(), large.rgba.len());
     }
 
     #[test]

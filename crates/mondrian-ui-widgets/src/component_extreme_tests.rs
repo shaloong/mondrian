@@ -27,6 +27,7 @@ struct RecordingEncoder {
     rects: Vec<Rect>,
     lines: Vec<(Point, Point, f32)>,
     triangle_batches: Vec<Vec<Point>>,
+    raster_images: Vec<Rect>,
     colored_triangle_batches: Vec<Vec<(Point, Color)>>,
     texts: Vec<TextCommand>,
     clip_depth: i32,
@@ -52,6 +53,9 @@ impl RecordingEncoder {
             for point in batch {
                 assert_point_finite(*point);
             }
+        }
+        for rect in &self.raster_images {
+            assert_rect_finite(*rect);
         }
         for batch in &self.colored_triangle_batches {
             for (point, _) in batch {
@@ -93,6 +97,18 @@ impl DrawCommandEncoder for RecordingEncoder {
 
     fn draw_triangles(&mut self, vertices: &[Point], _color: Color) {
         self.triangle_batches.push(vertices.to_vec());
+    }
+
+    fn draw_raster_image(
+        &mut self,
+        _key: &str,
+        bounds: Rect,
+        _width: u32,
+        _height: u32,
+        _rgba: std::sync::Arc<[u8]>,
+        _tint: Color,
+    ) {
+        self.raster_images.push(bounds);
     }
 
     fn draw_colored_triangles(&mut self, vertices: &[(Point, Color)]) {
@@ -318,8 +334,9 @@ fn dropdown_overlay_scrolls_in_pc_direction_and_keeps_overlay_balanced() {
 
     let before = paint_widget(&dropdown, Rect::new(0.0, 0.0, 180.0, 180.0));
     assert!(
-        before.triangle_batches.iter().any(|batch| batch.len() >= 6),
-        "iconized dropdown rows should paint SVG triangle geometry"
+        before.triangle_batches.iter().any(|batch| batch.len() >= 6)
+            || !before.raster_images.is_empty(),
+        "iconized dropdown rows should paint SVG icon geometry"
     );
     assert!(
         before.texts.iter().any(|text| text.text == "Ctrl+0"),
@@ -499,7 +516,8 @@ fn overlay_and_scroll_container_extremes_keep_paint_and_event_state_stable() {
         "context menu overlay should paint shortcut hints"
     );
     assert!(
-        menu_paint.triangle_batches.iter().any(|batch| batch.len() >= 6),
+        menu_paint.triangle_batches.iter().any(|batch| batch.len() >= 6)
+            || !menu_paint.raster_images.is_empty(),
         "context menu overlay should paint icon geometry"
     );
     assert!(

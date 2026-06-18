@@ -3486,6 +3486,8 @@ dependencies = [
  "mondrian-ui-layout",
  "mondrian-ui-text",
  "mondrian-ui-theme",
+ "resvg",
+ "tiny-skia",
  "tiny-skia-path",
  "unicode-segmentation",
  "usvg",

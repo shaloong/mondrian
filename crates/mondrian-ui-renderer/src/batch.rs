@@ -103,6 +103,12 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                 // Stage B: text placeholder — skip
             }
             DrawCommand::Image { bounds, uv_rect, tint } => {
+                ensure_texture_key(
+                    &mut batches,
+                    &mut current_batch,
+                    clip_stack.last().copied(),
+                    None,
+                );
                 let rect = apply_transform(bounds, &transform_stack);
                 let screen_rect = pixel_to_ndc_rect(rect, sx, sy, tx, ty);
 
@@ -121,6 +127,43 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                 let a = tint.a;
                 // NDC Y is flipped (y0=bottom, y1=top), so swap V coords:
                 // bottom vertices → v1 (bottom of glyph), top vertices → v0 (top of glyph)
+                let bw = bounds.width.max(1.0);
+                let bh = bounds.height.max(1.0);
+                let vertices = vec![
+                    RectVertex::new(x0, y0, u0, v1, r, g, b, a, bw, bh, 0.0, RenderMode::Glyph),
+                    RectVertex::new(x1, y0, u1, v1, r, g, b, a, bw, bh, 0.0, RenderMode::Glyph),
+                    RectVertex::new(x0, y1, u0, v0, r, g, b, a, bw, bh, 0.0, RenderMode::Glyph),
+                    RectVertex::new(x0, y1, u0, v0, r, g, b, a, bw, bh, 0.0, RenderMode::Glyph),
+                    RectVertex::new(x1, y0, u1, v1, r, g, b, a, bw, bh, 0.0, RenderMode::Glyph),
+                    RectVertex::new(x1, y1, u1, v0, r, g, b, a, bw, bh, 0.0, RenderMode::Glyph),
+                ];
+                current_batch.vertices.extend(vertices);
+            }
+            DrawCommand::RasterImage { .. } => {
+                // The renderer resolves these into RasterAtlasImage before batching.
+            }
+            DrawCommand::RasterAtlasImage { bounds, uv_rect, tint } => {
+                ensure_texture_key(
+                    &mut batches,
+                    &mut current_batch,
+                    clip_stack.last().copied(),
+                    Some("image".to_string()),
+                );
+                let rect = apply_transform(bounds, &transform_stack);
+                let screen_rect = pixel_to_ndc_rect(rect, sx, sy, tx, ty);
+
+                let x0 = screen_rect.x;
+                let y0 = screen_rect.y;
+                let x1 = screen_rect.x + screen_rect.width;
+                let y1 = screen_rect.y + screen_rect.height;
+                let u0 = uv_rect.x;
+                let v0 = uv_rect.y;
+                let u1 = uv_rect.x + uv_rect.width;
+                let v1 = uv_rect.y + uv_rect.height;
+                let r = tint.r;
+                let g = tint.g;
+                let b = tint.b;
+                let a = tint.a;
                 let bw = bounds.width.max(1.0);
                 let bh = bounds.height.max(1.0);
                 let vertices = vec![
@@ -350,6 +393,19 @@ fn finish_batch_if_needed(
         current_batch,
         DrawBatch { vertices: Vec::new(), clip_rect, texture_key: None },
     ));
+}
+
+fn ensure_texture_key(
+    batches: &mut Vec<DrawBatch>,
+    current_batch: &mut DrawBatch,
+    clip_rect: Option<Rect>,
+    texture_key: Option<String>,
+) {
+    if current_batch.texture_key == texture_key {
+        return;
+    }
+    finish_batch_if_needed(batches, current_batch, clip_rect);
+    current_batch.texture_key = texture_key;
 }
 
 /// Convert pixel-space rect to NDC coordinates with Y-flip.
@@ -757,6 +813,28 @@ mod tests {
         let batches = build_batches(&cmds, (1920, 1080));
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].vertices.len(), 6);
+    }
+
+    #[test]
+    fn build_batches_raster_atlas_images_use_image_texture_key() {
+        let cmds = [
+            DrawCommand::Image {
+                bounds: Rect::new(0.0, 0.0, 16.0, 16.0),
+                uv_rect: Rect::new(0.0, 0.0, 0.01, 0.01),
+                tint: Color::WHITE,
+            },
+            DrawCommand::RasterAtlasImage {
+                bounds: Rect::new(20.0, 0.0, 16.0, 16.0),
+                uv_rect: Rect::new(0.1, 0.0, 0.01, 0.01),
+                tint: Color::WHITE,
+            },
+        ];
+
+        let batches = build_batches(&cmds, (100, 100));
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].texture_key, None);
+        assert_eq!(batches[1].texture_key.as_deref(), Some("image"));
     }
 
     // ═══════════════════════════════════════════════════════════════════════

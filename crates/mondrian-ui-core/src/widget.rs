@@ -19,6 +19,7 @@ use mondrian_editor_state::state::PanelKind;
 use mondrian_editor_state::Action;
 use mondrian_platform::PlatformService;
 use mondrian_ui_theme::Theme;
+use std::sync::Arc;
 
 /// Pointer capture requested by a widget during event handling.
 ///
@@ -208,6 +209,20 @@ pub trait DrawCommandEncoder {
         _corner_radius: f32,
     ) {
         self.draw_colored_triangles(vertices);
+    }
+    /// Draw a cached RGBA raster image from the renderer-owned image atlas.
+    ///
+    /// The `key` must be stable for a given image payload. Production encoders
+    /// upload the bytes once and then reuse the cached atlas slot.
+    fn draw_raster_image(
+        &mut self,
+        _key: &str,
+        _bounds: Rect,
+        _width: u32,
+        _height: u32,
+        _rgba: Arc<[u8]>,
+        _tint: mondrian_core::Color,
+    ) {
     }
     fn draw_text(
         &mut self,

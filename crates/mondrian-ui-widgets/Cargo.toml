@@ -18,6 +18,8 @@ mondrian-platform     = { workspace = true }
 
 glam = { workspace = true }
 lyon = { workspace = true }
+resvg = { workspace = true }
+tiny-skia = { workspace = true }
 tiny-skia-path = { workspace = true }
 unicode-segmentation = { workspace = true }
 usvg = { workspace = true }

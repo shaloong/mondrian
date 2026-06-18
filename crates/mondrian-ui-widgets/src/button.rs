@@ -281,6 +281,7 @@ mod tests {
         clips: Vec<Rect>,
         clip_pops: usize,
         triangles: usize,
+        raster_images: usize,
         texts: Vec<String>,
     }
 
@@ -316,6 +317,18 @@ mod tests {
 
         fn draw_triangles(&mut self, vertices: &[Point], _color: mondrian_core::Color) {
             self.triangles += vertices.len();
+        }
+
+        fn draw_raster_image(
+            &mut self,
+            _key: &str,
+            _bounds: Rect,
+            _width: u32,
+            _height: u32,
+            _rgba: std::sync::Arc<[u8]>,
+            _tint: mondrian_core::Color,
+        ) {
+            self.raster_images += 1;
         }
 
         fn push_translate(&mut self, _offset: glam::Vec2) {}
@@ -397,7 +410,7 @@ mod tests {
 
         b.paint(&mut ctx);
 
-        assert!(encoder.triangles > 0);
+        assert!(encoder.triangles > 0 || encoder.raster_images > 0);
         assert_eq!(encoder.texts, vec!["Remove"]);
         assert_eq!(encoder.clip_pops, 1);
         assert!(encoder.clips[0].x > 22.0);

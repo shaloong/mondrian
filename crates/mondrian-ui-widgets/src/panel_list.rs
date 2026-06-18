@@ -1124,6 +1124,7 @@ mod tests {
         rect_bounds: Vec<Rect>,
         lines: usize,
         triangles: usize,
+        raster_images: usize,
         texts: Vec<String>,
         clips: usize,
     }
@@ -1146,6 +1147,18 @@ mod tests {
 
         fn draw_triangles(&mut self, vertices: &[Point], _color: Color) {
             self.triangles += vertices.len();
+        }
+
+        fn draw_raster_image(
+            &mut self,
+            _key: &str,
+            _bounds: Rect,
+            _width: u32,
+            _height: u32,
+            _rgba: std::sync::Arc<[u8]>,
+            _tint: Color,
+        ) {
+            self.raster_images += 1;
         }
 
         fn draw_text(&mut self, text: &str, _font_size: f32, _position: Point, _color: Color) {
@@ -1904,7 +1917,7 @@ mod tests {
         };
         list.paint(&mut ctx);
 
-        assert!(encoder.triangles > 0);
+        assert!(encoder.triangles > 0 || encoder.raster_images > 0);
         assert!(encoder.texts.iter().any(|text| text == "New project..."));
     }
 

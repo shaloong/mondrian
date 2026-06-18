@@ -8,6 +8,7 @@ use mondrian_core::Color;
 use mondrian_ui_core::types::{Point, Rect};
 use mondrian_ui_core::widget::DrawCommandEncoder;
 use mondrian_ui_theme::typography::TextStyle;
+use std::sync::Arc;
 
 fn snap_scalar(value: f32) -> f32 {
     if value.is_finite() {
@@ -74,6 +75,24 @@ pub enum DrawCommand {
 
     /// 图像（从纹理图集采样）
     Image {
+        bounds: Rect,
+        uv_rect: Rect,
+        tint: Color,
+    },
+
+    /// RGBA image data to cache in the renderer-owned image atlas.
+    RasterImage {
+        key: String,
+        bounds: Rect,
+        width: u32,
+        height: u32,
+        rgba: Arc<[u8]>,
+        tint: Color,
+    },
+
+    /// Resolved renderer image-atlas draw. This is produced internally from
+    /// [`DrawCommand::RasterImage`] after atlas allocation.
+    RasterAtlasImage {
         bounds: Rect,
         uv_rect: Rect,
         tint: Color,
@@ -205,6 +224,31 @@ impl DrawEncoder {
             .push(DrawCommand::Image { bounds: snap_rect(bounds), uv_rect, tint });
     }
 
+    /// Record an RGBA image that the renderer should upload to its image atlas.
+    pub fn draw_raster_image(
+        &mut self,
+        key: &str,
+        bounds: Rect,
+        width: u32,
+        height: u32,
+        rgba: Arc<[u8]>,
+        tint: Color,
+    ) {
+        let expected_len = width as usize * height as usize * 4;
+        if width == 0 || height == 0 || rgba.len() != expected_len {
+            return;
+        }
+
+        self.commands.push(DrawCommand::RasterImage {
+            key: key.to_string(),
+            bounds: snap_rect(bounds),
+            width,
+            height,
+            rgba,
+            tint,
+        });
+    }
+
     pub fn draw_line(&mut self, start: Point, end: Point, width: f32, color: Color) {
         self.commands.push(DrawCommand::Line {
             start: snap_point(start),
@@ -311,6 +355,18 @@ impl DrawCommandEncoder for DrawEncoder {
         corner_radius: f32,
     ) {
         self.draw_colored_triangles_in_rect(vertices, mask_bounds, corner_radius);
+    }
+
+    fn draw_raster_image(
+        &mut self,
+        key: &str,
+        bounds: Rect,
+        width: u32,
+        height: u32,
+        rgba: Arc<[u8]>,
+        tint: Color,
+    ) {
+        DrawEncoder::draw_raster_image(self, key, bounds, width, height, rgba, tint);
     }
 
     fn draw_text(&mut self, text: &str, font_size: f32, position: Point, color: Color) {
@@ -542,6 +598,39 @@ mod tests {
         let mut enc = DrawEncoder::new();
         enc.draw_image(rect(), rect(), color());
         assert_eq!(enc.command_count(), 1);
+    }
+
+    #[test]
+    fn encoder_draw_raster_image_records_valid_rgba_payload() {
+        let mut enc = DrawEncoder::new();
+        enc.draw_raster_image(
+            "icon.copy.16",
+            rect(),
+            2,
+            1,
+            Arc::from(vec![255u8; 8]),
+            color(),
+        );
+
+        let commands = enc.finish();
+
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            DrawCommand::RasterImage { key, width, height, rgba, .. } => {
+                assert_eq!(key, "icon.copy.16");
+                assert_eq!((*width, *height), (2, 1));
+                assert_eq!(rgba.len(), 8);
+            }
+            other => panic!("expected raster image command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn encoder_draw_raster_image_rejects_mismatched_payload_size() {
+        let mut enc = DrawEncoder::new();
+        enc.draw_raster_image("bad", rect(), 2, 2, Arc::from(vec![255u8; 8]), color());
+
+        assert!(enc.is_empty());
     }
 
     #[test]

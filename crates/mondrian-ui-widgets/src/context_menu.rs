@@ -261,6 +261,7 @@ mod tests {
         lines: usize,
         texts: Vec<String>,
         triangles: usize,
+        raster_images: usize,
     }
 
     impl DrawCommandEncoder for RecordingEncoder {
@@ -299,6 +300,18 @@ mod tests {
 
         fn draw_triangles(&mut self, vertices: &[Point], _color: mondrian_core::Color) {
             self.triangles += vertices.len() / 3;
+        }
+
+        fn draw_raster_image(
+            &mut self,
+            _key: &str,
+            _bounds: Rect,
+            _width: u32,
+            _height: u32,
+            _rgba: std::sync::Arc<[u8]>,
+            _tint: mondrian_core::Color,
+        ) {
+            self.raster_images += 1;
         }
     }
 
@@ -623,7 +636,8 @@ mod tests {
             encoder.texts,
             vec!["Copy linked audio and video selection", "Ctrl+C"]
         );
-        assert_eq!(encoder.triangles, icon.triangle_count());
+        assert_eq!(encoder.triangles + encoder.raster_images, 1);
+        assert!(icon.triangle_count() > 0);
     }
 
     #[test]

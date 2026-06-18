@@ -204,6 +204,7 @@ mod tests {
     struct PaintRecorder {
         lines: usize,
         triangles: usize,
+        raster_images: usize,
         texts: Vec<String>,
     }
 
@@ -216,6 +217,17 @@ mod tests {
         }
         fn draw_triangles(&mut self, vertices: &[Point], _color: Color) {
             self.triangles += vertices.len();
+        }
+        fn draw_raster_image(
+            &mut self,
+            _key: &str,
+            _bounds: Rect,
+            _width: u32,
+            _height: u32,
+            _rgba: std::sync::Arc<[u8]>,
+            _tint: Color,
+        ) {
+            self.raster_images += 1;
         }
         fn draw_text(&mut self, text: &str, _font_size: f32, _position: Point, _color: Color) {
             self.texts.push(text.to_owned());
@@ -318,7 +330,7 @@ mod tests {
         button.paint(&mut ctx);
 
         assert_eq!(recorder.lines, 0);
-        assert!(recorder.triangles > 0);
+        assert!(recorder.triangles > 0 || recorder.raster_images > 0);
         assert!(recorder.texts.is_empty());
     }
 }

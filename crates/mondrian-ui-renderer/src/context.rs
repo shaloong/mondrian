@@ -3,8 +3,10 @@
 //! [`UiRenderer`] 持有 wgpu 渲染管线 + glyph 纹理图集，每帧接收绘制命令。
 
 use bytemuck::Pod;
+use std::collections::HashMap;
 use wgpu::util::DeviceExt;
 
+use crate::atlas::TextureAtlas;
 use crate::batch::build_batches;
 use crate::command::DrawCommand;
 use crate::pipeline::UiPipeline;
@@ -18,10 +20,17 @@ struct Uniforms {
 }
 
 const UI_SAMPLE_COUNT: u32 = 4;
+const ATLAS_SIZE: u32 = 2048;
+const IMAGE_ATLAS_PAD: u32 = 1;
 
 struct MsaaTarget {
     size: (u32, u32),
     view: wgpu::TextureView,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ImageCacheEntry {
+    uv_rect: mondrian_ui_core::types::Rect,
 }
 
 /// 字形上传数据
@@ -38,6 +47,10 @@ pub struct UiRenderer {
     pipeline: UiPipeline,
     glyph_texture: wgpu::Texture,
     glyph_bind_group: wgpu::BindGroup,
+    image_texture: wgpu::Texture,
+    image_bind_group: wgpu::BindGroup,
+    image_atlas: TextureAtlas,
+    image_cache: HashMap<String, ImageCacheEntry>,
     surface_format: wgpu::TextureFormat,
     msaa_target: Option<MsaaTarget>,
 }
@@ -75,12 +88,11 @@ impl UiRenderer {
     pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
         let pipeline = UiPipeline::new(device, surface_format, UI_SAMPLE_COUNT);
 
-        let atlas_size: u32 = 2048;
         let glyph_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("glyph_atlas"),
             size: wgpu::Extent3d {
-                width: atlas_size,
-                height: atlas_size,
+                width: ATLAS_SIZE,
+                height: ATLAS_SIZE,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -117,10 +129,53 @@ impl UiRenderer {
             ],
         });
 
+        let image_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("ui_image_atlas"),
+            size: wgpu::Extent3d {
+                width: ATLAS_SIZE,
+                height: ATLAS_SIZE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let image_view = image_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let image_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("ui_image_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let image_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ui_image_bg"),
+            layout: &pipeline.texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Sampler(&image_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&image_view),
+                },
+            ],
+        });
+
         Self {
             pipeline,
             glyph_texture,
             glyph_bind_group,
+            image_texture,
+            image_bind_group,
+            image_atlas: TextureAtlas::new(ATLAS_SIZE, ATLAS_SIZE),
+            image_cache: HashMap::new(),
             surface_format,
             msaa_target: None,
         }
@@ -193,6 +248,74 @@ impl UiRenderer {
         }
     }
 
+    fn resolve_raster_images(
+        &mut self,
+        queue: &wgpu::Queue,
+        commands: &[DrawCommand],
+    ) -> Vec<DrawCommand> {
+        commands
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::RasterImage { key, bounds, width, height, rgba, tint } => {
+                    self.resolve_raster_image(queue, key, *width, *height, rgba).map(|uv_rect| {
+                        DrawCommand::RasterAtlasImage { bounds: *bounds, uv_rect, tint: *tint }
+                    })
+                }
+                other => Some(other.clone()),
+            })
+            .collect()
+    }
+
+    fn resolve_raster_image(
+        &mut self,
+        queue: &wgpu::Queue,
+        key: &str,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Option<mondrian_ui_core::types::Rect> {
+        let expected_len = width as usize * height as usize * 4;
+        if width == 0 || height == 0 || rgba.len() != expected_len {
+            return None;
+        }
+
+        let cache_key = format!("{key}@{width}x{height}");
+        if let Some(entry) = self.image_cache.get(&cache_key) {
+            return Some(entry.uv_rect);
+        }
+
+        let alloc_w = width.checked_add(IMAGE_ATLAS_PAD * 2)?;
+        let alloc_h = height.checked_add(IMAGE_ATLAS_PAD * 2)?;
+        let allocated = self.image_atlas.allocate(&cache_key, alloc_w, alloc_h)?;
+        let px = (allocated.x * ATLAS_SIZE as f32) as u32 + IMAGE_ATLAS_PAD;
+        let py = (allocated.y * ATLAS_SIZE as f32) as u32 + IMAGE_ATLAS_PAD;
+        let uv_rect = mondrian_ui_core::types::Rect::new(
+            px as f32 / ATLAS_SIZE as f32,
+            py as f32 / ATLAS_SIZE as f32,
+            width as f32 / ATLAS_SIZE as f32,
+            height as f32 / ATLAS_SIZE as f32,
+        );
+
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.image_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: px, y: py, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        );
+
+        self.image_cache.insert(cache_key, ImageCacheEntry { uv_rect });
+        Some(uv_rect)
+    }
+
     pub fn render(
         &mut self,
         device: &wgpu::Device,
@@ -201,7 +324,8 @@ impl UiRenderer {
         commands: &[DrawCommand],
         screen_size: (u32, u32),
     ) {
-        let batches = build_batches(commands, screen_size);
+        let commands = self.resolve_raster_images(queue, commands);
+        let batches = build_batches(&commands, screen_size);
         self.ensure_msaa_target(device, screen_size);
         let msaa_view = self.msaa_target.as_ref().map(|target| &target.view);
 
@@ -252,7 +376,6 @@ impl UiRenderer {
 
             rpass.set_pipeline(&self.pipeline.render_pipeline);
             rpass.set_bind_group(0, &bind_group, &[]);
-            rpass.set_bind_group(1, &self.glyph_bind_group, &[]);
 
             for batch in &batches {
                 if batch.vertices.is_empty() {
@@ -264,6 +387,12 @@ impl UiRenderer {
                     continue;
                 };
                 rpass.set_scissor_rect(x, y, width, height);
+                let texture_bind_group = if batch.texture_key.as_deref() == Some("image") {
+                    &self.image_bind_group
+                } else {
+                    &self.glyph_bind_group
+                };
+                rpass.set_bind_group(1, texture_bind_group, &[]);
 
                 let vertex_data: &[RectVertex] = &batch.vertices;
                 let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
