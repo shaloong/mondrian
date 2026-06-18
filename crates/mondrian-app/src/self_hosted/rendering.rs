@@ -11,11 +11,7 @@ use mondrian_ui_text::{resolve_text_commands, TextRenderer};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelfHostedFrameResult {
     /// The frame rendered and was presented to the surface.
-    Presented {
-        /// The frame uploaded new glyph atlas entries and should be followed by
-        /// another redraw to guarantee a fully populated first visual frame.
-        needs_follow_up_redraw: bool,
-    },
+    Presented,
     /// The surface was temporarily unavailable and the frame was skipped.
     Skipped,
     /// The surface was lost/outdated and was reconfigured for the next frame.
@@ -25,11 +21,7 @@ pub enum SelfHostedFrameResult {
 impl SelfHostedFrameResult {
     /// Whether the window should request another redraw immediately.
     pub fn needs_follow_up_redraw(self) -> bool {
-        matches!(
-            self,
-            SelfHostedFrameResult::Presented { needs_follow_up_redraw: true }
-                | SelfHostedFrameResult::Reconfigured
-        )
+        matches!(self, SelfHostedFrameResult::Reconfigured)
     }
 }
 
@@ -60,8 +52,7 @@ impl SelfHostedFrameRenderer {
     ) -> SelfHostedFrameResult {
         let commands = resolve_text_commands(commands, &mut self.text_renderer);
         let pending = renderer_glyph_uploads(self.text_renderer.take_pending_uploads());
-        let uploaded_glyphs = !pending.is_empty();
-        if uploaded_glyphs {
+        if !pending.is_empty() {
             self.ui_renderer.upload_glyphs(queue, &pending);
         }
 
@@ -71,7 +62,7 @@ impl SelfHostedFrameRenderer {
                 let view = output.texture.create_view(&Default::default());
                 self.ui_renderer.render(device, queue, &view, &commands, screen_size);
                 output.present();
-                SelfHostedFrameResult::Presented { needs_follow_up_redraw: uploaded_glyphs }
+                SelfHostedFrameResult::Presented
             }
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
                 SelfHostedFrameResult::Skipped
@@ -103,15 +94,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn frame_result_requests_follow_up_for_glyph_uploads_and_reconfigure() {
-        assert!(
-            SelfHostedFrameResult::Presented { needs_follow_up_redraw: true }
-                .needs_follow_up_redraw()
-        );
-        assert!(
-            !SelfHostedFrameResult::Presented { needs_follow_up_redraw: false }
-                .needs_follow_up_redraw()
-        );
+    fn frame_result_requests_follow_up_only_after_reconfigure() {
+        assert!(!SelfHostedFrameResult::Presented.needs_follow_up_redraw());
         assert!(SelfHostedFrameResult::Reconfigured.needs_follow_up_redraw());
         assert!(!SelfHostedFrameResult::Skipped.needs_follow_up_redraw());
     }
