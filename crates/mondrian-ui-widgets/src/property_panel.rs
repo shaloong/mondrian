@@ -53,6 +53,7 @@ pub struct PropertyRow {
     control: Box<dyn Widget>,
     height: Option<f32>,
     bounds: Rect,
+    control_bounds: Rect,
     label_position: Point,
 }
 
@@ -64,6 +65,7 @@ impl PropertyRow {
             control,
             height: None,
             bounds: Rect::ZERO,
+            control_bounds: Rect::ZERO,
             label_position: Point::ZERO,
         }
     }
@@ -281,6 +283,7 @@ impl Widget for PropertyPanel {
                     measured.height,
                 );
                 row.bounds = rects.row;
+                row.control_bounds = rects.control;
                 row.label_position = rects.label.min();
                 row.label.layout(rects.label);
                 row.control.layout(rects.control);
@@ -341,8 +344,12 @@ impl Widget for PropertyPanel {
                 section.title.paint(ctx);
             }
             for row in &section.rows {
+                ctx.push_clip(row.bounds);
                 row.label.paint(ctx);
+                ctx.push_clip(row.control_bounds);
                 row.control.paint(ctx);
+                ctx.pop_clip();
+                ctx.pop_clip();
             }
         }
     }
@@ -385,6 +392,7 @@ mod tests {
     use super::*;
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use crate::Slider;
+    use mondrian_core::Color;
     use mondrian_editor_state::Action;
     use mondrian_ui_core::widget::DrawCommandEncoder;
     use mondrian_ui_theme::ThemePreset;
@@ -437,12 +445,18 @@ mod tests {
     struct RecordingEncoder {
         rects: usize,
         texts: Vec<String>,
+        clips: Vec<Rect>,
+        clip_pops: usize,
     }
 
     impl DrawCommandEncoder for RecordingEncoder {
-        fn push_clip(&mut self, _bounds: Rect) {}
+        fn push_clip(&mut self, bounds: Rect) {
+            self.clips.push(bounds);
+        }
 
-        fn pop_clip(&mut self) {}
+        fn pop_clip(&mut self) {
+            self.clip_pops += 1;
+        }
 
         fn draw_rect(&mut self, _bounds: Rect, _color: mondrian_core::Color, _corner_radius: f32) {
             self.rects += 1;
@@ -470,6 +484,43 @@ mod tests {
         fn push_translate(&mut self, _offset: glam::Vec2) {}
 
         fn pop_transform(&mut self) {}
+    }
+
+    struct OverflowPaintWidget {
+        id: WidgetId,
+        bounds: Rect,
+    }
+
+    impl OverflowPaintWidget {
+        fn new() -> Self {
+            Self { id: WidgetId::new(), bounds: Rect::ZERO }
+        }
+    }
+
+    impl Widget for OverflowPaintWidget {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+
+        fn measure(&self, constraint: LayoutConstraint) -> Size {
+            constraint.constrain(Size::new(80.0, 20.0))
+        }
+
+        fn layout(&mut self, bounds: Rect) {
+            self.bounds = bounds;
+        }
+
+        fn event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+            EventResult::Ignored
+        }
+
+        fn paint(&self, ctx: &mut PaintContext) {
+            ctx.encoder.draw_rect(self.bounds.inset(-200.0, -200.0), Color::WHITE, 0.0);
+        }
+
+        fn hit_test(&self, point: Point) -> bool {
+            self.bounds.contains(point)
+        }
     }
 
     #[test]
@@ -612,6 +663,35 @@ mod tests {
         assert!(encoder.texts.contains(&"Inspector".to_string()));
         assert!(encoder.texts.contains(&"Clip".to_string()));
         assert!(encoder.texts.contains(&"Opacity".to_string()));
+    }
+
+    #[test]
+    fn property_panel_clips_row_controls_to_form_rects() {
+        let mut panel =
+            PropertyPanel::new("Inspector").with_section(PropertySection::new("Clip").with_row(
+                PropertyRow::new("Overflow", Box::new(OverflowPaintWidget::new())),
+            ));
+        panel.layout(Rect::new(0.0, 0.0, 300.0, 180.0));
+        let mut encoder = RecordingEncoder::default();
+        let theme = ThemePreset::Dark.build();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 300.0, 180.0),
+        };
+
+        panel.paint(&mut ctx);
+
+        let row = &panel.sections[0].rows[0];
+        assert!(
+            encoder.clips.contains(&row.bounds),
+            "row paint should be clipped to row bounds"
+        );
+        assert!(
+            encoder.clips.contains(&row.control_bounds),
+            "control paint should be clipped to the form control bounds"
+        );
+        assert_eq!(encoder.clip_pops, encoder.clips.len());
     }
 
     #[test]

@@ -97,6 +97,10 @@ workspace minimum size. Closing the project moves the host back to startup mode.
 Recent-project recovery, crash recovery, and future onboarding belong in the
 startup model and should be surfaced through app-layer actions rather than
 reintroducing a separate project browser or console panel.
+The workspace panel set follows NLE product surfaces only: Viewer, Timeline,
+Assets, Inspector, Effects, Node Graph, and Export. Project media browsing lives
+inside Assets as the project library; self-hosted menus and dock factories must
+not grow separate Project-browser or Console panels.
 The self-hosted recent-project list is persisted in
 `self_hosted::preferences_store::SelfHostedPreferences`: it records only shell
 launch history, is filtered to existing files when loaded, and is rendered by
@@ -986,6 +990,10 @@ instances for semantic color, padding, and wrapping rather than direct
 per-dialog `draw_text` calls.
 Inspector/property-panel titles, section headers, and row labels follow the
 same rule through `PropertyPanel`'s internal `Label` instances.
+`PropertyPanel` clips each row and its form-control rect during normal paint so
+oversized controls cannot leak across inspector rows or outside a `ScrollView`.
+Dropdowns, color-picker popups, context menus, and tooltips that must escape a
+panel should render through `paint_overlay` instead of ordinary row paint.
 Reusable labeled-field geometry should flow through
 `mondrian-ui-widgets::FormLayout` / `FormRowOptions` instead of each component
 recalculating label and control rectangles independently.

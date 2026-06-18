@@ -441,6 +441,30 @@ mod tests {
     }
 
     #[test]
+    fn self_hosted_view_menu_excludes_project_browser_and_console_panels() {
+        let menu_items = default_menu_items();
+        let view_items = menu_items
+            .iter()
+            .find_map(|(label, items)| (*label == "View").then_some(items))
+            .expect("view menu");
+
+        let labels = view_items
+            .iter()
+            .filter(|item| !item.is_separator())
+            .map(|item| item.label.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(
+            !labels.iter().any(|label| *label == "Project" || *label == "Console"),
+            "self-hosted product panels should not reintroduce project-browser or console entries"
+        );
+        assert!(
+            labels.contains(&"Assets"),
+            "project media belongs in the Assets panel"
+        );
+    }
+
+    #[test]
     fn default_menu_items_use_semantic_vector_icons() {
         let menu_items = default_menu_items();
 
