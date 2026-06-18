@@ -33,17 +33,18 @@ back into the widget tree.
 
 ## Application Entrypoints and App Modules
 
-`mondrian-app/src/main.rs` is the product entrypoint and builds the current
-production egui shell through `mondrian-app::app::MondrianApp`.
+`mondrian-app/src/main.rs` is the product entrypoint and launches the
+self-hosted winit/wgpu editor shell through `self_hosted::window`.
 `mondrian-app/src/bin` is reserved for developer-only binaries: widget
-galleries, pipeline smoke tests, and migration integration shells. Binaries in
-`src/bin` must stay thin; reusable runtime, panel, or mapping logic belongs in
-library modules.
+galleries, pipeline smoke tests, and visual diagnostics. Binaries in `src/bin`
+must stay thin; reusable runtime, panel, or mapping logic belongs in library
+modules. The product shell should not be mirrored by a second launcher binary.
 
-The legacy production egui UI lives under `mondrian-app/src/egui_ui`. That
-module contains egui panels, egui theme tokens, viewer helpers, and the old
-timeline implementation. New self-hosted UI code must not be added there unless
-it is deliberately bridging or deleting legacy egui behavior.
+The legacy egui UI lives under `mondrian-app/src/egui_ui` and remains migration
+reference code only. That module contains egui panels, egui theme tokens,
+viewer helpers, and the old timeline implementation. New self-hosted UI code
+must not be added there unless it is deliberately deleting or extracting legacy
+behavior.
 
 The self-hosted UI application adapter lives under
 `mondrian-app/src/self_hosted`. `self_hosted::runtime` owns winit-side request
@@ -63,9 +64,9 @@ application-facing concepts into generic widget view models.
 state bridge: it keeps the root widget, current `AppState`, dirty refresh flag,
 and queued-action draining together so window entrypoints do not duplicate
 root/AppState refresh plumbing. `self_hosted::window` owns the reusable
-winit/wgpu product-window runner; `src/bin/self_hosted_app.rs` is only a thin
-executable launcher. The boundary type is `SelfHostedPanelModels`: real `AppState` /
-`EditorState` adapters should produce this model, while
+winit/wgpu product-window runner used by the `mondrian` binary. The boundary
+type is `SelfHostedPanelModels`: real `AppState` / `EditorState` adapters
+should produce this model, while
 `SelfHostedPanelModels::demo()` is test-only fixture code and must not be part
 of product entrypoints.
 `SelfHostedPanelModels::from_app_state` is the app-side snapshot boundary: it
@@ -73,13 +74,10 @@ reads the current `AppState`, asset library, effect registry, selection state,
 and timeline sequence into generic widget models. Timeline adapters start at
 `TimelinePanelModel::from_sequence`, which maps `mondrian-timeline::Sequence`
 plus app-layer selection DTOs into widget view models and stable-id-backed
-actions. During the migration, the `self_hosted_app` developer binary is the
-product-shell tracer: it starts from a real empty `AppState`, builds
-`SelfHostedPanelModels::from_app_state`, and refreshes from that same boundary
-after dispatched actions. Component fixtures remain in `ui_demo` and explicit
-`SelfHostedPanelModels::demo()` tests only. When the self-hosted UI becomes the
-official `mondrian` entrypoint, it should keep calling into this module with
-real panel models instead of moving logic back into `src/bin`.
+actions. The official `mondrian` entrypoint starts from a real empty
+`AppState`, builds `SelfHostedPanelModels::from_app_state`, and refreshes from
+that same boundary after dispatched actions. Component fixtures remain in
+`ui_demo` and explicit `SelfHostedPanelModels::demo()` tests only.
 
 `mondrian-editor-ui` owns the long-lived editor panel contract. Panel instances
 are created with `PanelInitContext`, which is limited to stable services such as
@@ -543,8 +541,8 @@ panel/app layer. Docked panel chrome belongs to `DockPanel`, which owns the
 `DockTabBar`, active-tab content rebuilding, `PanelSlot`, and overlay
 forwarding. App entrypoints should call panel adapters in
 `mondrian-app::self_hosted::panels` instead of reimplementing tab/content
-synchronization. The `self_hosted_app` Inspector slot uses this path with real
-self-hosted widgets (checkbox, slider, and color trigger) instead of a colored
+synchronization. The self-hosted product Inspector slot uses this path with
+real widgets (checkbox, slider, and color trigger) instead of a colored
 placeholder. Its panel snapshot carries the selected clip identity, and user
 edits emit stable inspector actions that mutate the selected clip through
 undoable app state commands. Basic transform controls show position in sequence
@@ -647,11 +645,12 @@ changes only visible row order; original item indices, row actions, drag
 payloads, badges, icons, and disabled state remain the item identity used for
 dispatch. The self-hosted Effects panel builds rows from the shared effect
 registry and, when a video clip is selected, activates rows through undoable
-`AppState::add_effect_to_clip` commands. The `self_hosted_app` and `ui_demo`
-Assets/Effects-style panels use this shared surface as the tracer bullet for
-migrating list-heavy egui panels. The self-hosted Project slot also uses
-`PanelListModel::from_project_status` to show project file, active sequence,
-asset-library, and current status-hint state instead of a colored placeholder.
+`AppState::add_effect_to_clip` commands. The `mondrian` entrypoint and
+`ui_demo` Assets/Effects-style panels use this shared surface as the tracer
+bullet for migrating list-heavy egui panels. The self-hosted Project slot also
+uses `PanelListModel::from_project_status` to show project file, active
+sequence, asset-library, and current status-hint state instead of a colored
+placeholder.
 The adjacent Console tab reads `AppState::status_log`, a bounded history fed by
 `set_status_hint`, and shows recent messages newest-first before runtime
 summary rows. `clear_status_hint` clears only the transient bottom-bar hint; it

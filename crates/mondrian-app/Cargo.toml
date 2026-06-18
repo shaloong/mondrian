@@ -4,7 +4,9 @@ version.workspace    = true
 edition.workspace    = true
 authors.workspace    = true
 license.workspace    = true
+default-run = "mondrian"
 
+# Product self-hosted editor shell.
 [[bin]]
 name = "mondrian"
 path = "src/main.rs"
@@ -25,11 +27,6 @@ path = "src/bin/ui_widget_test.rs"
 [[bin]]
 name = "ui_pipeline_test"
 path = "src/bin/ui_pipeline_test.rs"
-
-[[bin]]
-# Developer integration shell for the self-hosted editor UI.
-name = "self_hosted_app"
-path = "src/bin/self_hosted_app.rs"
 
 [dependencies]
 mondrian-core     = { workspace = true }
