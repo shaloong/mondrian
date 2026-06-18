@@ -559,10 +559,13 @@ the intersection of its bounds and the incoming parent clip. Widget code should
 push local clips through `PaintContext::push_clip()` / `pop_clip()` rather than
 calling the encoder directly, because the helper intersects local clips with the
 current root/window clip before they become renderer scissor state.
-Scrollable chrome painted inside the viewport, such as the built-in scrollbar,
-must keep the same paint-time clip active until the matching `pop_clip`; the
-component clip and renderer clip stack should not temporarily diverge during a
-single paint pass.
+Scrollable chrome that lives in the reserved gutter, such as the built-in
+scrollbars, must still be clipped, but it uses the scroll container bounds
+rather than the content viewport. A `ScrollView` paint pass therefore has two
+explicit clip scopes: child content paints under the viewport clip, then
+scrollbar chrome paints under the container-bounds clip. The component
+`PaintContext.clip_rect` and renderer clip stack must match for each scope
+during the pass.
 Clip rectangles are snapped conservatively by flooring their top-left and
 ceiling their bottom-right edge before GPU scissoring. Ordinary shape, image,
 line, and vector geometry keeps subpixel coordinates so SDF antialiasing, MSAA,

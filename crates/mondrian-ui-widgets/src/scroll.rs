@@ -611,7 +611,13 @@ impl Widget for ScrollView {
             child.paint(ctx);
         }
         ctx.pop_clip();
-        ctx.clip_rect = previous_clip;
+
+        let has_scrollbar = self.has_vertical_scrollbar() || self.has_horizontal_scrollbar();
+        if has_scrollbar {
+            let chrome_clip = previous_clip.intersection(&self.bounds);
+            ctx.clip_rect = chrome_clip;
+            ctx.push_clip(chrome_clip);
+        }
 
         if let Some(mut sb_rect) = self.vertical_scrollbar_thumb_rect() {
             let dragging = self.dragging_thumb == Some(ScrollbarAxis::Vertical);
@@ -668,6 +674,11 @@ impl Widget for ScrollView {
             };
             ctx.encoder.draw_rect(sb_rect, thumb_color, ctx.theme.spacing.radius_full);
         }
+
+        if has_scrollbar {
+            ctx.pop_clip();
+        }
+        ctx.clip_rect = previous_clip;
     }
 
     fn paint_overlay(&self, ctx: &mut PaintContext) {
@@ -858,17 +869,23 @@ mod tests {
         translations: Vec<Vec2>,
         rects: Vec<Rect>,
         clips: Vec<Rect>,
+        clip_depth: usize,
+        rect_clip_depths: Vec<usize>,
     }
 
     impl DrawCommandEncoder for RecordingEncoder {
         fn push_clip(&mut self, bounds: Rect) {
             self.clips.push(bounds);
+            self.clip_depth += 1;
         }
 
-        fn pop_clip(&mut self) {}
+        fn pop_clip(&mut self) {
+            self.clip_depth = self.clip_depth.saturating_sub(1);
+        }
 
         fn draw_rect(&mut self, bounds: Rect, _color: Color, _corner_radius: f32) {
             self.rects.push(bounds);
+            self.rect_clip_depths.push(self.clip_depth);
         }
 
         fn draw_line(&mut self, _start: Point, _end: Point, _width: f32, _color: Color) {}
@@ -948,6 +965,35 @@ mod tests {
         );
         assert_eq!(encoder.clips.first().copied(), *observed_clip.borrow());
         assert_eq!(final_clip, Rect::new(0.0, 0.0, 100.0, 100.0));
+    }
+
+    #[test]
+    fn scroll_view_paints_scrollbars_inside_own_bounds_clip() {
+        let child = Spacer::new(400.0, 400.0);
+        let mut sv = ScrollView::new(Some(Box::new(child))).with_axes(ScrollAxes::Both);
+        sv.layout(Rect::new(40.0, 50.0, 120.0, 90.0));
+
+        let mut encoder = RecordingEncoder::default();
+        let theme = ThemePreset::Dark.build();
+        let final_clip = {
+            let mut ctx = PaintContext {
+                encoder: &mut encoder,
+                theme: &theme,
+                clip_rect: Rect::new(0.0, 0.0, 200.0, 200.0),
+            };
+
+            sv.paint(&mut ctx);
+            ctx.clip_rect
+        };
+
+        assert_eq!(encoder.clips[0], Rect::new(40.0, 50.0, 112.0, 82.0));
+        assert_eq!(encoder.clips[1], Rect::new(40.0, 50.0, 120.0, 90.0));
+        assert!(!encoder.rects.is_empty());
+        assert!(
+            encoder.rect_clip_depths.iter().all(|depth| *depth > 0),
+            "scrollbar chrome must be GPU-clipped by the scroll view bounds"
+        );
+        assert_eq!(final_clip, Rect::new(0.0, 0.0, 200.0, 200.0));
     }
 
     #[test]
