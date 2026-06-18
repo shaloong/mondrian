@@ -832,7 +832,12 @@ editing session. The widget owns F2/title double-click editing, TextInput
 focus/IME routing, commit/cancel behavior, and dispatching a rename callback
 with the new title. The self-hosted Assets adapter maps that callback to
 `ui.assets.rename_asset` or `ui.assets.rename_folder`; `AppState` performs the
-library mutation, project save, reload event, and status hint.
+library mutation, project save, reload event, and status hint. Card context
+menus expose the same rename flow through `MenuItem::local`, so choosing Rename
+starts the component's existing inline editor instead of dispatching a partial
+app action with no edited text. `ContextMenu` still dispatches normal
+`MenuItem::new` actions directly; local commands are intentionally interpreted
+only by the component that created the popup.
 Folder cards expose `ui.assets.delete_folder` through the same card-level menu
 surface. Folder deletion is an app/library mutation: `AssetLibrary` removes the
 selected folder subtree, unlinks assets assigned to any deleted folder, and

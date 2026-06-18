@@ -3592,6 +3592,15 @@ mod tests {
             ),
             EventResult::Handled
         );
+        for _ in 0..2 {
+            assert_eq!(
+                grid.event(
+                    &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
+                    &mut ctx,
+                ),
+                EventResult::Handled
+            );
+        }
         assert_eq!(
             grid.event(
                 &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
@@ -3649,6 +3658,15 @@ mod tests {
             ),
             EventResult::Handled
         );
+        for _ in 0..2 {
+            assert_eq!(
+                grid.event(
+                    &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
+                    &mut ctx,
+                ),
+                EventResult::Handled
+            );
+        }
         assert_eq!(
             grid.event(
                 &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },

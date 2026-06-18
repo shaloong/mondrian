@@ -24,6 +24,7 @@ pub struct ContextMenu {
     min_width: f32,
     visible: bool,
     hovered: Option<usize>,
+    local_command: Option<String>,
     overlay_viewport: Cell<Option<Rect>>,
 }
 
@@ -42,12 +43,18 @@ impl ContextMenu {
             min_width: 140.0,
             visible: true,
             hovered: None,
+            local_command: None,
             overlay_viewport: Cell::new(None),
         }
     }
 
     pub fn is_visible(&self) -> bool {
         self.visible
+    }
+
+    /// Take the most recent component-local command activated from this menu.
+    pub fn take_local_command(&mut self) -> Option<String> {
+        self.local_command.take()
     }
 
     fn bounds_rect(&self) -> Rect {
@@ -122,16 +129,24 @@ impl ContextMenu {
         activatable.get(next).copied()
     }
 
+    fn activate_index(&mut self, index: usize, ctx: &mut EventContext) -> bool {
+        if !self.items[index].is_activatable() {
+            return false;
+        }
+        if let Some(command) = self.items[index].local_command.clone() {
+            self.local_command = Some(command);
+        } else {
+            (ctx.dispatch)(self.items[index].action.clone());
+        }
+        self.visible = false;
+        true
+    }
+
     fn activate_hovered(&mut self, ctx: &mut EventContext) -> bool {
         let Some(index) = self.hovered.or_else(|| self.first_activatable_index()) else {
             return false;
         };
-        if !self.items[index].is_activatable() {
-            return false;
-        }
-        (ctx.dispatch)(self.items[index].action.clone());
-        self.visible = false;
-        true
+        self.activate_index(index, ctx)
     }
 }
 
@@ -162,8 +177,7 @@ impl Widget for ContextMenu {
             UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
                 if let Some(index) = self.item_at(*position) {
                     if self.items[index].is_activatable() {
-                        (ctx.dispatch)(self.items[index].action.clone());
-                        self.visible = false;
+                        self.activate_index(index, ctx);
                     }
                     return EventResult::Handled;
                 }
@@ -354,6 +368,38 @@ mod tests {
         );
         assert!(!menu.visible);
         assert_eq!(cell.into_inner(), vec![Action::Cut]);
+    }
+
+    #[test]
+    fn context_menu_local_command_closes_without_dispatching() {
+        let mut menu = ContextMenu::new(
+            Point::new(100.0, 100.0),
+            vec![MenuItem::local("Rename", "rename")],
+        );
+        menu.layout(Rect::ZERO);
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let cell = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch_fn);
+
+        let result = menu.event(
+            &UiEvent::MouseDown {
+                position: Point::new(120.0, 117.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert!(!menu.visible);
+        assert_eq!(menu.take_local_command().as_deref(), Some("rename"));
+        assert!(cell.into_inner().is_empty());
     }
 
     #[test]

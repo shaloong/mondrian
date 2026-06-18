@@ -283,6 +283,9 @@ pub enum MenuItemKind {
 pub struct MenuItem {
     pub label: String,
     pub action: Action,
+    /// Component-local command emitted by popups that should not dispatch an
+    /// editor action.
+    pub local_command: Option<String>,
     pub enabled: bool,
     pub kind: MenuItemKind,
     pub icon: Option<VectorIcon>,
@@ -294,6 +297,21 @@ impl MenuItem {
         Self {
             label: label.into(),
             action,
+            local_command: None,
+            enabled: true,
+            kind: MenuItemKind::Action,
+            icon: None,
+            shortcut: None,
+        }
+    }
+
+    /// Create a menu row that reports a component-local command instead of
+    /// dispatching an app action.
+    pub fn local(label: impl Into<String>, command: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            action: Action::NoOp,
+            local_command: Some(command.into()),
             enabled: true,
             kind: MenuItemKind::Action,
             icon: None,
@@ -306,6 +324,7 @@ impl MenuItem {
         Self {
             label: String::new(),
             action: Action::DeselectAll,
+            local_command: None,
             enabled: false,
             kind: MenuItemKind::Separator,
             icon: None,
