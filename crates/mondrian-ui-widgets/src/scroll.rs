@@ -206,6 +206,10 @@ impl ScrollView {
         self.child.as_ref().is_some_and(|child| child.overlay_hit_test(point))
     }
 
+    fn should_forward_pointer_to_child(&self, point: Point) -> bool {
+        self.bounds.contains(point) || self.child_overlay_hit_test(point)
+    }
+
     fn vertical_scrollbar_track_rect(&self) -> Rect {
         let bottom_reserved = if self.has_horizontal_scrollbar() {
             self.scrollbar_width
@@ -422,8 +426,12 @@ impl Widget for ScrollView {
                     return EventResult::Handled;
                 }
 
-                if let Some(ref mut child) = self.child {
-                    child.event(event, ctx)
+                if self.should_forward_pointer_to_child(*position) {
+                    if let Some(ref mut child) = self.child {
+                        child.event(event, ctx)
+                    } else {
+                        EventResult::Ignored
+                    }
                 } else {
                     EventResult::Ignored
                 }
@@ -453,8 +461,23 @@ impl Widget for ScrollView {
                     return EventResult::Handled;
                 }
 
-                if let Some(ref mut child) = self.child {
-                    child.event(event, ctx)
+                if self.should_forward_pointer_to_child(*position) {
+                    if let Some(ref mut child) = self.child {
+                        child.event(event, ctx)
+                    } else {
+                        EventResult::Ignored
+                    }
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            UiEvent::MouseUp { position, .. } => {
+                if self.should_forward_pointer_to_child(*position) {
+                    if let Some(ref mut child) = self.child {
+                        child.event(event, ctx)
+                    } else {
+                        EventResult::Ignored
+                    }
                 } else {
                     EventResult::Ignored
                 }
@@ -921,6 +944,38 @@ mod tests {
 
         assert_eq!(result, EventResult::Ignored);
         assert_eq!(sv.scroll_offset().y, 0.0);
+    }
+
+    #[test]
+    fn scroll_view_does_not_forward_pointer_events_outside_viewport_to_normal_child() {
+        let last_mouse_down = Rc::new(RefCell::new(None));
+        let last_layout = Rc::new(RefCell::new(None));
+        let child = RecordingChild {
+            id: WidgetId::new(),
+            preferred: Size::new(200.0, 800.0),
+            last_mouse_down: Rc::clone(&last_mouse_down),
+            last_layout,
+        };
+        let mut sv = ScrollView::new(Some(Box::new(child)));
+        sv.layout(Rect::new(20.0, 20.0, 300.0, 300.0));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let dispatch = |_| {};
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch);
+
+        let result = sv.event(
+            &UiEvent::MouseDown {
+                position: Point::new(10.0, 30.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(*last_mouse_down.borrow(), None);
     }
 
     #[test]

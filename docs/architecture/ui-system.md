@@ -520,6 +520,11 @@ steal clicks from sibling controls or panels. Overlay hit testing deliberately
 ignores that normal-content clip: dropdowns, context menus, color pickers, and
 tooltips owned by a scrolled child still paint and receive events in the top
 overlay layer when open.
+`ScrollView::event()` also enforces this viewport boundary itself for pointer
+events. Directly routed events, compound-widget delegation, and unit tests must
+therefore obey the same clipping rule as tree hit testing: normal child content
+outside the viewport is inert, while open child overlays may still receive
+overlay-routed input.
 
 Renderer clip state is hierarchical. When a child widget pushes its own text or
 content clip inside a `ScrollView`, the renderer intersects that child clip with
