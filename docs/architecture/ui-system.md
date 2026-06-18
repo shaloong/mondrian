@@ -1078,3 +1078,11 @@ initial dock tree matches the last product workspace. Shell-only actions such as
 `Action::SwitchWorkspace` update the root immediately and then write the
 workspace preset back through `self_hosted::preferences_store`; editor-state
 actions and widget models remain disk-I/O free.
+
+Panel model refreshes must not erase local panel interaction state. Reusable
+widgets expose small explicit state snapshots for UI-local affordances such as
+`PanelList` filters, selection, and scroll offsets. `SelfHostedAppRoot` captures
+those snapshots before rebuilding dock content from fresh `AppState` models and
+restores them afterward, while splitter layout restoration remains owned by
+`DockSplitter`. This keeps app-state data replacement separate from ephemeral
+user navigation state.

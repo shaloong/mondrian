@@ -27,6 +27,22 @@ pub type PanelListAction = dyn Fn(usize, &PanelListItem) -> Action;
 /// Dynamic action factory used when a payload is dropped on the panel list.
 pub type PanelListDropAction = dyn Fn(&DragPayload, Point) -> Option<Action>;
 
+/// Local interaction state for a [`PanelList`].
+///
+/// Application adapters can persist this across model refreshes without making
+/// the reusable widget depend on editor state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PanelListState {
+    /// Text currently committed in the optional filter input.
+    pub filter_query: String,
+    /// Selected item by stable row identity when available.
+    pub selected_item_title: Option<String>,
+    /// Selected item by model index as a fallback for duplicate titles.
+    pub selected_index: Option<usize>,
+    /// Vertical scroll offset in content pixels.
+    pub scroll_y: f32,
+}
+
 /// Item rendered by [`PanelList`].
 #[derive(Debug, Clone)]
 pub struct PanelListItem {
@@ -195,6 +211,11 @@ impl PanelList {
         self
     }
 
+    /// Panel title used by host shells as a stable local-state key.
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
     /// Add a searchable filter field above the list rows.
     pub fn with_filter(mut self, placeholder: impl Into<String>) -> Self {
         let mut input = TextInput::new(placeholder);
@@ -217,6 +238,35 @@ impl PanelList {
             input.set_text(self.filter_query.clone());
         }
         self.normalize_after_filter_change();
+    }
+
+    /// Snapshot local list interaction state for model refresh migration.
+    pub fn state(&self) -> PanelListState {
+        PanelListState {
+            filter_query: self.filter_query.clone(),
+            selected_item_title: self
+                .selected
+                .and_then(|index| self.items.get(index))
+                .map(|item| item.title.clone()),
+            selected_index: self.selected,
+            scroll_y: self.scroll_y,
+        }
+    }
+
+    /// Restore local list interaction state after replacing the backing model.
+    pub fn restore_state(&mut self, state: &PanelListState) {
+        self.set_filter_query(state.filter_query.clone());
+        let selected = state
+            .selected_item_title
+            .as_ref()
+            .and_then(|title| {
+                self.items
+                    .iter()
+                    .position(|item| item.title == *title && self.item_matches_filter(item))
+            })
+            .or(state.selected_index);
+        self.set_selected(selected);
+        self.set_scroll_y(state.scroll_y);
     }
 
     /// Set the selected item if it is valid and enabled.
@@ -1074,6 +1124,14 @@ impl Widget for PanelList {
             None
         }
     }
+
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
 }
 
 #[cfg(test)]
@@ -1693,6 +1751,54 @@ mod tests {
         list.set_items(vec![PanelListItem::new("Only")]);
 
         assert_eq!(list.selected_index(), None);
+    }
+
+    #[test]
+    fn state_round_trips_filter_selection_and_scroll_by_item_title() {
+        let items = (0..16).map(|index| PanelListItem::new(format!("Camera {index}"))).collect();
+        let mut list = PanelList::new("Assets", items).with_filter("Search assets");
+        list.layout(Rect::new(0.0, 0.0, 240.0, 170.0));
+        list.set_filter_query("camera");
+        list.set_selected(Some(9));
+        list.set_scroll_y(120.0);
+        let state = list.state();
+
+        let mut restored = PanelList::new(
+            "Assets",
+            vec![
+                PanelListItem::new("Camera 1"),
+                PanelListItem::new("Inserted"),
+                PanelListItem::new("Camera 9"),
+                PanelListItem::new("Camera 10"),
+            ],
+        )
+        .with_filter("Search assets");
+        restored.layout(Rect::new(0.0, 0.0, 240.0, 120.0));
+        restored.restore_state(&state);
+
+        assert_eq!(restored.filter_query(), "camera");
+        assert_eq!(restored.selected_index(), Some(2));
+        assert!(restored.scroll_offset_y() > 0.0);
+    }
+
+    #[test]
+    fn restore_state_falls_back_to_index_when_title_is_missing() {
+        let mut list = PanelList::new("Effects", sample_items()).with_selected(Some(2));
+        list.layout(Rect::new(0.0, 0.0, 240.0, 180.0));
+        let state = list.state();
+
+        let mut restored = PanelList::new(
+            "Effects",
+            vec![
+                PanelListItem::new("Replacement 0"),
+                PanelListItem::new("Replacement 1"),
+                PanelListItem::new("Replacement 2"),
+            ],
+        );
+        restored.layout(Rect::new(0.0, 0.0, 240.0, 180.0));
+        restored.restore_state(&state);
+
+        assert_eq!(restored.selected_index(), Some(2));
     }
 
     #[test]

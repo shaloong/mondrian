@@ -11,6 +11,8 @@ use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, Widget};
 use mondrian_ui_widgets::dock_panel::DockPanel;
 use mondrian_ui_widgets::dock_splitter::DockSplitter;
+use mondrian_ui_widgets::{PanelList, PanelListState};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::app::ui_actions::{
@@ -303,11 +305,14 @@ impl SelfHostedAppRoot {
     /// root widget id and menu state.
     pub fn set_models(&mut self, models: SelfHostedPanelModels) {
         let layout = self.dock.layout_snapshot();
+        let panel_list_state = collect_panel_list_state(&self.dock);
         self.models = models;
         self.dock = build_dock_tree_for_preset(self.models.clone(), self.workspace_preset);
         self.dock.restore_layout(&layout);
+        restore_panel_list_state(&mut self.dock, &panel_list_state);
         if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
             self.layout(self.bounds);
+            restore_panel_list_state(&mut self.dock, &panel_list_state);
         }
     }
 
@@ -536,6 +541,39 @@ fn activate_panel_in_widget(
         }
     }
     false
+}
+
+fn collect_panel_list_state(widget: &dyn Widget) -> BTreeMap<String, PanelListState> {
+    let mut states = BTreeMap::new();
+    collect_panel_list_state_into(widget, &mut states);
+    states
+}
+
+fn collect_panel_list_state_into(
+    widget: &dyn Widget,
+    states: &mut BTreeMap<String, PanelListState>,
+) {
+    if let Some(list) = widget.as_any().and_then(|any| any.downcast_ref::<PanelList>()) {
+        states.insert(list.title().to_owned(), list.state());
+    }
+    for index in 0..widget.child_count() {
+        if let Some(child) = widget.child(index) {
+            collect_panel_list_state_into(child, states);
+        }
+    }
+}
+
+fn restore_panel_list_state(widget: &mut dyn Widget, states: &BTreeMap<String, PanelListState>) {
+    if let Some(list) = widget.as_any_mut().and_then(|any| any.downcast_mut::<PanelList>()) {
+        if let Some(state) = states.get(list.title()) {
+            list.restore_state(state);
+        }
+    }
+    for index in 0..widget.child_count() {
+        if let Some(child) = widget.child_mut(index) {
+            restore_panel_list_state(child, states);
+        }
+    }
 }
 
 impl Widget for SelfHostedAppRoot {
@@ -816,6 +854,48 @@ mod tests {
             }
         }
         None
+    }
+
+    fn panel_list_state_for_title(widget: &dyn Widget, title: &str) -> Option<PanelListState> {
+        if let Some(list) = widget.as_any().and_then(|any| any.downcast_ref::<PanelList>()) {
+            if list.title() == title {
+                return Some(list.state());
+            }
+        }
+        for index in 0..widget.child_count() {
+            if let Some(child) = widget.child(index) {
+                if let Some(state) = panel_list_state_for_title(child, title) {
+                    return Some(state);
+                }
+            }
+        }
+        None
+    }
+
+    fn with_panel_list_mut_for_title(
+        widget: &mut dyn Widget,
+        title: &str,
+        update: &mut dyn FnMut(&mut PanelList),
+    ) -> bool {
+        if widget
+            .as_any()
+            .and_then(|any| any.downcast_ref::<PanelList>())
+            .is_some_and(|list| list.title() == title)
+        {
+            if let Some(list) = widget.as_any_mut().and_then(|any| any.downcast_mut::<PanelList>())
+            {
+                update(list);
+                return true;
+            }
+        }
+        for index in 0..widget.child_count() {
+            if let Some(child) = widget.child_mut(index) {
+                if with_panel_list_mut_for_title(child, title, update) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     #[test]
@@ -1494,6 +1574,27 @@ mod tests {
         root.set_models(SelfHostedPanelModels::demo());
 
         assert!((root.dock().ratio() - dragged_ratio).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn set_models_preserves_panel_list_filter_and_selection() {
+        let mut root = SelfHostedAppRoot::demo();
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        assert!(with_panel_list_mut_for_title(
+            root.dock_mut(),
+            "Assets",
+            &mut |list| {
+                list.set_filter_query("audio");
+                list.set_selected(Some(1));
+            },
+        ));
+
+        root.set_models(SelfHostedPanelModels::demo());
+
+        let state = panel_list_state_for_title(&root, "Assets").expect("assets state");
+        assert_eq!(state.filter_query, "audio");
+        assert_eq!(state.selected_item_title.as_deref(), Some("Audio"));
+        assert_eq!(state.selected_index, Some(1));
     }
 
     #[test]

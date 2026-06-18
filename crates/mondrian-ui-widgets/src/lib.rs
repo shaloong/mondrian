@@ -54,7 +54,7 @@ pub use label::Label;
 pub use list::{List, ListItem};
 pub use menu::{Dropdown, MenuItem};
 pub use node_graph_view::{NodeGraphEdge, NodeGraphNode, NodeGraphView};
-pub use panel_list::{PanelList, PanelListAction, PanelListItem};
+pub use panel_list::{PanelList, PanelListAction, PanelListItem, PanelListState};
 pub use panel_slot::{PanelSlot, SlotKind};
 pub use property_panel::{PropertyPanel, PropertyPanelOptions, PropertyRow, PropertySection};
 pub use scroll::ScrollView;
