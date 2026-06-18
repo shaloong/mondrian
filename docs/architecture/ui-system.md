@@ -550,6 +550,10 @@ the intersection of its bounds and the incoming parent clip. Widget code should
 push local clips through `PaintContext::push_clip()` / `pop_clip()` rather than
 calling the encoder directly, because the helper intersects local clips with the
 current root/window clip before they become renderer scissor state.
+Scrollable chrome painted inside the viewport, such as the built-in scrollbar,
+must keep the same paint-time clip active until the matching `pop_clip`; the
+component clip and renderer clip stack should not temporarily diverge during a
+single paint pass.
 Clip rectangles are snapped conservatively by flooring their top-left and
 ceiling their bottom-right edge before GPU scissoring. Ordinary shape, image,
 line, and vector geometry keeps subpixel coordinates so SDF antialiasing, MSAA,
@@ -1066,6 +1070,12 @@ including transparent padding around the inner content UV. Padding is not just
 reserved packing space: it is sampled by the GPU at fractional edges, so leaving
 it unwritten can produce dirty borders or neighbor bleeding on glyphs, SVG
 icons, thumbnails, and checkerboard-backed color previews.
+Raster image commands must not disappear silently when their payload is invalid
+or the shared image atlas cannot allocate space. The renderer replaces failed
+uploads with a low-alpha diagnostic rectangle and increments
+`UiRenderFrameStats::failed_raster_images`; app shells may surface that counter
+as resource pressure, but they must not start an unconditional redraw loop
+because an exhausted atlas will not heal on the next frame.
 
 Text uses cosmic-text layout and swash grayscale alpha masks in the glyph atlas.
 The atlas cache intentionally ignores subpixel bins for the default UI text path

@@ -3,12 +3,13 @@
 //! [`UiRenderer`] 持有 wgpu 渲染管线 + glyph 纹理图集，每帧接收绘制命令。
 
 use bytemuck::Pod;
+use mondrian_core::Color;
 use std::collections::HashMap;
 use wgpu::util::DeviceExt;
 
 use crate::atlas::TextureAtlas;
 use crate::batch::build_batches;
-use crate::command::DrawCommand;
+use crate::command::{raster_image_payload_len, DrawCommand};
 use crate::pipeline::UiPipeline;
 use crate::shape::RectVertex;
 
@@ -47,6 +48,12 @@ pub struct GlyphUpload {
 pub struct UiRenderFrameStats {
     /// The frame uploaded new raster images into the renderer-owned image atlas.
     pub uploaded_raster_images: bool,
+    /// Raster images that could not be uploaded or allocated in the image atlas.
+    ///
+    /// Failed images are replaced with a low-alpha diagnostic rectangle instead
+    /// of disappearing silently, so the app can surface resource pressure while
+    /// the frame remains visibly debuggable.
+    pub failed_raster_images: u32,
 }
 
 /// GPU 2D UI 渲染器
@@ -120,6 +127,16 @@ fn rgba_with_transparent_padding(
     }
 
     Some((padded_width, padded_height, padded))
+}
+
+fn raster_image_failure_fallback(
+    bounds: mondrian_ui_core::types::Rect,
+    tint: Color,
+) -> DrawCommand {
+    let mut color = tint;
+    color.a = (color.a * 0.18).clamp(0.08, 0.24);
+    let radius = bounds.width.min(bounds.height).min(8.0) * 0.25;
+    DrawCommand::Rect { bounds, color, corner_radius: radius }
 }
 
 impl UiRenderer {
@@ -292,21 +309,32 @@ impl UiRenderer {
         &mut self,
         queue: &wgpu::Queue,
         commands: &[DrawCommand],
-    ) -> (Vec<DrawCommand>, bool) {
-        let mut uploaded_raster_images = false;
-        let commands = commands
-            .iter()
-            .filter_map(|command| match command {
-                DrawCommand::RasterImage { key, bounds, width, height, rgba, tint } => self
-                    .resolve_raster_image(queue, key, *width, *height, rgba)
-                    .map(|(uv_rect, uploaded)| {
-                        uploaded_raster_images |= uploaded;
-                        DrawCommand::RasterAtlasImage { bounds: *bounds, uv_rect, tint: *tint }
-                    }),
-                other => Some(other.clone()),
-            })
-            .collect();
-        (commands, uploaded_raster_images)
+    ) -> (Vec<DrawCommand>, UiRenderFrameStats) {
+        let mut stats = UiRenderFrameStats::default();
+        let mut resolved = Vec::with_capacity(commands.len());
+
+        for command in commands {
+            match command {
+                DrawCommand::RasterImage { key, bounds, width, height, rgba, tint } => {
+                    if let Some((uv_rect, uploaded)) =
+                        self.resolve_raster_image(queue, key, *width, *height, rgba)
+                    {
+                        stats.uploaded_raster_images |= uploaded;
+                        resolved.push(DrawCommand::RasterAtlasImage {
+                            bounds: *bounds,
+                            uv_rect,
+                            tint: *tint,
+                        });
+                    } else {
+                        stats.failed_raster_images = stats.failed_raster_images.saturating_add(1);
+                        resolved.push(raster_image_failure_fallback(*bounds, *tint));
+                    }
+                }
+                other => resolved.push(other.clone()),
+            }
+        }
+
+        (resolved, stats)
     }
 
     fn resolve_raster_image(
@@ -317,7 +345,7 @@ impl UiRenderer {
         height: u32,
         rgba: &[u8],
     ) -> Option<(mondrian_ui_core::types::Rect, bool)> {
-        let expected_len = width as usize * height as usize * 4;
+        let expected_len = raster_image_payload_len(width, height)?;
         if width == 0 || height == 0 || rgba.len() != expected_len {
             return None;
         }
@@ -384,7 +412,7 @@ impl UiRenderer {
             !commands.iter().any(|command| matches!(command, DrawCommand::Text { .. })),
             "UiRenderer::render_resolved_commands received unresolved text commands"
         );
-        let (commands, uploaded_raster_images) = self.resolve_raster_images(queue, commands);
+        let (commands, stats) = self.resolve_raster_images(queue, commands);
         let batches = build_batches(&commands, screen_size);
         self.ensure_msaa_target(device, screen_size);
         let msaa_view = self.msaa_target.as_ref().map(|target| &target.view);
@@ -466,7 +494,7 @@ impl UiRenderer {
         }
 
         queue.submit(std::iter::once(encoder.finish()));
-        UiRenderFrameStats { uploaded_raster_images }
+        stats
     }
 }
 
@@ -537,5 +565,29 @@ mod tests {
     #[test]
     fn rgba_padding_rejects_mismatched_payload() {
         assert!(rgba_with_transparent_padding(&[1, 2, 3], 1, 1, 1).is_none());
+    }
+
+    #[test]
+    fn raster_image_payload_len_rejects_overflow() {
+        assert_eq!(raster_image_payload_len(2, 3), Some(24));
+        assert_eq!(raster_image_payload_len(u32::MAX, u32::MAX), None);
+    }
+
+    #[test]
+    fn raster_image_failure_fallback_is_visible_but_low_alpha() {
+        let fallback = raster_image_failure_fallback(
+            Rect::new(10.0, 20.0, 30.0, 40.0),
+            Color { r: 0.4, g: 0.5, b: 0.6, a: 1.0 },
+        );
+
+        match fallback {
+            DrawCommand::Rect { bounds, color, corner_radius } => {
+                assert_eq!(bounds, Rect::new(10.0, 20.0, 30.0, 40.0));
+                assert_eq!((color.r, color.g, color.b), (0.4, 0.5, 0.6));
+                assert!((0.08..=0.24).contains(&color.a));
+                assert!(corner_radius > 0.0);
+            }
+            other => panic!("expected rect fallback, got {other:?}"),
+        }
     }
 }

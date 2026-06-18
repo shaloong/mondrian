@@ -562,7 +562,6 @@ impl Widget for ScrollView {
         if let Some(ref child) = self.child {
             child.paint(ctx);
         }
-        ctx.clip_rect = previous_clip;
 
         if let Some(mut sb_rect) = self.vertical_scrollbar_thumb_rect() {
             let dragging = self.dragging_thumb == Some(ScrollbarAxis::Vertical);
@@ -621,6 +620,7 @@ impl Widget for ScrollView {
         }
 
         ctx.pop_clip();
+        ctx.clip_rect = previous_clip;
     }
 
     fn paint_overlay(&self, ctx: &mut PaintContext) {

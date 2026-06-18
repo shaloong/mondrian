@@ -34,6 +34,10 @@ fn conservative_clip_rect(rect: Rect) -> Rect {
     Rect::new(left, top, (right - left).max(0.0), (bottom - top).max(0.0))
 }
 
+pub(crate) fn raster_image_payload_len(width: u32, height: u32) -> Option<usize> {
+    width.checked_mul(height)?.checked_mul(4).map(|len| len as usize)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ShapeMask {
     pub bounds: Rect,
@@ -228,7 +232,9 @@ impl DrawEncoder {
         rgba: Arc<[u8]>,
         tint: Color,
     ) {
-        let expected_len = width as usize * height as usize * 4;
+        let Some(expected_len) = raster_image_payload_len(width, height) else {
+            return;
+        };
         if width == 0 || height == 0 || rgba.len() != expected_len {
             return;
         }
@@ -618,6 +624,21 @@ mod tests {
     fn encoder_draw_raster_image_rejects_mismatched_payload_size() {
         let mut enc = DrawEncoder::new();
         enc.draw_raster_image("bad", rect(), 2, 2, Arc::from(vec![255u8; 8]), color());
+
+        assert!(enc.is_empty());
+    }
+
+    #[test]
+    fn encoder_draw_raster_image_rejects_overflowing_dimensions() {
+        let mut enc = DrawEncoder::new();
+        enc.draw_raster_image(
+            "huge",
+            rect(),
+            u32::MAX,
+            u32::MAX,
+            Arc::from(vec![255u8; 4]),
+            color(),
+        );
 
         assert!(enc.is_empty());
     }
