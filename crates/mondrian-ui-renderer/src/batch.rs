@@ -46,7 +46,12 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                     clip_stack.last().copied(),
                 );
                 let transformed = apply_transform(bounds, &transform_stack);
-                clip_stack.push(transformed);
+                let effective = clip_stack
+                    .last()
+                    .copied()
+                    .map(|parent| intersect_rect(parent, transformed))
+                    .unwrap_or(transformed);
+                clip_stack.push(effective);
             }
             DrawCommand::PopClip => {
                 finish_batch_if_needed(
@@ -395,6 +400,14 @@ fn finish_batch_if_needed(
     ));
 }
 
+fn intersect_rect(a: Rect, b: Rect) -> Rect {
+    let x0 = a.x.max(b.x);
+    let y0 = a.y.max(b.y);
+    let x1 = (a.x + a.width).min(b.x + b.width);
+    let y1 = (a.y + a.height).min(b.y + b.height);
+    Rect::new(x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0))
+}
+
 fn ensure_texture_key(
     batches: &mut Vec<DrawBatch>,
     current_batch: &mut DrawBatch,
@@ -633,6 +646,49 @@ mod tests {
         assert_eq!(batches.len(), 2);
         assert!(batches[0].clip_rect.is_none());
         assert!(batches[1].clip_rect.is_some());
+    }
+
+    #[test]
+    fn build_batches_nested_clips_intersect_parent_and_child() {
+        let cmds = [
+            DrawCommand::PushClip { bounds: Rect::new(20.0, 30.0, 100.0, 80.0) },
+            DrawCommand::PushClip { bounds: Rect::new(0.0, 0.0, 200.0, 48.0) },
+            DrawCommand::Image {
+                bounds: Rect::new(0.0, 0.0, 200.0, 48.0),
+                uv_rect: Rect::new(0.0, 0.0, 1.0, 1.0),
+                tint: Color::WHITE,
+            },
+            DrawCommand::PopClip,
+            DrawCommand::PopClip,
+        ];
+
+        let batches = build_batches(&cmds, (300, 200));
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(
+            batches[0].clip_rect,
+            Some(Rect::new(20.0, 30.0, 100.0, 18.0))
+        );
+    }
+
+    #[test]
+    fn build_batches_disjoint_nested_clip_keeps_empty_effective_clip() {
+        let cmds = [
+            DrawCommand::PushClip { bounds: Rect::new(20.0, 30.0, 100.0, 80.0) },
+            DrawCommand::PushClip { bounds: Rect::new(0.0, 0.0, 10.0, 10.0) },
+            DrawCommand::Rect {
+                bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
+                color: Color::WHITE,
+                corner_radius: 0.0,
+            },
+            DrawCommand::PopClip,
+            DrawCommand::PopClip,
+        ];
+
+        let batches = build_batches(&cmds, (300, 200));
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].clip_rect, Some(Rect::new(20.0, 30.0, 0.0, 0.0)));
     }
 
     // ═══════════════════════════════════════════════════════════════════════

@@ -503,6 +503,12 @@ are handled only inside the viewport and offsets are clamped after wheel input
 and layout. Offset-changing wheel, track, thumb drag, and scrollbar hover
 transitions request repaint through `EventRequests`.
 
+Renderer clip state is hierarchical. When a child widget pushes its own text or
+content clip inside a `ScrollView`, the renderer intersects that child clip with
+the active parent viewport clip before batching and applying the GPU scissor.
+Nested clips must never replace their parent clip; otherwise text glyph images
+inside a scrolled child can bleed over sibling controls outside the viewport.
+
 `ScrollView` exposes a draggable vertical scrollbar thumb when content
 overflows. The scrollbar is an overlay affordance and does not reserve child
 layout width. Thumb drags request pointer capture, map thumb-track movement
@@ -962,6 +968,17 @@ resvg/tiny-skia without sharing mutable atlas state with text glyphs. Text
 positions are left to the text renderer and caller-side layout policy, and image
 UVs remain unsnapped because they are texture coordinates rather than
 screen-space geometry.
+
+Text uses cosmic-text layout and swash grayscale alpha masks in the glyph atlas.
+The atlas cache intentionally ignores subpixel bins for the default UI text path
+so glyph metrics and bearings stay stable across window resizes and repeated
+layout. Subpixel placement is represented by the glyph image bounds emitted by
+`mondrian-ui-text`, and the renderer samples the glyph atlas linearly so
+fractional positions interpolate coverage instead of snapping to the nearest
+texel. LCD/subpixel-color AA is intentionally not used in the default UI path
+because it interacts poorly with transparent surfaces, transforms, and
+cross-platform compositor differences; a future rich-text/editor mode may add a
+separate subpixel-bin atlas where sharper text is worth the cache cost.
 
 The renderer must flush draw batches when clip state changes and must apply the
 batch clip rect as a GPU scissor before drawing. A command emitted inside
