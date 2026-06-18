@@ -822,6 +822,11 @@ The shell owns the native replacement-file picker, then converts the selected
 path into `ui.assets.relink_asset`. `AppState` owns the actual asset-library
 mutation, project save, reload event, and status hint; widgets never call media
 probing or filesystem mutation APIs directly.
+Online video cards expose `ui.assets.set_proxy_mode` from the same card menu.
+The panel adapter derives the checked/unchecked command from
+`AppState::proxy_mode_assets`, while `AppState` owns persistence and background
+proxy generation. Offline media must be relinked before proxy generation is
+requested, keeping media-task side effects outside reusable widgets.
 Folder cards expose `ui.assets.delete_folder` through the same card-level menu
 surface. Folder deletion is an app/library mutation: `AssetLibrary` removes the
 selected folder subtree, unlinks assets assigned to any deleted folder, and

@@ -78,6 +78,8 @@ pub const ASSETS_OPEN_FOLDER: &str = "open_folder";
 pub const ASSETS_IMPORT_FILES: &str = "import_files";
 /// Action name for relinking one asset-library record to a new media path.
 pub const ASSETS_RELINK_ASSET: &str = "relink_asset";
+/// Action name for toggling proxy playback for one video asset.
+pub const ASSETS_SET_PROXY_MODE: &str = "set_proxy_mode";
 /// Action name for deleting one asset from the library.
 pub const ASSETS_DELETE_ASSET: &str = "delete_asset";
 /// Action name for deleting one folder/bin from the library.
@@ -541,6 +543,15 @@ pub struct AssetsRelinkAssetPayload {
     pub path: PathBuf,
 }
 
+/// Enable or disable proxy playback for one video asset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetsSetProxyModePayload {
+    /// Video asset to update.
+    pub asset_id: AssetId,
+    /// Whether timeline playback should prefer a generated proxy.
+    pub enabled: bool,
+}
+
 /// Platform file-dialog target for importing media.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImportMediaDialogPayload {
@@ -761,6 +772,11 @@ pub fn assets_import_files_action(payload: AssetsImportFilesPayload) -> Action {
 /// Build an action that relinks one asset to a replacement file.
 pub fn assets_relink_asset_action(payload: AssetsRelinkAssetPayload) -> Action {
     custom_assets_action(ASSETS_RELINK_ASSET, payload)
+}
+
+/// Build an action that toggles proxy playback for one video asset.
+pub fn assets_set_proxy_mode_action(payload: AssetsSetProxyModePayload) -> Action {
+    custom_assets_action(ASSETS_SET_PROXY_MODE, payload)
 }
 
 /// Build a shell-local action that opens an asset-browser folder.

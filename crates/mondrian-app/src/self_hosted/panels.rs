@@ -10,9 +10,7 @@ use mondrian_assets::{AssetKind, AssetLibrary, AssetRecord};
 use mondrian_core::automation::timecode_to_ticks;
 use mondrian_core::automation::PropertyValue;
 use mondrian_core::effect_data::EffectType;
-#[cfg(test)]
-use mondrian_core::types::AssetId;
-use mondrian_core::types::{ClipId, EffectId, SequenceId, TimeCode, TrackId};
+use mondrian_core::types::{AssetId, ClipId, EffectId, SequenceId, TimeCode, TrackId};
 use mondrian_core::Color;
 use mondrian_editor_state::state::WorkspacePreset;
 use mondrian_editor_state::Action;
@@ -46,19 +44,20 @@ use crate::app::ui_actions::{
     assets_create_solid_color_action, assets_delete_asset_action, assets_delete_folder_action,
     assets_delete_selection_action, assets_import_files_action, assets_move_asset_action,
     assets_move_folder_action, assets_move_selection_action, assets_open_folder_action,
-    assets_prepare_drag_action, effects_add_to_clip_action, export_enqueue_action,
-    export_set_draft_action, inspector_remove_effect_action, inspector_select_effect_action,
-    inspector_set_clip_curve_action, inspector_set_clip_enabled_action,
-    inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
-    inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
-    inspector_set_effect_property_action, timeline_add_track_action, timeline_drop_asset_action,
-    timeline_move_clip_action, timeline_move_track_action, timeline_seek_action,
-    timeline_select_clip_action, timeline_set_track_control_action, timeline_trim_clip_action,
-    AppShellRelinkAssetDialogPayload, AppShellRevealInFileManagerPayload, AssetsCreateAssetPayload,
-    AssetsCreateFolderPayload, AssetsDeleteAssetPayload, AssetsDeleteFolderPayload,
-    AssetsDeleteSelectionPayload, AssetsImportFilesPayload, AssetsMoveAssetPayload,
-    AssetsMoveFolderPayload, AssetsMoveSelectionPayload, AssetsOpenFolderPayload,
-    AssetsPrepareDragPayload, EffectsAddToClipPayload, ExportDraftUpdatePayload,
+    assets_prepare_drag_action, assets_set_proxy_mode_action, effects_add_to_clip_action,
+    export_enqueue_action, export_set_draft_action, inspector_remove_effect_action,
+    inspector_select_effect_action, inspector_set_clip_curve_action,
+    inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
+    inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
+    inspector_set_effect_enabled_action, inspector_set_effect_property_action,
+    timeline_add_track_action, timeline_drop_asset_action, timeline_move_clip_action,
+    timeline_move_track_action, timeline_seek_action, timeline_select_clip_action,
+    timeline_set_track_control_action, timeline_trim_clip_action, AppShellRelinkAssetDialogPayload,
+    AppShellRevealInFileManagerPayload, AssetsCreateAssetPayload, AssetsCreateFolderPayload,
+    AssetsDeleteAssetPayload, AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload,
+    AssetsImportFilesPayload, AssetsMoveAssetPayload, AssetsMoveFolderPayload,
+    AssetsMoveSelectionPayload, AssetsOpenFolderPayload, AssetsPrepareDragPayload,
+    AssetsSetProxyModePayload, EffectsAddToClipPayload, ExportDraftUpdatePayload,
     ExportEnqueuePayload, ExportOutputDialogPayload, ImportMediaDialogPayload,
     InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
     InspectorRemoveEffectPayload, InspectorSelectEffectPayload, InspectorSetClipCurvePayload,
@@ -135,6 +134,7 @@ impl SelfHostedPanelModels {
                 state.asset_library.as_deref(),
                 asset_folder_id,
                 thumbnails,
+                Some(&state.proxy_mode_assets),
             ),
             effects: PanelListModel::from_app_effect_registry(state),
             viewer: ViewerPanelModel::from_app_state(state),
@@ -280,7 +280,7 @@ impl AssetGridModel {
         library: Option<&AssetLibrary>,
         current_folder_id: Option<&str>,
     ) -> Self {
-        Self::from_asset_library_in_folder_with_thumbnails(library, current_folder_id, None)
+        Self::from_asset_library_in_folder_with_thumbnails(library, current_folder_id, None, None)
     }
 
     /// Build the project asset browser for a shell-local folder selection,
@@ -289,6 +289,7 @@ impl AssetGridModel {
         library: Option<&AssetLibrary>,
         current_folder_id: Option<&str>,
         thumbnails: Option<&dyn AssetThumbnailSource>,
+        proxy_mode_assets: Option<&std::collections::HashSet<AssetId>>,
     ) -> Self {
         let colors = current_theme().colors.clone();
         let Some(library) = library else {
@@ -347,8 +348,13 @@ impl AssetGridModel {
             .map(|folder| format!("Project library / {}", folder.name))
             .unwrap_or_else(|| "Project library".to_owned());
         let current_folder_id = current_folder.map(|folder| folder.id.clone());
-        let mut items =
-            asset_grid_items_from_library_records(&folders, assets, current_folder, thumbnails);
+        let mut items = asset_grid_items_from_library_records(
+            &folders,
+            assets,
+            current_folder,
+            thumbnails,
+            proxy_mode_assets,
+        );
         if current_folder.is_some() && items.len() == 1 {
             items.push(asset_empty_item(
                 "asset-folder-empty",
@@ -1415,13 +1421,14 @@ fn default_opacity_curve(opacity: f32) -> Vec<CurvePoint> {
 fn asset_grid_item_from_asset(
     asset: AssetRecord,
     thumbnails: Option<&dyn AssetThumbnailSource>,
+    proxy_mode: bool,
 ) -> AssetGridItem {
     let badge = asset_kind_badge(&asset.kind);
     let accent = asset_kind_accent(&asset.kind);
     let icon = asset_kind_icon(&asset.kind);
     let subtitle = asset.path.display().to_string();
     let thumbnail_state = thumbnails.map(|source| source.thumbnail_for_asset(&asset));
-    let context_menu_items = asset_grid_asset_context_menu_items(&asset);
+    let context_menu_items = asset_grid_asset_context_menu_items(&asset, proxy_mode);
     let mut item = AssetGridItem::new(asset.id.to_string(), asset.name, accent)
         .with_subtitle(subtitle)
         .with_badge(badge)
@@ -1441,7 +1448,7 @@ fn asset_grid_item_from_asset(
     with_asset_icon(item, icon)
 }
 
-fn asset_grid_asset_context_menu_items(asset: &AssetRecord) -> Vec<MenuItem> {
+fn asset_grid_asset_context_menu_items(asset: &AssetRecord, proxy_mode: bool) -> Vec<MenuItem> {
     let mut items = Vec::new();
     if asset_has_file_manager_target(asset) {
         items.push(asset_menu_item(
@@ -1462,6 +1469,22 @@ fn asset_grid_asset_context_menu_items(asset: &AssetRecord) -> Vec<MenuItem> {
                     }),
                 ),
                 AppIcon::Import,
+            ));
+        } else if matches!(asset.kind, AssetKind::Video) {
+            let (label, enabled) = if proxy_mode {
+                ("Disable Proxy Mode", false)
+            } else {
+                ("Enable Proxy Mode", true)
+            };
+            items.push(asset_menu_item(
+                MenuItem::new(
+                    label,
+                    assets_set_proxy_mode_action(AssetsSetProxyModePayload {
+                        asset_id: asset.id,
+                        enabled,
+                    }),
+                ),
+                AppIcon::Film,
             ));
         }
         items.push(MenuItem::separator());
@@ -1489,6 +1512,7 @@ fn asset_grid_items_from_library_records(
     assets: Vec<AssetRecord>,
     current_folder: Option<&FolderRecord>,
     thumbnails: Option<&dyn AssetThumbnailSource>,
+    proxy_mode_assets: Option<&std::collections::HashSet<AssetId>>,
 ) -> Vec<AssetGridItem> {
     let mut items =
         Vec::with_capacity(folders.len() + assets.len() + usize::from(current_folder.is_some()));
@@ -1507,7 +1531,10 @@ fn asset_grid_items_from_library_records(
         assets
             .into_iter()
             .filter(|asset| asset.folder_id.as_deref() == parent_id)
-            .map(|asset| asset_grid_item_from_asset(asset, thumbnails)),
+            .map(|asset| {
+                let proxy_mode = proxy_mode_assets.is_some_and(|ids| ids.contains(&asset.id));
+                asset_grid_item_from_asset(asset, thumbnails, proxy_mode)
+            }),
     );
     items
 }
@@ -2966,15 +2993,16 @@ mod tests {
         AssetsCreateAssetPayload, AssetsCreateFolderPayload, AssetsDeleteAssetPayload,
         AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload, AssetsImportFilesPayload,
         AssetsMoveAssetPayload, AssetsMoveFolderPayload, AssetsMoveSelectionPayload,
-        AssetsOpenFolderPayload, ImportMediaDialogPayload, APP_SHELL_IMPORT_MEDIA_DIALOG,
-        APP_SHELL_NAMESPACE, APP_SHELL_RELINK_ASSET_DIALOG, APP_SHELL_REVEAL_IN_FILE_MANAGER,
-        ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR,
-        ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_DELETE_SELECTION, ASSETS_IMPORT_FILES,
-        ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE,
-        ASSETS_OPEN_FOLDER, ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE,
-        INSPECTOR_NAMESPACE, INSPECTOR_SELECT_EFFECT, INSPECTOR_SET_CLIP_CURVE,
-        INSPECTOR_SET_EFFECT_PROPERTY, TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET,
-        TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_SELECT_CLIP,
+        AssetsOpenFolderPayload, AssetsSetProxyModePayload, ImportMediaDialogPayload,
+        APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_RELINK_ASSET_DIALOG,
+        APP_SHELL_REVEAL_IN_FILE_MANAGER, ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER,
+        ASSETS_CREATE_SOLID_COLOR, ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER,
+        ASSETS_DELETE_SELECTION, ASSETS_IMPORT_FILES, ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER,
+        ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE, ASSETS_OPEN_FOLDER, ASSETS_PREPARE_DRAG,
+        ASSETS_SET_PROXY_MODE, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE,
+        INSPECTOR_SELECT_EFFECT, INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_EFFECT_PROPERTY,
+        TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
+        TIMELINE_SELECT_CLIP,
     };
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
@@ -3568,7 +3596,8 @@ mod tests {
     fn assets_panel_file_card_context_menu_dispatches_reveal_first() {
         let asset_id = AssetId::new();
         let path = PathBuf::from("E:/media/shot.mov");
-        let item = asset_grid_item_from_asset(test_video_asset(asset_id, path.clone()), None);
+        let item =
+            asset_grid_item_from_asset(test_video_asset(asset_id, path.clone()), None, false);
         let model = AssetGridModel::new("Assets", vec![item]);
         let mut grid = asset_grid(&model);
         grid.layout(Rect::new(0.0, 0.0, 360.0, 240.0));
@@ -3624,6 +3653,7 @@ mod tests {
         let item = asset_grid_item_from_asset(
             test_video_asset(asset_id, PathBuf::from("E:/missing/shot.mov")),
             None,
+            false,
         );
 
         assert_eq!(item.context_menu_items.len(), 4);
@@ -3639,6 +3669,43 @@ mod tests {
         let payload: AppShellRelinkAssetDialogPayload =
             serde_json::from_value(payload.clone()).expect("relink payload");
         assert_eq!(payload.asset_id, asset_id);
+    }
+
+    #[test]
+    fn assets_panel_online_video_card_context_menu_toggles_proxy_mode() {
+        let root = unique_temp_dir("asset-panel-proxy-menu");
+        std::fs::create_dir_all(&root).expect("create temp root");
+        let media_path = root.join("shot.mov");
+        std::fs::write(&media_path, b"not decoded in this view-model test").expect("write media");
+        let asset_id = AssetId::new();
+        let item =
+            asset_grid_item_from_asset(test_video_asset(asset_id, media_path.clone()), None, false);
+
+        assert_eq!(item.context_menu_items.len(), 4);
+        assert_eq!(item.context_menu_items[0].label, "Reveal in File Manager");
+        assert_eq!(item.context_menu_items[1].label, "Enable Proxy Mode");
+        assert!(item.context_menu_items[2].is_separator());
+        let Action::Custom { namespace, name, payload } = &item.context_menu_items[1].action else {
+            panic!("expected proxy mode custom action");
+        };
+        assert_eq!(namespace, ASSETS_NAMESPACE);
+        assert_eq!(name, ASSETS_SET_PROXY_MODE);
+        let payload: AssetsSetProxyModePayload =
+            serde_json::from_value(payload.clone()).expect("proxy payload");
+        assert_eq!(payload.asset_id, asset_id);
+        assert!(payload.enabled);
+
+        let proxied =
+            asset_grid_item_from_asset(test_video_asset(asset_id, media_path), None, true);
+        assert_eq!(proxied.context_menu_items[1].label, "Disable Proxy Mode");
+        let Action::Custom { payload, .. } = &proxied.context_menu_items[1].action else {
+            panic!("expected proxy mode custom action");
+        };
+        let payload: AssetsSetProxyModePayload =
+            serde_json::from_value(payload.clone()).expect("proxy payload");
+        assert!(!payload.enabled);
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
