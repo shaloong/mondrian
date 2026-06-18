@@ -10,11 +10,12 @@ use std::path::PathBuf;
 use mondrian_editor_state::state::WorkspacePreset;
 use mondrian_platform::PlatformService;
 use mondrian_ui_core::types::Rect;
-use mondrian_ui_core::TreeWalker;
+use mondrian_ui_core::{TreeWalker, Widget};
 use mondrian_ui_theme::set_theme_preset;
 
 use crate::app::ui_actions::{
     AssetsOpenFolderPayload, PreferencesThemePayload, APP_SHELL_NAMESPACE,
+    APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_OPEN_PROJECT_DIALOG,
     APP_SHELL_PREFERENCES_THEME_CHANGED, APP_SHELL_QUIT, APP_SHELL_WINDOW_DRAG,
     APP_SHELL_WINDOW_MINIMIZE, APP_SHELL_WINDOW_TOGGLE_MAXIMIZE, ASSETS_NAMESPACE,
     ASSETS_OPEN_FOLDER,
@@ -26,7 +27,8 @@ use crate::self_hosted::preferences_store::{
     load_self_hosted_preferences, persist_self_hosted_preferences_to, self_hosted_preferences_path,
     SelfHostedPreferences,
 };
-use crate::self_hosted::shell::SelfHostedAppRoot;
+use crate::self_hosted::shell::{try_resolve_app_shell_action, SelfHostedAppRoot};
+use crate::self_hosted::startup::SelfHostedStartupScreen;
 use mondrian_editor_state::Action;
 
 /// Window-host commands produced while draining self-hosted UI actions.
@@ -47,12 +49,23 @@ pub struct SelfHostedShellCommands {
     pub begin_window_drag: bool,
 }
 
+/// Product shell mode owned by the self-hosted host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelfHostedUiMode {
+    /// Startup surface shown before a project is opened.
+    Startup,
+    /// Main editing workspace.
+    Workspace,
+}
+
 /// Product-facing self-hosted UI session state.
 pub struct SelfHostedUiHost {
+    startup: SelfHostedStartupScreen,
     root: SelfHostedAppRoot,
     app_state: RefCell<AppState>,
     preferences: SelfHostedPreferences,
     preferences_path: PathBuf,
+    mode: SelfHostedUiMode,
     ui_dirty: Cell<bool>,
 }
 
@@ -74,11 +87,18 @@ impl SelfHostedUiHost {
     ) -> Self {
         set_theme_preset(preferences.theme_preset);
         let root = SelfHostedAppRoot::from_app_state_with_preferences(&app_state, &preferences);
+        let mode = if app_state.has_open_project() {
+            SelfHostedUiMode::Workspace
+        } else {
+            SelfHostedUiMode::Startup
+        };
         Self {
+            startup: SelfHostedStartupScreen::new(),
             root,
             app_state: RefCell::new(app_state),
             preferences,
             preferences_path,
+            mode,
             ui_dirty: Cell::new(false),
         }
     }
@@ -91,6 +111,27 @@ impl SelfHostedUiHost {
     /// Mutable access to the root widget for event routing and layout.
     pub fn root_mut(&mut self) -> &mut SelfHostedAppRoot {
         &mut self.root
+    }
+
+    /// Current visible product mode.
+    pub fn mode(&self) -> SelfHostedUiMode {
+        self.mode
+    }
+
+    /// Immutable access to the widget currently visible in the native window.
+    pub fn active_root(&self) -> &dyn Widget {
+        match self.mode {
+            SelfHostedUiMode::Startup => &self.startup,
+            SelfHostedUiMode::Workspace => &self.root,
+        }
+    }
+
+    /// Mutable access to the widget currently visible in the native window.
+    pub fn active_root_mut(&mut self) -> &mut dyn Widget {
+        match self.mode {
+            SelfHostedUiMode::Startup => &mut self.startup,
+            SelfHostedUiMode::Workspace => &mut self.root,
+        }
     }
 
     /// Read-only access to the current app state.
@@ -111,12 +152,14 @@ impl SelfHostedUiHost {
     /// Refresh the root widget models when editor state changed.
     pub fn refresh_if_dirty(&mut self, bounds: Rect) {
         if !self.ui_dirty.replace(false) {
+            self.sync_mode_from_app_state(bounds);
             return;
         }
         self.normalize_asset_folder_selection();
         self.root
             .refresh_from_app_state_with_preferences(&self.app_state.borrow(), &self.preferences);
-        TreeWalker::layout(&mut self.root, bounds);
+        self.sync_mode_from_app_state(bounds);
+        TreeWalker::layout(self.active_root_mut(), bounds);
     }
 
     /// Drain queued widget actions through shell-local handling and `AppState`.
@@ -136,6 +179,10 @@ impl SelfHostedUiHost {
         let mut needs_layout = false;
         for action in actions {
             if take_shell_window_command(&mut commands, &action) {
+                continue;
+            }
+            if self.take_startup_action(&action, bounds, platform) {
+                needs_layout = true;
                 continue;
             }
             if self.take_preferences_update(&action, bounds) {
@@ -194,9 +241,25 @@ impl SelfHostedUiHost {
 
         self.refresh_if_dirty(bounds);
         if needs_layout {
-            TreeWalker::layout(&mut self.root, bounds);
+            TreeWalker::layout(self.active_root_mut(), bounds);
         }
         commands
+    }
+
+    fn sync_mode_from_app_state(&mut self, bounds: Rect) {
+        let next = if self.app_state.borrow().has_open_project() {
+            SelfHostedUiMode::Workspace
+        } else {
+            SelfHostedUiMode::Startup
+        };
+        if self.mode != next {
+            self.mode = next;
+            self.root.refresh_from_app_state_with_preferences(
+                &self.app_state.borrow(),
+                &self.preferences,
+            );
+            TreeWalker::layout(self.active_root_mut(), bounds);
+        }
     }
 
     fn is_action_enabled(&self, action: &Action) -> bool {
@@ -218,6 +281,36 @@ impl SelfHostedUiHost {
             );
             self.mark_dirty();
         }
+    }
+
+    fn take_startup_action(
+        &mut self,
+        action: &Action,
+        bounds: Rect,
+        platform: &dyn PlatformService,
+    ) -> bool {
+        if self.mode != SelfHostedUiMode::Startup || !is_startup_project_action(action) {
+            return false;
+        }
+
+        match try_resolve_app_shell_action(action.clone(), platform, None) {
+            Ok(Some(resolved)) => {
+                if let Err(err) = self.app_state.borrow_mut().dispatch_action(resolved) {
+                    tracing::warn!("startup action failed: {err}");
+                }
+                self.mark_dirty();
+                self.refresh_if_dirty(bounds);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                tracing::warn!("startup shell action failed: {err}");
+                self.app_state
+                    .borrow_mut()
+                    .set_status_hint(format!("Startup action failed: {err}"), true);
+                self.mark_dirty();
+            }
+        }
+        true
     }
 
     fn take_preferences_update(&mut self, action: &Action, bounds: Rect) -> bool {
@@ -308,6 +401,15 @@ impl SelfHostedUiHost {
     }
 }
 
+fn is_startup_project_action(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::Custom { namespace, name, .. }
+            if namespace == APP_SHELL_NAMESPACE
+                && (name == APP_SHELL_NEW_PROJECT_DIALOG || name == APP_SHELL_OPEN_PROJECT_DIALOG)
+    )
+}
+
 fn take_shell_window_command(commands: &mut SelfHostedShellCommands, action: &Action) -> bool {
     match action {
         Action::ToggleFullscreen => {
@@ -389,6 +491,10 @@ mod tests {
         open_file_dialog_calls: AtomicUsize,
     }
 
+    struct StartupProjectPlatform {
+        project_file: PathBuf,
+    }
+
     impl PlatformService for CountingPlatform {
         fn clipboard_copy(&self, _text: &str) {}
 
@@ -421,6 +527,37 @@ mod tests {
         fn send_notification(&self, _title: &str, _body: &str) {}
     }
 
+    impl PlatformService for StartupProjectPlatform {
+        fn clipboard_copy(&self, _text: &str) {}
+
+        fn clipboard_paste(&self) -> Option<String> {
+            None
+        }
+
+        fn open_file_dialog(&self, _title: &str, _filters: &[FileFilter]) -> Option<Vec<PathBuf>> {
+            None
+        }
+
+        fn save_file_dialog(
+            &self,
+            _title: &str,
+            _default_name: &str,
+            _filters: &[FileFilter],
+        ) -> Option<PathBuf> {
+            Some(self.project_file.clone())
+        }
+
+        fn open_folder_dialog(&self, _title: &str) -> Option<PathBuf> {
+            None
+        }
+
+        fn open_url(&self, _url: &str) {}
+
+        fn reveal_in_file_manager(&self, _path: &Path) {}
+
+        fn send_notification(&self, _title: &str, _body: &str) {}
+    }
+
     fn temp_preferences_path(name: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -433,6 +570,19 @@ mod tests {
         temp_preferences_path(name).with_extension("assets")
     }
 
+    fn project_runtime_root_for_test(project_file: &Path) -> PathBuf {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let stem = project_file.file_stem().and_then(|s| s.to_str()).unwrap_or("project");
+        let mut hasher = DefaultHasher::new();
+        project_file.to_string_lossy().hash(&mut hasher);
+        let hash = hasher.finish();
+        std::env::temp_dir()
+            .join("mondrian-runtime")
+            .join(format!("mondrian_{stem}_{hash:x}"))
+    }
+
     #[test]
     fn host_builds_root_from_initial_app_state() {
         let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
@@ -440,8 +590,34 @@ mod tests {
 
         TreeWalker::layout(host.root_mut(), Rect::new(0.0, 0.0, 1280.0, 720.0));
 
+        assert_eq!(host.mode(), SelfHostedUiMode::Startup);
         assert!(!host.root().dock().collect_grab_zones().is_empty());
         assert!(!host.app_state().has_open_project());
+    }
+
+    #[test]
+    fn startup_new_project_action_switches_to_workspace_mode() {
+        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let project_file = temp_preferences_path("startup-project").with_extension("mdp");
+        let runtime_root = project_runtime_root_for_test(&project_file);
+        let platform = StartupProjectPlatform { project_file: project_file.clone() };
+        let mut host = SelfHostedUiHost::new(AppState::new());
+        let pending = PendingUiActions::default();
+
+        pending.push(crate::app::ui_actions::app_shell_new_project_dialog_action());
+        let commands =
+            host.drain_pending_actions(&pending, Rect::new(0.0, 0.0, 1280.0, 720.0), &platform);
+
+        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert_eq!(host.mode(), SelfHostedUiMode::Workspace);
+        assert!(host.app_state().has_open_project());
+        assert_eq!(
+            host.app_state().current_project_path.as_deref(),
+            Some(project_file.as_path())
+        );
+
+        let _ = std::fs::remove_file(project_file);
+        let _ = std::fs::remove_dir_all(runtime_root);
     }
 
     #[test]

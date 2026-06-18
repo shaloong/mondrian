@@ -62,18 +62,21 @@ loss/outdating. `self_hosted::menu_bar` owns the product menu model, shortcut
 hints, state-aware item availability, and top menu widget. `self_hosted::shell`
 owns reusable root-widget composition such as the menu bar, dock tree, and modal
 layer; developer binaries should use `SelfHostedAppRoot` rather than defining
-shell widgets inline. `self_hosted::icons` owns the app-layer registry for
-bundled designer SVG icon assets and converts them into
+shell widgets inline. `self_hosted::startup` owns the launch-time root surface
+shown before any project is open; it emits only app-shell lifecycle actions and
+does not own project creation, loading, recent-file persistence, or editor
+state. `self_hosted::icons` owns the app-layer registry for bundled designer SVG
+icon assets and converts them into
 `mondrian-ui-widgets::VectorIcon` / `IconButton` values without depending on
 legacy egui theme types. `self_hosted::panels` owns panel adapters that map
 application-facing concepts into generic widget view models.
 `self_hosted::host::SelfHostedUiHost` owns the reusable product
-state bridge: it keeps the root widget, current `AppState`, dirty refresh flag,
-and queued-action draining together so window entrypoints do not duplicate
-root/AppState refresh plumbing. `self_hosted::window` owns the reusable
-winit/wgpu product-window runner used by the `mondrian` binary. The boundary
-type is `SelfHostedPanelModels`: real `AppState` / `EditorState` adapters
-should produce this model, while
+state bridge: it keeps the startup root, workspace root, current `AppState`,
+dirty refresh flag, visible shell mode, and queued-action draining together so
+window entrypoints do not duplicate root/AppState refresh plumbing.
+`self_hosted::window` owns the reusable winit/wgpu product-window runner used
+by the `mondrian` binary. The boundary type is `SelfHostedPanelModels`: real
+`AppState` / `EditorState` adapters should produce this model, while
 `SelfHostedPanelModels::demo()` is test-only fixture code and must not be part
 of product entrypoints.
 `SelfHostedPanelModels::from_app_state` is the app-side snapshot boundary: it
@@ -85,6 +88,15 @@ actions. The official `mondrian` entrypoint starts from a real empty
 `AppState`, builds `SelfHostedPanelModels::from_app_state`, and refreshes from
 that same boundary after dispatched actions. Component fixtures remain in
 `ui_demo` and explicit `SelfHostedPanelModels::demo()` tests only.
+
+The product window starts in startup mode when `AppState` has no open project.
+After create/open resolves to a concrete editor action and `AppState` owns an
+open project, the host switches the active root to the workspace and the winit
+adapter applies workspace chrome: resizable, decorated, and constrained by the
+workspace minimum size. Closing the project moves the host back to startup mode.
+Recent-project recovery, crash recovery, and future onboarding belong in the
+startup model and should be surfaced through app-layer actions rather than
+reintroducing a separate project browser or console panel.
 
 Product top chrome is `self_hosted::title_bar::TitleBar`: it combines the
 product menu bar, a read-only project/sequence title, draggable titlebar space,

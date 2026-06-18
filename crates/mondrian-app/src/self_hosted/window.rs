@@ -9,16 +9,17 @@ use std::sync::Arc;
 
 use crate::app::AppState;
 use crate::self_hosted::action_queue::PendingUiActions;
-use crate::self_hosted::host::{SelfHostedShellCommands, SelfHostedUiHost};
+use crate::self_hosted::host::{SelfHostedShellCommands, SelfHostedUiHost, SelfHostedUiMode};
 use crate::self_hosted::rendering::{SelfHostedFrameRenderer, SelfHostedRenderDiagnosticReporter};
 use crate::self_hosted::runtime::{
     winit_cursor_icon_for_ui_state, winit_modifiers_to_ui_modifiers,
     winit_mouse_button_to_ui_button, winit_scroll_delta_to_ui_delta, WinitUiRuntime,
 };
 use crate::self_hosted::shortcuts::register_default_shortcuts;
+use crate::self_hosted::startup::{STARTUP_WINDOW_HEIGHT, STARTUP_WINDOW_WIDTH};
 use mondrian_platform::SystemPlatformService;
 use mondrian_ui_core::types::*;
-use mondrian_ui_core::{TreeWalker, Widget};
+use mondrian_ui_core::TreeWalker;
 use mondrian_ui_events::EventRouter;
 use mondrian_ui_renderer::command::DrawEncoder;
 use mondrian_ui_tooltip::TooltipManagerImpl;
@@ -32,6 +33,21 @@ use tracing_subscriber::EnvFilter;
 pub(crate) const DEFAULT_SELF_HOSTED_LOG_FILTER: &str =
     "info,wgpu_core=warn,wgpu_hal=warn,naga=warn";
 pub(crate) const SELF_HOSTED_BACKGROUND_WORKERS: usize = 4;
+const WORKSPACE_WINDOW_WIDTH: f32 = 1600.0;
+const WORKSPACE_WINDOW_HEIGHT: f32 = 900.0;
+const WORKSPACE_MIN_WIDTH: f32 = 1024.0;
+const WORKSPACE_MIN_HEIGHT: f32 = 600.0;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct WindowChrome {
+    title: &'static str,
+    width: f32,
+    height: f32,
+    decorations: bool,
+    resizable: bool,
+    min_size: Option<(f32, f32)>,
+    max_size: Option<(f32, f32)>,
+}
 
 /// Run the self-hosted Mondrian editor window.
 pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
@@ -43,9 +59,16 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
 
     use winit::event_loop::EventLoop;
     let event_loop = EventLoop::new()?;
+    let startup_chrome = window_chrome_for_mode(SelfHostedUiMode::Startup);
     let window_attrs = winit::window::Window::default_attributes()
-        .with_title("Mondrian — 自研 UI")
-        .with_inner_size(winit::dpi::LogicalSize::new(1280, 720))
+        .with_title(startup_chrome.title)
+        .with_inner_size(winit::dpi::LogicalSize::new(
+            startup_chrome.width as f64,
+            startup_chrome.height as f64,
+        ))
+        .with_transparent(true)
+        .with_decorations(startup_chrome.decorations)
+        .with_resizable(startup_chrome.resizable)
         .with_visible(false);
     let window = Arc::new(event_loop.create_window(window_attrs)?);
 
@@ -74,9 +97,9 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut host = SelfHostedUiHost::new(AppState::new());
     let bounds = Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
-    TreeWalker::layout(host.root_mut(), bounds);
+    TreeWalker::layout(host.active_root_mut(), bounds);
     let mut router = EventRouter::with_platform_and_tooltip(
-        host.root().id(),
+        host.active_root().id(),
         Box::new(SystemPlatformService),
         Box::new(TooltipManagerImpl::new(450)),
     );
@@ -89,6 +112,8 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
     let mut pending_initial_redraw = true;
     let pending_actions = PendingUiActions::default();
     let platform = SystemPlatformService;
+    let mut applied_window_mode = host.mode();
+    apply_window_mode(applied_window_mode, &window);
 
     tracing::info!("UI initialized — {}x{}", size.width, size.height);
     window.set_visible(true);
@@ -115,14 +140,18 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                 let _ = ui_runtime.route_window_event(
                     &window,
                     &mut router,
-                    host.root_mut(),
+                    host.active_root_mut(),
                     UiEvent::FocusLost,
                     &dispatch_action,
                 );
-                apply_shell_commands(
-                    host.drain_pending_actions(&pending_actions, current_bounds.get(), &platform),
+                drain_actions_and_apply_window(
+                    &mut host,
+                    &pending_actions,
+                    current_bounds.get(),
+                    &platform,
                     &window,
                     elwt,
+                    &mut applied_window_mode,
                 );
                 window.request_redraw();
             }
@@ -139,15 +168,19 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                 let result = ui_runtime.route_keyboard_input(
                     &window,
                     &mut router,
-                    host.root_mut(),
+                    host.active_root_mut(),
                     &key_event,
                     &mut modifiers_state,
                     &dispatch_action,
                 );
-                apply_shell_commands(
-                    host.drain_pending_actions(&pending_actions, current_bounds.get(), &platform),
+                drain_actions_and_apply_window(
+                    &mut host,
+                    &pending_actions,
+                    current_bounds.get(),
+                    &platform,
                     &window,
                     elwt,
+                    &mut applied_window_mode,
                 );
                 if pressed && is_escape && result == EventResult::Ignored {
                     elwt.exit();
@@ -159,14 +192,18 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                 let _ = ui_runtime.route_ime_event(
                     &window,
                     &mut router,
-                    host.root_mut(),
+                    host.active_root_mut(),
                     ime,
                     &dispatch_action,
                 );
-                apply_shell_commands(
-                    host.drain_pending_actions(&pending_actions, current_bounds.get(), &platform),
+                drain_actions_and_apply_window(
+                    &mut host,
+                    &pending_actions,
+                    current_bounds.get(),
+                    &platform,
                     &window,
                     elwt,
+                    &mut applied_window_mode,
                 );
                 window.request_redraw();
             }
@@ -177,7 +214,7 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                 let theme = mondrian_ui_theme::current_theme();
                 let b = current_bounds.get();
                 encoder.draw_rect(b, theme.colors.background, 0.0);
-                TreeWalker::paint_clipped(host.root(), &mut encoder, &theme, b);
+                TreeWalker::paint_clipped(host.active_root(), &mut encoder, &theme, b);
                 ui_runtime.paint_shell_overlays(&mut encoder, &theme, b, last_cursor, &router);
                 let size = window.inner_size();
                 let frame_result = frame_renderer.render_draw_commands(
@@ -211,7 +248,7 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                     surface.configure(&device, &config);
                     let b = Rect::new(0.0, 0.0, new_size.width as f32, new_size.height as f32);
                     current_bounds.set(b);
-                    TreeWalker::layout(host.root_mut(), b);
+                    TreeWalker::layout(host.active_root_mut(), b);
                     window.request_redraw();
                 }
             }
@@ -220,7 +257,7 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                 let _ = ui_runtime.route_hovered_file(
                     &window,
                     &mut router,
-                    host.root_mut(),
+                    host.active_root_mut(),
                     path,
                     last_cursor,
                     &dispatch_action,
@@ -232,7 +269,7 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                 let _ = ui_runtime.route_hovered_file_cancelled(
                     &window,
                     &mut router,
-                    host.root_mut(),
+                    host.active_root_mut(),
                     &dispatch_action,
                 );
                 window.request_redraw();
@@ -244,7 +281,7 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                 let result = ui_runtime.route_dropped_file(
                     &window,
                     &mut router,
-                    host.root_mut(),
+                    host.active_root_mut(),
                     ui_path,
                     last_cursor,
                     &dispatch_action,
@@ -252,10 +289,14 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                 if result == EventResult::Ignored {
                     pending_actions.push(mondrian_editor_state::Action::ImportMedia(paths));
                 }
-                apply_shell_commands(
-                    host.drain_pending_actions(&pending_actions, current_bounds.get(), &platform),
+                drain_actions_and_apply_window(
+                    &mut host,
+                    &pending_actions,
+                    current_bounds.get(),
+                    &platform,
                     &window,
                     elwt,
+                    &mut applied_window_mode,
                 );
                 window.request_redraw();
             }
@@ -268,17 +309,25 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                 let _ = ui_runtime.route_window_event(
                     &window,
                     &mut router,
-                    host.root_mut(),
+                    host.active_root_mut(),
                     UiEvent::MouseMove { position: last_cursor, modifiers: modifiers_state },
                     &dispatch_action,
                 );
-                apply_shell_commands(
-                    host.drain_pending_actions(&pending_actions, current_bounds.get(), &platform),
+                drain_actions_and_apply_window(
+                    &mut host,
+                    &pending_actions,
+                    current_bounds.get(),
+                    &platform,
                     &window,
                     elwt,
+                    &mut applied_window_mode,
                 );
-                let zones = host.root().dock().collect_grab_zones();
-                let dir = zones.iter().find(|(z, _)| z.contains(last_cursor)).map(|(_, d)| *d);
+                let dir = if host.mode() == SelfHostedUiMode::Workspace {
+                    let zones = host.root().dock().collect_grab_zones();
+                    zones.iter().find(|(z, _)| z.contains(last_cursor)).map(|(_, d)| *d)
+                } else {
+                    None
+                };
                 window.set_cursor_icon(winit_cursor_icon_for_ui_state(
                     ui_runtime.is_eyedropper_active(),
                     dir,
@@ -308,35 +357,35 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                     ui_runtime.finish_eyedropper_at_window_point(
                         &window,
                         &mut router,
-                        host.root_mut(),
+                        host.active_root_mut(),
                         last_cursor,
                         &dispatch_action,
                     );
-                    apply_shell_commands(
-                        host.drain_pending_actions(
-                            &pending_actions,
-                            current_bounds.get(),
-                            &platform,
-                        ),
+                    drain_actions_and_apply_window(
+                        &mut host,
+                        &pending_actions,
+                        current_bounds.get(),
+                        &platform,
                         &window,
                         elwt,
+                        &mut applied_window_mode,
                     );
                 } else {
                     let _ = ui_runtime.route_window_event(
                         &window,
                         &mut router,
-                        host.root_mut(),
+                        host.active_root_mut(),
                         evt,
                         &dispatch_action,
                     );
-                    apply_shell_commands(
-                        host.drain_pending_actions(
-                            &pending_actions,
-                            current_bounds.get(),
-                            &platform,
-                        ),
+                    drain_actions_and_apply_window(
+                        &mut host,
+                        &pending_actions,
+                        current_bounds.get(),
+                        &platform,
                         &window,
                         elwt,
+                        &mut applied_window_mode,
                     );
                 }
                 window.request_redraw();
@@ -346,7 +395,7 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                 let _ = ui_runtime.route_window_event(
                     &window,
                     &mut router,
-                    host.root_mut(),
+                    host.active_root_mut(),
                     UiEvent::MouseWheel {
                         delta: winit_scroll_delta_to_ui_delta(delta),
                         position: last_cursor,
@@ -354,10 +403,14 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                     },
                     &dispatch_action,
                 );
-                apply_shell_commands(
-                    host.drain_pending_actions(&pending_actions, current_bounds.get(), &platform),
+                drain_actions_and_apply_window(
+                    &mut host,
+                    &pending_actions,
+                    current_bounds.get(),
+                    &platform,
                     &window,
                     elwt,
+                    &mut applied_window_mode,
                 );
                 window.request_redraw();
             }
@@ -372,19 +425,19 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                     ui_runtime.poll_eyedropper(
                         &window,
                         &mut router,
-                        host.root_mut(),
+                        host.active_root_mut(),
                         &mut last_cursor,
                         modifiers_state,
                         &dispatch_action,
                     );
-                    apply_shell_commands(
-                        host.drain_pending_actions(
-                            &pending_actions,
-                            current_bounds.get(),
-                            &platform,
-                        ),
+                    drain_actions_and_apply_window(
+                        &mut host,
+                        &pending_actions,
+                        current_bounds.get(),
+                        &platform,
                         &window,
                         elwt,
+                        &mut applied_window_mode,
                     );
                     window.request_redraw();
                     elwt.set_control_flow(ControlFlow::Poll);
@@ -415,6 +468,60 @@ fn build_self_hosted_background_runtime() -> std::io::Result<tokio::runtime::Run
         .thread_name("mondrian-bg")
         .enable_all()
         .build()
+}
+
+fn drain_actions_and_apply_window(
+    host: &mut SelfHostedUiHost,
+    pending_actions: &PendingUiActions,
+    bounds: Rect,
+    platform: &dyn mondrian_platform::PlatformService,
+    window: &winit::window::Window,
+    elwt: &winit::event_loop::ActiveEventLoop,
+    applied_window_mode: &mut SelfHostedUiMode,
+) {
+    let commands = host.drain_pending_actions(pending_actions, bounds, platform);
+    apply_shell_commands(commands, window, elwt);
+    if *applied_window_mode != host.mode() {
+        *applied_window_mode = host.mode();
+        apply_window_mode(*applied_window_mode, window);
+    }
+}
+
+fn window_chrome_for_mode(mode: SelfHostedUiMode) -> WindowChrome {
+    match mode {
+        SelfHostedUiMode::Startup => WindowChrome {
+            title: "Mondrian",
+            width: STARTUP_WINDOW_WIDTH,
+            height: STARTUP_WINDOW_HEIGHT,
+            decorations: false,
+            resizable: false,
+            min_size: Some((STARTUP_WINDOW_WIDTH, STARTUP_WINDOW_HEIGHT)),
+            max_size: Some((STARTUP_WINDOW_WIDTH, STARTUP_WINDOW_HEIGHT)),
+        },
+        SelfHostedUiMode::Workspace => WindowChrome {
+            title: "Mondrian - 自研 UI",
+            width: WORKSPACE_WINDOW_WIDTH,
+            height: WORKSPACE_WINDOW_HEIGHT,
+            decorations: true,
+            resizable: true,
+            min_size: Some((WORKSPACE_MIN_WIDTH, WORKSPACE_MIN_HEIGHT)),
+            max_size: None,
+        },
+    }
+}
+
+fn logical_size(width: f32, height: f32) -> winit::dpi::LogicalSize<f64> {
+    winit::dpi::LogicalSize::new(width as f64, height as f64)
+}
+
+fn apply_window_mode(mode: SelfHostedUiMode, window: &winit::window::Window) {
+    let chrome = window_chrome_for_mode(mode);
+    window.set_title(chrome.title);
+    window.set_decorations(chrome.decorations);
+    window.set_resizable(chrome.resizable);
+    window.set_min_inner_size(chrome.min_size.map(|(w, h)| logical_size(w, h)));
+    window.set_max_inner_size(chrome.max_size.map(|(w, h)| logical_size(w, h)));
+    let _ = window.request_inner_size(logical_size(chrome.width, chrome.height));
 }
 
 fn apply_shell_commands(
@@ -465,5 +572,40 @@ mod tests {
         assert_eq!(SELF_HOSTED_BACKGROUND_WORKERS, 4);
         let runtime = build_self_hosted_background_runtime().expect("runtime should build");
         runtime.block_on(async {});
+    }
+
+    #[test]
+    fn startup_window_chrome_is_fixed_and_undecorated() {
+        let chrome = window_chrome_for_mode(SelfHostedUiMode::Startup);
+
+        assert_eq!(chrome.title, "Mondrian");
+        assert_eq!(chrome.width, STARTUP_WINDOW_WIDTH);
+        assert_eq!(chrome.height, STARTUP_WINDOW_HEIGHT);
+        assert!(!chrome.decorations);
+        assert!(!chrome.resizable);
+        assert_eq!(
+            chrome.min_size,
+            Some((STARTUP_WINDOW_WIDTH, STARTUP_WINDOW_HEIGHT))
+        );
+        assert_eq!(
+            chrome.max_size,
+            Some((STARTUP_WINDOW_WIDTH, STARTUP_WINDOW_HEIGHT))
+        );
+    }
+
+    #[test]
+    fn workspace_window_chrome_is_resizable_product_workspace() {
+        let chrome = window_chrome_for_mode(SelfHostedUiMode::Workspace);
+
+        assert_eq!(chrome.title, "Mondrian - 自研 UI");
+        assert_eq!(chrome.width, WORKSPACE_WINDOW_WIDTH);
+        assert_eq!(chrome.height, WORKSPACE_WINDOW_HEIGHT);
+        assert!(chrome.decorations);
+        assert!(chrome.resizable);
+        assert_eq!(
+            chrome.min_size,
+            Some((WORKSPACE_MIN_WIDTH, WORKSPACE_MIN_HEIGHT))
+        );
+        assert_eq!(chrome.max_size, None);
     }
 }

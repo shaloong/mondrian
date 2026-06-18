@@ -18,6 +18,7 @@ pub mod rendering;
 pub mod runtime;
 pub mod shell;
 pub mod shortcuts;
+pub mod startup;
 #[cfg(test)]
 pub(crate) mod test_utils;
 pub mod title_bar;

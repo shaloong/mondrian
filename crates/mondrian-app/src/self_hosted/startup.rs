@@ -1,0 +1,496 @@
+//! Self-hosted startup surface.
+//!
+//! The startup surface is separate from the editor workspace. It owns only
+//! launch-time presentation and emits shell actions; project lifecycle work
+//! stays in `SelfHostedUiHost` / `AppState`.
+
+use mondrian_core::Color;
+use mondrian_ui_core::types::*;
+use mondrian_ui_core::widget::{EventContext, PaintContext};
+use mondrian_ui_core::{EventResult, UiEvent, Widget};
+
+use crate::app::ui_actions::{
+    app_shell_new_project_dialog_action, app_shell_open_project_dialog_action,
+    app_shell_quit_action, app_shell_window_drag_action,
+};
+
+/// Startup window logical size used by the self-hosted product entrypoint.
+pub const STARTUP_WINDOW_WIDTH: f32 = 820.0;
+/// Startup window logical size used by the self-hosted product entrypoint.
+pub const STARTUP_WINDOW_HEIGHT: f32 = 500.0;
+
+const OUTER_MARGIN: f32 = 18.0;
+const LEFT_WIDTH: f32 = 300.0;
+const CONTENT_PAD_X: f32 = 22.0;
+const CONTENT_PAD_Y: f32 = 24.0;
+const CLOSE_SIZE: f32 = 28.0;
+const CLOSE_MARGIN: f32 = 10.0;
+const ACTION_BUTTON_HEIGHT: f32 = 34.0;
+const ACTION_BUTTON_GAP: f32 = 10.0;
+const RECENT_ROW_HEIGHT: f32 = 44.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupHit {
+    NewProject,
+    OpenProject,
+    Close,
+    DragSurface,
+}
+
+/// Startup screen shown before a project is opened.
+pub struct SelfHostedStartupScreen {
+    id: WidgetId,
+    bounds: Rect,
+    panel_rect: Rect,
+    left_rect: Rect,
+    right_rect: Rect,
+    new_project_rect: Rect,
+    open_project_rect: Rect,
+    close_rect: Rect,
+    hover: Option<StartupHit>,
+    pressed: Option<StartupHit>,
+}
+
+impl SelfHostedStartupScreen {
+    /// Build the default startup surface.
+    pub fn new() -> Self {
+        Self {
+            id: WidgetId::new(),
+            bounds: Rect::ZERO,
+            panel_rect: Rect::ZERO,
+            left_rect: Rect::ZERO,
+            right_rect: Rect::ZERO,
+            new_project_rect: Rect::ZERO,
+            open_project_rect: Rect::ZERO,
+            close_rect: Rect::ZERO,
+            hover: None,
+            pressed: None,
+        }
+    }
+
+    fn hit_region(&self, point: Point) -> Option<StartupHit> {
+        if self.close_rect.contains(point) {
+            Some(StartupHit::Close)
+        } else if self.new_project_rect.contains(point) {
+            Some(StartupHit::NewProject)
+        } else if self.open_project_rect.contains(point) {
+            Some(StartupHit::OpenProject)
+        } else if self.panel_rect.contains(point) {
+            Some(StartupHit::DragSurface)
+        } else {
+            None
+        }
+    }
+
+    fn dispatch_hit(&self, hit: StartupHit, ctx: &mut EventContext) {
+        let action = match hit {
+            StartupHit::NewProject => app_shell_new_project_dialog_action(),
+            StartupHit::OpenProject => app_shell_open_project_dialog_action(),
+            StartupHit::Close => app_shell_quit_action(),
+            StartupHit::DragSurface => app_shell_window_drag_action(),
+        };
+        (ctx.dispatch)(action);
+    }
+
+    fn button_color(&self, hit: StartupHit, primary: bool, ctx: &PaintContext) -> Color {
+        let colors = &ctx.theme.colors;
+        if self.pressed == Some(hit) {
+            return colors.muted;
+        }
+        if primary {
+            if self.hover == Some(hit) {
+                colors.primary.lerp(colors.foreground, 0.10)
+            } else {
+                colors.primary
+            }
+        } else if self.hover == Some(hit) {
+            colors.muted
+        } else {
+            colors.card
+        }
+    }
+}
+
+impl Default for SelfHostedStartupScreen {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Widget for SelfHostedStartupScreen {
+    fn id(&self) -> WidgetId {
+        self.id
+    }
+
+    fn measure(&self, constraint: LayoutConstraint) -> Size {
+        constraint.constrain(Size::new(STARTUP_WINDOW_WIDTH, STARTUP_WINDOW_HEIGHT))
+    }
+
+    fn layout(&mut self, bounds: Rect) {
+        self.bounds = bounds;
+        let panel_width = (bounds.width - OUTER_MARGIN * 2.0).max(320.0);
+        let panel_height = (bounds.height - OUTER_MARGIN * 2.0).max(260.0);
+        self.panel_rect = Rect::new(
+            bounds.x + (bounds.width - panel_width) * 0.5,
+            bounds.y + (bounds.height - panel_height) * 0.5,
+            panel_width,
+            panel_height,
+        );
+
+        let left_width = LEFT_WIDTH.min(self.panel_rect.width * 0.45);
+        self.left_rect = Rect::new(
+            self.panel_rect.x,
+            self.panel_rect.y,
+            left_width,
+            self.panel_rect.height,
+        );
+        self.right_rect = Rect::new(
+            self.left_rect.x + self.left_rect.width,
+            self.panel_rect.y,
+            (self.panel_rect.width - self.left_rect.width).max(0.0),
+            self.panel_rect.height,
+        );
+
+        self.close_rect = Rect::new(
+            self.panel_rect.x + self.panel_rect.width - CLOSE_MARGIN - CLOSE_SIZE,
+            self.panel_rect.y + CLOSE_MARGIN,
+            CLOSE_SIZE,
+            CLOSE_SIZE,
+        );
+
+        let content_x = self.right_rect.x + CONTENT_PAD_X;
+        let content_width = (self.right_rect.width - CONTENT_PAD_X * 2.0).max(0.0);
+        let action_y = self.right_rect.y + CONTENT_PAD_Y + 86.0;
+        let button_width = ((content_width - ACTION_BUTTON_GAP) * 0.5).max(92.0);
+        self.new_project_rect = Rect::new(content_x, action_y, button_width, ACTION_BUTTON_HEIGHT);
+        self.open_project_rect = Rect::new(
+            content_x + button_width + ACTION_BUTTON_GAP,
+            action_y,
+            button_width,
+            ACTION_BUTTON_HEIGHT,
+        );
+    }
+
+    fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        match event {
+            UiEvent::MouseMove { position, .. } => {
+                self.hover = self.hit_region(*position);
+                EventResult::Ignored
+            }
+            UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
+                let Some(hit) = self.hit_region(*position) else {
+                    self.pressed = None;
+                    return EventResult::Ignored;
+                };
+                if hit == StartupHit::DragSurface {
+                    self.dispatch_hit(hit, ctx);
+                }
+                self.pressed = Some(hit);
+                EventResult::Handled
+            }
+            UiEvent::MouseUp { position, button: MouseButton::Left, .. } => {
+                let pressed = self.pressed.take();
+                if let Some(hit) = pressed {
+                    if hit != StartupHit::DragSurface && self.hit_region(*position) == Some(hit) {
+                        self.dispatch_hit(hit, ctx);
+                    }
+                    return EventResult::Handled;
+                }
+                EventResult::Ignored
+            }
+            UiEvent::FocusLost => {
+                self.hover = None;
+                self.pressed = None;
+                EventResult::Handled
+            }
+            UiEvent::KeyDown { key: KeyCode::Escape, .. } => {
+                self.dispatch_hit(StartupHit::Close, ctx);
+                EventResult::Handled
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    fn paint(&self, ctx: &mut PaintContext) {
+        let colors = &ctx.theme.colors;
+        let spacing = &ctx.theme.spacing;
+        let typography = &ctx.theme.typography;
+        let radius = spacing.radius_lg;
+
+        ctx.encoder.draw_rect(self.panel_rect, colors.border, radius);
+        ctx.encoder.draw_gradient_rect(
+            self.left_rect,
+            [
+                colors.primary.lerp(colors.background, 0.15),
+                colors.accent.lerp(colors.primary, 0.30),
+                colors.background.lerp(colors.primary, 0.22),
+                colors.card.lerp(colors.primary, 0.18),
+            ],
+            radius,
+        );
+        ctx.encoder.draw_rect(self.right_rect, colors.popover, radius);
+
+        let brand_x = self.left_rect.x + 30.0;
+        let brand_y = self.left_rect.y + 54.0;
+        let mark = Rect::new(brand_x, brand_y, 54.0, 54.0);
+        ctx.encoder.draw_rect(mark, colors.primary_foreground, 14.0);
+        ctx.encoder.draw_rect(mark.inset(7.0, 7.0), colors.primary, 9.0);
+        ctx.encoder.draw_text(
+            "Mondrian",
+            typography.heading_h1.font_size,
+            Point::new(brand_x, brand_y + 92.0),
+            colors.primary_foreground,
+        );
+        ctx.encoder.draw_text_box(
+            "AI-native video editing workspace",
+            typography.body.font_size,
+            Point::new(brand_x, brand_y + 126.0),
+            self.left_rect.width - 60.0,
+            colors.primary_foreground.lerp(colors.background, 0.18),
+        );
+
+        let accent = Rect::new(
+            self.left_rect.x + 30.0,
+            self.left_rect.y + self.left_rect.height - 92.0,
+            self.left_rect.width - 60.0,
+            44.0,
+        );
+        ctx.encoder
+            .draw_rect(accent, colors.background.lerp(colors.primary, 0.28), 10.0);
+        ctx.encoder.draw_text(
+            "自研 UI",
+            typography.button.font_size,
+            Point::new(accent.x + 14.0, accent.y + 15.0),
+            colors.primary_foreground,
+        );
+
+        let content_x = self.right_rect.x + CONTENT_PAD_X;
+        let content_y = self.right_rect.y + CONTENT_PAD_Y + 16.0;
+        let content_width = self.right_rect.width - CONTENT_PAD_X * 2.0;
+        ctx.encoder.draw_text(
+            "开始工作",
+            typography.heading_h2.font_size,
+            Point::new(content_x, content_y),
+            colors.popover_foreground,
+        );
+        ctx.encoder.draw_text_box(
+            "创建剪辑项目，或打开现有 Mondrian 工程。",
+            typography.body.font_size,
+            Point::new(content_x, content_y + 30.0),
+            content_width,
+            colors.muted_foreground,
+        );
+
+        self.paint_button(
+            ctx,
+            self.new_project_rect,
+            "新建项目",
+            true,
+            StartupHit::NewProject,
+        );
+        self.paint_button(
+            ctx,
+            self.open_project_rect,
+            "打开项目",
+            false,
+            StartupHit::OpenProject,
+        );
+
+        let recent_y = self.new_project_rect.y + ACTION_BUTTON_HEIGHT + 34.0;
+        ctx.encoder.draw_text(
+            "最近项目",
+            typography.large.font_size,
+            Point::new(content_x, recent_y),
+            colors.popover_foreground,
+        );
+        let recent_rect = Rect::new(content_x, recent_y + 24.0, content_width, RECENT_ROW_HEIGHT);
+        ctx.encoder.draw_rect(recent_rect, colors.card, spacing.radius_md);
+        ctx.encoder.draw_text(
+            "暂无最近项目",
+            typography.body.font_size,
+            Point::new(recent_rect.x + 14.0, recent_rect.y + 17.0),
+            colors.muted_foreground,
+        );
+
+        let close_bg = if self.hover == Some(StartupHit::Close) {
+            colors.muted
+        } else {
+            Color::TRANSPARENT
+        };
+        ctx.encoder.draw_rect(self.close_rect, close_bg, spacing.radius_sm);
+        let inset = 8.0;
+        let a = Point::new(self.close_rect.x + inset, self.close_rect.y + inset);
+        let b = Point::new(
+            self.close_rect.x + self.close_rect.width - inset,
+            self.close_rect.y + self.close_rect.height - inset,
+        );
+        let c = Point::new(
+            self.close_rect.x + inset,
+            self.close_rect.y + self.close_rect.height - inset,
+        );
+        let d = Point::new(
+            self.close_rect.x + self.close_rect.width - inset,
+            self.close_rect.y + inset,
+        );
+        ctx.encoder.draw_line(a, b, spacing.border_emphasis, colors.popover_foreground);
+        ctx.encoder.draw_line(c, d, spacing.border_emphasis, colors.popover_foreground);
+    }
+
+    fn hit_test(&self, point: Point) -> bool {
+        self.panel_rect.contains(point)
+    }
+}
+
+impl SelfHostedStartupScreen {
+    fn paint_button(
+        &self,
+        ctx: &mut PaintContext,
+        rect: Rect,
+        label: &str,
+        primary: bool,
+        hit: StartupHit,
+    ) {
+        let colors = &ctx.theme.colors;
+        let spacing = &ctx.theme.spacing;
+        let fill = self.button_color(hit, primary, ctx);
+        let text = if primary {
+            colors.primary_foreground
+        } else {
+            colors.card_foreground
+        };
+        ctx.encoder.draw_rect(rect, fill, spacing.radius_md);
+        let text_width = label.chars().count() as f32 * 14.0;
+        ctx.encoder.draw_text(
+            label,
+            ctx.theme.typography.button.font_size,
+            Point::new(
+                rect.x + (rect.width - text_width).max(0.0) * 0.5,
+                rect.y + 21.0,
+            ),
+            text,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::ui_actions::{
+        APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_OPEN_PROJECT_DIALOG,
+        APP_SHELL_QUIT, APP_SHELL_WINDOW_DRAG,
+    };
+    use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use mondrian_editor_state::Action;
+    use mondrian_ui_core::widget::EventRequests;
+    use std::cell::RefCell;
+
+    fn action_name(action: &Action) -> (&str, &str) {
+        match action {
+            Action::Custom { namespace, name, .. } => (namespace.as_str(), name.as_str()),
+            other => panic!("expected custom action, got {other:?}"),
+        }
+    }
+
+    fn dispatch_click(screen: &mut SelfHostedStartupScreen, point: Point) -> Vec<Action> {
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        assert_eq!(
+            screen.event(
+                &UiEvent::MouseDown {
+                    position: point,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            screen.event(
+                &UiEvent::MouseUp {
+                    position: point,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        actions.into_inner()
+    }
+
+    #[test]
+    fn startup_screen_measures_to_product_startup_window_size() {
+        let screen = SelfHostedStartupScreen::new();
+
+        assert_eq!(
+            screen.measure(LayoutConstraint::LOOSE),
+            Size::new(STARTUP_WINDOW_WIDTH, STARTUP_WINDOW_HEIGHT)
+        );
+    }
+
+    #[test]
+    fn startup_screen_dispatches_project_actions() {
+        let mut screen = SelfHostedStartupScreen::new();
+        screen.layout(Rect::new(
+            0.0,
+            0.0,
+            STARTUP_WINDOW_WIDTH,
+            STARTUP_WINDOW_HEIGHT,
+        ));
+
+        let new_point = screen.new_project_rect.center();
+        let new_actions = dispatch_click(&mut screen, new_point);
+        assert_eq!(new_actions.len(), 1);
+        assert_eq!(
+            action_name(&new_actions[0]),
+            (APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG)
+        );
+
+        let open_point = screen.open_project_rect.center();
+        let open_actions = dispatch_click(&mut screen, open_point);
+        assert_eq!(open_actions.len(), 1);
+        assert_eq!(
+            action_name(&open_actions[0]),
+            (APP_SHELL_NAMESPACE, APP_SHELL_OPEN_PROJECT_DIALOG)
+        );
+    }
+
+    #[test]
+    fn startup_screen_dispatches_window_commands() {
+        let mut screen = SelfHostedStartupScreen::new();
+        screen.layout(Rect::new(
+            0.0,
+            0.0,
+            STARTUP_WINDOW_WIDTH,
+            STARTUP_WINDOW_HEIGHT,
+        ));
+
+        let close_point = screen.close_rect.center();
+        let close_actions = dispatch_click(&mut screen, close_point);
+        assert_eq!(close_actions.len(), 1);
+        assert_eq!(
+            action_name(&close_actions[0]),
+            (APP_SHELL_NAMESPACE, APP_SHELL_QUIT)
+        );
+
+        let drag_point = screen.left_rect.center();
+        let drag_actions = dispatch_click(&mut screen, drag_point);
+        assert_eq!(drag_actions.len(), 1);
+        assert_eq!(
+            action_name(&drag_actions[0]),
+            (APP_SHELL_NAMESPACE, APP_SHELL_WINDOW_DRAG)
+        );
+    }
+}
