@@ -45,20 +45,20 @@ use crate::app::ui_actions::{
     app_shell_export_output_dialog_action, app_shell_import_media_dialog_action,
     app_shell_new_project_dialog_action, app_shell_open_project_dialog_action,
     app_shell_save_project_as_dialog_action, assets_create_adjustment_layer_action,
-    assets_create_folder_action, assets_create_solid_color_action, assets_prepare_drag_action,
-    effects_add_to_clip_action, export_enqueue_action, export_set_draft_action,
-    inspector_remove_effect_action, inspector_select_effect_action,
+    assets_create_folder_action, assets_create_solid_color_action, assets_open_folder_action,
+    assets_prepare_drag_action, effects_add_to_clip_action, export_enqueue_action,
+    export_set_draft_action, inspector_remove_effect_action, inspector_select_effect_action,
     inspector_set_clip_curve_action, inspector_set_clip_enabled_action,
     inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
     inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
     inspector_set_effect_property_action, timeline_add_track_action, timeline_drop_asset_action,
     timeline_move_clip_action, timeline_move_track_action, timeline_seek_action,
     timeline_select_clip_action, timeline_set_track_control_action, timeline_trim_clip_action,
-    AssetsPrepareDragPayload, EffectsAddToClipPayload, ExportDraftUpdatePayload,
-    ExportEnqueuePayload, ExportOutputDialogPayload, InspectorClipRefPayload,
-    InspectorClipTransformField, InspectorCurvePointPayload, InspectorRemoveEffectPayload,
-    InspectorSelectEffectPayload, InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
-    InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+    AssetsOpenFolderPayload, AssetsPrepareDragPayload, EffectsAddToClipPayload,
+    ExportDraftUpdatePayload, ExportEnqueuePayload, ExportOutputDialogPayload,
+    InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
+    InspectorRemoveEffectPayload, InspectorSelectEffectPayload, InspectorSetClipCurvePayload,
+    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
     InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
     InspectorSetEffectPropertyPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
     TimelineDropAssetPayload, TimelineMoveClipPayload, TimelineMoveTrackPayload,
@@ -96,9 +96,21 @@ impl SelfHostedPanelModels {
         state: &AppState,
         runtime_logs: Option<&LogBuffer>,
     ) -> Self {
+        Self::from_app_state_with_runtime_logs_and_asset_folder(state, runtime_logs, None)
+    }
+
+    /// Snapshot app state while keeping shell-local asset browser navigation.
+    pub fn from_app_state_with_runtime_logs_and_asset_folder(
+        state: &AppState,
+        runtime_logs: Option<&LogBuffer>,
+        asset_folder_id: Option<&str>,
+    ) -> Self {
         Self {
             project: PanelListModel::from_project_status(state),
-            assets: AssetGridModel::from_asset_library(state.asset_library.as_deref()),
+            assets: AssetGridModel::from_asset_library_in_folder(
+                state.asset_library.as_deref(),
+                asset_folder_id,
+            ),
             effects: PanelListModel::from_app_effect_registry(state),
             console: PanelListModel::from_app_status_and_logs(state, runtime_logs),
             viewer: ViewerPanelModel::from_app_state(state),
@@ -236,6 +248,14 @@ impl AssetGridModel {
     /// Build the project asset browser. Database read failures are represented
     /// as disabled cards so the panel can render without owning app errors.
     pub fn from_asset_library(library: Option<&AssetLibrary>) -> Self {
+        Self::from_asset_library_in_folder(library, None)
+    }
+
+    /// Build the project asset browser for a shell-local folder selection.
+    pub fn from_asset_library_in_folder(
+        library: Option<&AssetLibrary>,
+        current_folder_id: Option<&str>,
+    ) -> Self {
         let colors = current_theme().colors.clone();
         let Some(library) = library else {
             return AssetGridModel::new(
@@ -287,25 +307,52 @@ impl AssetGridModel {
             }
         };
 
-        let items = asset_grid_items_from_library_records(folders, assets);
+        let current_folder =
+            current_folder_id.and_then(|id| folders.iter().find(|folder| folder.id == id));
+        let subtitle = current_folder
+            .map(|folder| format!("Project library / {}", folder.name))
+            .unwrap_or_else(|| "Project library".to_owned());
+        let mut items = asset_grid_items_from_library_records(&folders, assets, current_folder);
+        if current_folder.is_some() && items.len() == 1 {
+            items.push(asset_empty_item(
+                "asset-folder-empty",
+                "Empty folder",
+                "Import media or create generated assets",
+                colors.muted_foreground,
+                AppIcon::FolderOpenFilled,
+            ));
+        }
         if items.is_empty() {
+            let (title, message, icon) = if current_folder.is_some() {
+                (
+                    "Empty folder",
+                    "Import media or create generated assets",
+                    AppIcon::FolderOpenFilled,
+                )
+            } else {
+                (
+                    "No assets",
+                    "Import media or create generated assets",
+                    AppIcon::Folder,
+                )
+            };
             return AssetGridModel::new(
                 "Assets",
                 vec![asset_empty_item(
                     "asset-library-empty",
-                    "No assets",
-                    "Import media or create generated assets",
+                    title,
+                    message,
                     colors.muted_foreground,
-                    AppIcon::Folder,
+                    icon,
                 )],
             )
-            .with_subtitle("Project library")
+            .with_subtitle(subtitle)
             .with_filter_placeholder("Search assets")
             .accepts_file_drop(true);
         }
 
         AssetGridModel::new("Assets", items)
-            .with_subtitle("Project library")
+            .with_subtitle(subtitle)
             .with_filter_placeholder("Search assets")
             .accepts_file_drop(true)
     }
@@ -1587,11 +1634,17 @@ fn asset_grid_item_from_asset(asset: AssetRecord) -> AssetGridItem {
 }
 
 fn asset_grid_items_from_library_records(
-    folders: Vec<FolderRecord>,
+    folders: &[FolderRecord],
     assets: Vec<AssetRecord>,
+    current_folder: Option<&FolderRecord>,
 ) -> Vec<AssetGridItem> {
-    let mut items = Vec::with_capacity(folders.len() + assets.len());
-    for folder in folders.into_iter().filter(|folder| folder.parent_id.is_none()) {
+    let mut items =
+        Vec::with_capacity(folders.len() + assets.len() + usize::from(current_folder.is_some()));
+    let parent_id = current_folder.map(|folder| folder.id.as_str());
+    if let Some(folder) = current_folder {
+        items.push(asset_grid_parent_item(folder.parent_id.clone()));
+    }
+    for folder in folders.iter().filter(|folder| folder.parent_id.as_deref() == parent_id) {
         let item_count = assets
             .iter()
             .filter(|asset| asset.folder_id.as_deref() == Some(folder.id.as_str()))
@@ -1601,13 +1654,30 @@ fn asset_grid_items_from_library_records(
     items.extend(
         assets
             .into_iter()
-            .filter(|asset| asset.folder_id.is_none())
+            .filter(|asset| asset.folder_id.as_deref() == parent_id)
             .map(asset_grid_item_from_asset),
     );
     items
 }
 
-fn asset_grid_item_from_folder(folder: FolderRecord, item_count: usize) -> AssetGridItem {
+fn asset_grid_parent_item(parent_id: Option<String>) -> AssetGridItem {
+    let (title, subtitle) = if parent_id.is_some() {
+        ("Back", "Parent folder")
+    } else {
+        ("All assets", "Project library")
+    };
+    with_asset_icon(
+        AssetGridItem::new("asset-folder-up", title, current_theme().colors.secondary)
+            .with_subtitle(subtitle)
+            .with_badge("UP")
+            .with_activate_action(assets_open_folder_action(AssetsOpenFolderPayload {
+                folder_id: parent_id,
+            })),
+        AppIcon::ArrowUp,
+    )
+}
+
+fn asset_grid_item_from_folder(folder: &FolderRecord, item_count: usize) -> AssetGridItem {
     let subtitle = if item_count == 1 {
         "Folder · 1 item".to_owned()
     } else {
@@ -1616,11 +1686,14 @@ fn asset_grid_item_from_folder(folder: FolderRecord, item_count: usize) -> Asset
     with_asset_icon(
         AssetGridItem::new(
             format!("folder:{}", folder.id),
-            folder.name,
+            folder.name.clone(),
             current_theme().colors.secondary,
         )
         .with_subtitle(subtitle)
-        .with_badge("BIN"),
+        .with_badge("BIN")
+        .with_activate_action(assets_open_folder_action(AssetsOpenFolderPayload {
+            folder_id: Some(folder.id.clone()),
+        })),
         AppIcon::Folder,
     )
 }
@@ -2940,13 +3013,13 @@ fn inspector_effect_property_action(
 mod tests {
     use super::*;
     use crate::app::ui_actions::{
-        APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
-        APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
-        ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR,
-        ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE,
-        INSPECTOR_NAMESPACE, INSPECTOR_SELECT_EFFECT, INSPECTOR_SET_CLIP_CURVE,
-        INSPECTOR_SET_EFFECT_PROPERTY, TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET,
-        TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_SELECT_CLIP,
+        AssetsOpenFolderPayload, APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE,
+        APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_OPEN_PROJECT_DIALOG,
+        APP_SHELL_SAVE_PROJECT_AS_DIALOG, ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER,
+        ASSETS_CREATE_SOLID_COLOR, ASSETS_NAMESPACE, ASSETS_OPEN_FOLDER, ASSETS_PREPARE_DRAG,
+        EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE, INSPECTOR_SELECT_EFFECT,
+        INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_EFFECT_PROPERTY, TIMELINE_ADD_TRACK,
+        TIMELINE_DROP_ASSET, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_SELECT_CLIP,
     };
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
@@ -4310,7 +4383,15 @@ mod tests {
         assert_eq!(folder.badge.as_deref(), Some("BIN"));
         assert!(folder.icon.is_some());
         assert!(folder.drag_payload.is_none());
-        assert!(folder.activate_action.is_none());
+        let action = folder.activate_action.as_ref().expect("folder activate action");
+        let Action::Custom { namespace, name, payload } = action else {
+            panic!("expected asset folder custom action, got {action:?}");
+        };
+        assert_eq!(namespace, ASSETS_NAMESPACE);
+        assert_eq!(name, ASSETS_OPEN_FOLDER);
+        let payload: AssetsOpenFolderPayload =
+            serde_json::from_value(payload.clone()).expect("folder open payload");
+        assert_eq!(payload.folder_id.as_deref(), Some(folder_id.as_str()));
 
         let asset = &models.assets.items[1];
         assert_eq!(asset.title, "Root Adjustment");
@@ -4323,6 +4404,75 @@ mod tests {
         assert!(
             !models.assets.items.iter().any(|item| item.title == "Filed Solid"),
             "root asset view should not flatten assets inside folders"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn asset_panel_model_can_show_one_folder_with_parent_navigation() {
+        let root = unique_temp_dir("asset-panel-folder-view");
+        let library = AssetLibrary::open(root.clone()).expect("open asset library");
+        let folder_id = library.create_folder("Rushes", None).expect("create folder");
+        let nested_id = library
+            .create_folder("Selects", Some(&folder_id))
+            .expect("create nested folder");
+        let filed_asset_id = library
+            .create_solid_color_asset(Some("Filed Solid"))
+            .expect("create filed solid");
+        library
+            .move_asset_to_folder(filed_asset_id, Some(&folder_id))
+            .expect("move into folder");
+        let nested_asset_id = library
+            .create_adjustment_layer_asset(Some("Nested Adjustment"))
+            .expect("create nested asset");
+        library
+            .move_asset_to_folder(nested_asset_id, Some(&nested_id))
+            .expect("move into nested folder");
+        let _root_asset_id = library
+            .create_adjustment_layer_asset(Some("Root Adjustment"))
+            .expect("create root adjustment");
+        let mut state = AppState::new();
+        state.asset_library = Some(library);
+
+        let models = SelfHostedPanelModels::from_app_state_with_runtime_logs_and_asset_folder(
+            &state,
+            None,
+            Some(&folder_id),
+        );
+
+        assert_eq!(models.assets.subtitle, "Project library / Rushes");
+        assert_eq!(models.assets.items.len(), 3);
+
+        let parent = &models.assets.items[0];
+        assert_eq!(parent.id, "asset-folder-up");
+        assert_eq!(parent.title, "All assets");
+        let Action::Custom { namespace, name, payload } =
+            parent.activate_action.as_ref().expect("parent activate action")
+        else {
+            panic!("expected parent navigation action");
+        };
+        assert_eq!(namespace, ASSETS_NAMESPACE);
+        assert_eq!(name, ASSETS_OPEN_FOLDER);
+        let payload: AssetsOpenFolderPayload =
+            serde_json::from_value(payload.clone()).expect("parent open payload");
+        assert_eq!(payload.folder_id, None);
+
+        let nested = &models.assets.items[1];
+        assert_eq!(nested.id, format!("folder:{nested_id}"));
+        assert_eq!(nested.title, "Selects");
+        assert_eq!(nested.subtitle, "Folder · 1 item");
+
+        let asset = &models.assets.items[2];
+        assert_eq!(asset.title, "Filed Solid");
+        assert_eq!(asset.drag_payload, Some(DragPayload::Asset(filed_asset_id)));
+        assert!(
+            !models.assets.items.iter().any(|item| item.title == "Root Adjustment"),
+            "folder view should not include root assets"
+        );
+        assert!(
+            !models.assets.items.iter().any(|item| item.title == "Nested Adjustment"),
+            "folder view should not flatten assets from nested folders"
         );
 
         let _ = std::fs::remove_dir_all(root);

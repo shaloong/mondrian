@@ -242,6 +242,7 @@ pub struct SelfHostedAppRoot {
     title_bar: TitleBar,
     dock: DockSplitter,
     models: SelfHostedPanelModels,
+    asset_folder_id: Option<String>,
     preferences_model: SelfHostedPreferencesModel,
     workspace_preset: WorkspacePreset,
     modal: Option<ShellModal>,
@@ -329,6 +330,7 @@ impl SelfHostedAppRoot {
             title_bar,
             dock,
             models,
+            asset_folder_id: None,
             preferences_model,
             workspace_preset,
             modal: None,
@@ -339,6 +341,16 @@ impl SelfHostedAppRoot {
     /// Current built-in workspace preset used by the dock tree.
     pub fn workspace_preset(&self) -> WorkspacePreset {
         self.workspace_preset
+    }
+
+    /// Currently shown asset-library folder, or root when absent.
+    pub fn asset_folder_id(&self) -> Option<&str> {
+        self.asset_folder_id.as_deref()
+    }
+
+    /// Replace the shell-local asset-library browser folder.
+    pub fn set_asset_folder_id(&mut self, folder_id: Option<String>) {
+        self.asset_folder_id = folder_id;
     }
 
     /// Access the inner dock splitter for shell-owned grab zone cursor queries.
@@ -406,10 +418,13 @@ impl SelfHostedAppRoot {
             window_title_for_app_state(state),
             MenuBar::for_app_state(state),
         );
-        self.set_models(SelfHostedPanelModels::from_app_state_with_runtime_logs(
-            state,
-            runtime_logs,
-        ));
+        self.set_models(
+            SelfHostedPanelModels::from_app_state_with_runtime_logs_and_asset_folder(
+                state,
+                runtime_logs,
+                self.asset_folder_id.as_deref(),
+            ),
+        );
         let preferences_model = SelfHostedPreferencesModel::from_app_state(
             state,
             self.workspace_preset,

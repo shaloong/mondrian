@@ -72,6 +72,8 @@ pub const ASSETS_CREATE_ADJUSTMENT_LAYER: &str = "create_adjustment_layer";
 pub const ASSETS_CREATE_SOLID_COLOR: &str = "create_solid_color";
 /// Action name for creating a folder in the library.
 pub const ASSETS_CREATE_FOLDER: &str = "create_folder";
+/// Action name for opening an asset-browser folder in the self-hosted shell.
+pub const ASSETS_OPEN_FOLDER: &str = "open_folder";
 
 /// Custom action namespace for export operations.
 pub const EXPORT_NAMESPACE: &str = "ui.export";
@@ -392,6 +394,13 @@ pub struct AssetsPrepareDragPayload {
     pub asset_id: AssetId,
 }
 
+/// Open one folder in the self-hosted asset browser, or the root view.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetsOpenFolderPayload {
+    /// Folder to show. `None` returns to the root/unfiled asset view.
+    pub folder_id: Option<String>,
+}
+
 /// Enqueue a timeline export job from a UI frontend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportEnqueuePayload {
@@ -567,6 +576,11 @@ pub fn assets_create_solid_color_action() -> Action {
 /// Build an action that creates a folder in the library.
 pub fn assets_create_folder_action() -> Action {
     custom_assets_action(ASSETS_CREATE_FOLDER, ())
+}
+
+/// Build a shell-local action that opens an asset-browser folder.
+pub fn assets_open_folder_action(payload: AssetsOpenFolderPayload) -> Action {
+    custom_assets_action(ASSETS_OPEN_FOLDER, payload)
 }
 
 /// Build an action that enqueues a timeline export.

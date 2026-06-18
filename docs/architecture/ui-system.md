@@ -732,8 +732,13 @@ assets, and folders. The app adapter maps `AssetRecord` into `AssetGridItem`
 view data and semantic media color tokens; the widget crate does not depend on
 the asset library or editor domain. The root Assets view is not a flat dump of
 every database row: it shows top-level folders first, then root/unfiled assets.
-Assets already assigned to a folder are counted on that folder card and should
-only appear inside that folder once folder navigation is implemented.
+Assets already assigned to a folder are counted on that folder card and appear
+only when the self-hosted shell is browsing that folder. Folder navigation is
+shell-local UI session state: folder cards emit `ui.assets.open_folder`, the
+host validates the target folder against the current `AssetLibrary`, updates
+`SelfHostedAppRoot::asset_folder_id`, and rebuilds panel models with that view
+filter. The folder browser path is intentionally not stored in `AppState` and
+does not participate in undo/redo.
 The adjacent Console tab reads `AppState::status_log`, a bounded history fed by
 `set_status_hint`, and shows recent messages newest-first before runtime
 summary rows. `clear_status_hint` clears only the transient bottom-bar hint; it

@@ -15,9 +15,10 @@ use mondrian_ui_core::TreeWalker;
 use mondrian_ui_theme::set_theme_preset;
 
 use crate::app::ui_actions::{
-    PreferencesThemePayload, APP_SHELL_NAMESPACE, APP_SHELL_PREFERENCES_THEME_CHANGED,
-    APP_SHELL_QUIT, APP_SHELL_WINDOW_DRAG, APP_SHELL_WINDOW_MINIMIZE,
-    APP_SHELL_WINDOW_TOGGLE_MAXIMIZE,
+    AssetsOpenFolderPayload, PreferencesThemePayload, APP_SHELL_NAMESPACE,
+    APP_SHELL_PREFERENCES_THEME_CHANGED, APP_SHELL_QUIT, APP_SHELL_WINDOW_DRAG,
+    APP_SHELL_WINDOW_MINIMIZE, APP_SHELL_WINDOW_TOGGLE_MAXIMIZE, ASSETS_NAMESPACE,
+    ASSETS_OPEN_FOLDER,
 };
 use crate::app::AppState;
 use crate::self_hosted::action_queue::PendingUiActions;
@@ -162,6 +163,10 @@ impl SelfHostedUiHost {
                 needs_layout = true;
                 continue;
             }
+            if self.take_asset_browser_navigation(&action, bounds) {
+                needs_layout = true;
+                continue;
+            }
             if !self.is_action_enabled(&action) {
                 tracing::debug!(?action, "disabled custom UI action ignored");
                 continue;
@@ -270,6 +275,52 @@ impl SelfHostedUiHost {
             }
         }
     }
+
+    fn take_asset_browser_navigation(&mut self, action: &Action, bounds: Rect) -> bool {
+        let Some(result) = parse_asset_browser_navigation(action) else {
+            return false;
+        };
+        match result {
+            Ok(payload) => {
+                let folder_id = self.valid_asset_folder_id(payload.folder_id);
+                self.root.set_asset_folder_id(folder_id);
+                self.root.refresh_from_app_state_with_preferences_and_runtime_logs(
+                    &self.app_state.borrow(),
+                    &self.preferences,
+                    self.console_log_buffer.as_ref(),
+                );
+                TreeWalker::layout(&mut self.root, bounds);
+                true
+            }
+            Err(err) => {
+                tracing::warn!("invalid self-hosted asset browser action: {err}");
+                self.app_state
+                    .borrow_mut()
+                    .set_status_hint(format!("Asset browser action failed: {err}"), true);
+                self.mark_dirty();
+                true
+            }
+        }
+    }
+
+    fn valid_asset_folder_id(&self, folder_id: Option<String>) -> Option<String> {
+        let folder_id = folder_id?;
+        let exists = {
+            let app_state = self.app_state.borrow();
+            app_state
+                .asset_library
+                .as_ref()
+                .and_then(|library| match library.list_folders() {
+                    Ok(folders) => Some(folders.iter().any(|folder| folder.id == folder_id)),
+                    Err(err) => {
+                        tracing::warn!("failed to list asset folders for navigation: {err}");
+                        None
+                    }
+                })
+                .unwrap_or(false)
+        };
+        exists.then_some(folder_id)
+    }
 }
 
 fn take_shell_window_command(commands: &mut SelfHostedShellCommands, action: &Action) -> bool {
@@ -319,9 +370,23 @@ fn parse_preferences_theme_update(
     }
 }
 
+fn parse_asset_browser_navigation(
+    action: &Action,
+) -> Option<Result<AssetsOpenFolderPayload, serde_json::Error>> {
+    match action {
+        Action::Custom { namespace, name, payload }
+            if namespace == ASSETS_NAMESPACE && name == ASSETS_OPEN_FOLDER =>
+        {
+            Some(serde_json::from_value(payload.clone()))
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mondrian_assets::AssetLibrary;
     use mondrian_core::types::AssetId;
     use mondrian_editor_state::Action;
     use mondrian_platform::{FileFilter, NoopPlatformService};
@@ -426,6 +491,10 @@ mod tests {
             .expect("system clock should be after unix epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("mondrian-host-{name}-{nanos}.json"))
+    }
+
+    fn temp_asset_library_dir(name: &str) -> PathBuf {
+        temp_preferences_path(name).with_extension("assets")
     }
 
     #[test]
@@ -645,6 +714,44 @@ mod tests {
         assert_eq!(commands, SelfHostedShellCommands::default());
         assert_eq!(platform.open_file_dialog_calls.load(Ordering::Relaxed), 0);
         assert!(host.app_state().status_hint.is_none());
+    }
+
+    #[test]
+    fn host_handles_asset_folder_navigation_as_shell_local_state() {
+        let root = temp_asset_library_dir("asset-folder-navigation");
+        let library = AssetLibrary::open(root.clone()).expect("open asset library");
+        let folder_id = library.create_folder("Rushes", None).expect("create folder");
+        let mut state = AppState::new();
+        state.asset_library = Some(library);
+        let mut host = SelfHostedUiHost::new(state);
+        let pending = PendingUiActions::default();
+
+        pending.push(crate::app::ui_actions::assets_open_folder_action(
+            crate::app::ui_actions::AssetsOpenFolderPayload { folder_id: Some(folder_id.clone()) },
+        ));
+        let commands = host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+
+        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert_eq!(host.root().asset_folder_id(), Some(folder_id.as_str()));
+        assert!(host.app_state().status_hint.is_none());
+
+        pending.push(crate::app::ui_actions::assets_open_folder_action(
+            crate::app::ui_actions::AssetsOpenFolderPayload { folder_id: None },
+        ));
+        host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+
+        assert_eq!(host.root().asset_folder_id(), None);
+        assert!(host.app_state().status_hint.is_none());
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
