@@ -11,7 +11,7 @@ use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, Widget};
 use mondrian_ui_widgets::dock_panel::DockPanel;
 use mondrian_ui_widgets::dock_splitter::DockSplitter;
-use mondrian_ui_widgets::{PanelList, PanelListState};
+use mondrian_ui_widgets::{PanelList, PanelListState, ScrollView, ScrollViewState};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -42,6 +42,13 @@ pub const PROJECT_FILE_EXTENSION: &str = "mdp";
 struct DockPanelState {
     owner: PanelKind,
     active_index: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PanelScrollState {
+    owner: PanelKind,
+    ordinal: usize,
+    state: ScrollViewState,
 }
 
 /// File dialog filters for project file commands.
@@ -313,15 +320,18 @@ impl SelfHostedAppRoot {
         let layout = self.dock.layout_snapshot();
         let dock_panel_state = collect_dock_panel_state(&self.dock);
         let panel_list_state = collect_panel_list_state(&self.dock);
+        let panel_scroll_state = collect_panel_scroll_state(&self.dock);
         self.models = models;
         self.dock = build_dock_tree_for_preset(self.models.clone(), self.workspace_preset);
         self.dock.restore_layout(&layout);
         restore_dock_panel_state(&mut self.dock, &dock_panel_state);
         restore_panel_list_state(&mut self.dock, &panel_list_state);
+        restore_panel_scroll_state(&mut self.dock, &panel_scroll_state);
         if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
             self.layout(self.bounds);
             restore_dock_panel_state(&mut self.dock, &dock_panel_state);
             restore_panel_list_state(&mut self.dock, &panel_list_state);
+            restore_panel_scroll_state(&mut self.dock, &panel_scroll_state);
         }
     }
 
@@ -618,6 +628,66 @@ fn restore_panel_list_state(widget: &mut dyn Widget, states: &BTreeMap<String, P
     }
 }
 
+fn collect_panel_scroll_state(widget: &dyn Widget) -> Vec<PanelScrollState> {
+    let mut states = Vec::new();
+    collect_panel_scroll_state_into(widget, None, &mut states);
+    states
+}
+
+fn collect_panel_scroll_state_into(
+    widget: &dyn Widget,
+    owner: Option<PanelKind>,
+    states: &mut Vec<PanelScrollState>,
+) {
+    let owner = widget.panel_kind().or(owner);
+    if let (Some(owner), Some(scroll)) = (
+        owner,
+        widget.as_any().and_then(|any| any.downcast_ref::<ScrollView>()),
+    ) {
+        states.push(PanelScrollState {
+            owner,
+            ordinal: states.iter().filter(|state| state.owner == owner).count(),
+            state: scroll.state(),
+        });
+    }
+    for index in 0..widget.child_count() {
+        if let Some(child) = widget.child(index) {
+            collect_panel_scroll_state_into(child, owner, states);
+        }
+    }
+}
+
+fn restore_panel_scroll_state(widget: &mut dyn Widget, states: &[PanelScrollState]) {
+    let mut restored = Vec::new();
+    restore_panel_scroll_state_into(widget, None, states, &mut restored);
+}
+
+fn restore_panel_scroll_state_into(
+    widget: &mut dyn Widget,
+    owner: Option<PanelKind>,
+    states: &[PanelScrollState],
+    restored: &mut Vec<(PanelKind, usize)>,
+) {
+    let owner = widget.panel_kind().or(owner);
+    if let Some(owner) = owner {
+        if let Some(scroll) = widget.as_any_mut().and_then(|any| any.downcast_mut::<ScrollView>()) {
+            let ordinal =
+                restored.iter().filter(|(restored_owner, _)| *restored_owner == owner).count();
+            if let Some(state) =
+                states.iter().find(|state| state.owner == owner && state.ordinal == ordinal)
+            {
+                scroll.restore_state(&state.state);
+            }
+            restored.push((owner, ordinal));
+        }
+    }
+    for index in 0..widget.child_count() {
+        if let Some(child) = widget.child_mut(index) {
+            restore_panel_scroll_state_into(child, owner, states, restored);
+        }
+    }
+}
+
 impl Widget for SelfHostedAppRoot {
     fn id(&self) -> WidgetId {
         self.id
@@ -705,6 +775,7 @@ mod tests {
         EXPORT_SET_DRAFT, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
     };
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use glam::Vec2;
     use mondrian_core::{Rational, Resolution};
     use mondrian_timeline::sequence::PreviewRenderFormat;
     use mondrian_ui_core::tree::WidgetTreeView;
@@ -933,6 +1004,48 @@ mod tests {
         for index in 0..widget.child_count() {
             if let Some(child) = widget.child_mut(index) {
                 if with_panel_list_mut_for_title(child, title, update) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn scroll_state_for_panel(widget: &dyn Widget, panel: PanelKind) -> Option<ScrollViewState> {
+        collect_panel_scroll_state(widget)
+            .into_iter()
+            .find(|state| state.owner == panel && state.ordinal == 0)
+            .map(|state| state.state)
+    }
+
+    fn with_scroll_view_mut_for_panel(
+        widget: &mut dyn Widget,
+        panel: PanelKind,
+        update: &mut dyn FnMut(&mut ScrollView),
+    ) -> bool {
+        with_scroll_view_mut_for_panel_inner(widget, None, panel, update)
+    }
+
+    fn with_scroll_view_mut_for_panel_inner(
+        widget: &mut dyn Widget,
+        owner: Option<PanelKind>,
+        panel: PanelKind,
+        update: &mut dyn FnMut(&mut ScrollView),
+    ) -> bool {
+        let owner = widget.panel_kind().or(owner);
+        if owner == Some(panel)
+            && widget.as_any().and_then(|any| any.downcast_ref::<ScrollView>()).is_some()
+        {
+            if let Some(scroll) =
+                widget.as_any_mut().and_then(|any| any.downcast_mut::<ScrollView>())
+            {
+                update(scroll);
+                return true;
+            }
+        }
+        for index in 0..widget.child_count() {
+            if let Some(child) = widget.child_mut(index) {
+                if with_scroll_view_mut_for_panel_inner(child, owner, panel, update) {
                     return true;
                 }
             }
@@ -1665,6 +1778,31 @@ mod tests {
         );
         let state = panel_list_state_for_title(&root, "Effects").expect("effects state");
         assert_eq!(state.filter_query, "blur");
+    }
+
+    #[test]
+    fn set_models_preserves_panel_scroll_position() {
+        let mut root = SelfHostedAppRoot::demo();
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 480.0));
+        assert!(with_scroll_view_mut_for_panel(
+            root.dock_mut(),
+            PanelKind::Inspector,
+            &mut |scroll| {
+                scroll.set_scroll_offset(Vec2::new(0.0, 96.0));
+            },
+        ));
+        let before = scroll_state_for_panel(root.dock(), PanelKind::Inspector)
+            .expect("inspector should have a scroll view");
+        assert!(
+            before.scroll_offset.y > 0.0,
+            "test fixture must overflow vertically"
+        );
+
+        root.set_models(SelfHostedPanelModels::demo());
+
+        let after = scroll_state_for_panel(root.dock(), PanelKind::Inspector)
+            .expect("inspector should keep a scroll view");
+        assert_eq!(after.scroll_offset, before.scroll_offset);
     }
 
     #[test]

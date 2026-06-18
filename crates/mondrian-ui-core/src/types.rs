@@ -158,6 +158,15 @@ impl Rect {
             && self.y + self.height > other.y
     }
 
+    /// Return the visible overlap of two rectangles.
+    pub fn intersection(&self, other: &Rect) -> Self {
+        let left = self.x.max(other.x);
+        let top = self.y.max(other.y);
+        let right = (self.x + self.width).min(other.x + other.width);
+        let bottom = (self.y + self.height).min(other.y + other.height);
+        Self::from_min_max(left, top, right.max(left), bottom.max(top))
+    }
+
     pub fn inset(&self, dx: f32, dy: f32) -> Self {
         Self {
             x: self.x + dx,
@@ -483,6 +492,22 @@ mod tests {
     fn rect_contains_center() {
         let r = Rect::new(0.0, 0.0, 100.0, 100.0);
         assert!(r.contains(Point::new(50.0, 50.0)));
+    }
+
+    #[test]
+    fn rect_intersection_returns_overlap() {
+        let a = Rect::new(10.0, 20.0, 100.0, 80.0);
+        let b = Rect::new(60.0, 10.0, 120.0, 50.0);
+
+        assert_eq!(a.intersection(&b), Rect::new(60.0, 20.0, 50.0, 40.0));
+    }
+
+    #[test]
+    fn rect_intersection_returns_zero_sized_rect_when_disjoint() {
+        let a = Rect::new(0.0, 0.0, 10.0, 10.0);
+        let b = Rect::new(20.0, 30.0, 5.0, 5.0);
+
+        assert_eq!(a.intersection(&b), Rect::new(20.0, 30.0, 0.0, 0.0));
     }
 
     #[test]

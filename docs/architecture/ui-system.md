@@ -16,6 +16,9 @@ winit
 `mondrian-ui-core` owns platform-neutral primitives: geometry, events,
 widgets, focus traits, shortcut traits, tooltip traits, and the event request
 surface. It does not depend on winit, wgpu, arboard, or OS APIs.
+Shared geometry helpers such as `Rect::intersection` live here so clipping
+semantics are consistent across widgets, hit testing, and renderer-facing
+command generation instead of being reimplemented per component.
 
 `mondrian-ui-events` owns routing: hit testing, focused keyboard dispatch, and
 pointer capture. Widgets record side-effect intent in `EventRequests`; the
@@ -536,6 +539,10 @@ content clip inside a `ScrollView`, the renderer intersects that child clip with
 the active parent viewport clip before batching and applying the GPU scissor.
 Nested clips must never replace their parent clip; otherwise text glyph images
 inside a scrolled child can bleed over sibling controls outside the viewport.
+Clipped containers must also narrow `PaintContext.clip_rect` while painting
+children, not just push a renderer clip command. Text and paragraph widgets use
+that paint-time clip for width decisions, so the component layer and renderer
+clip stack must describe the same viewport.
 Clip rectangles are snapped conservatively by flooring their top-left and
 ceiling their bottom-right edge before GPU scissoring. Ordinary shape, image,
 line, and vector geometry keeps subpixel coordinates so SDF antialiasing, MSAA,
@@ -656,6 +663,13 @@ panel content widgets, but it must preserve dock chrome state. `DockSplitter`
 therefore exposes a layout snapshot containing splitter direction/ratio data
 only, and `SelfHostedAppRoot::set_models` restores that snapshot before
 relayout so app data changes do not reset user-resized panels.
+Panel-local state that is not editor data should expose a small typed widget
+snapshot and be restored at this same shell boundary. `PanelListState` keeps
+filter, selection, and list scroll stable; `ScrollViewState` keeps long
+Inspector/Export-style panels from snapping back to the top. Scroll state is
+matched by owning `PanelKind` plus per-panel scroll ordinal so future panels can
+contain multiple scroll surfaces without relying on widget ids or legacy
+compatibility shims.
 
 Browser-style panels should use `PanelList` / `PanelListItem` instead of
 ad-hoc colored placeholders or one-off row painting. `PanelList` owns local

@@ -34,6 +34,12 @@ enum ScrollbarAxis {
     Vertical,
 }
 
+/// Snapshot of scroll position that can survive widget-tree rebuilds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScrollViewState {
+    pub scroll_offset: Vec2,
+}
+
 /// 可滚动的单子节点容器
 pub struct ScrollView {
     id: WidgetId,
@@ -81,6 +87,27 @@ impl ScrollView {
 
     pub fn scroll_offset(&self) -> Vec2 {
         self.scroll_offset
+    }
+
+    /// Return the scroll state needed to restore this view after rebuilding.
+    pub fn state(&self) -> ScrollViewState {
+        ScrollViewState { scroll_offset: self.scroll_offset }
+    }
+
+    /// Restore a previously captured scroll state.
+    pub fn restore_state(&mut self, state: &ScrollViewState) {
+        self.scroll_offset = Vec2::new(
+            state.scroll_offset.x.max(0.0),
+            state.scroll_offset.y.max(0.0),
+        );
+        if self.bounds.width > 0.0
+            && self.bounds.height > 0.0
+            && self.content_size.width > 0.0
+            && self.content_size.height > 0.0
+        {
+            self.clamp_scroll_offset();
+            self.layout_child();
+        }
     }
 
     /// Set the scroll offset, clamped to the current content and viewport.
@@ -528,10 +555,13 @@ impl Widget for ScrollView {
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
+        let previous_clip = ctx.clip_rect;
+        ctx.clip_rect = previous_clip.intersection(&self.bounds);
         ctx.encoder.push_clip(self.bounds);
         if let Some(ref child) = self.child {
             child.paint(ctx);
         }
+        ctx.clip_rect = previous_clip;
 
         if let Some(mut sb_rect) = self.vertical_scrollbar_thumb_rect() {
             let dragging = self.dragging_thumb == Some(ScrollbarAxis::Vertical);
@@ -622,6 +652,14 @@ impl Widget for ScrollView {
             Some(c) => std::slice::from_mut(c),
             None => &mut [],
         }
+    }
+
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
     }
 }
 
@@ -735,6 +773,38 @@ mod tests {
         }
     }
 
+    struct ClipRecordingChild {
+        id: WidgetId,
+        preferred: Size,
+        clip_rect: Rc<RefCell<Option<Rect>>>,
+    }
+
+    impl ClipRecordingChild {
+        fn new(preferred: Size, clip_rect: Rc<RefCell<Option<Rect>>>) -> Self {
+            Self { id: WidgetId::new(), preferred, clip_rect }
+        }
+    }
+
+    impl Widget for ClipRecordingChild {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+
+        fn measure(&self, _constraint: LayoutConstraint) -> Size {
+            self.preferred
+        }
+
+        fn layout(&mut self, _bounds: Rect) {}
+
+        fn event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+            EventResult::Ignored
+        }
+
+        fn paint(&self, ctx: &mut PaintContext) {
+            *self.clip_rect.borrow_mut() = Some(ctx.clip_rect);
+        }
+    }
+
     #[derive(Default)]
     struct RecordingEncoder {
         translations: Vec<Vec2>,
@@ -768,6 +838,21 @@ mod tests {
     }
 
     #[test]
+    fn scroll_view_state_round_trips_after_layout() {
+        let child = Spacer::new(600.0, 900.0);
+        let mut original = ScrollView::new(Some(Box::new(child))).with_axes(ScrollAxes::Both);
+        original.layout(Rect::new(0.0, 0.0, 300.0, 240.0));
+        original.set_scroll_offset(Vec2::new(120.0, 180.0));
+
+        let mut rebuilt =
+            ScrollView::new(Some(Box::new(Spacer::new(600.0, 900.0)))).with_axes(ScrollAxes::Both);
+        rebuilt.layout(Rect::new(0.0, 0.0, 300.0, 240.0));
+        rebuilt.restore_state(&original.state());
+
+        assert_eq!(rebuilt.scroll_offset(), Vec2::new(120.0, 180.0));
+    }
+
+    #[test]
     fn scroll_view_measure_with_child() {
         let child = Spacer::new(200.0, 400.0);
         let sv = ScrollView::new(Some(Box::new(child)));
@@ -784,6 +869,30 @@ mod tests {
         // content_size should reflect child's measured size
         assert!(sv.content_size.height > 0.0);
         assert!(sv.content_size.width > 0.0);
+    }
+
+    #[test]
+    fn scroll_view_paint_narrows_child_clip_rect_to_viewport() {
+        let observed_clip = Rc::new(RefCell::new(None));
+        let child = ClipRecordingChild::new(Size::new(400.0, 400.0), Rc::clone(&observed_clip));
+        let mut sv = ScrollView::new(Some(Box::new(child)));
+        sv.layout(Rect::new(40.0, 50.0, 120.0, 90.0));
+
+        let mut encoder = RecordingEncoder::default();
+        let theme = ThemePreset::Dark.build();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 100.0, 100.0),
+        };
+
+        sv.paint(&mut ctx);
+
+        assert_eq!(
+            *observed_clip.borrow(),
+            Some(Rect::new(40.0, 50.0, 60.0, 50.0))
+        );
+        assert_eq!(ctx.clip_rect, Rect::new(0.0, 0.0, 100.0, 100.0));
     }
 
     #[test]
