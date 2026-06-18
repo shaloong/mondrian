@@ -162,12 +162,15 @@ mod tests {
     #[derive(Default)]
     struct RecordingEncoder {
         rects: Vec<Rect>,
+        clips: Vec<Rect>,
         texts: Vec<(String, Point)>,
         text_boxes: Vec<(String, Point, f32)>,
     }
 
     impl DrawCommandEncoder for RecordingEncoder {
-        fn push_clip(&mut self, _bounds: Rect) {}
+        fn push_clip(&mut self, bounds: Rect) {
+            self.clips.push(bounds);
+        }
 
         fn pop_clip(&mut self) {}
 
@@ -333,6 +336,35 @@ mod tests {
         assert!(fill.width <= clip_rect.width);
         assert_eq!(encoder.text_boxes.len(), 1);
         assert!(encoder.text_boxes[0].2 <= clip_rect.width - HORIZONTAL_PADDING * 2.0 + 0.1);
+    }
+
+    #[test]
+    fn paint_text_box_width_matches_clamped_fill_content_width() {
+        let mut widget = TooltipWidget::new();
+        widget.update_state(TooltipState {
+            text: "A tooltip near the right edge should keep text inside the popover fill".into(),
+            position: Point::new(174.0, 20.0),
+            visible: true,
+        });
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let clip_rect = Rect::new(0.0, 0.0, 220.0, 180.0);
+        {
+            let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+            widget.paint_overlay(&mut ctx);
+        }
+
+        let fill = encoder.rects.get(1).expect("paint should draw border and fill");
+        let clip = encoder.clips.first().expect("text should be clipped to the fill rect");
+        let (_, text_position, text_width) =
+            encoder.text_boxes.first().expect("tooltip should draw a text box");
+        assert_eq!(*clip, *fill);
+        assert!(text_position.x >= fill.x + HORIZONTAL_PADDING - 0.1);
+        assert!(text_position.y >= fill.y + VERTICAL_PADDING - 0.1);
+        assert!(
+            text_position.x + text_width <= fill.x + fill.width - HORIZONTAL_PADDING + 0.1,
+            "tooltip text box must not extend beyond the clamped fill rect"
+        );
     }
 
     #[test]

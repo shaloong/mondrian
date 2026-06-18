@@ -93,7 +93,8 @@ impl TextRenderer {
 /// 后处理：将 DrawCommand::Text 替换为字形 DrawCommand::Image
 ///
 /// 在每个渲染帧调用 `TreeWalker::paint()` 之后、`UiRenderer::render()` 之前使用。
-/// 首次出现的字形本帧不显示（下帧 atlas 上传 GPU 后可见）。
+/// 调用者应在提交本帧前上传 `TextRenderer::take_pending_uploads()`，这样首次出现
+/// 的字形也能在同一帧可见。
 pub fn resolve_text_commands(
     commands: Vec<DrawCommand>,
     text_renderer: &mut TextRenderer,
@@ -704,10 +705,6 @@ mod tests {
             max_width: None,
             color: Color::WHITE,
         }];
-        // First pass: rasterizes
-        let _ = resolve_text_commands(commands.clone(), &mut r);
-        let _ = r.take_pending_uploads();
-        // Second pass: should return Image commands
         let resolved = resolve_text_commands(commands, &mut r);
         let image_count =
             resolved.iter().filter(|c| matches!(c, DrawCommand::Image { .. })).count();
@@ -715,6 +712,10 @@ mod tests {
             image_count > 0,
             "Expected Image commands, got none. Commands: {:?}",
             resolved
+        );
+        assert!(
+            !r.take_pending_uploads().is_empty(),
+            "first text resolve should expose glyph uploads before the frame is submitted"
         );
         // No Text commands should remain
         let text_remaining =

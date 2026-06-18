@@ -39,7 +39,11 @@ impl GlyphAtlas {
         }
     }
 
-    /// 获取或光栅化字形。首次返回 None，下一次返回 (UV rect, bmp_w, bmp_h, top)。
+    /// 获取或光栅化字形，返回 atlas UV、bitmap 尺寸和 swash placement。
+    ///
+    /// 首次光栅化会分配 atlas 槽位并加入 `pending_uploads`，同时立即返回
+    /// 可用于本帧 draw command 的 UV。调用方必须在提交本帧前上传 pending
+    /// glyph 数据。
     /// `top` 是 glyph bitmap 内部 placement.top（swash rasterized offset）。
     pub fn get_or_rasterize(
         &mut self,
@@ -107,7 +111,7 @@ impl GlyphAtlas {
             data: padded_alpha,
         });
 
-        None
+        Some((uv_rect, bmp_w, bmp_h, top, left))
     }
 
     pub fn size(&self) -> (u32, u32) {
@@ -302,11 +306,9 @@ mod tests {
         let glyphs = layout.glyphs();
         assert!(!glyphs.is_empty());
 
-        // First call rasterizes (returns None), second returns cached UV
-        let _ = atlas.get_or_rasterize(&mut mgr.font_system, &glyphs[0], 0.0);
         let (uv, _w, _h, _top, _left) = atlas
             .get_or_rasterize(&mut mgr.font_system, &glyphs[0], 0.0)
-            .expect("Second call should return cached UV");
+            .expect("First call should return freshly allocated UV");
 
         assert!(uv.x >= 0.0 && uv.x <= 1.0, "UV x={} out of [0,1]", uv.x);
         assert!(uv.y >= 0.0 && uv.y <= 1.0, "UV y={} out of [0,1]", uv.y);
@@ -396,21 +398,17 @@ mod tests {
         let glyphs = layout.glyphs();
         assert!(!glyphs.is_empty());
 
-        // First call: rasterizes, returns None
+        // First call rasterizes and returns freshly allocated UV; second should
+        // reuse the cached geometry.
         let first = atlas.get_or_rasterize(&mut mgr.font_system, &glyphs[0], 0.0);
-        // Second call: should return cached UV
         let second = atlas.get_or_rasterize(&mut mgr.font_system, &glyphs[0], 0.0);
 
-        if first.is_none() {
-            // First rasterized, bitmap in pending_uploads, second should be cached
-            assert!(second.is_some(), "Second call should return cached UV+size");
-        } else {
-            // Already cached somehow — should be the same
-            assert_eq!(
-                first.map(|(r, _, _, _, _)| r),
-                second.map(|(r, _, _, _, _)| r)
-            );
-        }
+        assert!(first.is_some(), "First call should return UV+size");
+        assert!(second.is_some(), "Second call should return cached UV+size");
+        assert_eq!(
+            first.map(|(r, _, _, _, _)| r),
+            second.map(|(r, _, _, _, _)| r)
+        );
     }
 
     // ── Bearing & Placement Tests ────────────────────────────────────────

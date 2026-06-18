@@ -980,20 +980,22 @@ Controls with different geometry, such as slider thumb halos or inset timeline
 focus borders, may keep local painting while preserving the same theme token
 vocabulary.
 
-`DrawEncoder` snaps axis-aligned UI geometry to whole pixels at command
-recording time: rectangle bounds, line endpoints, clip bounds, image bounds,
-and translate offsets. This keeps rounded-rect circles, slider thumbs,
-splitter handles, and scrollbar thumbs visually stable after window resizing.
-Arbitrary triangle geometry, including filled checkmarks, fallback SVG meshes,
-and color wheel meshes, preserves subpixel vertices so lyon-tessellated curves
-and diagonals do not lose shape quality before the GPU rasterizer sees them.
+`DrawEncoder` preserves subpixel geometry for rectangles, gradients, lines,
+images, raster icons, and arbitrary triangle meshes. This lets the GPU shape SDF
+path, 4x MSAA resolve, and linear atlas sampling keep circles, SVG raster icons,
+diagonals, and text glyph images smooth during resize and scroll. Clip bounds
+are the exception: they are expanded conservatively with floor/ceil when the
+command is recorded, then intersected hierarchically by the renderer and applied
+as GPU scissors. Widgets may still opt into stable pixel placement at semantic
+edges with `snap_point()` or local layout policy, but whole-sale snapping of draw
+commands is avoided because it degrades curved/vector geometry and can misalign
+glyph bitmap bearings.
 The GPU UI pass renders through a cached 4x MSAA target and resolves into the
 surface view. Raster icon images use a separate renderer-owned image atlas with
 linear sampling so small SVG icons receive browser-like coverage from
-resvg/tiny-skia without sharing mutable atlas state with text glyphs. Text
-positions are left to the text renderer and caller-side layout policy, and image
-UVs remain unsnapped because they are texture coordinates rather than
-screen-space geometry.
+resvg/tiny-skia without sharing mutable atlas state with text glyphs. Image UVs
+remain unsnapped because they are texture coordinates rather than screen-space
+geometry.
 Linear-sampled atlas entries must upload their full allocated rectangle,
 including transparent padding around the inner content UV. Padding is not just
 reserved packing space: it is sampled by the GPU at fractional edges, so leaving
@@ -1017,7 +1019,10 @@ batch clip rect as a GPU scissor before drawing. A command emitted inside
 glyph images and other later-resolved commands can bleed outside their widget
 content rects.
 Self-hosted windows share `SelfHostedFrameRenderer` for the text-atlas upload
-and surface-present path. If a frame resolves new glyphs and uploads atlas
+and surface-present path. `mondrian-ui-text` resolves text into glyph image
+commands and exposes pending glyph uploads before the frame is submitted, so the
+renderer can upload first-use glyphs and draw them in the same frame. If a frame
+resolves new glyphs and uploads atlas
 entries, the returned frame result asks the window to schedule one immediate
 follow-up redraw so the first stable visual frame does not depend on a later
 mouse move or resize event.

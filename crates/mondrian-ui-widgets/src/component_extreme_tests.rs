@@ -25,6 +25,7 @@ struct TextCommand {
 #[derive(Default)]
 struct RecordingEncoder {
     rects: Vec<Rect>,
+    clips: Vec<Rect>,
     lines: Vec<(Point, Point, f32)>,
     triangle_batches: Vec<Vec<Point>>,
     raster_images: Vec<Rect>,
@@ -43,6 +44,9 @@ impl RecordingEncoder {
         );
         for rect in &self.rects {
             assert_rect_finite(*rect);
+        }
+        for clip in &self.clips {
+            assert_rect_finite(*clip);
         }
         for (start, end, width) in &self.lines {
             assert_point_finite(*start);
@@ -75,6 +79,7 @@ impl RecordingEncoder {
 impl DrawCommandEncoder for RecordingEncoder {
     fn push_clip(&mut self, bounds: Rect) {
         assert_rect_finite(bounds);
+        self.clips.push(bounds);
         self.clip_depth += 1;
     }
 
@@ -556,6 +561,11 @@ fn overlay_and_scroll_container_extremes_keep_paint_and_event_state_stable() {
     );
     assert!(scroll.scroll_offset().y >= 0.0);
     let scroll_paint = paint_widget(&scroll, Rect::new(0.0, 0.0, 48.0, 24.0));
+    assert_eq!(
+        scroll_paint.clips.first().copied(),
+        Some(Rect::new(0.0, 0.0, 48.0, 24.0)),
+        "scroll view must establish its viewport clip before painting child content"
+    );
     assert!(
         scroll_paint.texts.iter().any(|text| text.text.contains("Scrollable")),
         "scroll view should paint translated child content through a balanced clip"
