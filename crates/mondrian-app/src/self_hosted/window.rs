@@ -39,7 +39,7 @@ pub(crate) const SELF_HOSTED_BACKGROUND_WORKERS: usize = 4;
 pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
     let _background_runtime = build_self_hosted_background_runtime()?;
     let _background_runtime_guard = _background_runtime.enter();
-    let _console_log_buffer = init_self_hosted_tracing();
+    let console_log_buffer = init_self_hosted_tracing();
 
     tracing::info!("Mondrian self-hosted UI starting");
 
@@ -74,7 +74,8 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
     let mut frame_renderer = SelfHostedFrameRenderer::new(&device, config.format);
     let mut render_diagnostic_reporter = SelfHostedRenderDiagnosticReporter::default();
 
-    let mut host = SelfHostedUiHost::new(AppState::new());
+    let mut host =
+        SelfHostedUiHost::new_with_console_log_buffer(AppState::new(), console_log_buffer);
     let bounds = Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
     TreeWalker::layout(host.root_mut(), bounds);
     let mut router = EventRouter::with_platform_and_tooltip(
@@ -174,6 +175,7 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             Event::WindowEvent { event: WindowEvent::RedrawRequested, .. } => {
+                host.refresh_if_dirty(current_bounds.get());
                 let mut encoder = DrawEncoder::new();
                 let theme = mondrian_ui_theme::current_theme();
                 let b = current_bounds.get();
@@ -196,6 +198,8 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                         diagnostics.text_missing_glyphs,
                         diagnostics.raster_image_failures
                     );
+                    host.mark_dirty();
+                    window.request_redraw();
                 }
                 if frame_result.needs_follow_up_redraw() {
                     window.request_redraw();

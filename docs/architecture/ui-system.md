@@ -1098,6 +1098,11 @@ results through `SelfHostedRenderDiagnosticReporter`, which logs only changed
 failure counts and resets after a healthy frame. Render diagnostics should go to
 the developer-facing console/log path by default; the status bar is reserved for
 actionable project or editor-state messages.
+The product window injects the `ConsoleLogLayer` buffer into `SelfHostedUiHost`
+so the self-hosted Console tab reads the same runtime log stream that tracing
+captures. When render diagnostics emit a warning after a frame, the host marks
+its panel models dirty and requests one follow-up redraw; the next paint refresh
+pulls the new log entry into the Console model without waiting for user input.
 
 The renderer must flush draw batches when clip state changes and must apply the
 batch clip rect as a GPU scissor before drawing. A command emitted inside

@@ -36,6 +36,8 @@ use mondrian_ui_widgets::{
     TimelineTrackMove, TimelineTrackRef, TimelineTrimEdge, TimelineView, ViewerSurface,
 };
 
+use mondrian_panel_console::tracing_layer::{LogBuffer, LogEntry};
+
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
 use crate::app::ui_actions::{
     app_shell_export_output_dialog_action, app_shell_import_media_dialog_action,
@@ -83,11 +85,19 @@ impl SelfHostedPanelModels {
     /// This is a read-only boundary: widgets receive generic view models and
     /// emit actions, while domain mutations stay in `AppState` handlers.
     pub fn from_app_state(state: &AppState) -> Self {
+        Self::from_app_state_with_runtime_logs(state, None)
+    }
+
+    /// Snapshot app state plus runtime console logs into panel models.
+    pub fn from_app_state_with_runtime_logs(
+        state: &AppState,
+        runtime_logs: Option<&LogBuffer>,
+    ) -> Self {
         Self {
             project: PanelListModel::from_project_status(state),
             assets: PanelListModel::from_asset_library(state.asset_library.as_deref()),
             effects: PanelListModel::from_app_effect_registry(state),
-            console: PanelListModel::from_app_status(state),
+            console: PanelListModel::from_app_status_and_logs(state, runtime_logs),
             viewer: ViewerPanelModel::from_app_state(state),
             timeline: state
                 .sequence
@@ -454,7 +464,15 @@ impl PanelListModel {
 
     /// Build the console panel from recent app status history plus runtime summary.
     pub fn from_app_status(state: &AppState) -> Self {
+        Self::from_app_status_and_logs(state, None)
+    }
+
+    /// Build the console panel from recent app status history and runtime logs.
+    pub fn from_app_status_and_logs(state: &AppState, runtime_logs: Option<&LogBuffer>) -> Self {
         let mut items = Vec::new();
+        for entry in recent_runtime_log_entries(runtime_logs, 8) {
+            items.push(runtime_log_item(entry));
+        }
         for entry in state.status_log.iter().rev().take(8) {
             items.push(status_log_item(entry.message.clone(), entry.is_error));
         }
@@ -496,6 +514,33 @@ impl PanelListModel {
 
         PanelListModel::new("Console", items).with_subtitle("Runtime messages")
     }
+}
+
+fn recent_runtime_log_entries(runtime_logs: Option<&LogBuffer>, limit: usize) -> Vec<LogEntry> {
+    runtime_logs
+        .map(|logs| logs.lock().iter().rev().take(limit).cloned().collect::<Vec<_>>())
+        .unwrap_or_default()
+}
+
+fn runtime_log_item(entry: LogEntry) -> PanelListItem {
+    let is_error = entry.level == tracing::Level::ERROR;
+    let is_warning = entry.level == tracing::Level::WARN;
+    let mut item = PanelListItem::new(entry.level.to_string())
+        .with_subtitle(format!("{} {}", entry.timestamp, entry.message))
+        .with_badge(entry.target);
+    if is_error {
+        item = item.with_accent(current_theme().colors.error);
+    } else if is_warning {
+        item = item.with_accent(current_theme().colors.warning);
+    }
+    with_app_icon(
+        item,
+        if is_error || is_warning {
+            AppIcon::Warning
+        } else {
+            AppIcon::Info
+        },
+    )
 }
 
 fn status_log_item(message: String, is_error: bool) -> PanelListItem {
@@ -2924,6 +2969,35 @@ mod tests {
         assert!(model.items.iter().any(|item| item.title == "Sequence" && item.icon.is_some()));
         assert!(model.items.iter().any(|item| item.title == "Timeline" && item.icon.is_some()));
         assert!(model.items.iter().any(|item| item.title == "Assets" && item.icon.is_some()));
+    }
+
+    #[test]
+    fn console_panel_model_includes_runtime_log_buffer_entries() {
+        let state = AppState::new();
+        let (_layer, logs) = mondrian_panel_console::tracing_layer::ConsoleLogLayer::new(10);
+        {
+            let mut logs = logs.lock();
+            logs.push_back(LogEntry {
+                timestamp: "12:34:56".into(),
+                level: tracing::Level::WARN,
+                target: "mondrian_app::self_hosted::rendering".into(),
+                message: "self-hosted UI render resource failures: missing_glyphs=1, raster_image_failures=0".into(),
+            });
+        }
+
+        let model = PanelListModel::from_app_status_and_logs(&state, Some(&logs));
+
+        assert_eq!(model.items[0].title, "WARN");
+        assert!(
+            model.items[0].subtitle.contains("missing_glyphs=1"),
+            "runtime log subtitle should include diagnostic message"
+        );
+        assert_eq!(
+            model.items[0].badge.as_deref(),
+            Some("mondrian_app::self_hosted::rendering")
+        );
+        assert!(model.items[0].accent.is_some());
+        assert!(model.items[0].icon.is_some());
     }
 
     #[test]

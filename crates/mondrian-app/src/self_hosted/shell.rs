@@ -5,6 +5,7 @@
 
 use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
 use mondrian_editor_state::Action;
+use mondrian_panel_console::tracing_layer::LogBuffer;
 use mondrian_platform::{FileFilter, PlatformService};
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
@@ -239,9 +240,18 @@ impl SelfHostedAppRoot {
         state: &AppState,
         preferences: &SelfHostedPreferences,
     ) -> Self {
+        Self::from_app_state_with_preferences_and_runtime_logs(state, preferences, None)
+    }
+
+    /// Build a root widget from app state, preferences, and runtime console logs.
+    pub fn from_app_state_with_preferences_and_runtime_logs(
+        state: &AppState,
+        preferences: &SelfHostedPreferences,
+        runtime_logs: Option<&LogBuffer>,
+    ) -> Self {
         Self::new_with_preferences(
             MenuBar::for_app_state(state),
-            SelfHostedPanelModels::from_app_state(state),
+            SelfHostedPanelModels::from_app_state_with_runtime_logs(state, runtime_logs),
             SelfHostedPreferencesModel::from_app_state(
                 state,
                 preferences.workspace_preset,
@@ -352,8 +362,21 @@ impl SelfHostedAppRoot {
         state: &AppState,
         preferences: &SelfHostedPreferences,
     ) {
+        self.refresh_from_app_state_with_preferences_and_runtime_logs(state, preferences, None);
+    }
+
+    /// Refresh panel contents, preferences, and runtime console logs.
+    pub fn refresh_from_app_state_with_preferences_and_runtime_logs(
+        &mut self,
+        state: &AppState,
+        preferences: &SelfHostedPreferences,
+        runtime_logs: Option<&LogBuffer>,
+    ) {
         self.menu_bar = MenuBar::for_app_state(state);
-        self.set_models(SelfHostedPanelModels::from_app_state(state));
+        self.set_models(SelfHostedPanelModels::from_app_state_with_runtime_logs(
+            state,
+            runtime_logs,
+        ));
         let preferences_model = SelfHostedPreferencesModel::from_app_state(
             state,
             self.workspace_preset,

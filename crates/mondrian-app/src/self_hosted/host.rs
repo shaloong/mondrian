@@ -8,6 +8,7 @@ use std::cell::{Cell, Ref, RefCell};
 use std::path::PathBuf;
 
 use mondrian_editor_state::state::WorkspacePreset;
+use mondrian_panel_console::tracing_layer::LogBuffer;
 use mondrian_platform::PlatformService;
 use mondrian_ui_core::types::Rect;
 use mondrian_ui_core::TreeWalker;
@@ -45,6 +46,7 @@ pub struct SelfHostedUiHost {
     app_state: RefCell<AppState>,
     preferences: SelfHostedPreferences,
     preferences_path: PathBuf,
+    console_log_buffer: Option<LogBuffer>,
     ui_dirty: Cell<bool>,
 }
 
@@ -55,6 +57,17 @@ impl SelfHostedUiHost {
             app_state,
             load_self_hosted_preferences(),
             self_hosted_preferences_path(),
+            None,
+        )
+    }
+
+    /// Create a host that includes runtime tracing entries in the Console tab.
+    pub fn new_with_console_log_buffer(app_state: AppState, console_log_buffer: LogBuffer) -> Self {
+        Self::new_with_preferences_path(
+            app_state,
+            load_self_hosted_preferences(),
+            self_hosted_preferences_path(),
+            Some(console_log_buffer),
         )
     }
 
@@ -63,14 +76,20 @@ impl SelfHostedUiHost {
         app_state: AppState,
         preferences: SelfHostedPreferences,
         preferences_path: PathBuf,
+        console_log_buffer: Option<LogBuffer>,
     ) -> Self {
         set_theme_preset(preferences.theme_preset);
-        let root = SelfHostedAppRoot::from_app_state_with_preferences(&app_state, &preferences);
+        let root = SelfHostedAppRoot::from_app_state_with_preferences_and_runtime_logs(
+            &app_state,
+            &preferences,
+            console_log_buffer.as_ref(),
+        );
         Self {
             root,
             app_state: RefCell::new(app_state),
             preferences,
             preferences_path,
+            console_log_buffer,
             ui_dirty: Cell::new(false),
         }
     }
@@ -105,8 +124,11 @@ impl SelfHostedUiHost {
         if !self.ui_dirty.replace(false) {
             return;
         }
-        self.root
-            .refresh_from_app_state_with_preferences(&self.app_state.borrow(), &self.preferences);
+        self.root.refresh_from_app_state_with_preferences_and_runtime_logs(
+            &self.app_state.borrow(),
+            &self.preferences,
+            self.console_log_buffer.as_ref(),
+        );
         TreeWalker::layout(&mut self.root, bounds);
     }
 
@@ -223,9 +245,10 @@ impl SelfHostedUiHost {
                         .borrow_mut()
                         .set_status_hint(format!("Preferences could not be saved: {err}"), true);
                 }
-                self.root.refresh_from_app_state_with_preferences(
+                self.root.refresh_from_app_state_with_preferences_and_runtime_logs(
                     &self.app_state.borrow(),
                     &self.preferences,
+                    self.console_log_buffer.as_ref(),
                 );
                 TreeWalker::layout(&mut self.root, bounds);
                 true
@@ -402,6 +425,7 @@ mod tests {
                 workspace_preset: WorkspacePreset::Compositing,
             },
             temp_preferences_path("initial-workspace"),
+            None,
         );
 
         TreeWalker::layout(host.root_mut(), Rect::new(0.0, 0.0, 1280.0, 720.0));
@@ -453,6 +477,7 @@ mod tests {
             AppState::new(),
             SelfHostedPreferences::default(),
             path.clone(),
+            None,
         );
         let pending = PendingUiActions::default();
 
@@ -488,6 +513,7 @@ mod tests {
                 workspace_preset: WorkspacePreset::Editing,
             },
             path.clone(),
+            None,
         );
         let pending = PendingUiActions::default();
 
