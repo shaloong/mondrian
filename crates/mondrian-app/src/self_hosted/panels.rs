@@ -35,7 +35,7 @@ use mondrian_ui_widgets::{
     PropertySection, ScrollView, Slider, TextInput, TimelineAssetDrop, TimelineClip,
     TimelineClipMove, TimelineClipRef, TimelineClipTrim, TimelineEditCommand, TimelineTrack,
     TimelineTrackControl, TimelineTrackMove, TimelineTrackRef, TimelineTrimEdge, TimelineView,
-    ViewerSurface,
+    ViewerFrameImage, ViewerSurface,
 };
 
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
@@ -471,6 +471,7 @@ pub struct ViewerPanelModel {
     pub height: u32,
     pub playing: bool,
     pub enabled: bool,
+    pub frame_image: Option<ViewerFrameImage>,
 }
 
 impl ViewerPanelModel {
@@ -500,6 +501,7 @@ impl ViewerPanelModel {
             height: resolution.height,
             playing: state.is_playing(),
             enabled: true,
+            frame_image: None,
         }
     }
 
@@ -515,6 +517,7 @@ impl ViewerPanelModel {
             height: 9,
             playing: false,
             enabled: false,
+            frame_image: None,
         }
     }
 }
@@ -1226,13 +1229,17 @@ fn panel_content_for_slot(kind: SlotKind, models: &SelfHostedPanelModels) -> Box
 }
 
 fn viewer_panel(model: &ViewerPanelModel) -> ViewerSurface {
-    ViewerSurface::new(model.title.clone(), model.width, model.height)
+    let surface = ViewerSurface::new(model.title.clone(), model.width, model.height)
         .with_status(model.status.clone())
         .with_resolution_label(model.resolution_label.clone())
         .with_frame_label(model.frame_label.clone())
         .with_duration_label(model.duration_label.clone())
         .playing(model.playing)
-        .enabled(model.enabled)
+        .enabled(model.enabled);
+    match model.frame_image.clone() {
+        Some(frame_image) => surface.with_frame_image(frame_image),
+        None => surface,
+    }
 }
 
 fn timeline_track_from_sequence_track(

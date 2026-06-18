@@ -1,18 +1,55 @@
 //! Domain-light viewer surface for editor preview panels.
 //!
-//! The widget paints preview chrome, aspect-ratio fitting, safe-area guides,
-//! and status metadata. App layers can later replace the canvas fill with a
-//! rendered texture without changing panel composition or state mapping.
+//! The widget paints preview chrome, aspect-ratio fitting, an optional raster
+//! preview frame, safe-area guides, and status metadata. App/runtime layers own
+//! preview decoding and pass already-renderable frame images across this
+//! domain-light boundary.
 
 use mondrian_core::Color;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
+use std::sync::Arc;
 
-use crate::paint::{color_with_alpha, mix_color, soft_border};
+use crate::paint::{
+    color_with_alpha, horizontal_stroke_rect, mix_color, soft_border, vertical_stroke_rect,
+};
 
 const DEFAULT_WIDTH: f32 = 480.0;
 const DEFAULT_HEIGHT: f32 = 270.0;
+
+/// RGBA preview image presented by [`ViewerSurface`].
+#[derive(Debug, Clone)]
+pub struct ViewerFrameImage {
+    /// Stable image cache key for the renderer-owned raster atlas.
+    pub key: String,
+    /// Source image width in pixels.
+    pub width: u32,
+    /// Source image height in pixels.
+    pub height: u32,
+    /// RGBA8 pixels, row-major, `width * height * 4` bytes.
+    pub rgba: Arc<[u8]>,
+}
+
+impl ViewerFrameImage {
+    /// Create a preview frame image. Returns `None` for invalid dimensions or
+    /// byte lengths so callers cannot silently poison the renderer atlas.
+    pub fn new(
+        key: impl Into<String>,
+        width: u32,
+        height: u32,
+        rgba: impl Into<Arc<[u8]>>,
+    ) -> Option<Self> {
+        let rgba = rgba.into();
+        let expected = width.checked_mul(height)?.checked_mul(4)? as usize;
+        (width > 0 && height > 0 && rgba.len() == expected).then(|| Self {
+            key: key.into(),
+            width,
+            height,
+            rgba,
+        })
+    }
+}
 
 /// Preview viewer surface.
 pub struct ViewerSurface {
@@ -27,6 +64,7 @@ pub struct ViewerSurface {
     source_height: u32,
     playing: bool,
     enabled: bool,
+    frame_image: Option<ViewerFrameImage>,
 }
 
 impl ViewerSurface {
@@ -44,6 +82,7 @@ impl ViewerSurface {
             source_height: source_height.max(1),
             playing: false,
             enabled: true,
+            frame_image: None,
         }
     }
 
@@ -86,6 +125,12 @@ impl ViewerSurface {
     /// Mark the surface as unavailable.
     pub fn disabled(self) -> Self {
         self.enabled(false)
+    }
+
+    /// Set the rendered preview image shown inside the fitted canvas.
+    pub fn with_frame_image(mut self, frame_image: ViewerFrameImage) -> Self {
+        self.frame_image = Some(frame_image);
+        self
     }
 
     /// Whether the surface represents an available preview target.
@@ -197,6 +242,20 @@ impl Widget for ViewerSurface {
             mix_color(colors.card, colors.muted, 0.34)
         };
         ctx.encoder.draw_rect(canvas, canvas_fill, spacing.radius_md);
+        if self.enabled {
+            if let Some(frame) = &self.frame_image {
+                ctx.push_clip(canvas);
+                ctx.encoder.draw_raster_image(
+                    &frame.key,
+                    canvas,
+                    frame.width,
+                    frame.height,
+                    Arc::clone(&frame.rgba),
+                    Color::WHITE,
+                );
+                ctx.pop_clip();
+            }
+        }
         paint_safe_guides(ctx, canvas, self.enabled);
 
         let metadata = self.metadata_text();
@@ -254,29 +313,25 @@ fn paint_safe_guides(ctx: &mut PaintContext, canvas: Rect, enabled: bool) {
 }
 
 fn draw_rect_outline(ctx: &mut PaintContext, rect: Rect, color: Color) {
-    ctx.encoder.draw_line(
-        Point::new(rect.x, rect.y),
-        Point::new(rect.x + rect.width, rect.y),
-        1.0,
+    ctx.encoder.draw_rect(
+        horizontal_stroke_rect(rect.y, rect.x, rect.width, 1.0),
         color,
+        0.0,
     );
-    ctx.encoder.draw_line(
-        Point::new(rect.x, rect.y + rect.height),
-        Point::new(rect.x + rect.width, rect.y + rect.height),
-        1.0,
+    ctx.encoder.draw_rect(
+        horizontal_stroke_rect(rect.y + rect.height, rect.x, rect.width, 1.0),
         color,
+        0.0,
     );
-    ctx.encoder.draw_line(
-        Point::new(rect.x, rect.y),
-        Point::new(rect.x, rect.y + rect.height),
-        1.0,
+    ctx.encoder.draw_rect(
+        vertical_stroke_rect(rect.x, rect.y, rect.height, 1.0),
         color,
+        0.0,
     );
-    ctx.encoder.draw_line(
-        Point::new(rect.x + rect.width, rect.y),
-        Point::new(rect.x + rect.width, rect.y + rect.height),
-        1.0,
+    ctx.encoder.draw_rect(
+        vertical_stroke_rect(rect.x + rect.width, rect.y, rect.height, 1.0),
         color,
+        0.0,
     );
 }
 
@@ -291,11 +346,18 @@ mod tests {
         rects: Vec<Rect>,
         lines: usize,
         texts: Vec<String>,
+        raster_images: Vec<(String, Rect, u32, u32)>,
+        clips: Vec<Rect>,
+        clip_pops: usize,
     }
 
     impl DrawCommandEncoder for RecordingEncoder {
-        fn push_clip(&mut self, _bounds: Rect) {}
-        fn pop_clip(&mut self) {}
+        fn push_clip(&mut self, bounds: Rect) {
+            self.clips.push(bounds);
+        }
+        fn pop_clip(&mut self) {
+            self.clip_pops += 1;
+        }
         fn draw_rect(&mut self, bounds: Rect, _color: Color, _corner_radius: f32) {
             self.rects.push(bounds);
         }
@@ -314,6 +376,17 @@ mod tests {
             _color: Color,
         ) {
             self.texts.push(text.into());
+        }
+        fn draw_raster_image(
+            &mut self,
+            key: &str,
+            bounds: Rect,
+            width: u32,
+            height: u32,
+            _rgba: Arc<[u8]>,
+            _tint: Color,
+        ) {
+            self.raster_images.push((key.to_owned(), bounds, width, height));
         }
         fn push_translate(&mut self, _offset: glam::Vec2) {}
         fn pop_transform(&mut self) {}
@@ -354,8 +427,8 @@ mod tests {
         assert!(encoder.texts.iter().any(|text| text == "Playing"));
         assert!(encoder.texts.iter().any(|text| text.contains("1920x1080")));
         assert!(encoder.texts.iter().any(|text| text.contains("F42")));
-        assert!(encoder.lines >= 8);
-        assert!(encoder.rects.len() >= 4);
+        assert_eq!(encoder.lines, 0);
+        assert!(encoder.rects.len() >= 12);
     }
 
     #[test]
@@ -363,5 +436,59 @@ mod tests {
         let viewer = ViewerSurface::new("Offline", 1920, 1080).disabled();
 
         assert!(!viewer.is_enabled());
+    }
+
+    #[test]
+    fn frame_image_rejects_invalid_rgba_payloads() {
+        assert!(ViewerFrameImage::new("bad", 2, 2, vec![255; 15]).is_none());
+        assert!(ViewerFrameImage::new("empty", 0, 2, Vec::<u8>::new()).is_none());
+    }
+
+    #[test]
+    fn paint_draws_preview_frame_inside_canvas_clip() {
+        let image =
+            ViewerFrameImage::new("preview:42", 2, 2, vec![255; 16]).expect("valid preview image");
+        let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080).with_frame_image(image);
+        viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
+        let canvas = viewer.canvas_rect();
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 500.0, 320.0),
+        };
+
+        viewer.paint(&mut ctx);
+
+        assert_eq!(
+            encoder.raster_images,
+            vec![("preview:42".to_owned(), canvas, 2, 2)]
+        );
+        assert!(
+            encoder.clips.contains(&canvas),
+            "preview image must be clipped to the fitted canvas"
+        );
+        assert_eq!(encoder.clip_pops, encoder.clips.len());
+    }
+
+    #[test]
+    fn disabled_viewer_does_not_draw_preview_frame() {
+        let image = ViewerFrameImage::new("preview:disabled", 2, 2, vec![255; 16])
+            .expect("valid preview image");
+        let mut viewer =
+            ViewerSurface::new("Scene 01", 1920, 1080).with_frame_image(image).disabled();
+        viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 500.0, 320.0),
+        };
+
+        viewer.paint(&mut ctx);
+
+        assert!(encoder.raster_images.is_empty());
     }
 }

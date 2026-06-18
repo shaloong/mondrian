@@ -71,4 +71,4 @@ pub use timeline_view::{
     TimelineTrimEdge, TimelineView,
 };
 pub use vector_icon::{VectorIcon, VectorIconError};
-pub use viewer_surface::ViewerSurface;
+pub use viewer_surface::{ViewerFrameImage, ViewerSurface};
