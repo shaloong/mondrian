@@ -4,7 +4,9 @@
 //! launch-time presentation and emits shell actions; project lifecycle work
 //! stays in `SelfHostedUiHost` / `AppState`.
 
-use mondrian_core::Color;
+use mondrian_core::{Color, MondrianError, Result};
+use mondrian_editor_state::Action;
+use mondrian_platform::PlatformService;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
@@ -13,9 +15,17 @@ use std::path::PathBuf;
 use crate::app::ui_actions::{
     app_shell_new_project_dialog_action, app_shell_open_project_dialog_action,
     app_shell_open_recent_project_action, app_shell_quit_action, app_shell_recover_project_action,
-    app_shell_window_drag_action, AppShellOpenRecentProjectPayload,
-    ProjectRecoverFromAutosavePayload,
+    app_shell_window_drag_action, project_create_with_settings_action,
+    AppShellOpenRecentProjectPayload, NewProjectDraftUpdatePayload,
+    ProjectRecoverFromAutosavePayload, APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
+    APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
+    APP_SHELL_NEW_PROJECT_DRAFT_CHANGED,
 };
+use crate::self_hosted::modal::ShellModal;
+use crate::self_hosted::new_project_dialog::{
+    default_project_file_name, SelfHostedNewProjectDraft,
+};
+use crate::self_hosted::shell::project_file_filters;
 
 /// Startup window logical size used by the self-hosted product entrypoint.
 pub const STARTUP_WINDOW_WIDTH: f32 = 820.0;
@@ -83,6 +93,7 @@ pub struct SelfHostedStartupScreen {
     recovery_projects: Vec<StartupRecoveryProject>,
     recent_rects: Vec<Rect>,
     recent_projects: Vec<StartupRecentProject>,
+    modal: Option<ShellModal>,
     close_rect: Rect,
     hover: Option<StartupHit>,
     pressed: Option<StartupHit>,
@@ -103,6 +114,7 @@ impl SelfHostedStartupScreen {
             recovery_projects: Vec::new(),
             recent_rects: Vec::new(),
             recent_projects: Vec::new(),
+            modal: None,
             close_rect: Rect::ZERO,
             hover: None,
             pressed: None,
@@ -120,6 +132,78 @@ impl SelfHostedStartupScreen {
     /// Number of autosave recovery rows currently shown.
     pub fn recovery_project_count(&self) -> usize {
         self.recovery_projects.len()
+    }
+
+    /// Whether a shell-local startup modal is currently open.
+    pub fn has_modal(&self) -> bool {
+        self.modal.is_some()
+    }
+
+    /// Apply a startup-local shell action and return an editor action when the
+    /// modal flow completes.
+    pub fn try_handle_shell_action(
+        &mut self,
+        action: Action,
+        platform: &dyn PlatformService,
+    ) -> Result<Option<Action>> {
+        match action {
+            Action::Custom { namespace, name, .. }
+                if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_NEW_PROJECT_DIALOG =>
+            {
+                self.modal = Some(ShellModal::new_project(SelfHostedNewProjectDraft::default()));
+                if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
+                    self.layout(self.bounds);
+                }
+                Ok(None)
+            }
+            Action::Custom { namespace, name, payload }
+                if namespace == APP_SHELL_NAMESPACE
+                    && name == APP_SHELL_NEW_PROJECT_DRAFT_CHANGED =>
+            {
+                let update: NewProjectDraftUpdatePayload = serde_json::from_value(payload)
+                    .map_err(|err| {
+                        startup_shell_action_error(APP_SHELL_NEW_PROJECT_DRAFT_CHANGED, err)
+                    })?;
+                if let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_new_project_mut) {
+                    dialog.apply_update(update);
+                }
+                Ok(None)
+            }
+            Action::Custom { namespace, name, .. }
+                if namespace == APP_SHELL_NAMESPACE
+                    && (name == APP_SHELL_CANCEL_NEW_PROJECT_DIALOG
+                        || name == APP_SHELL_CLOSE_MODAL) =>
+            {
+                self.modal = None;
+                Ok(None)
+            }
+            Action::Custom { namespace, name, .. }
+                if namespace == APP_SHELL_NAMESPACE
+                    && name == APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG =>
+            {
+                let draft = self
+                    .modal
+                    .as_ref()
+                    .and_then(ShellModal::as_new_project)
+                    .map(|dialog| dialog.draft().clone())
+                    .unwrap_or_default();
+                if draft.validate().is_err() {
+                    return Ok(None);
+                }
+                let Some(path) = platform.save_file_dialog(
+                    "Create Mondrian Project",
+                    &default_project_file_name(&draft.name),
+                    &project_file_filters(),
+                ) else {
+                    return Ok(None);
+                };
+                self.modal = None;
+                Ok(Some(project_create_with_settings_action(
+                    draft.into_payload(path),
+                )))
+            }
+            action => Ok(Some(action)),
+        }
     }
 
     /// Replace startup recent-project rows.
@@ -295,9 +379,17 @@ impl Widget for SelfHostedStartupScreen {
                 RECENT_ROW_HEIGHT,
             ));
         }
+        if let Some(modal) = &mut self.modal {
+            modal.layout(bounds);
+        }
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if let Some(modal) = &mut self.modal {
+            if modal.event(event, ctx) == EventResult::Handled {
+                return EventResult::Handled;
+            }
+        }
         match event {
             UiEvent::MouseMove { position, .. } => {
                 self.hover = self.hit_region(*position);
@@ -533,10 +625,31 @@ impl Widget for SelfHostedStartupScreen {
         );
         ctx.encoder.draw_line(a, b, spacing.border_emphasis, colors.popover_foreground);
         ctx.encoder.draw_line(c, d, spacing.border_emphasis, colors.popover_foreground);
+        if let Some(modal) = &self.modal {
+            modal.paint(ctx);
+        }
     }
 
     fn hit_test(&self, point: Point) -> bool {
         self.panel_rect.contains(point)
+    }
+
+    fn child_count(&self) -> usize {
+        usize::from(self.modal.is_some())
+    }
+
+    fn child(&self, index: usize) -> Option<&dyn Widget> {
+        match index {
+            0 => self.modal.as_ref().map(|modal| modal as &dyn Widget),
+            _ => None,
+        }
+    }
+
+    fn child_mut(&mut self, index: usize) -> Option<&mut dyn Widget> {
+        match index {
+            0 => self.modal.as_mut().map(|modal| modal as &mut dyn Widget),
+            _ => None,
+        }
     }
 }
 
@@ -571,6 +684,13 @@ impl SelfHostedStartupScreen {
     }
 }
 
+fn startup_shell_action_error(name: &str, err: serde_json::Error) -> MondrianError {
+    MondrianError::WorkflowStepFailed {
+        step_id: format!("startup_shell_action.{name}"),
+        reason: format!("invalid action payload: {err}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -581,8 +701,45 @@ mod tests {
     };
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_editor_state::Action;
+    use mondrian_platform::{FileFilter, PlatformService};
     use mondrian_ui_core::widget::EventRequests;
     use std::cell::RefCell;
+    use std::path::Path;
+
+    struct SaveProjectPlatform {
+        project_file: PathBuf,
+    }
+
+    impl PlatformService for SaveProjectPlatform {
+        fn clipboard_copy(&self, _text: &str) {}
+
+        fn clipboard_paste(&self) -> Option<String> {
+            None
+        }
+
+        fn open_file_dialog(&self, _title: &str, _filters: &[FileFilter]) -> Option<Vec<PathBuf>> {
+            None
+        }
+
+        fn save_file_dialog(
+            &self,
+            _title: &str,
+            _default_name: &str,
+            _filters: &[FileFilter],
+        ) -> Option<PathBuf> {
+            Some(self.project_file.clone())
+        }
+
+        fn open_folder_dialog(&self, _title: &str) -> Option<PathBuf> {
+            None
+        }
+
+        fn open_url(&self, _url: &str) {}
+
+        fn reveal_in_file_manager(&self, _path: &Path) {}
+
+        fn send_notification(&self, _title: &str, _body: &str) {}
+    }
 
     fn action_name(action: &Action) -> (&str, &str) {
         match action {
@@ -755,5 +912,47 @@ mod tests {
             serde_json::from_value(payload.clone()).expect("recovery payload");
         assert_eq!(payload.project_file, project_file);
         assert_eq!(payload.autosave_file, autosave_file);
+    }
+
+    #[test]
+    fn startup_screen_handles_new_project_modal_shell_actions() {
+        let mut screen = SelfHostedStartupScreen::new();
+        let platform = SaveProjectPlatform {
+            project_file: PathBuf::from("E:/projects/modal-create.mdp"),
+        };
+        screen.layout(Rect::new(
+            0.0,
+            0.0,
+            STARTUP_WINDOW_WIDTH,
+            STARTUP_WINDOW_HEIGHT,
+        ));
+
+        let opened = screen
+            .try_handle_shell_action(app_shell_new_project_dialog_action(), &platform)
+            .expect("open new project modal");
+        assert_eq!(opened, None);
+        assert!(screen.has_modal());
+        assert_eq!(screen.child_count(), 1);
+
+        let confirmed = screen
+            .try_handle_shell_action(
+                crate::app::ui_actions::app_shell_confirm_new_project_dialog_action(),
+                &platform,
+            )
+            .expect("confirm new project modal")
+            .expect("confirm should produce project action");
+
+        assert!(!screen.has_modal());
+        let Action::Custom { namespace, name, payload } = confirmed else {
+            panic!("expected project create action");
+        };
+        assert_eq!(namespace, crate::app::ui_actions::PROJECT_NAMESPACE);
+        assert_eq!(name, crate::app::ui_actions::PROJECT_CREATE_WITH_SETTINGS);
+        let payload: crate::app::ui_actions::ProjectCreateWithSettingsPayload =
+            serde_json::from_value(payload).expect("project payload");
+        assert_eq!(
+            payload.project_file,
+            PathBuf::from("E:/projects/modal-create.mdp")
+        );
     }
 }

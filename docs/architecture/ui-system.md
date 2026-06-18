@@ -108,6 +108,12 @@ crate-local `CrashRecoveryCandidate` values, maps them into startup view models,
 and the startup surface emits `app.shell/recover_project`. The shell resolves
 that request into `ui.project/recover_from_autosave`; only `AppState` opens the
 autosave snapshot, writes the recovered project, and clears recovery files.
+Startup also hosts shell-local modals when no project is open. Its New Project
+entry opens the shared `NewProjectDialog` through `self_hosted::modal`, applies
+draft updates to `SelfHostedNewProjectDraft`, and produces a concrete
+`ui.project/create_with_settings` action only after the user confirms and the
+platform save dialog returns a path. Startup must not use a hidden direct-create
+shortcut with default project settings.
 
 Product top chrome is `self_hosted::title_bar::TitleBar`: it combines the
 product menu bar, a read-only project/sequence title, draggable titlebar space,

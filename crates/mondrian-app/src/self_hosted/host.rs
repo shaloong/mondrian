@@ -15,8 +15,10 @@ use mondrian_ui_core::{TreeWalker, Widget};
 use mondrian_ui_theme::set_theme_preset;
 
 use crate::app::ui_actions::{
-    AssetsOpenFolderPayload, PreferencesThemePayload, APP_SHELL_NAMESPACE,
-    APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_OPEN_RECENT_PROJECT,
+    AssetsOpenFolderPayload, PreferencesThemePayload, APP_SHELL_CANCEL_NEW_PROJECT_DIALOG,
+    APP_SHELL_CLOSE_MODAL, APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_NAMESPACE,
+    APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_NEW_PROJECT_DRAFT_CHANGED,
+    APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_OPEN_RECENT_PROJECT,
     APP_SHELL_PREFERENCES_THEME_CHANGED, APP_SHELL_QUIT, APP_SHELL_RECOVER_PROJECT,
     APP_SHELL_WINDOW_DRAG, APP_SHELL_WINDOW_MINIMIZE, APP_SHELL_WINDOW_TOGGLE_MAXIMIZE,
     ASSETS_NAMESPACE, ASSETS_OPEN_FOLDER,
@@ -300,7 +302,34 @@ impl SelfHostedUiHost {
         bounds: Rect,
         platform: &dyn PlatformService,
     ) -> bool {
-        if self.mode != SelfHostedUiMode::Startup || !is_startup_project_action(action) {
+        if self.mode != SelfHostedUiMode::Startup {
+            return false;
+        }
+
+        if is_startup_local_shell_action(action) {
+            match self.startup.try_handle_shell_action(action.clone(), platform) {
+                Ok(Some(resolved)) => {
+                    if let Err(err) = self.dispatch_editor_action(resolved) {
+                        tracing::warn!("startup local action failed: {err}");
+                    }
+                    self.mark_dirty();
+                    self.refresh_if_dirty(bounds);
+                }
+                Ok(None) => {
+                    TreeWalker::layout(self.active_root_mut(), bounds);
+                }
+                Err(err) => {
+                    tracing::warn!("startup local shell action failed: {err}");
+                    self.app_state
+                        .borrow_mut()
+                        .set_status_hint(format!("Startup action failed: {err}"), true);
+                    self.mark_dirty();
+                }
+            }
+            return true;
+        }
+
+        if !is_startup_project_action(action) {
             return false;
         }
 
@@ -458,10 +487,22 @@ fn is_startup_project_action(action: &Action) -> bool {
         action,
         Action::Custom { namespace, name, .. }
             if namespace == APP_SHELL_NAMESPACE
-                && (name == APP_SHELL_NEW_PROJECT_DIALOG
-                    || name == APP_SHELL_OPEN_PROJECT_DIALOG
+                && (name == APP_SHELL_OPEN_PROJECT_DIALOG
                     || name == APP_SHELL_OPEN_RECENT_PROJECT
                     || name == APP_SHELL_RECOVER_PROJECT)
+    )
+}
+
+fn is_startup_local_shell_action(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::Custom { namespace, name, .. }
+            if namespace == APP_SHELL_NAMESPACE
+                && (name == APP_SHELL_NEW_PROJECT_DIALOG
+                    || name == APP_SHELL_NEW_PROJECT_DRAFT_CHANGED
+                    || name == APP_SHELL_CANCEL_NEW_PROJECT_DIALOG
+                    || name == APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG
+                    || name == APP_SHELL_CLOSE_MODAL)
     )
 }
 
@@ -744,7 +785,17 @@ mod tests {
             host.drain_pending_actions(&pending, Rect::new(0.0, 0.0, 1280.0, 720.0), &platform);
 
         assert_eq!(commands, SelfHostedShellCommands::default());
+        assert_eq!(host.mode(), SelfHostedUiMode::Startup);
+        assert!(host.startup.has_modal());
+        assert!(!host.app_state().has_open_project());
+
+        pending.push(crate::app::ui_actions::app_shell_confirm_new_project_dialog_action());
+        let commands =
+            host.drain_pending_actions(&pending, Rect::new(0.0, 0.0, 1280.0, 720.0), &platform);
+
+        assert_eq!(commands, SelfHostedShellCommands::default());
         assert_eq!(host.mode(), SelfHostedUiMode::Workspace);
+        assert!(!host.startup.has_modal());
         assert!(host.app_state().has_open_project());
         assert_eq!(
             host.app_state().current_project_path.as_deref(),
