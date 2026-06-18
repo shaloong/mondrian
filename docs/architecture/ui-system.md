@@ -1067,10 +1067,12 @@ usvg so basic shapes, inherited paint, relative path commands, arcs, and
 transforms become renderable path data. The icon keeps lyon-tessellated
 theme-tinted triangle meshes as a geometry fallback and metadata path, while
 normal small-icon painting rasterizes the SVG source with resvg/tiny-skia at the
-target pixel size and submits a stable raster-image key to the renderer.
-Rasterized SVG icons are kept on this high-quality path up to 512px per edge;
-larger bounds may fall back to the lyon mesh path so one oversized SVG does not
-consume a disproportionate slice of the shared 2048px image atlas.
+target pixel size or a capped 2x supersampled size, then submits a stable
+raster-image key to the renderer. Supersampling is used only while the generated
+bitmap still fits within the 512px per-edge raster icon budget, so common small
+SVG controls get smoother diagonal and curve coverage without letting one
+oversized SVG consume a disproportionate slice of the shared 2048px image atlas.
+Larger bounds may fall back to the lyon mesh path.
 Text buttons that need command glyphs use the same optional leading
 `VectorIcon` path, so icon-only and icon-plus-label controls share parsing,
 caching, focus, disabled, and text clipping behavior.
@@ -1098,9 +1100,11 @@ glyph bitmap bearings.
 The GPU UI pass renders through a cached 4x MSAA target and resolves into the
 surface view. Raster icon images use a separate renderer-owned image atlas with
 linear sampling so small SVG icons receive browser-like coverage from
-resvg/tiny-skia without sharing mutable atlas state with text glyphs. Image UVs
-remain unsnapped because they are texture coordinates rather than screen-space
-geometry.
+resvg/tiny-skia without sharing mutable atlas state with text glyphs. Small SVG
+rasters may be cached at a higher pixel resolution than their layout bounds and
+downsampled by the GPU; layout bounds remain the authoritative hit-test and
+composition geometry. Image UVs remain unsnapped because they are texture
+coordinates rather than screen-space geometry.
 Linear-sampled atlas entries must upload their full allocated rectangle,
 including edge-dilated padding around the inner content UV. Padding is not just
 reserved packing space: it is sampled by the GPU at fractional edges, so leaving

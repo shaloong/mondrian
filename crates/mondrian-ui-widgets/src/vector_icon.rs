@@ -31,6 +31,12 @@ const TESSELLATION_TOLERANCE: f32 = 0.08;
 /// glyphs on the browser-like resvg/tiny-skia path while still preventing a
 /// single oversized SVG from consuming a disproportionate atlas row.
 const MAX_RASTER_ICON_SIZE: u32 = 512;
+/// Quality multiplier for small SVG icon rasters.
+///
+/// The supersampled bitmap is cached once in the renderer image atlas and drawn
+/// back into the requested logical bounds with linear filtering. This improves
+/// diagonal and curve coverage for small icons without changing widget layout.
+const RASTER_ICON_SUPERSAMPLE: u32 = 2;
 
 static STATIC_SVG_ICON_CACHE: OnceLock<Mutex<std::collections::HashMap<&'static str, VectorIcon>>> =
     OnceLock::new();
@@ -198,13 +204,14 @@ impl VectorIcon {
 
     fn raster_icon_for_bounds(&self, bounds: Rect) -> Option<(String, RasterIcon)> {
         let source = self.raster_source.as_ref()?;
-        let width = bounds.width.round().max(1.0);
-        let height = bounds.height.round().max(1.0);
-        if width > MAX_RASTER_ICON_SIZE as f32 || height > MAX_RASTER_ICON_SIZE as f32 {
+        let target_width = bounds.width.round().max(1.0) as u32;
+        let target_height = bounds.height.round().max(1.0) as u32;
+        if target_width > MAX_RASTER_ICON_SIZE || target_height > MAX_RASTER_ICON_SIZE {
             return None;
         }
-        let width = width as u32;
-        let height = height as u32;
+        let scale = raster_supersample_scale(target_width, target_height);
+        let width = target_width.checked_mul(scale)?;
+        let height = target_height.checked_mul(scale)?;
 
         let key = RasterIconKey { id: source.id.clone(), width, height };
         let cache = RASTER_ICON_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
@@ -219,6 +226,16 @@ impl VectorIcon {
         let mut guard = cache.lock().ok()?;
         let raster = guard.entry(key.clone()).or_insert(raster).clone();
         Some((raster_draw_key(&key), raster))
+    }
+}
+
+fn raster_supersample_scale(target_width: u32, target_height: u32) -> u32 {
+    if target_width.saturating_mul(RASTER_ICON_SUPERSAMPLE) <= MAX_RASTER_ICON_SIZE
+        && target_height.saturating_mul(RASTER_ICON_SUPERSAMPLE) <= MAX_RASTER_ICON_SIZE
+    {
+        RASTER_ICON_SUPERSAMPLE
+    } else {
+        1
     }
 }
 
@@ -494,6 +511,8 @@ mod tests {
     struct PaintRecorder {
         triangles: usize,
         raster_images: usize,
+        raster_bounds: Vec<Rect>,
+        raster_sizes: Vec<(u32, u32)>,
     }
 
     impl DrawCommandEncoder for PaintRecorder {
@@ -507,13 +526,15 @@ mod tests {
         fn draw_raster_image(
             &mut self,
             _key: &str,
-            _bounds: Rect,
-            _width: u32,
-            _height: u32,
+            bounds: Rect,
+            width: u32,
+            height: u32,
             _rgba: std::sync::Arc<[u8]>,
             _tint: Color,
         ) {
             self.raster_images += 1;
+            self.raster_bounds.push(bounds);
+            self.raster_sizes.push((width, height));
         }
         fn draw_text(&mut self, _text: &str, _font_size: f32, _position: Point, _color: Color) {}
         fn push_translate(&mut self, _offset: glam::Vec2) {}
@@ -648,6 +669,29 @@ mod tests {
     }
 
     #[test]
+    fn small_svg_icons_are_supersampled_without_changing_layout_bounds() {
+        let icon = VectorIcon::from_svg_str(
+            r#"<svg viewBox="0 0 24 24"><path d="M4 4L20 4L12 20Z" fill="black"/></svg>"#,
+        )
+        .expect("icon");
+        let mut recorder = PaintRecorder::default();
+        let mut ctx = paint_ctx(&mut recorder);
+
+        icon.paint(
+            &mut ctx,
+            Rect::new(10.2, 20.6, 16.0, 16.0),
+            Color::from_hex(0xFFFFFF),
+        );
+
+        assert_eq!(recorder.raster_images, 1);
+        assert_eq!(
+            recorder.raster_bounds,
+            vec![Rect::new(10.0, 21.0, 16.0, 16.0)]
+        );
+        assert_eq!(recorder.raster_sizes, vec![(32, 32)]);
+    }
+
+    #[test]
     fn medium_svg_icons_stay_on_raster_path_for_smooth_edges() {
         let icon = VectorIcon::from_svg_str(
             r#"<svg viewBox="0 0 24 24"><path d="M4 4L20 4L12 20Z" fill="black"/></svg>"#,
@@ -706,7 +750,7 @@ mod tests {
     }
 
     #[test]
-    fn raster_icon_cache_is_keyed_by_output_size() {
+    fn raster_icon_cache_is_keyed_by_rasterized_pixel_size() {
         let icon = VectorIcon::from_static_svg(
             "test.triangle.cache",
             r#"<svg viewBox="0 0 24 24"><path d="M4 4L20 4L12 20Z" fill="black"/></svg>"#,
@@ -720,8 +764,8 @@ mod tests {
             .raster_icon_for_bounds(Rect::new(0.0, 0.0, 32.0, 32.0))
             .expect("large raster");
 
-        assert_eq!((small.width, small.height), (16, 16));
-        assert_eq!((large.width, large.height), (32, 32));
+        assert_eq!((small.width, small.height), (32, 32));
+        assert_eq!((large.width, large.height), (64, 64));
         assert_ne!(small.rgba.len(), large.rgba.len());
     }
 
