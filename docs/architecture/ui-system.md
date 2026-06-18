@@ -502,12 +502,23 @@ therefore drag the same way as controls outside the scroll view. Wheel events
 are handled only inside the viewport and offsets are clamped after wheel input
 and layout. Offset-changing wheel, track, thumb drag, and scrollbar hover
 transitions request repaint through `EventRequests`.
+Normal child hit testing is clipped by the scroll viewport through the
+`Widget::child_hit_test_clip()` contract, so offscreen scrolled content cannot
+steal clicks from sibling controls or panels. Overlay hit testing deliberately
+ignores that normal-content clip: dropdowns, context menus, color pickers, and
+tooltips owned by a scrolled child still paint and receive events in the top
+overlay layer when open.
 
 Renderer clip state is hierarchical. When a child widget pushes its own text or
 content clip inside a `ScrollView`, the renderer intersects that child clip with
 the active parent viewport clip before batching and applying the GPU scissor.
 Nested clips must never replace their parent clip; otherwise text glyph images
 inside a scrolled child can bleed over sibling controls outside the viewport.
+Clip rectangles are snapped conservatively by flooring their top-left and
+ceiling their bottom-right edge before GPU scissoring. Ordinary shape, image,
+line, and vector geometry keeps subpixel coordinates so SDF antialiasing, MSAA,
+and linear texture filtering behave like browser/native UI renderers instead of
+rounding designer-authored geometry into visibly rough edges.
 
 `ScrollView` defaults to vertical-only scrolling so inspector/property panels
 continue to wrap and measure against their panel width. Components that truly

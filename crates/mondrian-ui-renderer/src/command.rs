@@ -10,29 +10,28 @@ use mondrian_ui_core::widget::DrawCommandEncoder;
 use mondrian_ui_theme::typography::TextStyle;
 use std::sync::Arc;
 
-fn snap_scalar(value: f32) -> f32 {
+fn floor_if_finite(value: f32) -> f32 {
     if value.is_finite() {
-        value.round()
+        value.floor()
     } else {
         value
     }
 }
 
-fn snap_point(point: Point) -> Point {
-    Point::new(snap_scalar(point.x), snap_scalar(point.y))
+fn ceil_if_finite(value: f32) -> f32 {
+    if value.is_finite() {
+        value.ceil()
+    } else {
+        value
+    }
 }
 
-fn snap_rect(rect: Rect) -> Rect {
-    Rect::new(
-        snap_scalar(rect.x),
-        snap_scalar(rect.y),
-        snap_scalar(rect.width),
-        snap_scalar(rect.height),
-    )
-}
-
-fn snap_vec2(offset: Vec2) -> Vec2 {
-    Vec2::new(snap_scalar(offset.x), snap_scalar(offset.y))
+fn conservative_clip_rect(rect: Rect) -> Rect {
+    let left = floor_if_finite(rect.x);
+    let top = floor_if_finite(rect.y);
+    let right = ceil_if_finite(rect.x + rect.width);
+    let bottom = ceil_if_finite(rect.y + rect.height);
+    Rect::new(left, top, (right - left).max(0.0), (bottom - top).max(0.0))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -153,7 +152,8 @@ impl DrawEncoder {
 
     pub fn push_clip(&mut self, bounds: Rect) {
         self.clip_depth += 1;
-        self.commands.push(DrawCommand::PushClip { bounds: snap_rect(bounds) });
+        self.commands
+            .push(DrawCommand::PushClip { bounds: conservative_clip_rect(bounds) });
     }
 
     pub fn pop_clip(&mut self) {
@@ -165,7 +165,7 @@ impl DrawEncoder {
 
     pub fn push_translate(&mut self, offset: Vec2) {
         self.transform_depth += 1;
-        self.commands.push(DrawCommand::PushTranslate { offset: snap_vec2(offset) });
+        self.commands.push(DrawCommand::PushTranslate { offset });
     }
 
     pub fn pop_transform(&mut self) {
@@ -176,19 +176,14 @@ impl DrawEncoder {
     }
 
     pub fn draw_rect(&mut self, bounds: Rect, color: Color, corner_radius: f32) {
-        self.commands
-            .push(DrawCommand::Rect { bounds: snap_rect(bounds), color, corner_radius });
+        self.commands.push(DrawCommand::Rect { bounds, color, corner_radius });
     }
 
     /// Record a GPU-interpolated gradient rectangle.
     ///
     /// Color order is top-left, top-right, bottom-left, bottom-right.
     pub fn draw_gradient_rect(&mut self, bounds: Rect, colors: [Color; 4], corner_radius: f32) {
-        self.commands.push(DrawCommand::GradientRect {
-            bounds: snap_rect(bounds),
-            colors,
-            corner_radius,
-        });
+        self.commands.push(DrawCommand::GradientRect { bounds, colors, corner_radius });
     }
 
     pub fn draw_text(&mut self, text: &str, style: &TextStyle, position: Point, color: Color) {
@@ -220,8 +215,7 @@ impl DrawEncoder {
     }
 
     pub fn draw_image(&mut self, bounds: Rect, uv_rect: Rect, tint: Color) {
-        self.commands
-            .push(DrawCommand::Image { bounds: snap_rect(bounds), uv_rect, tint });
+        self.commands.push(DrawCommand::Image { bounds, uv_rect, tint });
     }
 
     /// Record an RGBA image that the renderer should upload to its image atlas.
@@ -241,7 +235,7 @@ impl DrawEncoder {
 
         self.commands.push(DrawCommand::RasterImage {
             key: key.to_string(),
-            bounds: snap_rect(bounds),
+            bounds,
             width,
             height,
             rgba,
@@ -250,12 +244,7 @@ impl DrawEncoder {
     }
 
     pub fn draw_line(&mut self, start: Point, end: Point, width: f32, color: Color) {
-        self.commands.push(DrawCommand::Line {
-            start: snap_point(start),
-            end: snap_point(end),
-            width,
-            color,
-        });
+        self.commands.push(DrawCommand::Line { start, end, width, color });
     }
 
     pub fn draw_triangles(&mut self, vertices: &[Point], color: Color) {
@@ -292,7 +281,7 @@ impl DrawEncoder {
         let vertices = vertices.iter().take(triangle_vertex_count).copied().collect();
         self.commands.push(DrawCommand::ColoredTriangles {
             vertices,
-            mask: Some(ShapeMask { bounds: snap_rect(mask_bounds), corner_radius }),
+            mask: Some(ShapeMask { bounds: mask_bounds, corner_radius }),
         });
     }
 
@@ -531,7 +520,7 @@ mod tests {
     }
 
     #[test]
-    fn encoder_draw_masked_colored_triangles_preserves_vertices_but_snaps_mask() {
+    fn encoder_draw_masked_colored_triangles_preserves_vertices_and_mask() {
         let mut enc = DrawEncoder::new();
         enc.draw_colored_triangles_in_rect(
             &[
@@ -552,7 +541,7 @@ mod tests {
                 assert_eq!(
                     *mask,
                     Some(ShapeMask {
-                        bounds: Rect::new(1.0, 3.0, 24.0, 26.0),
+                        bounds: Rect::new(1.4, 2.6, 24.2, 25.7),
                         corner_radius: 6.0,
                     })
                 );
@@ -634,7 +623,7 @@ mod tests {
     }
 
     #[test]
-    fn encoder_snaps_axis_aligned_geometry_to_pixels() {
+    fn encoder_preserves_subpixel_geometry_but_expands_clips_conservatively() {
         let mut enc = DrawEncoder::new();
         enc.push_clip(Rect::new(0.4, 1.6, 100.3, 49.8));
         enc.push_translate(Vec2::new(2.2, 3.8));
@@ -652,27 +641,27 @@ mod tests {
         assert!(matches!(
             cmds[0],
             DrawCommand::PushClip { bounds }
-                if bounds == Rect::new(0.0, 2.0, 100.0, 50.0)
+                if bounds == Rect::new(0.0, 1.0, 101.0, 51.0)
         ));
         assert!(matches!(
             cmds[1],
             DrawCommand::PushTranslate { offset }
-                if offset == Vec2::new(2.0, 4.0)
+                if offset == Vec2::new(2.2, 3.8)
         ));
         assert!(matches!(
             cmds[2],
             DrawCommand::Rect { bounds, .. }
-                if bounds == Rect::new(10.0, 10.0, 21.0, 30.0)
+                if bounds == Rect::new(9.5, 10.4, 20.6, 30.2)
         ));
         assert!(matches!(
             cmds[3],
             DrawCommand::Line { start, end, .. }
-                if start == Point::new(1.0, 3.0) && end == Point::new(10.0, 10.0)
+                if start == Point::new(1.2, 2.8) && end == Point::new(9.7, 10.1)
         ));
         assert!(matches!(
             cmds[4],
             DrawCommand::Image { bounds, uv_rect, .. }
-                if bounds == Rect::new(4.0, 6.0, 13.0, 16.0)
+                if bounds == Rect::new(4.4, 5.5, 12.6, 16.1)
                     && uv_rect == Rect::new(0.25, 0.25, 0.5, 0.5)
         ));
     }

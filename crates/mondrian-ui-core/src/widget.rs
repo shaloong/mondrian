@@ -336,6 +336,16 @@ pub trait Widget {
         false
     }
 
+    /// Optional viewport that clips normal child hit testing.
+    ///
+    /// Scroll containers and other clipped viewports should return their
+    /// visible content rect here. Overlay hit testing is intentionally not
+    /// clipped by this method, so popovers owned by clipped children can still
+    /// escape their parent panel when open.
+    fn child_hit_test_clip(&self) -> Option<Rect> {
+        None
+    }
+
     /// 子 Widget 遍历（用于事件冒泡和焦点遍历）
     fn children(&self) -> &[Box<dyn Widget>] {
         &[]

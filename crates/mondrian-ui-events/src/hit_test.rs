@@ -53,13 +53,17 @@ fn hit_test_recursive(tree: &dyn WidgetTree, node_id: WidgetId, position: Point)
     if widget.hit_test(position) {
         let mut path = vec![node_id];
 
-        // 递归搜索子节点（后添加的在上层）
-        let children = tree.children_ids(node_id);
-        for child_id in children.iter().rev() {
-            let child_path = hit_test_recursive(tree, *child_id, position);
-            if !child_path.is_empty() {
-                path.extend(child_path);
-                break;
+        let can_hit_children =
+            widget.child_hit_test_clip().is_none_or(|clip| clip.contains(position));
+        if can_hit_children {
+            // 递归搜索子节点（后添加的在上层）
+            let children = tree.children_ids(node_id);
+            for child_id in children.iter().rev() {
+                let child_path = hit_test_recursive(tree, *child_id, position);
+                if !child_path.is_empty() {
+                    path.extend(child_path);
+                    break;
+                }
             }
         }
 
@@ -80,6 +84,7 @@ mod tests {
         id: WidgetId,
         bounds: Rect,
         overlay_hit: bool,
+        child_clip: Option<Rect>,
         children: Vec<Box<dyn Widget>>,
     }
     impl Widget for HitWidget {
@@ -99,6 +104,9 @@ mod tests {
         }
         fn overlay_hit_test(&self, _point: Point) -> bool {
             self.overlay_hit
+        }
+        fn child_hit_test_clip(&self) -> Option<Rect> {
+            self.child_clip
         }
         fn children(&self) -> &[Box<dyn Widget>] {
             &self.children
@@ -143,12 +151,14 @@ mod tests {
             id: child_id,
             bounds: Rect::new(10.0, 10.0, 80.0, 80.0),
             overlay_hit: false,
+            child_clip: None,
             children: vec![],
         };
         let parent = HitWidget {
             id: parent_id,
             bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
             overlay_hit: false,
+            child_clip: None,
             children: vec![Box::new(child)],
         };
 
@@ -160,6 +170,7 @@ mod tests {
                 id: child_id,
                 bounds: Rect::new(10.0, 10.0, 80.0, 80.0),
                 overlay_hit: false,
+                child_clip: None,
                 children: vec![],
             },
         );
@@ -186,18 +197,21 @@ mod tests {
             id: overlay_id,
             bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
             overlay_hit: true,
+            child_clip: None,
             children: vec![],
         };
         let normal_child = HitWidget {
             id: normal_id,
             bounds: Rect::new(200.0, 0.0, 100.0, 100.0),
             overlay_hit: false,
+            child_clip: None,
             children: vec![],
         };
         let root = HitWidget {
             id: root_id,
             bounds: Rect::new(0.0, 0.0, 400.0, 200.0),
             overlay_hit: false,
+            child_clip: None,
             children: vec![Box::new(overlay_child), Box::new(normal_child)],
         };
 
@@ -209,6 +223,7 @@ mod tests {
                 id: overlay_id,
                 bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
                 overlay_hit: true,
+                child_clip: None,
                 children: vec![],
             },
         );
@@ -218,6 +233,7 @@ mod tests {
                 id: normal_id,
                 bounds: Rect::new(200.0, 0.0, 100.0, 100.0),
                 overlay_hit: false,
+                child_clip: None,
                 children: vec![],
             },
         );
@@ -244,24 +260,28 @@ mod tests {
             id: overlay_id,
             bounds: Rect::new(0.0, 0.0, 20.0, 20.0),
             overlay_hit: true,
+            child_clip: None,
             children: vec![],
         };
         let overlay_container = HitWidget {
             id: container_id,
             bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
             overlay_hit: false,
+            child_clip: None,
             children: vec![Box::new(overlay_child)],
         };
         let normal_child = HitWidget {
             id: normal_id,
             bounds: Rect::new(200.0, 0.0, 100.0, 100.0),
             overlay_hit: false,
+            child_clip: None,
             children: vec![],
         };
         let root = HitWidget {
             id: root_id,
             bounds: Rect::new(0.0, 0.0, 400.0, 200.0),
             overlay_hit: false,
+            child_clip: None,
             children: vec![Box::new(overlay_container), Box::new(normal_child)],
         };
 
@@ -273,10 +293,12 @@ mod tests {
                 id: container_id,
                 bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
                 overlay_hit: false,
+                child_clip: None,
                 children: vec![Box::new(HitWidget {
                     id: overlay_id,
                     bounds: Rect::new(0.0, 0.0, 20.0, 20.0),
                     overlay_hit: true,
+                    child_clip: None,
                     children: vec![],
                 })],
             },
@@ -287,6 +309,7 @@ mod tests {
                 id: overlay_id,
                 bounds: Rect::new(0.0, 0.0, 20.0, 20.0),
                 overlay_hit: true,
+                child_clip: None,
                 children: vec![],
             },
         );
@@ -296,6 +319,7 @@ mod tests {
                 id: normal_id,
                 bounds: Rect::new(200.0, 0.0, 100.0, 100.0),
                 overlay_hit: false,
+                child_clip: None,
                 children: vec![],
             },
         );
@@ -322,18 +346,21 @@ mod tests {
             id: child_overlay_id,
             bounds: Rect::new(30.0, 30.0, 80.0, 80.0),
             overlay_hit: true,
+            child_clip: None,
             children: vec![],
         };
         let parent_overlay = HitWidget {
             id: parent_overlay_id,
             bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
             overlay_hit: true,
+            child_clip: None,
             children: vec![Box::new(child_overlay)],
         };
         let root = HitWidget {
             id: root_id,
             bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
             overlay_hit: false,
+            child_clip: None,
             children: vec![Box::new(parent_overlay)],
         };
 
@@ -345,10 +372,12 @@ mod tests {
                 id: parent_overlay_id,
                 bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
                 overlay_hit: true,
+                child_clip: None,
                 children: vec![Box::new(HitWidget {
                     id: child_overlay_id,
                     bounds: Rect::new(30.0, 30.0, 80.0, 80.0),
                     overlay_hit: true,
+                    child_clip: None,
                     children: vec![],
                 })],
             },
@@ -359,6 +388,7 @@ mod tests {
                 id: child_overlay_id,
                 bounds: Rect::new(30.0, 30.0, 80.0, 80.0),
                 overlay_hit: true,
+                child_clip: None,
                 children: vec![],
             },
         );
@@ -372,5 +402,83 @@ mod tests {
         let hit = hit_test_deepest(&tree, Point::new(60.0, 60.0));
 
         assert_eq!(hit, Some(child_overlay_id));
+    }
+
+    #[test]
+    fn normal_child_hit_test_respects_parent_child_clip() {
+        let root_id = WidgetId::new();
+        let child_id = WidgetId::new();
+        let child = HitWidget {
+            id: child_id,
+            bounds: Rect::new(0.0, 120.0, 100.0, 40.0),
+            overlay_hit: false,
+            child_clip: None,
+            children: vec![],
+        };
+        let root = HitWidget {
+            id: root_id,
+            bounds: Rect::new(0.0, 0.0, 100.0, 200.0),
+            overlay_hit: false,
+            child_clip: Some(Rect::new(0.0, 0.0, 100.0, 100.0)),
+            children: vec![Box::new(child)],
+        };
+        let mut widgets = std::collections::HashMap::new();
+        widgets.insert(root_id, root);
+        widgets.insert(
+            child_id,
+            HitWidget {
+                id: child_id,
+                bounds: Rect::new(0.0, 120.0, 100.0, 40.0),
+                overlay_hit: false,
+                child_clip: None,
+                children: vec![],
+            },
+        );
+        let mut parents = std::collections::HashMap::new();
+        parents.insert(child_id, root_id);
+        let tree = TestTree { widgets, parents, root: root_id };
+
+        let hit = hit_test_path(&tree, Point::new(10.0, 130.0));
+
+        assert_eq!(hit, vec![root_id]);
+    }
+
+    #[test]
+    fn overlay_hit_test_is_not_clipped_by_parent_child_clip() {
+        let root_id = WidgetId::new();
+        let child_id = WidgetId::new();
+        let child = HitWidget {
+            id: child_id,
+            bounds: Rect::new(0.0, 120.0, 100.0, 40.0),
+            overlay_hit: true,
+            child_clip: None,
+            children: vec![],
+        };
+        let root = HitWidget {
+            id: root_id,
+            bounds: Rect::new(0.0, 0.0, 100.0, 200.0),
+            overlay_hit: false,
+            child_clip: Some(Rect::new(0.0, 0.0, 100.0, 100.0)),
+            children: vec![Box::new(child)],
+        };
+        let mut widgets = std::collections::HashMap::new();
+        widgets.insert(root_id, root);
+        widgets.insert(
+            child_id,
+            HitWidget {
+                id: child_id,
+                bounds: Rect::new(0.0, 120.0, 100.0, 40.0),
+                overlay_hit: true,
+                child_clip: None,
+                children: vec![],
+            },
+        );
+        let mut parents = std::collections::HashMap::new();
+        parents.insert(child_id, root_id);
+        let tree = TestTree { widgets, parents, root: root_id };
+
+        let hit = hit_test_path(&tree, Point::new(10.0, 130.0));
+
+        assert_eq!(hit, vec![root_id, child_id]);
     }
 }

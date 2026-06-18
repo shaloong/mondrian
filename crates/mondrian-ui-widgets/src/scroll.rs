@@ -202,10 +202,6 @@ impl ScrollView {
         }
     }
 
-    fn child_hit_test(&self, point: Point) -> bool {
-        self.child.as_ref().is_some_and(|child| child.hit_test(point))
-    }
-
     fn child_overlay_hit_test(&self, point: Point) -> bool {
         self.child.as_ref().is_some_and(|child| child.overlay_hit_test(point))
     }
@@ -465,7 +461,7 @@ impl Widget for ScrollView {
             }
             UiEvent::MouseWheel { delta, position, modifiers } => {
                 if !self.bounds.contains(*position) {
-                    if self.child_hit_test(*position) || self.child_overlay_hit_test(*position) {
+                    if self.child_overlay_hit_test(*position) {
                         if let Some(ref mut child) = self.child {
                             return child.event(event, ctx);
                         }
@@ -569,6 +565,10 @@ impl Widget for ScrollView {
 
     fn hit_test(&self, point: Point) -> bool {
         self.bounds.contains(point)
+    }
+
+    fn child_hit_test_clip(&self) -> Option<Rect> {
+        Some(self.bounds)
     }
 
     fn children(&self) -> &[Box<dyn Widget>] {
