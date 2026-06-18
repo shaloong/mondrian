@@ -5,7 +5,7 @@
 //! `AssetThumbnailSource`; missing video thumbnails are decoded on a background
 //! worker and picked up by the host on the next event-loop wake.
 
-use crate::self_hosted::panels::AssetThumbnailSource;
+use crate::self_hosted::panels::{AssetThumbnailSource, AssetThumbnailState};
 use mondrian_assets::{AssetKind, AssetRecord};
 use mondrian_core::types::AssetId;
 use mondrian_ui_widgets::RasterImage;
@@ -143,25 +143,29 @@ impl Default for AssetThumbnailCache {
 }
 
 impl AssetThumbnailSource for AssetThumbnailCache {
-    fn thumbnail_for_asset(&self, asset: &AssetRecord) -> Option<RasterImage> {
+    fn thumbnail_for_asset(&self, asset: &AssetRecord) -> AssetThumbnailState {
         if asset.kind != AssetKind::Video {
-            return None;
+            return AssetThumbnailState::Unavailable;
         }
         let modified = std::fs::metadata(&asset.path).ok().and_then(|m| m.modified().ok());
         if let Some(entry) = self.cache.borrow().get(&asset.id) {
             if entry.path == asset.path && entry.modified == modified {
-                return Some(entry.image.clone());
+                return AssetThumbnailState::Ready(entry.image.clone());
             }
         }
         if let Some(failure) = self.failures.borrow().get(&asset.id) {
             if failure.path == asset.path && failure.modified == modified {
-                return None;
+                return AssetThumbnailState::Failed;
             }
+        }
+        if self.pending.borrow().contains(&asset.id) {
+            return AssetThumbnailState::Loading;
         }
         if asset.path.exists() {
             self.request_thumbnail(asset, modified);
+            return AssetThumbnailState::Loading;
         }
-        None
+        AssetThumbnailState::Failed
     }
 }
 
@@ -242,17 +246,39 @@ mod tests {
             PathBuf::from("mondrian://solid-color"),
         );
 
-        assert!(cache.thumbnail_for_asset(&asset).is_none());
+        assert!(matches!(
+            cache.thumbnail_for_asset(&asset),
+            AssetThumbnailState::Unavailable
+        ));
         assert_eq!(cache.pending_count(), 0);
     }
 
     #[test]
-    fn missing_video_files_do_not_schedule_thumbnail_decodes() {
+    fn missing_video_files_fail_without_scheduling_thumbnail_decodes() {
         let cache = AssetThumbnailCache::new();
         let asset = asset(AssetKind::Video, PathBuf::from("E:/missing/video.mov"));
 
-        assert!(cache.thumbnail_for_asset(&asset).is_none());
+        assert!(matches!(
+            cache.thumbnail_for_asset(&asset),
+            AssetThumbnailState::Failed
+        ));
         assert_eq!(cache.pending_count(), 0);
+    }
+
+    #[test]
+    fn existing_video_files_return_loading_while_decode_is_pending() {
+        let cache = AssetThumbnailCache::new();
+        let path = std::env::temp_dir().join(format!("mondrian-thumb-test-{}.mov", AssetId::new()));
+        std::fs::write(&path, b"not actually a video").expect("write test file");
+        let asset = asset(AssetKind::Video, path.clone());
+
+        assert!(matches!(
+            cache.thumbnail_for_asset(&asset),
+            AssetThumbnailState::Loading
+        ));
+        assert_eq!(cache.pending_count(), 1);
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

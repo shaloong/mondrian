@@ -75,9 +75,21 @@ use crate::self_hosted::icons::AppIcon;
 /// a thumbnail is unavailable. The panel adapter stays read-only and never
 /// decodes media directly.
 pub trait AssetThumbnailSource {
-    /// Return a render-ready thumbnail for an asset, if one is already
-    /// available.
-    fn thumbnail_for_asset(&self, asset: &AssetRecord) -> Option<RasterImage>;
+    /// Return the current thumbnail lifecycle state for an asset.
+    fn thumbnail_for_asset(&self, asset: &AssetRecord) -> AssetThumbnailState;
+}
+
+/// Current thumbnail lifecycle state for one asset card.
+#[derive(Debug, Clone)]
+pub enum AssetThumbnailState {
+    /// No thumbnail is expected for this asset.
+    Unavailable,
+    /// A thumbnail request has been queued or is currently decoding.
+    Loading,
+    /// A thumbnail was expected but could not be loaded.
+    Failed,
+    /// A render-ready thumbnail is available.
+    Ready(RasterImage),
 }
 
 /// Complete set of view models needed by the self-hosted panel shell.
@@ -1405,7 +1417,7 @@ fn asset_grid_item_from_asset(
     let accent = asset_kind_accent(&asset.kind);
     let icon = asset_kind_icon(&asset.kind);
     let subtitle = asset.path.display().to_string();
-    let thumbnail = thumbnails.and_then(|source| source.thumbnail_for_asset(&asset));
+    let thumbnail_state = thumbnails.map(|source| source.thumbnail_for_asset(&asset));
     let mut item = AssetGridItem::new(asset.id.to_string(), asset.name, accent)
         .with_subtitle(subtitle)
         .with_badge(badge)
@@ -1420,8 +1432,13 @@ fn asset_grid_item_from_asset(
             ),
             AppIcon::Trash,
         )]);
-    if let Some(thumbnail) = thumbnail {
-        item = item.with_thumbnail(thumbnail);
+    if let Some(state) = thumbnail_state {
+        item = match state {
+            AssetThumbnailState::Unavailable => item,
+            AssetThumbnailState::Loading => item.with_thumbnail_loading(),
+            AssetThumbnailState::Failed => item.with_thumbnail_failed(),
+            AssetThumbnailState::Ready(thumbnail) => item.with_thumbnail(thumbnail),
+        };
     }
     with_asset_icon(item, icon)
 }
@@ -4353,12 +4370,15 @@ mod tests {
         struct TestThumbnails;
 
         impl AssetThumbnailSource for TestThumbnails {
-            fn thumbnail_for_asset(&self, asset: &AssetRecord) -> Option<RasterImage> {
-                RasterImage::new(
-                    format!("test-thumb:{}", asset.id),
-                    2,
-                    2,
-                    vec![0, 0, 0, 255, 80, 0, 0, 255, 0, 80, 0, 255, 0, 0, 80, 255],
+            fn thumbnail_for_asset(&self, asset: &AssetRecord) -> AssetThumbnailState {
+                AssetThumbnailState::Ready(
+                    RasterImage::new(
+                        format!("test-thumb:{}", asset.id),
+                        2,
+                        2,
+                        vec![0, 0, 0, 255, 80, 0, 0, 255, 0, 80, 0, 255, 0, 0, 80, 255],
+                    )
+                    .expect("valid test thumbnail"),
                 )
             }
         }
@@ -4380,6 +4400,47 @@ mod tests {
         let thumbnail = models.assets.items[0].thumbnail.as_ref().expect("thumbnail");
         assert_eq!(thumbnail.key, format!("test-thumb:{asset_id}"));
         assert_eq!((thumbnail.width, thumbnail.height), (2, 2));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn asset_panel_model_maps_thumbnail_loading_and_failed_states() {
+        struct TestThumbnails(AssetThumbnailState);
+
+        impl AssetThumbnailSource for TestThumbnails {
+            fn thumbnail_for_asset(&self, _asset: &AssetRecord) -> AssetThumbnailState {
+                self.0.clone()
+            }
+        }
+
+        let root = unique_temp_dir("asset-panel-thumbnail-states");
+        let library = AssetLibrary::open(root.clone()).expect("open asset library");
+        library
+            .create_solid_color_asset(Some("Brand Purple"))
+            .expect("create solid color asset");
+        let mut state = AppState::new();
+        state.asset_library = Some(library);
+
+        let loading = SelfHostedPanelModels::from_app_state_with_asset_folder_and_thumbnails(
+            &state,
+            None,
+            Some(&TestThumbnails(AssetThumbnailState::Loading)),
+        );
+        assert_eq!(
+            loading.assets.items[0].thumbnail_status,
+            mondrian_ui_widgets::AssetGridThumbnailStatus::Loading
+        );
+
+        let failed = SelfHostedPanelModels::from_app_state_with_asset_folder_and_thumbnails(
+            &state,
+            None,
+            Some(&TestThumbnails(AssetThumbnailState::Failed)),
+        );
+        assert_eq!(
+            failed.assets.items[0].thumbnail_status,
+            mondrian_ui_widgets::AssetGridThumbnailStatus::Failed
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }

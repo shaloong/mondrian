@@ -53,6 +53,17 @@ pub struct AssetGridState {
     pub selected_index: Option<usize>,
 }
 
+/// Non-image state for an [`AssetGridItem`] preview region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssetGridThumbnailStatus {
+    /// No thumbnail is expected; paint the normal icon placeholder.
+    None,
+    /// A thumbnail request is in flight.
+    Loading,
+    /// A thumbnail was expected but could not be produced.
+    Failed,
+}
+
 /// Single card rendered by [`AssetGrid`].
 #[derive(Debug, Clone)]
 pub struct AssetGridItem {
@@ -63,6 +74,7 @@ pub struct AssetGridItem {
     pub accent: Color,
     pub icon: Option<VectorIcon>,
     pub thumbnail: Option<RasterImage>,
+    pub thumbnail_status: AssetGridThumbnailStatus,
     pub disabled: bool,
     pub select_action: Option<Action>,
     pub activate_action: Option<Action>,
@@ -81,6 +93,7 @@ impl AssetGridItem {
             accent,
             icon: None,
             thumbnail: None,
+            thumbnail_status: AssetGridThumbnailStatus::None,
             disabled: false,
             select_action: None,
             activate_action: None,
@@ -110,6 +123,21 @@ impl AssetGridItem {
     /// Set a raster thumbnail painted in the preview region.
     pub fn with_thumbnail(mut self, thumbnail: RasterImage) -> Self {
         self.thumbnail = Some(thumbnail);
+        self.thumbnail_status = AssetGridThumbnailStatus::None;
+        self
+    }
+
+    /// Mark the preview region as waiting for an async thumbnail.
+    pub fn with_thumbnail_loading(mut self) -> Self {
+        self.thumbnail = None;
+        self.thumbnail_status = AssetGridThumbnailStatus::Loading;
+        self
+    }
+
+    /// Mark the preview region as failed to load a thumbnail.
+    pub fn with_thumbnail_failed(mut self) -> Self {
+        self.thumbnail = None;
+        self.thumbnail_status = AssetGridThumbnailStatus::Failed;
         self
     }
 
@@ -768,6 +796,15 @@ impl AssetGrid {
                 );
                 icon.paint(ctx, icon_rect, text_color);
             }
+            match item.thumbnail_status {
+                AssetGridThumbnailStatus::None => {}
+                AssetGridThumbnailStatus::Loading => {
+                    paint_thumbnail_loading(ctx, preview, text_color);
+                }
+                AssetGridThumbnailStatus::Failed => {
+                    paint_thumbnail_failed(ctx, preview, colors.muted_foreground);
+                }
+            }
         }
         if let Some(badge) = &item.badge {
             let badge_rect = Rect::new(
@@ -1139,6 +1176,54 @@ fn grid_columns_for_width(width: f32) -> usize {
     columns.max(1)
 }
 
+fn paint_thumbnail_loading(ctx: &mut PaintContext, preview: Rect, color: Color) {
+    let dot_size = 4.0;
+    let gap = 5.0;
+    let total_width = dot_size * 3.0 + gap * 2.0;
+    let y = preview.y + preview.height - 13.0;
+    let start_x = preview.x + (preview.width - total_width) * 0.5;
+    for index in 0..3 {
+        let alpha = 0.30 + index as f32 * 0.18;
+        ctx.encoder.draw_rect(
+            Rect::new(
+                start_x + index as f32 * (dot_size + gap),
+                y,
+                dot_size,
+                dot_size,
+            ),
+            color_with_alpha(color, alpha),
+            dot_size * 0.5,
+        );
+    }
+}
+
+fn paint_thumbnail_failed(ctx: &mut PaintContext, preview: Rect, color: Color) {
+    let chip = Rect::new(
+        preview.x + 8.0,
+        preview.y + preview.height - 24.0,
+        22.0,
+        16.0,
+    );
+    ctx.encoder.draw_rect(chip, color_with_alpha(color, 0.18), 5.0);
+    let center = chip.center();
+    let triangle = [
+        Point::new(center.x, chip.y + 4.0),
+        Point::new(chip.x + 6.0, chip.y + chip.height - 4.0),
+        Point::new(chip.x + chip.width - 6.0, chip.y + chip.height - 4.0),
+    ];
+    ctx.encoder.draw_triangles(&triangle, color_with_alpha(color, 0.70));
+    ctx.encoder.draw_rect(
+        Rect::new(center.x - 0.75, chip.y + 7.0, 1.5, 4.5),
+        color_with_alpha(Color::BLACK, 0.78),
+        0.75,
+    );
+    ctx.encoder.draw_rect(
+        Rect::new(center.x - 0.75, chip.y + 12.4, 1.5, 1.5),
+        color_with_alpha(Color::BLACK, 0.78),
+        0.75,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1157,6 +1242,7 @@ mod tests {
         clip_pops: usize,
         raster_images: Vec<(String, Rect, u32, u32)>,
         texts: Vec<String>,
+        triangles: usize,
     }
 
     impl DrawCommandEncoder for RecordingEncoder {
@@ -1173,6 +1259,10 @@ mod tests {
         }
 
         fn draw_line(&mut self, _start: Point, _end: Point, _width: f32, _color: Color) {}
+
+        fn draw_triangles(&mut self, vertices: &[Point], _color: Color) {
+            self.triangles += vertices.len() / 3;
+        }
 
         fn draw_text(&mut self, text: &str, _font_size: f32, _position: Point, _color: Color) {
             self.texts.push(text.to_owned());
@@ -1242,6 +1332,22 @@ mod tests {
     }
 
     #[test]
+    fn thumbnail_status_builders_clear_ready_thumbnail_payloads() {
+        let thumbnail =
+            RasterImage::new("asset-thumb:clip-a", 2, 2, vec![255; 16]).expect("valid thumbnail");
+
+        let loading = item("clip-a", "Clip A")
+            .with_thumbnail(thumbnail.clone())
+            .with_thumbnail_loading();
+        let failed = item("clip-b", "Clip B").with_thumbnail(thumbnail).with_thumbnail_failed();
+
+        assert!(loading.thumbnail.is_none());
+        assert_eq!(loading.thumbnail_status, AssetGridThumbnailStatus::Loading);
+        assert!(failed.thumbnail.is_none());
+        assert_eq!(failed.thumbnail_status, AssetGridThumbnailStatus::Failed);
+    }
+
+    #[test]
     fn paint_card_draws_thumbnail_inside_preview_clip() {
         let thumbnail =
             RasterImage::new("asset-thumb:clip-a", 2, 2, vec![255; 16]).expect("valid thumbnail");
@@ -1292,6 +1398,47 @@ mod tests {
 
         assert!(encoder.raster_images.is_empty());
         assert!(encoder.rects.len() >= 3);
+    }
+
+    #[test]
+    fn paint_card_loading_thumbnail_uses_shape_marker_without_raster_image() {
+        let grid = AssetGrid::new(
+            "Assets",
+            vec![item("clip-a", "Clip A").with_thumbnail_loading()],
+        );
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 320.0, 240.0),
+        };
+
+        grid.paint_card(&mut ctx, 0, Rect::new(20.0, 30.0, 158.0, 118.0));
+
+        assert!(encoder.raster_images.is_empty());
+        assert_eq!(encoder.triangles, 0);
+        assert!(encoder.rects.len() >= 6);
+    }
+
+    #[test]
+    fn paint_card_failed_thumbnail_uses_vector_warning_marker() {
+        let grid = AssetGrid::new(
+            "Assets",
+            vec![item("clip-a", "Clip A").with_thumbnail_failed()],
+        );
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 320.0, 240.0),
+        };
+
+        grid.paint_card(&mut ctx, 0, Rect::new(20.0, 30.0, 158.0, 118.0));
+
+        assert!(encoder.raster_images.is_empty());
+        assert_eq!(encoder.triangles, 1);
     }
 
     #[test]

@@ -784,14 +784,17 @@ every database row: it shows top-level folders first, then root/unfiled assets.
 Asset cards may receive an optional `RasterImage` thumbnail. The thumbnail is
 an already-decoded RGBA payload with a stable atlas key; `AssetGrid` only
 validates dimensions, clips it to the card preview region, and forwards it to
-the renderer. Asset discovery, video-frame decoding, cache invalidation, and
-filesystem metadata remain in app/media layers so the project media library
-does not become a filesystem browser or media decoder. The self-hosted panel
-adapter accepts thumbnails through `AssetThumbnailSource`, which lets a
-host-owned cache or future background thumbnail queue feed cards without adding
-media dependencies to `mondrian-ui-widgets`. `SelfHostedUiHost` owns the
-current `AssetThumbnailCache`: model refreshes request missing video thumbnails
-without blocking, a background worker decodes bounded RGBA frames through
+the renderer. Loading and failed thumbnail states are represented as card
+preview geometry rather than text or font glyphs, so users can distinguish
+queued decodes and offline/bad media without platform font dependencies. Asset
+discovery, video-frame decoding, cache invalidation, and filesystem metadata
+remain in app/media layers so the project media library does not become a
+filesystem browser or media decoder. The self-hosted panel adapter accepts
+thumbnail lifecycle data through `AssetThumbnailSource`, which lets a host-owned
+cache or future background thumbnail queue feed cards without adding media
+dependencies to `mondrian-ui-widgets`. `SelfHostedUiHost` owns the current
+`AssetThumbnailCache`: model refreshes request missing video thumbnails without
+blocking, a background worker decodes bounded RGBA frames through
 `mondrian-media`, and the window event loop polls completions before repainting.
 Asset cards expose `ui.assets.delete_asset` through their card-level context
 menu. `AppState` owns the actual deletion, including timeline cleanup for clips

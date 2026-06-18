@@ -37,7 +37,9 @@ mod component_extreme_tests;
 #[cfg(test)]
 mod test_utils;
 
-pub use asset_grid::{AssetGrid, AssetGridAction, AssetGridItem, AssetGridState};
+pub use asset_grid::{
+    AssetGrid, AssetGridAction, AssetGridItem, AssetGridState, AssetGridThumbnailStatus,
+};
 pub use button::Button;
 pub use checkbox::Checkbox;
 pub use color_picker::{
