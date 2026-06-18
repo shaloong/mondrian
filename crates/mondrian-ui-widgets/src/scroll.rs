@@ -556,8 +556,9 @@ impl Widget for ScrollView {
 
     fn paint(&self, ctx: &mut PaintContext) {
         let previous_clip = ctx.clip_rect;
-        ctx.clip_rect = previous_clip.intersection(&self.bounds);
-        ctx.encoder.push_clip(self.bounds);
+        let viewport_clip = previous_clip.intersection(&self.bounds);
+        ctx.clip_rect = viewport_clip;
+        ctx.encoder.push_clip(viewport_clip);
         if let Some(ref child) = self.child {
             child.paint(ctx);
         }
@@ -809,10 +810,13 @@ mod tests {
     struct RecordingEncoder {
         translations: Vec<Vec2>,
         rects: Vec<Rect>,
+        clips: Vec<Rect>,
     }
 
     impl DrawCommandEncoder for RecordingEncoder {
-        fn push_clip(&mut self, _bounds: Rect) {}
+        fn push_clip(&mut self, bounds: Rect) {
+            self.clips.push(bounds);
+        }
 
         fn pop_clip(&mut self) {}
 
@@ -880,19 +884,23 @@ mod tests {
 
         let mut encoder = RecordingEncoder::default();
         let theme = ThemePreset::Dark.build();
-        let mut ctx = PaintContext {
-            encoder: &mut encoder,
-            theme: &theme,
-            clip_rect: Rect::new(0.0, 0.0, 100.0, 100.0),
-        };
+        let final_clip = {
+            let mut ctx = PaintContext {
+                encoder: &mut encoder,
+                theme: &theme,
+                clip_rect: Rect::new(0.0, 0.0, 100.0, 100.0),
+            };
 
-        sv.paint(&mut ctx);
+            sv.paint(&mut ctx);
+            ctx.clip_rect
+        };
 
         assert_eq!(
             *observed_clip.borrow(),
             Some(Rect::new(40.0, 50.0, 60.0, 50.0))
         );
-        assert_eq!(ctx.clip_rect, Rect::new(0.0, 0.0, 100.0, 100.0));
+        assert_eq!(encoder.clips.first().copied(), *observed_clip.borrow());
+        assert_eq!(final_clip, Rect::new(0.0, 0.0, 100.0, 100.0));
     }
 
     #[test]

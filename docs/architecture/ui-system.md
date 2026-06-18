@@ -544,7 +544,9 @@ inside a scrolled child can bleed over sibling controls outside the viewport.
 Clipped containers must also narrow `PaintContext.clip_rect` while painting
 children, not just push a renderer clip command. Text and paragraph widgets use
 that paint-time clip for width decisions, so the component layer and renderer
-clip stack must describe the same viewport.
+clip stack must describe the same viewport. `ScrollView` therefore pushes the
+same effective viewport clip that it stores in `PaintContext.clip_rect`, namely
+the intersection of its bounds and the incoming parent clip.
 Clip rectangles are snapped conservatively by flooring their top-left and
 ceiling their bottom-right edge before GPU scissoring. Ordinary shape, image,
 line, and vector geometry keeps subpixel coordinates so SDF antialiasing, MSAA,
