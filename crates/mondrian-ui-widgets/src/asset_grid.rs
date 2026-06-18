@@ -9,12 +9,14 @@ use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::paint::{color_with_alpha, mix_color, paint_focus_ring};
+use crate::paint::{color_with_alpha, mix_color, paint_focus_ring, soft_border};
 use crate::vector_icon::VectorIcon;
 use crate::ContextMenu;
 use crate::MenuItem;
+use crate::RasterImage;
 use crate::TextInput;
 
 const DOUBLE_CLICK_MAX_AGE: Duration = Duration::from_millis(500);
@@ -60,6 +62,7 @@ pub struct AssetGridItem {
     pub badge: Option<String>,
     pub accent: Color,
     pub icon: Option<VectorIcon>,
+    pub thumbnail: Option<RasterImage>,
     pub disabled: bool,
     pub select_action: Option<Action>,
     pub activate_action: Option<Action>,
@@ -77,6 +80,7 @@ impl AssetGridItem {
             badge: None,
             accent,
             icon: None,
+            thumbnail: None,
             disabled: false,
             select_action: None,
             activate_action: None,
@@ -100,6 +104,12 @@ impl AssetGridItem {
     /// Set a vector icon painted in the preview region.
     pub fn with_icon(mut self, icon: VectorIcon) -> Self {
         self.icon = Some(icon);
+        self
+    }
+
+    /// Set a raster thumbnail painted in the preview region.
+    pub fn with_thumbnail(mut self, thumbnail: RasterImage) -> Self {
+        self.thumbnail = Some(thumbnail);
         self
     }
 
@@ -696,22 +706,15 @@ impl AssetGrid {
         } else {
             item.accent
         };
-        let preview_top = mix_color(accent, colors.card, 0.22);
-        let preview_bottom = mix_color(accent, colors.background, 0.58);
-        ctx.encoder.draw_gradient_rect(
-            preview,
-            [preview_top, preview_top, preview_bottom, preview_bottom],
-            spacing.radius_sm,
+        ctx.encoder.draw_rect(
+            preview.inset(-1.0, -1.0),
+            soft_border(colors.border),
+            spacing.radius_sm + 1.0,
         );
         ctx.encoder.draw_rect(
-            Rect::new(
-                preview.x,
-                preview.y + preview.height - 2.0,
-                preview.width,
-                2.0,
-            ),
-            color_with_alpha(accent, 0.72),
-            0.0,
+            preview,
+            mix_color(colors.card, colors.background, 0.42),
+            spacing.radius_sm,
         );
 
         let text_color = if item.disabled {
@@ -721,14 +724,50 @@ impl AssetGrid {
         } else {
             colors.foreground
         };
-        if let Some(icon) = &item.icon {
-            let icon_rect = Rect::new(
-                preview.x + (preview.width - ICON_SIZE) * 0.5,
-                preview.y + (preview.height - ICON_SIZE) * 0.5,
-                ICON_SIZE,
-                ICON_SIZE,
+        if let Some(thumbnail) = &item.thumbnail {
+            ctx.push_clip(preview);
+            ctx.encoder.draw_raster_image(
+                &thumbnail.key,
+                preview,
+                thumbnail.width,
+                thumbnail.height,
+                Arc::clone(&thumbnail.rgba),
+                if item.disabled {
+                    colors.muted_foreground
+                } else {
+                    Color::WHITE
+                },
             );
-            icon.paint(ctx, icon_rect, text_color);
+            ctx.pop_clip();
+        } else {
+            let preview_top = mix_color(accent, colors.card, 0.22);
+            let preview_bottom = mix_color(accent, colors.background, 0.58);
+            ctx.encoder.draw_gradient_rect(
+                preview,
+                [preview_top, preview_top, preview_bottom, preview_bottom],
+                spacing.radius_sm,
+            );
+            ctx.encoder.draw_rect(
+                Rect::new(
+                    preview.x,
+                    preview.y + preview.height - 2.0,
+                    preview.width,
+                    2.0,
+                ),
+                color_with_alpha(accent, 0.72),
+                0.0,
+            );
+        }
+        if item.thumbnail.is_none() {
+            if let Some(icon) = &item.icon {
+                let icon_rect = Rect::new(
+                    preview.x + (preview.width - ICON_SIZE) * 0.5,
+                    preview.y + (preview.height - ICON_SIZE) * 0.5,
+                    ICON_SIZE,
+                    ICON_SIZE,
+                );
+                icon.paint(ctx, icon_rect, text_color);
+            }
         }
         if let Some(badge) = &item.badge {
             let badge_rect = Rect::new(
@@ -1106,9 +1145,55 @@ mod tests {
     use crate::test_utils::{DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::types::AssetId;
     use mondrian_platform::NoopPlatformService;
-    use mondrian_ui_core::widget::{EventContext, EventRequests};
+    use mondrian_ui_core::widget::{DrawCommandEncoder, EventContext, EventRequests};
+    use mondrian_ui_theme::ThemePreset;
     use std::cell::RefCell;
     use std::path::PathBuf;
+
+    #[derive(Default)]
+    struct RecordingEncoder {
+        rects: Vec<Rect>,
+        clips: Vec<Rect>,
+        clip_pops: usize,
+        raster_images: Vec<(String, Rect, u32, u32)>,
+        texts: Vec<String>,
+    }
+
+    impl DrawCommandEncoder for RecordingEncoder {
+        fn push_clip(&mut self, bounds: Rect) {
+            self.clips.push(bounds);
+        }
+
+        fn pop_clip(&mut self) {
+            self.clip_pops += 1;
+        }
+
+        fn draw_rect(&mut self, bounds: Rect, _color: Color, _corner_radius: f32) {
+            self.rects.push(bounds);
+        }
+
+        fn draw_line(&mut self, _start: Point, _end: Point, _width: f32, _color: Color) {}
+
+        fn draw_text(&mut self, text: &str, _font_size: f32, _position: Point, _color: Color) {
+            self.texts.push(text.to_owned());
+        }
+
+        fn draw_raster_image(
+            &mut self,
+            key: &str,
+            bounds: Rect,
+            width: u32,
+            height: u32,
+            _rgba: Arc<[u8]>,
+            _tint: Color,
+        ) {
+            self.raster_images.push((key.to_owned(), bounds, width, height));
+        }
+
+        fn push_translate(&mut self, _offset: glam::Vec2) {}
+
+        fn pop_transform(&mut self) {}
+    }
 
     fn item(id: &str, title: &str) -> AssetGridItem {
         AssetGridItem::new(id, title, Color::from_hex(0x6688CC))
@@ -1148,6 +1233,65 @@ mod tests {
         let second = grid.card_rect_for_index(1).expect("second card");
         assert!(second.x > first.x + first.width);
         assert!(second.x + second.width <= 360.0);
+    }
+
+    #[test]
+    fn thumbnail_model_rejects_invalid_rgba_payloads() {
+        assert!(RasterImage::new("asset:bad", 2, 2, vec![255; 15]).is_none());
+        assert!(RasterImage::new("asset:empty", 0, 2, Vec::<u8>::new()).is_none());
+    }
+
+    #[test]
+    fn paint_card_draws_thumbnail_inside_preview_clip() {
+        let thumbnail =
+            RasterImage::new("asset-thumb:clip-a", 2, 2, vec![255; 16]).expect("valid thumbnail");
+        let grid = AssetGrid::new(
+            "Assets",
+            vec![item("clip-a", "Clip A").with_thumbnail(thumbnail)],
+        );
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 320.0, 240.0),
+        };
+        let card = Rect::new(20.0, 30.0, 158.0, 118.0);
+        let preview = Rect::new(
+            card.x + 6.0,
+            card.y + 6.0,
+            card.width - 12.0,
+            THUMBNAIL_HEIGHT,
+        );
+
+        grid.paint_card(&mut ctx, 0, card);
+
+        assert_eq!(
+            encoder.raster_images,
+            vec![("asset-thumb:clip-a".to_owned(), preview, 2, 2)]
+        );
+        assert!(
+            encoder.clips.contains(&preview),
+            "asset thumbnails must be clipped to the card preview region"
+        );
+        assert_eq!(encoder.clip_pops, encoder.clips.len());
+    }
+
+    #[test]
+    fn paint_card_without_thumbnail_keeps_vector_placeholder_path() {
+        let grid = AssetGrid::new("Assets", vec![item("clip-a", "Clip A")]);
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 320.0, 240.0),
+        };
+
+        grid.paint_card(&mut ctx, 0, Rect::new(20.0, 30.0, 158.0, 118.0));
+
+        assert!(encoder.raster_images.is_empty());
+        assert!(encoder.rects.len() >= 3);
     }
 
     #[test]

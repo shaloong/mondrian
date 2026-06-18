@@ -14,42 +14,13 @@ use std::sync::Arc;
 use crate::paint::{
     color_with_alpha, horizontal_stroke_rect, mix_color, soft_border, vertical_stroke_rect,
 };
+use crate::RasterImage;
 
 const DEFAULT_WIDTH: f32 = 480.0;
 const DEFAULT_HEIGHT: f32 = 270.0;
 
 /// RGBA preview image presented by [`ViewerSurface`].
-#[derive(Debug, Clone)]
-pub struct ViewerFrameImage {
-    /// Stable image cache key for the renderer-owned raster atlas.
-    pub key: String,
-    /// Source image width in pixels.
-    pub width: u32,
-    /// Source image height in pixels.
-    pub height: u32,
-    /// RGBA8 pixels, row-major, `width * height * 4` bytes.
-    pub rgba: Arc<[u8]>,
-}
-
-impl ViewerFrameImage {
-    /// Create a preview frame image. Returns `None` for invalid dimensions or
-    /// byte lengths so callers cannot silently poison the renderer atlas.
-    pub fn new(
-        key: impl Into<String>,
-        width: u32,
-        height: u32,
-        rgba: impl Into<Arc<[u8]>>,
-    ) -> Option<Self> {
-        let rgba = rgba.into();
-        let expected = width.checked_mul(height)?.checked_mul(4)? as usize;
-        (width > 0 && height > 0 && rgba.len() == expected).then(|| Self {
-            key: key.into(),
-            width,
-            height,
-            rgba,
-        })
-    }
-}
+pub type ViewerFrameImage = RasterImage;
 
 /// Preview viewer surface.
 pub struct ViewerSurface {

@@ -48,8 +48,8 @@ use mondrian_ui_widgets::scroll::ScrollView;
 use mondrian_ui_widgets::slider::Slider;
 use mondrian_ui_widgets::text_input::TextInput;
 use mondrian_ui_widgets::{
-    NodeGraphEdge, NodeGraphNode, NodeGraphView, TimelineClip, TimelineClipRef, TimelineTrack,
-    TimelineView, ViewerSurface,
+    AssetGrid, AssetGridItem, NodeGraphEdge, NodeGraphNode, NodeGraphView, RasterImage,
+    TimelineClip, TimelineClipRef, TimelineTrack, TimelineView, ViewerSurface,
 };
 
 fn demo_action(name: &str) -> Action {
@@ -891,43 +891,88 @@ fn demo_node_graph_panel() -> NodeGraphView {
     })
 }
 
-fn demo_asset_panel() -> PanelList {
-    PanelList::new(
+fn demo_asset_panel() -> AssetGrid {
+    AssetGrid::new(
         "Assets",
         vec![
-            with_demo_icon(
-                PanelListItem::new("A001_Camera_Main.mov")
-                    .with_subtitle("00:01:24:12 - Rec.709 - 4K")
-                    .with_badge("Video")
-                    .with_select_action(demo_action("assets.select.video")),
+            demo_asset_card(
+                "demo-camera-main",
+                "A001_Camera_Main.mov",
+                "00:01:24:12 - Rec.709 - 4K",
+                "Video",
+                Color::from_hex(0x89B4FA),
                 AppIcon::Film,
-            ),
-            with_demo_icon(
-                PanelListItem::new("VO_Take_03.wav")
-                    .with_subtitle("48 kHz stereo - normalized")
-                    .with_badge("Audio")
-                    .with_select_action(demo_action("assets.select.audio")),
+            )
+            .with_thumbnail(demo_asset_thumbnail(
+                "demo-thumb:camera-main",
+                Color::from_hex(0x89B4FA),
+                Color::from_hex(0xF6C177),
+            )),
+            demo_asset_card(
+                "demo-vo-take",
+                "VO_Take_03.wav",
+                "48 kHz stereo - normalized",
+                "Audio",
+                Color::from_hex(0xA6E3A1),
                 AppIcon::Music,
             ),
-            with_demo_icon(
-                PanelListItem::new("Brand_Pack")
-                    .with_subtitle("Logos, colors, and lower thirds")
-                    .with_badge("Folder")
-                    .with_select_action(demo_action("assets.select.folder")),
+            demo_asset_card(
+                "demo-brand-pack",
+                "Brand_Pack",
+                "Logos, colors, and lower thirds",
+                "Folder",
+                Color::from_hex(0xF9E2AF),
                 AppIcon::Folder,
             ),
-            with_demo_icon(
-                PanelListItem::new("Missing_Reference.psd")
-                    .with_subtitle("Offline media placeholder")
-                    .with_badge("Offline")
-                    .disabled(true),
+            demo_asset_card(
+                "demo-missing-reference",
+                "Missing_Reference.psd",
+                "Offline media placeholder",
+                "Offline",
+                Color::from_hex(0xF38BA8),
                 AppIcon::Warning,
-            ),
+            )
+            .disabled(true),
         ],
     )
     .with_subtitle("Project media")
     .with_filter("Search assets")
     .on_activate(|index, item| demo_action(&format!("assets.activate.{index}.{}", item.title)))
+}
+
+fn demo_asset_card(
+    id: &str,
+    title: &str,
+    subtitle: &str,
+    badge: &str,
+    accent: Color,
+    icon: AppIcon,
+) -> AssetGridItem {
+    AssetGridItem::new(id, title, accent)
+        .with_subtitle(subtitle)
+        .with_badge(badge)
+        .with_icon(icon.vector_icon().expect("bundled ui_demo icon asset should parse"))
+        .with_select_action(demo_action(&format!("assets.select.{id}")))
+}
+
+fn demo_asset_thumbnail(key: &str, primary: Color, secondary: Color) -> RasterImage {
+    const WIDTH: u32 = 96;
+    const HEIGHT: u32 = 54;
+    let mut rgba = Vec::with_capacity((WIDTH * HEIGHT * 4) as usize);
+    for y in 0..HEIGHT {
+        for x in 0..WIDTH {
+            let u = x as f32 / (WIDTH - 1) as f32;
+            let v = y as f32 / (HEIGHT - 1) as f32;
+            let stripe = if (x / 12 + y / 9) % 2 == 0 { 0.10 } else { 0.0 };
+            let vignette = ((u - 0.5).abs() + (v - 0.5).abs()).min(1.0) * 0.22;
+            let color = primary.lerp(secondary, (u * 0.72 + v * 0.28).clamp(0.0, 1.0));
+            rgba.push(((color.r + stripe - vignette).clamp(0.0, 1.0) * 255.0) as u8);
+            rgba.push(((color.g + stripe - vignette).clamp(0.0, 1.0) * 255.0) as u8);
+            rgba.push(((color.b + stripe - vignette).clamp(0.0, 1.0) * 255.0) as u8);
+            rgba.push(255);
+        }
+    }
+    RasterImage::new(key, WIDTH, HEIGHT, rgba).expect("demo thumbnail dimensions are fixed")
 }
 
 fn demo_library_panel() -> PanelList {

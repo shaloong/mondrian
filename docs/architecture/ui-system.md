@@ -781,6 +781,12 @@ folder context. The app adapter maps `AssetRecord` into `AssetGridItem` view
 data and semantic media color tokens; the widget crate does not depend on the
 asset library or editor domain. The root Assets view is not a flat dump of
 every database row: it shows top-level folders first, then root/unfiled assets.
+Asset cards may receive an optional `RasterImage` thumbnail. The thumbnail is
+an already-decoded RGBA payload with a stable atlas key; `AssetGrid` only
+validates dimensions, clips it to the card preview region, and forwards it to
+the renderer. Asset discovery, video-frame decoding, cache invalidation, and
+filesystem metadata remain in app/media layers so the project media library
+does not become a filesystem browser or media decoder.
 Asset cards expose `ui.assets.delete_asset` through their card-level context
 menu. `AppState` owns the actual deletion, including timeline cleanup for clips
 that referenced the asset, event publication, status hints, and project save.
@@ -1032,10 +1038,11 @@ generic widget layer.
 The self-hosted Viewer panel uses the domain-light `ViewerSurface` widget
 instead of a colored placeholder. App code maps `AppState` / `Sequence` into a
 small `ViewerPanelModel` containing title, playback status, current frame,
-duration, source resolution, and an optional `ViewerFrameImage`. The widget owns
-preview chrome, source aspect-ratio fitting, raster-image presentation,
-metadata labels, and safe-area guide drawing only; frame decoding, preview
-scheduling, and GPU texture lifecycle remain app/runtime responsibilities.
+duration, source resolution, and an optional `ViewerFrameImage` alias over the
+shared `RasterImage` payload. The widget owns preview chrome,
+source aspect-ratio fitting, raster-image presentation, metadata labels, and
+safe-area guide drawing only; frame decoding, preview scheduling, and GPU
+texture lifecycle remain app/runtime responsibilities.
 Empty app state maps to a disabled viewer model so the product shell can show
 clear no-signal chrome without pretending a preview texture exists.
 `ui_demo` should use the same `ViewerSurface` for the Viewer panel and keep
