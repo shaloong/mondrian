@@ -7,4 +7,4 @@ pub mod font;
 pub mod layout;
 pub mod render;
 
-pub use render::{resolve_text_commands, TextRenderer};
+pub use render::{resolve_text_commands, ResolvedTextCommands, TextRenderer, TextResolveStats};

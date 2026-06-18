@@ -161,7 +161,6 @@ impl GalleryWidget {
             \n\nA deliberately long Latin sentence lives here as well, so mixed CJK and Latin layout can be checked inside the same scroll surface.",
         )
         .wrapped()
-        .with_max_width(160.0)
         .with_padding(10.0, 10.0);
 
         let initial_color = Color::from_hex(0x336699);

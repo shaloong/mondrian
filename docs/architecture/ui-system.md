@@ -1087,12 +1087,20 @@ texel. LCD/subpixel-color AA is intentionally not used in the default UI path
 because it interacts poorly with transparent surfaces, transforms, and
 cross-platform compositor differences; a future rich-text/editor mode may add a
 separate subpixel-bin atlas where sharper text is worth the cache cost.
+Text resolution returns `ResolvedTextCommands` rather than a bare command list so
+the app can inspect `TextResolveStats`. Missing glyphs caused by rasterization
+or atlas allocation failures must be counted instead of silently disappearing;
+the shell may surface the counter, but missing glyphs should not trigger an
+unbounded redraw loop.
 
 The renderer must flush draw batches when clip state changes and must apply the
 batch clip rect as a GPU scissor before drawing. A command emitted inside
 `PushClip`/`PopClip` must not share a batch with unclipped geometry, otherwise
 glyph images and other later-resolved commands can bleed outside their widget
 content rects.
+The text resolver preserves surrounding draw-state commands. A `Text` command
+inside `PushClip`/`PopClip` resolves into glyph `Image` commands at the same
+sequence position, still enclosed by the original clip scope.
 Self-hosted windows share `SelfHostedFrameRenderer` for the text-atlas upload
 and surface-present path. `mondrian-ui-text` resolves text into glyph image
 commands and exposes pending glyph uploads before the frame is submitted, so the

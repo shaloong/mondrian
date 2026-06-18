@@ -15,6 +15,10 @@ pub enum SelfHostedFrameResult {
         /// The frame uploaded atlas resources that should be visible on a
         /// deterministic follow-up frame across all backends.
         uploaded_resources: bool,
+        /// Text glyphs that failed rasterization or atlas allocation.
+        text_missing_glyphs: u32,
+        /// Raster images that failed upload or image-atlas allocation.
+        raster_image_failures: u32,
     },
     /// The surface was temporarily unavailable and the frame was skipped.
     Skipped,
@@ -26,7 +30,7 @@ impl SelfHostedFrameResult {
     /// Whether the window should request another redraw immediately.
     pub fn needs_follow_up_redraw(self) -> bool {
         match self {
-            SelfHostedFrameResult::Presented { uploaded_resources } => uploaded_resources,
+            SelfHostedFrameResult::Presented { uploaded_resources, .. } => uploaded_resources,
             SelfHostedFrameResult::Reconfigured => true,
             SelfHostedFrameResult::Skipped => false,
         }
@@ -58,7 +62,9 @@ impl SelfHostedFrameRenderer {
         screen_size: (u32, u32),
         commands: Vec<DrawCommand>,
     ) -> SelfHostedFrameResult {
-        let commands = resolve_text_commands(commands, &mut self.text_renderer);
+        let resolved_text = resolve_text_commands(commands, &mut self.text_renderer);
+        let text_stats = resolved_text.stats;
+        let commands = resolved_text.commands;
         let pending = renderer_glyph_uploads(self.text_renderer.take_pending_uploads());
         let uploaded_glyphs = !pending.is_empty();
         if uploaded_glyphs {
@@ -79,6 +85,8 @@ impl SelfHostedFrameRenderer {
                 output.present();
                 SelfHostedFrameResult::Presented {
                     uploaded_resources: uploaded_glyphs || render_stats.uploaded_raster_images,
+                    text_missing_glyphs: text_stats.missing_glyphs,
+                    raster_image_failures: render_stats.failed_raster_images,
                 }
             }
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
@@ -112,13 +120,18 @@ mod tests {
 
     #[test]
     fn frame_result_requests_follow_up_after_resource_upload_or_reconfigure() {
-        assert!(
-            !SelfHostedFrameResult::Presented { uploaded_resources: false }
-                .needs_follow_up_redraw()
-        );
-        assert!(
-            SelfHostedFrameResult::Presented { uploaded_resources: true }.needs_follow_up_redraw()
-        );
+        assert!(!SelfHostedFrameResult::Presented {
+            uploaded_resources: false,
+            text_missing_glyphs: 2,
+            raster_image_failures: 1,
+        }
+        .needs_follow_up_redraw());
+        assert!(SelfHostedFrameResult::Presented {
+            uploaded_resources: true,
+            text_missing_glyphs: 0,
+            raster_image_failures: 0,
+        }
+        .needs_follow_up_redraw());
         assert!(SelfHostedFrameResult::Reconfigured.needs_follow_up_redraw());
         assert!(!SelfHostedFrameResult::Skipped.needs_follow_up_redraw());
     }

@@ -15,6 +15,37 @@ pub struct TextRenderer {
     pub atlas: GlyphAtlas,
 }
 
+/// Diagnostics collected while resolving text commands into glyph images.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TextResolveStats {
+    /// Number of text commands resolved in this pass.
+    pub text_commands: u32,
+    /// Number of laid-out glyphs that requested an atlas image.
+    pub glyphs_requested: u32,
+    /// Number of laid-out glyphs resolved to image draw commands.
+    pub glyphs_resolved: u32,
+    /// Number of laid-out glyphs that could not be rasterized or atlas-allocated.
+    pub missing_glyphs: u32,
+}
+
+impl TextResolveStats {
+    fn add(&mut self, other: Self) {
+        self.text_commands = self.text_commands.saturating_add(other.text_commands);
+        self.glyphs_requested = self.glyphs_requested.saturating_add(other.glyphs_requested);
+        self.glyphs_resolved = self.glyphs_resolved.saturating_add(other.glyphs_resolved);
+        self.missing_glyphs = self.missing_glyphs.saturating_add(other.missing_glyphs);
+    }
+}
+
+/// Text resolve output for one frame.
+#[derive(Debug, Clone, Default)]
+pub struct ResolvedTextCommands {
+    /// Draw commands after every text command has been replaced by glyph images.
+    pub commands: Vec<DrawCommand>,
+    /// Diagnostics gathered while resolving text in this frame.
+    pub stats: TextResolveStats,
+}
+
 impl TextRenderer {
     pub fn new() -> Self {
         Self {
@@ -31,6 +62,18 @@ impl TextRenderer {
         color: Color,
         max_width: Option<f32>,
     ) -> Vec<DrawCommand> {
+        self.layout_and_render_with_stats(text, font_size, position, color, max_width)
+            .commands
+    }
+
+    fn layout_and_render_with_stats(
+        &mut self,
+        text: &str,
+        font_size: f32,
+        position: Point,
+        color: Color,
+        max_width: Option<f32>,
+    ) -> ResolvedTextCommands {
         let attrs = cosmic_text::Attrs::new()
             .family(cosmic_text::Family::SansSerif)
             .weight(cosmic_text::Weight::NORMAL);
@@ -43,7 +86,9 @@ impl TextRenderer {
         };
 
         let mut commands = Vec::new();
+        let mut stats = TextResolveStats::default();
         for (line_y, glyph) in layout.positioned_glyphs() {
+            stats.glyphs_requested = stats.glyphs_requested.saturating_add(1);
             if let Some((uv_rect, bmp_w, bmp_h, top, left)) =
                 self.atlas.get_or_rasterize(font_system, glyph, 0.0)
             {
@@ -54,9 +99,12 @@ impl TextRenderer {
                     uv_rect,
                     tint: color,
                 });
+                stats.glyphs_resolved = stats.glyphs_resolved.saturating_add(1);
+            } else {
+                stats.missing_glyphs = stats.missing_glyphs.saturating_add(1);
             }
         }
-        commands
+        ResolvedTextCommands { commands, stats }
     }
 
     pub fn measure_text(&mut self, text: &str, font_size: f32) -> (f32, f32) {
@@ -99,24 +147,28 @@ impl TextRenderer {
 pub fn resolve_text_commands(
     commands: Vec<DrawCommand>,
     text_renderer: &mut TextRenderer,
-) -> Vec<DrawCommand> {
+) -> ResolvedTextCommands {
     let mut resolved = Vec::with_capacity(commands.len());
+    let mut stats = TextResolveStats::default();
     for cmd in commands {
         match cmd {
             DrawCommand::Text { text, style, position, max_width, color } => {
-                let glyph_cmds = text_renderer.layout_and_render(
+                let mut glyph_result = text_renderer.layout_and_render_with_stats(
                     &text,
                     style.font_size,
                     position,
                     color,
                     max_width,
                 );
-                resolved.extend(glyph_cmds);
+                glyph_result.stats.text_commands =
+                    glyph_result.stats.text_commands.saturating_add(1);
+                stats.add(glyph_result.stats);
+                resolved.append(&mut glyph_result.commands);
             }
             _ => resolved.push(cmd),
         }
     }
-    resolved
+    ResolvedTextCommands { commands: resolved, stats }
 }
 
 impl Default for TextRenderer {
@@ -706,7 +758,8 @@ mod tests {
             max_width: None,
             color: Color::WHITE,
         }];
-        let resolved = resolve_text_commands(commands, &mut r);
+        let result = resolve_text_commands(commands, &mut r);
+        let resolved = result.commands;
         let image_count =
             resolved.iter().filter(|c| matches!(c, DrawCommand::Image { .. })).count();
         assert!(
@@ -724,6 +777,46 @@ mod tests {
         assert_eq!(
             text_remaining, 0,
             "Text commands should all be resolved to Image"
+        );
+        assert_eq!(result.stats.text_commands, 1);
+        assert!(result.stats.glyphs_requested >= image_count as u32);
+        assert_eq!(result.stats.glyphs_resolved, image_count as u32);
+        assert_eq!(result.stats.missing_glyphs, 0);
+    }
+
+    #[test]
+    fn resolve_text_commands_keeps_glyph_images_inside_clip_scope() {
+        let mut r = TextRenderer::new();
+        let clip = Rect::new(4.0, 5.0, 80.0, 24.0);
+        let commands = vec![
+            DrawCommand::PushClip { bounds: clip },
+            DrawCommand::Text {
+                text: "Hi".to_string(),
+                style: mondrian_ui_theme::typography::TextStyle {
+                    font_size: 16.0,
+                    line_height: 20.8,
+                    font_weight: mondrian_ui_theme::typography::FontWeight::Regular,
+                    letter_spacing: 0.0,
+                },
+                position: Point::new(10.0, 20.0),
+                max_width: None,
+                color: Color::WHITE,
+            },
+            DrawCommand::PopClip,
+        ];
+
+        let result = resolve_text_commands(commands, &mut r);
+        let first = result.commands.first().expect("push clip should remain first");
+        let last = result.commands.last().expect("pop clip should remain last");
+
+        assert!(matches!(first, DrawCommand::PushClip { bounds } if *bounds == clip));
+        assert!(matches!(last, DrawCommand::PopClip));
+        assert!(
+            result.commands[1..result.commands.len() - 1]
+                .iter()
+                .all(|command| matches!(command, DrawCommand::Image { .. })),
+            "resolved glyph images must remain between the original clip commands: {:?}",
+            result.commands
         );
     }
 }

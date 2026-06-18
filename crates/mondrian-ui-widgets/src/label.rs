@@ -418,6 +418,35 @@ mod tests {
     }
 
     #[test]
+    fn wrapped_label_without_max_width_reflows_to_layout_content_width() {
+        let theme = ThemePreset::Dark.build();
+        let mut label = Label::new("Scroll text should reflow with the viewport")
+            .with_padding(5.0, 0.0)
+            .wrapped();
+        let measured =
+            label.measure(LayoutConstraint { min: Size::ZERO, max: Size::new(72.0, f32::MAX) });
+        label.layout(Rect::new(10.0, 20.0, 72.0, measured.height));
+
+        let commands = paint_label(&label, &theme);
+
+        assert!(measured.width <= 72.0);
+        assert!(
+            measured.height > 14.0 * 1.3,
+            "narrow auto-wrapped label should increase height"
+        );
+        assert_eq!(
+            commands,
+            vec![TextCommand::TextBox {
+                text: "Scroll text should reflow with the viewport".into(),
+                font_size: 14.0,
+                position: Point::new(15.0, 20.0),
+                max_width: 62.0,
+                color: theme.colors.foreground,
+            }]
+        );
+    }
+
+    #[test]
     fn cjk_wrapped_label_measure_uses_exact_text_layout() {
         let label = Label::new("很长的中文标签需要换行")
             .with_font_size(13.0)
