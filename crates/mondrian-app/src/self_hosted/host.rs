@@ -5,15 +5,24 @@
 //! refresh policy after widget-dispatched actions.
 
 use std::cell::{Cell, Ref, RefCell};
+use std::path::PathBuf;
 
 use mondrian_platform::PlatformService;
 use mondrian_ui_core::types::Rect;
 use mondrian_ui_core::TreeWalker;
+use mondrian_ui_theme::set_theme_preset;
 
-use crate::app::ui_actions::{APP_SHELL_NAMESPACE, APP_SHELL_QUIT};
+use crate::app::ui_actions::{
+    PreferencesThemePayload, APP_SHELL_NAMESPACE, APP_SHELL_PREFERENCES_THEME_CHANGED,
+    APP_SHELL_QUIT,
+};
 use crate::app::AppState;
 use crate::self_hosted::action_queue::PendingUiActions;
 use crate::self_hosted::menu_bar::app_state_action_enabled;
+use crate::self_hosted::preferences_store::{
+    load_self_hosted_preferences, persist_self_hosted_preferences_to, self_hosted_preferences_path,
+    SelfHostedPreferences,
+};
 use crate::self_hosted::shell::SelfHostedAppRoot;
 use mondrian_editor_state::Action;
 
@@ -33,16 +42,34 @@ pub struct SelfHostedShellCommands {
 pub struct SelfHostedUiHost {
     root: SelfHostedAppRoot,
     app_state: RefCell<AppState>,
+    preferences: SelfHostedPreferences,
+    preferences_path: PathBuf,
     ui_dirty: Cell<bool>,
 }
 
 impl SelfHostedUiHost {
     /// Create a host from an initial application state snapshot.
     pub fn new(app_state: AppState) -> Self {
-        let root = SelfHostedAppRoot::from_app_state(&app_state);
+        Self::new_with_preferences_path(
+            app_state,
+            load_self_hosted_preferences(),
+            self_hosted_preferences_path(),
+        )
+    }
+
+    /// Create a host from explicit preferences and path.
+    pub(crate) fn new_with_preferences_path(
+        app_state: AppState,
+        preferences: SelfHostedPreferences,
+        preferences_path: PathBuf,
+    ) -> Self {
+        set_theme_preset(preferences.theme_preset);
+        let root = SelfHostedAppRoot::from_app_state_with_preferences(&app_state, &preferences);
         Self {
             root,
             app_state: RefCell::new(app_state),
+            preferences,
+            preferences_path,
             ui_dirty: Cell::new(false),
         }
     }
@@ -62,6 +89,11 @@ impl SelfHostedUiHost {
         self.app_state.borrow()
     }
 
+    /// Current persisted self-hosted preferences snapshot.
+    pub fn preferences(&self) -> &SelfHostedPreferences {
+        &self.preferences
+    }
+
     /// Mark the root as needing a model refresh from `AppState`.
     pub fn mark_dirty(&self) {
         self.ui_dirty.set(true);
@@ -72,7 +104,8 @@ impl SelfHostedUiHost {
         if !self.ui_dirty.replace(false) {
             return;
         }
-        self.root.refresh_from_app_state(&self.app_state.borrow());
+        self.root
+            .refresh_from_app_state_with_preferences(&self.app_state.borrow(), &self.preferences);
         TreeWalker::layout(&mut self.root, bounds);
     }
 
@@ -93,6 +126,10 @@ impl SelfHostedUiHost {
         let mut needs_layout = false;
         for action in actions {
             if take_shell_window_command(&mut commands, &action) {
+                continue;
+            }
+            if self.take_preferences_update(&action, bounds) {
+                needs_layout = true;
                 continue;
             }
             if !self.is_action_enabled(&action) {
@@ -144,6 +181,40 @@ impl SelfHostedUiHost {
     fn is_action_enabled(&self, action: &Action) -> bool {
         app_state_action_enabled(action, &self.app_state.borrow())
     }
+
+    fn take_preferences_update(&mut self, action: &Action, bounds: Rect) -> bool {
+        let Some(result) = parse_preferences_theme_update(action) else {
+            return false;
+        };
+        match result {
+            Ok(payload) => {
+                self.preferences.theme_preset = payload.preset;
+                set_theme_preset(payload.preset);
+                if let Err(err) =
+                    persist_self_hosted_preferences_to(&self.preferences_path, &self.preferences)
+                {
+                    tracing::warn!("failed to persist self-hosted preferences: {err}");
+                    self.app_state
+                        .borrow_mut()
+                        .set_status_hint(format!("Preferences could not be saved: {err}"), true);
+                }
+                self.root.refresh_from_app_state_with_preferences(
+                    &self.app_state.borrow(),
+                    &self.preferences,
+                );
+                TreeWalker::layout(&mut self.root, bounds);
+                true
+            }
+            Err(err) => {
+                tracing::warn!("invalid self-hosted preferences action: {err}");
+                self.app_state
+                    .borrow_mut()
+                    .set_status_hint(format!("Preferences action failed: {err}"), true);
+                self.mark_dirty();
+                true
+            }
+        }
+    }
 }
 
 fn take_shell_window_command(commands: &mut SelfHostedShellCommands, action: &Action) -> bool {
@@ -162,6 +233,19 @@ fn take_shell_window_command(commands: &mut SelfHostedShellCommands, action: &Ac
     }
 }
 
+fn parse_preferences_theme_update(
+    action: &Action,
+) -> Option<Result<PreferencesThemePayload, serde_json::Error>> {
+    match action {
+        Action::Custom { namespace, name, payload }
+            if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_PREFERENCES_THEME_CHANGED =>
+        {
+            Some(serde_json::from_value(payload.clone()))
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,9 +254,16 @@ mod tests {
     use mondrian_platform::{FileFilter, NoopPlatformService};
     use mondrian_ui_core::widget::{DrawCommandEncoder, PaintContext, Widget};
     use mondrian_ui_core::Point;
-    use mondrian_ui_theme::ThemePreset;
+    use mondrian_ui_theme::{
+        current_theme, set_theme_preset as set_global_theme_preset, ThemePreset,
+    };
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use crate::self_hosted::preferences_store::{
+        load_self_hosted_preferences_from, SelfHostedPreferences,
+    };
 
     #[derive(Default)]
     struct RecordingEncoder {
@@ -258,6 +349,14 @@ mod tests {
         fn pop_transform(&mut self) {}
     }
 
+    fn temp_preferences_path(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("mondrian-host-{name}-{nanos}.json"))
+    }
+
     #[test]
     fn host_builds_root_from_initial_app_state() {
         let mut host = SelfHostedUiHost::new(AppState::new());
@@ -302,6 +401,37 @@ mod tests {
             SelfHostedShellCommands { quit: true, toggle_fullscreen: true }
         );
         assert!(!host.app_state().has_open_project());
+    }
+
+    #[test]
+    fn host_applies_and_persists_theme_preference_updates() {
+        let path = temp_preferences_path("theme-preferences");
+        let mut host = SelfHostedUiHost::new_with_preferences_path(
+            AppState::new(),
+            SelfHostedPreferences::default(),
+            path.clone(),
+        );
+        let pending = PendingUiActions::default();
+
+        pending.push(
+            crate::app::ui_actions::app_shell_preferences_theme_changed_action(ThemePreset::Light),
+        );
+        let commands = host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+
+        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert_eq!(host.preferences().theme_preset, ThemePreset::Light);
+        assert_eq!(current_theme().name, "Light");
+        assert_eq!(
+            load_self_hosted_preferences_from(&path).theme_preset,
+            ThemePreset::Light
+        );
+
+        std::fs::remove_file(path).ok();
+        set_global_theme_preset(ThemePreset::Dark);
     }
 
     #[test]

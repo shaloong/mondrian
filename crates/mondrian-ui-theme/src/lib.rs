@@ -10,6 +10,7 @@ pub mod typography;
 use std::sync::RwLock;
 
 use colors::ColorTokens;
+use serde::{Deserialize, Serialize};
 use spacing::SpacingTokens;
 use typography::TypographyTokens;
 
@@ -25,7 +26,7 @@ pub struct Theme {
 /// 主题预设
 ///
 /// Dark 和 Light 是内置主题。用户可通过 plugin 或直接构造 `Theme` 来扩展。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ThemePreset {
     Dark,
     Light,

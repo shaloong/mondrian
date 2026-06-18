@@ -30,6 +30,7 @@ use crate::self_hosted::new_project_dialog::{
 };
 use crate::self_hosted::panels::{build_dock_tree_for_preset, SelfHostedPanelModels};
 use crate::self_hosted::preferences_dialog::{PreferencesDialogTab, SelfHostedPreferencesModel};
+use crate::self_hosted::preferences_store::SelfHostedPreferences;
 use mondrian_core::{MondrianError, Result};
 
 /// Default file extension for Mondrian project containers.
@@ -214,10 +215,23 @@ pub struct SelfHostedAppRoot {
 impl SelfHostedAppRoot {
     /// Build a root widget from the current application state snapshot.
     pub fn from_app_state(state: &AppState) -> Self {
+        Self::from_app_state_with_preferences(state, &SelfHostedPreferences::default())
+    }
+
+    /// Build a root widget from the current app state and self-hosted shell
+    /// preferences.
+    pub fn from_app_state_with_preferences(
+        state: &AppState,
+        preferences: &SelfHostedPreferences,
+    ) -> Self {
         Self::new_with_preferences(
             MenuBar::for_app_state(state),
             SelfHostedPanelModels::from_app_state(state),
-            SelfHostedPreferencesModel::from_app_state(state, WorkspacePreset::Editing),
+            SelfHostedPreferencesModel::from_app_state(
+                state,
+                WorkspacePreset::Editing,
+                preferences.theme_preset,
+            ),
             WorkspacePreset::Editing,
         )
     }
@@ -299,10 +313,27 @@ impl SelfHostedAppRoot {
 
     /// Refresh panel contents from the current application state snapshot.
     pub fn refresh_from_app_state(&mut self, state: &AppState) {
+        let preferences = SelfHostedPreferences {
+            version: 1,
+            theme_preset: self.preferences_model.theme_preset,
+        };
+        self.refresh_from_app_state_with_preferences(state, &preferences);
+    }
+
+    /// Refresh panel contents and preferences from a full self-hosted state
+    /// snapshot.
+    pub fn refresh_from_app_state_with_preferences(
+        &mut self,
+        state: &AppState,
+        preferences: &SelfHostedPreferences,
+    ) {
         self.menu_bar = MenuBar::for_app_state(state);
         self.set_models(SelfHostedPanelModels::from_app_state(state));
-        let preferences_model =
-            SelfHostedPreferencesModel::from_app_state(state, self.workspace_preset);
+        let preferences_model = SelfHostedPreferencesModel::from_app_state(
+            state,
+            self.workspace_preset,
+            preferences.theme_preset,
+        );
         self.preferences_model = preferences_model.clone();
         if let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_preferences_mut) {
             dialog.set_model(preferences_model);

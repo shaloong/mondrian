@@ -13,6 +13,7 @@ pub mod modal;
 pub mod new_project_dialog;
 pub mod panels;
 pub mod preferences_dialog;
+pub mod preferences_store;
 pub mod rendering;
 pub mod runtime;
 pub mod shell;

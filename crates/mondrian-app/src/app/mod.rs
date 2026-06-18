@@ -2388,7 +2388,7 @@ fn app_preferences_path() -> PathBuf {
     app_data_dir().join("app_preferences.json")
 }
 
-fn app_data_dir() -> PathBuf {
+pub(crate) fn app_data_dir() -> PathBuf {
     let base = std::env::var_os("APPDATA")
         .or_else(|| std::env::var_os("HOME"))
         .map(PathBuf::from)

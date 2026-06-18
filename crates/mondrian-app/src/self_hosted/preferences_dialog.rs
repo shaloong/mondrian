@@ -9,10 +9,12 @@ use mondrian_export::preset::TimelineExportRange;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, Widget};
+use mondrian_ui_theme::ThemePreset;
 use mondrian_ui_widgets::{Button, DialogSurface, Label};
 
 use crate::app::ui_actions::{
-    app_shell_close_modal_action, app_shell_preferences_tab_changed_action, PreferencesTabPayload,
+    app_shell_close_modal_action, app_shell_preferences_tab_changed_action,
+    app_shell_preferences_theme_changed_action, PreferencesTabPayload,
 };
 use crate::app::AppState;
 use crate::self_hosted::shortcuts::default_shortcuts;
@@ -33,10 +35,15 @@ const ROW_HEIGHT: f32 = 28.0;
 const BUTTON_WIDTH: f32 = 84.0;
 const BUTTON_HEIGHT: f32 = 32.0;
 const BUTTON_BOTTOM_INSET: f32 = 20.0;
+const THEME_BUTTON_WIDTH: f32 = 76.0;
+const THEME_BUTTON_HEIGHT: f32 = 26.0;
+const THEME_BUTTON_GAP: f32 = 6.0;
 
 /// Read-only settings/status snapshot shown by the self-hosted preferences UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelfHostedPreferencesModel {
+    pub theme_preset: ThemePreset,
+    pub theme_label: String,
     pub project_status: String,
     pub workspace: String,
     pub sequence_summary: String,
@@ -53,7 +60,11 @@ pub struct SelfHostedPreferencesModel {
 impl SelfHostedPreferencesModel {
     /// Build the preferences model from the state actually owned by the
     /// self-hosted product shell.
-    pub fn from_app_state(state: &AppState, workspace: WorkspacePreset) -> Self {
+    pub fn from_app_state(
+        state: &AppState,
+        workspace: WorkspacePreset,
+        theme_preset: ThemePreset,
+    ) -> Self {
         let project_status = state
             .current_project_path
             .as_ref()
@@ -73,6 +84,8 @@ impl SelfHostedPreferencesModel {
             })
             .unwrap_or_else(|| "No active sequence".to_owned());
         Self {
+            theme_preset,
+            theme_label: theme_preset.display_name().to_owned(),
             project_status,
             workspace: workspace.display_name().to_owned(),
             sequence_summary,
@@ -95,6 +108,8 @@ impl SelfHostedPreferencesModel {
 impl Default for SelfHostedPreferencesModel {
     fn default() -> Self {
         Self {
+            theme_preset: ThemePreset::Dark,
+            theme_label: ThemePreset::Dark.display_name().to_owned(),
             project_status: "No project open".to_owned(),
             workspace: WorkspacePreset::Editing.display_name().to_owned(),
             sequence_summary: "No active sequence".to_owned(),
@@ -163,6 +178,7 @@ pub struct PreferencesDialog {
     title_label: Label,
     description_label: Label,
     nav_buttons: Vec<Button>,
+    theme_buttons: Vec<Button>,
     content_labels: Vec<Label>,
     close_button: Button,
 }
@@ -190,6 +206,13 @@ impl PreferencesDialog {
                     .on_click(app_shell_preferences_tab_changed_action(tab.payload()))
             })
             .collect();
+        let theme_buttons = ThemePreset::ALL
+            .into_iter()
+            .map(|preset| {
+                Button::new(preset.display_name())
+                    .on_click(app_shell_preferences_theme_changed_action(preset))
+            })
+            .collect();
         let mut dialog = Self {
             id: WidgetId::new(),
             active_tab,
@@ -213,6 +236,7 @@ impl PreferencesDialog {
             .with_padding(0.0, 0.0)
             .wrapped(),
             nav_buttons,
+            theme_buttons,
             content_labels: Vec::new(),
             close_button: Button::new("Done").on_click(app_shell_close_modal_action()),
         };
@@ -318,6 +342,18 @@ impl Widget for PreferencesDialog {
                 NAV_BUTTON_HEIGHT,
             ));
         }
+        for (index, button) in self.theme_buttons.iter_mut().enumerate() {
+            if self.active_tab == PreferencesDialogTab::General {
+                button.layout(Rect::new(
+                    content_x + 116.0 + index as f32 * (THEME_BUTTON_WIDTH + THEME_BUTTON_GAP),
+                    body_top + ROW_HEIGHT + (ROW_HEIGHT - THEME_BUTTON_HEIGHT) * 0.5,
+                    THEME_BUTTON_WIDTH,
+                    THEME_BUTTON_HEIGHT,
+                ));
+            } else {
+                button.layout(Rect::ZERO);
+            }
+        }
         let content_width = content.x + content.width - content_x;
         for (index, label) in self.content_labels.iter_mut().enumerate() {
             label.layout(Rect::new(
@@ -358,6 +394,13 @@ impl Widget for PreferencesDialog {
                 return EventResult::Handled;
             }
         }
+        if self.active_tab == PreferencesDialogTab::General {
+            for button in &mut self.theme_buttons {
+                if button.event(event, ctx) == EventResult::Handled {
+                    return EventResult::Handled;
+                }
+            }
+        }
         EventResult::Ignored
     }
 
@@ -394,6 +437,28 @@ impl Widget for PreferencesDialog {
         for button in &self.nav_buttons {
             button.paint(ctx);
         }
+        if self.active_tab == PreferencesDialogTab::General {
+            for button in &self.theme_buttons {
+                button.paint(ctx);
+            }
+            for (index, preset) in ThemePreset::ALL.into_iter().enumerate() {
+                if preset == self.model.theme_preset {
+                    paint_theme_button_outline(
+                        ctx,
+                        Rect::new(
+                            content.x
+                                + NAV_WIDTH
+                                + CONTENT_GAP
+                                + 116.0
+                                + index as f32 * (THEME_BUTTON_WIDTH + THEME_BUTTON_GAP),
+                            body_top + ROW_HEIGHT + (ROW_HEIGHT - THEME_BUTTON_HEIGHT) * 0.5,
+                            THEME_BUTTON_WIDTH,
+                            THEME_BUTTON_HEIGHT,
+                        ),
+                    );
+                }
+            }
+        }
         for label in &self.content_labels {
             label.paint(ctx);
         }
@@ -405,7 +470,7 @@ impl Widget for PreferencesDialog {
     }
 
     fn child_count(&self) -> usize {
-        3 + self.nav_buttons.len() + self.content_labels.len()
+        3 + self.nav_buttons.len() + self.theme_buttons.len() + self.content_labels.len()
     }
 
     fn child(&self, index: usize) -> Option<&dyn Widget> {
@@ -420,7 +485,12 @@ impl Widget for PreferencesDialog {
         if (nav_start..nav_end).contains(&index) {
             return self.nav_buttons.get(index - nav_start).map(|button| button as &dyn Widget);
         }
-        let content_start = nav_end;
+        let theme_start = nav_end;
+        let theme_end = theme_start + self.theme_buttons.len();
+        if (theme_start..theme_end).contains(&index) {
+            return self.theme_buttons.get(index - theme_start).map(|button| button as &dyn Widget);
+        }
+        let content_start = theme_end;
         let content_end = content_start + self.content_labels.len();
         if (content_start..content_end).contains(&index) {
             return self
@@ -446,7 +516,15 @@ impl Widget for PreferencesDialog {
                 .get_mut(index - nav_start)
                 .map(|button| button as &mut dyn Widget);
         }
-        let content_start = nav_end;
+        let theme_start = nav_end;
+        let theme_end = theme_start + self.theme_buttons.len();
+        if (theme_start..theme_end).contains(&index) {
+            return self
+                .theme_buttons
+                .get_mut(index - theme_start)
+                .map(|button| button as &mut dyn Widget);
+        }
+        let content_start = theme_end;
         let content_end = content_start + self.content_labels.len();
         if (content_start..content_end).contains(&index) {
             return self
@@ -471,12 +549,37 @@ fn detail(text: impl Into<String>) -> ContentRow {
     ContentRow { text: text.into(), heading: false }
 }
 
+fn paint_theme_button_outline(ctx: &mut PaintContext, bounds: Rect) {
+    let color = ctx.theme.colors.ring;
+    let left = bounds.x + 1.0;
+    let right = bounds.x + bounds.width - 1.0;
+    let top = bounds.y + 1.0;
+    let bottom = bounds.y + bounds.height - 1.0;
+    ctx.encoder.draw_line(Point::new(left, top), Point::new(right, top), 1.5, color);
+    ctx.encoder.draw_line(
+        Point::new(right, top),
+        Point::new(right, bottom),
+        1.5,
+        color,
+    );
+    ctx.encoder.draw_line(
+        Point::new(right, bottom),
+        Point::new(left, bottom),
+        1.5,
+        color,
+    );
+    ctx.encoder
+        .draw_line(Point::new(left, bottom), Point::new(left, top), 1.5, color);
+}
+
 fn content_rows_for_tab(
     tab: PreferencesDialogTab,
     model: &SelfHostedPreferencesModel,
 ) -> Vec<ContentRow> {
     match tab {
         PreferencesDialogTab::General => vec![
+            heading("Appearance"),
+            detail(format!("Theme: {}", model.theme_label)),
             heading("Workspace"),
             detail(format!("Active workspace: {}", model.workspace)),
             heading("Project"),
@@ -537,6 +640,7 @@ mod tests {
 
     use crate::app::ui_actions::{
         APP_SHELL_CLOSE_MODAL, APP_SHELL_NAMESPACE, APP_SHELL_PREFERENCES_TAB_CHANGED,
+        APP_SHELL_PREFERENCES_THEME_CHANGED,
     };
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
 
@@ -573,14 +677,83 @@ mod tests {
         state.export_draft.range = TimelineExportRange::EntireSequence;
         state.export_draft.output_path = "E:/renders/cut.mp4".to_owned();
 
-        let model = SelfHostedPreferencesModel::from_app_state(&state, WorkspacePreset::Color);
+        let model = SelfHostedPreferencesModel::from_app_state(
+            &state,
+            WorkspacePreset::Color,
+            ThemePreset::Light,
+        );
 
         assert_eq!(model.workspace, WorkspacePreset::Color.display_name());
+        assert_eq!(model.theme_preset, ThemePreset::Light);
+        assert_eq!(model.theme_label, ThemePreset::Light.display_name());
         assert!(model.project_status.contains("edit.mdp"));
         assert!(model.sequence_summary.contains("Cut"));
         assert_eq!(model.proxy_mode, "Enabled");
         assert_eq!(model.export_range, "Entire sequence");
         assert_eq!(model.export_output, "E:/renders/cut.mp4");
+    }
+
+    #[test]
+    fn preferences_theme_button_dispatches_theme_action() {
+        let mut dialog = PreferencesDialog::new();
+        dialog.layout(Rect::new(0.0, 0.0, 1000.0, 700.0));
+        let actions = RefCell::new(Vec::new());
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        let content = dialog.surface.content_rect(dialog.card);
+        let body_top = content.y + 82.0;
+        let content_x = content.x + NAV_WIDTH + CONTENT_GAP;
+        let light_bounds = Rect::new(
+            content_x + 116.0 + THEME_BUTTON_WIDTH + THEME_BUTTON_GAP,
+            body_top + ROW_HEIGHT + (ROW_HEIGHT - THEME_BUTTON_HEIGHT) * 0.5,
+            THEME_BUTTON_WIDTH,
+            THEME_BUTTON_HEIGHT,
+        );
+
+        dialog.event(
+            &UiEvent::MouseDown {
+                position: light_bounds.center(),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        dialog.event(
+            &UiEvent::MouseUp {
+                position: light_bounds.center(),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        let recorded = actions.borrow();
+        assert_eq!(recorded.len(), 1);
+        match &recorded[0] {
+            Action::Custom { namespace, name, payload } => {
+                assert_eq!(namespace, APP_SHELL_NAMESPACE);
+                assert_eq!(name, APP_SHELL_PREFERENCES_THEME_CHANGED);
+                assert_eq!(
+                    serde_json::from_value::<crate::app::ui_actions::PreferencesThemePayload>(
+                        payload.clone()
+                    )
+                    .unwrap()
+                    .preset,
+                    ThemePreset::Light
+                );
+            }
+            other => panic!("expected preferences theme action, got {other:?}"),
+        }
     }
 
     #[test]

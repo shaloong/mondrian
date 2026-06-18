@@ -9,6 +9,7 @@ use mondrian_core::{ProjectSettings, Rational, Resolution};
 use mondrian_editor_state::Action;
 use mondrian_export::preset::{ExportPreset, TimelineExportRange};
 use mondrian_timeline::SequenceSettings;
+use mondrian_ui_theme::ThemePreset;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -103,6 +104,8 @@ pub const APP_SHELL_ABOUT: &str = "about";
 pub const APP_SHELL_PREFERENCES: &str = "preferences";
 /// App-shell request to switch the active self-hosted preferences tab.
 pub const APP_SHELL_PREFERENCES_TAB_CHANGED: &str = "preferences_tab_changed";
+/// App-shell request to switch the active self-hosted theme preset.
+pub const APP_SHELL_PREFERENCES_THEME_CHANGED: &str = "preferences_theme_changed";
 /// App-shell request to close the current shell-local modal.
 pub const APP_SHELL_CLOSE_MODAL: &str = "close_modal";
 /// App-shell request to quit the native application window.
@@ -115,6 +118,13 @@ pub enum PreferencesTabPayload {
     Media,
     Shortcuts,
     Developer,
+}
+
+/// Theme preset selected by the self-hosted preferences UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreferencesThemePayload {
+    /// Theme preset to apply and persist.
+    pub preset: ThemePreset,
 }
 
 /// Clip edge being trimmed by a timeline UI.
@@ -584,6 +594,14 @@ pub fn app_shell_preferences_action() -> Action {
 /// Build an app-shell request for selecting one preferences tab.
 pub fn app_shell_preferences_tab_changed_action(payload: PreferencesTabPayload) -> Action {
     custom_app_shell_action_with_payload(APP_SHELL_PREFERENCES_TAB_CHANGED, payload)
+}
+
+/// Build an app-shell request for switching the self-hosted theme preset.
+pub fn app_shell_preferences_theme_changed_action(preset: ThemePreset) -> Action {
+    custom_app_shell_action_with_payload(
+        APP_SHELL_PREFERENCES_THEME_CHANGED,
+        PreferencesThemePayload { preset },
+    )
 }
 
 /// Build an app-shell request for closing the current shell-local modal.
