@@ -98,7 +98,7 @@ fn scissor_rect_for_clip(
     }
 }
 
-fn rgba_with_transparent_padding(
+fn rgba_with_edge_padding(
     rgba: &[u8],
     width: u32,
     height: u32,
@@ -116,14 +116,15 @@ fn rgba_with_transparent_padding(
     let padded_len = padded_width.checked_mul(padded_height)?.checked_mul(4)? as usize;
     let mut padded = vec![0; padded_len];
 
-    let src_row_bytes = width as usize * 4;
     let dst_row_bytes = padded_width as usize * 4;
-    let pad_bytes = pad as usize * 4;
-    for row in 0..height as usize {
-        let src_start = row * src_row_bytes;
-        let dst_start = (row + pad as usize) * dst_row_bytes + pad_bytes;
-        padded[dst_start..dst_start + src_row_bytes]
-            .copy_from_slice(&rgba[src_start..src_start + src_row_bytes]);
+    for dst_y in 0..padded_height as usize {
+        let src_y = dst_y.saturating_sub(pad as usize).min(height as usize - 1);
+        for dst_x in 0..padded_width as usize {
+            let src_x = dst_x.saturating_sub(pad as usize).min(width as usize - 1);
+            let src_start = (src_y * width as usize + src_x) * 4;
+            let dst_start = dst_y * dst_row_bytes + dst_x * 4;
+            padded[dst_start..dst_start + 4].copy_from_slice(&rgba[src_start..src_start + 4]);
+        }
     }
 
     Some((padded_width, padded_height, padded))
@@ -368,7 +369,7 @@ impl UiRenderer {
             height as f32 / ATLAS_SIZE as f32,
         );
         let (upload_width, upload_height, padded_rgba) =
-            rgba_with_transparent_padding(rgba, width, height, IMAGE_ATLAS_PAD)?;
+            rgba_with_edge_padding(rgba, width, height, IMAGE_ATLAS_PAD)?;
 
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
@@ -528,31 +529,22 @@ mod tests {
     }
 
     #[test]
-    fn rgba_padding_adds_transparent_border_and_preserves_inner_pixels() {
+    fn rgba_padding_dilates_edge_pixels_and_preserves_inner_pixels() {
         let source = vec![
             10, 11, 12, 13, //
             20, 21, 22, 23, //
             30, 31, 32, 33, //
             40, 41, 42, 43,
         ];
-        let (width, height, padded) = rgba_with_transparent_padding(&source, 2, 2, 1).unwrap();
+        let (width, height, padded) = rgba_with_edge_padding(&source, 2, 2, 1).unwrap();
 
         assert_eq!((width, height), (4, 4));
         assert_eq!(padded.len(), 4 * 4 * 4);
 
-        let transparent = [0, 0, 0, 0];
-        for x in 0..4 {
-            let top = x * 4;
-            let bottom = (3 * 4 + x) * 4;
-            assert_eq!(&padded[top..top + 4], &transparent);
-            assert_eq!(&padded[bottom..bottom + 4], &transparent);
-        }
-        for y in 0..4 {
-            let left = y * 4 * 4;
-            let right = left + 3 * 4;
-            assert_eq!(&padded[left..left + 4], &transparent);
-            assert_eq!(&padded[right..right + 4], &transparent);
-        }
+        assert_eq!(&padded[0..4], &source[0..4]);
+        assert_eq!(&padded[3 * 4..4 * 4], &source[4..8]);
+        assert_eq!(&padded[3 * 4 * 4..3 * 4 * 4 + 4], &source[8..12]);
+        assert_eq!(&padded[3 * 4 * 4 + 3 * 4..4 * 4 * 4], &source[12..16]);
 
         let row_stride = 4 * 4;
         assert_eq!(&padded[row_stride + 4..row_stride + 12], &source[0..8]);
@@ -564,7 +556,7 @@ mod tests {
 
     #[test]
     fn rgba_padding_rejects_mismatched_payload() {
-        assert!(rgba_with_transparent_padding(&[1, 2, 3], 1, 1, 1).is_none());
+        assert!(rgba_with_edge_padding(&[1, 2, 3], 1, 1, 1).is_none());
     }
 
     #[test]

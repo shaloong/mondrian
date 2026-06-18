@@ -1087,10 +1087,11 @@ resvg/tiny-skia without sharing mutable atlas state with text glyphs. Image UVs
 remain unsnapped because they are texture coordinates rather than screen-space
 geometry.
 Linear-sampled atlas entries must upload their full allocated rectangle,
-including transparent padding around the inner content UV. Padding is not just
+including edge-dilated padding around the inner content UV. Padding is not just
 reserved packing space: it is sampled by the GPU at fractional edges, so leaving
-it unwritten can produce dirty borders or neighbor bleeding on glyphs, SVG
-icons, thumbnails, and checkerboard-backed color previews.
+it unwritten or transparent can produce dirty borders, alpha fringing, or
+neighbor bleeding on glyphs, SVG icons, thumbnails, and checkerboard-backed
+color previews.
 Raster image commands must not disappear silently when their payload is invalid
 or the shared image atlas cannot allocate space. The renderer replaces failed
 uploads with a low-alpha diagnostic rectangle and increments
