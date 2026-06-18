@@ -19,14 +19,15 @@ use std::path::Path;
 
 use crate::app::ui_actions::{
     assets_import_files_action, export_set_draft_action, project_create_with_settings_action,
-    AppShellOpenRecentProjectPayload, AssetsImportFilesPayload, ExportDraftUpdatePayload,
-    ExportOutputDialogPayload, ImportMediaDialogPayload, NewProjectDraftUpdatePayload,
-    PreferencesTabPayload, APP_SHELL_ABOUT, APP_SHELL_CANCEL_NEW_PROJECT_DIALOG,
+    project_recover_from_autosave_action, AppShellOpenRecentProjectPayload,
+    AssetsImportFilesPayload, ExportDraftUpdatePayload, ExportOutputDialogPayload,
+    ImportMediaDialogPayload, NewProjectDraftUpdatePayload, PreferencesTabPayload,
+    ProjectRecoverFromAutosavePayload, APP_SHELL_ABOUT, APP_SHELL_CANCEL_NEW_PROJECT_DIALOG,
     APP_SHELL_CLOSE_MODAL, APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_EXPORT_OUTPUT_DIALOG,
     APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
     APP_SHELL_NEW_PROJECT_DRAFT_CHANGED, APP_SHELL_OPEN_PROJECT_DIALOG,
     APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PREFERENCES, APP_SHELL_PREFERENCES_TAB_CHANGED,
-    APP_SHELL_SAVE_PROJECT_AS_DIALOG,
+    APP_SHELL_RECOVER_PROJECT, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
 };
 use crate::app::AppState;
 use crate::self_hosted::menu_bar::MenuBar;
@@ -147,6 +148,13 @@ pub fn try_resolve_app_shell_action(
             let payload: AppShellOpenRecentProjectPayload = serde_json::from_value(payload)
                 .map_err(|err| app_shell_action_error(&name, err))?;
             Ok(Some(Action::OpenProject(payload.project_file)))
+        }
+        Action::Custom { namespace, name, payload }
+            if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_RECOVER_PROJECT =>
+        {
+            let payload: ProjectRecoverFromAutosavePayload = serde_json::from_value(payload)
+                .map_err(|err| app_shell_action_error(&name, err))?;
+            Ok(Some(project_recover_from_autosave_action(payload)))
         }
         Action::Custom { namespace, name, payload }
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_IMPORT_MEDIA_DIALOG =>
@@ -878,12 +886,13 @@ mod tests {
         app_shell_import_media_dialog_action_with_target, app_shell_new_project_dialog_action,
         app_shell_new_project_draft_changed_action, app_shell_open_project_dialog_action,
         app_shell_open_recent_project_action, app_shell_preferences_action,
-        app_shell_preferences_tab_changed_action, app_shell_save_project_as_dialog_action,
-        AppShellOpenRecentProjectPayload, AssetsImportFilesPayload, ExportDraftUpdatePayload,
-        ExportOutputDialogPayload, ImportMediaDialogPayload, NewProjectDraftUpdatePayload,
-        PreferencesTabPayload, ProjectCreateWithSettingsPayload, ASSETS_IMPORT_FILES,
+        app_shell_preferences_tab_changed_action, app_shell_recover_project_action,
+        app_shell_save_project_as_dialog_action, AppShellOpenRecentProjectPayload,
+        AssetsImportFilesPayload, ExportDraftUpdatePayload, ExportOutputDialogPayload,
+        ImportMediaDialogPayload, NewProjectDraftUpdatePayload, PreferencesTabPayload,
+        ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload, ASSETS_IMPORT_FILES,
         ASSETS_NAMESPACE, EXPORT_NAMESPACE, EXPORT_SET_DRAFT, PROJECT_CREATE_WITH_SETTINGS,
-        PROJECT_NAMESPACE,
+        PROJECT_NAMESPACE, PROJECT_RECOVER_FROM_AUTOSAVE,
     };
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use glam::Vec2;
@@ -1382,6 +1391,33 @@ mod tests {
         );
 
         assert_eq!(action, Some(Action::OpenProject(project_file)));
+    }
+
+    #[test]
+    fn resolve_app_shell_recover_project_returns_project_recovery_action() {
+        let platform = FakePlatform { open_paths: None, save_path: None };
+        let payload = ProjectRecoverFromAutosavePayload {
+            project_file: PathBuf::from("E:/projects/recover.mdp"),
+            autosave_file: PathBuf::from("E:/runtime/autosave/project.autosave.mdp"),
+        };
+
+        let action = resolve_app_shell_action(
+            app_shell_recover_project_action(payload.clone()),
+            &platform,
+            None,
+        )
+        .expect("recover action");
+
+        let Action::Custom { namespace, name, payload: actual } = action else {
+            panic!("expected project custom action");
+        };
+        assert_eq!(namespace, PROJECT_NAMESPACE);
+        assert_eq!(name, PROJECT_RECOVER_FROM_AUTOSAVE);
+        assert_eq!(
+            serde_json::from_value::<ProjectRecoverFromAutosavePayload>(actual)
+                .expect("recovery payload"),
+            payload
+        );
     }
 
     #[test]

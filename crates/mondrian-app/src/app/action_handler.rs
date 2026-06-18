@@ -19,21 +19,22 @@ use crate::app::ui_actions::{
     InspectorRemoveEffectPayload, InspectorSelectEffectPayload, InspectorSetClipCurvePayload,
     InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
     InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
-    InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload, TimelineAddTrackKind,
-    TimelineAddTrackPayload, TimelineDropAssetPayload, TimelineMoveClipPayload,
-    TimelineMoveTrackPayload, TimelineSeekPayload, TimelineSelectClipPayload,
-    TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipPayload,
-    TimelineTrimPayloadEdge, ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER,
-    ASSETS_CREATE_SOLID_COLOR, ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_IMPORT_FILES,
-    ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG,
-    EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, EXPORT_ENQUEUE, EXPORT_NAMESPACE, EXPORT_SET_DRAFT,
-    INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT, INSPECTOR_SELECT_EFFECT,
-    INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY,
-    INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD, INSPECTOR_SET_EFFECT_ENABLED,
+    InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload,
+    ProjectRecoverFromAutosavePayload, TimelineAddTrackKind, TimelineAddTrackPayload,
+    TimelineDropAssetPayload, TimelineMoveClipPayload, TimelineMoveTrackPayload,
+    TimelineSeekPayload, TimelineSelectClipPayload, TimelineSetTrackControlPayload,
+    TimelineTrackControlPayloadKind, TimelineTrimClipPayload, TimelineTrimPayloadEdge,
+    ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR,
+    ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_IMPORT_FILES, ASSETS_MOVE_ASSET,
+    ASSETS_MOVE_FOLDER, ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP,
+    EFFECTS_NAMESPACE, EXPORT_ENQUEUE, EXPORT_NAMESPACE, EXPORT_SET_DRAFT, INSPECTOR_NAMESPACE,
+    INSPECTOR_REMOVE_EFFECT, INSPECTOR_SELECT_EFFECT, INSPECTOR_SET_CLIP_CURVE,
+    INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY, INSPECTOR_SET_CLIP_TINT,
+    INSPECTOR_SET_CLIP_TRANSFORM_FIELD, INSPECTOR_SET_EFFECT_ENABLED,
     INSPECTOR_SET_EFFECT_PROPERTY, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
-    TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET, TIMELINE_MOVE_CLIP, TIMELINE_MOVE_TRACK,
-    TIMELINE_NAMESPACE, TIMELINE_SEEK, TIMELINE_SELECT_CLIP, TIMELINE_SET_TRACK_CONTROL,
-    TIMELINE_TRIM_CLIP,
+    PROJECT_RECOVER_FROM_AUTOSAVE, TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET, TIMELINE_MOVE_CLIP,
+    TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_SEEK, TIMELINE_SELECT_CLIP,
+    TIMELINE_SET_TRACK_CONTROL, TIMELINE_TRIM_CLIP,
 };
 use crate::app::{AppClipboardKind, AppState, ClipOverlapMode, SelectedClipRef};
 use glam::Vec2;
@@ -279,6 +280,31 @@ impl AppState {
             MondrianError::WorkflowStepFailed { step_id: "create_project".to_string(), reason }
         })?;
         self.set_status_hint(format!("项目已创建：{}", project_file.display()), false);
+        Ok(())
+    }
+
+    fn recover_project_from_autosave_ui(
+        &mut self,
+        payload: ProjectRecoverFromAutosavePayload,
+    ) -> Result<()> {
+        if payload.project_file.as_os_str().is_empty()
+            || payload.autosave_file.as_os_str().is_empty()
+        {
+            return Ok(());
+        }
+        self.open_project_from_autosave_snapshot(
+            payload.project_file.clone(),
+            payload.autosave_file,
+        )
+        .map_err(|err| {
+            let reason = err.to_string();
+            self.set_status_hint(format!("恢复自动保存失败：{reason}"), true);
+            MondrianError::WorkflowStepFailed { step_id: "recover_project".to_string(), reason }
+        })?;
+        self.set_status_hint(
+            format!("已从自动保存恢复：{}", payload.project_file.display()),
+            false,
+        );
         Ok(())
     }
 
@@ -1102,6 +1128,14 @@ impl AppState {
                 )?;
                 self.create_project_from_ui(payload)
             }
+            PROJECT_RECOVER_FROM_AUTOSAVE => {
+                let payload = parse_ui_payload::<ProjectRecoverFromAutosavePayload>(
+                    "project_ui_action",
+                    name,
+                    payload,
+                )?;
+                self.recover_project_from_autosave_ui(payload)
+            }
             _ => Err(unknown_ui_action_error("project_ui_action", name)),
         }
     }
@@ -1602,18 +1636,19 @@ mod tests {
         inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
         inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
         inspector_set_effect_property_action, project_create_with_settings_action,
-        timeline_add_track_action, timeline_drop_asset_action, timeline_move_clip_action,
-        timeline_move_track_action, timeline_seek_action, timeline_select_clip_action,
-        timeline_set_track_control_action, timeline_trim_clip_action, AssetsCreateAssetPayload,
-        AssetsCreateFolderPayload, AssetsDeleteAssetPayload, AssetsDeleteFolderPayload,
-        AssetsImportFilesPayload, AssetsMoveAssetPayload, AssetsMoveFolderPayload,
-        AssetsPrepareDragPayload, EffectsAddToClipPayload, ExportDraftUpdatePayload,
-        ExportEnqueuePayload, InspectorClipRefPayload, InspectorClipTransformField,
-        InspectorCurvePointPayload, InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
-        InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
-        InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
-        InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
-        InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload, TimelineAddTrackKind,
+        project_recover_from_autosave_action, timeline_add_track_action,
+        timeline_drop_asset_action, timeline_move_clip_action, timeline_move_track_action,
+        timeline_seek_action, timeline_select_clip_action, timeline_set_track_control_action,
+        timeline_trim_clip_action, AssetsCreateAssetPayload, AssetsCreateFolderPayload,
+        AssetsDeleteAssetPayload, AssetsDeleteFolderPayload, AssetsImportFilesPayload,
+        AssetsMoveAssetPayload, AssetsMoveFolderPayload, AssetsPrepareDragPayload,
+        EffectsAddToClipPayload, ExportDraftUpdatePayload, ExportEnqueuePayload,
+        InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
+        InspectorRemoveEffectPayload, InspectorSelectEffectPayload, InspectorSetClipCurvePayload,
+        InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
+        InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
+        InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload,
+        ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload, TimelineAddTrackKind,
         TimelineAddTrackPayload, TimelineDropAssetPayload, TimelineMoveTrackPayload,
         TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind,
     };
@@ -2626,6 +2661,24 @@ mod tests {
 
         assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
         assert!(state.status_hint.as_ref().is_some_and(|(_, is_error)| *is_error));
+    }
+
+    #[test]
+    fn dispatch_project_recovery_reports_missing_autosave() {
+        let mut state = AppState::new();
+        let root = unique_temp_path("recover-missing-autosave");
+        let project_file = root.join("cut.mdp");
+        let autosave_file = root.join("autosave").join("missing.mdp");
+
+        let err = state
+            .dispatch_action(project_recover_from_autosave_action(
+                ProjectRecoverFromAutosavePayload { project_file, autosave_file },
+            ))
+            .expect_err("missing autosave should fail");
+
+        assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
+        assert!(state.status_hint.as_ref().is_some_and(|(_, is_error)| *is_error));
+        remove_temp_path(&root);
     }
 
     #[test]

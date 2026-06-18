@@ -103,6 +103,11 @@ launch history, is filtered to existing files when loaded, and is rendered by
 `self_hosted::startup` through explicit view models. Startup rows emit
 `app.shell/open_recent_project`, which the shell resolves to `Action::OpenProject`;
 widgets must not read the filesystem or mutate editor state directly.
+Autosave recovery follows the same boundary. `SelfHostedUiHost` discovers
+crate-local `CrashRecoveryCandidate` values, maps them into startup view models,
+and the startup surface emits `app.shell/recover_project`. The shell resolves
+that request into `ui.project/recover_from_autosave`; only `AppState` opens the
+autosave snapshot, writes the recovered project, and clears recovery files.
 
 Product top chrome is `self_hosted::title_bar::TitleBar`: it combines the
 product menu bar, a read-only project/sequence title, draggable titlebar space,

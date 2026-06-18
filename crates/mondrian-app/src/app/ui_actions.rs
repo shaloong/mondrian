@@ -98,6 +98,8 @@ pub const PROJECT_NAMESPACE: &str = "ui.project";
 
 /// Action name for creating a project with explicit settings.
 pub const PROJECT_CREATE_WITH_SETTINGS: &str = "create_with_settings";
+/// Action name for recovering a project from an autosave snapshot.
+pub const PROJECT_RECOVER_FROM_AUTOSAVE: &str = "recover_from_autosave";
 
 /// Custom action namespace for app-shell operations resolved by native adapters.
 pub const APP_SHELL_NAMESPACE: &str = "app.shell";
@@ -114,6 +116,8 @@ pub const APP_SHELL_CANCEL_NEW_PROJECT_DIALOG: &str = "cancel_new_project_dialog
 pub const APP_SHELL_OPEN_PROJECT_DIALOG: &str = "open_project_dialog";
 /// App-shell request to open one project from the self-hosted recent list.
 pub const APP_SHELL_OPEN_RECENT_PROJECT: &str = "open_recent_project";
+/// App-shell request to recover a project from a startup autosave candidate.
+pub const APP_SHELL_RECOVER_PROJECT: &str = "recover_project";
 /// App-shell request to open a platform media import dialog.
 pub const APP_SHELL_IMPORT_MEDIA_DIALOG: &str = "import_media_dialog";
 /// App-shell request to open a platform project save-as dialog.
@@ -160,6 +164,15 @@ pub struct PreferencesThemePayload {
 pub struct AppShellOpenRecentProjectPayload {
     /// Mondrian project file to open.
     pub project_file: PathBuf,
+}
+
+/// Project autosave candidate selected from the self-hosted startup surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectRecoverFromAutosavePayload {
+    /// Original Mondrian project file represented by the autosave snapshot.
+    pub project_file: PathBuf,
+    /// Autosave snapshot archive to recover.
+    pub autosave_file: PathBuf,
 }
 
 /// Clip edge being trimmed by a timeline UI.
@@ -704,6 +717,11 @@ pub fn project_create_with_settings_action(payload: ProjectCreateWithSettingsPay
     custom_project_action(PROJECT_CREATE_WITH_SETTINGS, payload)
 }
 
+/// Build an action that recovers a project from an autosave snapshot.
+pub fn project_recover_from_autosave_action(payload: ProjectRecoverFromAutosavePayload) -> Action {
+    custom_project_action(PROJECT_RECOVER_FROM_AUTOSAVE, payload)
+}
+
 /// Build an app-shell request for creating a new project.
 pub fn app_shell_new_project_dialog_action() -> Action {
     custom_app_shell_action(APP_SHELL_NEW_PROJECT_DIALOG)
@@ -732,6 +750,11 @@ pub fn app_shell_open_project_dialog_action() -> Action {
 /// Build an app-shell request for opening one recent project path.
 pub fn app_shell_open_recent_project_action(payload: AppShellOpenRecentProjectPayload) -> Action {
     custom_app_shell_action_with_payload(APP_SHELL_OPEN_RECENT_PROJECT, payload)
+}
+
+/// Build an app-shell request for recovering one startup autosave candidate.
+pub fn app_shell_recover_project_action(payload: ProjectRecoverFromAutosavePayload) -> Action {
+    custom_app_shell_action_with_payload(APP_SHELL_RECOVER_PROJECT, payload)
 }
 
 /// Build an app-shell request for importing media files.

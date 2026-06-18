@@ -586,11 +586,11 @@ const fn default_auto_save_retention_days() -> u32 {
 }
 
 #[derive(Debug, Clone)]
-struct CrashRecoveryCandidate {
-    project_file: PathBuf,
-    autosave_file: PathBuf,
-    saved_at_unix_ms: u64,
-    total_snapshots: usize,
+pub(crate) struct CrashRecoveryCandidate {
+    pub(crate) project_file: PathBuf,
+    pub(crate) autosave_file: PathBuf,
+    pub(crate) saved_at_unix_ms: u64,
+    pub(crate) total_snapshots: usize,
 }
 
 // ─────────────────────────────────────────────
@@ -2655,7 +2655,7 @@ fn apply_autosave_retention(
     manifest.normalize_legacy_fields();
 }
 
-fn discover_crash_recovery_candidates() -> Vec<CrashRecoveryCandidate> {
+pub(crate) fn discover_crash_recovery_candidates() -> Vec<CrashRecoveryCandidate> {
     let root = std::env::temp_dir().join("mondrian-runtime");
     let mut candidates = Vec::<CrashRecoveryCandidate>::new();
 

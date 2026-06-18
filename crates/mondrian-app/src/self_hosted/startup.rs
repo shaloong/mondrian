@@ -12,8 +12,9 @@ use std::path::PathBuf;
 
 use crate::app::ui_actions::{
     app_shell_new_project_dialog_action, app_shell_open_project_dialog_action,
-    app_shell_open_recent_project_action, app_shell_quit_action, app_shell_window_drag_action,
-    AppShellOpenRecentProjectPayload,
+    app_shell_open_recent_project_action, app_shell_quit_action, app_shell_recover_project_action,
+    app_shell_window_drag_action, AppShellOpenRecentProjectPayload,
+    ProjectRecoverFromAutosavePayload,
 };
 
 /// Startup window logical size used by the self-hosted product entrypoint.
@@ -32,12 +33,15 @@ const ACTION_BUTTON_GAP: f32 = 10.0;
 const RECENT_ROW_HEIGHT: f32 = 44.0;
 const RECENT_ROW_GAP: f32 = 8.0;
 const MAX_VISIBLE_RECENT_PROJECTS: usize = 5;
+const MAX_VISIBLE_RECENT_PROJECTS_WITH_RECOVERY: usize = 2;
+const MAX_VISIBLE_RECOVERY_PROJECTS: usize = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StartupHit {
     NewProject,
     OpenProject,
     RecentProject(usize),
+    RecoveryProject(usize),
     Close,
     DragSurface,
 }
@@ -53,6 +57,19 @@ pub struct StartupRecentProject {
     pub subtitle: String,
 }
 
+/// One autosave recovery row shown on the self-hosted startup surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartupRecoveryProject {
+    /// Original project file represented by the autosave snapshot.
+    pub project_file: PathBuf,
+    /// Autosave snapshot archive to recover.
+    pub autosave_file: PathBuf,
+    /// Primary row label.
+    pub title: String,
+    /// Secondary row label with age/snapshot metadata.
+    pub detail: String,
+}
+
 /// Startup screen shown before a project is opened.
 pub struct SelfHostedStartupScreen {
     id: WidgetId,
@@ -62,6 +79,8 @@ pub struct SelfHostedStartupScreen {
     right_rect: Rect,
     new_project_rect: Rect,
     open_project_rect: Rect,
+    recovery_rects: Vec<Rect>,
+    recovery_projects: Vec<StartupRecoveryProject>,
     recent_rects: Vec<Rect>,
     recent_projects: Vec<StartupRecentProject>,
     close_rect: Rect,
@@ -80,12 +99,27 @@ impl SelfHostedStartupScreen {
             right_rect: Rect::ZERO,
             new_project_rect: Rect::ZERO,
             open_project_rect: Rect::ZERO,
+            recovery_rects: Vec::new(),
+            recovery_projects: Vec::new(),
             recent_rects: Vec::new(),
             recent_projects: Vec::new(),
             close_rect: Rect::ZERO,
             hover: None,
             pressed: None,
         }
+    }
+
+    /// Replace startup autosave recovery rows.
+    pub fn set_recovery_projects(&mut self, recovery_projects: Vec<StartupRecoveryProject>) {
+        self.recovery_projects = recovery_projects;
+        self.recovery_rects.clear();
+        self.hover = None;
+        self.pressed = None;
+    }
+
+    /// Number of autosave recovery rows currently shown.
+    pub fn recovery_project_count(&self) -> usize {
+        self.recovery_projects.len()
     }
 
     /// Replace startup recent-project rows.
@@ -109,6 +143,10 @@ impl SelfHostedStartupScreen {
         } else if self.open_project_rect.contains(point) {
             Some(StartupHit::OpenProject)
         } else if let Some((index, _)) =
+            self.recovery_rects.iter().enumerate().find(|(_, rect)| rect.contains(point))
+        {
+            Some(StartupHit::RecoveryProject(index))
+        } else if let Some((index, _)) =
             self.recent_rects.iter().enumerate().find(|(_, rect)| rect.contains(point))
         {
             Some(StartupHit::RecentProject(index))
@@ -129,6 +167,15 @@ impl SelfHostedStartupScreen {
                 };
                 app_shell_open_recent_project_action(AppShellOpenRecentProjectPayload {
                     project_file: project.project_file.clone(),
+                })
+            }
+            StartupHit::RecoveryProject(index) => {
+                let Some(project) = self.recovery_projects.get(index) else {
+                    return;
+                };
+                app_shell_recover_project_action(ProjectRecoverFromAutosavePayload {
+                    project_file: project.project_file.clone(),
+                    autosave_file: project.autosave_file.clone(),
                 })
             }
             StartupHit::Close => app_shell_quit_action(),
@@ -215,10 +262,31 @@ impl Widget for SelfHostedStartupScreen {
             ACTION_BUTTON_HEIGHT,
         );
 
-        let recent_y = self.new_project_rect.y + ACTION_BUTTON_HEIGHT + 34.0;
-        let first_row_y = recent_y + 24.0;
+        let mut section_y = self.new_project_rect.y + ACTION_BUTTON_HEIGHT + 34.0;
+        self.recovery_rects.clear();
+        let recovery_count = self.recovery_projects.len().min(MAX_VISIBLE_RECOVERY_PROJECTS);
+        if recovery_count > 0 {
+            let first_row_y = section_y + 24.0;
+            for index in 0..recovery_count {
+                self.recovery_rects.push(Rect::new(
+                    content_x,
+                    first_row_y + index as f32 * (RECENT_ROW_HEIGHT + RECENT_ROW_GAP),
+                    content_width,
+                    RECENT_ROW_HEIGHT,
+                ));
+            }
+            section_y =
+                first_row_y + recovery_count as f32 * (RECENT_ROW_HEIGHT + RECENT_ROW_GAP) + 8.0;
+        }
+
         self.recent_rects.clear();
-        let row_count = self.recent_projects.len().min(MAX_VISIBLE_RECENT_PROJECTS);
+        let max_recent = if recovery_count > 0 {
+            MAX_VISIBLE_RECENT_PROJECTS_WITH_RECOVERY
+        } else {
+            MAX_VISIBLE_RECENT_PROJECTS
+        };
+        let first_row_y = section_y + 24.0;
+        let row_count = self.recent_projects.len().min(max_recent);
         for index in 0..row_count {
             self.recent_rects.push(Rect::new(
                 content_x,
@@ -354,7 +422,49 @@ impl Widget for SelfHostedStartupScreen {
             StartupHit::OpenProject,
         );
 
-        let recent_y = self.new_project_rect.y + ACTION_BUTTON_HEIGHT + 34.0;
+        let mut section_y = self.new_project_rect.y + ACTION_BUTTON_HEIGHT + 34.0;
+        if !self.recovery_projects.is_empty() {
+            ctx.encoder.draw_text(
+                "可恢复项目",
+                typography.large.font_size,
+                Point::new(content_x, section_y),
+                colors.popover_foreground,
+            );
+            for (index, rect) in self.recovery_rects.iter().enumerate() {
+                let hit = StartupHit::RecoveryProject(index);
+                let fill = if self.pressed == Some(hit) {
+                    colors.muted
+                } else if self.hover == Some(hit) {
+                    colors.card.lerp(colors.foreground, 0.06)
+                } else {
+                    colors.card
+                };
+                ctx.encoder.draw_rect(*rect, fill, spacing.radius_md);
+                if let Some(project) = self.recovery_projects.get(index) {
+                    ctx.encoder.draw_text_box(
+                        &project.title,
+                        typography.body.font_size,
+                        Point::new(rect.x + 14.0, rect.y + 15.0),
+                        rect.width - 28.0,
+                        colors.card_foreground,
+                    );
+                    ctx.encoder.draw_text_box(
+                        &project.detail,
+                        typography.small.font_size,
+                        Point::new(rect.x + 14.0, rect.y + 32.0),
+                        rect.width - 28.0,
+                        colors.muted_foreground,
+                    );
+                }
+            }
+            section_y = self
+                .recovery_rects
+                .last()
+                .map(|rect| rect.y + rect.height + 16.0)
+                .unwrap_or(section_y + 24.0);
+        }
+
+        let recent_y = section_y;
         ctx.encoder.draw_text(
             "最近项目",
             typography.large.font_size,
@@ -466,7 +576,8 @@ mod tests {
     use super::*;
     use crate::app::ui_actions::{
         APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_OPEN_PROJECT_DIALOG,
-        APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_QUIT, APP_SHELL_WINDOW_DRAG,
+        APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_QUIT, APP_SHELL_RECOVER_PROJECT,
+        APP_SHELL_WINDOW_DRAG,
     };
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_editor_state::Action;
@@ -611,5 +722,38 @@ mod tests {
         let payload: AppShellOpenRecentProjectPayload =
             serde_json::from_value(payload.clone()).expect("recent payload");
         assert_eq!(payload.project_file, project_file);
+    }
+
+    #[test]
+    fn startup_screen_dispatches_recovery_project_action() {
+        let mut screen = SelfHostedStartupScreen::new();
+        let project_file = PathBuf::from("E:/projects/recover.mdp");
+        let autosave_file = PathBuf::from("E:/runtime/autosave/project.autosave.mdp");
+        screen.set_recovery_projects(vec![StartupRecoveryProject {
+            project_file: project_file.clone(),
+            autosave_file: autosave_file.clone(),
+            title: "recover".to_owned(),
+            detail: "刚刚，共 2 个恢复点".to_owned(),
+        }]);
+        screen.layout(Rect::new(
+            0.0,
+            0.0,
+            STARTUP_WINDOW_WIDTH,
+            STARTUP_WINDOW_HEIGHT,
+        ));
+
+        let recovery_point = screen.recovery_rects[0].center();
+        let recovery_actions = dispatch_click(&mut screen, recovery_point);
+
+        assert_eq!(recovery_actions.len(), 1);
+        let Action::Custom { namespace, name, payload } = &recovery_actions[0] else {
+            panic!("expected recovery custom action");
+        };
+        assert_eq!(namespace, APP_SHELL_NAMESPACE);
+        assert_eq!(name, APP_SHELL_RECOVER_PROJECT);
+        let payload: ProjectRecoverFromAutosavePayload =
+            serde_json::from_value(payload.clone()).expect("recovery payload");
+        assert_eq!(payload.project_file, project_file);
+        assert_eq!(payload.autosave_file, autosave_file);
     }
 }

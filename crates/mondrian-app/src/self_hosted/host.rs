@@ -6,6 +6,7 @@
 
 use std::cell::{Cell, Ref, RefCell};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use mondrian_editor_state::state::WorkspacePreset;
 use mondrian_platform::PlatformService;
@@ -16,11 +17,11 @@ use mondrian_ui_theme::set_theme_preset;
 use crate::app::ui_actions::{
     AssetsOpenFolderPayload, PreferencesThemePayload, APP_SHELL_NAMESPACE,
     APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_OPEN_RECENT_PROJECT,
-    APP_SHELL_PREFERENCES_THEME_CHANGED, APP_SHELL_QUIT, APP_SHELL_WINDOW_DRAG,
-    APP_SHELL_WINDOW_MINIMIZE, APP_SHELL_WINDOW_TOGGLE_MAXIMIZE, ASSETS_NAMESPACE,
-    ASSETS_OPEN_FOLDER,
+    APP_SHELL_PREFERENCES_THEME_CHANGED, APP_SHELL_QUIT, APP_SHELL_RECOVER_PROJECT,
+    APP_SHELL_WINDOW_DRAG, APP_SHELL_WINDOW_MINIMIZE, APP_SHELL_WINDOW_TOGGLE_MAXIMIZE,
+    ASSETS_NAMESPACE, ASSETS_OPEN_FOLDER,
 };
-use crate::app::AppState;
+use crate::app::{discover_crash_recovery_candidates, AppState, CrashRecoveryCandidate};
 use crate::self_hosted::action_queue::PendingUiActions;
 use crate::self_hosted::menu_bar::app_state_action_enabled;
 use crate::self_hosted::preferences_store::{
@@ -28,7 +29,9 @@ use crate::self_hosted::preferences_store::{
     SelfHostedPreferences,
 };
 use crate::self_hosted::shell::{try_resolve_app_shell_action, SelfHostedAppRoot};
-use crate::self_hosted::startup::{SelfHostedStartupScreen, StartupRecentProject};
+use crate::self_hosted::startup::{
+    SelfHostedStartupScreen, StartupRecentProject, StartupRecoveryProject,
+};
 use mondrian_editor_state::Action;
 
 /// Window-host commands produced while draining self-hosted UI actions.
@@ -65,6 +68,7 @@ pub struct SelfHostedUiHost {
     app_state: RefCell<AppState>,
     preferences: SelfHostedPreferences,
     preferences_path: PathBuf,
+    recovery_candidates: Vec<CrashRecoveryCandidate>,
     mode: SelfHostedUiMode,
     ui_dirty: Cell<bool>,
 }
@@ -92,14 +96,19 @@ impl SelfHostedUiHost {
         } else {
             SelfHostedUiMode::Startup
         };
+        let recovery_candidates = discover_crash_recovery_candidates();
         let mut startup = SelfHostedStartupScreen::new();
         startup.set_recent_projects(startup_recent_projects_from_preferences(&preferences));
+        startup.set_recovery_projects(startup_recovery_projects_from_candidates(
+            &recovery_candidates,
+        ));
         Self {
             startup,
             root,
             app_state: RefCell::new(app_state),
             preferences,
             preferences_path,
+            recovery_candidates,
             mode,
             ui_dirty: Cell::new(false),
         }
@@ -324,6 +333,7 @@ impl SelfHostedUiHost {
                 if let Some(path) = current_project_path {
                     self.record_recent_project(path);
                 }
+                self.refresh_recovery_candidates();
             }
         }
         result
@@ -346,6 +356,13 @@ impl SelfHostedUiHost {
     fn sync_startup_recent_projects(&mut self) {
         self.startup
             .set_recent_projects(startup_recent_projects_from_preferences(&self.preferences));
+    }
+
+    fn refresh_recovery_candidates(&mut self) {
+        self.recovery_candidates = discover_crash_recovery_candidates();
+        self.startup.set_recovery_projects(startup_recovery_projects_from_candidates(
+            &self.recovery_candidates,
+        ));
     }
 
     fn take_preferences_update(&mut self, action: &Action, bounds: Rect) -> bool {
@@ -443,7 +460,8 @@ fn is_startup_project_action(action: &Action) -> bool {
             if namespace == APP_SHELL_NAMESPACE
                 && (name == APP_SHELL_NEW_PROJECT_DIALOG
                     || name == APP_SHELL_OPEN_PROJECT_DIALOG
-                    || name == APP_SHELL_OPEN_RECENT_PROJECT)
+                    || name == APP_SHELL_OPEN_RECENT_PROJECT
+                    || name == APP_SHELL_RECOVER_PROJECT)
     )
 }
 
@@ -461,6 +479,32 @@ fn startup_recent_projects_from_preferences(
         .collect()
 }
 
+fn startup_recovery_projects_from_candidates(
+    candidates: &[CrashRecoveryCandidate],
+) -> Vec<StartupRecoveryProject> {
+    candidates
+        .iter()
+        .map(|candidate| {
+            let snapshots = if candidate.total_snapshots > 1 {
+                format!("，共 {} 个恢复点", candidate.total_snapshots)
+            } else {
+                String::new()
+            };
+            StartupRecoveryProject {
+                project_file: candidate.project_file.clone(),
+                autosave_file: candidate.autosave_file.clone(),
+                title: recent_project_title(&candidate.project_file),
+                detail: format!(
+                    "{}{} · {}",
+                    recovery_age_label(candidate.saved_at_unix_ms),
+                    snapshots,
+                    recent_project_subtitle(&candidate.project_file)
+                ),
+            }
+        })
+        .collect()
+}
+
 fn recent_project_title(project_file: &Path) -> String {
     project_file
         .file_stem()
@@ -469,6 +513,23 @@ fn recent_project_title(project_file: &Path) -> String {
         .filter(|name| !name.trim().is_empty())
         .map(str::to_owned)
         .unwrap_or_else(|| project_file.display().to_string())
+}
+
+fn recovery_age_label(saved_at_unix_ms: u64) -> String {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(saved_at_unix_ms);
+    let age_secs = now_ms.saturating_sub(saved_at_unix_ms) / 1000;
+    if age_secs < 60 {
+        format!("{age_secs} 秒前")
+    } else if age_secs < 3600 {
+        format!("{} 分钟前", age_secs / 60)
+    } else if age_secs < 86_400 {
+        format!("{} 小时前", age_secs / 3600)
+    } else {
+        format!("{} 天前", age_secs / 86_400)
+    }
 }
 
 fn recent_project_subtitle(project_file: &Path) -> String {
@@ -719,6 +780,26 @@ mod tests {
 
         assert_eq!(host.mode(), SelfHostedUiMode::Startup);
         assert_eq!(host.startup.recent_project_count(), 1);
+    }
+
+    #[test]
+    fn recovery_candidates_map_to_startup_rows() {
+        let project_file = PathBuf::from("E:/projects/recover.mdp");
+        let autosave_file = PathBuf::from("E:/runtime/autosave/project.autosave.mdp");
+        let candidates = vec![CrashRecoveryCandidate {
+            project_file: project_file.clone(),
+            autosave_file: autosave_file.clone(),
+            saved_at_unix_ms: 0,
+            total_snapshots: 2,
+        }];
+
+        let rows = startup_recovery_projects_from_candidates(&candidates);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].project_file, project_file);
+        assert_eq!(rows[0].autosave_file, autosave_file);
+        assert_eq!(rows[0].title, "recover");
+        assert!(rows[0].detail.contains("2 个恢复点"));
     }
 
     #[test]
