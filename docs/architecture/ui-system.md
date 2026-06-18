@@ -1070,3 +1070,11 @@ selection remains timeline-scoped, while effect selection is a nested
 and pruned with stale clips/effects. Selecting an effect is navigation state and
 must not enter timeline undo history; mutating, reordering, or removing effects
 continues to use undoable editor actions.
+
+The self-hosted product shell persists user-facing shell preferences through
+`SelfHostedUiHost`, not reusable widgets or `SelfHostedAppRoot`. Theme preset
+and workspace preset are restored before the first root widget is built, so the
+initial dock tree matches the last product workspace. Shell-only actions such as
+`Action::SwitchWorkspace` update the root immediately and then write the
+workspace preset back through `self_hosted::preferences_store`; editor-state
+actions and widget models remain disk-I/O free.

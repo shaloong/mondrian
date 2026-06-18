@@ -7,6 +7,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use mondrian_editor_state::state::WorkspacePreset;
 use mondrian_ui_theme::ThemePreset;
 use serde::{Deserialize, Serialize};
 
@@ -21,11 +22,17 @@ pub struct SelfHostedPreferences {
     pub version: u32,
     /// Active product theme preset.
     pub theme_preset: ThemePreset,
+    /// Built-in workspace preset restored when the self-hosted shell opens.
+    pub workspace_preset: WorkspacePreset,
 }
 
 impl Default for SelfHostedPreferences {
     fn default() -> Self {
-        Self { version: 1, theme_preset: ThemePreset::Dark }
+        Self {
+            version: 1,
+            theme_preset: ThemePreset::Dark,
+            workspace_preset: WorkspacePreset::Editing,
+        }
     }
 }
 
@@ -101,12 +108,28 @@ mod tests {
     #[test]
     fn preferences_round_trip_to_disk() {
         let path = temp_preferences_path("round-trip-preferences");
-        let preferences = SelfHostedPreferences { version: 1, theme_preset: ThemePreset::Light };
+        let preferences = SelfHostedPreferences {
+            version: 1,
+            theme_preset: ThemePreset::Light,
+            workspace_preset: WorkspacePreset::Compositing,
+        };
 
         persist_self_hosted_preferences_to(&path, &preferences).expect("persist preferences");
         let loaded = load_self_hosted_preferences_from(&path);
         fs::remove_file(path).ok();
 
         assert_eq!(loaded, preferences);
+    }
+
+    #[test]
+    fn partial_preferences_file_uses_clean_defaults() {
+        let path = temp_preferences_path("partial-preferences");
+        fs::write(&path, br#"{"version":1,"theme_preset":"Light"}"#)
+            .expect("write partial fixture");
+
+        let preferences = load_self_hosted_preferences_from(&path);
+        fs::remove_file(path).ok();
+
+        assert_eq!(preferences, SelfHostedPreferences::default());
     }
 }

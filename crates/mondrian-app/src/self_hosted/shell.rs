@@ -229,10 +229,10 @@ impl SelfHostedAppRoot {
             SelfHostedPanelModels::from_app_state(state),
             SelfHostedPreferencesModel::from_app_state(
                 state,
-                WorkspacePreset::Editing,
+                preferences.workspace_preset,
                 preferences.theme_preset,
             ),
-            WorkspacePreset::Editing,
+            preferences.workspace_preset,
         )
     }
 
@@ -316,6 +316,7 @@ impl SelfHostedAppRoot {
         let preferences = SelfHostedPreferences {
             version: 1,
             theme_preset: self.preferences_model.theme_preset,
+            workspace_preset: self.workspace_preset,
         };
         self.refresh_from_app_state_with_preferences(state, &preferences);
     }

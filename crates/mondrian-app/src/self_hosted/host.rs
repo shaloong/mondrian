@@ -7,6 +7,7 @@
 use std::cell::{Cell, Ref, RefCell};
 use std::path::PathBuf;
 
+use mondrian_editor_state::state::WorkspacePreset;
 use mondrian_platform::PlatformService;
 use mondrian_ui_core::types::Rect;
 use mondrian_ui_core::TreeWalker;
@@ -137,6 +138,10 @@ impl SelfHostedUiHost {
                 continue;
             }
 
+            let switched_workspace = match &action {
+                Action::SwitchWorkspace(preset) => Some(*preset),
+                _ => None,
+            };
             let current_project_path = self.app_state.borrow().current_project_path.clone();
             let action = match self.root.try_handle_shell_action(
                 action,
@@ -145,6 +150,9 @@ impl SelfHostedUiHost {
             ) {
                 Ok(Some(action)) => action,
                 Ok(None) => {
+                    if let Some(preset) = switched_workspace {
+                        self.persist_workspace_preset(preset);
+                    }
                     needs_layout = true;
                     continue;
                 }
@@ -180,6 +188,23 @@ impl SelfHostedUiHost {
 
     fn is_action_enabled(&self, action: &Action) -> bool {
         app_state_action_enabled(action, &self.app_state.borrow())
+    }
+
+    fn persist_workspace_preset(&mut self, preset: WorkspacePreset) {
+        if self.preferences.workspace_preset == preset {
+            return;
+        }
+        self.preferences.workspace_preset = preset;
+        if let Err(err) =
+            persist_self_hosted_preferences_to(&self.preferences_path, &self.preferences)
+        {
+            tracing::warn!("failed to persist self-hosted workspace preference: {err}");
+            self.app_state.borrow_mut().set_status_hint(
+                format!("Workspace preference could not be saved: {err}"),
+                true,
+            );
+            self.mark_dirty();
+        }
     }
 
     fn take_preferences_update(&mut self, action: &Action, bounds: Rect) -> bool {
@@ -368,6 +393,24 @@ mod tests {
     }
 
     #[test]
+    fn host_builds_root_from_persisted_workspace_preference() {
+        let mut host = SelfHostedUiHost::new_with_preferences_path(
+            AppState::new(),
+            SelfHostedPreferences {
+                version: 1,
+                theme_preset: ThemePreset::Dark,
+                workspace_preset: WorkspacePreset::Compositing,
+            },
+            temp_preferences_path("initial-workspace"),
+        );
+
+        TreeWalker::layout(host.root_mut(), Rect::new(0.0, 0.0, 1280.0, 720.0));
+
+        assert_eq!(host.root().workspace_preset(), WorkspacePreset::Compositing);
+        assert!((host.root().dock().ratio() - 0.35).abs() < f32::EPSILON);
+    }
+
+    #[test]
     fn host_drains_actions_and_refreshes_root() {
         let mut host = SelfHostedUiHost::new(AppState::new());
         let pending = PendingUiActions::default();
@@ -429,6 +472,38 @@ mod tests {
             load_self_hosted_preferences_from(&path).theme_preset,
             ThemePreset::Light
         );
+
+        std::fs::remove_file(path).ok();
+        set_global_theme_preset(ThemePreset::Dark);
+    }
+
+    #[test]
+    fn host_persists_workspace_preference_updates() {
+        let path = temp_preferences_path("workspace-preferences");
+        let mut host = SelfHostedUiHost::new_with_preferences_path(
+            AppState::new(),
+            SelfHostedPreferences {
+                version: 1,
+                theme_preset: ThemePreset::Dark,
+                workspace_preset: WorkspacePreset::Editing,
+            },
+            path.clone(),
+        );
+        let pending = PendingUiActions::default();
+
+        pending.push(Action::SwitchWorkspace(WorkspacePreset::Export));
+        let commands = host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+
+        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert_eq!(host.root().workspace_preset(), WorkspacePreset::Export);
+        assert_eq!(host.preferences().workspace_preset, WorkspacePreset::Export);
+        let loaded = load_self_hosted_preferences_from(&path);
+        assert_eq!(loaded.workspace_preset, WorkspacePreset::Export);
+        assert_eq!(loaded.theme_preset, ThemePreset::Dark);
 
         std::fs::remove_file(path).ok();
         set_global_theme_preset(ThemePreset::Dark);
