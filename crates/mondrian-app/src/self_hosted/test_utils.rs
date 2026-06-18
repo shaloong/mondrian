@@ -9,6 +9,26 @@ use mondrian_ui_core::{
     FocusManager, ShortcutBinding, ShortcutContext, ShortcutManager, ShortcutScope, TooltipManager,
     TooltipState,
 };
+use mondrian_ui_theme::{set_theme_preset, ThemePreset};
+use std::sync::{Mutex, MutexGuard};
+
+static THEME_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+pub(crate) struct ThemeTestGuard {
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl Drop for ThemeTestGuard {
+    fn drop(&mut self) {
+        set_theme_preset(ThemePreset::Dark);
+    }
+}
+
+pub(crate) fn theme_test_guard() -> ThemeTestGuard {
+    let lock = THEME_TEST_LOCK.lock().expect("theme test lock poisoned");
+    set_theme_preset(ThemePreset::Dark);
+    ThemeTestGuard { _lock: lock }
+}
 
 pub(crate) struct DummyFocus;
 

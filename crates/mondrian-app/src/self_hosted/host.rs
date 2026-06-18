@@ -302,9 +302,7 @@ mod tests {
     use mondrian_platform::{FileFilter, NoopPlatformService};
     use mondrian_ui_core::widget::{DrawCommandEncoder, PaintContext, Widget};
     use mondrian_ui_core::Point;
-    use mondrian_ui_theme::{
-        current_theme, set_theme_preset as set_global_theme_preset, ThemePreset,
-    };
+    use mondrian_ui_theme::{current_theme, ThemePreset};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -407,6 +405,7 @@ mod tests {
 
     #[test]
     fn host_builds_root_from_initial_app_state() {
+        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
         let mut host = SelfHostedUiHost::new(AppState::new());
 
         TreeWalker::layout(host.root_mut(), Rect::new(0.0, 0.0, 1280.0, 720.0));
@@ -417,6 +416,7 @@ mod tests {
 
     #[test]
     fn host_builds_root_from_persisted_workspace_preference() {
+        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
         let mut host = SelfHostedUiHost::new_with_preferences_path(
             AppState::new(),
             SelfHostedPreferences {
@@ -472,6 +472,7 @@ mod tests {
 
     #[test]
     fn host_applies_and_persists_theme_preference_updates() {
+        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
         let path = temp_preferences_path("theme-preferences");
         let mut host = SelfHostedUiHost::new_with_preferences_path(
             AppState::new(),
@@ -499,11 +500,11 @@ mod tests {
         );
 
         std::fs::remove_file(path).ok();
-        set_global_theme_preset(ThemePreset::Dark);
     }
 
     #[test]
     fn host_persists_workspace_preference_updates() {
+        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
         let path = temp_preferences_path("workspace-preferences");
         let mut host = SelfHostedUiHost::new_with_preferences_path(
             AppState::new(),
@@ -532,7 +533,6 @@ mod tests {
         assert_eq!(loaded.theme_preset, ThemePreset::Dark);
 
         std::fs::remove_file(path).ok();
-        set_global_theme_preset(ThemePreset::Dark);
     }
 
     #[test]

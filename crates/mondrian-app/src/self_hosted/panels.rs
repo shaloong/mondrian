@@ -3774,7 +3774,7 @@ mod tests {
 
     #[test]
     fn app_state_models_map_sequence_selection_and_basic_inspector_values() {
-        mondrian_ui_theme::set_theme_preset(mondrian_ui_theme::ThemePreset::Dark);
+        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
         let mut state = AppState::new();
         let mut sequence = Sequence::new("edit");
         let tb = sequence.time_base();
@@ -4394,6 +4394,7 @@ mod tests {
 
     #[test]
     fn timeline_clip_fallback_colors_use_theme_tokens() {
+        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
         mondrian_ui_theme::set_theme_preset(mondrian_ui_theme::ThemePreset::Light);
         let mut sequence = Sequence::new("edit");
         let tb = sequence.time_base();
@@ -4435,11 +4436,11 @@ mod tests {
             model.tracks[first_audio_track].clips[0].color,
             Some(colors.timeline_clip_audio)
         );
-        mondrian_ui_theme::set_theme_preset(mondrian_ui_theme::ThemePreset::Dark);
     }
 
     #[test]
     fn panel_domain_accents_use_theme_tokens() {
+        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
         mondrian_ui_theme::set_theme_preset(mondrian_ui_theme::ThemePreset::Light);
         let colors = current_theme().colors.clone();
 
@@ -4480,7 +4481,6 @@ mod tests {
             Some(colors.error)
         );
         assert_eq!(status_log_item("ok".to_owned(), false).accent, None);
-        mondrian_ui_theme::set_theme_preset(mondrian_ui_theme::ThemePreset::Dark);
     }
 
     #[test]

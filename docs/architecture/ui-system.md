@@ -1104,6 +1104,13 @@ captures. When render diagnostics emit a warning after a frame, the host marks
 its panel models dirty and requests one follow-up redraw; the next paint refresh
 pulls the new log entry into the Console model without waiting for user input.
 
+Tests that mutate the process-global theme must take the self-hosted
+`theme_test_guard()` before calling `set_theme_preset()`. Most widget tests
+should avoid the global theme entirely and pass an explicit
+`ThemePreset::build()` snapshot to `PaintContext`; global theme tests without
+the guard can race under Rust's parallel test runner and make visual token
+regressions look intermittent.
+
 The renderer must flush draw batches when clip state changes and must apply the
 batch clip rect as a GPU scissor before drawing. A command emitted inside
 `PushClip`/`PopClip` must not share a batch with unclipped geometry, otherwise
