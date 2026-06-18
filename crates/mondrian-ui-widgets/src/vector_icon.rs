@@ -163,7 +163,7 @@ impl VectorIcon {
 
     /// Paint the icon into a square or rectangular viewport using one theme color.
     pub fn paint(&self, ctx: &mut PaintContext, bounds: Rect, color: Color) {
-        let fitted = fit_view_box(self.view_box, bounds).pixel_aligned();
+        let fitted = fit_view_box(self.view_box, bounds);
         if let Some((key, raster)) = self.raster_icon_for_bounds(fitted) {
             ctx.encoder.draw_raster_image(
                 &key,
@@ -204,8 +204,8 @@ impl VectorIcon {
 
     fn raster_icon_for_bounds(&self, bounds: Rect) -> Option<(String, RasterIcon)> {
         let source = self.raster_source.as_ref()?;
-        let target_width = bounds.width.round().max(1.0) as u32;
-        let target_height = bounds.height.round().max(1.0) as u32;
+        let target_width = raster_target_edge(bounds.width);
+        let target_height = raster_target_edge(bounds.height);
         if target_width > MAX_RASTER_ICON_SIZE || target_height > MAX_RASTER_ICON_SIZE {
             return None;
         }
@@ -229,6 +229,10 @@ impl VectorIcon {
     }
 }
 
+fn raster_target_edge(logical_edge: f32) -> u32 {
+    logical_edge.ceil().max(1.0) as u32
+}
+
 fn raster_supersample_scale(target_width: u32, target_height: u32) -> u32 {
     if target_width.saturating_mul(RASTER_ICON_SUPERSAMPLE) <= MAX_RASTER_ICON_SIZE
         && target_height.saturating_mul(RASTER_ICON_SUPERSAMPLE) <= MAX_RASTER_ICON_SIZE
@@ -236,21 +240,6 @@ fn raster_supersample_scale(target_width: u32, target_height: u32) -> u32 {
         RASTER_ICON_SUPERSAMPLE
     } else {
         1
-    }
-}
-
-trait PixelAlignRect {
-    fn pixel_aligned(self) -> Self;
-}
-
-impl PixelAlignRect for Rect {
-    fn pixel_aligned(self) -> Self {
-        Rect::new(
-            self.x.round(),
-            self.y.round(),
-            self.width.round().max(1.0),
-            self.height.round().max(1.0),
-        )
     }
 }
 
@@ -686,7 +675,30 @@ mod tests {
         assert_eq!(recorder.raster_images, 1);
         assert_eq!(
             recorder.raster_bounds,
-            vec![Rect::new(10.0, 21.0, 16.0, 16.0)]
+            vec![Rect::new(10.2, 20.6, 16.0, 16.0)]
+        );
+        assert_eq!(recorder.raster_sizes, vec![(32, 32)]);
+    }
+
+    #[test]
+    fn fractional_svg_icon_bounds_are_preserved_while_raster_size_is_ceiled() {
+        let icon = VectorIcon::from_svg_str(
+            r#"<svg viewBox="0 0 24 24"><path d="M4 4L20 4L12 20Z" fill="black"/></svg>"#,
+        )
+        .expect("icon");
+        let mut recorder = PaintRecorder::default();
+        let mut ctx = paint_ctx(&mut recorder);
+
+        icon.paint(
+            &mut ctx,
+            Rect::new(5.25, 7.75, 15.2, 15.7),
+            Color::from_hex(0xFFFFFF),
+        );
+
+        assert_eq!(recorder.raster_images, 1);
+        assert_eq!(
+            recorder.raster_bounds,
+            vec![Rect::new(5.25, 8.0, 15.2, 15.2)]
         );
         assert_eq!(recorder.raster_sizes, vec![(32, 32)]);
     }
@@ -764,7 +776,7 @@ mod tests {
             .raster_icon_for_bounds(Rect::new(0.0, 0.0, 32.0, 32.0))
             .expect("large raster");
 
-        assert_eq!((small.width, small.height), (32, 32));
+        assert_eq!((small.width, small.height), (32, 34));
         assert_eq!((large.width, large.height), (64, 64));
         assert_ne!(small.rgba.len(), large.rgba.len());
     }
