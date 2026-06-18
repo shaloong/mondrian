@@ -5,10 +5,11 @@
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
+use std::cell::Cell;
 
 use crate::menu::{
-    menu_item_text_width, paint_menu_popup_chrome, paint_menu_row, paint_menu_separator, MenuItem,
-    MenuRowPaint,
+    anchored_menu_rect, menu_item_text_width, paint_menu_popup_chrome, paint_menu_row,
+    paint_menu_separator, MenuItem, MenuRowPaint,
 };
 
 /// 右键弹出菜单
@@ -23,6 +24,7 @@ pub struct ContextMenu {
     min_width: f32,
     visible: bool,
     hovered: Option<usize>,
+    overlay_viewport: Cell<Option<Rect>>,
 }
 
 const CONTEXT_MENU_PADDING_X: f32 = 8.0;
@@ -40,6 +42,7 @@ impl ContextMenu {
             min_width: 140.0,
             visible: true,
             hovered: None,
+            overlay_viewport: Cell::new(None),
         }
     }
 
@@ -48,18 +51,20 @@ impl ContextMenu {
     }
 
     fn bounds_rect(&self) -> Rect {
-        Rect::new(
-            self.anchor.x,
-            self.anchor.y,
+        anchored_menu_rect(
+            Rect::new(self.anchor.x, self.anchor.y, 0.0, 0.0),
             self.menu_width() + CONTEXT_MENU_PADDING_X,
             8.0 + self.items.len() as f32 * self.item_height,
+            0.0,
+            self.overlay_viewport.get(),
         )
     }
 
     fn item_rect(&self, idx: usize) -> Rect {
+        let bounds = self.bounds_rect();
         Rect::new(
-            self.anchor.x + CONTEXT_MENU_PADDING_X * 0.5,
-            self.anchor.y + 4.0 + idx as f32 * self.item_height,
+            bounds.x + CONTEXT_MENU_PADDING_X * 0.5,
+            bounds.y + 4.0 + idx as f32 * self.item_height,
             self.menu_width(),
             self.item_height,
         )
@@ -202,6 +207,7 @@ impl Widget for ContextMenu {
             return;
         }
 
+        self.overlay_viewport.set(Some(ctx.clip_rect));
         let bg = self.bounds_rect();
         paint_menu_popup_chrome(ctx, bg);
         let reserve_icon_lane = self.icon_lane_width() > 0.0;
@@ -511,6 +517,52 @@ mod tests {
         let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
         menu.paint_overlay(&mut ctx);
         assert!(encoder.rect_count > 0);
+    }
+
+    #[test]
+    fn context_menu_clamps_to_bottom_right_viewport_and_keeps_hit_testing() {
+        let mut menu = ContextMenu::new(
+            Point::new(386.0, 286.0),
+            vec![
+                MenuItem::new("Cut", Action::Cut),
+                MenuItem::new("Copy", Action::Copy),
+                MenuItem::new("Paste", Action::Paste),
+            ],
+        );
+        let theme = mondrian_ui_theme::ThemePreset::Dark.build();
+        let clip_rect = Rect::new(0.0, 0.0, 400.0, 300.0);
+        let mut encoder = RecordingEncoder::default();
+        let mut paint_ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+
+        menu.paint_overlay(&mut paint_ctx);
+
+        let bounds = menu.bounds_rect();
+        assert!(bounds.x + bounds.width <= 396.0);
+        assert!(bounds.y + bounds.height <= 296.0);
+        assert!(bounds.x < menu.anchor.x);
+        assert!(bounds.y < menu.anchor.y);
+
+        let actions = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            actions.borrow_mut().push(a);
+        };
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch_fn);
+        let copy = menu.item_rect(1).center();
+        let result = menu.event(
+            &UiEvent::MouseDown {
+                position: copy,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert!(!menu.visible);
+        assert_eq!(actions.borrow().as_slice(), &[Action::Copy]);
     }
 
     #[test]

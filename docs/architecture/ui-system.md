@@ -394,6 +394,10 @@ shadow tokens rather than per-widget hardcoded black alpha values, so dark/light
 themes can tune perceived depth centrally. Common color composition helpers
 such as alpha scaling, color mixing, and softened borders also live behind that
 shared paint helper so widgets do not drift in their interpretation of tokens.
+Dropdowns, context menus, and embedded selectors such as the color-picker mode
+menu use the shared anchored-menu geometry for viewport edge clamping and
+above/below flipping, and their hit-testing is derived from the same rects used
+for overlay painting.
 Dropdown trigger labels are clipped to the trigger text lane, reserving the
 arrow area when enabled, so constrained form rows do not let long labels paint
 over affordances or neighboring controls.
