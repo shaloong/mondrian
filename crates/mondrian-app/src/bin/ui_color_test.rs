@@ -88,7 +88,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     wgpu::CurrentSurfaceTexture::Success(f)
                     | wgpu::CurrentSurfaceTexture::Suboptimal(f) => {
                         let v = f.texture.create_view(&Default::default());
-                        renderer.render(&dev, &q, &v, &cmds, (sz.width, sz.height));
+                        renderer.render_resolved_commands(
+                            &dev,
+                            &q,
+                            &v,
+                            &cmds,
+                            (sz.width, sz.height),
+                        );
                         f.present();
                     }
                     wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {

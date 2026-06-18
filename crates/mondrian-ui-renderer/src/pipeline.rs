@@ -1,7 +1,7 @@
 //! 2D UI 渲染管线
 //!
 //! 包含顶点/片段 shader 和 bind group layout。
-//! Stage B 只支持纯色矩形（不含纹理采样），Text 暂为占位。
+//! 支持 SDF 几何、纹理图集图像、字形图像和小型 SVG raster atlas 绘制。
 
 use crate::shape::RectVertex;
 

@@ -6,7 +6,7 @@
 //!
 //! * [`DrawCommand`] — 绘制命令枚举
 //! * [`DrawEncoder`] — 收集绘制命令的编码器
-//! * [`UiRenderer`] — wgpu 渲染器（管线 + 批次提交）
+//! * [`UiRenderer`] — wgpu 渲染器（管线 + 已解析绘制命令批次提交）
 
 pub mod atlas;
 pub mod batch;

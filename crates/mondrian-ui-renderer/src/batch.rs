@@ -105,7 +105,8 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                 current_batch.vertices.extend(vertices);
             }
             DrawCommand::Text { .. } => {
-                // Stage B: text placeholder — skip
+                // Text must be resolved by mondrian-ui-text before commands
+                // reach this low-level batch builder.
             }
             DrawCommand::Image { bounds, uv_rect, tint } => {
                 ensure_texture_key(
@@ -894,11 +895,11 @@ mod tests {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Text command (skipped in Stage B)
+    // Unresolved text command
     // ═══════════════════════════════════════════════════════════════════════
 
     #[test]
-    fn build_batches_text_is_skipped() {
+    fn build_batches_leaves_unresolved_text_to_the_text_resolver() {
         use mondrian_ui_theme::typography::{FontWeight, TextStyle};
         let style = TextStyle {
             font_size: 14.0,

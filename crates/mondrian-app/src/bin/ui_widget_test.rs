@@ -5,13 +5,13 @@
 //! Builds a simple widget tree and renders it. Uses BRIGHT colors to make visual
 //! inspection easy.
 
+use mondrian_app::self_hosted::rendering::SelfHostedFrameRenderer;
 use mondrian_core::Color;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::widgets::ColoredBox;
 use mondrian_ui_core::{EventResult, TreeWalker, Widget};
 use mondrian_ui_renderer::command::DrawEncoder;
-use mondrian_ui_renderer::UiRenderer;
 use std::sync::Arc;
 
 /// A root widget that fills its entire bounds with a background color.
@@ -95,7 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sz = w.inner_size();
     let mut cfg = surf.get_default_config(&adap, sz.width, sz.height).unwrap();
     surf.configure(&dev, &cfg);
-    let mut renderer = UiRenderer::new(&dev, cfg.format);
+    let mut frame_renderer = SelfHostedFrameRenderer::new(&dev, cfg.format);
 
     // Build widget tree: RootFill containing 2 ColoredBox children
     // Red box at (50,50) 300x400, Blue box at (450,50) 300x400
@@ -138,18 +138,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let theme = mondrian_ui_theme::current_theme();
                 TreeWalker::paint_clipped(&root, &mut enc, &theme, bounds);
                 let cmds = enc.finish();
-                let cur = surf.get_current_texture();
-                match cur {
-                    wgpu::CurrentSurfaceTexture::Success(f)
-                    | wgpu::CurrentSurfaceTexture::Suboptimal(f) => {
-                        let v = f.texture.create_view(&Default::default());
-                        renderer.render(&dev, &q, &v, &cmds, (sz.width, sz.height));
-                        f.present();
-                    }
-                    wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                        surf.configure(&dev, &cfg);
-                    }
-                    _ => {}
+                if frame_renderer
+                    .render_draw_commands(&dev, &q, &surf, &cfg, (sz.width, sz.height), cmds)
+                    .needs_follow_up_redraw()
+                {
+                    w.request_redraw();
                 }
             }
             Event::WindowEvent { event: WindowEvent::Resized(ns), .. } => {

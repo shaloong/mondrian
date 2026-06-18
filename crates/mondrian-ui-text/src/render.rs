@@ -92,7 +92,8 @@ impl TextRenderer {
 
 /// 后处理：将 DrawCommand::Text 替换为字形 DrawCommand::Image
 ///
-/// 在每个渲染帧调用 `TreeWalker::paint()` 之后、`UiRenderer::render()` 之前使用。
+/// 在每个渲染帧调用 `TreeWalker::paint()` 之后、
+/// `UiRenderer::render_resolved_commands()` 之前使用。
 /// 调用者应在提交本帧前上传 `TextRenderer::take_pending_uploads()`，这样首次出现
 /// 的字形也能在同一帧可见。
 pub fn resolve_text_commands(

@@ -356,7 +356,13 @@ impl UiRenderer {
         Some(uv_rect)
     }
 
-    pub fn render(
+    /// Render draw commands that have already had text commands resolved to
+    /// glyph atlas image draws.
+    ///
+    /// Product and widget windows should normally call their app-level frame
+    /// renderer, which runs `mondrian-ui-text::resolve_text_commands` and
+    /// uploads glyphs before calling this low-level submission path.
+    pub fn render_resolved_commands(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -364,6 +370,10 @@ impl UiRenderer {
         commands: &[DrawCommand],
         screen_size: (u32, u32),
     ) {
+        debug_assert!(
+            !commands.iter().any(|command| matches!(command, DrawCommand::Text { .. })),
+            "UiRenderer::render_resolved_commands received unresolved text commands"
+        );
         let commands = self.resolve_raster_images(queue, commands);
         let batches = build_batches(&commands, screen_size);
         self.ensure_msaa_target(device, screen_size);

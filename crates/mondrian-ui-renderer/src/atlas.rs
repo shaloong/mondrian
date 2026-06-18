@@ -1,7 +1,7 @@
 //! 纹理图集
 //!
 //! 将多个小纹理打包到一个大纹理中，减少 bind group 切换。
-//! Stage B 提供最小实现，后续扩展 glyph atlas 支持。
+//! 由 glyph atlas 和通用 raster image atlas 共享。
 
 use std::collections::HashMap;
 

@@ -60,7 +60,13 @@ impl SelfHostedFrameRenderer {
             wgpu::CurrentSurfaceTexture::Success(output)
             | wgpu::CurrentSurfaceTexture::Suboptimal(output) => {
                 let view = output.texture.create_view(&Default::default());
-                self.ui_renderer.render(device, queue, &view, &commands, screen_size);
+                self.ui_renderer.render_resolved_commands(
+                    device,
+                    queue,
+                    &view,
+                    &commands,
+                    screen_size,
+                );
                 output.present();
                 SelfHostedFrameResult::Presented
             }
