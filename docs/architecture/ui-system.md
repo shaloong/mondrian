@@ -480,6 +480,13 @@ catcher or a sibling panel.
 Dragging popup internals should use pointer capture so move/up events remain
 routed to the owning widget.
 
+Application render loops must call `TreeWalker::paint_clipped()` with the
+current window or surface bounds. Overlay placement uses `PaintContext.clip_rect`
+as the root viewport for flipping and edge clamping; using the unbounded
+`TreeWalker::paint()` helper in production shells makes dropdowns, color-picker
+mode menus, and tooltips think the screen is infinite and can push popups off
+the visible window.
+
 ## Scroll Views
 
 Scroll containers lay their child content out in scrolled screen coordinates:

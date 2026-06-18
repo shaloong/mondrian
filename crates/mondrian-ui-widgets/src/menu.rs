@@ -7,6 +7,7 @@ use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
+use std::cell::Cell;
 
 use crate::paint::{mix_color, paint_focus_ring, paint_shadow};
 use crate::text_metrics::measure_single_line;
@@ -29,6 +30,39 @@ const MENU_ROW_ICON_SIZE: f32 = 16.0;
 const MENU_ROW_ICON_GAP: f32 = 8.0;
 const MENU_ROW_SHORTCUT_GAP: f32 = 24.0;
 const MENU_SCROLLBAR_SPACE: f32 = 8.0;
+const MENU_VIEWPORT_MARGIN: f32 = 4.0;
+
+pub(crate) fn anchored_menu_rect(
+    anchor: Rect,
+    width: f32,
+    height: f32,
+    gap: f32,
+    viewport: Option<Rect>,
+) -> Rect {
+    let width = width.max(1.0);
+    let height = height.max(1.0);
+    let below = Rect::new(anchor.x, anchor.y + anchor.height + gap, width, height);
+    let Some(viewport) = viewport else {
+        return below;
+    };
+
+    let left = viewport.x + MENU_VIEWPORT_MARGIN;
+    let right = viewport.x + viewport.width - MENU_VIEWPORT_MARGIN;
+    let top = viewport.y + MENU_VIEWPORT_MARGIN;
+    let bottom = viewport.y + viewport.height - MENU_VIEWPORT_MARGIN;
+    let x = anchor.x.clamp(left, (right - width).max(left));
+    let below_y = anchor.y + anchor.height + gap;
+    let above_y = anchor.y - gap - height;
+    let space_below = bottom - below_y;
+    let space_above = above_y + height - top;
+    let mut y = if space_below < height && space_above > space_below {
+        above_y
+    } else {
+        below_y
+    };
+    y = y.clamp(top, (bottom - height).max(top));
+    Rect::new(x, y, width, height)
+}
 
 pub(crate) fn paint_menu_trigger(ctx: &mut PaintContext, rect: Rect, label: &str, open: bool) {
     let tokens = &ctx.theme.colors;
@@ -332,6 +366,7 @@ pub struct Dropdown {
     suppress_next_release: bool,
     focused: bool,
     focus_visible: bool,
+    overlay_viewport: Cell<Option<Rect>>,
 }
 
 impl Dropdown {
@@ -351,6 +386,7 @@ impl Dropdown {
             suppress_next_release: false,
             focused: false,
             focus_visible: false,
+            overlay_viewport: Cell::new(None),
         }
     }
 
@@ -475,20 +511,21 @@ impl Dropdown {
     }
 
     fn menu_rect(&self) -> Rect {
-        Rect::new(
-            self.bounds.x,
-            self.bounds.y + MENU_TRIGGER_HEIGHT,
+        anchored_menu_rect(
+            self.trigger_rect(),
             self.menu_width(),
             self.visible_content_height() + 4.0,
+            0.0,
+            self.overlay_viewport.get(),
         )
     }
 
     fn item_rect(&self, index: usize) -> Rect {
+        let menu = self.menu_rect();
         Rect::new(
-            self.bounds.x + 2.0,
-            self.bounds.y + MENU_TRIGGER_HEIGHT + 2.0 + index as f32 * self.item_height
-                - self.scroll_offset,
-            self.menu_width() - 4.0,
+            menu.x + 2.0,
+            menu.y + 2.0 + index as f32 * self.item_height - self.scroll_offset,
+            (menu.width - 4.0).max(1.0),
             self.item_height,
         )
     }
@@ -497,8 +534,7 @@ impl Dropdown {
         if !self.menu_rect().contains(position) {
             return None;
         }
-        let relative_y =
-            position.y - (self.bounds.y + MENU_TRIGGER_HEIGHT + 2.0) + self.scroll_offset;
+        let relative_y = position.y - (self.menu_rect().y + 2.0) + self.scroll_offset;
         if relative_y < 0.0 {
             return None;
         }
@@ -595,6 +631,7 @@ impl Dropdown {
             return;
         }
 
+        self.overlay_viewport.set(Some(ctx.clip_rect));
         let menu_bg = self.menu_rect();
 
         paint_menu_popup_chrome(ctx, menu_bg);
@@ -1419,6 +1456,64 @@ mod tests {
             encoder.rects.len() > 1,
             "open dropdown should draw menu chrome during overlay paint"
         );
+    }
+
+    #[test]
+    fn dropdown_menu_flips_above_bottom_viewport_and_keeps_hit_testing() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+        let mut d = Dropdown::new(
+            "Mode",
+            vec![
+                MenuItem::new("Alpha", Action::Play),
+                MenuItem::new("Beta", Action::Pause),
+            ],
+        );
+        d.layout(Rect::new(20.0, 110.0, 120.0, 28.0));
+        d.open_menu(&mut ctx);
+
+        let theme = mondrian_ui_theme::ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut paint_ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 180.0, 150.0),
+        };
+        d.paint_overlay(&mut paint_ctx);
+
+        let menu = d.menu_rect();
+        assert!(menu.y < d.trigger_rect().y);
+        assert!(menu.y + menu.height <= 146.0);
+
+        let beta = d.item_rect(1).center();
+        assert_eq!(
+            d.event(
+                &UiEvent::MouseDown {
+                    position: beta,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            d.event(
+                &UiEvent::MouseUp {
+                    position: beta,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(actions.borrow().as_slice(), &[Action::Pause]);
     }
 
     #[test]

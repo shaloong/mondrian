@@ -43,7 +43,8 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = EventLoop::new()?;
     let window_attrs = winit::window::Window::default_attributes()
         .with_title("Mondrian — 自研 UI")
-        .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
+        .with_inner_size(winit::dpi::LogicalSize::new(1280, 720))
+        .with_visible(false);
     let window = Arc::new(event_loop.create_window(window_attrs)?);
 
     let instance_desc = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
@@ -82,10 +83,12 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_cursor = Point::new(0.0, 0.0);
     let current_bounds = std::cell::Cell::new(bounds);
     let mut modifiers_state = Modifiers::none();
+    let mut pending_initial_redraw = true;
     let pending_actions = PendingUiActions::default();
     let platform = SystemPlatformService;
 
     tracing::info!("UI initialized — {}x{}", size.width, size.height);
+    window.set_visible(true);
     window.request_redraw();
 
     event_loop.run(move |event, elwt| {
@@ -170,7 +173,7 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                 let theme = mondrian_ui_theme::current_theme();
                 let b = current_bounds.get();
                 encoder.draw_rect(b, theme.colors.background, 0.0);
-                TreeWalker::paint(host.root(), &mut encoder, &theme);
+                TreeWalker::paint_clipped(host.root(), &mut encoder, &theme, b);
                 ui_runtime.paint_shell_overlays(&mut encoder, &theme, b, last_cursor, &router);
                 let size = window.inner_size();
                 let frame_result = frame_renderer.render_draw_commands(
@@ -184,6 +187,7 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                 if frame_result.needs_follow_up_redraw() {
                     window.request_redraw();
                 }
+                pending_initial_redraw = false;
             }
 
             Event::WindowEvent { event: WindowEvent::Resized(new_size), .. } => {
@@ -346,6 +350,10 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
 
             Event::AboutToWait => {
                 ui_runtime.drive_timers(&window, &mut router, elwt);
+                if pending_initial_redraw {
+                    window.request_redraw();
+                    elwt.set_control_flow(ControlFlow::Poll);
+                }
                 if ui_runtime.is_eyedropper_active() {
                     ui_runtime.poll_eyedropper(
                         &window,

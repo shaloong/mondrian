@@ -136,7 +136,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Event::WindowEvent { event: WindowEvent::RedrawRequested, .. } => {
                 let mut enc = DrawEncoder::new();
                 let theme = mondrian_ui_theme::current_theme();
-                TreeWalker::paint(&root, &mut enc, &theme);
+                TreeWalker::paint_clipped(&root, &mut enc, &theme, bounds);
                 let cmds = enc.finish();
                 let cur = surf.get_current_texture();
                 match cur {

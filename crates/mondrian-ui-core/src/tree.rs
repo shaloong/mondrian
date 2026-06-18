@@ -165,6 +165,20 @@ impl TreeWalker {
     /// 这样 ScrollView 等容器可以在绘制子节点前设置 clip/transform。
     pub fn paint(root: &dyn Widget, encoder: &mut dyn DrawCommandEncoder, theme: &Theme) {
         let clip_rect = Rect::new(0.0, 0.0, f32::MAX, f32::MAX);
+        Self::paint_clipped(root, encoder, theme, clip_rect);
+    }
+
+    /// Paint a widget tree with an explicit root clip rectangle.
+    ///
+    /// Application shells should pass the window or surface bounds here so
+    /// overlay widgets can place popups, tooltips, and menus against the real
+    /// visible viewport instead of an unbounded test canvas.
+    pub fn paint_clipped(
+        root: &dyn Widget,
+        encoder: &mut dyn DrawCommandEncoder,
+        theme: &Theme,
+        clip_rect: Rect,
+    ) {
         let mut ctx = PaintContext { encoder, theme, clip_rect };
         root.paint(&mut ctx);
         root.paint_overlay(&mut ctx);
@@ -303,20 +317,26 @@ mod tests {
 
     struct MockEncoder {
         rect_count: usize,
+        rects: Vec<Rect>,
         rect_colors: Vec<Color>,
     }
 
     impl MockEncoder {
         fn new() -> Self {
-            Self { rect_count: 0, rect_colors: Vec::new() }
+            Self {
+                rect_count: 0,
+                rects: Vec::new(),
+                rect_colors: Vec::new(),
+            }
         }
     }
 
     impl DrawCommandEncoder for MockEncoder {
         fn push_clip(&mut self, _bounds: Rect) {}
         fn pop_clip(&mut self) {}
-        fn draw_rect(&mut self, _bounds: Rect, color: Color, _corner_radius: f32) {
+        fn draw_rect(&mut self, bounds: Rect, color: Color, _corner_radius: f32) {
             self.rect_count += 1;
+            self.rects.push(bounds);
             self.rect_colors.push(color);
         }
         fn draw_line(&mut self, _start: Point, _end: Point, _width: f32, _color: Color) {}
@@ -412,6 +432,50 @@ mod tests {
             encoder.rect_colors,
             vec![Color::from_hex(0x111111), Color::from_hex(0xEEEEEE)]
         );
+    }
+
+    struct ClipEchoWidget {
+        id: WidgetId,
+    }
+
+    impl ClipEchoWidget {
+        fn new() -> Self {
+            Self { id: WidgetId::new() }
+        }
+    }
+
+    impl Widget for ClipEchoWidget {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+
+        fn measure(&self, _constraint: LayoutConstraint) -> Size {
+            Size::new(100.0, 100.0)
+        }
+
+        fn layout(&mut self, _bounds: Rect) {}
+
+        fn event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+            EventResult::Ignored
+        }
+
+        fn paint(&self, _ctx: &mut PaintContext) {}
+
+        fn paint_overlay(&self, ctx: &mut PaintContext) {
+            ctx.encoder.draw_rect(ctx.clip_rect, Color::from_hex(0xEEEEEE), 0.0);
+        }
+    }
+
+    #[test]
+    fn tree_walker_paint_clipped_passes_root_clip_to_overlay() {
+        let root = ClipEchoWidget::new();
+        let mut encoder = MockEncoder::new();
+        let theme = mondrian_ui_theme::ThemePreset::Dark.build();
+        let clip = Rect::new(10.0, 20.0, 320.0, 240.0);
+
+        TreeWalker::paint_clipped(&root, &mut encoder, &theme, clip);
+
+        assert_eq!(encoder.rects, vec![clip]);
     }
 
     // ═══════════════════════════════════════════════════════════════════════

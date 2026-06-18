@@ -2,6 +2,7 @@
 //!
 //! Provides a compact model-based color editor for the custom UI stack.
 
+use std::cell::Cell;
 use std::f32::consts::TAU;
 
 use mondrian_core::{CmykColor, Color, HslColor, HsvColor, RgbaColor};
@@ -13,7 +14,9 @@ use mondrian_ui_core::widget::{
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
 use crate::form_layout::{FormLayout, FormRowOptions, FormRowRects};
-use crate::menu::{paint_menu_popup_chrome, paint_menu_row, paint_menu_trigger, MenuRowPaint};
+use crate::menu::{
+    anchored_menu_rect, paint_menu_popup_chrome, paint_menu_row, paint_menu_trigger, MenuRowPaint,
+};
 use crate::paint::{
     color_with_alpha, mix_color, paint_checkerboard, paint_focus_ring, paint_shadow, soft_border,
 };
@@ -146,6 +149,7 @@ pub struct ColorPicker {
     mode_hovered: Option<ColorPickerMode>,
     mode_pressed: Option<ColorPickerMode>,
     mode_menu_open: bool,
+    overlay_viewport: Cell<Option<Rect>>,
     eyedropper_hovered: bool,
     eyedropper_pressed: bool,
     drag_target: Option<ColorDragTarget>,
@@ -188,6 +192,7 @@ impl ColorPicker {
             mode_hovered: None,
             mode_pressed: None,
             mode_menu_open: false,
+            overlay_viewport: Cell::new(None),
             eyedropper_hovered: false,
             eyedropper_pressed: false,
             drag_target: None,
@@ -441,11 +446,12 @@ impl ColorPicker {
 
     fn mode_menu_rect(&self) -> Rect {
         let trigger = self.mode_trigger_rect();
-        Rect::new(
-            trigger.x,
-            trigger.y + trigger.height + 6.0,
+        anchored_menu_rect(
+            trigger,
             trigger.width,
             MODE_HEIGHT * MODES.len() as f32 + 8.0,
+            6.0,
+            self.overlay_viewport.get(),
         )
     }
 
@@ -1362,6 +1368,7 @@ impl Widget for ColorPicker {
             return;
         }
 
+        self.overlay_viewport.set(Some(ctx.clip_rect));
         let menu = self.mode_menu_rect();
         paint_menu_popup_chrome(ctx, menu);
 
@@ -2848,6 +2855,55 @@ mod tests {
         assert!(encoder.texts.iter().any(|text| text == "HEX"));
         assert!(encoder.texts.iter().any(|text| text == "HSV"));
         assert!(encoder.rects.len() >= MODES.len() + 2);
+    }
+
+    #[test]
+    fn mode_dropdown_flips_above_bottom_viewport_and_remains_clickable() {
+        let mut picker = ColorPicker::new(Color::from_rgba8(51, 102, 153, 255));
+        picker.layout(Rect::new(0.0, 246.0, 280.0, 302.0));
+        picker.mode_menu_open = true;
+        picker.mode_hovered = Some(ColorPickerMode::Hex);
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut paint_ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 320.0, 340.0),
+        };
+
+        picker.paint_overlay(&mut paint_ctx);
+
+        let menu = picker.mode_menu_rect();
+        assert!(menu.y < picker.mode_trigger_rect().y);
+        assert!(menu.y + menu.height <= 336.0);
+
+        let mut ctx = event_ctx();
+        let hsv = picker.mode_item_rect(ColorPickerMode::Hsv).center();
+        assert_eq!(
+            picker.event(
+                &UiEvent::MouseDown {
+                    position: hsv,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            picker.event(
+                &UiEvent::MouseUp {
+                    position: hsv,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(picker.mode(), ColorPickerMode::Hsv);
+        assert!(!picker.mode_menu_open);
     }
 
     #[test]
