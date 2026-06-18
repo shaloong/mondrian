@@ -114,11 +114,6 @@ pub fn default_shortcuts() -> Vec<SelfHostedShortcut> {
             "Ctrl+Alt+T",
         ),
         shortcut(
-            ShortcutBinding::new(KeyCode::P, ctrl_alt()),
-            Action::FocusPanel(PanelKind::Project),
-            "Ctrl+Alt+P",
-        ),
-        shortcut(
             ShortcutBinding::new(KeyCode::A, ctrl_alt()),
             Action::FocusPanel(PanelKind::Assets),
             "Ctrl+Alt+A",
@@ -137,11 +132,6 @@ pub fn default_shortcuts() -> Vec<SelfHostedShortcut> {
             ShortcutBinding::new(KeyCode::X, ctrl_alt()),
             Action::FocusPanel(PanelKind::Export),
             "Ctrl+Alt+X",
-        ),
-        shortcut(
-            ShortcutBinding::new(KeyCode::Backspace, ctrl_alt()),
-            Action::FocusPanel(PanelKind::Console),
-            "Ctrl+Alt+Backspace",
         ),
     ]
 }

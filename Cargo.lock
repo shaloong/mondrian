@@ -3162,7 +3162,6 @@ dependencies = [
  "mondrian-effects",
  "mondrian-export",
  "mondrian-media",
- "mondrian-panel-console",
  "mondrian-platform",
  "mondrian-renderer",
  "mondrian-timeline",
@@ -3323,24 +3322,6 @@ dependencies = [
  "tokio",
  "tracing",
  "walkdir",
-]
-
-[[package]]
-name = "mondrian-panel-console"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "mondrian-core",
- "mondrian-editor-state",
- "mondrian-editor-ui",
- "mondrian-platform",
- "mondrian-ui-core",
- "mondrian-ui-layout",
- "mondrian-ui-theme",
- "mondrian-ui-widgets",
- "parking_lot",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

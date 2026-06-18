@@ -16,7 +16,6 @@ use crate::self_hosted::runtime::{
     winit_mouse_button_to_ui_button, winit_scroll_delta_to_ui_delta, WinitUiRuntime,
 };
 use crate::self_hosted::shortcuts::register_default_shortcuts;
-use mondrian_panel_console::tracing_layer::{ConsoleLogLayer, LogBuffer};
 use mondrian_platform::SystemPlatformService;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::{TreeWalker, Widget};
@@ -30,7 +29,6 @@ use tracing_subscriber::EnvFilter;
 // Main
 // ═══════════════════════════════════════════════════════════════════════════
 
-const SELF_HOSTED_CONSOLE_LOG_LINES: usize = 500;
 pub(crate) const DEFAULT_SELF_HOSTED_LOG_FILTER: &str =
     "info,wgpu_core=warn,wgpu_hal=warn,naga=warn";
 pub(crate) const SELF_HOSTED_BACKGROUND_WORKERS: usize = 4;
@@ -39,7 +37,7 @@ pub(crate) const SELF_HOSTED_BACKGROUND_WORKERS: usize = 4;
 pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
     let _background_runtime = build_self_hosted_background_runtime()?;
     let _background_runtime_guard = _background_runtime.enter();
-    let console_log_buffer = init_self_hosted_tracing();
+    init_self_hosted_tracing();
 
     tracing::info!("Mondrian self-hosted UI starting");
 
@@ -74,8 +72,7 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
     let mut frame_renderer = SelfHostedFrameRenderer::new(&device, config.format);
     let mut render_diagnostic_reporter = SelfHostedRenderDiagnosticReporter::default();
 
-    let mut host =
-        SelfHostedUiHost::new_with_console_log_buffer(AppState::new(), console_log_buffer);
+    let mut host = SelfHostedUiHost::new(AppState::new());
     let bounds = Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
     TreeWalker::layout(host.root_mut(), bounds);
     let mut router = EventRouter::with_platform_and_tooltip(
@@ -400,20 +397,11 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn init_self_hosted_tracing() -> LogBuffer {
-    let (console_layer, log_buffer) = ConsoleLogLayer::new(SELF_HOSTED_CONSOLE_LOG_LINES);
+fn init_self_hosted_tracing() {
     let filter = self_hosted_log_filter();
-    if tracing_subscriber::registry()
-        .with(filter)
-        .with(console_layer)
-        .try_init()
-        .is_err()
-    {
-        tracing::debug!(
-            "tracing subscriber already initialized; self-hosted console layer skipped"
-        );
+    if tracing_subscriber::registry().with(filter).try_init().is_err() {
+        tracing::debug!("tracing subscriber already initialized; self-hosted filter skipped");
     }
-    log_buffer
 }
 
 fn self_hosted_log_filter() -> EnvFilter {

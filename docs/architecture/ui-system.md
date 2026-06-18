@@ -39,7 +39,7 @@ back into the widget tree.
 `mondrian-app/src/main.rs` is the product entrypoint and launches the
 self-hosted winit/wgpu editor shell through `self_hosted::window`.
 The window runner is responsible for process-level UI bootstrap only: it
-installs tracing with the self-hosted console log capture, honors `RUST_LOG`
+installs tracing, honors `RUST_LOG`
 through `EnvFilter`, enters the shared Tokio background runtime used by app
 actions, and then owns the native winit event loop.
 `mondrian-app/src/bin` is reserved for developer-only binaries: widget
@@ -717,10 +717,10 @@ framework-owned. Filtering changes only visible row order; original item
 indices, row actions, drag payloads, badges, icons, and disabled state remain
 the item identity used for dispatch. The self-hosted Effects panel builds rows
 from the shared effect registry and, when a video clip is selected, activates
-rows through undoable `AppState::add_effect_to_clip` commands. The
-self-hosted Project slot also uses `PanelListModel::from_project_status` to
-show project file, active sequence, asset-library, and current status-hint
-state instead of a colored placeholder.
+rows through undoable `AppState::add_effect_to_clip` commands. Project lifecycle
+state belongs to the shell and File menu surfaces instead of a dock panel, so
+editing workspaces do not expose a separate project-status panel beside
+creative panels.
 The self-hosted Assets panel uses the dedicated `AssetGrid` card browser
 instead of the row-list surface. `AssetGrid` keeps the same framework-owned
 interaction contract as `PanelList`: filter input is a real `TextInput`, local
@@ -771,10 +771,10 @@ host validates the target folder against the current `AssetLibrary`, updates
 `SelfHostedAppRoot::asset_folder_id`, and rebuilds panel models with that view
 filter. The folder browser path is intentionally not stored in `AppState` and
 does not participate in undo/redo.
-The adjacent Console tab reads `AppState::status_log`, a bounded history fed by
-`set_status_hint`, and shows recent messages newest-first before runtime
-summary rows. `clear_status_hint` clears only the transient bottom-bar hint; it
-does not erase Console history.
+`AppState::status_log` remains a bounded internal history fed by
+`set_status_hint`, but it is not presented as a product dock log panel. Transient
+status hints can be surfaced in shell chrome, while runtime diagnostics stay on
+the tracing/logging path and developer preferences.
 Real product panels keep single-click row selection local to the widget unless
 the app has a stable domain selection to update; file commands, asset drags,
 and effect insertion are emitted only through activation actions.
@@ -790,9 +790,9 @@ stable actions to rows instead of deriving commands from titles or indices.
 Synthetic demo rows use the `ui.demo_panel` action namespace so they cannot be
 confused with the app-layer `ui.assets`, `ui.effects`, `ui.timeline`, or
 `ui.inspector` protocols.
-The lower-left dock exposes that Project status as the first tab beside
-Console, so product-shell state is visible in the default layout without adding
-another split.
+The default editing dock keeps the left column focused on the project media
+library. Project commands remain in the shell/menu layer, and export uses its
+own workspace/panel instead of sharing a status/log tab group.
 Self-hosted `FocusPanel` and current View-menu `TogglePanel` actions activate
 the matching dock panel or grouped tab through shell-local dock traversal and do
 not continue into `AppState`. The traversal first understands grouped tabs in
@@ -926,9 +926,9 @@ status hints or other user-visible state before reporting the failure.
 such as quit and toggle-fullscreen. Entrypoints apply those commands only after
 event routing and model refresh have completed, so native side effects stay out
 of widget code and out of `AppState`.
-Project/status panel models should keep transient status rows near the top of
-the list, before command rows, so error feedback from failed actions is visible
-without requiring the user to scroll a compact dock panel.
+Shell chrome that presents transient project status should keep error feedback
+visible without requiring the user to scroll a compact dock panel. Dock panels
+should stay focused on editing surfaces rather than general project diagnostics.
 Registered self-hosted UI action namespaces are strict protocols: known
 namespaces with unknown action names return workflow errors instead of being
 silently ignored, so widget/app wiring mistakes fail during development.
@@ -1182,13 +1182,8 @@ unbounded redraw loop.
 `SelfHostedFrameDiagnostics`. Product and demo windows pass presented frame
 results through `SelfHostedRenderDiagnosticReporter`, which logs only changed
 failure counts and resets after a healthy frame. Render diagnostics should go to
-the developer-facing console/log path by default; the status bar is reserved for
-actionable project or editor-state messages.
-The product window injects the `ConsoleLogLayer` buffer into `SelfHostedUiHost`
-so the self-hosted Console tab reads the same runtime log stream that tracing
-captures. When render diagnostics emit a warning after a frame, the host marks
-its panel models dirty and requests one follow-up redraw; the next paint refresh
-pulls the new log entry into the Console model without waiting for user input.
+the tracing/log path by default; the status bar is reserved for actionable
+project or editor-state messages.
 
 Tests that mutate the process-global theme must take the self-hosted
 `theme_test_guard()` before calling `set_theme_preset()`. Most widget tests
@@ -1245,6 +1240,7 @@ widgets expose small explicit state snapshots for UI-local affordances such as
 active tab through widget APIs, and `SelfHostedAppRoot` captures that shell-local
 navigation state before rebuilding dock content from fresh `AppState` models.
 It restores active tabs before list state so grouped panels such as
-Assets/Effects and Project/Console/Export keep showing the surface the user was
-working in. Splitter layout restoration remains owned by `DockSplitter`. This
+Assets/Effects keep showing the surface the user was working in. Export is an
+independent panel/workspace. Splitter layout restoration remains owned by
+`DockSplitter`. This
 keeps app-state data replacement separate from ephemeral user navigation state.

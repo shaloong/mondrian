@@ -105,7 +105,7 @@ mod tests {
         let mut fm = FocusManagerImpl::new();
         let id1 = WidgetId::new();
         let id2 = WidgetId::new();
-        fm.set_focused_widget(Some(id1), Some(PanelKind::Console));
+        fm.set_focused_widget(Some(id1), Some(PanelKind::Export));
         fm.release_focus(id2); // different widget
         assert_eq!(fm.focused_widget(), Some(id1));
     }

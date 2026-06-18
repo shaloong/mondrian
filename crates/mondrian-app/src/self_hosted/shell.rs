@@ -5,7 +5,6 @@
 
 use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
 use mondrian_editor_state::Action;
-use mondrian_panel_console::tracing_layer::LogBuffer;
 use mondrian_platform::{FileFilter, PlatformService};
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
@@ -276,21 +275,12 @@ impl SelfHostedAppRoot {
         state: &AppState,
         preferences: &SelfHostedPreferences,
     ) -> Self {
-        Self::from_app_state_with_preferences_and_runtime_logs(state, preferences, None)
-    }
-
-    /// Build a root widget from app state, preferences, and runtime console logs.
-    pub fn from_app_state_with_preferences_and_runtime_logs(
-        state: &AppState,
-        preferences: &SelfHostedPreferences,
-        runtime_logs: Option<&LogBuffer>,
-    ) -> Self {
         Self::new_with_preferences(
             TitleBar::new(
                 window_title_for_app_state(state),
                 MenuBar::for_app_state(state),
             ),
-            SelfHostedPanelModels::from_app_state_with_runtime_logs(state, runtime_logs),
+            SelfHostedPanelModels::from_app_state(state),
             SelfHostedPreferencesModel::from_app_state(
                 state,
                 preferences.workspace_preset,
@@ -419,27 +409,14 @@ impl SelfHostedAppRoot {
         state: &AppState,
         preferences: &SelfHostedPreferences,
     ) {
-        self.refresh_from_app_state_with_preferences_and_runtime_logs(state, preferences, None);
-    }
-
-    /// Refresh panel contents, preferences, and runtime console logs.
-    pub fn refresh_from_app_state_with_preferences_and_runtime_logs(
-        &mut self,
-        state: &AppState,
-        preferences: &SelfHostedPreferences,
-        runtime_logs: Option<&LogBuffer>,
-    ) {
         self.title_bar = TitleBar::new(
             window_title_for_app_state(state),
             MenuBar::for_app_state(state),
         );
-        self.set_models(
-            SelfHostedPanelModels::from_app_state_with_runtime_logs_and_asset_folder(
-                state,
-                runtime_logs,
-                self.asset_folder_id.as_deref(),
-            ),
-        );
+        self.set_models(SelfHostedPanelModels::from_app_state_with_asset_folder(
+            state,
+            self.asset_folder_id.as_deref(),
+        ));
         let preferences_model = SelfHostedPreferencesModel::from_app_state(
             state,
             self.workspace_preset,
@@ -617,12 +594,11 @@ fn dock_panel_locations(panel: PanelKind) -> Vec<(PanelKind, usize)> {
     match panel {
         PanelKind::Assets => vec![(PanelKind::Assets, 0)],
         PanelKind::Effects => vec![(PanelKind::Assets, 1), (PanelKind::Effects, 0)],
-        PanelKind::Project => vec![(PanelKind::Console, 0), (PanelKind::Project, 0)],
-        PanelKind::Console => vec![(PanelKind::Console, 1), (PanelKind::Console, 0)],
-        PanelKind::Export => vec![(PanelKind::Console, 2), (PanelKind::Export, 0)],
-        PanelKind::Viewer | PanelKind::Timeline | PanelKind::Inspector | PanelKind::NodeGraph => {
-            vec![(panel, 0)]
-        }
+        PanelKind::Viewer
+        | PanelKind::Timeline
+        | PanelKind::Inspector
+        | PanelKind::NodeGraph
+        | PanelKind::Export => vec![(panel, 0)],
     }
 }
 
@@ -1221,7 +1197,7 @@ mod tests {
     }
 
     #[test]
-    fn app_root_focus_panel_activates_grouped_export_tab_without_editor_action() {
+    fn app_root_focus_panel_ignores_absent_export_panel_without_editor_action() {
         let platform = FakePlatform::default();
         let mut root = SelfHostedAppRoot::demo();
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
@@ -1230,10 +1206,7 @@ mod tests {
             root.handle_shell_action(Action::FocusPanel(PanelKind::Export), &platform, None);
 
         assert_eq!(action, None);
-        assert_eq!(
-            active_index_for_dock_panel(&root, PanelKind::Console),
-            Some(2)
-        );
+        assert_eq!(active_index_for_dock_panel(&root, PanelKind::Export), None);
     }
 
     #[test]

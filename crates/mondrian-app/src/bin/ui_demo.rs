@@ -788,7 +788,7 @@ fn tab_infos(kind: SlotKind) -> Vec<TabInfo> {
             TabInfo { label: "检查器".into(), active: true },
             TabInfo { label: "属性".into(), active: false },
         ],
-        SlotKind::Console => vec![
+        SlotKind::Effects => vec![
             TabInfo { label: "控件".into(), active: true },
             TabInfo { label: "文本".into(), active: false },
             TabInfo { label: "形状".into(), active: false },
@@ -807,7 +807,7 @@ fn slot_content_for_tab(kind: SlotKind, tab_index: usize) -> Box<dyn Widget> {
             0 => Box::new(demo_viewer_surface()),
             _ => Box::new(demo_node_graph_panel()),
         },
-        SlotKind::Console => match tab_index {
+        SlotKind::Effects => match tab_index {
             0 => Box::new(GalleryWidget::new()),
             1 => Box::new(TextDiagnosticWidget::new()),
             _ => Box::new(ShapePanelWidget::new()),
@@ -1292,12 +1292,12 @@ fn inspector_curve_action(points: &[CurvePoint]) -> Action {
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn build_dock_tree() -> DockSplitter {
-    // Top-left: Assets=red (35%) / Bottom-left: Gallery=Console (65%)
+    // Top-left: Assets=red (35%) / Bottom-left: widget gallery/effects (65%)
     let left = DockSplitter::new(
         SplitDirection::Vertical,
         0.35,
         dock_panel(SlotKind::Assets),
-        dock_panel(SlotKind::Console),
+        dock_panel(SlotKind::Effects),
     );
 
     let right_bottom = DockSplitter::new(
@@ -1645,7 +1645,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 // ── Shape Panel Widget ────────────────────────────────────────────────────────
-/// 形状面板：在 Console → 形状 标签页中绘制 3 个圆形（大/中/小），
+/// 形状面板：在效果/组件画廊的“形状”标签页中绘制 3 个圆形（大/中/小），
 /// 中号圆形不绘制背景矩形。
 struct ShapePanelWidget {
     id: WidgetId,

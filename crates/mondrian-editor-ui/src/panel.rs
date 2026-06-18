@@ -146,8 +146,8 @@ mod tests {
     // ═══════════════════════════════════════════════════════════════════════
 
     #[test]
-    fn panel_kind_all_has_9_variants() {
-        assert_eq!(PanelKind::ALL.len(), 9);
+    fn panel_kind_all_has_7_variants() {
+        assert_eq!(PanelKind::ALL.len(), 7);
     }
 
     #[test]
@@ -197,7 +197,7 @@ mod tests {
 
     #[test]
     fn panel_build_widget_tree_returns_widget() {
-        let mut panel = MockPanel::new(PanelKind::Console, "Console");
+        let mut panel = MockPanel::new(PanelKind::Export, "Export");
         let state = EditorState::new();
         let context = PanelBuildContext { state: &state, dispatch: &|_| {} };
         let widget = panel.build_widget_tree(&context);
@@ -212,7 +212,7 @@ mod tests {
 
     #[test]
     fn panel_is_draggable_default_true() {
-        let panel = MockPanel::new(PanelKind::Console, "Console");
+        let panel = MockPanel::new(PanelKind::Export, "Export");
         assert!(panel.is_draggable());
     }
 
@@ -232,8 +232,8 @@ mod tests {
 
     #[test]
     fn panel_is_object_safe() {
-        let mut panel: Box<dyn Panel> = Box::new(MockPanel::new(PanelKind::Console, "C"));
-        assert_eq!(panel.kind(), PanelKind::Console);
+        let mut panel: Box<dyn Panel> = Box::new(MockPanel::new(PanelKind::Export, "E"));
+        assert_eq!(panel.kind(), PanelKind::Export);
         let state = EditorState::new();
         let context = PanelBuildContext { state: &state, dispatch: &|_| {} };
         let _widget = panel.build_widget_tree(&context);

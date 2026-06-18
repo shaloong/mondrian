@@ -1132,7 +1132,7 @@ mod tests {
         let mut router = EventRouter::new(root);
         router
             .focus_manager_mut()
-            .set_focused_widget(Some(root), Some(PanelKind::Console));
+            .set_focused_widget(Some(root), Some(PanelKind::Export));
         router.shortcut_manager_mut().register_global(
             mondrian_ui_core::shortcut::ShortcutBinding::ctrl(KeyCode::S),
             Action::SaveProject,
@@ -1463,7 +1463,7 @@ mod tests {
 
         router
             .focus_manager_mut()
-            .set_focused_widget(Some(root), Some(PanelKind::Console));
+            .set_focused_widget(Some(root), Some(PanelKind::Export));
         assert_eq!(router.focus_manager().focused_widget(), Some(root));
 
         tree.nodes.remove(&root);
@@ -1569,7 +1569,7 @@ mod tests {
         let mut router = EventRouter::new(tree.root_id());
         router
             .focus_manager_mut()
-            .set_focused_widget(Some(child_id), Some(PanelKind::Console));
+            .set_focused_widget(Some(child_id), Some(PanelKind::Export));
 
         let result = router.route(
             UiEvent::KeyDown {

@@ -8,7 +8,6 @@ use std::cell::{Cell, Ref, RefCell};
 use std::path::PathBuf;
 
 use mondrian_editor_state::state::WorkspacePreset;
-use mondrian_panel_console::tracing_layer::LogBuffer;
 use mondrian_platform::PlatformService;
 use mondrian_ui_core::types::Rect;
 use mondrian_ui_core::TreeWalker;
@@ -54,7 +53,6 @@ pub struct SelfHostedUiHost {
     app_state: RefCell<AppState>,
     preferences: SelfHostedPreferences,
     preferences_path: PathBuf,
-    console_log_buffer: Option<LogBuffer>,
     ui_dirty: Cell<bool>,
 }
 
@@ -65,17 +63,6 @@ impl SelfHostedUiHost {
             app_state,
             load_self_hosted_preferences(),
             self_hosted_preferences_path(),
-            None,
-        )
-    }
-
-    /// Create a host that includes runtime tracing entries in the Console tab.
-    pub fn new_with_console_log_buffer(app_state: AppState, console_log_buffer: LogBuffer) -> Self {
-        Self::new_with_preferences_path(
-            app_state,
-            load_self_hosted_preferences(),
-            self_hosted_preferences_path(),
-            Some(console_log_buffer),
         )
     }
 
@@ -84,20 +71,14 @@ impl SelfHostedUiHost {
         app_state: AppState,
         preferences: SelfHostedPreferences,
         preferences_path: PathBuf,
-        console_log_buffer: Option<LogBuffer>,
     ) -> Self {
         set_theme_preset(preferences.theme_preset);
-        let root = SelfHostedAppRoot::from_app_state_with_preferences_and_runtime_logs(
-            &app_state,
-            &preferences,
-            console_log_buffer.as_ref(),
-        );
+        let root = SelfHostedAppRoot::from_app_state_with_preferences(&app_state, &preferences);
         Self {
             root,
             app_state: RefCell::new(app_state),
             preferences,
             preferences_path,
-            console_log_buffer,
             ui_dirty: Cell::new(false),
         }
     }
@@ -133,11 +114,8 @@ impl SelfHostedUiHost {
             return;
         }
         self.normalize_asset_folder_selection();
-        self.root.refresh_from_app_state_with_preferences_and_runtime_logs(
-            &self.app_state.borrow(),
-            &self.preferences,
-            self.console_log_buffer.as_ref(),
-        );
+        self.root
+            .refresh_from_app_state_with_preferences(&self.app_state.borrow(), &self.preferences);
         TreeWalker::layout(&mut self.root, bounds);
     }
 
@@ -258,10 +236,9 @@ impl SelfHostedUiHost {
                         .borrow_mut()
                         .set_status_hint(format!("Preferences could not be saved: {err}"), true);
                 }
-                self.root.refresh_from_app_state_with_preferences_and_runtime_logs(
+                self.root.refresh_from_app_state_with_preferences(
                     &self.app_state.borrow(),
                     &self.preferences,
-                    self.console_log_buffer.as_ref(),
                 );
                 TreeWalker::layout(&mut self.root, bounds);
                 true
@@ -285,10 +262,9 @@ impl SelfHostedUiHost {
             Ok(payload) => {
                 let folder_id = self.valid_asset_folder_id(payload.folder_id);
                 self.root.set_asset_folder_id(folder_id);
-                self.root.refresh_from_app_state_with_preferences_and_runtime_logs(
+                self.root.refresh_from_app_state_with_preferences(
                     &self.app_state.borrow(),
                     &self.preferences,
-                    self.console_log_buffer.as_ref(),
                 );
                 TreeWalker::layout(&mut self.root, bounds);
                 true
@@ -399,8 +375,6 @@ mod tests {
     use mondrian_core::types::AssetId;
     use mondrian_editor_state::Action;
     use mondrian_platform::{FileFilter, NoopPlatformService};
-    use mondrian_ui_core::widget::{DrawCommandEncoder, PaintContext, Widget};
-    use mondrian_ui_core::Point;
     use mondrian_ui_theme::{current_theme, ThemePreset};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -409,11 +383,6 @@ mod tests {
     use crate::self_hosted::preferences_store::{
         load_self_hosted_preferences_from, SelfHostedPreferences,
     };
-
-    #[derive(Default)]
-    struct RecordingEncoder {
-        texts: Vec<String>,
-    }
 
     #[derive(Default)]
     struct CountingPlatform {
@@ -452,48 +421,6 @@ mod tests {
         fn send_notification(&self, _title: &str, _body: &str) {}
     }
 
-    impl DrawCommandEncoder for RecordingEncoder {
-        fn push_clip(&mut self, _bounds: Rect) {}
-
-        fn pop_clip(&mut self) {}
-
-        fn draw_rect(&mut self, _bounds: Rect, _color: mondrian_core::Color, _corner_radius: f32) {}
-
-        fn draw_line(
-            &mut self,
-            _start: Point,
-            _end: Point,
-            _width: f32,
-            _color: mondrian_core::Color,
-        ) {
-        }
-
-        fn draw_text(
-            &mut self,
-            text: &str,
-            _font_size: f32,
-            _position: Point,
-            _color: mondrian_core::Color,
-        ) {
-            self.texts.push(text.to_string());
-        }
-
-        fn draw_text_box(
-            &mut self,
-            text: &str,
-            _font_size: f32,
-            _position: Point,
-            _max_width: f32,
-            _color: mondrian_core::Color,
-        ) {
-            self.texts.push(text.to_string());
-        }
-
-        fn push_translate(&mut self, _offset: glam::Vec2) {}
-
-        fn pop_transform(&mut self) {}
-    }
-
     fn temp_preferences_path(name: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -528,7 +455,6 @@ mod tests {
                 workspace_preset: WorkspacePreset::Compositing,
             },
             temp_preferences_path("initial-workspace"),
-            None,
         );
 
         TreeWalker::layout(host.root_mut(), Rect::new(0.0, 0.0, 1280.0, 720.0));
@@ -614,7 +540,6 @@ mod tests {
             AppState::new(),
             SelfHostedPreferences::default(),
             path.clone(),
-            None,
         );
         let pending = PendingUiActions::default();
 
@@ -650,7 +575,6 @@ mod tests {
                 workspace_preset: WorkspacePreset::Editing,
             },
             path.clone(),
-            None,
         );
         let pending = PendingUiActions::default();
 
@@ -834,24 +758,9 @@ mod tests {
             host.app_state().status_hint
         );
 
-        let mut encoder = RecordingEncoder::default();
-        let theme = ThemePreset::Dark.build();
-        let mut ctx = PaintContext {
-            encoder: &mut encoder,
-            theme: &theme,
-            clip_rect: Rect::new(0.0, 0.0, 1280.0, 720.0),
-        };
-        host.root().paint(&mut ctx);
-
         assert!(
-            encoder.texts.iter().any(|text| text == "Error"),
-            "painted texts: {:?}",
-            encoder.texts
-        );
-        assert!(
-            encoder.texts.iter().any(|text| text.contains("素材准备失败")),
-            "painted texts: {:?}",
-            encoder.texts
+            !host.ui_dirty.get(),
+            "failed editor actions should refresh the root immediately"
         );
     }
 }

@@ -112,12 +112,12 @@ mod tests {
     fn registry_create_returns_panel() {
         let mut registry = PanelRegistry::new();
         registry.register(
-            PanelKind::Console,
-            Arc::new(|_ctx| Box::new(TestPanel { kind: PanelKind::Console })),
+            PanelKind::Export,
+            Arc::new(|_ctx| Box::new(TestPanel { kind: PanelKind::Export })),
         );
 
-        let panel = registry.create(PanelKind::Console, test_context()).unwrap();
-        assert_eq!(panel.kind(), PanelKind::Console);
+        let panel = registry.create(PanelKind::Export, test_context()).unwrap();
+        assert_eq!(panel.kind(), PanelKind::Export);
     }
 
     #[test]
@@ -167,8 +167,8 @@ mod tests {
     fn registry_registered_kinds_follow_canonical_panel_order() {
         let mut registry = PanelRegistry::new();
         registry.register(
-            PanelKind::Console,
-            Arc::new(|_ctx| Box::new(TestPanel { kind: PanelKind::Console })),
+            PanelKind::Export,
+            Arc::new(|_ctx| Box::new(TestPanel { kind: PanelKind::Export })),
         );
         registry.register(
             PanelKind::Assets,
@@ -181,7 +181,7 @@ mod tests {
 
         assert_eq!(
             registry.registered_kinds(),
-            vec![PanelKind::Viewer, PanelKind::Assets, PanelKind::Console]
+            vec![PanelKind::Viewer, PanelKind::Assets, PanelKind::Export]
         );
     }
 

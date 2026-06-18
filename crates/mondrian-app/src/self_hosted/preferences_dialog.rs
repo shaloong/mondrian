@@ -52,7 +52,7 @@ pub struct SelfHostedPreferencesModel {
     pub audio_sample_rate: String,
     pub export_range: String,
     pub export_output: String,
-    pub console_capture: String,
+    pub runtime_diagnostics: String,
     pub log_filter: String,
     pub background_workers: String,
 }
@@ -98,7 +98,7 @@ impl SelfHostedPreferencesModel {
             } else {
                 state.export_draft.output_path.clone()
             },
-            console_capture: "Enabled".to_owned(),
+            runtime_diagnostics: "Tracing enabled".to_owned(),
             log_filter: format!("RUST_LOG / {DEFAULT_SELF_HOSTED_LOG_FILTER}"),
             background_workers: SELF_HOSTED_BACKGROUND_WORKERS.to_string(),
         }
@@ -118,7 +118,7 @@ impl Default for SelfHostedPreferencesModel {
             audio_sample_rate: "48000 Hz".to_owned(),
             export_range: export_range_label(TimelineExportRange::SequenceInOut).to_owned(),
             export_output: "Not selected".to_owned(),
-            console_capture: "Enabled".to_owned(),
+            runtime_diagnostics: "Tracing enabled".to_owned(),
             log_filter: format!("RUST_LOG / {DEFAULT_SELF_HOSTED_LOG_FILTER}"),
             background_workers: SELF_HOSTED_BACKGROUND_WORKERS.to_string(),
         }
@@ -610,7 +610,10 @@ fn content_rows_for_tab(
         }
         PreferencesDialogTab::Developer => vec![
             heading("Diagnostics"),
-            detail(format!("Console capture: {}", model.console_capture)),
+            detail(format!(
+                "Runtime diagnostics: {}",
+                model.runtime_diagnostics
+            )),
             detail(format!("Log filter: {}", model.log_filter)),
             heading("Runtime"),
             detail(format!("Background workers: {}", model.background_workers)),

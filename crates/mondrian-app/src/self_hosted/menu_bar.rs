@@ -96,14 +96,6 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
                     AppIcon::Effect,
                 ),
                 menu_item_with_icon(
-                    MenuItem::new("Project", Action::FocusPanel(PanelKind::Project)),
-                    AppIcon::FolderOpenFilled,
-                ),
-                menu_item_with_icon(
-                    MenuItem::new("Console", Action::FocusPanel(PanelKind::Console)),
-                    AppIcon::Info,
-                ),
-                menu_item_with_icon(
                     MenuItem::new("Node Graph", Action::FocusPanel(PanelKind::NodeGraph)),
                     AppIcon::Grid,
                 ),

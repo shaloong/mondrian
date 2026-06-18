@@ -31,8 +31,6 @@ pub enum PanelKind {
     Assets,
     Inspector,
     Effects,
-    Project,
-    Console,
     NodeGraph,
     Export,
 }
@@ -45,8 +43,6 @@ impl PanelKind {
             Self::Assets => "素材",
             Self::Inspector => "检查器",
             Self::Effects => "效果",
-            Self::Project => "项目",
-            Self::Console => "控制台",
             Self::NodeGraph => "节点图",
             Self::Export => "导出",
         }
@@ -59,21 +55,17 @@ impl PanelKind {
             Self::Assets => "assets",
             Self::Inspector => "inspector",
             Self::Effects => "effects",
-            Self::Project => "project",
-            Self::Console => "console",
             Self::NodeGraph => "node_graph",
             Self::Export => "export",
         }
     }
 
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 7] = [
         Self::Viewer,
         Self::Timeline,
         Self::Assets,
         Self::Inspector,
         Self::Effects,
-        Self::Project,
-        Self::Console,
         Self::NodeGraph,
         Self::Export,
     ];
@@ -242,8 +234,8 @@ mod tests {
     // ═══════════════════════════════════════════════════════════════════════
 
     #[test]
-    fn panel_kind_all_has_9_variants() {
-        assert_eq!(PanelKind::ALL.len(), 9);
+    fn panel_kind_all_has_7_variants() {
+        assert_eq!(PanelKind::ALL.len(), 7);
     }
 
     #[test]
@@ -299,8 +291,8 @@ mod tests {
             "\"Timeline\""
         );
         assert_eq!(
-            serde_json::to_string(&PanelKind::Console).unwrap(),
-            "\"Console\""
+            serde_json::to_string(&PanelKind::Export).unwrap(),
+            "\"Export\""
         );
     }
 

@@ -38,13 +38,9 @@ use mondrian_ui_widgets::{
     ViewerSurface,
 };
 
-use mondrian_panel_console::tracing_layer::{LogBuffer, LogEntry};
-
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
 use crate::app::ui_actions::{
-    app_shell_export_output_dialog_action, app_shell_import_media_dialog_action,
-    app_shell_import_media_dialog_action_with_target, app_shell_new_project_dialog_action,
-    app_shell_open_project_dialog_action, app_shell_save_project_as_dialog_action,
+    app_shell_export_output_dialog_action, app_shell_import_media_dialog_action_with_target,
     assets_create_adjustment_layer_action, assets_create_folder_action,
     assets_create_solid_color_action, assets_delete_asset_action, assets_delete_folder_action,
     assets_import_files_action, assets_move_asset_action, assets_move_folder_action,
@@ -76,10 +72,8 @@ use crate::self_hosted::icons::AppIcon;
 /// Complete set of view models needed by the self-hosted panel shell.
 #[derive(Debug, Clone)]
 pub struct SelfHostedPanelModels {
-    pub project: PanelListModel,
     pub assets: AssetGridModel,
     pub effects: PanelListModel,
-    pub console: PanelListModel,
     pub viewer: ViewerPanelModel,
     pub timeline: TimelinePanelModel,
     pub inspector: InspectorPanelModel,
@@ -93,31 +87,20 @@ impl SelfHostedPanelModels {
     /// This is a read-only boundary: widgets receive generic view models and
     /// emit actions, while domain mutations stay in `AppState` handlers.
     pub fn from_app_state(state: &AppState) -> Self {
-        Self::from_app_state_with_runtime_logs(state, None)
-    }
-
-    /// Snapshot app state plus runtime console logs into panel models.
-    pub fn from_app_state_with_runtime_logs(
-        state: &AppState,
-        runtime_logs: Option<&LogBuffer>,
-    ) -> Self {
-        Self::from_app_state_with_runtime_logs_and_asset_folder(state, runtime_logs, None)
+        Self::from_app_state_with_asset_folder(state, None)
     }
 
     /// Snapshot app state while keeping shell-local asset browser navigation.
-    pub fn from_app_state_with_runtime_logs_and_asset_folder(
+    pub fn from_app_state_with_asset_folder(
         state: &AppState,
-        runtime_logs: Option<&LogBuffer>,
         asset_folder_id: Option<&str>,
     ) -> Self {
         Self {
-            project: PanelListModel::from_project_status(state),
             assets: AssetGridModel::from_asset_library_in_folder(
                 state.asset_library.as_deref(),
                 asset_folder_id,
             ),
             effects: PanelListModel::from_app_effect_registry(state),
-            console: PanelListModel::from_app_status_and_logs(state, runtime_logs),
             viewer: ViewerPanelModel::from_app_state(state),
             timeline: state
                 .sequence
@@ -142,10 +125,8 @@ impl SelfHostedPanelModels {
     #[cfg(test)]
     pub fn demo_from_app_state(state: &AppState) -> Self {
         Self {
-            project: PanelListModel::from_project_status(state),
             assets: demo_asset_model(),
             effects: PanelListModel::from_app_effect_registry(state),
-            console: demo_console_model(),
             viewer: ViewerPanelModel::from_app_state(state),
             timeline: state
                 .sequence
@@ -405,132 +386,6 @@ impl PanelListModel {
         self
     }
 
-    /// Build the project status panel for the product shell.
-    pub fn from_project_status(state: &AppState) -> Self {
-        let mut items = Vec::new();
-        if let Some(path) = &state.current_project_path {
-            let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("Project");
-            items.push(with_app_icon(
-                PanelListItem::new(name)
-                    .with_subtitle(path.display().to_string())
-                    .with_badge("Open"),
-                AppIcon::FolderOpenFilled,
-            ));
-        } else if state.sequence.is_some() {
-            items.push(with_app_icon(
-                PanelListItem::new("Unsaved project")
-                    .with_subtitle("Save the current edit to create a project file")
-                    .with_badge("Draft"),
-                AppIcon::Save,
-            ));
-        } else {
-            items.push(with_app_icon(
-                PanelListItem::new("No project")
-                    .with_subtitle("Open or create a project to start editing")
-                    .with_badge("Idle")
-                    .disabled(true),
-                AppIcon::Info,
-            ));
-        }
-
-        if let Some(sequence) = &state.sequence {
-            let track_count = sequence.video_tracks.len() + sequence.audio_tracks.len();
-            let duration = sequence.total_duration().frame.max(0);
-            let resolution = sequence.settings.resolution;
-            items.push(with_app_icon(
-                PanelListItem::new(sequence.name.clone())
-                    .with_subtitle(format!("{track_count} tracks, {duration} frames"))
-                    .with_badge(format!("{}x{}", resolution.width, resolution.height)),
-                AppIcon::Film,
-            ));
-        } else {
-            items.push(with_app_icon(
-                PanelListItem::new("No sequence")
-                    .with_subtitle("Project timeline is not loaded")
-                    .with_badge("SEQ")
-                    .disabled(true),
-                AppIcon::Film,
-            ));
-        }
-
-        if let Some((message, is_error)) = &state.status_hint {
-            items.push(status_log_item(message.clone(), *is_error));
-        } else {
-            items.push(with_app_icon(
-                PanelListItem::new("Status")
-                    .with_subtitle("Ready")
-                    .with_badge("OK")
-                    .disabled(true),
-                AppIcon::Info,
-            ));
-        }
-
-        items.push(with_app_icon(
-            PanelListItem::new("Asset library")
-                .with_subtitle(if state.asset_library.is_some() {
-                    "SQLite library connected"
-                } else {
-                    "Asset library disconnected"
-                })
-                .with_badge(if state.asset_library.is_some() {
-                    "DB"
-                } else {
-                    "Off"
-                })
-                .disabled(state.asset_library.is_none()),
-            AppIcon::Folder,
-        ));
-
-        let has_sequence = state.sequence.is_some();
-        let has_project_path = state.current_project_path.is_some();
-        items.push(with_app_icon(
-            PanelListItem::new("New project...")
-                .with_subtitle("Create a project file and initialize timeline settings")
-                .with_badge("New")
-                .with_activate_action(app_shell_new_project_dialog_action()),
-            AppIcon::PlusFilled,
-        ));
-        items.push(with_app_icon(
-            PanelListItem::new("Open project...")
-                .with_subtitle("Choose an .mdp project file")
-                .with_badge("Open")
-                .with_activate_action(app_shell_open_project_dialog_action()),
-            AppIcon::FolderOpenFilled,
-        ));
-        items.push(with_app_icon(
-            PanelListItem::new("Import media...")
-                .with_subtitle("Add video or audio files to the project library")
-                .with_badge("Import")
-                .with_activate_action(app_shell_import_media_dialog_action())
-                .disabled(state.asset_library.is_none()),
-            AppIcon::Import,
-        ));
-        items.push(with_app_icon(
-            PanelListItem::new("Save project")
-                .with_subtitle(if has_project_path {
-                    "Write changes to the current project file"
-                } else {
-                    "Save As is required before this project has a file path"
-                })
-                .with_badge("Save")
-                .with_activate_action(Action::SaveProject)
-                .disabled(!has_sequence || !has_project_path),
-            AppIcon::Save,
-        ));
-        items.push(with_app_icon(
-            PanelListItem::new("Save project as...")
-                .with_subtitle("Choose a project file path")
-                .with_badge("As")
-                .with_activate_action(app_shell_save_project_as_dialog_action())
-                .disabled(!has_sequence),
-            AppIcon::Save,
-        ));
-
-        PanelListModel::new("Project", items)
-            .with_subtitle("Project state")
-            .with_filter_placeholder("Search project")
-    }
-
     /// Build the visible effect browser from the current app state.
     ///
     /// The widget rows stay domain-light, but the model records app-level
@@ -602,103 +457,6 @@ impl PanelListModel {
             .with_subtitle("Effect browser")
             .with_filter_placeholder("Search effects")
     }
-
-    /// Build the console panel from recent app status history plus runtime summary.
-    pub fn from_app_status(state: &AppState) -> Self {
-        Self::from_app_status_and_logs(state, None)
-    }
-
-    /// Build the console panel from recent app status history and runtime logs.
-    pub fn from_app_status_and_logs(state: &AppState, runtime_logs: Option<&LogBuffer>) -> Self {
-        let mut items = Vec::new();
-        for entry in recent_runtime_log_entries(runtime_logs, 8) {
-            items.push(runtime_log_item(entry));
-        }
-        for entry in state.status_log.iter().rev().take(8) {
-            items.push(status_log_item(entry.message.clone(), entry.is_error));
-        }
-
-        if items.is_empty() {
-            items.push(with_app_icon(
-                PanelListItem::new("No messages")
-                    .with_subtitle("Status history is empty")
-                    .with_badge("OK")
-                    .disabled(true),
-                AppIcon::Info,
-            ));
-        }
-
-        let sequence_label = state
-            .sequence
-            .as_ref()
-            .map(|sequence| sequence.name.clone())
-            .unwrap_or_else(|| "No sequence".to_string());
-        items.push(with_app_icon(
-            PanelListItem::new("Sequence")
-                .with_subtitle(sequence_label)
-                .with_badge(format!("F{}", state.current_frame().max(0))),
-            AppIcon::Film,
-        ));
-        items.push(with_app_icon(
-            PanelListItem::new("Timeline")
-                .with_subtitle(format!("End frame {}", state.last_content_frame().max(0))),
-            AppIcon::Clock,
-        ));
-        items.push(with_app_icon(
-            PanelListItem::new("Assets").with_subtitle(if state.asset_library.is_some() {
-                "Library connected"
-            } else {
-                "Library disconnected"
-            }),
-            AppIcon::Folder,
-        ));
-
-        PanelListModel::new("Console", items).with_subtitle("Runtime messages")
-    }
-}
-
-fn recent_runtime_log_entries(runtime_logs: Option<&LogBuffer>, limit: usize) -> Vec<LogEntry> {
-    runtime_logs
-        .map(|logs| logs.lock().iter().rev().take(limit).cloned().collect::<Vec<_>>())
-        .unwrap_or_default()
-}
-
-fn runtime_log_item(entry: LogEntry) -> PanelListItem {
-    let is_error = entry.level == tracing::Level::ERROR;
-    let is_warning = entry.level == tracing::Level::WARN;
-    let mut item = PanelListItem::new(entry.level.to_string())
-        .with_subtitle(format!("{} {}", entry.timestamp, entry.message))
-        .with_badge(entry.target);
-    if is_error {
-        item = item.with_accent(current_theme().colors.error);
-    } else if is_warning {
-        item = item.with_accent(current_theme().colors.warning);
-    }
-    with_app_icon(
-        item,
-        if is_error || is_warning {
-            AppIcon::Warning
-        } else {
-            AppIcon::Info
-        },
-    )
-}
-
-fn status_log_item(message: String, is_error: bool) -> PanelListItem {
-    let mut item = PanelListItem::new(if is_error { "Error" } else { "Status" })
-        .with_subtitle(message)
-        .with_badge(if is_error { "ERR" } else { "OK" });
-    if is_error {
-        item = item.with_accent(current_theme().colors.error);
-    }
-    with_app_icon(
-        item,
-        if is_error {
-            AppIcon::Warning
-        } else {
-            AppIcon::Info
-        },
-    )
 }
 
 /// Viewer panel data independent from preview texture plumbing.
@@ -1327,12 +1085,6 @@ pub fn build_dock_tree_for_preset(
 ) -> DockSplitter {
     match preset {
         WorkspacePreset::Editing | WorkspacePreset::Custom => {
-            let left = DockSplitter::new(
-                SplitDirection::Vertical,
-                0.6,
-                slot(SlotKind::Assets, models.clone()),
-                slot(SlotKind::Console, models.clone()),
-            );
             let right_bottom = DockSplitter::new(
                 SplitDirection::Horizontal,
                 0.7,
@@ -1348,7 +1100,7 @@ pub fn build_dock_tree_for_preset(
             DockSplitter::new(
                 SplitDirection::Horizontal,
                 0.28,
-                Box::new(left),
+                slot(SlotKind::Assets, models.clone()),
                 Box::new(right),
             )
         }
@@ -1436,21 +1188,6 @@ fn slot(kind: SlotKind, models: SelfHostedPanelModels) -> Box<dyn Widget> {
         ));
     }
 
-    if kind == SlotKind::Console {
-        return Box::new(DockPanel::new(
-            kind,
-            project_console_tabs(),
-            move |_kind, active| {
-                let active_kind = match active {
-                    0 => SlotKind::Project,
-                    1 => SlotKind::Console,
-                    _ => SlotKind::Export,
-                };
-                panel_content_for_slot(active_kind, &models)
-            },
-        ));
-    }
-
     Box::new(DockPanel::new(
         kind,
         single_tab(kind),
@@ -1472,22 +1209,12 @@ fn asset_browser_tabs() -> Vec<TabInfo> {
     ]
 }
 
-fn project_console_tabs() -> Vec<TabInfo> {
-    vec![
-        TabInfo { label: "Project".into(), active: true },
-        TabInfo { label: "Console".into(), active: false },
-        TabInfo { label: "Export".into(), active: false },
-    ]
-}
-
 fn panel_content_for_slot(kind: SlotKind, models: &SelfHostedPanelModels) -> Box<dyn Widget> {
     match kind {
         SlotKind::Assets => Box::new(ScrollView::new(Some(Box::new(asset_grid(&models.assets))))),
         SlotKind::Effects => Box::new(panel_list(&models.effects)),
-        SlotKind::Console => Box::new(panel_list(&models.console)),
         SlotKind::Viewer => Box::new(viewer_panel(&models.viewer)),
         SlotKind::Timeline => Box::new(timeline_panel(&models.timeline)),
-        SlotKind::Project => Box::new(panel_list(&models.project)),
         SlotKind::Export => Box::new(ScrollView::new(Some(Box::new(export_panel(
             &models.export,
         ))))),
@@ -2029,27 +1756,6 @@ fn demo_asset_model() -> AssetGridModel {
     .with_filter_placeholder("Search assets")
     .accepts_file_drop(true)
     .with_demo_activate_prefix("assets.activate")
-}
-
-#[cfg(test)]
-fn demo_console_model() -> PanelListModel {
-    PanelListModel::new(
-        "Console",
-        vec![
-            console_demo_item("UI runtime ready", "Event router attached"),
-            console_demo_item("Renderer warm", "wgpu command encoder active"),
-            console_demo_item("Text atlas", "cosmic-text layout path"),
-        ],
-    )
-    .with_subtitle("Runtime messages")
-}
-
-#[cfg(test)]
-fn console_demo_item(title: impl Into<String>, subtitle: impl Into<String>) -> PanelListItem {
-    with_app_icon(
-        PanelListItem::new(title).with_subtitle(subtitle),
-        AppIcon::Info,
-    )
 }
 
 #[cfg(test)]
@@ -3104,14 +2810,13 @@ mod tests {
         AssetsCreateAssetPayload, AssetsCreateFolderPayload, AssetsDeleteAssetPayload,
         AssetsDeleteFolderPayload, AssetsImportFilesPayload, AssetsMoveAssetPayload,
         AssetsMoveFolderPayload, AssetsOpenFolderPayload, ImportMediaDialogPayload,
-        APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
-        APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
-        ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR,
-        ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_IMPORT_FILES, ASSETS_MOVE_ASSET,
-        ASSETS_MOVE_FOLDER, ASSETS_NAMESPACE, ASSETS_OPEN_FOLDER, ASSETS_PREPARE_DRAG,
-        EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE, INSPECTOR_SELECT_EFFECT,
-        INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_EFFECT_PROPERTY, TIMELINE_ADD_TRACK,
-        TIMELINE_DROP_ASSET, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_SELECT_CLIP,
+        APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, ASSETS_CREATE_ADJUSTMENT_LAYER,
+        ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR, ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER,
+        ASSETS_IMPORT_FILES, ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_NAMESPACE,
+        ASSETS_OPEN_FOLDER, ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE,
+        INSPECTOR_NAMESPACE, INSPECTOR_SELECT_EFFECT, INSPECTOR_SET_CLIP_CURVE,
+        INSPECTOR_SET_EFFECT_PROPERTY, TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET,
+        TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_SELECT_CLIP,
     };
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
@@ -3196,13 +2901,9 @@ mod tests {
     fn demo_panel_models_cover_primary_editor_surfaces() {
         let models = SelfHostedPanelModels::demo();
 
-        assert_eq!(models.project.title, "Project");
-        assert!(models.project.items.iter().any(|item| item.title == "Unsaved project"));
         assert!(!models.assets.items.is_empty());
         assert!(models.assets.items.iter().all(|item| item.icon.is_some()));
         assert!(!models.effects.items.is_empty());
-        assert!(!models.console.items.is_empty());
-        assert!(models.console.items.iter().all(|item| item.icon.is_some()));
         assert_eq!(models.viewer.title, "Demo edit");
         assert!(models.viewer.enabled);
         assert!(!models.timeline.tracks.is_empty());
@@ -3221,19 +2922,6 @@ mod tests {
     }
 
     #[test]
-    fn project_console_tabs_expose_project_status_first() {
-        let tabs = project_console_tabs();
-
-        assert_eq!(tabs.len(), 3);
-        assert_eq!(tabs[0].label, "Project");
-        assert!(tabs[0].active);
-        assert_eq!(tabs[1].label, "Console");
-        assert!(!tabs[1].active);
-        assert_eq!(tabs[2].label, "Export");
-        assert!(!tabs[2].active);
-    }
-
-    #[test]
     fn app_state_models_are_safe_without_an_open_project() {
         let state = AppState::new();
         let models = SelfHostedPanelModels::from_app_state(&state);
@@ -3241,17 +2929,10 @@ mod tests {
         assert!(models.timeline.tracks.is_empty());
         assert_eq!(models.timeline.playhead_frame, 0);
         assert!(!timeline_panel(&models.timeline).can_focus());
-        assert_eq!(models.project.items[0].title, "No project");
-        assert!(models.project.items[0].disabled);
         assert_eq!(models.assets.items[0].title, "No project library");
         assert!(models.assets.items[0].icon.is_some());
         assert!(models.assets.items[0].disabled);
         assert!(!models.effects.items.is_empty());
-        assert_eq!(models.console.title, "Console");
-        assert!(!models.console.items.is_empty());
-        assert_eq!(models.console.items[0].title, "No messages");
-        assert!(models.console.items[0].icon.is_some());
-        assert!(models.console.items[0].disabled);
         assert_eq!(models.viewer.title, "Viewer");
         assert!(!models.viewer.enabled);
         assert_eq!(models.viewer.resolution_label, "No signal");
@@ -3297,58 +2978,6 @@ mod tests {
     }
 
     #[test]
-    fn console_panel_model_reads_recent_status_log_newest_first() {
-        let mut state = AppState::new();
-        for index in 0..10 {
-            state.set_status_hint(format!("status {index}"), index == 7);
-        }
-
-        let model = PanelListModel::from_app_status(&state);
-
-        assert_eq!(model.title, "Console");
-        assert_eq!(model.items[0].subtitle, "status 9");
-        assert_eq!(model.items[0].badge.as_deref(), Some("OK"));
-        assert!(model.items[0].icon.is_some());
-        assert_eq!(model.items[2].subtitle, "status 7");
-        assert_eq!(model.items[2].badge.as_deref(), Some("ERR"));
-        assert!(model.items[2].accent.is_some());
-        assert!(model.items[2].icon.is_some());
-        assert!(!model.items.iter().any(|item| item.subtitle == "status 1"));
-        assert!(model.items.iter().any(|item| item.title == "Sequence" && item.icon.is_some()));
-        assert!(model.items.iter().any(|item| item.title == "Timeline" && item.icon.is_some()));
-        assert!(model.items.iter().any(|item| item.title == "Assets" && item.icon.is_some()));
-    }
-
-    #[test]
-    fn console_panel_model_includes_runtime_log_buffer_entries() {
-        let state = AppState::new();
-        let (_layer, logs) = mondrian_panel_console::tracing_layer::ConsoleLogLayer::new(10);
-        {
-            let mut logs = logs.lock();
-            logs.push_back(LogEntry {
-                timestamp: "12:34:56".into(),
-                level: tracing::Level::WARN,
-                target: "mondrian_app::self_hosted::rendering".into(),
-                message: "self-hosted UI render resource failures: missing_glyphs=1, raster_image_failures=0".into(),
-            });
-        }
-
-        let model = PanelListModel::from_app_status_and_logs(&state, Some(&logs));
-
-        assert_eq!(model.items[0].title, "WARN");
-        assert!(
-            model.items[0].subtitle.contains("missing_glyphs=1"),
-            "runtime log subtitle should include diagnostic message"
-        );
-        assert_eq!(
-            model.items[0].badge.as_deref(),
-            Some("mondrian_app::self_hosted::rendering")
-        );
-        assert!(model.items[0].accent.is_some());
-        assert!(model.items[0].icon.is_some());
-    }
-
-    #[test]
     fn self_hosted_content_factory_covers_every_panel_kind() {
         let models = SelfHostedPanelModels::from_app_state(&AppState::new());
         let constraint = LayoutConstraint { min: Size::ZERO, max: Size::new(320.0, 240.0) };
@@ -3383,72 +3012,6 @@ mod tests {
 
         assert!(model.playhead_frame >= 0);
         assert!(model.playhead_frame <= max_end);
-    }
-
-    #[test]
-    fn project_panel_model_reads_project_path_sequence_and_status() {
-        let mut state = demo_app_state();
-        state.current_project_path = Some(PathBuf::from("E:/projects/cut.mdp"));
-        state.set_status_hint("Saved", false);
-
-        let model = PanelListModel::from_project_status(&state);
-
-        assert_eq!(model.title, "Project");
-        assert_eq!(model.filter_placeholder.as_deref(), Some("Search project"));
-        assert_eq!(model.items[0].title, "cut.mdp");
-        assert_eq!(model.items[0].badge.as_deref(), Some("Open"));
-        assert!(model.items[0].icon.is_some());
-        assert!(model.items[0].select_action.is_none());
-        assert!(model.items.iter().any(|item| item.title == "Demo edit" && item.icon.is_some()));
-        assert!(model.items.iter().any(|item| item.subtitle == "Saved" && item.icon.is_some()));
-    }
-
-    #[test]
-    fn project_panel_commands_share_app_shell_actions() {
-        let mut state = demo_app_state();
-        state.current_project_path = Some(PathBuf::from("E:/projects/cut.mdp"));
-
-        let model = PanelListModel::from_project_status(&state);
-
-        assert_shell_action(
-            project_item(&model, "New project...").activate_action.as_ref(),
-            APP_SHELL_NEW_PROJECT_DIALOG,
-        );
-        assert!(project_item(&model, "New project...").icon.is_some());
-        assert_shell_action(
-            project_item(&model, "Open project...").activate_action.as_ref(),
-            APP_SHELL_OPEN_PROJECT_DIALOG,
-        );
-        assert!(project_item(&model, "Open project...").icon.is_some());
-        assert_shell_action(
-            project_item(&model, "Import media...").activate_action.as_ref(),
-            APP_SHELL_IMPORT_MEDIA_DIALOG,
-        );
-        assert!(project_item(&model, "Import media...").icon.is_some());
-        assert_eq!(
-            project_item(&model, "Save project").activate_action.as_ref(),
-            Some(&Action::SaveProject)
-        );
-        assert!(project_item(&model, "Save project").icon.is_some());
-        assert!(!project_item(&model, "Save project").disabled);
-        assert_shell_action(
-            project_item(&model, "Save project as...").activate_action.as_ref(),
-            APP_SHELL_SAVE_PROJECT_AS_DIALOG,
-        );
-        assert!(project_item(&model, "Save project as...").icon.is_some());
-        assert!(!project_item(&model, "Save project as...").disabled);
-    }
-
-    #[test]
-    fn project_panel_commands_disable_file_mutations_without_sequence() {
-        let state = AppState::new();
-        let model = PanelListModel::from_project_status(&state);
-
-        assert!(!project_item(&model, "New project...").disabled);
-        assert!(!project_item(&model, "Open project...").disabled);
-        assert!(project_item(&model, "Import media...").disabled);
-        assert!(project_item(&model, "Save project").disabled);
-        assert!(project_item(&model, "Save project as...").disabled);
     }
 
     #[test]
@@ -4836,11 +4399,8 @@ mod tests {
         let mut state = AppState::new();
         state.asset_library = Some(library);
 
-        let models = SelfHostedPanelModels::from_app_state_with_runtime_logs_and_asset_folder(
-            &state,
-            None,
-            Some(&folder_id),
-        );
+        let models =
+            SelfHostedPanelModels::from_app_state_with_asset_folder(&state, Some(&folder_id));
 
         assert_eq!(models.assets.subtitle, "Project library / Rushes");
         assert_eq!(
@@ -5354,11 +4914,6 @@ mod tests {
             effect_node_accent(&EffectType::Vignette),
             colors.effect_default
         );
-        assert_eq!(
-            status_log_item("failed".to_owned(), true).accent,
-            Some(colors.error)
-        );
-        assert_eq!(status_log_item("ok".to_owned(), false).accent, None);
     }
 
     #[test]
@@ -5652,10 +5207,6 @@ mod tests {
             .expect("system time after epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("mondrian-{prefix}-{suffix}"))
-    }
-
-    fn project_item<'a>(model: &'a PanelListModel, title: &str) -> &'a PanelListItem {
-        model.items.iter().find(|item| item.title == title).expect("project panel item")
     }
 
     fn assert_shell_action(action: Option<&Action>, name: &str) {
