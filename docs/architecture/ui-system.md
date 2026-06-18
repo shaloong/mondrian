@@ -924,7 +924,10 @@ rectangles for its HSV area overlays, hue ramp, and alpha ramp. It uses a
 masked colored triangle fan for the optional hue/saturation wheel.
 Checkerboards are low-count deterministic colored-triangle geometry provided by
 the shared widget paint helpers, and use the same rounded mask path when they
-sit inside rounded swatches. A compact
+sit inside rounded swatches.
+The crosshair and slider handles use semantic color-handle tokens rather than
+local black/white literals, because they must remain legible over arbitrary
+sampled colors while still being adjustable per theme.
 `ColorPickerTrigger` wraps the full picker for inspector rows and toolbar use:
 the trigger paints the current color above a checkerboard and opens the full
 picker in the overlay pass. Trigger-owned popups may hide the picker's internal

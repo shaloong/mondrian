@@ -152,6 +152,38 @@ mod tests {
     }
 
     #[test]
+    fn typography_uses_neutral_letter_spacing() {
+        let typography = TypographyTokens::default();
+        let styles = [
+            &typography.small,
+            &typography.body,
+            &typography.large,
+            &typography.mono_small,
+            &typography.mono_large,
+            &typography.button,
+            &typography.metadata,
+            &typography.heading_h1,
+            &typography.heading_h2,
+            &typography.heading_h3,
+            &typography.tab_label,
+        ];
+
+        assert!(styles.iter().all(|style| style.letter_spacing == 0.0));
+    }
+
+    #[test]
+    fn color_handle_tokens_keep_dual_contrast_available() {
+        for preset in ThemePreset::ALL {
+            let colors = preset.build().colors;
+
+            assert!(colors.color_handle_shadow.a > 0.0);
+            assert!(colors.color_handle_strong_shadow.a >= colors.color_handle_shadow.a);
+            assert_eq!(colors.color_handle_outer, mondrian_core::Color::WHITE);
+            assert_eq!(colors.color_handle_inner, mondrian_core::Color::BLACK);
+        }
+    }
+
+    #[test]
     fn theme_can_be_sent_between_threads() {
         let theme = ThemePreset::Dark.build();
         std::thread::spawn(move || {

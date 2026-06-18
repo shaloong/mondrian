@@ -495,25 +495,6 @@ impl PanelListModel {
 
         PanelListModel::new("Console", items).with_subtitle("Runtime messages")
     }
-
-    /// Build an explicit disabled empty state for panel kinds not migrated into
-    /// the self-hosted product shell yet.
-    pub fn unsupported_panel(kind: SlotKind) -> Self {
-        PanelListModel::new(
-            kind.display_name(),
-            vec![with_app_icon(
-                PanelListItem::new("Panel not available")
-                    .with_subtitle(format!(
-                        "{} is not mapped to the self-hosted UI yet",
-                        kind.display_name()
-                    ))
-                    .with_badge("Pending")
-                    .disabled(true),
-                AppIcon::Info,
-            )],
-        )
-        .with_subtitle("Self-hosted panel")
-    }
 }
 
 fn status_log_item(message: String, is_error: bool) -> PanelListItem {
@@ -3968,17 +3949,6 @@ mod tests {
         assert!(models.assets.items[0].disabled);
 
         let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn unsupported_panel_fallback_uses_icon_empty_state() {
-        let model = PanelListModel::unsupported_panel(SlotKind::Inspector);
-
-        assert_eq!(model.filter_placeholder, None);
-        assert_eq!(model.items.len(), 1);
-        assert_eq!(model.items[0].title, "Panel not available");
-        assert!(model.items[0].icon.is_some());
-        assert!(model.items[0].disabled);
     }
 
     #[test]

@@ -49,6 +49,15 @@ pub struct ColorTokens {
     /// 强调文字
     pub accent_foreground: Color,
 
+    /// 任意颜色背景上方控件把手的柔和阴影
+    pub color_handle_shadow: Color,
+    /// 任意颜色背景上方控件把手的强阴影
+    pub color_handle_strong_shadow: Color,
+    /// 任意颜色背景上方控件把手的浅色描边
+    pub color_handle_outer: Color,
+    /// 任意颜色背景上方控件把手的深色描边
+    pub color_handle_inner: Color,
+
     /// 危险/删除操作色
     pub destructive: Color,
     /// 危险色上的文字
@@ -102,6 +111,10 @@ impl ColorTokens {
             muted_foreground: Color::from_hex(0x717182),
             accent: Color::from_hex(0x27272D),
             accent_foreground: Color::from_hex(0xD4D4DB),
+            color_handle_shadow: Color { r: 0.0, g: 0.0, b: 0.0, a: 0.45 },
+            color_handle_strong_shadow: Color { r: 0.0, g: 0.0, b: 0.0, a: 0.8 },
+            color_handle_outer: Color::WHITE,
+            color_handle_inner: Color::BLACK,
 
             destructive: Color::from_hex(0x7F1D1D),
             destructive_foreground: Color::from_hex(0xFCA5A5),
@@ -145,6 +158,10 @@ impl ColorTokens {
             muted_foreground: Color::from_hex(0x717182),
             accent: Color::from_hex(0xF4F4F5),
             accent_foreground: Color::from_hex(0x1A1A22),
+            color_handle_shadow: Color { r: 0.0, g: 0.0, b: 0.0, a: 0.38 },
+            color_handle_strong_shadow: Color { r: 0.0, g: 0.0, b: 0.0, a: 0.72 },
+            color_handle_outer: Color::WHITE,
+            color_handle_inner: Color::BLACK,
 
             destructive: Color::from_hex(0xFEE2E2),
             destructive_foreground: Color::from_hex(0x991B1B),

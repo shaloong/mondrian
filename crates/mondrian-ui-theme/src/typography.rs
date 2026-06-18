@@ -98,13 +98,13 @@ impl Default for TypographyTokens {
                 font_size: 28.0,
                 line_height: 36.0,
                 font_weight: FontWeight::Bold,
-                letter_spacing: -0.5,
+                letter_spacing: 0.0,
             },
             heading_h2: TextStyle {
                 font_size: 22.0,
                 line_height: 28.0,
                 font_weight: FontWeight::Semibold,
-                letter_spacing: -0.25,
+                letter_spacing: 0.0,
             },
             heading_h3: TextStyle {
                 font_size: 18.0,

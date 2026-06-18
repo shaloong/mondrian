@@ -1067,36 +1067,35 @@ impl ColorPicker {
     }
 
     fn paint_crosshair(&self, ctx: &mut PaintContext, point: Point) {
-        let shadow = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.45 };
+        let tokens = &ctx.theme.colors;
         ctx.encoder.draw_rect(
             Rect::new(point.x - 7.0, point.y - 6.0, 14.0, 14.0),
-            shadow,
+            tokens.color_handle_shadow,
             7.0,
         );
         ctx.encoder.draw_rect(
             Rect::new(point.x - 6.0, point.y - 6.0, 12.0, 12.0),
-            Color::WHITE,
+            tokens.color_handle_outer,
             6.0,
         );
         ctx.encoder.draw_rect(
             Rect::new(point.x - 3.0, point.y - 3.0, 6.0, 6.0),
-            Color::BLACK,
+            tokens.color_handle_inner,
             3.0,
         );
     }
 
     fn paint_bar_handle(&self, ctx: &mut PaintContext, bar: Rect, x: f32) {
-        let dark = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.8 };
-        let light = Color::WHITE;
+        let tokens = &ctx.theme.colors;
         let x = x.clamp(bar.x, bar.x + bar.width);
         ctx.encoder.draw_rect(
             Rect::new(x - 2.0, bar.y - 3.0, 4.0, bar.height + 6.0),
-            dark,
+            tokens.color_handle_strong_shadow,
             2.0,
         );
         ctx.encoder.draw_rect(
             Rect::new(x - 1.0, bar.y - 2.0, 2.0, bar.height + 4.0),
-            light,
+            tokens.color_handle_outer,
             1.0,
         );
     }
@@ -2816,6 +2815,51 @@ mod tests {
         let shadow = &theme.spacing.shadow_md;
         assert_eq!(encoder.rects[0], shadow_rect(bounds, shadow));
         assert_eq!(encoder.rect_colors[0], shadow_color(shadow));
+    }
+
+    #[test]
+    fn paint_crosshair_uses_color_handle_tokens() {
+        let picker = ColorPicker::new(Color::from_rgba8(51, 102, 153, 255));
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 200.0, 200.0),
+        };
+
+        picker.paint_crosshair(&mut ctx, Point::new(80.0, 90.0));
+
+        assert_eq!(
+            encoder.rect_colors,
+            vec![
+                theme.colors.color_handle_shadow,
+                theme.colors.color_handle_outer,
+                theme.colors.color_handle_inner,
+            ]
+        );
+    }
+
+    #[test]
+    fn paint_bar_handle_uses_color_handle_tokens() {
+        let picker = ColorPicker::new(Color::from_rgba8(51, 102, 153, 255));
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 200.0, 200.0),
+        };
+
+        picker.paint_bar_handle(&mut ctx, Rect::new(20.0, 30.0, 100.0, 12.0), 60.0);
+
+        assert_eq!(
+            encoder.rect_colors,
+            vec![
+                theme.colors.color_handle_strong_shadow,
+                theme.colors.color_handle_outer
+            ]
+        );
     }
 
     #[test]
