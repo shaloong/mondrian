@@ -12,12 +12,15 @@ use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use std::time::{Duration, Instant};
 
 use crate::vector_icon::VectorIcon;
+use crate::TextInput;
 
 const DOUBLE_CLICK_MAX_AGE: Duration = Duration::from_millis(500);
 const DOUBLE_CLICK_MAX_DISTANCE: f32 = 5.0;
 const DRAG_START_DISTANCE: f32 = 6.0;
 const ROW_ICON_GAP: f32 = 8.0;
 const ROW_ICON_SIZE: f32 = 16.0;
+const FILTER_INPUT_HEIGHT: f32 = 28.0;
+const FILTER_INPUT_GAP: f32 = 10.0;
 
 /// Dynamic action factory used when a panel-list item changes state.
 pub type PanelListAction = dyn Fn(usize, &PanelListItem) -> Action;
@@ -110,6 +113,9 @@ pub struct PanelList {
     title: String,
     subtitle: String,
     items: Vec<PanelListItem>,
+    filter_input: Option<Box<TextInput>>,
+    filter_query: String,
+    visible_indices: Vec<usize>,
     bounds: Rect,
     viewport: Rect,
     selected: Option<usize>,
@@ -147,11 +153,15 @@ struct PanelListDragCandidate {
 impl PanelList {
     /// Create a panel list with a title and rows.
     pub fn new(title: impl Into<String>, items: Vec<PanelListItem>) -> Self {
+        let visible_indices = (0..items.len()).collect();
         Self {
             id: WidgetId::new(),
             title: title.into(),
             subtitle: String::new(),
             items,
+            filter_input: None,
+            filter_query: String::new(),
+            visible_indices,
             bounds: Rect::ZERO,
             viewport: Rect::ZERO,
             selected: None,
@@ -183,6 +193,30 @@ impl PanelList {
     pub fn with_row_height(mut self, row_height: f32) -> Self {
         self.row_height = row_height.max(36.0);
         self
+    }
+
+    /// Add a searchable filter field above the list rows.
+    pub fn with_filter(mut self, placeholder: impl Into<String>) -> Self {
+        let mut input = TextInput::new(placeholder);
+        if !self.filter_query.is_empty() {
+            input.set_text(self.filter_query.clone());
+        }
+        self.filter_input = Some(Box::new(input));
+        self
+    }
+
+    /// Current committed filter query.
+    pub fn filter_query(&self) -> &str {
+        &self.filter_query
+    }
+
+    /// Set the filter text programmatically without dispatching item actions.
+    pub fn set_filter_query(&mut self, query: impl Into<String>) {
+        self.filter_query = query.into();
+        if let Some(input) = &mut self.filter_input {
+            input.set_text(self.filter_query.clone());
+        }
+        self.normalize_after_filter_change();
     }
 
     /// Set the selected item if it is valid and enabled.
@@ -218,7 +252,10 @@ impl PanelList {
     /// Replace all items and clamp selection/scroll state.
     pub fn set_items(&mut self, items: Vec<PanelListItem>) {
         self.items = items;
-        self.selected = self.selected.filter(|idx| self.is_enabled_index(*idx));
+        self.rebuild_visible_indices();
+        self.selected = self.selected.filter(|idx| {
+            self.is_enabled_index(*idx) && self.item_matches_filter(&self.items[*idx])
+        });
         self.hovered = None;
         self.drop_hovered = false;
         self.drag_candidate = None;
@@ -238,11 +275,21 @@ impl PanelList {
 
     /// Set selected item without dispatching actions.
     pub fn set_selected(&mut self, index: Option<usize>) {
-        self.selected = index.filter(|idx| self.is_enabled_index(*idx));
+        self.selected =
+            index.filter(|idx| self.is_enabled_index(*idx) && self.visible_indices.contains(idx));
         self.ensure_selected_visible();
     }
 
     fn header_height(&self) -> f32 {
+        let base = self.title_block_height();
+        if self.filter_input.is_some() {
+            base + FILTER_INPUT_HEIGHT + FILTER_INPUT_GAP
+        } else {
+            base
+        }
+    }
+
+    fn title_block_height(&self) -> f32 {
         if self.subtitle.is_empty() {
             42.0
         } else {
@@ -251,7 +298,7 @@ impl PanelList {
     }
 
     fn content_height(&self) -> f32 {
-        self.items.len() as f32 * self.row_height
+        self.visible_indices.len() as f32 * self.row_height
     }
 
     fn max_scroll_y(&self) -> f32 {
@@ -314,6 +361,42 @@ impl PanelList {
         self.items.get(index).is_some_and(|item| !item.disabled)
     }
 
+    fn item_matches_query(item: &PanelListItem, query: &str) -> bool {
+        if query.is_empty() {
+            return true;
+        }
+
+        item.title.to_lowercase().contains(query)
+            || item.subtitle.to_lowercase().contains(query)
+            || item.badge.as_ref().is_some_and(|badge| badge.to_lowercase().contains(query))
+    }
+
+    fn item_matches_filter(&self, item: &PanelListItem) -> bool {
+        Self::item_matches_query(item, &self.filter_query.trim().to_lowercase())
+    }
+
+    fn rebuild_visible_indices(&mut self) {
+        let query = self.filter_query.trim().to_lowercase();
+        self.visible_indices = self
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| Self::item_matches_query(item, &query).then_some(index))
+            .collect();
+    }
+
+    fn visible_position_for_index(&self, index: usize) -> Option<usize> {
+        self.visible_indices.iter().position(|candidate| *candidate == index)
+    }
+
+    fn visible_enabled_indices(&self) -> Vec<usize> {
+        self.visible_indices
+            .iter()
+            .copied()
+            .filter(|index| self.is_enabled_index(*index))
+            .collect()
+    }
+
     fn index_at(&self, point: Point) -> Option<usize> {
         if !self.viewport.contains(point) {
             return None;
@@ -322,24 +405,28 @@ impl PanelList {
             return None;
         }
         let rel_y = point.y - self.viewport.y + self.scroll_y;
-        let index = (rel_y / self.row_height).floor() as usize;
-        (index < self.items.len()).then_some(index)
+        let visible_row = (rel_y / self.row_height).floor() as usize;
+        self.visible_indices.get(visible_row).copied()
     }
 
     fn next_enabled_from(&self, start: usize, direction: i32) -> Option<usize> {
-        if self.items.is_empty() {
+        let visible = self.visible_enabled_indices();
+        if visible.is_empty() {
             return None;
         }
 
-        let mut index = start as i32;
-        while index >= 0 && (index as usize) < self.items.len() {
-            let candidate = index as usize;
-            if self.is_enabled_index(candidate) {
-                return Some(candidate);
-            }
-            index += direction;
+        let start_position = visible
+            .iter()
+            .position(|index| *index >= start)
+            .unwrap_or_else(|| visible.len().saturating_sub(1));
+        if direction >= 0 {
+            visible.get(start_position).copied()
+        } else {
+            visible
+                .iter()
+                .rposition(|index| *index <= start)
+                .and_then(|position| visible.get(position).copied())
         }
-        None
     }
 
     fn first_enabled(&self) -> Option<usize> {
@@ -354,17 +441,30 @@ impl PanelList {
     }
 
     fn move_selection(&mut self, direction: i32) -> Option<usize> {
-        if self.items.is_empty() {
+        let visible = self.visible_enabled_indices();
+        if visible.is_empty() {
             return None;
         }
-        let start = match (self.selected, direction) {
-            (Some(index), 1) => (index + 1).min(self.items.len().saturating_sub(1)),
-            (Some(index), -1) => index.saturating_sub(1),
-            (_, 1) => 0,
-            (_, -1) => self.items.len().saturating_sub(1),
-            _ => 0,
+
+        let Some(selected) = self.selected else {
+            return if direction >= 0 {
+                visible.first().copied()
+            } else {
+                visible.last().copied()
+            };
         };
-        self.next_enabled_from(start, direction)
+        let Some(position) = visible.iter().position(|index| *index == selected) else {
+            return if direction >= 0 {
+                visible.first().copied()
+            } else {
+                visible.last().copied()
+            };
+        };
+        if direction >= 0 {
+            visible.get(position + 1).copied()
+        } else {
+            position.checked_sub(1).and_then(|prev| visible.get(prev).copied())
+        }
     }
 
     fn ensure_selected_visible(&mut self) {
@@ -374,7 +474,10 @@ impl PanelList {
         if self.viewport.height <= 0.0 {
             return;
         }
-        let top = index as f32 * self.row_height;
+        let Some(visible_position) = self.visible_position_for_index(index) else {
+            return;
+        };
+        let top = visible_position as f32 * self.row_height;
         let bottom = top + self.row_height;
         if top < self.scroll_y {
             self.scroll_y = top;
@@ -395,6 +498,55 @@ impl PanelList {
             ctx.request_repaint();
         }
         EventResult::Handled
+    }
+
+    fn filter_input_rect(&self) -> Option<Rect> {
+        self.filter_input.as_ref()?;
+        let y = self.bounds.y + self.title_block_height() - 4.0;
+        Some(Rect::new(
+            self.bounds.x + 8.0,
+            y,
+            (self.bounds.width - 16.0).max(0.0),
+            FILTER_INPUT_HEIGHT,
+        ))
+    }
+
+    fn sync_filter_query_from_input(&mut self) -> bool {
+        let Some(input) = &self.filter_input else {
+            return false;
+        };
+        let query = input.text().to_owned();
+        if query == self.filter_query {
+            return false;
+        }
+        self.filter_query = query;
+        self.normalize_after_filter_change();
+        true
+    }
+
+    fn normalize_after_filter_change(&mut self) {
+        self.rebuild_visible_indices();
+        self.selected = self
+            .selected
+            .filter(|index| self.is_enabled_index(*index) && self.visible_indices.contains(index));
+        self.hovered = None;
+        self.drag_candidate = None;
+        self.last_click = None;
+        self.clamp_scroll();
+        self.ensure_selected_visible();
+    }
+
+    fn route_filter_input_event(
+        &mut self,
+        event: &UiEvent,
+        ctx: &mut EventContext,
+    ) -> Option<EventResult> {
+        let input = self.filter_input.as_mut()?;
+        let result = input.event(event, ctx);
+        if self.sync_filter_query_from_input() {
+            ctx.request_repaint();
+        }
+        Some(result)
     }
 
     fn click_is_activation(&self, index: usize, position: Point, now: Instant) -> bool {
@@ -603,6 +755,11 @@ impl Widget for PanelList {
         self.bounds = bounds;
         let padding = 8.0;
         let header = self.header_height();
+        if let Some(rect) = self.filter_input_rect() {
+            if let Some(input) = &mut self.filter_input {
+                input.layout(rect);
+            }
+        }
         self.viewport = Rect::new(
             bounds.x + padding,
             bounds.y + header,
@@ -616,6 +773,11 @@ impl Widget for PanelList {
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
         match event {
             UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
+                if self.filter_input.as_ref().is_some_and(|input| input.hit_test(*position)) {
+                    return self
+                        .route_filter_input_event(event, ctx)
+                        .unwrap_or(EventResult::Ignored);
+                }
                 if self.bounds.contains(*position) {
                     self.focus_visible = false;
                     if let Some(thumb) = self.scrollbar_thumb_rect() {
@@ -743,6 +905,9 @@ impl Widget for PanelList {
                 self.drag_candidate = None;
                 self.drop_hovered = false;
                 self.last_click = None;
+                if let Some(input) = &mut self.filter_input {
+                    let _ = input.event(event, ctx);
+                }
                 return EventResult::Handled;
             }
             UiEvent::KeyDown { key: KeyCode::Down, .. } if self.focused => {
@@ -777,6 +942,15 @@ impl Widget for PanelList {
         EventResult::Ignored
     }
 
+    fn after_child_event(&mut self, _event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if self.sync_filter_query_from_input() {
+            ctx.request_repaint();
+            EventResult::Handled
+        } else {
+            EventResult::Ignored
+        }
+    }
+
     fn paint(&self, ctx: &mut PaintContext) {
         let colors = &ctx.theme.colors;
         let spacing = &ctx.theme.spacing;
@@ -798,6 +972,9 @@ impl Widget for PanelList {
                 colors.muted_foreground,
             );
         }
+        if let Some(input) = &self.filter_input {
+            input.paint(ctx);
+        }
 
         let divider_y = self.viewport.y - 7.0;
         ctx.encoder.draw_line(
@@ -808,10 +985,13 @@ impl Widget for PanelList {
         );
 
         ctx.encoder.push_clip(self.viewport);
+        let visible = &self.visible_indices;
         let first = (self.scroll_y / self.row_height).floor().max(0.0) as usize;
         let last = ((self.scroll_y + self.viewport.height) / self.row_height).ceil() as usize + 1;
-        for index in first..last.min(self.items.len()) {
-            let y = self.viewport.y + index as f32 * self.row_height - self.scroll_y;
+        for (visible_position, index) in
+            visible.iter().copied().enumerate().take(last.min(visible.len())).skip(first)
+        {
+            let y = self.viewport.y + visible_position as f32 * self.row_height - self.scroll_y;
             let row = Rect::new(
                 self.viewport.x,
                 y + 2.0,
@@ -819,6 +999,19 @@ impl Widget for PanelList {
                 self.row_height - 4.0,
             );
             self.paint_row(ctx, index, row);
+        }
+        if visible.is_empty() {
+            ctx.encoder.draw_text_box(
+                if self.filter_query.trim().is_empty() {
+                    "No items"
+                } else {
+                    "No matches"
+                },
+                ctx.theme.typography.small.font_size,
+                snap_point(Point::new(self.viewport.x + 8.0, self.viewport.y + 8.0)),
+                (self.viewport.width - 16.0).max(0.0),
+                colors.muted_foreground,
+            );
         }
         ctx.encoder.pop_clip();
 
@@ -860,6 +1053,26 @@ impl Widget for PanelList {
 
     fn can_focus(&self) -> bool {
         true
+    }
+
+    fn child_count(&self) -> usize {
+        usize::from(self.filter_input.is_some())
+    }
+
+    fn child(&self, index: usize) -> Option<&dyn Widget> {
+        if index == 0 {
+            self.filter_input.as_deref().map(|input| input as &dyn Widget)
+        } else {
+            None
+        }
+    }
+
+    fn child_mut(&mut self, index: usize) -> Option<&mut dyn Widget> {
+        if index == 0 {
+            self.filter_input.as_deref_mut().map(|input| input as &mut dyn Widget)
+        } else {
+            None
+        }
     }
 }
 
@@ -1467,6 +1680,186 @@ mod tests {
         list.set_items(vec![PanelListItem::new("Only")]);
 
         assert_eq!(list.selected_index(), None);
+    }
+
+    #[test]
+    fn filter_query_clicks_visible_rows_with_original_item_identity() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut list = PanelList::new(
+            "Assets",
+            vec![
+                PanelListItem::new("Camera A"),
+                PanelListItem::new("Dialogue"),
+                PanelListItem::new("Color Grade").with_select_action(Action::Play),
+            ],
+        )
+        .with_filter("Search assets");
+        list.set_filter_query("color");
+        list.layout(Rect::new(0.0, 0.0, 260.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        let result = list.event(
+            &UiEvent::MouseDown {
+                position: Point::new(24.0, 92.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(list.selected_index(), Some(2));
+        assert_eq!(actions.borrow().as_slice(), &[Action::Play]);
+    }
+
+    #[test]
+    fn filter_query_keyboard_navigation_uses_visible_enabled_items_only() {
+        let mut list = PanelList::new(
+            "Effects",
+            vec![
+                PanelListItem::new("Blur"),
+                PanelListItem::new("Color Wheels"),
+                PanelListItem::new("Color Match").disabled(true),
+                PanelListItem::new("Color Balance"),
+            ],
+        )
+        .with_filter("Search effects");
+        list.set_filter_query("color");
+        list.layout(Rect::new(0.0, 0.0, 260.0, 220.0));
+
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            list.event(&UiEvent::FocusGained, &mut ctx),
+            EventResult::Handled
+        );
+        assert_eq!(
+            list.event(
+                &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            list.event(
+                &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(list.selected_index(), Some(3));
+    }
+
+    #[test]
+    fn set_selected_rejects_items_hidden_by_filter() {
+        let mut list = PanelList::new(
+            "Assets",
+            vec![
+                PanelListItem::new("Camera A"),
+                PanelListItem::new("Music Bed"),
+                PanelListItem::new("Color Grade"),
+            ],
+        )
+        .with_filter("Search assets");
+        list.set_filter_query("music");
+
+        list.set_selected(Some(2));
+        assert_eq!(list.selected_index(), None);
+
+        list.set_selected(Some(1));
+        assert_eq!(list.selected_index(), Some(1));
+    }
+
+    #[test]
+    fn filter_input_child_syncs_query_and_requests_repaint() {
+        let mut list = PanelList::new(
+            "Assets",
+            vec![PanelListItem::new("A Cam"), PanelListItem::new("Music Bed")],
+        )
+        .with_filter("Search assets")
+        .with_selected(Some(1));
+        list.layout(Rect::new(0.0, 0.0, 260.0, 180.0));
+
+        let input = list
+            .child_mut(0)
+            .and_then(Widget::as_any_mut)
+            .and_then(|any| any.downcast_mut::<TextInput>())
+            .expect("filter input child");
+        input.set_text("cam".to_owned());
+
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            list.after_child_event(&UiEvent::TextInput("cam".to_owned()), &mut ctx),
+            EventResult::Handled
+        );
+        assert_eq!(list.filter_query(), "cam");
+        assert_eq!(list.selected_index(), None);
+        assert!(requests.repaint);
+    }
+
+    #[test]
+    fn filter_query_paint_hides_non_matching_rows() {
+        let mut list = PanelList::new(
+            "Assets",
+            vec![
+                PanelListItem::new("Camera A"),
+                PanelListItem::new("Music Bed"),
+                PanelListItem::new("Color Grade"),
+            ],
+        )
+        .with_filter("Search assets");
+        list.set_filter_query("music");
+        list.layout(Rect::new(0.0, 0.0, 260.0, 180.0));
+
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 260.0, 180.0),
+        };
+        list.paint(&mut ctx);
+
+        assert!(encoder.texts.iter().any(|text| text == "Music Bed"));
+        assert!(!encoder.texts.iter().any(|text| text == "Camera A"));
+        assert!(!encoder.texts.iter().any(|text| text == "Color Grade"));
     }
 
     #[test]

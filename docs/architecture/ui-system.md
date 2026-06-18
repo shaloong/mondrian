@@ -605,9 +605,13 @@ a second click on the same row activates it, and keyboard Enter/Space uses the
 same activation path. Pointer movement beyond the drag threshold asks the
 router to begin an internal drag; the router, not the source widget, owns
 `DragEnter` / `DragOver` / `DragLeave` / `Drop` delivery so pointer capture from
-the source cannot block target panels. The self-hosted Effects panel builds rows
-from the shared effect registry and, when a video clip is selected, activates
-rows through undoable
+the source cannot block target panels. Searchable list panels should use
+`PanelList::with_filter`, which exposes its filter `TextInput` as a real widget
+tree child so focus, IME, and keyboard routing stay framework-owned. Filtering
+changes only visible row order; original item indices, row actions, drag
+payloads, badges, icons, and disabled state remain the item identity used for
+dispatch. The self-hosted Effects panel builds rows from the shared effect
+registry and, when a video clip is selected, activates rows through undoable
 `AppState::add_effect_to_clip` commands. The `self_hosted_app` and `ui_demo`
 Assets/Effects-style panels use this shared surface as the tracer bullet for
 migrating list-heavy egui panels. The self-hosted Project slot also uses

@@ -855,6 +855,7 @@ fn demo_asset_panel() -> PanelList {
         ],
     )
     .with_subtitle("Project media")
+    .with_filter("Search assets")
     .on_activate(|index, item| demo_action(&format!("assets.activate.{index}.{}", item.title)))
 }
 
@@ -886,6 +887,7 @@ fn demo_library_panel() -> PanelList {
         ],
     )
     .with_subtitle("Reusable resources")
+    .with_filter("Search library")
 }
 
 fn demo_audio_panel() -> PanelList {
@@ -916,6 +918,7 @@ fn demo_audio_panel() -> PanelList {
         ],
     )
     .with_subtitle("Track lanes")
+    .with_filter("Search audio")
 }
 
 fn demo_timeline_panel() -> TimelineView {
@@ -1051,6 +1054,7 @@ fn demo_effect_panel() -> PanelList {
         ],
     )
     .with_subtitle("Apply to selected clip")
+    .with_filter("Search effects")
     .on_activate(|index, item| demo_action(&format!("effects.apply.{index}.{}", item.title)))
 }
 
@@ -1079,6 +1083,7 @@ fn demo_property_browser_panel() -> PanelList {
         ],
     )
     .with_subtitle("Inspector categories")
+    .with_filter("Search properties")
 }
 
 fn inspector_demo_panel() -> Box<dyn Widget> {

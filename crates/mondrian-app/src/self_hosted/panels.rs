@@ -166,6 +166,7 @@ pub struct PanelListModel {
     pub title: String,
     pub subtitle: String,
     pub items: Vec<PanelListItem>,
+    pub filter_placeholder: Option<String>,
     #[cfg(test)]
     pub demo_activate_prefix: Option<String>,
 }
@@ -176,6 +177,7 @@ impl PanelListModel {
             title: title.into(),
             subtitle: String::new(),
             items,
+            filter_placeholder: None,
             #[cfg(test)]
             demo_activate_prefix: None,
         }
@@ -183,6 +185,11 @@ impl PanelListModel {
 
     pub fn with_subtitle(mut self, subtitle: impl Into<String>) -> Self {
         self.subtitle = subtitle.into();
+        self
+    }
+
+    pub fn with_filter_placeholder(mut self, placeholder: impl Into<String>) -> Self {
+        self.filter_placeholder = Some(placeholder.into());
         self
     }
 
@@ -317,7 +324,9 @@ impl PanelListModel {
             AppIcon::Save,
         ));
 
-        PanelListModel::new("Project", items).with_subtitle("Project state")
+        PanelListModel::new("Project", items)
+            .with_subtitle("Project state")
+            .with_filter_placeholder("Search project")
     }
 
     /// Build the project asset list. Database read failures are represented as
@@ -333,7 +342,8 @@ impl PanelListModel {
                     AppIcon::Folder,
                 )],
             )
-            .with_subtitle("Project library");
+            .with_subtitle("Project library")
+            .with_filter_placeholder("Search assets");
         };
 
         match library.list_assets() {
@@ -346,12 +356,14 @@ impl PanelListModel {
                     AppIcon::Folder,
                 )],
             )
-            .with_subtitle("Project library"),
+            .with_subtitle("Project library")
+            .with_filter_placeholder("Search assets"),
             Ok(assets) => PanelListModel::new(
                 "Assets",
                 assets.into_iter().map(panel_item_from_asset).collect(),
             )
-            .with_subtitle("Project library"),
+            .with_subtitle("Project library")
+            .with_filter_placeholder("Search assets"),
             Err(err) => PanelListModel::new(
                 "Assets",
                 vec![with_app_icon(
@@ -361,7 +373,8 @@ impl PanelListModel {
                     AppIcon::Warning,
                 )],
             )
-            .with_subtitle("Project library"),
+            .with_subtitle("Project library")
+            .with_filter_placeholder("Search assets"),
         }
     }
 
@@ -432,7 +445,9 @@ impl PanelListModel {
                 .collect()
         };
 
-        PanelListModel::new("Effects", items).with_subtitle("Effect browser")
+        PanelListModel::new("Effects", items)
+            .with_subtitle("Effect browser")
+            .with_filter_placeholder("Search effects")
     }
 
     /// Build the console panel from recent app status history plus runtime summary.
@@ -1539,6 +1554,9 @@ fn selected_clip_track_is_locked(state: &AppState, selection: SelectedClipRef) -
 fn panel_list(model: &PanelListModel) -> PanelList {
     let mut list = PanelList::new(model.title.clone(), model.items.clone())
         .with_subtitle(model.subtitle.clone());
+    if let Some(placeholder) = &model.filter_placeholder {
+        list = list.with_filter(placeholder.clone());
+    }
     if model.title == "Assets" {
         list = list.on_drop(|payload, _position| match payload {
             DragPayload::File(paths) if !paths.is_empty() => {
@@ -1592,6 +1610,7 @@ fn demo_asset_model() -> PanelListModel {
         ],
     )
     .with_subtitle("Project library")
+    .with_filter_placeholder("Search assets")
     .with_demo_activate_prefix("assets.activate")
 }
 
@@ -2772,6 +2791,7 @@ mod tests {
         let model = PanelListModel::from_project_status(&state);
 
         assert_eq!(model.title, "Project");
+        assert_eq!(model.filter_placeholder.as_deref(), Some("Search project"));
         assert_eq!(model.items[0].title, "cut.mdp");
         assert_eq!(model.items[0].badge.as_deref(), Some("Open"));
         assert!(model.items[0].icon.is_some());
@@ -3692,6 +3712,10 @@ mod tests {
         let models = SelfHostedPanelModels::from_app_state(&state);
 
         assert_eq!(models.assets.items.len(), 1);
+        assert_eq!(
+            models.assets.filter_placeholder.as_deref(),
+            Some("Search assets")
+        );
         assert!(models.assets.demo_activate_prefix.is_none());
         let item = &models.assets.items[0];
         assert_eq!(item.title, "Brand Purple");
@@ -3733,6 +3757,7 @@ mod tests {
     fn unsupported_panel_fallback_uses_icon_empty_state() {
         let model = PanelListModel::unsupported_panel(SlotKind::Inspector);
 
+        assert_eq!(model.filter_placeholder, None);
         assert_eq!(model.items.len(), 1);
         assert_eq!(model.items[0].title, "Panel not available");
         assert!(model.items[0].icon.is_some());
@@ -3743,6 +3768,7 @@ mod tests {
     fn effect_panel_model_uses_stable_item_actions_without_dynamic_prefix() {
         let model = PanelListModel::from_effect_registry(None);
 
+        assert_eq!(model.filter_placeholder.as_deref(), Some("Search effects"));
         assert!(model.demo_activate_prefix.is_none());
         assert!(model.items.iter().all(|item| item.select_action.is_none()));
         assert!(model.items.iter().all(|item| item.activate_action.is_none()));
