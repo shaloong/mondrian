@@ -129,6 +129,13 @@ impl TextInput {
         self.update_scroll(DEFAULT_FONT_SIZE);
     }
 
+    /// Select the whole committed text.
+    pub fn select_all(&mut self) {
+        self.cursor = self.len_graphemes();
+        self.selection_start = Some(0);
+        self.update_scroll(DEFAULT_FONT_SIZE);
+    }
+
     /// Dispatch an action whenever user input changes the committed text.
     pub fn on_change(mut self, action: impl Fn(&str) -> Action + 'static) -> Self {
         self.on_change = Some(Box::new(action));

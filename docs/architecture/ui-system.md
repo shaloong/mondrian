@@ -827,6 +827,12 @@ The panel adapter derives the checked/unchecked command from
 `AppState::proxy_mode_assets`, while `AppState` owns persistence and background
 proxy generation. Offline media must be relinked before proxy generation is
 requested, keeping media-task side effects outside reusable widgets.
+Asset and folder cards support inline rename through `AssetGrid`'s domain-light
+editing session. The widget owns F2/title double-click editing, TextInput
+focus/IME routing, commit/cancel behavior, and dispatching a rename callback
+with the new title. The self-hosted Assets adapter maps that callback to
+`ui.assets.rename_asset` or `ui.assets.rename_folder`; `AppState` performs the
+library mutation, project save, reload event, and status hint.
 Folder cards expose `ui.assets.delete_folder` through the same card-level menu
 surface. Folder deletion is an app/library mutation: `AssetLibrary` removes the
 selected folder subtree, unlinks assets assigned to any deleted folder, and

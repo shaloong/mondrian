@@ -38,6 +38,8 @@ const ICON_SIZE: f32 = 22.0;
 
 /// Dynamic action factory for [`AssetGrid`] item selection or activation.
 pub type AssetGridAction = dyn Fn(usize, &AssetGridItem) -> Action;
+/// Dynamic action factory for committing an item title edit.
+pub type AssetGridRenameAction = dyn Fn(usize, &AssetGridItem, &str) -> Action;
 /// Dynamic action factory for payloads dropped on an [`AssetGrid`].
 pub type AssetGridDropAction = dyn Fn(&DragPayload, Point) -> Option<Action>;
 /// Dynamic action factory for payloads dropped on one [`AssetGridItem`].
@@ -87,6 +89,7 @@ pub struct AssetGridItem {
     pub activate_action: Option<Action>,
     pub drag_payload: Option<DragPayload>,
     pub context_menu_items: Vec<MenuItem>,
+    pub renamable: bool,
 }
 
 impl AssetGridItem {
@@ -106,6 +109,7 @@ impl AssetGridItem {
             activate_action: None,
             drag_payload: None,
             context_menu_items: Vec::new(),
+            renamable: false,
         }
     }
 
@@ -177,6 +181,12 @@ impl AssetGridItem {
         self.context_menu_items = items;
         self
     }
+
+    /// Allow this card title to enter inline editing from keyboard/mouse input.
+    pub fn renamable(mut self, renamable: bool) -> Self {
+        self.renamable = renamable;
+        self
+    }
 }
 
 /// Searchable, selectable card grid for asset-library style panels.
@@ -204,8 +214,10 @@ pub struct AssetGrid {
     context_menu_items: Vec<MenuItem>,
     selection_context_menu: Option<Box<AssetGridSelectionMenu>>,
     context_menu: Option<ContextMenu>,
+    rename_editor: Option<AssetGridRenameEditor>,
     on_select: Option<Box<AssetGridAction>>,
     on_activate: Option<Box<AssetGridAction>>,
+    on_rename: Option<Box<AssetGridRenameAction>>,
     on_drop: Option<Box<AssetGridDropAction>>,
     on_item_drop: Option<Box<AssetGridItemDropAction>>,
 }
@@ -222,6 +234,11 @@ struct AssetGridDragCandidate {
     index: usize,
     start: Point,
     payload: DragPayload,
+}
+
+struct AssetGridRenameEditor {
+    index: usize,
+    input: Box<TextInput>,
 }
 
 impl AssetGrid {
@@ -252,8 +269,10 @@ impl AssetGrid {
             context_menu_items: Vec::new(),
             selection_context_menu: None,
             context_menu: None,
+            rename_editor: None,
             on_select: None,
             on_activate: None,
+            on_rename: None,
             on_drop: None,
             on_item_drop: None,
         }
@@ -386,6 +405,15 @@ impl AssetGrid {
         action: impl Fn(usize, &AssetGridItem) -> Action + 'static,
     ) -> Self {
         self.on_activate = Some(Box::new(action));
+        self
+    }
+
+    /// Dispatch a dynamic action when a card title inline edit is committed.
+    pub fn on_rename(
+        mut self,
+        action: impl Fn(usize, &AssetGridItem, &str) -> Action + 'static,
+    ) -> Self {
+        self.on_rename = Some(Box::new(action));
         self
     }
 
@@ -720,6 +748,11 @@ impl AssetGrid {
             ctx.request_repaint();
         }
         if activate {
+            if self.title_editor_rect(index).is_some_and(|rect| rect.contains(position))
+                && self.can_rename_index(index)
+            {
+                return self.start_rename(index, ctx);
+            }
             self.dispatch_activate(index, ctx);
         }
         EventResult::Handled
@@ -860,6 +893,94 @@ impl AssetGrid {
                     .contains(point)
                     .then_some(index)
             })
+    }
+
+    fn title_editor_rect(&self, index: usize) -> Option<Rect> {
+        let visible_position = self.visible_position_for_index(index)?;
+        let card = self.card_rect_at_visible_position(visible_position);
+        Some(Rect::new(
+            card.x + 6.0,
+            card.y + 76.0,
+            (card.width - 12.0).max(0.0),
+            24.0,
+        ))
+    }
+
+    fn start_rename(&mut self, index: usize, ctx: &mut EventContext) -> EventResult {
+        if !self.can_rename_index(index) {
+            return EventResult::Ignored;
+        }
+        let Some(item) = self.items.get(index) else {
+            return EventResult::Ignored;
+        };
+        let mut input = TextInput::new("Name").with_text(item.title.clone());
+        input.select_all();
+        if let Some(rect) = self.title_editor_rect(index) {
+            input.layout(rect);
+        }
+        let input_id = input.id();
+        self.rename_editor = Some(AssetGridRenameEditor { index, input: Box::new(input) });
+        self.drag_candidate = None;
+        self.context_menu = None;
+        ctx.focus.request_focus(input_id);
+        if let Some(editor) = &mut self.rename_editor {
+            let _ = editor.input.event(&UiEvent::FocusGained, ctx);
+        }
+        ctx.request_repaint();
+        EventResult::Handled
+    }
+
+    fn can_rename_index(&self, index: usize) -> bool {
+        self.on_rename.is_some()
+            && self.items.get(index).is_some_and(|item| !item.disabled && item.renamable)
+            && self.visible_indices.contains(&index)
+    }
+
+    fn commit_rename(&mut self, ctx: &mut EventContext) -> EventResult {
+        let Some(editor) = self.rename_editor.take() else {
+            return EventResult::Ignored;
+        };
+        let text = editor.input.text().trim().to_owned();
+        if !text.is_empty() {
+            if let (Some(item), Some(factory)) =
+                (self.items.get(editor.index), self.on_rename.as_ref())
+            {
+                if text != item.title {
+                    (ctx.dispatch)(factory(editor.index, item, &text));
+                }
+            }
+        }
+        ctx.request_repaint();
+        EventResult::Handled
+    }
+
+    fn cancel_rename(&mut self, ctx: &mut EventContext) -> EventResult {
+        if self.rename_editor.take().is_some() {
+            ctx.request_repaint();
+            EventResult::Handled
+        } else {
+            EventResult::Ignored
+        }
+    }
+
+    fn route_rename_editor_event(
+        &mut self,
+        event: &UiEvent,
+        ctx: &mut EventContext,
+    ) -> Option<EventResult> {
+        let editor = self.rename_editor.as_mut()?;
+        match event {
+            UiEvent::KeyDown { key: KeyCode::Enter, .. } => Some(self.commit_rename(ctx)),
+            UiEvent::KeyDown { key: KeyCode::Escape, .. } => Some(self.cancel_rename(ctx)),
+            UiEvent::MouseDown { position, .. } if !editor.input.hit_test(*position) => {
+                Some(self.commit_rename(ctx))
+            }
+            UiEvent::FocusLost => Some(self.commit_rename(ctx)),
+            _ => {
+                let result = editor.input.event(event, ctx);
+                Some(result)
+            }
+        }
     }
 
     fn paint_empty_state(&self, ctx: &mut PaintContext) {
@@ -1019,18 +1140,24 @@ impl AssetGrid {
             34.0,
         );
         ctx.push_clip(text_clip);
-        ctx.encoder.draw_text_box(
-            &item.title,
-            ctx.theme.typography.small.font_size,
-            snap_point(Point::new(text_clip.x, text_clip.y)),
-            text_clip.width,
-            text_color,
-        );
+        let editing_title = self.rename_editor.as_ref().is_some_and(|editor| editor.index == index);
+        if !editing_title {
+            ctx.encoder.draw_text_box(
+                &item.title,
+                ctx.theme.typography.small.font_size,
+                snap_point(Point::new(text_clip.x, text_clip.y)),
+                text_clip.width,
+                text_color,
+            );
+        }
         if !item.subtitle.is_empty() {
             ctx.encoder.draw_text_box(
                 &item.subtitle,
                 ctx.theme.typography.small.font_size,
-                snap_point(Point::new(text_clip.x, text_clip.y + 17.0)),
+                snap_point(Point::new(
+                    text_clip.x,
+                    text_clip.y + if editing_title { 24.0 } else { 17.0 },
+                )),
                 text_clip.width,
                 colors.muted_foreground,
             );
@@ -1079,9 +1206,20 @@ impl Widget for AssetGrid {
             bounds.width.max(0.0),
             self.content_height().max((bounds.height - header).max(0.0)),
         );
+        if let Some(index) = self.rename_editor.as_ref().map(|editor| editor.index) {
+            if let Some(rect) = self.title_editor_rect(index) {
+                if let Some(editor) = &mut self.rename_editor {
+                    editor.input.layout(rect);
+                }
+            }
+        }
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if let Some(result) = self.route_rename_editor_event(event, ctx) {
+            return result;
+        }
+
         if let Some(menu) = &mut self.context_menu {
             if menu.is_visible() {
                 let result = menu.event(event, ctx);
@@ -1281,6 +1419,12 @@ impl Widget for AssetGrid {
                 }
                 return EventResult::Ignored;
             }
+            UiEvent::KeyDown { key: KeyCode::F2, .. } if self.focused => {
+                if let Some(index) = self.selected {
+                    return self.start_rename(index, ctx);
+                }
+                return EventResult::Ignored;
+            }
             UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, .. } if self.focused => {
                 return self.activate_selected(ctx);
             }
@@ -1290,6 +1434,17 @@ impl Widget for AssetGrid {
     }
 
     fn after_child_event(&mut self, _event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if self.rename_editor.is_some() {
+            match _event {
+                UiEvent::KeyDown { key: KeyCode::Enter, .. } | UiEvent::FocusLost => {
+                    return self.commit_rename(ctx);
+                }
+                UiEvent::KeyDown { key: KeyCode::Escape, .. } => {
+                    return self.cancel_rename(ctx);
+                }
+                _ => {}
+            }
+        }
         if self.sync_filter_query_from_input() {
             ctx.request_repaint();
             EventResult::Handled
@@ -1338,6 +1493,9 @@ impl Widget for AssetGrid {
                     self.card_rect_at_visible_position(visible_position),
                 );
             }
+            if let Some(editor) = &self.rename_editor {
+                editor.input.paint(ctx);
+            }
         }
         ctx.pop_clip();
 
@@ -1365,21 +1523,36 @@ impl Widget for AssetGrid {
     }
 
     fn child_count(&self) -> usize {
-        usize::from(self.filter_input.is_some())
+        usize::from(self.filter_input.is_some()) + usize::from(self.rename_editor.is_some())
     }
 
     fn child(&self, index: usize) -> Option<&dyn Widget> {
-        match index {
-            0 => self.filter_input.as_ref().map(|input| input.as_ref() as &dyn Widget),
-            _ => None,
+        let filter_count = usize::from(self.filter_input.is_some());
+        if index == 0 {
+            if let Some(input) = &self.filter_input {
+                return Some(input.as_ref() as &dyn Widget);
+            }
         }
+        if index == filter_count {
+            return self.rename_editor.as_ref().map(|editor| editor.input.as_ref() as &dyn Widget);
+        }
+        None
     }
 
     fn child_mut(&mut self, index: usize) -> Option<&mut dyn Widget> {
-        match index {
-            0 => self.filter_input.as_mut().map(|input| input.as_mut() as &mut dyn Widget),
-            _ => None,
+        let filter_count = usize::from(self.filter_input.is_some());
+        if index == 0 {
+            if let Some(input) = &mut self.filter_input {
+                return Some(input.as_mut() as &mut dyn Widget);
+            }
         }
+        if index == filter_count {
+            return self
+                .rename_editor
+                .as_mut()
+                .map(|editor| editor.input.as_mut() as &mut dyn Widget);
+        }
+        None
     }
 
     fn as_any(&self) -> Option<&dyn std::any::Any> {
@@ -1572,6 +1745,108 @@ mod tests {
         assert_eq!(loading.thumbnail_status, AssetGridThumbnailStatus::Loading);
         assert!(failed.thumbnail.is_none());
         assert_eq!(failed.thumbnail_status, AssetGridThumbnailStatus::Failed);
+    }
+
+    #[test]
+    fn inline_rename_commits_f2_edit_with_enter() {
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        let mut grid = AssetGrid::new("Assets", vec![item("clip-a", "Old").renamable(true)])
+            .on_rename(|_, _, name| Action::OpenProject(PathBuf::from(name)));
+        grid.layout(Rect::new(0.0, 0.0, 360.0, 220.0));
+        grid.event(&UiEvent::FocusGained, &mut ctx);
+        grid.event(
+            &UiEvent::MouseDown {
+                position: grid.card_rect_for_index(0).expect("card").center(),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::F2, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(grid.child_count(), 1);
+        assert_eq!(
+            grid.event(&UiEvent::TextInput("New".into()), &mut ctx),
+            EventResult::Handled
+        );
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        let actions = actions.borrow();
+        assert_eq!(actions.len(), 1);
+        let Action::OpenProject(path) = &actions[0] else {
+            panic!("expected rename custom action");
+        };
+        assert_eq!(path, &PathBuf::from("New"));
+        assert_eq!(grid.child_count(), 0);
+    }
+
+    #[test]
+    fn inline_rename_escape_cancels_without_dispatch() {
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        let mut grid = AssetGrid::new("Assets", vec![item("clip-a", "Old").renamable(true)])
+            .on_rename(|_, _, name| Action::OpenProject(PathBuf::from(name)));
+        grid.layout(Rect::new(0.0, 0.0, 360.0, 220.0));
+        grid.event(&UiEvent::FocusGained, &mut ctx);
+        grid.event(
+            &UiEvent::MouseDown {
+                position: grid.card_rect_for_index(0).expect("card").center(),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        grid.event(
+            &UiEvent::KeyDown { key: KeyCode::F2, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        grid.event(&UiEvent::TextInput("New".into()), &mut ctx);
+
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert!(actions.borrow().is_empty());
+        assert_eq!(grid.child_count(), 0);
     }
 
     #[test]

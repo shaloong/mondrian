@@ -397,11 +397,17 @@ impl AssetLibrary {
             });
         }
         let db = self.db.lock();
-        db.execute(
-            "UPDATE folders SET name = ?1, updated_at = ?2 WHERE id = ?3",
-            rusqlite::params![trimmed, chrono::Utc::now().to_rfc3339(), folder_id],
-        )
-        .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
+        let changed = db
+            .execute(
+                "UPDATE folders SET name = ?1, updated_at = ?2 WHERE id = ?3",
+                rusqlite::params![trimmed, chrono::Utc::now().to_rfc3339(), folder_id],
+            )
+            .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
+        if changed == 0 {
+            return Err(MondrianError::AssetDbError {
+                reason: format!("文件夹不存在：{folder_id}"),
+            });
+        }
         Ok(())
     }
 
@@ -938,6 +944,13 @@ mod tests {
         lib.rename_folder(&id, "New").expect("rename");
         let folders = lib.list_folders().expect("list");
         assert_eq!(folders[0].name, "New");
+    }
+
+    #[test]
+    fn rename_nonexistent_folder_fails() {
+        let lib = open_test_library();
+        let err = lib.rename_folder("missing-folder", "New").unwrap_err();
+        assert!(matches!(err, MondrianError::AssetDbError { .. }));
     }
 
     #[test]

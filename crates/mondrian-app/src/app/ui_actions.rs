@@ -78,6 +78,10 @@ pub const ASSETS_OPEN_FOLDER: &str = "open_folder";
 pub const ASSETS_IMPORT_FILES: &str = "import_files";
 /// Action name for relinking one asset-library record to a new media path.
 pub const ASSETS_RELINK_ASSET: &str = "relink_asset";
+/// Action name for renaming one asset-library record.
+pub const ASSETS_RENAME_ASSET: &str = "rename_asset";
+/// Action name for renaming one asset-library folder/bin.
+pub const ASSETS_RENAME_FOLDER: &str = "rename_folder";
 /// Action name for toggling proxy playback for one video asset.
 pub const ASSETS_SET_PROXY_MODE: &str = "set_proxy_mode";
 /// Action name for deleting one asset from the library.
@@ -543,6 +547,24 @@ pub struct AssetsRelinkAssetPayload {
     pub path: PathBuf,
 }
 
+/// Rename one asset-library record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetsRenameAssetPayload {
+    /// Asset to rename.
+    pub asset_id: AssetId,
+    /// New user-facing asset name.
+    pub name: String,
+}
+
+/// Rename one asset-library folder/bin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetsRenameFolderPayload {
+    /// Folder to rename.
+    pub folder_id: String,
+    /// New user-facing folder name.
+    pub name: String,
+}
+
 /// Enable or disable proxy playback for one video asset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssetsSetProxyModePayload {
@@ -772,6 +794,16 @@ pub fn assets_import_files_action(payload: AssetsImportFilesPayload) -> Action {
 /// Build an action that relinks one asset to a replacement file.
 pub fn assets_relink_asset_action(payload: AssetsRelinkAssetPayload) -> Action {
     custom_assets_action(ASSETS_RELINK_ASSET, payload)
+}
+
+/// Build an action that renames one asset.
+pub fn assets_rename_asset_action(payload: AssetsRenameAssetPayload) -> Action {
+    custom_assets_action(ASSETS_RENAME_ASSET, payload)
+}
+
+/// Build an action that renames one folder.
+pub fn assets_rename_folder_action(payload: AssetsRenameFolderPayload) -> Action {
+    custom_assets_action(ASSETS_RENAME_FOLDER, payload)
 }
 
 /// Build an action that toggles proxy playback for one video asset.

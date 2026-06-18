@@ -44,19 +44,20 @@ use crate::app::ui_actions::{
     assets_create_solid_color_action, assets_delete_asset_action, assets_delete_folder_action,
     assets_delete_selection_action, assets_import_files_action, assets_move_asset_action,
     assets_move_folder_action, assets_move_selection_action, assets_open_folder_action,
-    assets_prepare_drag_action, assets_set_proxy_mode_action, effects_add_to_clip_action,
-    export_enqueue_action, export_set_draft_action, inspector_remove_effect_action,
-    inspector_select_effect_action, inspector_set_clip_curve_action,
-    inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
-    inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
-    inspector_set_effect_enabled_action, inspector_set_effect_property_action,
-    timeline_add_track_action, timeline_drop_asset_action, timeline_move_clip_action,
-    timeline_move_track_action, timeline_seek_action, timeline_select_clip_action,
-    timeline_set_track_control_action, timeline_trim_clip_action, AppShellRelinkAssetDialogPayload,
-    AppShellRevealInFileManagerPayload, AssetsCreateAssetPayload, AssetsCreateFolderPayload,
-    AssetsDeleteAssetPayload, AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload,
-    AssetsImportFilesPayload, AssetsMoveAssetPayload, AssetsMoveFolderPayload,
-    AssetsMoveSelectionPayload, AssetsOpenFolderPayload, AssetsPrepareDragPayload,
+    assets_prepare_drag_action, assets_rename_asset_action, assets_rename_folder_action,
+    assets_set_proxy_mode_action, effects_add_to_clip_action, export_enqueue_action,
+    export_set_draft_action, inspector_remove_effect_action, inspector_select_effect_action,
+    inspector_set_clip_curve_action, inspector_set_clip_enabled_action,
+    inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
+    inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
+    inspector_set_effect_property_action, timeline_add_track_action, timeline_drop_asset_action,
+    timeline_move_clip_action, timeline_move_track_action, timeline_seek_action,
+    timeline_select_clip_action, timeline_set_track_control_action, timeline_trim_clip_action,
+    AppShellRelinkAssetDialogPayload, AppShellRevealInFileManagerPayload, AssetsCreateAssetPayload,
+    AssetsCreateFolderPayload, AssetsDeleteAssetPayload, AssetsDeleteFolderPayload,
+    AssetsDeleteSelectionPayload, AssetsImportFilesPayload, AssetsMoveAssetPayload,
+    AssetsMoveFolderPayload, AssetsMoveSelectionPayload, AssetsOpenFolderPayload,
+    AssetsPrepareDragPayload, AssetsRenameAssetPayload, AssetsRenameFolderPayload,
     AssetsSetProxyModePayload, EffectsAddToClipPayload, ExportDraftUpdatePayload,
     ExportEnqueuePayload, ExportOutputDialogPayload, ImportMediaDialogPayload,
     InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
@@ -1436,7 +1437,8 @@ fn asset_grid_item_from_asset(
         .with_activate_action(assets_prepare_drag_action(AssetsPrepareDragPayload {
             asset_id: asset.id,
         }))
-        .with_context_menu(context_menu_items);
+        .with_context_menu(context_menu_items)
+        .renamable(true);
     if let Some(state) = thumbnail_state {
         item = match state {
             AssetThumbnailState::Unavailable => item,
@@ -1581,7 +1583,8 @@ fn asset_grid_item_from_folder(folder: &FolderRecord, item_count: usize) -> Asse
                 assets_delete_folder_action(AssetsDeleteFolderPayload { folder_id }),
             ),
             AppIcon::Trash,
-        )]),
+        )])
+        .renamable(true),
         AppIcon::Folder,
     )
 }
@@ -1737,7 +1740,8 @@ fn panel_list(model: &PanelListModel) -> PanelList {
 
 fn asset_grid(model: &AssetGridModel) -> AssetGrid {
     let mut grid = AssetGrid::new(model.title.clone(), model.items.clone())
-        .with_subtitle(model.subtitle.clone());
+        .with_subtitle(model.subtitle.clone())
+        .on_rename(asset_grid_rename_action);
     if let Some(placeholder) = &model.filter_placeholder {
         grid = grid.with_filter(placeholder.clone());
     }
@@ -1805,6 +1809,24 @@ fn asset_grid(model: &AssetGridModel) -> AssetGrid {
         });
     }
     grid
+}
+
+fn asset_grid_rename_action(_index: usize, item: &AssetGridItem, name: &str) -> Action {
+    match item.drag_payload.as_ref() {
+        Some(DragPayload::Asset(asset_id)) => {
+            assets_rename_asset_action(AssetsRenameAssetPayload {
+                asset_id: *asset_id,
+                name: name.to_owned(),
+            })
+        }
+        Some(DragPayload::AssetFolder(folder_id)) => {
+            assets_rename_folder_action(AssetsRenameFolderPayload {
+                folder_id: folder_id.clone(),
+                name: name.to_owned(),
+            })
+        }
+        _ => Action::NoOp,
+    }
 }
 
 fn asset_grid_selection_context_menu_items(
@@ -2993,16 +3015,16 @@ mod tests {
         AssetsCreateAssetPayload, AssetsCreateFolderPayload, AssetsDeleteAssetPayload,
         AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload, AssetsImportFilesPayload,
         AssetsMoveAssetPayload, AssetsMoveFolderPayload, AssetsMoveSelectionPayload,
-        AssetsOpenFolderPayload, AssetsSetProxyModePayload, ImportMediaDialogPayload,
-        APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_RELINK_ASSET_DIALOG,
-        APP_SHELL_REVEAL_IN_FILE_MANAGER, ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER,
-        ASSETS_CREATE_SOLID_COLOR, ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER,
-        ASSETS_DELETE_SELECTION, ASSETS_IMPORT_FILES, ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER,
-        ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE, ASSETS_OPEN_FOLDER, ASSETS_PREPARE_DRAG,
-        ASSETS_SET_PROXY_MODE, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE,
-        INSPECTOR_SELECT_EFFECT, INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_EFFECT_PROPERTY,
-        TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
-        TIMELINE_SELECT_CLIP,
+        AssetsOpenFolderPayload, AssetsRenameAssetPayload, AssetsSetProxyModePayload,
+        ImportMediaDialogPayload, APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE,
+        APP_SHELL_RELINK_ASSET_DIALOG, APP_SHELL_REVEAL_IN_FILE_MANAGER,
+        ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR,
+        ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_DELETE_SELECTION, ASSETS_IMPORT_FILES,
+        ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE,
+        ASSETS_OPEN_FOLDER, ASSETS_PREPARE_DRAG, ASSETS_RENAME_ASSET, ASSETS_SET_PROXY_MODE,
+        EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE, INSPECTOR_SELECT_EFFECT,
+        INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_EFFECT_PROPERTY, TIMELINE_ADD_TRACK,
+        TIMELINE_DROP_ASSET, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_SELECT_CLIP,
     };
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
@@ -3645,6 +3667,64 @@ mod tests {
         let payload: AppShellRevealInFileManagerPayload =
             serde_json::from_value(payload.clone()).expect("reveal payload");
         assert_eq!(payload.path, path);
+    }
+
+    #[test]
+    fn assets_panel_inline_rename_dispatches_asset_rename_action() {
+        let root = unique_temp_dir("asset-panel-inline-rename");
+        let library = AssetLibrary::open(root.clone()).expect("open asset library");
+        let asset_id = library.create_solid_color_asset(Some("Old Plate")).expect("create asset");
+        let mut state = AppState::new();
+        state.asset_library = Some(library);
+        let model = SelfHostedPanelModels::from_app_state(&state).assets;
+        let mut grid = asset_grid(&model);
+        grid.layout(Rect::new(0.0, 0.0, 360.0, 240.0));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        grid.event(&UiEvent::FocusGained, &mut ctx);
+        grid.event(
+            &UiEvent::MouseDown {
+                position: grid.card_rect_for_index(0).expect("asset card").center(),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        grid.event(
+            &UiEvent::KeyDown { key: KeyCode::F2, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        grid.event(&UiEvent::TextInput("New Plate".to_owned()), &mut ctx);
+        grid.event(
+            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+
+        let actions = actions.borrow();
+        assert_eq!(actions.len(), 1);
+        let Action::Custom { namespace, name, payload } = &actions[0] else {
+            panic!("expected asset rename action");
+        };
+        assert_eq!(namespace, ASSETS_NAMESPACE);
+        assert_eq!(name, ASSETS_RENAME_ASSET);
+        let payload: AssetsRenameAssetPayload =
+            serde_json::from_value(payload.clone()).expect("rename payload");
+        assert_eq!(payload.asset_id, asset_id);
+        assert_eq!(payload.name, "New Plate");
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
