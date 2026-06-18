@@ -706,6 +706,11 @@ Self-hosted Inspector actions should use typed payloads for clip mutations.
 The curve editor currently emits `ui.inspector.set_clip_curve` with normalized
 points; AppState maps them to opacity keyframes over the selected clip's
 timeline span so curve edits participate in undo/redo and render evaluation.
+Effect property rows are adapter-owned: bools, scalar numbers, colors, text,
+and Vec2/Vec3/Vec4 values render as typed controls in the self-hosted Inspector,
+then dispatch `ui.inspector.set_effect_property` with the full `PropertyValue`.
+Vector rows use stacked component sliders and preserve untouched components in
+the emitted payload.
 Inspector clip mutations are validated at the AppState boundary, including
 locked-track protection; widgets stay domain-light and do not decide whether a
 clip can be edited.

@@ -2225,16 +2225,11 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                 ),
             ));
             for property in &effect.properties {
-                let path = property.path.clone();
-                section = section.with_row(PropertyRow::new(
-                    property.label.clone(),
-                    effect_property_value_widget(
-                        property,
-                        can_edit,
-                        selected_clip,
-                        effect_id,
-                        path,
-                    ),
+                section = section.with_row(effect_property_row(
+                    property,
+                    can_edit,
+                    selected_clip,
+                    effect_id,
                 ));
             }
         }
@@ -2397,6 +2392,39 @@ fn inspector_clip_payload(selection: SelectedClipRef) -> InspectorClipRefPayload
     }
 }
 
+fn effect_property_row(
+    property: &InspectorEffectPropertyModel,
+    can_edit: bool,
+    selection: Option<SelectedClipRef>,
+    effect_id: EffectId,
+) -> PropertyRow {
+    let row = PropertyRow::new(
+        property.label.clone(),
+        effect_property_value_widget(
+            property,
+            can_edit,
+            selection,
+            effect_id,
+            property.path.clone(),
+        ),
+    );
+    if let Some(height) = effect_property_row_height(&property.value) {
+        row.with_height(height)
+    } else {
+        row
+    }
+}
+
+fn effect_property_row_height(value: &PropertyValue) -> Option<f32> {
+    let components: usize = match value {
+        PropertyValue::Vec2(_) => 2,
+        PropertyValue::Vec3(_) => 3,
+        PropertyValue::Vec4(_) => 4,
+        _ => return None,
+    };
+    Some(components as f32 * 26.0 + components.saturating_sub(1) as f32 * 4.0)
+}
+
 /// Build a typed value widget for one effect property row.
 ///
 /// Widget construction depends on the `PropertyValue` variant present in the
@@ -2504,12 +2532,81 @@ fn effect_property_value_widget(
                 )
             }
         }
-        _ => {
-            // Vec2, Vec3, Vec4: not yet rendered as multiple sliders.
-            let display = format!("{:#?}", property.value);
-            Box::new(Label::new(display).with_max_width(200.0))
-        }
+        PropertyValue::Vec2(value) => vector_property_widget(
+            &["X", "Y"],
+            &[value.x, value.y],
+            property,
+            can_edit,
+            selection,
+            effect_id,
+            path,
+            |values| PropertyValue::Vec2(glam::Vec2::new(values[0], values[1])),
+        ),
+        PropertyValue::Vec3(value) => vector_property_widget(
+            &["X", "Y", "Z"],
+            &[value.x, value.y, value.z],
+            property,
+            can_edit,
+            selection,
+            effect_id,
+            path,
+            |values| PropertyValue::Vec3(glam::Vec3::new(values[0], values[1], values[2])),
+        ),
+        PropertyValue::Vec4(value) => vector_property_widget(
+            &["X", "Y", "Z", "W"],
+            value,
+            property,
+            can_edit,
+            selection,
+            effect_id,
+            path,
+            |values| PropertyValue::Vec4([values[0], values[1], values[2], values[3]]),
+        ),
     }
+}
+
+fn vector_property_widget(
+    labels: &[&'static str],
+    values: &[f32],
+    property: &InspectorEffectPropertyModel,
+    can_edit: bool,
+    selection: Option<SelectedClipRef>,
+    effect_id: EffectId,
+    path: String,
+    build_value: fn(&[f32]) -> PropertyValue,
+) -> Box<dyn Widget> {
+    let min = property.min.map(|v| v as f32).unwrap_or(0.0);
+    let max = property.max.map(|v| v as f32).unwrap_or(1.0);
+    let rows = labels
+        .iter()
+        .zip(values.iter())
+        .enumerate()
+        .map(|(component_index, (label, value))| {
+            let base_values = values.to_vec();
+            let selected_clip = selection;
+            let path = path.clone();
+            let slider = Slider::new(*value, min, max).enabled(can_edit).on_change(move |v| {
+                let mut next_values = base_values.clone();
+                next_values[component_index] = v.clamp(min, max);
+                inspector_effect_property_action(
+                    selected_clip,
+                    effect_id,
+                    &path,
+                    build_value(&next_values),
+                )
+            });
+            FlexChild::fixed(Box::new(
+                FlexContainer::row(vec![
+                    FlexChild::fixed(Box::new(
+                        Label::new(*label).muted().with_font_size(11.0).with_padding(0.0, 0.0),
+                    )),
+                    FlexChild::flex(Box::new(slider), 1.0),
+                ])
+                .with_gap(8.0),
+            ))
+        })
+        .collect();
+    Box::new(FlexContainer::column(rows).with_gap(4.0))
 }
 
 fn inspector_effect_property_action(
@@ -2536,8 +2633,8 @@ mod tests {
         APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
         APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_SAVE_PROJECT_AS_DIALOG, ASSETS_NAMESPACE,
         ASSETS_PREPARE_DRAG, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE,
-        INSPECTOR_SET_CLIP_CURVE, TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET, TIMELINE_MOVE_TRACK,
-        TIMELINE_NAMESPACE, TIMELINE_SELECT_CLIP,
+        INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_EFFECT_PROPERTY, TIMELINE_ADD_TRACK,
+        TIMELINE_DROP_ASSET, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_SELECT_CLIP,
     };
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
@@ -3806,6 +3903,92 @@ mod tests {
         assert_eq!(payload.clip.clip_id, clip_id);
         assert_eq!(payload.clip.track_id, track_id);
         assert!(payload.clip.is_video_track);
+    }
+
+    #[test]
+    fn inspector_effect_vector_property_rows_get_multi_component_height() {
+        assert_eq!(
+            effect_property_row_height(&PropertyValue::Vec2(glam::Vec2::ZERO)),
+            Some(56.0)
+        );
+        assert_eq!(
+            effect_property_row_height(&PropertyValue::Vec4([0.0, 0.0, 0.0, 0.0])),
+            Some(116.0)
+        );
+        assert_eq!(effect_property_row_height(&PropertyValue::Float(0.5)), None);
+    }
+
+    #[test]
+    fn inspector_effect_vec3_property_widget_dispatches_component_change() {
+        let effect_id = EffectId::new();
+        let selection = SelectedClipRef {
+            track_id: TrackId::new(),
+            is_video_track: true,
+            clip_id: ClipId::new(),
+        };
+        let property = InspectorEffectPropertyModel {
+            path: "lighting.direction".to_string(),
+            label: "Direction".to_string(),
+            value: PropertyValue::Vec3(glam::Vec3::new(0.1, 0.2, 0.3)),
+            min: Some(0.0),
+            max: Some(1.0),
+            step: Some(0.01),
+            is_animatable: true,
+        };
+        let mut widget = effect_property_value_widget(
+            &property,
+            true,
+            Some(selection),
+            effect_id,
+            property.path.clone(),
+        );
+        widget.layout(Rect::new(0.0, 0.0, 220.0, 82.0));
+
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let result = widget.event(
+            &UiEvent::MouseDown {
+                position: Point::new(80.0, 53.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        let recorded = actions.borrow();
+        assert_eq!(recorded.len(), 1);
+        let Action::Custom { namespace, name, payload } = &recorded[0] else {
+            panic!("expected inspector custom action, got {:?}", recorded[0]);
+        };
+        assert_eq!(namespace, INSPECTOR_NAMESPACE);
+        assert_eq!(name, INSPECTOR_SET_EFFECT_PROPERTY);
+        let payload: InspectorSetEffectPropertyPayload =
+            serde_json::from_value(payload.clone()).expect("set effect property payload");
+        assert_eq!(payload.clip.clip_id, selection.clip_id);
+        assert_eq!(payload.effect_id, effect_id);
+        assert_eq!(payload.path, "lighting.direction");
+        let PropertyValue::Vec3(value) = payload.value else {
+            panic!("expected Vec3 payload");
+        };
+        assert_eq!(value.x, 0.1);
+        assert_eq!(value.y, 0.2);
+        assert!(
+            value.z > 0.3,
+            "clicking the third component slider should update z, got {value:?}"
+        );
     }
 
     #[test]
