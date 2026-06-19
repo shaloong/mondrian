@@ -515,10 +515,10 @@ impl ViewerSurface {
         ctx.encoder.draw_rect(rect, bg, radius);
         match control {
             ViewerControl::MarkIn => {
-                self.paint_mark_control(ctx, rect, "I", icon);
+                paint_mark_in_icon(ctx, rect, icon);
             }
             ViewerControl::MarkOut => {
-                self.paint_mark_control(ctx, rect, "O", icon);
+                paint_mark_out_icon(ctx, rect, icon);
             }
             ViewerControl::JumpStart => {
                 ctx.encoder.draw_rect(
@@ -559,15 +559,6 @@ impl ViewerSurface {
                 );
             }
         }
-    }
-
-    fn paint_mark_control(&self, ctx: &mut PaintContext, rect: Rect, label: &str, color: Color) {
-        ctx.encoder.draw_text(
-            label,
-            ctx.theme.typography.small.font_size,
-            Point::new(rect.x + 8.0, rect.y + 6.0),
-            color,
-        );
     }
 }
 
@@ -629,6 +620,34 @@ fn paint_right_triangle(ctx: &mut PaintContext, rect: Rect, left: f32, color: Co
         ],
         color,
     );
+}
+
+fn paint_mark_in_icon(ctx: &mut PaintContext, rect: Rect, color: Color) {
+    let x = rect.x.round();
+    let y = rect.y.round();
+    ctx.encoder.draw_rect(Rect::new(x + 7.0, y + 7.0, 2.0, 12.0), color, 1.0);
+    ctx.encoder.draw_triangles(
+        &[
+            Point::new(x + 12.0, y + 8.0),
+            Point::new(x + 12.0, y + 18.0),
+            Point::new(x + 18.0, y + 13.0),
+        ],
+        color,
+    );
+}
+
+fn paint_mark_out_icon(ctx: &mut PaintContext, rect: Rect, color: Color) {
+    let x = rect.x.round();
+    let y = rect.y.round();
+    ctx.encoder.draw_triangles(
+        &[
+            Point::new(x + 12.0, y + 13.0),
+            Point::new(x + 18.0, y + 8.0),
+            Point::new(x + 18.0, y + 18.0),
+        ],
+        color,
+    );
+    ctx.encoder.draw_rect(Rect::new(x + 20.0, y + 7.0, 2.0, 12.0), color, 1.0);
 }
 
 fn fit_aspect(bounds: Rect, aspect: f32) -> Rect {
@@ -1024,12 +1043,33 @@ mod tests {
         viewer.paint(&mut ctx);
 
         assert_eq!(
-            encoder.triangles, 12,
-            "jump and step buttons still paint triangles"
+            encoder.triangles, 18,
+            "jump, step, and mark buttons should paint geometric triangles"
         );
         assert!(
             encoder.rects.len() >= 18,
             "playing transport should add pause-bar geometry"
+        );
+    }
+
+    #[test]
+    fn mark_transport_controls_paint_geometry_without_text_letters() {
+        let mut viewer = ViewerSurface::new("Viewer", 1920, 1080);
+        viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 500.0, 320.0),
+        };
+
+        viewer.paint(&mut ctx);
+
+        assert!(!encoder.texts.iter().any(|text| text == "I" || text == "O"));
+        assert_eq!(
+            encoder.triangles, 21,
+            "mark in/out controls should contribute geometric marker triangles"
         );
     }
 
