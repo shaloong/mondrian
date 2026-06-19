@@ -1570,10 +1570,7 @@ fn asset_grid_items_from_library_records(
         items.push(asset_grid_parent_item(folder.parent_id.clone()));
     }
     for folder in folders.iter().filter(|folder| folder.parent_id.as_deref() == parent_id) {
-        let item_count = assets
-            .iter()
-            .filter(|asset| asset.folder_id.as_deref() == Some(folder.id.as_str()))
-            .count();
+        let item_count = asset_folder_direct_item_count(folders, &assets, folder);
         items.push(asset_grid_item_from_folder(folder, item_count));
     }
     items.extend(
@@ -1586,6 +1583,23 @@ fn asset_grid_items_from_library_records(
             }),
     );
     items
+}
+
+fn asset_folder_direct_item_count(
+    folders: &[FolderRecord],
+    assets: &[AssetRecord],
+    folder: &FolderRecord,
+) -> usize {
+    let folder_id = folder.id.as_str();
+    let child_folders = folders
+        .iter()
+        .filter(|child| child.parent_id.as_deref() == Some(folder_id))
+        .count();
+    let child_assets = assets
+        .iter()
+        .filter(|asset| asset.folder_id.as_deref() == Some(folder_id))
+        .count();
+    child_folders + child_assets
 }
 
 fn asset_grid_parent_item(parent_id: Option<String>) -> AssetGridItem {
@@ -5195,7 +5209,7 @@ mod tests {
         let folder = &models.assets.items[0];
         assert_eq!(folder.id, format!("folder:{folder_id}"));
         assert_eq!(folder.title, "Rushes");
-        assert_eq!(folder.subtitle, "Folder · 1 item");
+        assert_eq!(folder.subtitle, "Folder · 2 items");
         assert_eq!(badge_labels(folder), ["BIN"]);
         assert!(folder.icon.is_some());
         assert_eq!(

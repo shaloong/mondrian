@@ -821,6 +821,8 @@ folder context. The app adapter maps `AssetRecord` into `AssetGridItem` view
 data and semantic media color tokens; the widget crate does not depend on the
 asset library or editor domain. The root Assets view is not a flat dump of
 every database row: it shows top-level folders first, then root/unfiled assets.
+Folder subtitles count direct child assets plus direct child folders, without
+recursively flattening nested bins into the visible grid.
 Asset cards may receive an optional `RasterImage` thumbnail. The thumbnail is
 an already-decoded RGBA payload with a stable atlas key; `AssetGrid` only
 validates dimensions, clips it to the card preview region, and forwards it to
