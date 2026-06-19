@@ -169,6 +169,8 @@ pub enum TimelineEditCommand {
     MarkOutAtPlayhead,
     /// Clear the sequence in/out range.
     ClearInOutPoints,
+    /// Toggle timeline playback from focused timeline keyboard input.
+    TogglePlayback,
 }
 
 /// Pointer tool currently active inside the timeline surface.
@@ -1816,6 +1818,9 @@ impl TimelineView {
             }
             KeyCode::O if !modifiers.ctrl && !modifiers.meta && !modifiers.shift => {
                 TimelineEditCommand::MarkOutAtPlayhead
+            }
+            KeyCode::Space if !modifiers.ctrl && !modifiers.meta && !modifiers.shift => {
+                TimelineEditCommand::TogglePlayback
             }
             KeyCode::Delete | KeyCode::Backspace if !modifiers.ctrl && !modifiers.meta => {
                 if modifiers.shift {
@@ -4771,6 +4776,7 @@ mod tests {
                 TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
                 TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
                 TimelineEditCommand::ClearInOutPoints => Action::NoOp,
+                TimelineEditCommand::TogglePlayback => Action::TogglePlay,
             }
         });
         view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
@@ -4827,6 +4833,7 @@ mod tests {
             TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
             TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
             TimelineEditCommand::ClearInOutPoints => Action::NoOp,
+            TimelineEditCommand::TogglePlayback => Action::TogglePlay,
         });
         view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
 
@@ -4900,6 +4907,7 @@ mod tests {
             command_log.borrow_mut().push(command);
             match command {
                 TimelineEditCommand::ClearInOutPoints => Action::SaveProject,
+                TimelineEditCommand::TogglePlayback => Action::TogglePlay,
                 _ => Action::NoOp,
             }
         });
@@ -4972,6 +4980,7 @@ mod tests {
                 TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
                 TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
                 TimelineEditCommand::ClearInOutPoints => Action::NoOp,
+                TimelineEditCommand::TogglePlayback => Action::TogglePlay,
             })
             .on_track_add(|kind| match kind {
                 TimelineTrackKind::Video => Action::Play,
@@ -5271,6 +5280,56 @@ mod tests {
             actions.borrow().as_slice(),
             &[Action::MarkInAtPlayhead, Action::MarkOutAtPlayhead]
         );
+    }
+
+    #[test]
+    fn focused_space_dispatches_toggle_playback_command() {
+        let actions = RefCell::new(Vec::new());
+        let commands = Rc::new(RefCell::new(Vec::new()));
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let command_log = Rc::clone(&commands);
+        let mut view = timeline().on_edit_command(move |command| {
+            command_log.borrow_mut().push(command);
+            match command {
+                TimelineEditCommand::TogglePlayback => Action::TogglePlay,
+                _ => Action::NoOp,
+            }
+        });
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        view.event(&UiEvent::FocusGained, &mut ctx);
+        assert_eq!(
+            view.event(
+                &UiEvent::KeyDown { key: KeyCode::Space, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            view.event(
+                &UiEvent::KeyDown { key: KeyCode::Space, modifiers: Modifiers::ctrl() },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+
+        assert_eq!(
+            commands.borrow().as_slice(),
+            &[TimelineEditCommand::TogglePlayback]
+        );
+        assert_eq!(actions.borrow().as_slice(), &[Action::TogglePlay]);
     }
 
     #[test]

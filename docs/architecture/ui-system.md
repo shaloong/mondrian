@@ -853,6 +853,10 @@ shortcuts, and scripts share the same selected-clip mutation path.
 Mark In / Mark Out shortcuts use `TimelineEditCommand::MarkInAtPlayhead` and
 `TimelineEditCommand::MarkOutAtPlayhead`, then route through shared app actions
 so timeline and viewer shortcuts can converge on the same command boundary.
+Focused Timeline Space uses `TimelineEditCommand::TogglePlayback`, which the
+self-hosted adapter maps to `Action::TogglePlay`; Space remains panel-local
+rather than a global shortcut so text editing cannot accidentally toggle
+playback.
 Ruler marker dragging is the explicit-frame counterpart: `TimelineView` owns
 only hit testing, pointer capture, and local preview for the in/out marker, then
 emits `ui.timeline.set_in_out_point` on mouse release. The self-hosted adapter

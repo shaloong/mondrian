@@ -2437,6 +2437,7 @@ fn timeline_edit_command_action(
         TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
         TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
         TimelineEditCommand::ClearInOutPoints => timeline_clear_in_out_points_action(),
+        TimelineEditCommand::TogglePlayback => Action::TogglePlay,
     }
 }
 
@@ -2444,6 +2445,7 @@ fn timeline_edit_command_shortcut_label(command: TimelineEditCommand) -> Option<
     let action = match command {
         TimelineEditCommand::OpenNestedSequence(_) => return None,
         TimelineEditCommand::ClearInOutPoints => return None,
+        TimelineEditCommand::TogglePlayback => return Some("Space".to_owned()),
         TimelineEditCommand::CutSelection => Action::Cut,
         TimelineEditCommand::CopySelection => Action::Copy,
         TimelineEditCommand::PasteAtPlayhead => Action::Paste,
@@ -5513,6 +5515,10 @@ mod tests {
             Action::Duplicate
         );
         assert_eq!(
+            timeline_edit_command_action(&model, TimelineEditCommand::TogglePlayback),
+            Action::TogglePlay
+        );
+        assert_eq!(
             timeline_edit_command_shortcut_label(TimelineEditCommand::CopySelection).as_deref(),
             Some("Ctrl+C")
         );
@@ -5524,6 +5530,10 @@ mod tests {
         assert_eq!(
             timeline_edit_command_shortcut_label(TimelineEditCommand::TrimSelectionInToPlayhead),
             None
+        );
+        assert_eq!(
+            timeline_edit_command_shortcut_label(TimelineEditCommand::TogglePlayback).as_deref(),
+            Some("Space")
         );
 
         let trim_action =
