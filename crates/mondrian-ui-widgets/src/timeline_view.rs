@@ -944,9 +944,6 @@ impl TimelineView {
         }
         for (track_index, track) in self.tracks.iter().enumerate() {
             for (clip_index, clip) in track.clips.iter().enumerate().rev() {
-                if clip.disabled {
-                    continue;
-                }
                 if self.clip_rect(track_index, clip).contains(point) {
                     return Some(TimelineClipRef { track_index, clip_index });
                 }
@@ -3685,6 +3682,49 @@ mod tests {
             ctx.requests.pointer_capture,
             Some(PointerCaptureRequest::Capture(view.id()))
         );
+    }
+
+    #[test]
+    fn disabled_clip_remains_selectable_for_inspection() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut view = TimelineView::new(vec![TimelineTrack::video(
+            "V1",
+            vec![TimelineClip::new("Disabled", 0, 24)
+                .disabled(true)
+                .with_select_action(Action::SaveProject)],
+        )]);
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            view.event(
+                &UiEvent::MouseDown {
+                    position: Point::new(108.0, 42.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(
+            view.selected_clip(),
+            Some(TimelineClipRef { track_index: 0, clip_index: 0 })
+        );
+        assert_eq!(actions.borrow().as_slice(), &[Action::SaveProject]);
     }
 
     #[test]

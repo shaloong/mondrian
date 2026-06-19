@@ -4447,6 +4447,60 @@ mod tests {
     }
 
     #[test]
+    fn timeline_panel_disabled_clip_still_selects_for_inspection() {
+        let mut sequence = Sequence::new("edit");
+        let tb = sequence.time_base();
+        let mut clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(24, tb));
+        clip.is_disabled = true;
+        let clip_id = clip.id;
+        let track_id = sequence.video_tracks[0].id;
+        sequence.video_tracks[0].add_clip(clip).expect("add clip");
+        let model = TimelinePanelModel::from_sequence(&sequence, &[], &[]);
+        assert!(model.tracks[0].clips[0].disabled);
+
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut panel = timeline_panel(&model);
+        panel.layout(mondrian_ui_core::types::Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            panel.event(
+                &UiEvent::MouseDown {
+                    position: Point::new(140.0, 42.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        let recorded = actions.borrow();
+        let Action::Custom { namespace, name, payload } = &recorded[0] else {
+            panic!("expected custom timeline select action");
+        };
+        assert_eq!(namespace, TIMELINE_NAMESPACE);
+        assert_eq!(name, TIMELINE_SELECT_CLIP);
+        let payload: TimelineSelectClipPayload =
+            serde_json::from_value(payload.clone()).expect("select payload");
+        assert_eq!(payload.track_id, track_id);
+        assert_eq!(payload.clip_id, clip_id);
+        assert!(payload.is_video_track);
+    }
+
+    #[test]
     fn timeline_panel_asset_drop_emits_typed_drop_asset_action() {
         let model = demo_timeline_model();
         let target = model.track_identity(TimelineTrackRef { track_index: 0 }).expect("track");

@@ -659,6 +659,10 @@ payloads as the Timeline view.
 Timeline selection actions treat the clip id as authoritative and resolve the
 current track from `AppState`; track ids in widget snapshots are context only
 because they can be stale after moves, undo/redo, or refresh lag.
+`TimelineClip::disabled` is visual playback state, not an input-hit-test guard:
+disabled or locked-track clips must remain selectable so the Inspector can show
+read-only state. Edit prevention belongs to locked-track checks in drag setup
+and, authoritatively, app command handlers.
 Track, clip, mask, and animation keyframe selection state is owned by
 `mondrian-app::app::selection`; action handlers should call its AppState
 methods instead of directly clearing individual selection fields. Track
