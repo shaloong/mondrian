@@ -219,6 +219,12 @@ Choosing an export output path is also an app-shell intent: panels emit
 `self_hosted::shell::resolve_app_shell_action` converts the native save-dialog
 result into `ui.export.set_draft(OutputPath(...))`. Widgets must not call
 platform file dialogs directly.
+Export queue visibility follows the same adapter boundary. The self-hosted
+Export panel may show a bounded snapshot of recent `RenderJob` ids, output file
+names, statuses, progress, and cancel affordances, but queue mutation still goes
+through typed `ui.export.cancel_job` / `ui.export.clear_completed` actions.
+`RenderQueue` owns worker state, cancellation flags, and terminal-job cleanup;
+generic widgets only render labels and buttons from the panel model.
 Those app-shell dialog intents are built through `app::ui_actions` helpers so
 menus and self-hosted panels share the same stable custom-action ids. Shell
 local actions, such as About and close-modal, use the same helper boundary

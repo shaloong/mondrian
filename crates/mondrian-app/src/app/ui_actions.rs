@@ -4,7 +4,7 @@
 //! to `Action::Custom` payloads before actions reach the app state layer.
 
 use mondrian_core::effect_data::EffectType;
-use mondrian_core::types::{AssetId, ClipId, EffectId, SequenceId, TrackId};
+use mondrian_core::types::{AssetId, ClipId, EffectId, JobId, SequenceId, TrackId};
 use mondrian_core::{ColorSpace, ProjectSettings, Rational, Resolution};
 use mondrian_editor_state::Action;
 use mondrian_export::preset::{ExportPreset, TimelineExportRange};
@@ -121,6 +121,10 @@ pub const EXPORT_NAMESPACE: &str = "ui.export";
 pub const EXPORT_ENQUEUE: &str = "enqueue";
 /// Action name for updating the self-hosted export draft.
 pub const EXPORT_SET_DRAFT: &str = "set_draft";
+/// Action name for cancelling one export queue job.
+pub const EXPORT_CANCEL_JOB: &str = "cancel_job";
+/// Action name for clearing completed export queue jobs.
+pub const EXPORT_CLEAR_COMPLETED: &str = "clear_completed";
 
 /// Custom action namespace for project lifecycle operations supplied by shell UI.
 pub const PROJECT_NAMESPACE: &str = "ui.project";
@@ -692,6 +696,13 @@ pub struct ExportEnqueuePayload {
     pub output_path: PathBuf,
 }
 
+/// Target one export queue job from a UI frontend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExportJobTargetPayload {
+    /// Render queue job id.
+    pub job_id: JobId,
+}
+
 /// Update one field of the self-hosted export draft.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ExportDraftUpdatePayload {
@@ -1017,6 +1028,16 @@ pub fn export_enqueue_action(payload: ExportEnqueuePayload) -> Action {
 /// Build an action that updates one export draft field.
 pub fn export_set_draft_action(payload: ExportDraftUpdatePayload) -> Action {
     custom_export_action(EXPORT_SET_DRAFT, payload)
+}
+
+/// Build an action that cancels one export queue job.
+pub fn export_cancel_job_action(payload: ExportJobTargetPayload) -> Action {
+    custom_export_action(EXPORT_CANCEL_JOB, payload)
+}
+
+/// Build an action that clears completed export queue jobs.
+pub fn export_clear_completed_action() -> Action {
+    custom_export_action(EXPORT_CLEAR_COMPLETED, ())
 }
 
 /// Build an action that creates a project from shell UI.

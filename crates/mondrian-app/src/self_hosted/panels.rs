@@ -5,6 +5,7 @@
 //! factories so real `AppState` / `EditorState` adapters can replace it without
 //! changing dock layout or widget construction.
 
+use std::path::Path;
 use std::rc::Rc;
 
 use mondrian_assets::library::FolderRecord;
@@ -12,12 +13,13 @@ use mondrian_assets::{AssetKind, AssetLibrary, AssetRecord};
 use mondrian_core::automation::timecode_to_ticks;
 use mondrian_core::automation::PropertyValue;
 use mondrian_core::effect_data::EffectType;
-use mondrian_core::types::{AssetId, ClipId, EffectId, SequenceId, TimeCode, TrackId};
+use mondrian_core::types::{AssetId, ClipId, EffectId, JobId, SequenceId, TimeCode, TrackId};
 use mondrian_core::Color;
 use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
 use mondrian_editor_state::Action;
 use mondrian_effects::{effect_display_name, effect_library_types};
 use mondrian_export::preset::{ExportPreset, TimelineExportRange, VideoCodecConfig};
+use mondrian_export::queue::JobStatus;
 use mondrian_timeline::clip::{Clip, Transform2D};
 use mondrian_timeline::sequence::Sequence;
 use mondrian_timeline::track::Track;
@@ -48,8 +50,9 @@ use crate::app::ui_actions::{
     assets_delete_selection_action, assets_import_files_action, assets_move_asset_action,
     assets_move_folder_action, assets_move_selection_action, assets_open_folder_action,
     assets_prepare_drag_action, assets_rename_asset_action, assets_rename_folder_action,
-    assets_set_proxy_mode_action, effects_add_to_clip_action, export_enqueue_action,
-    export_set_draft_action, inspector_remove_effect_action, inspector_select_effect_action,
+    assets_set_proxy_mode_action, effects_add_to_clip_action, export_cancel_job_action,
+    export_clear_completed_action, export_enqueue_action, export_set_draft_action,
+    inspector_remove_effect_action, inspector_select_effect_action,
     inspector_set_clip_curve_action, inspector_set_clip_enabled_action,
     inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
     inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
@@ -65,17 +68,18 @@ use crate::app::ui_actions::{
     AssetsMoveFolderPayload, AssetsMoveSelectionPayload, AssetsOpenFolderPayload,
     AssetsPrepareDragPayload, AssetsRenameAssetPayload, AssetsRenameFolderPayload,
     AssetsSetProxyModePayload, EffectsAddToClipPayload, ExportDraftUpdatePayload,
-    ExportEnqueuePayload, ExportOutputDialogPayload, ImportMediaDialogPayload,
-    InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
-    InspectorRemoveEffectPayload, InspectorSelectEffectPayload, InspectorSetClipCurvePayload,
-    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
-    InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
-    InspectorSetEffectPropertyPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
-    TimelineDropAssetPayload, TimelineInOutPointPayloadKind, TimelineMoveClipPayload,
-    TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload, TimelineSelectClipPayload,
-    TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
-    TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipsPayload,
-    TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
+    ExportEnqueuePayload, ExportJobTargetPayload, ExportOutputDialogPayload,
+    ImportMediaDialogPayload, InspectorClipRefPayload, InspectorClipTransformField,
+    InspectorCurvePointPayload, InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
+    InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
+    InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
+    InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload, TimelineAddTrackKind,
+    TimelineAddTrackPayload, TimelineDropAssetPayload, TimelineInOutPointPayloadKind,
+    TimelineMoveClipPayload, TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
+    TimelineSelectClipPayload, TimelineSetInOutPointPayload,
+    TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
+    TimelineTrackControlPayloadKind, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
+    TimelineTrimSelectedClipsToPlayheadPayload,
 };
 use crate::app::{AppState, SelectedClipRef};
 use crate::self_hosted::icons::AppIcon;
@@ -1014,6 +1018,8 @@ pub struct ExportPanelModel {
     pub range: TimelineExportRange,
     pub output_path: String,
     pub status: Option<(String, bool)>,
+    pub jobs: Vec<ExportJobModel>,
+    pub can_clear_completed_jobs: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1028,6 +1034,16 @@ pub struct ExportSequenceOptionModel {
     pub name: String,
     pub video_clips: usize,
     pub audio_clips: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExportJobModel {
+    pub id: JobId,
+    pub title: String,
+    pub status: String,
+    pub progress_percent: u8,
+    pub can_cancel: bool,
+    pub is_completed: bool,
 }
 
 /// Node graph panel data independent from a concrete widget tree.
@@ -1168,8 +1184,30 @@ impl ExportPanelModel {
             .filter(|id| sequences.iter().any(|sequence| sequence.id == *id))
             .or_else(|| sequences.first().map(|sequence| sequence.id));
 
+        let jobs = state.render_queue.list_jobs();
+        let queue_count = jobs.len();
+        let can_clear_completed_jobs = jobs
+            .iter()
+            .any(|job| matches!(job.status, JobStatus::Completed | JobStatus::Cancelled));
+        let jobs = jobs
+            .into_iter()
+            .rev()
+            .take(6)
+            .map(|job| ExportJobModel {
+                id: job.id,
+                title: export_job_title(job.config.output_path.as_path()),
+                status: export_job_status_label(&job.status),
+                progress_percent: (job.progress.clamp(0.0, 1.0) * 100.0).round() as u8,
+                can_cancel: matches!(
+                    job.status,
+                    JobStatus::Pending | JobStatus::Rendering { .. } | JobStatus::Encoding
+                ),
+                is_completed: matches!(job.status, JobStatus::Completed | JobStatus::Cancelled),
+            })
+            .collect();
+
         Self {
-            queue_count: state.render_queue.list_jobs().len(),
+            queue_count,
             presets,
             selected_preset_idx,
             sequences,
@@ -1177,6 +1215,8 @@ impl ExportPanelModel {
             range: state.export_draft.range,
             output_path: state.export_draft.output_path.clone(),
             status: state.status_hint.clone(),
+            jobs,
+            can_clear_completed_jobs,
         }
     }
 
@@ -2494,6 +2534,11 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
         .expect("bundled Export icon asset should parse")
         .enabled(model.can_enqueue())
         .on_click(enqueue_action);
+    let clear_completed_button = AppIcon::Trash
+        .text_button("Clear completed")
+        .expect("bundled Trash icon asset should parse")
+        .enabled(model.can_clear_completed_jobs)
+        .on_click(export_clear_completed_action());
 
     let sequence_summary = selected_sequence
         .map(|sequence| {
@@ -2514,6 +2559,20 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
             }
         })
         .unwrap_or_else(|| "Ready".to_owned());
+
+    let mut queue_section = PropertySection::new("Queue");
+    if model.jobs.is_empty() {
+        queue_section = queue_section.with_row(PropertyRow::new(
+            "Jobs",
+            Box::new(Label::new("No jobs queued").muted()),
+        ));
+    } else {
+        for job in &model.jobs {
+            queue_section = queue_section.with_row(export_job_row(job));
+        }
+        queue_section =
+            queue_section.with_row(PropertyRow::new("", Box::new(clear_completed_button)));
+    }
 
     PropertyPanel::new("Export")
         .with_subtitle(format!("{} queued job(s)", model.queue_count))
@@ -2548,6 +2607,42 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
                 ))
                 .with_row(PropertyRow::new("", Box::new(enqueue_button))),
         )
+        .with_section(queue_section)
+}
+
+fn export_job_row(job: &ExportJobModel) -> PropertyRow {
+    let summary = FlexContainer::column(vec![
+        FlexChild::fixed(Box::new(
+            Label::new(job.title.clone()).with_padding(0.0, 0.0),
+        )),
+        FlexChild::fixed(Box::new(
+            Label::new(format!("{} / {}%", job.status, job.progress_percent))
+                .muted()
+                .wrapped()
+                .with_padding(0.0, 0.0),
+        )),
+    ])
+    .with_gap(4.0);
+
+    let content: Box<dyn Widget> = if job.can_cancel {
+        let cancel = AppIcon::Trash
+            .text_button("Cancel")
+            .expect("bundled Trash icon asset should parse")
+            .on_click(export_cancel_job_action(ExportJobTargetPayload {
+                job_id: job.id,
+            }));
+        Box::new(
+            FlexContainer::row(vec![
+                FlexChild::flex(Box::new(summary), 1.0),
+                FlexChild::fixed(Box::new(cancel)),
+            ])
+            .with_gap(8.0),
+        )
+    } else {
+        Box::new(summary)
+    };
+
+    PropertyRow::new("Job", content).with_height(if job.can_cancel { 48.0 } else { 42.0 })
 }
 
 fn export_default_file_name(preset: Option<&ExportPreset>) -> String {
@@ -2594,6 +2689,27 @@ fn export_range_label(range: TimelineExportRange) -> &'static str {
         TimelineExportRange::SequenceInOut => "Sequence In/Out",
         TimelineExportRange::EntireSequence => "Entire sequence",
         TimelineExportRange::WorkArea { .. } => "Work area",
+    }
+}
+
+fn export_job_title(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn export_job_status_label(status: &JobStatus) -> String {
+    match status {
+        JobStatus::Pending => "Pending".to_owned(),
+        JobStatus::Rendering { frame, total_frames } => {
+            format!("Rendering {}/{}", frame, total_frames)
+        }
+        JobStatus::Encoding => "Encoding".to_owned(),
+        JobStatus::Completed => "Completed".to_owned(),
+        JobStatus::Failed(reason) => format!("Failed: {reason}"),
+        JobStatus::Cancelled => "Cancelled".to_owned(),
     }
 }
 
@@ -3741,6 +3857,30 @@ mod tests {
             payload.output_path,
             std::path::PathBuf::from("E:/renders/deliverable.mp4")
         );
+    }
+
+    #[test]
+    fn export_panel_model_exposes_render_queue_jobs() {
+        let state = AppState::new();
+        let job_id = state.render_queue.enqueue(mondrian_export::queue::RenderJob::new(
+            mondrian_export::preset::ExportConfig {
+                preset: mondrian_export::preset::ExportPreset::youtube_1080p(),
+                input: mondrian_export::preset::ExportInput::File {
+                    input_path: "missing-source.mov".into(),
+                    in_point: None,
+                    out_point: None,
+                },
+                output_path: "E:/renders/dailies.mp4".into(),
+            },
+        ));
+
+        let model = ExportPanelModel::from_app_state(&state);
+
+        assert_eq!(model.queue_count, 1);
+        assert_eq!(model.jobs.len(), 1);
+        assert_eq!(model.jobs[0].id, job_id);
+        assert_eq!(model.jobs[0].title, "dailies.mp4");
+        assert!(!model.jobs[0].status.is_empty());
     }
 
     #[test]
