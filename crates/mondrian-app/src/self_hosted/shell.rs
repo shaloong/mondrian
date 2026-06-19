@@ -27,15 +27,16 @@ use crate::app::ui_actions::{
     AppShellRelinkAssetDialogPayload, AppShellRevealInFileManagerPayload, AssetsImportFilesPayload,
     AssetsRelinkAssetPayload, ExportDraftUpdatePayload, ExportOutputDialogPayload,
     ImportMediaDialogPayload, NewProjectDraftUpdatePayload, PreferencesTabPayload,
-    ProjectRecoverFromAutosavePayload, SequenceSettingsDraftUpdatePayload, APP_SHELL_ABOUT,
-    APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
-    APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_CONFIRM_SEQUENCE_SETTINGS,
-    APP_SHELL_EXPORT_OUTPUT_DIALOG, APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE,
-    APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_NEW_PROJECT_DRAFT_CHANGED,
-    APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PREFERENCES,
-    APP_SHELL_PREFERENCES_TAB_CHANGED, APP_SHELL_RECOVER_PROJECT, APP_SHELL_RELINK_ASSET_DIALOG,
-    APP_SHELL_REVEAL_IN_FILE_MANAGER, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
-    APP_SHELL_SEQUENCE_SETTINGS, APP_SHELL_SEQUENCE_SETTINGS_DRAFT_CHANGED,
+    ProjectRecoverFromAutosavePayload, SequenceSettingsDraftUpdatePayload,
+    SequenceSettingsTabPayload, APP_SHELL_ABOUT, APP_SHELL_CANCEL_NEW_PROJECT_DIALOG,
+    APP_SHELL_CLOSE_MODAL, APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG,
+    APP_SHELL_CONFIRM_SEQUENCE_SETTINGS, APP_SHELL_EXPORT_OUTPUT_DIALOG,
+    APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
+    APP_SHELL_NEW_PROJECT_DRAFT_CHANGED, APP_SHELL_OPEN_PROJECT_DIALOG,
+    APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PREFERENCES, APP_SHELL_PREFERENCES_TAB_CHANGED,
+    APP_SHELL_RECOVER_PROJECT, APP_SHELL_RELINK_ASSET_DIALOG, APP_SHELL_REVEAL_IN_FILE_MANAGER,
+    APP_SHELL_SAVE_PROJECT_AS_DIALOG, APP_SHELL_SEQUENCE_SETTINGS,
+    APP_SHELL_SEQUENCE_SETTINGS_DRAFT_CHANGED, APP_SHELL_SEQUENCE_SETTINGS_TAB_CHANGED,
 };
 use crate::app::AppState;
 use crate::self_hosted::menu_bar::MenuBar;
@@ -890,6 +891,19 @@ impl SelfHostedAppRoot {
                 }
                 Ok(None)
             }
+            Action::Custom { namespace, name, payload }
+                if namespace == APP_SHELL_NAMESPACE
+                    && name == APP_SHELL_SEQUENCE_SETTINGS_TAB_CHANGED =>
+            {
+                let tab: SequenceSettingsTabPayload = serde_json::from_value(payload)
+                    .map_err(|err| app_shell_action_error(&name, err))?;
+                if let Some(dialog) =
+                    self.modal.as_mut().and_then(ShellModal::as_sequence_settings_mut)
+                {
+                    dialog.set_active_tab(tab);
+                }
+                Ok(None)
+            }
             Action::Custom { namespace, name, .. }
                 if namespace == APP_SHELL_NAMESPACE
                     && name == APP_SHELL_CONFIRM_SEQUENCE_SETTINGS =>
@@ -1263,11 +1277,12 @@ mod tests {
         app_shell_recover_project_action, app_shell_relink_asset_dialog_action,
         app_shell_reveal_in_file_manager_action, app_shell_save_project_as_dialog_action,
         app_shell_sequence_settings_action, app_shell_sequence_settings_draft_changed_action,
-        AppShellOpenRecentProjectPayload, AppShellRelinkAssetDialogPayload,
-        AppShellRevealInFileManagerPayload, AssetsImportFilesPayload, AssetsRelinkAssetPayload,
-        ExportDraftUpdatePayload, ExportOutputDialogPayload, ImportMediaDialogPayload,
-        NewProjectDraftUpdatePayload, PreferencesTabPayload, ProjectCreateWithSettingsPayload,
-        ProjectRecoverFromAutosavePayload, SequenceSettingsDraftUpdatePayload,
+        app_shell_sequence_settings_tab_changed_action, AppShellOpenRecentProjectPayload,
+        AppShellRelinkAssetDialogPayload, AppShellRevealInFileManagerPayload,
+        AssetsImportFilesPayload, AssetsRelinkAssetPayload, ExportDraftUpdatePayload,
+        ExportOutputDialogPayload, ImportMediaDialogPayload, NewProjectDraftUpdatePayload,
+        PreferencesTabPayload, ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload,
+        SequenceSettingsDraftUpdatePayload, SequenceSettingsTabPayload,
         SequenceUpdateSettingsPayload, ASSETS_IMPORT_FILES, ASSETS_NAMESPACE, ASSETS_RELINK_ASSET,
         EXPORT_NAMESPACE, EXPORT_SET_DRAFT, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
         PROJECT_RECOVER_FROM_AUTOSAVE, SEQUENCE_NAMESPACE, SEQUENCE_UPDATE_SETTINGS,
@@ -1275,10 +1290,11 @@ mod tests {
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use glam::Vec2;
     use mondrian_core::types::AssetId;
-    use mondrian_core::{Rational, Resolution};
+    use mondrian_core::{ColorSpace, Rational, Resolution};
     use mondrian_timeline::sequence::{
-        AudioChannelLayout, AudioDisplayFormat, EditingMode, FieldOrder, PixelAspectRatio,
-        PreviewRenderFormat, Sequence, VideoDisplayFormat,
+        AudioChannelLayout, AudioDisplayFormat, ColorWorkflow, EditingMode, ExportBitDepth,
+        FieldOrder, MissingColorMetadataPolicy, NestedColorProcessing, PixelAspectRatio,
+        PreviewRenderFormat, Sequence, VideoDisplayFormat, VideoRange,
     };
     use mondrian_ui_core::tree::WidgetTreeView;
     use mondrian_ui_core::widget::{DrawCommandEncoder, PaintContext};
@@ -2001,6 +2017,14 @@ mod tests {
             None
         );
         assert!(root.modal.as_ref().and_then(ShellModal::as_sequence_settings).is_some());
+        assert_eq!(
+            root.handle_shell_action(
+                app_shell_sequence_settings_tab_changed_action(SequenceSettingsTabPayload::Color),
+                &platform,
+                None
+            ),
+            None
+        );
 
         root.handle_shell_action(
             app_shell_sequence_settings_draft_changed_action(
@@ -2051,6 +2075,73 @@ mod tests {
                 SequenceSettingsDraftUpdatePayload::VideoDisplayFormat(
                     VideoDisplayFormat::Timecode2997DropFrame,
                 ),
+            ),
+            &platform,
+            None,
+        );
+        root.handle_shell_action(
+            app_shell_sequence_settings_draft_changed_action(
+                SequenceSettingsDraftUpdatePayload::ColorSpace(ColorSpace::Rec2100Pq),
+            ),
+            &platform,
+            None,
+        );
+        root.handle_shell_action(
+            app_shell_sequence_settings_draft_changed_action(
+                SequenceSettingsDraftUpdatePayload::OutputColorSpace(ColorSpace::Rec2100Pq),
+            ),
+            &platform,
+            None,
+        );
+        root.handle_shell_action(
+            app_shell_sequence_settings_draft_changed_action(
+                SequenceSettingsDraftUpdatePayload::ColorWorkflow(ColorWorkflow::Aces),
+            ),
+            &platform,
+            None,
+        );
+        root.handle_shell_action(
+            app_shell_sequence_settings_draft_changed_action(
+                SequenceSettingsDraftUpdatePayload::MissingColorMetadataPolicy(
+                    MissingColorMetadataPolicy::AssumeSequenceWorkingSpace,
+                ),
+            ),
+            &platform,
+            None,
+        );
+        root.handle_shell_action(
+            app_shell_sequence_settings_draft_changed_action(
+                SequenceSettingsDraftUpdatePayload::NestedColorProcessing(
+                    NestedColorProcessing::ForceParentWorkingSpace,
+                ),
+            ),
+            &platform,
+            None,
+        );
+        root.handle_shell_action(
+            app_shell_sequence_settings_draft_changed_action(
+                SequenceSettingsDraftUpdatePayload::VideoRange(VideoRange::Legal),
+            ),
+            &platform,
+            None,
+        );
+        root.handle_shell_action(
+            app_shell_sequence_settings_draft_changed_action(
+                SequenceSettingsDraftUpdatePayload::ExportBitDepth(ExportBitDepth::Ten),
+            ),
+            &platform,
+            None,
+        );
+        root.handle_shell_action(
+            app_shell_sequence_settings_draft_changed_action(
+                SequenceSettingsDraftUpdatePayload::AutoToneMapMedia(false),
+            ),
+            &platform,
+            None,
+        );
+        root.handle_shell_action(
+            app_shell_sequence_settings_draft_changed_action(
+                SequenceSettingsDraftUpdatePayload::PreserveHdrMetadata(true),
             ),
             &platform,
             None,
@@ -2134,6 +2225,33 @@ mod tests {
             payload.settings.video_display_format,
             VideoDisplayFormat::Timecode2997DropFrame
         );
+        assert_eq!(payload.settings.color_space, ColorSpace::Rec2100Pq);
+        assert!(!payload.settings.auto_tone_map_media);
+        assert_eq!(
+            payload.settings.color_management.workflow,
+            ColorWorkflow::Aces
+        );
+        assert_eq!(
+            payload.settings.color_management.missing_metadata_policy,
+            MissingColorMetadataPolicy::AssumeSequenceWorkingSpace
+        );
+        assert_eq!(
+            payload.settings.color_management.nested_processing,
+            NestedColorProcessing::ForceParentWorkingSpace
+        );
+        assert_eq!(
+            payload.settings.color_management.output_color_space,
+            ColorSpace::Rec2100Pq
+        );
+        assert_eq!(
+            payload.settings.color_management.video_range,
+            VideoRange::Legal
+        );
+        assert_eq!(
+            payload.settings.color_management.export_bit_depth,
+            ExportBitDepth::Ten
+        );
+        assert!(payload.settings.color_management.preserve_hdr_metadata);
         assert_eq!(payload.settings.audio_sample_rate, 96_000);
         assert_eq!(
             payload.settings.audio_channel_layout,

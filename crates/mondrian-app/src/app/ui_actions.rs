@@ -5,10 +5,14 @@
 
 use mondrian_core::effect_data::EffectType;
 use mondrian_core::types::{AssetId, ClipId, EffectId, SequenceId, TrackId};
-use mondrian_core::{ProjectSettings, Rational, Resolution};
+use mondrian_core::{ColorSpace, ProjectSettings, Rational, Resolution};
 use mondrian_editor_state::Action;
 use mondrian_export::preset::{ExportPreset, TimelineExportRange};
 use mondrian_timeline::{
+    sequence::{
+        ColorWorkflow, ExportBitDepth, MissingColorMetadataPolicy, NestedColorProcessing,
+        VideoRange,
+    },
     AudioChannelLayout, AudioDisplayFormat, EditingMode, FieldOrder, PixelAspectRatio,
     PreviewRenderFormat, SequenceSettings, VideoDisplayFormat,
 };
@@ -177,6 +181,8 @@ pub const APP_SHELL_SEQUENCE_SETTINGS: &str = "sequence_settings";
 pub const APP_SHELL_SEQUENCE_SETTINGS_DRAFT_CHANGED: &str = "sequence_settings_draft_changed";
 /// App-shell request to apply the active sequence settings dialog.
 pub const APP_SHELL_CONFIRM_SEQUENCE_SETTINGS: &str = "confirm_sequence_settings";
+/// App-shell request to switch the active sequence-settings tab.
+pub const APP_SHELL_SEQUENCE_SETTINGS_TAB_CHANGED: &str = "sequence_settings_tab_changed";
 /// App-shell request to switch the active self-hosted preferences tab.
 pub const APP_SHELL_PREFERENCES_TAB_CHANGED: &str = "preferences_tab_changed";
 /// App-shell request to switch the active self-hosted theme preset.
@@ -735,6 +741,24 @@ pub enum SequenceSettingsDraftUpdatePayload {
     FieldOrder(FieldOrder),
     /// Timeline/video display format.
     VideoDisplayFormat(VideoDisplayFormat),
+    /// Sequence working color space.
+    ColorSpace(ColorSpace),
+    /// Whether source media is auto tone-mapped into the sequence.
+    AutoToneMapMedia(bool),
+    /// Sequence color workflow.
+    ColorWorkflow(ColorWorkflow),
+    /// Policy for media with missing color metadata.
+    MissingColorMetadataPolicy(MissingColorMetadataPolicy),
+    /// How nested sequence color transforms are handled.
+    NestedColorProcessing(NestedColorProcessing),
+    /// Output color space for sequence rendering/export.
+    OutputColorSpace(ColorSpace),
+    /// Video range used by the sequence output.
+    VideoRange(VideoRange),
+    /// Export bit depth preference.
+    ExportBitDepth(ExportBitDepth),
+    /// Whether HDR metadata should be preserved for HDR output spaces.
+    PreserveHdrMetadata(bool),
     /// Active sequence audio sample rate in Hz.
     AudioSampleRate(u32),
     /// Active sequence audio channel layout.
@@ -747,6 +771,17 @@ pub enum SequenceSettingsDraftUpdatePayload {
     PreviewResolutionScale(f32),
     /// Whether preview rendering cache is enabled.
     PreviewCacheEnabled(bool),
+}
+
+/// Section selected in the self-hosted sequence settings dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SequenceSettingsTabPayload {
+    /// Format, frame timing, and audio settings.
+    Format,
+    /// Color management settings.
+    Color,
+    /// Preview render/cache settings.
+    Preview,
 }
 
 /// Build an action that selects a clip in the active timeline.
@@ -1082,6 +1117,13 @@ pub fn app_shell_sequence_settings_draft_changed_action(
     payload: SequenceSettingsDraftUpdatePayload,
 ) -> Action {
     custom_app_shell_action_with_payload(APP_SHELL_SEQUENCE_SETTINGS_DRAFT_CHANGED, payload)
+}
+
+/// Build an app-shell request for selecting one sequence-settings tab.
+pub fn app_shell_sequence_settings_tab_changed_action(
+    payload: SequenceSettingsTabPayload,
+) -> Action {
+    custom_app_shell_action_with_payload(APP_SHELL_SEQUENCE_SETTINGS_TAB_CHANGED, payload)
 }
 
 /// Build an app-shell request for applying sequence settings.

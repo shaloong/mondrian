@@ -3,8 +3,12 @@
 //! The dialog owns shell-local draft state. It emits a typed sequence update
 //! only on Apply, keeping editor mutations in `AppState`.
 
-use mondrian_core::{Rational, Resolution};
+use mondrian_core::{ColorSpace, Rational, Resolution};
 use mondrian_timeline::{
+    sequence::{
+        ColorWorkflow, ExportBitDepth, MissingColorMetadataPolicy, NestedColorProcessing,
+        VideoRange,
+    },
     AudioChannelLayout, AudioDisplayFormat, EditingMode, FieldOrder, PixelAspectRatio,
     PreviewRenderFormat, Sequence, SequenceSettings, VideoDisplayFormat,
 };
@@ -16,8 +20,9 @@ use mondrian_ui_widgets::{Button, Checkbox, DialogSurface, Label, Slider, TextIn
 
 use crate::app::ui_actions::{
     app_shell_close_modal_action, app_shell_confirm_sequence_settings_action,
-    app_shell_sequence_settings_draft_changed_action, SequenceSettingsDraftUpdatePayload,
-    SequenceUpdateSettingsPayload,
+    app_shell_sequence_settings_draft_changed_action,
+    app_shell_sequence_settings_tab_changed_action, SequenceSettingsDraftUpdatePayload,
+    SequenceSettingsTabPayload, SequenceUpdateSettingsPayload,
 };
 use crate::self_hosted::icons::AppIcon;
 
@@ -78,6 +83,33 @@ impl SelfHostedSequenceSettingsDraft {
             }
             SequenceSettingsDraftUpdatePayload::VideoDisplayFormat(display_format) => {
                 self.settings.video_display_format = display_format;
+            }
+            SequenceSettingsDraftUpdatePayload::ColorSpace(color_space) => {
+                self.settings.color_space = color_space;
+            }
+            SequenceSettingsDraftUpdatePayload::AutoToneMapMedia(enabled) => {
+                self.settings.auto_tone_map_media = enabled;
+            }
+            SequenceSettingsDraftUpdatePayload::ColorWorkflow(workflow) => {
+                self.settings.color_management.workflow = workflow;
+            }
+            SequenceSettingsDraftUpdatePayload::MissingColorMetadataPolicy(policy) => {
+                self.settings.color_management.missing_metadata_policy = policy;
+            }
+            SequenceSettingsDraftUpdatePayload::NestedColorProcessing(processing) => {
+                self.settings.color_management.nested_processing = processing;
+            }
+            SequenceSettingsDraftUpdatePayload::OutputColorSpace(color_space) => {
+                self.settings.color_management.output_color_space = color_space;
+            }
+            SequenceSettingsDraftUpdatePayload::VideoRange(range) => {
+                self.settings.color_management.video_range = range;
+            }
+            SequenceSettingsDraftUpdatePayload::ExportBitDepth(bit_depth) => {
+                self.settings.color_management.export_bit_depth = bit_depth;
+            }
+            SequenceSettingsDraftUpdatePayload::PreserveHdrMetadata(enabled) => {
+                self.settings.color_management.preserve_hdr_metadata = enabled;
             }
             SequenceSettingsDraftUpdatePayload::AudioSampleRate(sample_rate) => {
                 if SequenceSettings::AUDIO_SAMPLE_RATES.contains(&sample_rate) {
@@ -193,6 +225,56 @@ const PREVIEW_RENDER_FORMAT_OPTIONS: [PreviewRenderFormat; 4] = [
     PreviewRenderFormat::LosslessRgba,
 ];
 
+const COLOR_SPACE_OPTIONS: [ColorSpace; 9] = [
+    ColorSpace::Rec709,
+    ColorSpace::Rec2100Hlg,
+    ColorSpace::Rec2100Pq,
+    ColorSpace::Srgb,
+    ColorSpace::Rec2020,
+    ColorSpace::DciP3,
+    ColorSpace::AppleLog,
+    ColorSpace::SLog3,
+    ColorSpace::ArriLogC4,
+];
+
+const COLOR_WORKFLOW_OPTIONS: [ColorWorkflow; 3] = [
+    ColorWorkflow::DisplayReferred,
+    ColorWorkflow::SceneReferred,
+    ColorWorkflow::Aces,
+];
+
+const MISSING_COLOR_METADATA_OPTIONS: [MissingColorMetadataPolicy; 3] = [
+    MissingColorMetadataPolicy::AssumeRec709,
+    MissingColorMetadataPolicy::AssumeSequenceWorkingSpace,
+    MissingColorMetadataPolicy::RejectMedia,
+];
+
+const NESTED_COLOR_PROCESSING_OPTIONS: [NestedColorProcessing; 3] = [
+    NestedColorProcessing::PreserveChildWorkingSpace,
+    NestedColorProcessing::ForceParentWorkingSpace,
+    NestedColorProcessing::BakeChildOutputTransform,
+];
+
+const VIDEO_RANGE_OPTIONS: [VideoRange; 2] = [VideoRange::Full, VideoRange::Legal];
+
+const EXPORT_BIT_DEPTH_OPTIONS: [ExportBitDepth; 3] = [
+    ExportBitDepth::Eight,
+    ExportBitDepth::Ten,
+    ExportBitDepth::SixteenFloat,
+];
+
+impl SequenceSettingsTabPayload {
+    const ALL: [Self; 3] = [Self::Format, Self::Color, Self::Preview];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Format => "Format",
+            Self::Color => "Color",
+            Self::Preview => "Preview",
+        }
+    }
+}
+
 fn editing_mode_label(value: EditingMode) -> &'static str {
     match value {
         EditingMode::Custom => "Custom",
@@ -278,6 +360,59 @@ fn preview_render_format_label(value: PreviewRenderFormat) -> &'static str {
         PreviewRenderFormat::ProResProxy => "ProRes Proxy",
         PreviewRenderFormat::DnxHrLb => "DNxHR LB",
         PreviewRenderFormat::LosslessRgba => "Lossless RGBA",
+    }
+}
+
+fn color_space_label(value: ColorSpace) -> &'static str {
+    match value {
+        ColorSpace::Rec709 => "Rec. 709",
+        ColorSpace::Rec2100Hlg => "Rec. 2100 HLG",
+        ColorSpace::Rec2100Pq => "Rec. 2100 PQ",
+        ColorSpace::Srgb => "sRGB",
+        ColorSpace::Rec2020 => "Rec. 2020",
+        ColorSpace::DciP3 => "DCI-P3",
+        ColorSpace::AppleLog => "Apple Log",
+        ColorSpace::SLog3 => "S-Log3",
+        ColorSpace::ArriLogC4 => "ARRI LogC4",
+    }
+}
+
+fn color_workflow_label(value: ColorWorkflow) -> &'static str {
+    match value {
+        ColorWorkflow::DisplayReferred => "Display referred",
+        ColorWorkflow::SceneReferred => "Scene referred",
+        ColorWorkflow::Aces => "ACES",
+    }
+}
+
+fn missing_color_metadata_policy_label(value: MissingColorMetadataPolicy) -> &'static str {
+    match value {
+        MissingColorMetadataPolicy::AssumeRec709 => "Assume Rec. 709",
+        MissingColorMetadataPolicy::AssumeSequenceWorkingSpace => "Assume sequence space",
+        MissingColorMetadataPolicy::RejectMedia => "Reject media",
+    }
+}
+
+fn nested_color_processing_label(value: NestedColorProcessing) -> &'static str {
+    match value {
+        NestedColorProcessing::PreserveChildWorkingSpace => "Preserve child space",
+        NestedColorProcessing::ForceParentWorkingSpace => "Force parent space",
+        NestedColorProcessing::BakeChildOutputTransform => "Bake child output",
+    }
+}
+
+fn video_range_label(value: VideoRange) -> &'static str {
+    match value {
+        VideoRange::Full => "Full range",
+        VideoRange::Legal => "Legal range",
+    }
+}
+
+fn export_bit_depth_label(value: ExportBitDepth) -> &'static str {
+    match value {
+        ExportBitDepth::Eight => "8-bit",
+        ExportBitDepth::Ten => "10-bit",
+        ExportBitDepth::SixteenFloat => "16-bit float",
     }
 }
 
@@ -425,6 +560,90 @@ fn preview_render_format_items() -> Vec<MenuItem> {
         .collect()
 }
 
+fn color_space_items(
+    update: fn(ColorSpace) -> SequenceSettingsDraftUpdatePayload,
+) -> Vec<MenuItem> {
+    COLOR_SPACE_OPTIONS
+        .into_iter()
+        .map(|color_space| {
+            MenuItem::new(
+                color_space_label(color_space),
+                app_shell_sequence_settings_draft_changed_action(update(color_space)),
+            )
+        })
+        .collect()
+}
+
+fn color_workflow_items() -> Vec<MenuItem> {
+    COLOR_WORKFLOW_OPTIONS
+        .into_iter()
+        .map(|workflow| {
+            MenuItem::new(
+                color_workflow_label(workflow),
+                app_shell_sequence_settings_draft_changed_action(
+                    SequenceSettingsDraftUpdatePayload::ColorWorkflow(workflow),
+                ),
+            )
+        })
+        .collect()
+}
+
+fn missing_color_metadata_items() -> Vec<MenuItem> {
+    MISSING_COLOR_METADATA_OPTIONS
+        .into_iter()
+        .map(|policy| {
+            MenuItem::new(
+                missing_color_metadata_policy_label(policy),
+                app_shell_sequence_settings_draft_changed_action(
+                    SequenceSettingsDraftUpdatePayload::MissingColorMetadataPolicy(policy),
+                ),
+            )
+        })
+        .collect()
+}
+
+fn nested_color_processing_items() -> Vec<MenuItem> {
+    NESTED_COLOR_PROCESSING_OPTIONS
+        .into_iter()
+        .map(|processing| {
+            MenuItem::new(
+                nested_color_processing_label(processing),
+                app_shell_sequence_settings_draft_changed_action(
+                    SequenceSettingsDraftUpdatePayload::NestedColorProcessing(processing),
+                ),
+            )
+        })
+        .collect()
+}
+
+fn video_range_items() -> Vec<MenuItem> {
+    VIDEO_RANGE_OPTIONS
+        .into_iter()
+        .map(|range| {
+            MenuItem::new(
+                video_range_label(range),
+                app_shell_sequence_settings_draft_changed_action(
+                    SequenceSettingsDraftUpdatePayload::VideoRange(range),
+                ),
+            )
+        })
+        .collect()
+}
+
+fn export_bit_depth_items() -> Vec<MenuItem> {
+    EXPORT_BIT_DEPTH_OPTIONS
+        .into_iter()
+        .map(|bit_depth| {
+            MenuItem::new(
+                export_bit_depth_label(bit_depth),
+                app_shell_sequence_settings_draft_changed_action(
+                    SequenceSettingsDraftUpdatePayload::ExportBitDepth(bit_depth),
+                ),
+            )
+        })
+        .collect()
+}
+
 fn editing_mode_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dropdown {
     Dropdown::new(
         editing_mode_label(draft.settings.editing_mode),
@@ -471,6 +690,64 @@ fn video_display_format_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) ->
         video_display_format_items(),
     )
     .with_max_visible_items(5)
+}
+
+fn color_space_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dropdown {
+    Dropdown::new(
+        color_space_label(draft.settings.color_space),
+        color_space_items(SequenceSettingsDraftUpdatePayload::ColorSpace),
+    )
+    .with_max_visible_items(6)
+}
+
+fn output_color_space_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dropdown {
+    Dropdown::new(
+        color_space_label(draft.settings.color_management.output_color_space),
+        color_space_items(SequenceSettingsDraftUpdatePayload::OutputColorSpace),
+    )
+    .with_max_visible_items(6)
+}
+
+fn color_workflow_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dropdown {
+    Dropdown::new(
+        color_workflow_label(draft.settings.color_management.workflow),
+        color_workflow_items(),
+    )
+    .with_max_visible_items(3)
+}
+
+fn missing_color_metadata_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dropdown {
+    Dropdown::new(
+        missing_color_metadata_policy_label(
+            draft.settings.color_management.missing_metadata_policy,
+        ),
+        missing_color_metadata_items(),
+    )
+    .with_max_visible_items(3)
+}
+
+fn nested_color_processing_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dropdown {
+    Dropdown::new(
+        nested_color_processing_label(draft.settings.color_management.nested_processing),
+        nested_color_processing_items(),
+    )
+    .with_max_visible_items(3)
+}
+
+fn video_range_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dropdown {
+    Dropdown::new(
+        video_range_label(draft.settings.color_management.video_range),
+        video_range_items(),
+    )
+    .with_max_visible_items(2)
+}
+
+fn export_bit_depth_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dropdown {
+    Dropdown::new(
+        export_bit_depth_label(draft.settings.color_management.export_bit_depth),
+        export_bit_depth_items(),
+    )
+    .with_max_visible_items(3)
 }
 
 fn audio_sample_rate_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dropdown {
@@ -523,6 +800,26 @@ fn preview_cache_checkbox_for(draft: &SelfHostedSequenceSettingsDraft) -> Checkb
     })
 }
 
+fn auto_tone_map_checkbox_for(draft: &SelfHostedSequenceSettingsDraft) -> Checkbox {
+    Checkbox::new("Auto tone map media", draft.settings.auto_tone_map_media).on_change(|enabled| {
+        app_shell_sequence_settings_draft_changed_action(
+            SequenceSettingsDraftUpdatePayload::AutoToneMapMedia(enabled),
+        )
+    })
+}
+
+fn preserve_hdr_metadata_checkbox_for(draft: &SelfHostedSequenceSettingsDraft) -> Checkbox {
+    Checkbox::new(
+        "Preserve HDR metadata",
+        draft.settings.color_management.preserve_hdr_metadata,
+    )
+    .on_change(|enabled| {
+        app_shell_sequence_settings_draft_changed_action(
+            SequenceSettingsDraftUpdatePayload::PreserveHdrMetadata(enabled),
+        )
+    })
+}
+
 const CARD_MIN_WIDTH: f32 = 420.0;
 const CARD_WIDTH: f32 = 680.0;
 const CARD_MIN_HEIGHT: f32 = 460.0;
@@ -531,17 +828,20 @@ const CONTENT_PADDING: f32 = 20.0;
 const FIELD_HEIGHT: f32 = 34.0;
 const DROPDOWN_HEIGHT: f32 = 28.0;
 const ROW_GAP: f32 = 12.0;
-const NAME_Y: f32 = 82.0;
-const FORMAT_LABEL_BASELINE_Y: f32 = 132.0;
-const FORMAT_ROW_1_Y: f32 = 148.0;
-const FORMAT_ROW_2_Y: f32 = 196.0;
-const FORMAT_ROW_3_Y: f32 = 244.0;
-const AUDIO_LABEL_BASELINE_Y: f32 = 304.0;
-const AUDIO_ROW_Y: f32 = 320.0;
-const PREVIEW_LABEL_BASELINE_Y: f32 = 394.0;
-const PREVIEW_ROW_Y: f32 = 410.0;
-const PREVIEW_SCALE_LABEL_Y: f32 = 456.0;
-const PREVIEW_SCALE_ROW_Y: f32 = 470.0;
+const TAB_Y: f32 = 78.0;
+const TAB_BUTTON_WIDTH: f32 = 88.0;
+const TAB_BUTTON_HEIGHT: f32 = 28.0;
+const NAME_Y: f32 = 138.0;
+const FORMAT_LABEL_BASELINE_Y: f32 = 188.0;
+const FORMAT_ROW_1_Y: f32 = 204.0;
+const FORMAT_ROW_2_Y: f32 = 252.0;
+const FORMAT_ROW_3_Y: f32 = 300.0;
+const AUDIO_LABEL_BASELINE_Y: f32 = 360.0;
+const AUDIO_ROW_Y: f32 = 376.0;
+const PREVIEW_LABEL_BASELINE_Y: f32 = 126.0;
+const PREVIEW_ROW_Y: f32 = 142.0;
+const PREVIEW_SCALE_LABEL_Y: f32 = 188.0;
+const PREVIEW_SCALE_ROW_Y: f32 = 202.0;
 const BUTTON_WIDTH: f32 = 88.0;
 const BUTTON_HEIGHT: f32 = 32.0;
 const BUTTON_GAP: f32 = 8.0;
@@ -550,21 +850,24 @@ const TITLE_FONT_SIZE: f32 = 18.0;
 const LABEL_FONT_SIZE: f32 = 12.0;
 const TITLE_BASELINE_Y: f32 = 22.0;
 const DESCRIPTION_BASELINE_Y: f32 = 46.0;
-const NAME_LABEL_BASELINE_Y: f32 = 76.0;
+const NAME_LABEL_BASELINE_Y: f32 = 132.0;
 
 /// Sequence settings modal for the self-hosted product shell.
 pub struct SequenceSettingsDialog {
     id: WidgetId,
     draft: SelfHostedSequenceSettingsDraft,
+    active_tab: SequenceSettingsTabPayload,
     surface: DialogSurface,
     bounds: Rect,
     card: Rect,
     title_label: Label,
     description_label: Label,
+    tab_buttons: Vec<Button>,
     name_label: Label,
     format_label: Label,
     audio_label: Label,
     preview_label: Label,
+    color_label: Label,
     preview_scale_label: Label,
     name_input: TextInput,
     editing_mode_dropdown: Dropdown,
@@ -573,6 +876,15 @@ pub struct SequenceSettingsDialog {
     pixel_aspect_ratio_dropdown: Dropdown,
     field_order_dropdown: Dropdown,
     video_display_format_dropdown: Dropdown,
+    color_space_dropdown: Dropdown,
+    output_color_space_dropdown: Dropdown,
+    color_workflow_dropdown: Dropdown,
+    missing_color_metadata_dropdown: Dropdown,
+    nested_color_processing_dropdown: Dropdown,
+    video_range_dropdown: Dropdown,
+    export_bit_depth_dropdown: Dropdown,
+    auto_tone_map_checkbox: Checkbox,
+    preserve_hdr_metadata_checkbox: Checkbox,
     audio_sample_rate_dropdown: Dropdown,
     audio_channel_layout_dropdown: Dropdown,
     audio_display_format_dropdown: Dropdown,
@@ -596,6 +908,13 @@ impl SequenceSettingsDialog {
                 .with_font_size(LABEL_FONT_SIZE)
                 .with_padding(0.0, 0.0)
                 .wrapped();
+        let tab_buttons = SequenceSettingsTabPayload::ALL
+            .into_iter()
+            .map(|tab| {
+                Button::new(tab.label())
+                    .on_click(app_shell_sequence_settings_tab_changed_action(tab))
+            })
+            .collect();
         let name_label = Label::new("Name")
             .muted()
             .with_font_size(LABEL_FONT_SIZE)
@@ -609,6 +928,10 @@ impl SequenceSettingsDialog {
             .with_font_size(LABEL_FONT_SIZE)
             .with_padding(0.0, 0.0);
         let preview_label = Label::new("Preview")
+            .muted()
+            .with_font_size(LABEL_FONT_SIZE)
+            .with_padding(0.0, 0.0);
+        let color_label = Label::new("Color management")
             .muted()
             .with_font_size(LABEL_FONT_SIZE)
             .with_padding(0.0, 0.0);
@@ -630,6 +953,15 @@ impl SequenceSettingsDialog {
         let pixel_aspect_ratio_dropdown = pixel_aspect_ratio_dropdown_for(&draft);
         let field_order_dropdown = field_order_dropdown_for(&draft);
         let video_display_format_dropdown = video_display_format_dropdown_for(&draft);
+        let color_space_dropdown = color_space_dropdown_for(&draft);
+        let output_color_space_dropdown = output_color_space_dropdown_for(&draft);
+        let color_workflow_dropdown = color_workflow_dropdown_for(&draft);
+        let missing_color_metadata_dropdown = missing_color_metadata_dropdown_for(&draft);
+        let nested_color_processing_dropdown = nested_color_processing_dropdown_for(&draft);
+        let video_range_dropdown = video_range_dropdown_for(&draft);
+        let export_bit_depth_dropdown = export_bit_depth_dropdown_for(&draft);
+        let auto_tone_map_checkbox = auto_tone_map_checkbox_for(&draft);
+        let preserve_hdr_metadata_checkbox = preserve_hdr_metadata_checkbox_for(&draft);
         let audio_sample_rate_dropdown = audio_sample_rate_dropdown_for(&draft);
         let audio_channel_layout_dropdown = audio_channel_layout_dropdown_for(&draft);
         let audio_display_format_dropdown = audio_display_format_dropdown_for(&draft);
@@ -639,6 +971,7 @@ impl SequenceSettingsDialog {
         Self {
             id: WidgetId::new(),
             draft,
+            active_tab: SequenceSettingsTabPayload::Format,
             surface: DialogSurface::new(
                 Size::new(CARD_MIN_WIDTH, CARD_MIN_HEIGHT),
                 Size::new(CARD_WIDTH, CARD_HEIGHT),
@@ -648,10 +981,12 @@ impl SequenceSettingsDialog {
             card: Rect::ZERO,
             title_label,
             description_label,
+            tab_buttons,
             name_label,
             format_label,
             audio_label,
             preview_label,
+            color_label,
             preview_scale_label,
             name_input,
             editing_mode_dropdown,
@@ -660,6 +995,15 @@ impl SequenceSettingsDialog {
             pixel_aspect_ratio_dropdown,
             field_order_dropdown,
             video_display_format_dropdown,
+            color_space_dropdown,
+            output_color_space_dropdown,
+            color_workflow_dropdown,
+            missing_color_metadata_dropdown,
+            nested_color_processing_dropdown,
+            video_range_dropdown,
+            export_bit_depth_dropdown,
+            auto_tone_map_checkbox,
+            preserve_hdr_metadata_checkbox,
             audio_sample_rate_dropdown,
             audio_channel_layout_dropdown,
             audio_display_format_dropdown,
@@ -685,6 +1029,16 @@ impl SequenceSettingsDialog {
             self.pixel_aspect_ratio_dropdown = pixel_aspect_ratio_dropdown_for(&self.draft);
             self.field_order_dropdown = field_order_dropdown_for(&self.draft);
             self.video_display_format_dropdown = video_display_format_dropdown_for(&self.draft);
+            self.color_space_dropdown = color_space_dropdown_for(&self.draft);
+            self.output_color_space_dropdown = output_color_space_dropdown_for(&self.draft);
+            self.color_workflow_dropdown = color_workflow_dropdown_for(&self.draft);
+            self.missing_color_metadata_dropdown = missing_color_metadata_dropdown_for(&self.draft);
+            self.nested_color_processing_dropdown =
+                nested_color_processing_dropdown_for(&self.draft);
+            self.video_range_dropdown = video_range_dropdown_for(&self.draft);
+            self.export_bit_depth_dropdown = export_bit_depth_dropdown_for(&self.draft);
+            self.auto_tone_map_checkbox = auto_tone_map_checkbox_for(&self.draft);
+            self.preserve_hdr_metadata_checkbox = preserve_hdr_metadata_checkbox_for(&self.draft);
             self.audio_sample_rate_dropdown = audio_sample_rate_dropdown_for(&self.draft);
             self.audio_channel_layout_dropdown = audio_channel_layout_dropdown_for(&self.draft);
             self.audio_display_format_dropdown = audio_display_format_dropdown_for(&self.draft);
@@ -701,6 +1055,14 @@ impl SequenceSettingsDialog {
             if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
                 self.layout(self.bounds);
             }
+        }
+    }
+
+    /// Select the visible settings section.
+    pub fn set_active_tab(&mut self, tab: SequenceSettingsTabPayload) {
+        self.active_tab = tab;
+        if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
+            self.layout(self.bounds);
         }
     }
 
@@ -735,117 +1097,193 @@ impl Widget for SequenceSettingsDialog {
             content.width,
             LABEL_FONT_SIZE * 3.0,
         ));
-        self.name_label.layout(Rect::new(
-            content.x,
-            content.y + NAME_LABEL_BASELINE_Y,
-            content.width,
-            LABEL_FONT_SIZE * 1.5,
-        ));
-        self.name_input.layout(Rect::new(
-            content.x,
-            content.y + NAME_Y,
-            content.width,
-            FIELD_HEIGHT,
-        ));
+        for (index, button) in self.tab_buttons.iter_mut().enumerate() {
+            button.layout(Rect::new(
+                content.x + index as f32 * (TAB_BUTTON_WIDTH + ROW_GAP),
+                content.y + TAB_Y,
+                TAB_BUTTON_WIDTH,
+                TAB_BUTTON_HEIGHT,
+            ));
+        }
 
         let half = (content.width - ROW_GAP) * 0.5;
         let right_x = content.x + half + ROW_GAP;
-        self.format_label.layout(Rect::new(
-            content.x,
-            content.y + FORMAT_LABEL_BASELINE_Y,
-            content.width,
-            LABEL_FONT_SIZE * 1.5,
-        ));
-        self.editing_mode_dropdown.layout(Rect::new(
-            content.x,
-            content.y + FORMAT_ROW_1_Y,
-            half,
-            DROPDOWN_HEIGHT,
-        ));
-        self.resolution_dropdown.layout(Rect::new(
-            right_x,
-            content.y + FORMAT_ROW_1_Y,
-            half,
-            DROPDOWN_HEIGHT,
-        ));
-        self.frame_rate_dropdown.layout(Rect::new(
-            content.x,
-            content.y + FORMAT_ROW_2_Y,
-            half,
-            DROPDOWN_HEIGHT,
-        ));
-        self.pixel_aspect_ratio_dropdown.layout(Rect::new(
-            right_x,
-            content.y + FORMAT_ROW_2_Y,
-            half,
-            DROPDOWN_HEIGHT,
-        ));
-        self.field_order_dropdown.layout(Rect::new(
-            content.x,
-            content.y + FORMAT_ROW_3_Y,
-            half,
-            DROPDOWN_HEIGHT,
-        ));
-        self.video_display_format_dropdown.layout(Rect::new(
-            right_x,
-            content.y + FORMAT_ROW_3_Y,
-            half,
-            DROPDOWN_HEIGHT,
-        ));
-        self.audio_label.layout(Rect::new(
-            content.x,
-            content.y + AUDIO_LABEL_BASELINE_Y,
-            content.width,
-            LABEL_FONT_SIZE * 1.5,
-        ));
-        self.audio_sample_rate_dropdown.layout(Rect::new(
-            content.x,
-            content.y + AUDIO_ROW_Y,
-            half,
-            DROPDOWN_HEIGHT,
-        ));
-        self.audio_channel_layout_dropdown.layout(Rect::new(
-            right_x,
-            content.y + AUDIO_ROW_Y,
-            half,
-            DROPDOWN_HEIGHT,
-        ));
-        self.audio_display_format_dropdown.layout(Rect::new(
-            content.x,
-            content.y + AUDIO_ROW_Y + 38.0,
-            half,
-            DROPDOWN_HEIGHT,
-        ));
-        self.preview_label.layout(Rect::new(
-            content.x,
-            content.y + PREVIEW_LABEL_BASELINE_Y,
-            content.width,
-            LABEL_FONT_SIZE * 1.5,
-        ));
-        self.preview_render_format_dropdown.layout(Rect::new(
-            content.x,
-            content.y + PREVIEW_ROW_Y,
-            half,
-            DROPDOWN_HEIGHT,
-        ));
-        self.preview_cache_checkbox.layout(Rect::new(
-            right_x,
-            content.y + PREVIEW_ROW_Y,
-            half,
-            DROPDOWN_HEIGHT,
-        ));
-        self.preview_scale_label.layout(Rect::new(
-            content.x,
-            content.y + PREVIEW_SCALE_LABEL_Y,
-            content.width,
-            LABEL_FONT_SIZE * 1.5,
-        ));
-        self.preview_scale_slider.layout(Rect::new(
-            content.x,
-            content.y + PREVIEW_SCALE_ROW_Y,
-            content.width,
-            DROPDOWN_HEIGHT,
-        ));
+        match self.active_tab {
+            SequenceSettingsTabPayload::Format => {
+                self.name_label.layout(Rect::new(
+                    content.x,
+                    content.y + NAME_LABEL_BASELINE_Y,
+                    content.width,
+                    LABEL_FONT_SIZE * 1.5,
+                ));
+                self.name_input.layout(Rect::new(
+                    content.x,
+                    content.y + NAME_Y,
+                    content.width,
+                    FIELD_HEIGHT,
+                ));
+                self.format_label.layout(Rect::new(
+                    content.x,
+                    content.y + FORMAT_LABEL_BASELINE_Y,
+                    content.width,
+                    LABEL_FONT_SIZE * 1.5,
+                ));
+                self.editing_mode_dropdown.layout(Rect::new(
+                    content.x,
+                    content.y + FORMAT_ROW_1_Y,
+                    half,
+                    DROPDOWN_HEIGHT,
+                ));
+                self.resolution_dropdown.layout(Rect::new(
+                    right_x,
+                    content.y + FORMAT_ROW_1_Y,
+                    half,
+                    DROPDOWN_HEIGHT,
+                ));
+                self.frame_rate_dropdown.layout(Rect::new(
+                    content.x,
+                    content.y + FORMAT_ROW_2_Y,
+                    half,
+                    DROPDOWN_HEIGHT,
+                ));
+                self.pixel_aspect_ratio_dropdown.layout(Rect::new(
+                    right_x,
+                    content.y + FORMAT_ROW_2_Y,
+                    half,
+                    DROPDOWN_HEIGHT,
+                ));
+                self.field_order_dropdown.layout(Rect::new(
+                    content.x,
+                    content.y + FORMAT_ROW_3_Y,
+                    half,
+                    DROPDOWN_HEIGHT,
+                ));
+                self.video_display_format_dropdown.layout(Rect::new(
+                    right_x,
+                    content.y + FORMAT_ROW_3_Y,
+                    half,
+                    DROPDOWN_HEIGHT,
+                ));
+                self.audio_label.layout(Rect::new(
+                    content.x,
+                    content.y + AUDIO_LABEL_BASELINE_Y,
+                    content.width,
+                    LABEL_FONT_SIZE * 1.5,
+                ));
+                self.audio_sample_rate_dropdown.layout(Rect::new(
+                    content.x,
+                    content.y + AUDIO_ROW_Y,
+                    half,
+                    DROPDOWN_HEIGHT,
+                ));
+                self.audio_channel_layout_dropdown.layout(Rect::new(
+                    right_x,
+                    content.y + AUDIO_ROW_Y,
+                    half,
+                    DROPDOWN_HEIGHT,
+                ));
+                self.audio_display_format_dropdown.layout(Rect::new(
+                    content.x,
+                    content.y + AUDIO_ROW_Y + 38.0,
+                    half,
+                    DROPDOWN_HEIGHT,
+                ));
+            }
+            SequenceSettingsTabPayload::Color => {
+                self.color_label.layout(Rect::new(
+                    content.x,
+                    content.y + NAME_LABEL_BASELINE_Y,
+                    content.width,
+                    LABEL_FONT_SIZE * 1.5,
+                ));
+                self.color_space_dropdown.layout(Rect::new(
+                    content.x,
+                    content.y + NAME_Y,
+                    half,
+                    DROPDOWN_HEIGHT,
+                ));
+                self.output_color_space_dropdown.layout(Rect::new(
+                    right_x,
+                    content.y + NAME_Y,
+                    half,
+                    DROPDOWN_HEIGHT,
+                ));
+                self.color_workflow_dropdown.layout(Rect::new(
+                    content.x,
+                    content.y + FORMAT_ROW_1_Y,
+                    half,
+                    DROPDOWN_HEIGHT,
+                ));
+                self.missing_color_metadata_dropdown.layout(Rect::new(
+                    right_x,
+                    content.y + FORMAT_ROW_1_Y,
+                    half,
+                    DROPDOWN_HEIGHT,
+                ));
+                self.nested_color_processing_dropdown.layout(Rect::new(
+                    content.x,
+                    content.y + FORMAT_ROW_2_Y,
+                    half,
+                    DROPDOWN_HEIGHT,
+                ));
+                self.video_range_dropdown.layout(Rect::new(
+                    right_x,
+                    content.y + FORMAT_ROW_2_Y,
+                    half,
+                    DROPDOWN_HEIGHT,
+                ));
+                self.export_bit_depth_dropdown.layout(Rect::new(
+                    content.x,
+                    content.y + FORMAT_ROW_3_Y,
+                    half,
+                    DROPDOWN_HEIGHT,
+                ));
+                self.auto_tone_map_checkbox.layout(Rect::new(
+                    right_x,
+                    content.y + FORMAT_ROW_3_Y,
+                    half,
+                    DROPDOWN_HEIGHT,
+                ));
+                self.preserve_hdr_metadata_checkbox.layout(Rect::new(
+                    content.x,
+                    content.y + AUDIO_ROW_Y,
+                    half,
+                    DROPDOWN_HEIGHT,
+                ));
+            }
+            SequenceSettingsTabPayload::Preview => {
+                self.preview_label.layout(Rect::new(
+                    content.x,
+                    content.y + PREVIEW_LABEL_BASELINE_Y,
+                    content.width,
+                    LABEL_FONT_SIZE * 1.5,
+                ));
+                self.preview_render_format_dropdown.layout(Rect::new(
+                    content.x,
+                    content.y + PREVIEW_ROW_Y,
+                    half,
+                    DROPDOWN_HEIGHT,
+                ));
+                self.preview_cache_checkbox.layout(Rect::new(
+                    right_x,
+                    content.y + PREVIEW_ROW_Y,
+                    half,
+                    DROPDOWN_HEIGHT,
+                ));
+                self.preview_scale_label.layout(Rect::new(
+                    content.x,
+                    content.y + PREVIEW_SCALE_LABEL_Y,
+                    content.width,
+                    LABEL_FONT_SIZE * 1.5,
+                ));
+                self.preview_scale_slider.layout(Rect::new(
+                    content.x,
+                    content.y + PREVIEW_SCALE_ROW_Y,
+                    content.width,
+                    DROPDOWN_HEIGHT,
+                ));
+            }
+        }
 
         let button_y = self.card.y + self.card.height - BUTTON_BOTTOM_INSET - BUTTON_HEIGHT;
         self.cancel_button.layout(Rect::new(
@@ -886,44 +1324,51 @@ impl Widget for SequenceSettingsDialog {
         if self.cancel_button.event(event, ctx) == EventResult::Handled {
             return EventResult::Handled;
         }
-        if self.name_input.event(event, ctx) == EventResult::Handled {
-            return EventResult::Handled;
+        for button in &mut self.tab_buttons {
+            if button.event(event, ctx) == EventResult::Handled {
+                return EventResult::Handled;
+            }
         }
-        if self.editing_mode_dropdown.event(event, ctx) == EventResult::Handled {
-            return EventResult::Handled;
-        }
-        if self.resolution_dropdown.event(event, ctx) == EventResult::Handled {
-            return EventResult::Handled;
-        }
-        if self.frame_rate_dropdown.event(event, ctx) == EventResult::Handled {
-            return EventResult::Handled;
-        }
-        if self.pixel_aspect_ratio_dropdown.event(event, ctx) == EventResult::Handled {
-            return EventResult::Handled;
-        }
-        if self.field_order_dropdown.event(event, ctx) == EventResult::Handled {
-            return EventResult::Handled;
-        }
-        if self.video_display_format_dropdown.event(event, ctx) == EventResult::Handled {
-            return EventResult::Handled;
-        }
-        if self.audio_sample_rate_dropdown.event(event, ctx) == EventResult::Handled {
-            return EventResult::Handled;
-        }
-        if self.audio_channel_layout_dropdown.event(event, ctx) == EventResult::Handled {
-            return EventResult::Handled;
-        }
-        if self.audio_display_format_dropdown.event(event, ctx) == EventResult::Handled {
-            return EventResult::Handled;
-        }
-        if self.preview_render_format_dropdown.event(event, ctx) == EventResult::Handled {
-            return EventResult::Handled;
-        }
-        if self.preview_scale_slider.event(event, ctx) == EventResult::Handled {
-            return EventResult::Handled;
-        }
-        if self.preview_cache_checkbox.event(event, ctx) == EventResult::Handled {
-            return EventResult::Handled;
+        match self.active_tab {
+            SequenceSettingsTabPayload::Format => {
+                if self.name_input.event(event, ctx) == EventResult::Handled
+                    || self.editing_mode_dropdown.event(event, ctx) == EventResult::Handled
+                    || self.resolution_dropdown.event(event, ctx) == EventResult::Handled
+                    || self.frame_rate_dropdown.event(event, ctx) == EventResult::Handled
+                    || self.pixel_aspect_ratio_dropdown.event(event, ctx) == EventResult::Handled
+                    || self.field_order_dropdown.event(event, ctx) == EventResult::Handled
+                    || self.video_display_format_dropdown.event(event, ctx) == EventResult::Handled
+                    || self.audio_sample_rate_dropdown.event(event, ctx) == EventResult::Handled
+                    || self.audio_channel_layout_dropdown.event(event, ctx) == EventResult::Handled
+                    || self.audio_display_format_dropdown.event(event, ctx) == EventResult::Handled
+                {
+                    return EventResult::Handled;
+                }
+            }
+            SequenceSettingsTabPayload::Color => {
+                if self.color_space_dropdown.event(event, ctx) == EventResult::Handled
+                    || self.output_color_space_dropdown.event(event, ctx) == EventResult::Handled
+                    || self.color_workflow_dropdown.event(event, ctx) == EventResult::Handled
+                    || self.missing_color_metadata_dropdown.event(event, ctx)
+                        == EventResult::Handled
+                    || self.nested_color_processing_dropdown.event(event, ctx)
+                        == EventResult::Handled
+                    || self.video_range_dropdown.event(event, ctx) == EventResult::Handled
+                    || self.export_bit_depth_dropdown.event(event, ctx) == EventResult::Handled
+                    || self.auto_tone_map_checkbox.event(event, ctx) == EventResult::Handled
+                    || self.preserve_hdr_metadata_checkbox.event(event, ctx) == EventResult::Handled
+                {
+                    return EventResult::Handled;
+                }
+            }
+            SequenceSettingsTabPayload::Preview => {
+                if self.preview_render_format_dropdown.event(event, ctx) == EventResult::Handled
+                    || self.preview_scale_slider.event(event, ctx) == EventResult::Handled
+                    || self.preview_cache_checkbox.event(event, ctx) == EventResult::Handled
+                {
+                    return EventResult::Handled;
+                }
+            }
         }
         EventResult::Ignored
     }
@@ -932,24 +1377,45 @@ impl Widget for SequenceSettingsDialog {
         self.surface.paint(self.bounds, self.card, ctx);
         self.title_label.paint(ctx);
         self.description_label.paint(ctx);
-        self.name_label.paint(ctx);
-        self.name_input.paint(ctx);
-        self.format_label.paint(ctx);
-        self.editing_mode_dropdown.paint(ctx);
-        self.resolution_dropdown.paint(ctx);
-        self.frame_rate_dropdown.paint(ctx);
-        self.pixel_aspect_ratio_dropdown.paint(ctx);
-        self.field_order_dropdown.paint(ctx);
-        self.video_display_format_dropdown.paint(ctx);
-        self.audio_label.paint(ctx);
-        self.audio_sample_rate_dropdown.paint(ctx);
-        self.audio_channel_layout_dropdown.paint(ctx);
-        self.audio_display_format_dropdown.paint(ctx);
-        self.preview_label.paint(ctx);
-        self.preview_render_format_dropdown.paint(ctx);
-        self.preview_cache_checkbox.paint(ctx);
-        self.preview_scale_label.paint(ctx);
-        self.preview_scale_slider.paint(ctx);
+        for button in &self.tab_buttons {
+            button.paint(ctx);
+        }
+        match self.active_tab {
+            SequenceSettingsTabPayload::Format => {
+                self.name_label.paint(ctx);
+                self.name_input.paint(ctx);
+                self.format_label.paint(ctx);
+                self.editing_mode_dropdown.paint(ctx);
+                self.resolution_dropdown.paint(ctx);
+                self.frame_rate_dropdown.paint(ctx);
+                self.pixel_aspect_ratio_dropdown.paint(ctx);
+                self.field_order_dropdown.paint(ctx);
+                self.video_display_format_dropdown.paint(ctx);
+                self.audio_label.paint(ctx);
+                self.audio_sample_rate_dropdown.paint(ctx);
+                self.audio_channel_layout_dropdown.paint(ctx);
+                self.audio_display_format_dropdown.paint(ctx);
+            }
+            SequenceSettingsTabPayload::Color => {
+                self.color_label.paint(ctx);
+                self.color_space_dropdown.paint(ctx);
+                self.output_color_space_dropdown.paint(ctx);
+                self.color_workflow_dropdown.paint(ctx);
+                self.missing_color_metadata_dropdown.paint(ctx);
+                self.nested_color_processing_dropdown.paint(ctx);
+                self.video_range_dropdown.paint(ctx);
+                self.export_bit_depth_dropdown.paint(ctx);
+                self.auto_tone_map_checkbox.paint(ctx);
+                self.preserve_hdr_metadata_checkbox.paint(ctx);
+            }
+            SequenceSettingsTabPayload::Preview => {
+                self.preview_label.paint(ctx);
+                self.preview_render_format_dropdown.paint(ctx);
+                self.preview_cache_checkbox.paint(ctx);
+                self.preview_scale_label.paint(ctx);
+                self.preview_scale_slider.paint(ctx);
+            }
+        }
         self.cancel_button.paint(ctx);
         self.apply_button.paint(ctx);
     }
@@ -959,33 +1425,44 @@ impl Widget for SequenceSettingsDialog {
     }
 
     fn child_count(&self) -> usize {
-        22
+        35
     }
 
     fn child(&self, index: usize) -> Option<&dyn Widget> {
         match index {
             0 => Some(&self.title_label),
             1 => Some(&self.description_label),
-            2 => Some(&self.name_label),
-            3 => Some(&self.format_label),
-            4 => Some(&self.audio_label),
-            5 => Some(&self.preview_label),
-            6 => Some(&self.preview_scale_label),
-            7 => Some(&self.name_input),
-            8 => Some(&self.editing_mode_dropdown),
-            9 => Some(&self.resolution_dropdown),
-            10 => Some(&self.frame_rate_dropdown),
-            11 => Some(&self.pixel_aspect_ratio_dropdown),
-            12 => Some(&self.field_order_dropdown),
-            13 => Some(&self.video_display_format_dropdown),
-            14 => Some(&self.audio_sample_rate_dropdown),
-            15 => Some(&self.audio_channel_layout_dropdown),
-            16 => Some(&self.audio_display_format_dropdown),
-            17 => Some(&self.preview_render_format_dropdown),
-            18 => Some(&self.preview_cache_checkbox),
-            19 => Some(&self.preview_scale_slider),
-            20 => Some(&self.cancel_button),
-            21 => Some(&self.apply_button),
+            2..=4 => self.tab_buttons.get(index - 2).map(|button| button as &dyn Widget),
+            5 => Some(&self.name_label),
+            6 => Some(&self.format_label),
+            7 => Some(&self.audio_label),
+            8 => Some(&self.preview_label),
+            9 => Some(&self.color_label),
+            10 => Some(&self.preview_scale_label),
+            11 => Some(&self.name_input),
+            12 => Some(&self.editing_mode_dropdown),
+            13 => Some(&self.resolution_dropdown),
+            14 => Some(&self.frame_rate_dropdown),
+            15 => Some(&self.pixel_aspect_ratio_dropdown),
+            16 => Some(&self.field_order_dropdown),
+            17 => Some(&self.video_display_format_dropdown),
+            18 => Some(&self.color_space_dropdown),
+            19 => Some(&self.output_color_space_dropdown),
+            20 => Some(&self.color_workflow_dropdown),
+            21 => Some(&self.missing_color_metadata_dropdown),
+            22 => Some(&self.nested_color_processing_dropdown),
+            23 => Some(&self.video_range_dropdown),
+            24 => Some(&self.export_bit_depth_dropdown),
+            25 => Some(&self.auto_tone_map_checkbox),
+            26 => Some(&self.preserve_hdr_metadata_checkbox),
+            27 => Some(&self.audio_sample_rate_dropdown),
+            28 => Some(&self.audio_channel_layout_dropdown),
+            29 => Some(&self.audio_display_format_dropdown),
+            30 => Some(&self.preview_render_format_dropdown),
+            31 => Some(&self.preview_cache_checkbox),
+            32 => Some(&self.preview_scale_slider),
+            33 => Some(&self.cancel_button),
+            34 => Some(&self.apply_button),
             _ => None,
         }
     }
@@ -994,26 +1471,37 @@ impl Widget for SequenceSettingsDialog {
         match index {
             0 => Some(&mut self.title_label),
             1 => Some(&mut self.description_label),
-            2 => Some(&mut self.name_label),
-            3 => Some(&mut self.format_label),
-            4 => Some(&mut self.audio_label),
-            5 => Some(&mut self.preview_label),
-            6 => Some(&mut self.preview_scale_label),
-            7 => Some(&mut self.name_input),
-            8 => Some(&mut self.editing_mode_dropdown),
-            9 => Some(&mut self.resolution_dropdown),
-            10 => Some(&mut self.frame_rate_dropdown),
-            11 => Some(&mut self.pixel_aspect_ratio_dropdown),
-            12 => Some(&mut self.field_order_dropdown),
-            13 => Some(&mut self.video_display_format_dropdown),
-            14 => Some(&mut self.audio_sample_rate_dropdown),
-            15 => Some(&mut self.audio_channel_layout_dropdown),
-            16 => Some(&mut self.audio_display_format_dropdown),
-            17 => Some(&mut self.preview_render_format_dropdown),
-            18 => Some(&mut self.preview_cache_checkbox),
-            19 => Some(&mut self.preview_scale_slider),
-            20 => Some(&mut self.cancel_button),
-            21 => Some(&mut self.apply_button),
+            2..=4 => self.tab_buttons.get_mut(index - 2).map(|button| button as &mut dyn Widget),
+            5 => Some(&mut self.name_label),
+            6 => Some(&mut self.format_label),
+            7 => Some(&mut self.audio_label),
+            8 => Some(&mut self.preview_label),
+            9 => Some(&mut self.color_label),
+            10 => Some(&mut self.preview_scale_label),
+            11 => Some(&mut self.name_input),
+            12 => Some(&mut self.editing_mode_dropdown),
+            13 => Some(&mut self.resolution_dropdown),
+            14 => Some(&mut self.frame_rate_dropdown),
+            15 => Some(&mut self.pixel_aspect_ratio_dropdown),
+            16 => Some(&mut self.field_order_dropdown),
+            17 => Some(&mut self.video_display_format_dropdown),
+            18 => Some(&mut self.color_space_dropdown),
+            19 => Some(&mut self.output_color_space_dropdown),
+            20 => Some(&mut self.color_workflow_dropdown),
+            21 => Some(&mut self.missing_color_metadata_dropdown),
+            22 => Some(&mut self.nested_color_processing_dropdown),
+            23 => Some(&mut self.video_range_dropdown),
+            24 => Some(&mut self.export_bit_depth_dropdown),
+            25 => Some(&mut self.auto_tone_map_checkbox),
+            26 => Some(&mut self.preserve_hdr_metadata_checkbox),
+            27 => Some(&mut self.audio_sample_rate_dropdown),
+            28 => Some(&mut self.audio_channel_layout_dropdown),
+            29 => Some(&mut self.audio_display_format_dropdown),
+            30 => Some(&mut self.preview_render_format_dropdown),
+            31 => Some(&mut self.preview_cache_checkbox),
+            32 => Some(&mut self.preview_scale_slider),
+            33 => Some(&mut self.cancel_button),
+            34 => Some(&mut self.apply_button),
             _ => None,
         }
     }
