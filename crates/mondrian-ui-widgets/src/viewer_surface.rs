@@ -6,6 +6,7 @@
 //! domain-light boundary.
 
 use mondrian_core::Color;
+use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
@@ -19,6 +20,8 @@ use crate::RasterImage;
 
 const DEFAULT_WIDTH: f32 = 480.0;
 const DEFAULT_HEIGHT: f32 = 270.0;
+const TRANSPORT_BUTTON_SIZE: f32 = 26.0;
+const TRANSPORT_BUTTON_GAP: f32 = 8.0;
 
 /// RGBA preview image presented by [`ViewerSurface`].
 pub type ViewerFrameImage = RasterImage;
@@ -38,6 +41,13 @@ pub enum ViewerStatusTone {
     Error,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewerControl {
+    StepBack,
+    PlayPause,
+    StepForward,
+}
+
 /// Preview viewer surface.
 pub struct ViewerSurface {
     id: WidgetId,
@@ -54,6 +64,8 @@ pub struct ViewerSurface {
     enabled: bool,
     frame_image: Option<ViewerFrameImage>,
     empty_message: Option<String>,
+    hovered_control: Option<ViewerControl>,
+    pressed_control: Option<ViewerControl>,
 }
 
 impl ViewerSurface {
@@ -74,6 +86,8 @@ impl ViewerSurface {
             enabled: true,
             frame_image: None,
             empty_message: None,
+            hovered_control: None,
+            pressed_control: None,
         }
     }
 
@@ -150,7 +164,7 @@ impl ViewerSurface {
 
     fn canvas_rect(&self) -> Rect {
         let chrome_top = 42.0;
-        let chrome_bottom = 34.0;
+        let chrome_bottom = 44.0;
         let padding = 16.0;
         let available = Rect::new(
             self.bounds.x + padding,
@@ -172,6 +186,50 @@ impl ViewerSurface {
         }
         parts.join("  |  ")
     }
+
+    fn control_strip_rect(&self) -> Rect {
+        let width = TRANSPORT_BUTTON_SIZE * 3.0 + TRANSPORT_BUTTON_GAP * 2.0;
+        Rect::new(
+            self.bounds.x + (self.bounds.width - width) * 0.5,
+            self.bounds.y + self.bounds.height - 34.0,
+            width,
+            TRANSPORT_BUTTON_SIZE,
+        )
+    }
+
+    fn control_rect(&self, control: ViewerControl) -> Rect {
+        let strip = self.control_strip_rect();
+        let index = match control {
+            ViewerControl::StepBack => 0.0,
+            ViewerControl::PlayPause => 1.0,
+            ViewerControl::StepForward => 2.0,
+        };
+        Rect::new(
+            strip.x + index * (TRANSPORT_BUTTON_SIZE + TRANSPORT_BUTTON_GAP),
+            strip.y,
+            TRANSPORT_BUTTON_SIZE,
+            TRANSPORT_BUTTON_SIZE,
+        )
+    }
+
+    fn control_at(&self, point: Point) -> Option<ViewerControl> {
+        [
+            ViewerControl::StepBack,
+            ViewerControl::PlayPause,
+            ViewerControl::StepForward,
+        ]
+        .into_iter()
+        .find(|control| self.control_rect(*control).contains(point))
+    }
+
+    fn dispatch_control(&self, control: ViewerControl, ctx: &mut EventContext) {
+        let action = match control {
+            ViewerControl::StepBack => Action::StepBack,
+            ViewerControl::PlayPause => Action::TogglePlay,
+            ViewerControl::StepForward => Action::StepForward,
+        };
+        (ctx.dispatch)(action);
+    }
 }
 
 impl Widget for ViewerSurface {
@@ -187,8 +245,52 @@ impl Widget for ViewerSurface {
         self.bounds = bounds;
     }
 
-    fn event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
-        EventResult::Ignored
+    fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if !self.enabled {
+            self.hovered_control = None;
+            self.pressed_control = None;
+            return EventResult::Ignored;
+        }
+
+        match event {
+            UiEvent::MouseMove { position, .. } => {
+                let hovered = self.control_at(*position);
+                if hovered != self.hovered_control {
+                    self.hovered_control = hovered;
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
+                hovered.map_or(EventResult::Ignored, |_| EventResult::Handled)
+            }
+            UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
+                if let Some(control) = self.control_at(*position) {
+                    self.pressed_control = Some(control);
+                    self.hovered_control = Some(control);
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
+                EventResult::Ignored
+            }
+            UiEvent::MouseUp { position, button: MouseButton::Left, .. } => {
+                let pressed = self.pressed_control.take();
+                let hovered = self.control_at(*position);
+                self.hovered_control = hovered;
+                if let Some(control) = pressed {
+                    if hovered == Some(control) {
+                        self.dispatch_control(control, ctx);
+                    }
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
+                EventResult::Ignored
+            }
+            UiEvent::FocusLost => {
+                self.hovered_control = None;
+                self.pressed_control = None;
+                EventResult::Handled
+            }
+            _ => EventResult::Ignored,
+        }
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
@@ -279,7 +381,10 @@ impl Widget for ViewerSurface {
         }
         paint_safe_guides(ctx, canvas, self.enabled);
 
+        self.paint_transport_controls(ctx);
+
         let metadata = self.metadata_text();
+        let control_strip = self.control_strip_rect();
         ctx.encoder.draw_text_box(
             &metadata,
             typography.small.font_size,
@@ -287,13 +392,95 @@ impl Widget for ViewerSurface {
                 self.bounds.x + 14.0,
                 self.bounds.y + self.bounds.height - 24.0,
             ),
-            (self.bounds.width - 28.0).max(1.0),
+            (control_strip.x - self.bounds.x - 28.0).max(1.0),
             colors.muted_foreground,
         );
     }
 
     fn hit_test(&self, point: Point) -> bool {
         self.bounds.contains(point)
+    }
+}
+
+impl ViewerSurface {
+    fn paint_transport_controls(&self, ctx: &mut PaintContext) {
+        for control in [
+            ViewerControl::StepBack,
+            ViewerControl::PlayPause,
+            ViewerControl::StepForward,
+        ] {
+            self.paint_transport_control(ctx, control);
+        }
+    }
+
+    fn paint_transport_control(&self, ctx: &mut PaintContext, control: ViewerControl) {
+        let colors = &ctx.theme.colors;
+        let radius = ctx.theme.spacing.radius_sm;
+        let rect = self.control_rect(control);
+        let pressed = self.pressed_control == Some(control);
+        let hovered = self.hovered_control == Some(control);
+        let bg = if !self.enabled || pressed {
+            colors.muted
+        } else if hovered {
+            colors.accent
+        } else {
+            colors.card
+        };
+        let icon = if self.enabled {
+            colors.foreground
+        } else {
+            colors.muted_foreground
+        };
+
+        ctx.encoder.draw_rect(rect, bg, radius);
+        match control {
+            ViewerControl::StepBack => {
+                ctx.encoder.draw_rect(
+                    Rect::new(rect.x + 7.0, rect.y + 7.0, 2.0, 12.0),
+                    color_with_alpha(icon, 0.9),
+                    1.0,
+                );
+                ctx.encoder.draw_triangles(
+                    &[
+                        Point::new(rect.x + 18.0, rect.y + 6.0),
+                        Point::new(rect.x + 18.0, rect.y + 20.0),
+                        Point::new(rect.x + 9.0, rect.y + 13.0),
+                    ],
+                    icon,
+                );
+            }
+            ViewerControl::PlayPause if self.playing => {
+                ctx.encoder
+                    .draw_rect(Rect::new(rect.x + 8.0, rect.y + 7.0, 3.0, 12.0), icon, 1.0);
+                ctx.encoder
+                    .draw_rect(Rect::new(rect.x + 15.0, rect.y + 7.0, 3.0, 12.0), icon, 1.0);
+            }
+            ViewerControl::PlayPause => {
+                ctx.encoder.draw_triangles(
+                    &[
+                        Point::new(rect.x + 10.0, rect.y + 6.0),
+                        Point::new(rect.x + 10.0, rect.y + 20.0),
+                        Point::new(rect.x + 19.0, rect.y + 13.0),
+                    ],
+                    icon,
+                );
+            }
+            ViewerControl::StepForward => {
+                ctx.encoder.draw_triangles(
+                    &[
+                        Point::new(rect.x + 8.0, rect.y + 6.0),
+                        Point::new(rect.x + 8.0, rect.y + 20.0),
+                        Point::new(rect.x + 17.0, rect.y + 13.0),
+                    ],
+                    icon,
+                );
+                ctx.encoder.draw_rect(
+                    Rect::new(rect.x + 17.0, rect.y + 7.0, 2.0, 12.0),
+                    color_with_alpha(icon, 0.9),
+                    1.0,
+                );
+            }
+        }
     }
 }
 
@@ -382,14 +569,17 @@ fn draw_rect_outline(ctx: &mut PaintContext, rect: Rect, color: Color) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_ui_core::widget::DrawCommandEncoder;
     use mondrian_ui_theme::ThemePreset;
+    use std::cell::RefCell;
 
     #[derive(Default)]
     struct RecordingEncoder {
         rects: Vec<Rect>,
         rect_colors: Vec<Color>,
         lines: usize,
+        triangles: usize,
         texts: Vec<String>,
         raster_images: Vec<(String, Rect, u32, u32)>,
         clips: Vec<Rect>,
@@ -409,6 +599,9 @@ mod tests {
         }
         fn draw_line(&mut self, _start: Point, _end: Point, _width: f32, _color: Color) {
             self.lines += 1;
+        }
+        fn draw_triangles(&mut self, vertices: &[Point], _color: Color) {
+            self.triangles += vertices.len();
         }
         fn draw_text(&mut self, text: &str, _font_size: f32, _position: Point, _color: Color) {
             self.texts.push(text.into());
@@ -512,6 +705,101 @@ mod tests {
         let viewer = ViewerSurface::new("Offline", 1920, 1080).disabled();
 
         assert!(!viewer.is_enabled());
+    }
+
+    #[test]
+    fn transport_controls_dispatch_playback_actions() {
+        let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080);
+        viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        for control in [
+            ViewerControl::StepBack,
+            ViewerControl::PlayPause,
+            ViewerControl::StepForward,
+        ] {
+            let position = viewer.control_rect(control).center();
+            assert_eq!(
+                viewer.event(
+                    &UiEvent::MouseDown {
+                        position,
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::none(),
+                    },
+                    &mut ctx,
+                ),
+                EventResult::Handled
+            );
+            assert_eq!(
+                viewer.event(
+                    &UiEvent::MouseUp {
+                        position,
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::none(),
+                    },
+                    &mut ctx,
+                ),
+                EventResult::Handled
+            );
+        }
+
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[Action::StepBack, Action::TogglePlay, Action::StepForward]
+        );
+    }
+
+    #[test]
+    fn disabled_viewer_transport_controls_ignore_input() {
+        let mut viewer = ViewerSurface::new("Offline", 1920, 1080).disabled();
+        viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
+        let position = viewer.control_rect(ViewerControl::PlayPause).center();
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        assert_eq!(
+            viewer.event(
+                &UiEvent::MouseDown {
+                    position,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn playing_viewer_paints_pause_transport_icon() {
+        let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080).playing(true);
+        viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 500.0, 320.0),
+        };
+
+        viewer.paint(&mut ctx);
+
+        assert_eq!(encoder.triangles, 6, "step buttons still paint triangles");
+        assert!(
+            encoder.rects.len() >= 18,
+            "playing transport should add pause-bar geometry"
+        );
     }
 
     #[test]

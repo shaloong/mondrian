@@ -1127,6 +1127,11 @@ source aspect-ratio fitting, raster-image presentation, tokenized status-badge
 tones, empty-canvas messaging, metadata labels, and safe-area guide drawing
 only; frame decoding, preview scheduling, and GPU texture lifecycle remain
 app/runtime responsibilities.
+Viewer transport controls are part of this chrome but stay domain-light: the
+widget draws geometry buttons for step back, play/pause, and step forward, then
+emits shared editor actions (`StepBack`, `TogglePlay`, `StepForward`). Playback
+state changes, frame stepping semantics, preview scheduling, and audio/video
+sync remain in the app/runtime layers.
 Empty app state maps to a disabled viewer model so the product shell can show
 clear no-signal chrome without pretending a preview texture exists.
 `ui_demo` should use the same `ViewerSurface` for the Viewer panel and keep
