@@ -134,6 +134,10 @@ pub enum TimelineEditCommand {
     TrimSelectionInToPlayhead,
     /// Trim selected clip ends to the playhead frame.
     TrimSelectionOutToPlayhead,
+    /// Enable the current timeline clip selection.
+    EnableSelection,
+    /// Disable the current timeline clip selection.
+    DisableSelection,
     /// Mark the current playhead frame as the sequence in point.
     MarkInAtPlayhead,
     /// Mark the current playhead frame as the sequence out point.
@@ -1421,6 +1425,15 @@ impl TimelineView {
             ),
             MenuItem::separator(),
             Self::menu_item(
+                "Enable Clip",
+                self.edit_command_action(TimelineEditCommand::EnableSelection),
+            ),
+            Self::menu_item(
+                "Disable Clip",
+                self.edit_command_action(TimelineEditCommand::DisableSelection),
+            ),
+            MenuItem::separator(),
+            Self::menu_item(
                 "Mark In",
                 self.edit_command_action(TimelineEditCommand::MarkInAtPlayhead),
             ),
@@ -1444,6 +1457,15 @@ impl TimelineView {
             Self::menu_item(
                 "Trim Selection Out to Playhead",
                 self.edit_command_action(TimelineEditCommand::TrimSelectionOutToPlayhead),
+            ),
+            MenuItem::separator(),
+            Self::menu_item(
+                "Enable Selection",
+                self.edit_command_action(TimelineEditCommand::EnableSelection),
+            ),
+            Self::menu_item(
+                "Disable Selection",
+                self.edit_command_action(TimelineEditCommand::DisableSelection),
             ),
             MenuItem::separator(),
             Self::menu_item(
@@ -4221,6 +4243,8 @@ mod tests {
                 TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
                 TimelineEditCommand::TrimSelectionInToPlayhead => Action::Cut,
                 TimelineEditCommand::TrimSelectionOutToPlayhead => Action::Copy,
+                TimelineEditCommand::EnableSelection => Action::Play,
+                TimelineEditCommand::DisableSelection => Action::Pause,
                 TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
                 TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
             }
@@ -4269,6 +4293,8 @@ mod tests {
             TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
             TimelineEditCommand::TrimSelectionInToPlayhead => Action::Cut,
             TimelineEditCommand::TrimSelectionOutToPlayhead => Action::Copy,
+            TimelineEditCommand::EnableSelection => Action::Play,
+            TimelineEditCommand::DisableSelection => Action::Pause,
             TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
             TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
         });
@@ -4330,6 +4356,8 @@ mod tests {
                 TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
                 TimelineEditCommand::TrimSelectionInToPlayhead => Action::Cut,
                 TimelineEditCommand::TrimSelectionOutToPlayhead => Action::Copy,
+                TimelineEditCommand::EnableSelection => Action::Play,
+                TimelineEditCommand::DisableSelection => Action::Pause,
                 TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
                 TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
             })
@@ -4373,7 +4401,7 @@ mod tests {
 
         let result = view.event(
             &UiEvent::MouseDown {
-                position: Point::new(510.0, 235.0),
+                position: Point::new(510.0, 281.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },

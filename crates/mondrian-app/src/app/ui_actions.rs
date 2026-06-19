@@ -22,6 +22,10 @@ pub const TIMELINE_SELECT_CLIP: &str = "select_clip";
 pub const TIMELINE_MOVE_CLIP: &str = "move_clip";
 /// Action name for trimming timeline clips.
 pub const TIMELINE_TRIM_CLIPS: &str = "trim_clips";
+/// Action name for trimming the current clip selection to the playhead.
+pub const TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD: &str = "trim_selected_clips_to_playhead";
+/// Action name for toggling the current timeline clip selection.
+pub const TIMELINE_SET_SELECTED_CLIPS_ENABLED: &str = "set_selected_clips_enabled";
 /// Action name for seeking the active timeline.
 pub const TIMELINE_SEEK: &str = "seek";
 /// Action name for changing one timeline track header control.
@@ -245,6 +249,20 @@ pub struct TimelineTrimClipsPayload {
     pub edge: TimelineTrimPayloadEdge,
     /// Target timeline frame for the selected edge.
     pub frame: i64,
+}
+
+/// Trim the current timeline clip selection to the playhead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineTrimSelectedClipsToPlayheadPayload {
+    /// Edge that should be trimmed.
+    pub edge: TimelineTrimPayloadEdge,
+}
+
+/// Toggle the enabled state for the current timeline clip selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineSetSelectedClipsEnabledPayload {
+    /// `true` when selected clips should participate in rendering/playback.
+    pub enabled: bool,
 }
 
 /// Seek the active timeline to a frame.
@@ -659,6 +677,20 @@ pub fn timeline_move_clip_action(payload: TimelineMoveClipPayload) -> Action {
 /// Build an action that trims clip edges in the active timeline.
 pub fn timeline_trim_clips_action(payload: TimelineTrimClipsPayload) -> Action {
     custom_timeline_action(TIMELINE_TRIM_CLIPS, payload)
+}
+
+/// Build an action that trims the current clip selection to the playhead.
+pub fn timeline_trim_selected_clips_to_playhead_action(
+    payload: TimelineTrimSelectedClipsToPlayheadPayload,
+) -> Action {
+    custom_timeline_action(TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD, payload)
+}
+
+/// Build an action that toggles the current timeline clip selection.
+pub fn timeline_set_selected_clips_enabled_action(
+    payload: TimelineSetSelectedClipsEnabledPayload,
+) -> Action {
+    custom_timeline_action(TIMELINE_SET_SELECTED_CLIPS_ENABLED, payload)
 }
 
 /// Build an action that seeks the active timeline.

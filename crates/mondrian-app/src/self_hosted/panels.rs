@@ -53,22 +53,25 @@ use crate::app::ui_actions::{
     inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
     inspector_set_effect_property_action, timeline_add_track_action, timeline_drop_asset_action,
     timeline_move_clip_action, timeline_move_track_action, timeline_seek_action,
-    timeline_select_clip_action, timeline_set_track_control_action, timeline_trim_clips_action,
-    AppShellRelinkAssetDialogPayload, AppShellRevealInFileManagerPayload, AssetsCreateAssetPayload,
-    AssetsCreateFolderPayload, AssetsDeleteAssetPayload, AssetsDeleteFolderPayload,
-    AssetsDeleteSelectionPayload, AssetsImportFilesPayload, AssetsMoveAssetPayload,
-    AssetsMoveFolderPayload, AssetsMoveSelectionPayload, AssetsOpenFolderPayload,
-    AssetsPrepareDragPayload, AssetsRenameAssetPayload, AssetsRenameFolderPayload,
-    AssetsSetProxyModePayload, EffectsAddToClipPayload, ExportDraftUpdatePayload,
-    ExportEnqueuePayload, ExportOutputDialogPayload, ImportMediaDialogPayload,
-    InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
-    InspectorRemoveEffectPayload, InspectorSelectEffectPayload, InspectorSetClipCurvePayload,
-    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+    timeline_select_clip_action, timeline_set_selected_clips_enabled_action,
+    timeline_set_track_control_action, timeline_trim_clips_action,
+    timeline_trim_selected_clips_to_playhead_action, AppShellRelinkAssetDialogPayload,
+    AppShellRevealInFileManagerPayload, AssetsCreateAssetPayload, AssetsCreateFolderPayload,
+    AssetsDeleteAssetPayload, AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload,
+    AssetsImportFilesPayload, AssetsMoveAssetPayload, AssetsMoveFolderPayload,
+    AssetsMoveSelectionPayload, AssetsOpenFolderPayload, AssetsPrepareDragPayload,
+    AssetsRenameAssetPayload, AssetsRenameFolderPayload, AssetsSetProxyModePayload,
+    EffectsAddToClipPayload, ExportDraftUpdatePayload, ExportEnqueuePayload,
+    ExportOutputDialogPayload, ImportMediaDialogPayload, InspectorClipRefPayload,
+    InspectorClipTransformField, InspectorCurvePointPayload, InspectorRemoveEffectPayload,
+    InspectorSelectEffectPayload, InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
+    InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
     InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
     InspectorSetEffectPropertyPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
     TimelineDropAssetPayload, TimelineMoveClipPayload, TimelineMoveTrackPayload,
-    TimelineSelectClipPayload, TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind,
-    TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
+    TimelineSelectClipPayload, TimelineSetSelectedClipsEnabledPayload,
+    TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipsPayload,
+    TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
 };
 use crate::app::{AppState, SelectedClipRef};
 use crate::self_hosted::icons::AppIcon;
@@ -584,7 +587,6 @@ pub struct TimelinePanelModel {
     pub playhead_frame: i64,
     pub in_point_frame: i64,
     pub out_point_frame: Option<i64>,
-    selected_clip_ids: Vec<ClipId>,
     track_refs: Vec<AppTimelineTrackRef>,
     clip_refs: Vec<Vec<ClipId>>,
 }
@@ -629,22 +631,11 @@ impl TimelinePanelModel {
             clip_refs.push(clip_ids);
             tracks.push(track);
         }
-        let mut selected_clip_ids = Vec::new();
-        for selection in selected_clips {
-            if selected_clip_ids.contains(&selection.clip_id) {
-                continue;
-            }
-            if clip_refs.iter().any(|ids| ids.contains(&selection.clip_id)) {
-                selected_clip_ids.push(selection.clip_id);
-            }
-        }
-
         Self {
             tracks,
             playhead_frame: sequence.playhead.frame.max(0),
             in_point_frame: sequence.in_point_frame(),
             out_point_frame: sequence.out_point_frame(),
-            selected_clip_ids,
             track_refs,
             clip_refs,
         }
@@ -745,24 +736,6 @@ impl TimelinePanelModel {
         };
         Some(TimelineTrimClipsPayload {
             clip_ids: vec![clip.clip_id],
-            edge,
-            frame: frame.max(0),
-        })
-    }
-
-    fn trim_selection_payload(
-        &self,
-        edge: TimelineTrimPayloadEdge,
-    ) -> Option<TimelineTrimClipsPayload> {
-        if self.selected_clip_ids.is_empty() {
-            return None;
-        }
-        let frame = match edge {
-            TimelineTrimPayloadEdge::In => self.playhead_frame,
-            TimelineTrimPayloadEdge::Out => self.playhead_frame.saturating_add(1),
-        };
-        Some(TimelineTrimClipsPayload {
-            clip_ids: self.selected_clip_ids.clone(),
             edge,
             frame: frame.max(0),
         })
@@ -2222,24 +2195,7 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
                     .unwrap_or(Action::NoOp)
             }
         })
-        .on_edit_command({
-            let action_model = action_model.clone();
-            move |command| match command {
-                TimelineEditCommand::DeleteSelection => Action::DeleteSelection,
-                TimelineEditCommand::RippleDeleteSelection => Action::RippleDeleteSelection,
-                TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
-                TimelineEditCommand::TrimSelectionInToPlayhead => action_model
-                    .trim_selection_payload(TimelineTrimPayloadEdge::In)
-                    .map(timeline_trim_clips_action)
-                    .unwrap_or(Action::NoOp),
-                TimelineEditCommand::TrimSelectionOutToPlayhead => action_model
-                    .trim_selection_payload(TimelineTrimPayloadEdge::Out)
-                    .map(timeline_trim_clips_action)
-                    .unwrap_or(Action::NoOp),
-                TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
-                TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
-            }
-        })
+        .on_edit_command(timeline_edit_command_action)
         .on_clip_move({
             let action_model = action_model.clone();
             move |movement, _clip| {
@@ -2259,6 +2215,36 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
             }
         })
         .on_seek(timeline_seek_action)
+}
+
+fn timeline_edit_command_action(command: TimelineEditCommand) -> Action {
+    match command {
+        TimelineEditCommand::DeleteSelection => Action::DeleteSelection,
+        TimelineEditCommand::RippleDeleteSelection => Action::RippleDeleteSelection,
+        TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
+        TimelineEditCommand::TrimSelectionInToPlayhead => {
+            timeline_trim_selected_clips_to_playhead_action(
+                TimelineTrimSelectedClipsToPlayheadPayload { edge: TimelineTrimPayloadEdge::In },
+            )
+        }
+        TimelineEditCommand::TrimSelectionOutToPlayhead => {
+            timeline_trim_selected_clips_to_playhead_action(
+                TimelineTrimSelectedClipsToPlayheadPayload { edge: TimelineTrimPayloadEdge::Out },
+            )
+        }
+        TimelineEditCommand::EnableSelection => {
+            timeline_set_selected_clips_enabled_action(TimelineSetSelectedClipsEnabledPayload {
+                enabled: true,
+            })
+        }
+        TimelineEditCommand::DisableSelection => {
+            timeline_set_selected_clips_enabled_action(TimelineSetSelectedClipsEnabledPayload {
+                enabled: false,
+            })
+        }
+        TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
+        TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
+    }
 }
 
 fn node_graph_panel(model: &NodeGraphPanelModel) -> NodeGraphView {
@@ -3134,6 +3120,7 @@ mod tests {
         EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE, INSPECTOR_SELECT_EFFECT,
         INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_EFFECT_PROPERTY, TIMELINE_ADD_TRACK,
         TIMELINE_DROP_ASSET, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_SELECT_CLIP,
+        TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD,
     };
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
@@ -4237,60 +4224,6 @@ mod tests {
     }
 
     #[test]
-    fn timeline_model_builds_trim_selection_payload_from_valid_unique_selection() {
-        let mut sequence = Sequence::new("edit");
-        let tb = sequence.time_base();
-        sequence.playhead = TimeCode::new(24, tb);
-
-        let video_track_id = sequence.video_tracks[0].id;
-        let mut video = Clip::new(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(30, tb));
-        video.label = Some("Video".to_string());
-        let video_id = video.id;
-        sequence.video_tracks[0].add_clip(video).expect("add video clip");
-
-        let audio_track_id = sequence.audio_tracks[0].id;
-        let mut audio = Clip::new(AssetId::new(), TimeCode::new(8, tb), TimeCode::new(40, tb));
-        audio.label = Some("Audio".to_string());
-        let audio_id = audio.id;
-        sequence.audio_tracks[0].add_clip(audio).expect("add audio clip");
-
-        let stale = SelectedClipRef {
-            track_id: TrackId::new(),
-            is_video_track: true,
-            clip_id: ClipId::new(),
-        };
-        let selected_video = SelectedClipRef {
-            track_id: video_track_id,
-            is_video_track: true,
-            clip_id: video_id,
-        };
-        let selected_audio = SelectedClipRef {
-            track_id: audio_track_id,
-            is_video_track: false,
-            clip_id: audio_id,
-        };
-        let model = TimelinePanelModel::from_sequence(
-            &sequence,
-            &[selected_video, stale, selected_audio, selected_video],
-            &[],
-        );
-
-        let in_payload = model
-            .trim_selection_payload(TimelineTrimPayloadEdge::In)
-            .expect("trim in payload");
-        assert_eq!(in_payload.clip_ids, vec![video_id, audio_id]);
-        assert_eq!(in_payload.edge, TimelineTrimPayloadEdge::In);
-        assert_eq!(in_payload.frame, 24);
-
-        let out_payload = model
-            .trim_selection_payload(TimelineTrimPayloadEdge::Out)
-            .expect("trim out payload");
-        assert_eq!(out_payload.clip_ids, vec![video_id, audio_id]);
-        assert_eq!(out_payload.edge, TimelineTrimPayloadEdge::Out);
-        assert_eq!(out_payload.frame, 25);
-    }
-
-    #[test]
     fn timeline_model_maps_sequence_tracks_clips_and_selection() {
         let mut sequence = Sequence::new("edit");
         let tb = sequence.time_base();
@@ -4896,6 +4829,30 @@ mod tests {
             actions.borrow().as_slice(),
             &[Action::MarkInAtPlayhead, Action::MarkOutAtPlayhead]
         );
+    }
+
+    #[test]
+    fn timeline_edit_command_mapping_emits_selection_trim_and_enable_actions() {
+        let trim_action =
+            timeline_edit_command_action(TimelineEditCommand::TrimSelectionInToPlayhead);
+        let Action::Custom { namespace, name, payload } = trim_action else {
+            panic!("expected selected trim action");
+        };
+        assert_eq!(namespace, TIMELINE_NAMESPACE);
+        assert_eq!(name, TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD);
+        let payload: TimelineTrimSelectedClipsToPlayheadPayload =
+            serde_json::from_value(payload).expect("trim payload");
+        assert_eq!(payload.edge, TimelineTrimPayloadEdge::In);
+
+        let disable_action = timeline_edit_command_action(TimelineEditCommand::DisableSelection);
+        let Action::Custom { namespace, name, payload } = disable_action else {
+            panic!("expected selected enable action");
+        };
+        assert_eq!(namespace, TIMELINE_NAMESPACE);
+        assert_eq!(name, TIMELINE_SET_SELECTED_CLIPS_ENABLED);
+        let payload: TimelineSetSelectedClipsEnabledPayload =
+            serde_json::from_value(payload).expect("enabled payload");
+        assert!(!payload.enabled);
     }
 
     #[test]

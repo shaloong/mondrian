@@ -24,8 +24,9 @@ use crate::app::ui_actions::{
     InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload,
     ProjectRecoverFromAutosavePayload, TimelineAddTrackKind, TimelineAddTrackPayload,
     TimelineDropAssetPayload, TimelineMoveClipPayload, TimelineMoveTrackPayload,
-    TimelineSeekPayload, TimelineSelectClipPayload, TimelineSetTrackControlPayload,
-    TimelineTrackControlPayloadKind, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
+    TimelineSeekPayload, TimelineSelectClipPayload, TimelineSetSelectedClipsEnabledPayload,
+    TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipsPayload,
+    TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
     ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR,
     ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_DELETE_SELECTION, ASSETS_IMPORT_FILES,
     ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE,
@@ -37,7 +38,8 @@ use crate::app::ui_actions::{
     INSPECTOR_SET_EFFECT_ENABLED, INSPECTOR_SET_EFFECT_PROPERTY, PROJECT_CREATE_WITH_SETTINGS,
     PROJECT_NAMESPACE, PROJECT_RECOVER_FROM_AUTOSAVE, TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET,
     TIMELINE_MOVE_CLIP, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_SEEK,
-    TIMELINE_SELECT_CLIP, TIMELINE_SET_TRACK_CONTROL, TIMELINE_TRIM_CLIPS,
+    TIMELINE_SELECT_CLIP, TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL,
+    TIMELINE_TRIM_CLIPS, TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD,
 };
 use crate::app::{AppClipboardKind, AppState, ClipOverlapMode, SelectedClipRef};
 use glam::Vec2;
@@ -1034,6 +1036,26 @@ impl AppState {
                 self.trim_clips_bulk_to_frame(&payload.clip_ids, edge, payload.frame)
                     .map(|_| ())
             }
+            TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD => {
+                let payload = parse_ui_payload::<TimelineTrimSelectedClipsToPlayheadPayload>(
+                    "timeline_ui_action",
+                    name,
+                    payload,
+                )?;
+                let edge = match payload.edge {
+                    TimelineTrimPayloadEdge::In => TrimEdge::In,
+                    TimelineTrimPayloadEdge::Out => TrimEdge::Out,
+                };
+                self.trim_selected_clips_to_playhead_from_ui(edge)
+            }
+            TIMELINE_SET_SELECTED_CLIPS_ENABLED => {
+                let payload = parse_ui_payload::<TimelineSetSelectedClipsEnabledPayload>(
+                    "timeline_ui_action",
+                    name,
+                    payload,
+                )?;
+                self.set_selected_clips_enabled_from_ui(payload.enabled)
+            }
             TIMELINE_SEEK => {
                 let payload =
                     parse_ui_payload::<TimelineSeekPayload>("timeline_ui_action", name, payload)?;
@@ -1530,20 +1552,69 @@ impl AppState {
         Ok(())
     }
 
+    fn set_selected_clips_enabled_from_ui(&mut self, enabled: bool) -> Result<()> {
+        let clip_ids = self.selected_clip_ids_for_timeline_action();
+        self.set_clips_enabled_from_ui("timeline_set_selected_clips_enabled", &clip_ids, enabled)
+    }
+
+    fn trim_selected_clips_to_playhead_from_ui(&mut self, edge: TrimEdge) -> Result<()> {
+        let clip_ids = self.selected_clip_ids_for_timeline_action();
+        if clip_ids.is_empty() {
+            return Ok(());
+        }
+        let target_frame = match edge {
+            TrimEdge::In => self.current_frame(),
+            TrimEdge::Out => self.current_frame().saturating_add(1),
+        };
+        self.trim_clips_bulk_to_frame(&clip_ids, edge, target_frame).map(|_| ())
+    }
+
+    fn selected_clip_ids_for_timeline_action(&self) -> Vec<ClipId> {
+        let mut clip_ids = Vec::new();
+        for selection in &self.selection.selected_clips {
+            if !clip_ids.contains(&selection.clip_id) {
+                clip_ids.push(selection.clip_id);
+            }
+        }
+        clip_ids
+    }
+
     fn set_clip_enabled_from_ui(&mut self, clip_id: ClipId, enabled: bool) -> Result<()> {
-        self.ensure_clip_track_unlocked("inspector_set_clip_enabled", clip_id)?;
+        self.set_clips_enabled_from_ui("inspector_set_clip_enabled", &[clip_id], enabled)
+    }
+
+    fn set_clips_enabled_from_ui(
+        &mut self,
+        step_id: &'static str,
+        clip_ids: &[ClipId],
+        enabled: bool,
+    ) -> Result<()> {
+        if clip_ids.is_empty() {
+            return Ok(());
+        }
+        for clip_id in clip_ids {
+            self.ensure_clip_track_unlocked(step_id, *clip_id)?;
+        }
         let Some(seq) = self.sequence.as_mut() else {
-            return Err(missing_sequence_error("inspector_set_clip_enabled"));
+            return Err(missing_sequence_error(step_id));
         };
         let before = seq.clone();
-        let changed = set_clip_disabled(seq, clip_id, !enabled);
+        let mut changed = false;
+        for clip_id in clip_ids {
+            changed |= set_clip_disabled(seq, *clip_id, !enabled);
+        }
         if changed {
             self.record_timeline_edit_snapshot("切换片段启用状态", before);
             Ok(())
-        } else if clip_exists(seq, clip_id) {
+        } else if clip_ids.iter().all(|clip_id| clip_exists(seq, *clip_id)) {
             Ok(())
         } else {
-            Err(missing_clip_error("inspector_set_clip_enabled", clip_id))
+            let missing = clip_ids
+                .iter()
+                .copied()
+                .find(|clip_id| !clip_exists(seq, *clip_id))
+                .unwrap_or(clip_ids[0]);
+            Err(missing_clip_error(step_id, missing))
         }
     }
 
@@ -1925,21 +1996,24 @@ mod tests {
         inspector_set_effect_property_action, project_create_with_settings_action,
         project_recover_from_autosave_action, timeline_add_track_action,
         timeline_drop_asset_action, timeline_move_clip_action, timeline_move_track_action,
-        timeline_seek_action, timeline_select_clip_action, timeline_set_track_control_action,
-        timeline_trim_clips_action, AssetsCreateAssetPayload, AssetsCreateFolderPayload,
-        AssetsDeleteAssetPayload, AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload,
-        AssetsImportFilesPayload, AssetsMoveAssetPayload, AssetsMoveFolderPayload,
-        AssetsMoveSelectionPayload, AssetsPrepareDragPayload, AssetsRelinkAssetPayload,
-        AssetsRenameAssetPayload, AssetsRenameFolderPayload, AssetsSetProxyModePayload,
-        EffectsAddToClipPayload, ExportDraftUpdatePayload, ExportEnqueuePayload,
-        InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
-        InspectorRemoveEffectPayload, InspectorSelectEffectPayload, InspectorSetClipCurvePayload,
-        InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
-        InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
-        InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload,
-        ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload, TimelineAddTrackKind,
-        TimelineAddTrackPayload, TimelineDropAssetPayload, TimelineMoveTrackPayload,
+        timeline_seek_action, timeline_select_clip_action,
+        timeline_set_selected_clips_enabled_action, timeline_set_track_control_action,
+        timeline_trim_clips_action, timeline_trim_selected_clips_to_playhead_action,
+        AssetsCreateAssetPayload, AssetsCreateFolderPayload, AssetsDeleteAssetPayload,
+        AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload, AssetsImportFilesPayload,
+        AssetsMoveAssetPayload, AssetsMoveFolderPayload, AssetsMoveSelectionPayload,
+        AssetsPrepareDragPayload, AssetsRelinkAssetPayload, AssetsRenameAssetPayload,
+        AssetsRenameFolderPayload, AssetsSetProxyModePayload, EffectsAddToClipPayload,
+        ExportDraftUpdatePayload, ExportEnqueuePayload, InspectorClipRefPayload,
+        InspectorClipTransformField, InspectorCurvePointPayload, InspectorRemoveEffectPayload,
+        InspectorSelectEffectPayload, InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
+        InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+        InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
+        InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload,
+        ProjectRecoverFromAutosavePayload, TimelineAddTrackKind, TimelineAddTrackPayload,
+        TimelineDropAssetPayload, TimelineMoveTrackPayload, TimelineSetSelectedClipsEnabledPayload,
         TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipsPayload,
+        TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
     };
     use mondrian_assets::AssetLibrary;
     use mondrian_core::types::{AssetId, EffectId, MaskId, TimeCode, TrackId};
@@ -2424,6 +2498,92 @@ mod tests {
         assert_eq!(first.duration.frame, 14);
         assert_eq!(second.position.frame, 16);
         assert_eq!(second.duration.frame, 26);
+    }
+
+    #[test]
+    fn dispatch_timeline_ui_trims_current_selection_to_playhead() {
+        let (mut state, first_track_id, first_clip_id) = state_with_two_video_tracks();
+        let tb = state.sequence.as_ref().expect("sequence").time_base();
+        let second_clip = Clip::new(AssetId::new(), TimeCode::new(12, tb), TimeCode::new(30, tb));
+        let second_clip_id = second_clip.id;
+        let second_track_id = state.sequence.as_ref().expect("sequence").video_tracks[1].id;
+        state.sequence.as_mut().expect("sequence").video_tracks[1]
+            .add_clip(second_clip)
+            .expect("add second clip");
+        state.selection.selected_clips = vec![
+            SelectedClipRef {
+                track_id: first_track_id,
+                is_video_track: true,
+                clip_id: first_clip_id,
+            },
+            SelectedClipRef {
+                track_id: second_track_id,
+                is_video_track: true,
+                clip_id: second_clip_id,
+            },
+        ];
+        state.seek(18);
+
+        state
+            .dispatch_action(timeline_trim_selected_clips_to_playhead_action(
+                TimelineTrimSelectedClipsToPlayheadPayload { edge: TimelineTrimPayloadEdge::In },
+            ))
+            .expect("dispatch selected trim");
+
+        let sequence = state.sequence.as_ref().expect("sequence");
+        let first = &sequence.video_tracks[0].clips[0];
+        let second = &sequence.video_tracks[1].clips[0];
+        assert_eq!(first.position.frame, 18);
+        assert_eq!(first.duration.frame, 12);
+        assert_eq!(second.position.frame, 18);
+        assert_eq!(second.duration.frame, 24);
+    }
+
+    #[test]
+    fn dispatch_timeline_ui_sets_current_selection_enabled_state_atomically() {
+        let (mut state, first_track_id, first_clip_id) = state_with_two_video_tracks();
+        let tb = state.sequence.as_ref().expect("sequence").time_base();
+        let second_clip = Clip::new(AssetId::new(), TimeCode::new(40, tb), TimeCode::new(10, tb));
+        let second_clip_id = second_clip.id;
+        let second_track_id = state.sequence.as_ref().expect("sequence").video_tracks[1].id;
+        state.sequence.as_mut().expect("sequence").video_tracks[1]
+            .add_clip(second_clip)
+            .expect("add second clip");
+        state.selection.selected_clips = vec![
+            SelectedClipRef {
+                track_id: first_track_id,
+                is_video_track: true,
+                clip_id: first_clip_id,
+            },
+            SelectedClipRef {
+                track_id: second_track_id,
+                is_video_track: true,
+                clip_id: second_clip_id,
+            },
+        ];
+
+        state
+            .dispatch_action(timeline_set_selected_clips_enabled_action(
+                TimelineSetSelectedClipsEnabledPayload { enabled: false },
+            ))
+            .expect("disable selection");
+
+        let sequence = state.sequence.as_ref().expect("sequence");
+        assert!(sequence.video_tracks[0].clips[0].is_disabled);
+        assert!(sequence.video_tracks[1].clips[0].is_disabled);
+
+        state.sequence.as_mut().expect("sequence").video_tracks[1].is_locked = true;
+        let result = state.dispatch_action(timeline_set_selected_clips_enabled_action(
+            TimelineSetSelectedClipsEnabledPayload { enabled: true },
+        ));
+
+        assert!(result.is_err());
+        let sequence = state.sequence.as_ref().expect("sequence");
+        assert!(
+            sequence.video_tracks[0].clips[0].is_disabled,
+            "locked-track rejection must not partially enable earlier selected clips"
+        );
+        assert!(sequence.video_tracks[1].clips[0].is_disabled);
     }
 
     #[test]

@@ -726,9 +726,16 @@ editor actions such as `Action::DeleteSelection` and
 Trim-to-playhead menu commands use explicit
 `TimelineEditCommand::TrimSelectionInToPlayhead` /
 `TimelineEditCommand::TrimSelectionOutToPlayhead` commands; the app adapter
-resolves the current validated selection and playhead into a batch
-`ui.timeline.trim_clips` payload instead of letting the widget inspect or mutate
-the sequence.
+maps them to `ui.timeline.trim_selected_clips_to_playhead`, and `AppState`
+resolves the current selection and playhead at dispatch time. This matters for
+right-click workflows because the widget first dispatches clip selection before
+the menu command is activated; menu items must not freeze stale clip ids when
+the menu opens.
+Enable/disable selection follows the same boundary through
+`TimelineEditCommand::EnableSelection` /
+`TimelineEditCommand::DisableSelection` and
+`ui.timeline.set_selected_clips_enabled`, so timeline context menus, future
+shortcuts, and scripts share the same selected-clip mutation path.
 Mark In / Mark Out shortcuts use `TimelineEditCommand::MarkInAtPlayhead` and
 `TimelineEditCommand::MarkOutAtPlayhead`, then route through shared app actions
 so timeline and viewer shortcuts can converge on the same command boundary.
