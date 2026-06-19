@@ -165,6 +165,8 @@ pub enum TimelineEditCommand {
     MarkInAtPlayhead,
     /// Mark the current playhead frame as the sequence out point.
     MarkOutAtPlayhead,
+    /// Clear the sequence in/out range.
+    ClearInOutPoints,
 }
 
 /// Pointer tool currently active inside the timeline surface.
@@ -1589,6 +1591,7 @@ impl TimelineView {
             MenuItem::separator(),
             self.edit_menu_item("Mark In", TimelineEditCommand::MarkInAtPlayhead),
             self.edit_menu_item("Mark Out", TimelineEditCommand::MarkOutAtPlayhead),
+            self.edit_menu_item("Clear In/Out", TimelineEditCommand::ClearInOutPoints),
         ]);
         items
     }
@@ -1628,6 +1631,7 @@ impl TimelineView {
             MenuItem::separator(),
             self.edit_menu_item("Mark In", TimelineEditCommand::MarkInAtPlayhead),
             self.edit_menu_item("Mark Out", TimelineEditCommand::MarkOutAtPlayhead),
+            self.edit_menu_item("Clear In/Out", TimelineEditCommand::ClearInOutPoints),
         ]
     }
 
@@ -4414,6 +4418,7 @@ mod tests {
                 TimelineEditCommand::OpenNestedSequence(_) => Action::NoOp,
                 TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
                 TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
+                TimelineEditCommand::ClearInOutPoints => Action::NoOp,
             }
         });
         view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
@@ -4469,6 +4474,7 @@ mod tests {
             TimelineEditCommand::OpenNestedSequence(_) => Action::NoOp,
             TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
             TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
+            TimelineEditCommand::ClearInOutPoints => Action::NoOp,
         });
         view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
 
@@ -4535,6 +4541,28 @@ mod tests {
     }
 
     #[test]
+    fn context_menu_can_dispatch_clear_in_out_command() {
+        let commands = Rc::new(RefCell::new(Vec::new()));
+        let command_log = Rc::clone(&commands);
+        let view = timeline().on_edit_command(move |command| {
+            command_log.borrow_mut().push(command);
+            match command {
+                TimelineEditCommand::ClearInOutPoints => Action::SaveProject,
+                _ => Action::NoOp,
+            }
+        });
+
+        let items = view.timeline_context_menu_items();
+        let clear = items
+            .iter()
+            .find(|item| item.label == "Clear In/Out")
+            .expect("clear in/out item");
+
+        assert_eq!(clear.action, Action::SaveProject);
+        assert!(commands.borrow().contains(&TimelineEditCommand::ClearInOutPoints));
+    }
+
+    #[test]
     fn nested_clip_context_menu_includes_open_nested_sequence_command() {
         let mut view = TimelineView::new(vec![TimelineTrack::video(
             "V1",
@@ -4591,6 +4619,7 @@ mod tests {
                 TimelineEditCommand::OpenNestedSequence(_) => Action::NoOp,
                 TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
                 TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
+                TimelineEditCommand::ClearInOutPoints => Action::NoOp,
             })
             .on_track_add(|kind| match kind {
                 TimelineTrackKind::Video => Action::Play,

@@ -33,6 +33,8 @@ pub const TIMELINE_TRIM_CLIPS: &str = "trim_clips";
 pub const TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD: &str = "trim_selected_clips_to_playhead";
 /// Action name for setting one timeline in/out point to an explicit frame.
 pub const TIMELINE_SET_IN_OUT_POINT: &str = "set_in_out_point";
+/// Action name for clearing active-sequence in/out points.
+pub const TIMELINE_CLEAR_IN_OUT_POINTS: &str = "clear_in_out_points";
 /// Action name for toggling the current timeline clip selection.
 pub const TIMELINE_SET_SELECTED_CLIPS_ENABLED: &str = "set_selected_clips_enabled";
 /// Action name for seeking the active timeline.
@@ -833,6 +835,11 @@ pub fn timeline_trim_selected_clips_to_playhead_action(
 /// Build an action that sets one active-sequence in/out point.
 pub fn timeline_set_in_out_point_action(payload: TimelineSetInOutPointPayload) -> Action {
     custom_timeline_action(TIMELINE_SET_IN_OUT_POINT, payload)
+}
+
+/// Build an action that clears the active sequence in/out points.
+pub fn timeline_clear_in_out_points_action() -> Action {
+    custom_timeline_action(TIMELINE_CLEAR_IN_OUT_POINTS, ())
 }
 
 /// Build an action that toggles the current timeline clip selection.

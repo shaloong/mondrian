@@ -40,11 +40,11 @@ use crate::app::ui_actions::{
     INSPECTOR_SET_EFFECT_ENABLED, INSPECTOR_SET_EFFECT_PROPERTY, PROJECT_CREATE_WITH_SETTINGS,
     PROJECT_NAMESPACE, PROJECT_RECOVER_FROM_AUTOSAVE, SEQUENCE_DELETE, SEQUENCE_DUPLICATE,
     SEQUENCE_NAMESPACE, SEQUENCE_NEW, SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT,
-    SEQUENCE_SWITCH_ACTIVE, SEQUENCE_UPDATE_SETTINGS, TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET,
-    TIMELINE_MOVE_CLIP, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_OPEN_NESTED_SEQUENCE,
-    TIMELINE_SEEK, TIMELINE_SELECT_CLIP, TIMELINE_SET_IN_OUT_POINT,
-    TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL, TIMELINE_TRIM_CLIPS,
-    TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD,
+    SEQUENCE_SWITCH_ACTIVE, SEQUENCE_UPDATE_SETTINGS, TIMELINE_ADD_TRACK,
+    TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_DROP_ASSET, TIMELINE_MOVE_CLIP, TIMELINE_MOVE_TRACK,
+    TIMELINE_NAMESPACE, TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_SEEK, TIMELINE_SELECT_CLIP,
+    TIMELINE_SET_IN_OUT_POINT, TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL,
+    TIMELINE_TRIM_CLIPS, TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD,
 };
 use crate::app::{AppClipboardKind, AppState, ClipOverlapMode, SelectedClipRef};
 use glam::Vec2;
@@ -1064,6 +1064,7 @@ impl AppState {
                 )?;
                 self.set_in_out_point_from_ui(payload)
             }
+            TIMELINE_CLEAR_IN_OUT_POINTS => self.clear_in_out_points_from_ui(),
             TIMELINE_SET_SELECTED_CLIPS_ENABLED => {
                 let payload = parse_ui_payload::<TimelineSetSelectedClipsEnabledPayload>(
                     "timeline_ui_action",
@@ -1667,6 +1668,16 @@ impl AppState {
         Ok(())
     }
 
+    fn clear_in_out_points_from_ui(&mut self) -> Result<()> {
+        let Some(sequence) = self.sequence.as_mut() else {
+            return Err(missing_sequence_error("timeline_clear_in_out_points"));
+        };
+        sequence.clear_in_out();
+        self.sync_current_sequence_into_collection();
+        let _ = self.save_project_file();
+        Ok(())
+    }
+
     fn selected_clip_ids_for_timeline_action(&self) -> Vec<ClipId> {
         let mut clip_ids = Vec::new();
         for selection in &self.selection.selected_clips {
@@ -2095,19 +2106,19 @@ mod tests {
         project_recover_from_autosave_action, sequence_delete_action, sequence_duplicate_action,
         sequence_new_action, sequence_return_to_parent_action, sequence_set_active_default_action,
         sequence_switch_active_action, sequence_update_settings_action, timeline_add_track_action,
-        timeline_drop_asset_action, timeline_move_clip_action, timeline_move_track_action,
-        timeline_open_nested_sequence_action, timeline_seek_action, timeline_select_clip_action,
-        timeline_set_in_out_point_action, timeline_set_selected_clips_enabled_action,
-        timeline_set_track_control_action, timeline_trim_clips_action,
-        timeline_trim_selected_clips_to_playhead_action, AssetsCreateAssetPayload,
-        AssetsCreateFolderPayload, AssetsDeleteAssetPayload, AssetsDeleteFolderPayload,
-        AssetsDeleteSelectionPayload, AssetsImportFilesPayload, AssetsMoveAssetPayload,
-        AssetsMoveFolderPayload, AssetsMoveSelectionPayload, AssetsPrepareDragPayload,
-        AssetsRelinkAssetPayload, AssetsRenameAssetPayload, AssetsRenameFolderPayload,
-        AssetsSetProxyModePayload, EffectsAddToClipPayload, ExportDraftUpdatePayload,
-        ExportEnqueuePayload, InspectorClipRefPayload, InspectorClipTransformField,
-        InspectorCurvePointPayload, InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
-        InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
+        timeline_clear_in_out_points_action, timeline_drop_asset_action, timeline_move_clip_action,
+        timeline_move_track_action, timeline_open_nested_sequence_action, timeline_seek_action,
+        timeline_select_clip_action, timeline_set_in_out_point_action,
+        timeline_set_selected_clips_enabled_action, timeline_set_track_control_action,
+        timeline_trim_clips_action, timeline_trim_selected_clips_to_playhead_action,
+        AssetsCreateAssetPayload, AssetsCreateFolderPayload, AssetsDeleteAssetPayload,
+        AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload, AssetsImportFilesPayload,
+        AssetsMoveAssetPayload, AssetsMoveFolderPayload, AssetsMoveSelectionPayload,
+        AssetsPrepareDragPayload, AssetsRelinkAssetPayload, AssetsRenameAssetPayload,
+        AssetsRenameFolderPayload, AssetsSetProxyModePayload, EffectsAddToClipPayload,
+        ExportDraftUpdatePayload, ExportEnqueuePayload, InspectorClipRefPayload,
+        InspectorClipTransformField, InspectorCurvePointPayload, InspectorRemoveEffectPayload,
+        InspectorSelectEffectPayload, InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
         InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
         InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
         InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload,
@@ -4052,6 +4063,24 @@ mod tests {
         let sequence = state.sequence.as_ref().expect("sequence");
         assert_eq!(sequence.in_point_frame(), 32);
         assert_eq!(sequence.out_point_frame(), Some(32));
+    }
+
+    #[test]
+    fn dispatch_timeline_ui_clears_in_out_points() {
+        let (mut state, _, _) = state_with_two_video_tracks();
+        {
+            let sequence = state.sequence.as_mut().expect("sequence");
+            sequence.mark_in(12);
+            sequence.mark_out(48);
+        }
+
+        state
+            .dispatch_action(timeline_clear_in_out_points_action())
+            .expect("clear in/out");
+
+        let sequence = state.sequence.as_ref().expect("sequence");
+        assert_eq!(sequence.in_point_frame(), 0);
+        assert_eq!(sequence.out_point_frame(), None);
     }
 
     #[test]

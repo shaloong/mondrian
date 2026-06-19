@@ -810,6 +810,9 @@ emits `ui.timeline.set_in_out_point` on mouse release. The self-hosted adapter
 does no sequence mutation; `AppState` consumes the typed payload and calls the
 active sequence's `mark_in(frame)` / `mark_out(frame)` methods so normalization,
 project synchronization, and autosave remain centralized.
+Clearing the range follows the same path through
+`TimelineEditCommand::ClearInOutPoints` and `ui.timeline.clear_in_out_points`;
+widgets and panel adapters do not clear sequence fields directly.
 The timeline context menu is implemented inside `TimelineView` with the shared
 `ContextMenu` overlay component, but it still emits only the same
 `TimelineEditCommand`s and track-add proposals as keyboard and toolbar input.

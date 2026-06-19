@@ -53,9 +53,10 @@ use crate::app::ui_actions::{
     inspector_set_clip_curve_action, inspector_set_clip_enabled_action,
     inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
     inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
-    inspector_set_effect_property_action, timeline_add_track_action, timeline_drop_asset_action,
-    timeline_move_clip_action, timeline_move_track_action, timeline_open_nested_sequence_action,
-    timeline_seek_action, timeline_select_clip_action, timeline_set_in_out_point_action,
+    inspector_set_effect_property_action, timeline_add_track_action,
+    timeline_clear_in_out_points_action, timeline_drop_asset_action, timeline_move_clip_action,
+    timeline_move_track_action, timeline_open_nested_sequence_action, timeline_seek_action,
+    timeline_select_clip_action, timeline_set_in_out_point_action,
     timeline_set_selected_clips_enabled_action, timeline_set_track_control_action,
     timeline_trim_clips_action, timeline_trim_selected_clips_to_playhead_action,
     AppShellRelinkAssetDialogPayload, AppShellRevealInFileManagerPayload, AssetsCreateAssetPayload,
@@ -2340,12 +2341,14 @@ fn timeline_edit_command_action(
             .unwrap_or(Action::NoOp),
         TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
         TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
+        TimelineEditCommand::ClearInOutPoints => timeline_clear_in_out_points_action(),
     }
 }
 
 fn timeline_edit_command_shortcut_label(command: TimelineEditCommand) -> Option<String> {
     let action = match command {
         TimelineEditCommand::OpenNestedSequence(_) => return None,
+        TimelineEditCommand::ClearInOutPoints => return None,
         TimelineEditCommand::CutSelection => Action::Cut,
         TimelineEditCommand::CopySelection => Action::Copy,
         TimelineEditCommand::PasteAtPlayhead => Action::Paste,
@@ -3336,10 +3339,10 @@ mod tests {
         ASSETS_OPEN_FOLDER, ASSETS_PREPARE_DRAG, ASSETS_RENAME_ASSET, ASSETS_SET_PROXY_MODE,
         EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE, INSPECTOR_SELECT_EFFECT,
         INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_CLIP_TRANSFORM_FIELD,
-        INSPECTOR_SET_EFFECT_PROPERTY, TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET,
-        TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_OPEN_NESTED_SEQUENCE,
-        TIMELINE_SELECT_CLIP, TIMELINE_SET_IN_OUT_POINT, TIMELINE_SET_SELECTED_CLIPS_ENABLED,
-        TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD,
+        INSPECTOR_SET_EFFECT_PROPERTY, TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS,
+        TIMELINE_DROP_ASSET, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
+        TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_SELECT_CLIP, TIMELINE_SET_IN_OUT_POINT,
+        TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD,
     };
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
@@ -5172,6 +5175,15 @@ mod tests {
         let payload: TimelineSetSelectedClipsEnabledPayload =
             serde_json::from_value(payload).expect("enabled payload");
         assert!(!payload.enabled);
+
+        let clear_action =
+            timeline_edit_command_action(&model, TimelineEditCommand::ClearInOutPoints);
+        let Action::Custom { namespace, name, payload } = clear_action else {
+            panic!("expected clear in/out custom action");
+        };
+        assert_eq!(namespace, TIMELINE_NAMESPACE);
+        assert_eq!(name, TIMELINE_CLEAR_IN_OUT_POINTS);
+        assert!(payload.is_null());
     }
 
     #[test]
