@@ -18,6 +18,7 @@ pub mod preferences_store;
 pub mod preview;
 pub mod rendering;
 pub mod runtime;
+pub mod sequence_settings_dialog;
 pub mod shell;
 pub mod shortcuts;
 pub mod startup;

@@ -234,6 +234,14 @@ The self-hosted new-project flow stages editable form state in
 `SelfHostedNewProjectDraft`, which owns the same settings structs used by
 project creation so the eventual custom form cannot drift from lifecycle
 semantics.
+Sequence settings follow the same split: `app.shell.sequence_settings` opens a
+shell-local `SelfHostedSequenceSettingsDraft`, draft widgets emit
+`app.shell.sequence_settings_draft_changed`, and Apply resolves to
+`ui.sequence.update_settings`. `AppState::update_sequence_identity_and_settings`
+is the only layer that mutates the sequence name/settings, validates the full
+`SequenceSettings`, syncs the sequence collection, and records one undoable
+snapshot. Shell dialogs must not call `rename_sequence` plus
+`update_active_sequence_settings` as separate operations.
 `Action::SplitClipAtPlayhead` similarly routes to `AppState::split_at_playhead`,
 which bulk-splits unlocked clips under the playhead and records one undoable
 timeline snapshot only when a split actually occurs.

@@ -225,6 +225,51 @@ impl AppState {
         Ok(())
     }
 
+    /// Atomically update one sequence name and settings through the app-state boundary.
+    pub fn update_sequence_identity_and_settings(
+        &mut self,
+        sequence_id: SequenceId,
+        name: impl Into<String>,
+        settings: mondrian_timeline::sequence::SequenceSettings,
+    ) -> mondrian_core::Result<()> {
+        let name = name.into();
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "update_sequence_identity_and_settings".to_string(),
+                reason: "序列名称不能为空".to_string(),
+            });
+        }
+
+        self.sync_current_sequence_into_collection();
+        let before = self
+            .sequences
+            .iter()
+            .find(|sequence| sequence.id == sequence_id)
+            .cloned()
+            .ok_or_else(|| mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "update_sequence_identity_and_settings".to_string(),
+                reason: format!("序列不存在: {sequence_id}"),
+            })?;
+        let mut after = before.clone();
+        after.name = name.to_owned();
+        after.apply_settings_preserve_frames(settings)?;
+
+        if let Some(sequence) =
+            self.sequences.iter_mut().find(|sequence| sequence.id == sequence_id)
+        {
+            *sequence = after.clone();
+        }
+        if self.active_sequence_id == Some(sequence_id) {
+            self.sequence = Some(after.clone());
+            self.playback = PlaybackState::Stopped;
+        }
+        self.record_sequence_snapshot_command("修改序列设置", before, after);
+        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
+        let _ = self.save_project_file();
+        Ok(())
+    }
+
     pub(super) fn record_sequence_snapshot_command(
         &mut self,
         description: impl Into<String>,

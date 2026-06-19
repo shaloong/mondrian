@@ -7,6 +7,7 @@ use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
 use mondrian_editor_state::Action;
 use mondrian_export::queue::JobStatus;
 use mondrian_platform::{FileFilter, PlatformService};
+use mondrian_timeline::Sequence;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
@@ -22,17 +23,19 @@ use std::path::Path;
 use crate::app::ui_actions::{
     assets_import_files_action, assets_relink_asset_action, export_set_draft_action,
     project_create_with_settings_action, project_recover_from_autosave_action,
-    AppShellOpenRecentProjectPayload, AppShellRelinkAssetDialogPayload,
-    AppShellRevealInFileManagerPayload, AssetsImportFilesPayload, AssetsRelinkAssetPayload,
-    ExportDraftUpdatePayload, ExportOutputDialogPayload, ImportMediaDialogPayload,
-    NewProjectDraftUpdatePayload, PreferencesTabPayload, ProjectRecoverFromAutosavePayload,
-    APP_SHELL_ABOUT, APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
-    APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_EXPORT_OUTPUT_DIALOG,
-    APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
-    APP_SHELL_NEW_PROJECT_DRAFT_CHANGED, APP_SHELL_OPEN_PROJECT_DIALOG,
-    APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PREFERENCES, APP_SHELL_PREFERENCES_TAB_CHANGED,
-    APP_SHELL_RECOVER_PROJECT, APP_SHELL_RELINK_ASSET_DIALOG, APP_SHELL_REVEAL_IN_FILE_MANAGER,
-    APP_SHELL_SAVE_PROJECT_AS_DIALOG,
+    sequence_update_settings_action, AppShellOpenRecentProjectPayload,
+    AppShellRelinkAssetDialogPayload, AppShellRevealInFileManagerPayload, AssetsImportFilesPayload,
+    AssetsRelinkAssetPayload, ExportDraftUpdatePayload, ExportOutputDialogPayload,
+    ImportMediaDialogPayload, NewProjectDraftUpdatePayload, PreferencesTabPayload,
+    ProjectRecoverFromAutosavePayload, SequenceSettingsDraftUpdatePayload, APP_SHELL_ABOUT,
+    APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
+    APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_CONFIRM_SEQUENCE_SETTINGS,
+    APP_SHELL_EXPORT_OUTPUT_DIALOG, APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE,
+    APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_NEW_PROJECT_DRAFT_CHANGED,
+    APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PREFERENCES,
+    APP_SHELL_PREFERENCES_TAB_CHANGED, APP_SHELL_RECOVER_PROJECT, APP_SHELL_RELINK_ASSET_DIALOG,
+    APP_SHELL_REVEAL_IN_FILE_MANAGER, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
+    APP_SHELL_SEQUENCE_SETTINGS, APP_SHELL_SEQUENCE_SETTINGS_DRAFT_CHANGED,
 };
 use crate::app::AppState;
 use crate::self_hosted::menu_bar::MenuBar;
@@ -45,6 +48,7 @@ use crate::self_hosted::panels::{
 };
 use crate::self_hosted::preferences_dialog::{PreferencesDialogTab, SelfHostedPreferencesModel};
 use crate::self_hosted::preferences_store::SelfHostedPreferences;
+use crate::self_hosted::sequence_settings_dialog::SelfHostedSequenceSettingsDraft;
 use crate::self_hosted::title_bar::{TitleBar, TITLE_BAR_HEIGHT};
 use mondrian_core::{MondrianError, Result};
 
@@ -482,6 +486,7 @@ pub struct SelfHostedAppRoot {
     asset_folder_id: Option<String>,
     preferences_model: SelfHostedPreferencesModel,
     workspace_preset: WorkspacePreset,
+    active_sequence: Option<Sequence>,
     modal: Option<ShellModal>,
     bounds: Rect,
 }
@@ -524,7 +529,7 @@ impl SelfHostedAppRoot {
         thumbnails: Option<&dyn AssetThumbnailSource>,
         preview: Option<&dyn ViewerPreviewSource>,
     ) -> Self {
-        Self::new_with_preferences(
+        let mut root = Self::new_with_preferences(
             TitleBar::new(
                 window_title_for_app_state(state),
                 MenuBar::for_app_state(state),
@@ -539,7 +544,9 @@ impl SelfHostedAppRoot {
             ),
             preferences.workspace_preset,
             status_bar_model(state),
-        )
+        );
+        root.active_sequence = state.sequence.clone();
+        root
     }
 
     /// Build a root widget from app-facing panel models.
@@ -597,6 +604,7 @@ impl SelfHostedAppRoot {
             asset_folder_id: None,
             preferences_model,
             workspace_preset,
+            active_sequence: None,
             modal: None,
             bounds: Rect::ZERO,
         }
@@ -705,6 +713,7 @@ impl SelfHostedAppRoot {
             MenuBar::for_app_state(state),
         );
         self.status_bar.set_model(status_bar_model(state));
+        self.active_sequence = state.sequence.clone();
         self.set_models(
             SelfHostedPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
                 state,
@@ -850,6 +859,54 @@ impl SelfHostedAppRoot {
                     self.layout(self.bounds);
                 }
                 Ok(None)
+            }
+            Action::Custom { namespace, name, .. }
+                if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_SEQUENCE_SETTINGS =>
+            {
+                let draft = self
+                    .active_sequence
+                    .as_ref()
+                    .map(SelfHostedSequenceSettingsDraft::from_sequence);
+                if let Some(draft) = draft {
+                    self.modal = Some(ShellModal::sequence_settings(draft));
+                    if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
+                        self.layout(self.bounds);
+                    }
+                }
+                Ok(None)
+            }
+            Action::Custom { namespace, name, payload }
+                if namespace == APP_SHELL_NAMESPACE
+                    && name == APP_SHELL_SEQUENCE_SETTINGS_DRAFT_CHANGED =>
+            {
+                if let Some(dialog) =
+                    self.modal.as_mut().and_then(ShellModal::as_sequence_settings_mut)
+                {
+                    if let Ok(update) =
+                        serde_json::from_value::<SequenceSettingsDraftUpdatePayload>(payload)
+                    {
+                        dialog.apply_update(update);
+                    }
+                }
+                Ok(None)
+            }
+            Action::Custom { namespace, name, .. }
+                if namespace == APP_SHELL_NAMESPACE
+                    && name == APP_SHELL_CONFIRM_SEQUENCE_SETTINGS =>
+            {
+                let Some(draft) = self
+                    .modal
+                    .as_ref()
+                    .and_then(ShellModal::as_sequence_settings)
+                    .map(|dialog| dialog.draft().clone())
+                else {
+                    return Ok(None);
+                };
+                if draft.validate().is_err() {
+                    return Ok(None);
+                }
+                self.modal = None;
+                Ok(Some(sequence_update_settings_action(draft.into_payload())))
             }
             Action::Custom { namespace, name, payload }
                 if namespace == APP_SHELL_NAMESPACE
@@ -1198,26 +1255,28 @@ mod tests {
     use crate::app::ui_actions::{
         app_shell_about_action, app_shell_cancel_new_project_dialog_action,
         app_shell_close_modal_action, app_shell_confirm_new_project_dialog_action,
-        app_shell_export_output_dialog_action, app_shell_import_media_dialog_action,
-        app_shell_import_media_dialog_action_with_target, app_shell_new_project_dialog_action,
-        app_shell_new_project_draft_changed_action, app_shell_open_project_dialog_action,
-        app_shell_open_recent_project_action, app_shell_preferences_action,
-        app_shell_preferences_tab_changed_action, app_shell_recover_project_action,
-        app_shell_relink_asset_dialog_action, app_shell_reveal_in_file_manager_action,
-        app_shell_save_project_as_dialog_action, AppShellOpenRecentProjectPayload,
-        AppShellRelinkAssetDialogPayload, AppShellRevealInFileManagerPayload,
-        AssetsImportFilesPayload, AssetsRelinkAssetPayload, ExportDraftUpdatePayload,
-        ExportOutputDialogPayload, ImportMediaDialogPayload, NewProjectDraftUpdatePayload,
-        PreferencesTabPayload, ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload,
-        ASSETS_IMPORT_FILES, ASSETS_NAMESPACE, ASSETS_RELINK_ASSET, EXPORT_NAMESPACE,
-        EXPORT_SET_DRAFT, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
-        PROJECT_RECOVER_FROM_AUTOSAVE,
+        app_shell_confirm_sequence_settings_action, app_shell_export_output_dialog_action,
+        app_shell_import_media_dialog_action, app_shell_import_media_dialog_action_with_target,
+        app_shell_new_project_dialog_action, app_shell_new_project_draft_changed_action,
+        app_shell_open_project_dialog_action, app_shell_open_recent_project_action,
+        app_shell_preferences_action, app_shell_preferences_tab_changed_action,
+        app_shell_recover_project_action, app_shell_relink_asset_dialog_action,
+        app_shell_reveal_in_file_manager_action, app_shell_save_project_as_dialog_action,
+        app_shell_sequence_settings_action, app_shell_sequence_settings_draft_changed_action,
+        AppShellOpenRecentProjectPayload, AppShellRelinkAssetDialogPayload,
+        AppShellRevealInFileManagerPayload, AssetsImportFilesPayload, AssetsRelinkAssetPayload,
+        ExportDraftUpdatePayload, ExportOutputDialogPayload, ImportMediaDialogPayload,
+        NewProjectDraftUpdatePayload, PreferencesTabPayload, ProjectCreateWithSettingsPayload,
+        ProjectRecoverFromAutosavePayload, SequenceSettingsDraftUpdatePayload,
+        SequenceUpdateSettingsPayload, ASSETS_IMPORT_FILES, ASSETS_NAMESPACE, ASSETS_RELINK_ASSET,
+        EXPORT_NAMESPACE, EXPORT_SET_DRAFT, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
+        PROJECT_RECOVER_FROM_AUTOSAVE, SEQUENCE_NAMESPACE, SEQUENCE_UPDATE_SETTINGS,
     };
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use glam::Vec2;
     use mondrian_core::types::AssetId;
     use mondrian_core::{Rational, Resolution};
-    use mondrian_timeline::sequence::PreviewRenderFormat;
+    use mondrian_timeline::sequence::{PreviewRenderFormat, Sequence};
     use mondrian_ui_core::tree::WidgetTreeView;
     use mondrian_ui_core::widget::{DrawCommandEncoder, PaintContext};
     use mondrian_ui_core::EventRequests;
@@ -1920,6 +1979,100 @@ mod tests {
         assert_eq!(payload.sequence_settings.audio_sample_rate, 96_000);
         assert!(!payload.project_settings.proxy_enabled);
         assert!(!payload.sequence_settings.preview.cache_enabled);
+    }
+
+    #[test]
+    fn app_root_handles_sequence_settings_draft_and_confirm() {
+        let platform = FakePlatform::default();
+        let mut state = AppState::new();
+        let sequence = Sequence::new("Scene 01");
+        let sequence_id = sequence.id;
+        state.active_sequence_id = Some(sequence_id);
+        state.sequence = Some(sequence.clone());
+        state.sequences.push(sequence);
+        let mut root = SelfHostedAppRoot::from_app_state(&state);
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+
+        assert_eq!(
+            root.handle_shell_action(app_shell_sequence_settings_action(), &platform, None),
+            None
+        );
+        assert!(root.modal.as_ref().and_then(ShellModal::as_sequence_settings).is_some());
+
+        root.handle_shell_action(
+            app_shell_sequence_settings_draft_changed_action(
+                SequenceSettingsDraftUpdatePayload::Name("Scene 02".to_owned()),
+            ),
+            &platform,
+            None,
+        );
+        root.handle_shell_action(
+            app_shell_sequence_settings_draft_changed_action(
+                SequenceSettingsDraftUpdatePayload::Resolution(Resolution::UHD4K),
+            ),
+            &platform,
+            None,
+        );
+        root.handle_shell_action(
+            app_shell_sequence_settings_draft_changed_action(
+                SequenceSettingsDraftUpdatePayload::FrameRate(Rational::FPS_2997),
+            ),
+            &platform,
+            None,
+        );
+        root.handle_shell_action(
+            app_shell_sequence_settings_draft_changed_action(
+                SequenceSettingsDraftUpdatePayload::AudioSampleRate(96_000),
+            ),
+            &platform,
+            None,
+        );
+        root.handle_shell_action(
+            app_shell_sequence_settings_draft_changed_action(
+                SequenceSettingsDraftUpdatePayload::PreviewCacheEnabled(false),
+            ),
+            &platform,
+            None,
+        );
+
+        let action = root
+            .handle_shell_action(
+                app_shell_confirm_sequence_settings_action(),
+                &platform,
+                None,
+            )
+            .expect("sequence update action");
+
+        assert!(root.modal.is_none());
+        let Action::Custom { namespace, name, payload } = action else {
+            panic!("expected sequence update action");
+        };
+        assert_eq!(namespace, SEQUENCE_NAMESPACE);
+        assert_eq!(name, SEQUENCE_UPDATE_SETTINGS);
+        let payload: SequenceUpdateSettingsPayload =
+            serde_json::from_value(payload).expect("sequence settings payload");
+        assert_eq!(payload.sequence_id, sequence_id);
+        assert_eq!(payload.name, "Scene 02");
+        assert_eq!(payload.settings.resolution, Resolution::UHD4K);
+        assert_eq!(payload.settings.frame_rate, Rational::FPS_2997);
+        assert_eq!(payload.settings.audio_sample_rate, 96_000);
+        assert_eq!(
+            payload.settings.audio_channels,
+            payload.settings.audio_channel_layout.channels()
+        );
+        assert!(!payload.settings.preview.cache_enabled);
+    }
+
+    #[test]
+    fn app_root_ignores_sequence_settings_without_active_sequence() {
+        let platform = FakePlatform::default();
+        let mut root = SelfHostedAppRoot::from_app_state(&AppState::new());
+
+        let action =
+            root.handle_shell_action(app_shell_sequence_settings_action(), &platform, None);
+
+        assert!(action.is_none());
+        assert!(root.modal.is_none());
     }
 
     #[test]

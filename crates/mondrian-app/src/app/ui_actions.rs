@@ -134,6 +134,8 @@ pub const SEQUENCE_SWITCH_ACTIVE: &str = "switch_active";
 pub const SEQUENCE_DUPLICATE: &str = "duplicate";
 /// Action name for deleting a sequence.
 pub const SEQUENCE_DELETE: &str = "delete";
+/// Action name for updating sequence identity/settings from self-hosted UI.
+pub const SEQUENCE_UPDATE_SETTINGS: &str = "update_settings";
 
 /// Custom action namespace for app-shell operations resolved by native adapters.
 pub const APP_SHELL_NAMESPACE: &str = "app.shell";
@@ -166,6 +168,12 @@ pub const APP_SHELL_EXPORT_OUTPUT_DIALOG: &str = "export_output_dialog";
 pub const APP_SHELL_ABOUT: &str = "about";
 /// App-shell request to show self-hosted preferences.
 pub const APP_SHELL_PREFERENCES: &str = "preferences";
+/// App-shell request to show the active sequence settings dialog.
+pub const APP_SHELL_SEQUENCE_SETTINGS: &str = "sequence_settings";
+/// App-shell request to update one self-hosted sequence-settings draft field.
+pub const APP_SHELL_SEQUENCE_SETTINGS_DRAFT_CHANGED: &str = "sequence_settings_draft_changed";
+/// App-shell request to apply the active sequence settings dialog.
+pub const APP_SHELL_CONFIRM_SEQUENCE_SETTINGS: &str = "confirm_sequence_settings";
 /// App-shell request to switch the active self-hosted preferences tab.
 pub const APP_SHELL_PREFERENCES_TAB_CHANGED: &str = "preferences_tab_changed";
 /// App-shell request to switch the active self-hosted theme preset.
@@ -295,6 +303,17 @@ pub struct TimelineOpenNestedSequencePayload {
 pub struct SequenceTargetPayload {
     /// Sequence to operate on.
     pub sequence_id: SequenceId,
+}
+
+/// Apply edited settings to one sequence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SequenceUpdateSettingsPayload {
+    /// Sequence whose name/settings should be replaced.
+    pub sequence_id: SequenceId,
+    /// User-facing sequence name.
+    pub name: String,
+    /// Full sequence settings after applying shell-local edits.
+    pub settings: SequenceSettings,
 }
 
 /// Seek the active timeline to a frame.
@@ -696,6 +715,21 @@ pub enum NewProjectDraftUpdatePayload {
     PreviewCacheEnabled(bool),
 }
 
+/// One mutation to the shell-local sequence-settings draft.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum SequenceSettingsDraftUpdatePayload {
+    /// User-facing sequence display name.
+    Name(String),
+    /// Active sequence frame size.
+    Resolution(Resolution),
+    /// Active sequence frame rate.
+    FrameRate(Rational),
+    /// Active sequence audio sample rate in Hz.
+    AudioSampleRate(u32),
+    /// Whether preview rendering cache is enabled.
+    PreviewCacheEnabled(bool),
+}
+
 /// Build an action that selects a clip in the active timeline.
 pub fn timeline_select_clip_action(payload: TimelineSelectClipPayload) -> Action {
     custom_timeline_action(TIMELINE_SELECT_CLIP, payload)
@@ -935,6 +969,11 @@ pub fn sequence_delete_action(payload: SequenceTargetPayload) -> Action {
     custom_sequence_action_with_payload(SEQUENCE_DELETE, payload)
 }
 
+/// Build an action that applies edited settings to one sequence.
+pub fn sequence_update_settings_action(payload: SequenceUpdateSettingsPayload) -> Action {
+    custom_sequence_action_with_payload(SEQUENCE_UPDATE_SETTINGS, payload)
+}
+
 /// Build an app-shell request for creating a new project.
 pub fn app_shell_new_project_dialog_action() -> Action {
     custom_app_shell_action(APP_SHELL_NEW_PROJECT_DIALOG)
@@ -1012,6 +1051,23 @@ pub fn app_shell_about_action() -> Action {
 /// Build an app-shell request for showing preferences.
 pub fn app_shell_preferences_action() -> Action {
     custom_app_shell_action(APP_SHELL_PREFERENCES)
+}
+
+/// Build an app-shell request for editing the active sequence settings.
+pub fn app_shell_sequence_settings_action() -> Action {
+    custom_app_shell_action(APP_SHELL_SEQUENCE_SETTINGS)
+}
+
+/// Build an app-shell request for changing one sequence-settings draft field.
+pub fn app_shell_sequence_settings_draft_changed_action(
+    payload: SequenceSettingsDraftUpdatePayload,
+) -> Action {
+    custom_app_shell_action_with_payload(APP_SHELL_SEQUENCE_SETTINGS_DRAFT_CHANGED, payload)
+}
+
+/// Build an app-shell request for applying sequence settings.
+pub fn app_shell_confirm_sequence_settings_action() -> Action {
+    custom_app_shell_action(APP_SHELL_CONFIRM_SEQUENCE_SETTINGS)
 }
 
 /// Build an app-shell request for selecting one preferences tab.

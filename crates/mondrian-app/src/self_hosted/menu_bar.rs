@@ -16,12 +16,12 @@ use crate::app::ui_actions::{
     app_shell_about_action, app_shell_import_media_dialog_action,
     app_shell_new_project_dialog_action, app_shell_open_project_dialog_action,
     app_shell_preferences_action, app_shell_quit_action, app_shell_save_project_as_dialog_action,
-    sequence_delete_action, sequence_duplicate_action, sequence_new_action,
-    sequence_return_to_parent_action, sequence_set_active_default_action,
+    app_shell_sequence_settings_action, sequence_delete_action, sequence_duplicate_action,
+    sequence_new_action, sequence_return_to_parent_action, sequence_set_active_default_action,
     sequence_switch_active_action, SequenceTargetPayload, APP_SHELL_IMPORT_MEDIA_DIALOG,
-    APP_SHELL_NAMESPACE, APP_SHELL_SAVE_PROJECT_AS_DIALOG, SEQUENCE_DELETE, SEQUENCE_DUPLICATE,
-    SEQUENCE_NAMESPACE, SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT,
-    SEQUENCE_SWITCH_ACTIVE,
+    APP_SHELL_NAMESPACE, APP_SHELL_SAVE_PROJECT_AS_DIALOG, APP_SHELL_SEQUENCE_SETTINGS,
+    SEQUENCE_DELETE, SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE, SEQUENCE_RETURN_TO_PARENT,
+    SEQUENCE_SET_ACTIVE_DEFAULT, SEQUENCE_SWITCH_ACTIVE,
 };
 use crate::app::AppState;
 use crate::self_hosted::icons::AppIcon;
@@ -122,6 +122,10 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
                     MenuItem::new("New Sequence", sequence_new_action()),
                     AppIcon::PlusFilled,
                 ),
+                menu_item_with_icon(
+                    MenuItem::new("Sequence Settings...", app_shell_sequence_settings_action()),
+                    AppIcon::Save,
+                ),
                 MenuItem::separator(),
                 menu_item_with_icon(
                     MenuItem::new(
@@ -205,6 +209,10 @@ fn sequence_menu_items_for_app_state(state: &AppState) -> Vec<MenuItem> {
         menu_item_with_icon(
             MenuItem::new("New Sequence", sequence_new_action()),
             AppIcon::PlusFilled,
+        ),
+        menu_item_with_icon(
+            MenuItem::new("Sequence Settings...", app_shell_sequence_settings_action()),
+            AppIcon::Save,
         ),
         MenuItem::separator(),
         menu_item_with_icon(
@@ -307,6 +315,11 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_IMPORT_MEDIA_DIALOG =>
         {
             state.asset_library.is_some()
+        }
+        Action::Custom { namespace, name, .. }
+            if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_SEQUENCE_SETTINGS =>
+        {
+            state.sequence.is_some()
         }
         Action::Custom { namespace, name, .. }
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_SAVE_PROJECT_AS_DIALOG =>

@@ -13,12 +13,16 @@ use crate::self_hosted::new_project_dialog::{NewProjectDialog, SelfHostedNewProj
 use crate::self_hosted::preferences_dialog::{
     PreferencesDialog, PreferencesDialogTab, SelfHostedPreferencesModel,
 };
+use crate::self_hosted::sequence_settings_dialog::{
+    SelfHostedSequenceSettingsDraft, SequenceSettingsDialog,
+};
 
 /// Shell-local modal dialog.
 pub enum ShellModal {
     About(Box<AboutDialog>),
     NewProject(Box<NewProjectDialog>),
     Preferences(Box<PreferencesDialog>),
+    SequenceSettings(Box<SequenceSettingsDialog>),
 }
 
 impl ShellModal {
@@ -43,6 +47,11 @@ impl ShellModal {
         tab: PreferencesDialogTab,
     ) -> Self {
         Self::Preferences(Box::new(PreferencesDialog::with_model_and_tab(model, tab)))
+    }
+
+    /// Build the active-sequence settings modal.
+    pub fn sequence_settings(draft: SelfHostedSequenceSettingsDraft) -> Self {
+        Self::SequenceSettings(Box::new(SequenceSettingsDialog::new(draft)))
     }
 
     /// Access the product about modal when it is active.
@@ -84,6 +93,22 @@ impl ShellModal {
             _ => None,
         }
     }
+
+    /// Access the sequence-settings modal when it is active.
+    pub fn as_sequence_settings(&self) -> Option<&SequenceSettingsDialog> {
+        match self {
+            Self::SequenceSettings(dialog) => Some(dialog.as_ref()),
+            _ => None,
+        }
+    }
+
+    /// Mutably access the sequence-settings modal when it is active.
+    pub fn as_sequence_settings_mut(&mut self) -> Option<&mut SequenceSettingsDialog> {
+        match self {
+            Self::SequenceSettings(dialog) => Some(dialog.as_mut()),
+            _ => None,
+        }
+    }
 }
 
 impl Widget for ShellModal {
@@ -92,6 +117,7 @@ impl Widget for ShellModal {
             Self::About(dialog) => dialog.id(),
             Self::NewProject(dialog) => dialog.id(),
             Self::Preferences(dialog) => dialog.id(),
+            Self::SequenceSettings(dialog) => dialog.id(),
         }
     }
 
@@ -100,6 +126,7 @@ impl Widget for ShellModal {
             Self::About(dialog) => dialog.measure(constraint),
             Self::NewProject(dialog) => dialog.measure(constraint),
             Self::Preferences(dialog) => dialog.measure(constraint),
+            Self::SequenceSettings(dialog) => dialog.measure(constraint),
         }
     }
 
@@ -108,6 +135,7 @@ impl Widget for ShellModal {
             Self::About(dialog) => dialog.layout(bounds),
             Self::NewProject(dialog) => dialog.layout(bounds),
             Self::Preferences(dialog) => dialog.layout(bounds),
+            Self::SequenceSettings(dialog) => dialog.layout(bounds),
         }
     }
 
@@ -116,6 +144,7 @@ impl Widget for ShellModal {
             Self::About(dialog) => dialog.event(event, ctx),
             Self::NewProject(dialog) => dialog.event(event, ctx),
             Self::Preferences(dialog) => dialog.event(event, ctx),
+            Self::SequenceSettings(dialog) => dialog.event(event, ctx),
         }
     }
 
@@ -124,6 +153,7 @@ impl Widget for ShellModal {
             Self::About(dialog) => dialog.paint(ctx),
             Self::NewProject(dialog) => dialog.paint(ctx),
             Self::Preferences(dialog) => dialog.paint(ctx),
+            Self::SequenceSettings(dialog) => dialog.paint(ctx),
         }
     }
 
@@ -132,6 +162,7 @@ impl Widget for ShellModal {
             Self::About(dialog) => dialog.hit_test(point),
             Self::NewProject(dialog) => dialog.hit_test(point),
             Self::Preferences(dialog) => dialog.hit_test(point),
+            Self::SequenceSettings(dialog) => dialog.hit_test(point),
         }
     }
 
@@ -144,6 +175,7 @@ impl Widget for ShellModal {
             Self::About(dialog) => dialog.child_count(),
             Self::NewProject(dialog) => dialog.child_count(),
             Self::Preferences(dialog) => dialog.child_count(),
+            Self::SequenceSettings(dialog) => dialog.child_count(),
         }
     }
 
@@ -152,6 +184,7 @@ impl Widget for ShellModal {
             Self::About(dialog) => dialog.child(index),
             Self::NewProject(dialog) => dialog.child(index),
             Self::Preferences(dialog) => dialog.child(index),
+            Self::SequenceSettings(dialog) => dialog.child(index),
         }
     }
 
@@ -160,6 +193,7 @@ impl Widget for ShellModal {
             Self::About(dialog) => dialog.child_mut(index),
             Self::NewProject(dialog) => dialog.child_mut(index),
             Self::Preferences(dialog) => dialog.child_mut(index),
+            Self::SequenceSettings(dialog) => dialog.child_mut(index),
         }
     }
 }
