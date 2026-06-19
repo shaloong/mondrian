@@ -13,6 +13,7 @@ use mondrian_ui_widgets::dock_panel::DockPanel;
 use mondrian_ui_widgets::dock_splitter::DockSplitter;
 use mondrian_ui_widgets::{
     AssetGrid, AssetGridState, PanelList, PanelListState, ScrollView, ScrollViewState,
+    TimelineView, TimelineViewState,
 };
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -432,6 +433,7 @@ impl SelfHostedAppRoot {
         let dock_panel_state = collect_dock_panel_state(&self.dock);
         let asset_grid_state = collect_asset_grid_state(&self.dock);
         let panel_list_state = collect_panel_list_state(&self.dock);
+        let timeline_state = collect_timeline_view_state(&self.dock);
         let panel_scroll_state = collect_panel_scroll_state(&self.dock);
         self.models = models;
         self.dock = build_dock_tree_for_preset(self.models.clone(), self.workspace_preset);
@@ -439,12 +441,14 @@ impl SelfHostedAppRoot {
         restore_dock_panel_state(&mut self.dock, &dock_panel_state);
         restore_asset_grid_state(&mut self.dock, &asset_grid_state);
         restore_panel_list_state(&mut self.dock, &panel_list_state);
+        restore_timeline_view_state(&mut self.dock, &timeline_state);
         restore_panel_scroll_state(&mut self.dock, &panel_scroll_state);
         if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
             self.layout(self.bounds);
             restore_dock_panel_state(&mut self.dock, &dock_panel_state);
             restore_asset_grid_state(&mut self.dock, &asset_grid_state);
             restore_panel_list_state(&mut self.dock, &panel_list_state);
+            restore_timeline_view_state(&mut self.dock, &timeline_state);
             restore_panel_scroll_state(&mut self.dock, &panel_scroll_state);
         }
     }
@@ -791,6 +795,34 @@ fn restore_panel_list_state(widget: &mut dyn Widget, states: &BTreeMap<String, P
     for index in 0..widget.child_count() {
         if let Some(child) = widget.child_mut(index) {
             restore_panel_list_state(child, states);
+        }
+    }
+}
+
+fn collect_timeline_view_state(widget: &dyn Widget) -> Option<TimelineViewState> {
+    if let Some(timeline) = widget.as_any().and_then(|any| any.downcast_ref::<TimelineView>()) {
+        return Some(timeline.state());
+    }
+    for index in 0..widget.child_count() {
+        if let Some(child) = widget.child(index) {
+            if let Some(state) = collect_timeline_view_state(child) {
+                return Some(state);
+            }
+        }
+    }
+    None
+}
+
+fn restore_timeline_view_state(widget: &mut dyn Widget, state: &Option<TimelineViewState>) {
+    if let (Some(timeline), Some(state)) = (
+        widget.as_any_mut().and_then(|any| any.downcast_mut::<TimelineView>()),
+        state.as_ref(),
+    ) {
+        timeline.restore_state(state);
+    }
+    for index in 0..widget.child_count() {
+        if let Some(child) = widget.child_mut(index) {
+            restore_timeline_view_state(child, state);
         }
     }
 }
@@ -1184,6 +1216,40 @@ mod tests {
         None
     }
 
+    fn timeline_view_state(widget: &dyn Widget) -> Option<TimelineViewState> {
+        if let Some(timeline) = widget.as_any().and_then(|any| any.downcast_ref::<TimelineView>()) {
+            return Some(timeline.state());
+        }
+        for index in 0..widget.child_count() {
+            if let Some(child) = widget.child(index) {
+                if let Some(state) = timeline_view_state(child) {
+                    return Some(state);
+                }
+            }
+        }
+        None
+    }
+
+    fn with_timeline_view_mut(
+        widget: &mut dyn Widget,
+        update: &mut dyn FnMut(&mut TimelineView),
+    ) -> bool {
+        if let Some(timeline) =
+            widget.as_any_mut().and_then(|any| any.downcast_mut::<TimelineView>())
+        {
+            update(timeline);
+            return true;
+        }
+        for index in 0..widget.child_count() {
+            if let Some(child) = widget.child_mut(index) {
+                if with_timeline_view_mut(child, update) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     fn with_asset_grid_mut_for_title(
         widget: &mut dyn Widget,
         title: &str,
@@ -1321,7 +1387,7 @@ mod tests {
 
         assert_eq!(action, None);
         assert_eq!(root.workspace_preset(), WorkspacePreset::Export);
-        assert!((root.dock().ratio() - 0.55).abs() < f32::EPSILON);
+        assert!((root.dock().ratio() - 0.42).abs() < f32::EPSILON);
         assert_eq!(
             active_index_for_dock_panel(&root, PanelKind::Export),
             Some(0)
@@ -1956,8 +2022,12 @@ mod tests {
             root.title_bar.bounds(),
             Rect::new(0.0, 0.0, 1280.0, TITLE_BAR_HEIGHT)
         );
-        assert_eq!(zones[0].0.y, TITLE_BAR_HEIGHT);
-        assert_eq!(zones[0].0.height, 720.0 - TITLE_BAR_HEIGHT);
+        assert!(
+            zones.iter().all(|(zone, _)| zone.y >= TITLE_BAR_HEIGHT - f32::EPSILON),
+            "dock splitter handles must stay below title bar: {zones:?}"
+        );
+        assert!(!root.dock().hit_test(Point::new(12.0, TITLE_BAR_HEIGHT - 1.0)));
+        assert!(root.dock().hit_test(Point::new(12.0, TITLE_BAR_HEIGHT + 1.0)));
         assert_eq!(root.child_count(), 2);
     }
 
@@ -2170,6 +2240,30 @@ mod tests {
     }
 
     #[test]
+    fn set_models_preserves_timeline_tool_zoom_and_scroll_state() {
+        let mut root = SelfHostedAppRoot::demo();
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 480.0));
+        assert!(with_timeline_view_mut(root.dock_mut(), &mut |timeline| {
+            timeline.restore_state(&TimelineViewState {
+                active_tool: mondrian_ui_widgets::TimelineTool::Blade,
+                scroll_x: 96.0,
+                scroll_y: 24.0,
+                pixels_per_frame: 8.0,
+            });
+        }));
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 480.0));
+        let before = timeline_view_state(root.dock()).expect("before timeline state");
+
+        root.set_models(SelfHostedPanelModels::demo());
+
+        let after = timeline_view_state(root.dock()).expect("after timeline state");
+        assert_eq!(after.active_tool, before.active_tool);
+        assert!((after.pixels_per_frame - before.pixels_per_frame).abs() < f32::EPSILON);
+        assert!((after.scroll_x - before.scroll_x).abs() < 0.01);
+        assert!((after.scroll_y - before.scroll_y).abs() < 0.01);
+    }
+
+    #[test]
     fn refresh_from_app_state_preserves_user_splitter_ratio() {
         let state = AppState::new();
         let mut root = SelfHostedAppRoot::from_app_state(&state);
@@ -2197,7 +2291,7 @@ mod tests {
         root.refresh_from_app_state(&state);
 
         assert_eq!(root.workspace_preset(), WorkspacePreset::Compositing);
-        assert!((root.dock().ratio() - 0.35).abs() < f32::EPSILON);
+        assert!((root.dock().ratio() - 0.42).abs() < f32::EPSILON);
         assert_eq!(
             active_index_for_dock_panel(&root, PanelKind::NodeGraph),
             Some(0)

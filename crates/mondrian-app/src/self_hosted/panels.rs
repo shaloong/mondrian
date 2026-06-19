@@ -1154,75 +1154,105 @@ pub fn build_dock_tree_for_preset(
     preset: WorkspacePreset,
 ) -> DockSplitter {
     match preset {
-        WorkspacePreset::Editing | WorkspacePreset::Custom => {
-            let right_bottom = DockSplitter::new(
-                SplitDirection::Horizontal,
-                0.7,
-                slot(SlotKind::Timeline, models.clone()),
-                slot(SlotKind::Inspector, models.clone()),
-            );
-            let right = DockSplitter::new(
-                SplitDirection::Vertical,
-                0.65,
-                slot(SlotKind::Viewer, models.clone()),
-                Box::new(right_bottom),
-            );
-            DockSplitter::new(
-                SplitDirection::Horizontal,
-                0.28,
-                slot(SlotKind::Assets, models.clone()),
-                Box::new(right),
-            )
-        }
-        WorkspacePreset::Color => {
-            let right = DockSplitter::new(
-                SplitDirection::Vertical,
-                0.5,
-                slot(SlotKind::Inspector, models.clone()),
-                slot(SlotKind::Effects, models.clone()),
-            );
-            DockSplitter::new(
-                SplitDirection::Horizontal,
-                0.7,
-                slot(SlotKind::Viewer, models),
-                Box::new(right),
-            )
-        }
-        WorkspacePreset::Audio => {
-            let bottom = DockSplitter::new(
-                SplitDirection::Horizontal,
-                0.3,
-                slot(SlotKind::Timeline, models.clone()),
-                slot(SlotKind::Inspector, models.clone()),
-            );
-            DockSplitter::new(
-                SplitDirection::Vertical,
-                0.4,
-                slot(SlotKind::Viewer, models),
-                Box::new(bottom),
-            )
-        }
-        WorkspacePreset::Compositing => {
-            let right = DockSplitter::new(
-                SplitDirection::Vertical,
-                0.6,
-                slot(SlotKind::Viewer, models.clone()),
-                slot(SlotKind::Effects, models.clone()),
-            );
-            DockSplitter::new(
-                SplitDirection::Horizontal,
-                0.35,
-                slot(SlotKind::NodeGraph, models),
-                Box::new(right),
-            )
-        }
-        WorkspacePreset::Export => DockSplitter::new(
-            SplitDirection::Horizontal,
-            0.55,
-            slot(SlotKind::Export, models.clone()),
-            slot(SlotKind::Viewer, models),
-        ),
+        WorkspacePreset::Editing | WorkspacePreset::Custom => editing_workspace(models),
+        WorkspacePreset::Color => color_workspace(models),
+        WorkspacePreset::Audio => audio_workspace(models),
+        WorkspacePreset::Compositing => compositing_workspace(models),
+        WorkspacePreset::Export => export_workspace(models),
     }
+}
+
+fn editing_workspace(models: SelfHostedPanelModels) -> DockSplitter {
+    let viewer_and_inspector = DockSplitter::new(
+        SplitDirection::Horizontal,
+        0.68,
+        slot(SlotKind::Viewer, models.clone()),
+        slot(SlotKind::Inspector, models.clone()),
+    );
+    let upper = DockSplitter::new(
+        SplitDirection::Horizontal,
+        0.26,
+        slot(SlotKind::Assets, models.clone()),
+        Box::new(viewer_and_inspector),
+    );
+    DockSplitter::new(
+        SplitDirection::Vertical,
+        0.62,
+        Box::new(upper),
+        slot(SlotKind::Timeline, models),
+    )
+}
+
+fn color_workspace(models: SelfHostedPanelModels) -> DockSplitter {
+    let right = DockSplitter::new(
+        SplitDirection::Vertical,
+        0.56,
+        slot(SlotKind::Inspector, models.clone()),
+        slot(SlotKind::Effects, models.clone()),
+    );
+    let center = DockSplitter::new(
+        SplitDirection::Vertical,
+        0.66,
+        slot(SlotKind::Viewer, models.clone()),
+        slot(SlotKind::Timeline, models.clone()),
+    );
+    DockSplitter::new(
+        SplitDirection::Horizontal,
+        0.72,
+        Box::new(center),
+        Box::new(right),
+    )
+}
+
+fn audio_workspace(models: SelfHostedPanelModels) -> DockSplitter {
+    let upper = DockSplitter::new(
+        SplitDirection::Horizontal,
+        0.34,
+        slot(SlotKind::Assets, models.clone()),
+        slot(SlotKind::Viewer, models.clone()),
+    );
+    let lower = DockSplitter::new(
+        SplitDirection::Horizontal,
+        0.74,
+        slot(SlotKind::Timeline, models.clone()),
+        slot(SlotKind::Inspector, models.clone()),
+    );
+    DockSplitter::new(
+        SplitDirection::Vertical,
+        0.38,
+        Box::new(upper),
+        Box::new(lower),
+    )
+}
+
+fn compositing_workspace(models: SelfHostedPanelModels) -> DockSplitter {
+    let right = DockSplitter::new(
+        SplitDirection::Vertical,
+        0.58,
+        slot(SlotKind::Viewer, models.clone()),
+        slot(SlotKind::Inspector, models.clone()),
+    );
+    let left = DockSplitter::new(
+        SplitDirection::Vertical,
+        0.68,
+        slot(SlotKind::NodeGraph, models.clone()),
+        slot(SlotKind::Effects, models.clone()),
+    );
+    DockSplitter::new(
+        SplitDirection::Horizontal,
+        0.42,
+        Box::new(left),
+        Box::new(right),
+    )
+}
+
+fn export_workspace(models: SelfHostedPanelModels) -> DockSplitter {
+    DockSplitter::new(
+        SplitDirection::Horizontal,
+        0.42,
+        slot(SlotKind::Export, models.clone()),
+        slot(SlotKind::Viewer, models),
+    )
 }
 
 /// Build a dock tree using built-in demo panel fixtures.
@@ -3174,6 +3204,106 @@ mod tests {
         assert_eq!(tabs[1].label, "Effects");
     }
 
+    fn panel_at_point(widget: &dyn Widget, point: Point) -> Option<SlotKind> {
+        if !widget.hit_test(point) {
+            return None;
+        }
+        for index in (0..widget.child_count()).rev() {
+            if let Some(child) = widget.child(index) {
+                if let Some(kind) = panel_at_point(child, point) {
+                    return Some(kind);
+                }
+            }
+        }
+        widget.panel_kind()
+    }
+
+    #[test]
+    fn editing_workspace_uses_full_width_bottom_timeline() {
+        let mut dock =
+            build_dock_tree_for_preset(SelfHostedPanelModels::demo(), WorkspacePreset::Editing);
+        dock.layout(Rect::new(0.0, 0.0, 1000.0, 600.0));
+
+        assert_eq!(
+            panel_at_point(&dock, Point::new(120.0, 90.0)),
+            Some(SlotKind::Assets)
+        );
+        assert_eq!(
+            panel_at_point(&dock, Point::new(520.0, 90.0)),
+            Some(SlotKind::Viewer)
+        );
+        assert_eq!(
+            panel_at_point(&dock, Point::new(900.0, 90.0)),
+            Some(SlotKind::Inspector)
+        );
+        assert_eq!(
+            panel_at_point(&dock, Point::new(500.0, 520.0)),
+            Some(SlotKind::Timeline)
+        );
+    }
+
+    #[test]
+    fn built_in_workspace_presets_route_primary_regions_to_expected_panels() {
+        let cases = [
+            (
+                WorkspacePreset::Color,
+                Point::new(500.0, 90.0),
+                SlotKind::Viewer,
+            ),
+            (
+                WorkspacePreset::Color,
+                Point::new(500.0, 520.0),
+                SlotKind::Timeline,
+            ),
+            (
+                WorkspacePreset::Color,
+                Point::new(900.0, 90.0),
+                SlotKind::Inspector,
+            ),
+            (
+                WorkspacePreset::Audio,
+                Point::new(500.0, 520.0),
+                SlotKind::Timeline,
+            ),
+            (
+                WorkspacePreset::Audio,
+                Point::new(900.0, 520.0),
+                SlotKind::Inspector,
+            ),
+            (
+                WorkspacePreset::Compositing,
+                Point::new(180.0, 90.0),
+                SlotKind::NodeGraph,
+            ),
+            (
+                WorkspacePreset::Compositing,
+                Point::new(180.0, 520.0),
+                SlotKind::Effects,
+            ),
+            (
+                WorkspacePreset::Export,
+                Point::new(180.0, 90.0),
+                SlotKind::Export,
+            ),
+            (
+                WorkspacePreset::Export,
+                Point::new(700.0, 90.0),
+                SlotKind::Viewer,
+            ),
+        ];
+
+        for (preset, point, expected) in cases {
+            let mut dock = build_dock_tree_for_preset(SelfHostedPanelModels::demo(), preset);
+            dock.layout(Rect::new(0.0, 0.0, 1000.0, 600.0));
+
+            assert_eq!(
+                panel_at_point(&dock, point),
+                Some(expected),
+                "{preset:?} should route {point:?} to {expected:?}"
+            );
+        }
+    }
+
     #[test]
     fn app_state_models_are_safe_without_an_open_project() {
         let state = AppState::new();
@@ -3653,7 +3783,11 @@ mod tests {
         }
         assert_eq!(
             grid.event(
-                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &UiEvent::MouseDown {
+                    position: Point::new(card.center().x + 20.0, card.center().y + 69.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
                 &mut ctx,
             ),
             EventResult::Handled
@@ -3893,6 +4027,20 @@ mod tests {
                     button: MouseButton::Right,
                     modifiers: Modifiers::none(),
                 },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
                 &mut ctx,
             ),
             EventResult::Handled
@@ -4225,7 +4373,7 @@ mod tests {
 
         let result = panel.event(
             &UiEvent::MouseDown {
-                position: Point::new(16.0, 15.0),
+                position: Point::new(63.0, 15.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },

@@ -673,6 +673,15 @@ Timeline corner controls for adding video/audio tracks emit only a
 `TimelineTrackKind`; the app adapter translates that into
 `ui.timeline.add_track`, and `AppState` routes it through the existing undoable
 track creation commands.
+Timeline pointer tools are widget-local session state. `TimelineTool::Select`
+keeps normal selection, move, trim, and seek behavior. `TimelineTool::Blade`
+matches the egui-era workflow without adding a separate app command by seeking
+to the clicked frame and dispatching `TimelineEditCommand::SplitAtPlayhead`.
+Shortcut keys `V` and `B` switch these widget-local tools; undoable timeline
+mutation still starts only at the app command boundary. `TimelineViewState`
+captures the active tool, zoom, and scroll offsets so `SelfHostedAppRoot`
+preserves timeline working context across panel model rebuilds without storing
+that UI session data in `AppState`.
 Asset drops follow the same boundary. `TimelineView` accepts
 `DragPayload::Asset` only as a domain-light drop proposal with a view track ref
 and frame. The self-hosted adapter resolves that view ref to a stable
@@ -898,9 +907,10 @@ stable actions to rows instead of deriving commands from titles or indices.
 Synthetic demo rows use the `ui.demo_panel` action namespace so they cannot be
 confused with the app-layer `ui.assets`, `ui.effects`, `ui.timeline`, or
 `ui.inspector` protocols.
-The default editing dock keeps the left column focused on the project media
-library. Project commands remain in the shell/menu layer, and export uses its
-own workspace/panel instead of sharing a status/log tab group.
+The default editing dock follows a conventional NLE shape: Assets/Effects,
+Viewer, and Inspector occupy the upper workspace, while Timeline owns the full
+bottom span. Project commands remain in the shell/menu layer, and export uses
+its own workspace/panel instead of sharing a status/log tab group.
 Self-hosted `FocusPanel` and current View-menu `TogglePanel` actions activate
 the matching dock panel or grouped tab through shell-local dock traversal and do
 not continue into `AppState`. The traversal first understands grouped tabs in
@@ -909,10 +919,14 @@ presets such as Color, Compositing, and Export. True hide/show panel visibility
 should be added as a separate dock-tree policy so it can handle split collapse
 and restoration deliberately.
 Self-hosted `SwitchWorkspace` is also shell-local: it rebuilds the dock tree
-from the current `SelfHostedPanelModels` using a built-in preset while keeping
-panel models read-only and app/domain mutation in `AppState`. Refreshing panel
-models must preserve the selected workspace preset so live app snapshots do not
-silently reset the user's shell layout.
+from the current `SelfHostedPanelModels` using named built-in preset factories
+while keeping panel models read-only and app/domain mutation in `AppState`.
+Editing prioritizes full-width timeline work, Color keeps Viewer/Timeline on
+the left with Inspector/Effects on the right, Audio gives Timeline the lower
+workspace, Compositing groups NodeGraph/Effects opposite Viewer/Inspector, and
+Export pairs export settings with the Viewer. Refreshing panel models must
+preserve the selected workspace preset so live app snapshots do not silently
+reset the user's shell layout.
 The self-hosted Assets panel maps real library cards to `ui.assets.prepare_drag`;
 `AppState` resolves the asset record and reuses the existing `begin_drag_asset`
 path so later Timeline drop handling stays shared with the egui implementation.

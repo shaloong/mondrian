@@ -14,6 +14,8 @@ use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
 const SCROLLBAR_THICKNESS: f32 = 8.0;
 const SCROLLBAR_MIN_THUMB: f32 = 28.0;
+const TIMELINE_TOOL_BUTTON_SIZE: f32 = 18.0;
+const TIMELINE_TOOL_BUTTON_GAP: f32 = 4.0;
 
 /// Action factory for clip selection.
 pub type TimelineClipAction = dyn Fn(TimelineClipRef, &TimelineClip) -> Action;
@@ -130,6 +132,29 @@ pub enum TimelineEditCommand {
     MarkInAtPlayhead,
     /// Mark the current playhead frame as the sequence out point.
     MarkOutAtPlayhead,
+}
+
+/// Pointer tool currently active inside the timeline surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineTool {
+    /// Standard selection, trim, move, and seek behavior.
+    Select,
+    /// Split clips at the clicked frame by seeking there and dispatching
+    /// [`TimelineEditCommand::SplitAtPlayhead`].
+    Blade,
+}
+
+/// Local UI state preserved across [`TimelineView`] model rebuilds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TimelineViewState {
+    /// Active pointer tool.
+    pub active_tool: TimelineTool,
+    /// Horizontal scroll offset in logical pixels.
+    pub scroll_x: f32,
+    /// Vertical scroll offset in logical pixels.
+    pub scroll_y: f32,
+    /// Current zoom in pixels per frame.
+    pub pixels_per_frame: f32,
 }
 
 /// Clip view model rendered by [`TimelineView`].
@@ -272,7 +297,9 @@ pub struct TimelineView {
     selected_clip: Option<TimelineClipRef>,
     hovered_clip: Option<TimelineClipRef>,
     hovered_track_control: Option<(TimelineTrackRef, TimelineTrackControl)>,
+    hovered_tool: Option<TimelineTool>,
     hovered_track_add: Option<TimelineTrackKind>,
+    active_tool: TimelineTool,
     playhead_frame: i64,
     in_point_frame: i64,
     out_point_frame: Option<i64>,
@@ -367,7 +394,9 @@ impl TimelineView {
             selected_clip: None,
             hovered_clip: None,
             hovered_track_control: None,
+            hovered_tool: None,
             hovered_track_add: None,
+            active_tool: TimelineTool::Select,
             playhead_frame: 0,
             in_point_frame: 0,
             out_point_frame: None,
@@ -450,7 +479,9 @@ impl TimelineView {
             self.focus_visible = false;
             self.hovered_clip = None;
             self.hovered_track_control = None;
+            self.hovered_tool = None;
             self.hovered_track_add = None;
+            self.active_tool = TimelineTool::Select;
             self.selected_track = None;
             self.asset_drop_hover = None;
             self.track_drag = None;
@@ -581,6 +612,32 @@ impl TimelineView {
     /// Current zoom in pixels per frame.
     pub fn pixels_per_frame(&self) -> f32 {
         self.pixels_per_frame
+    }
+
+    /// Active pointer tool for the timeline surface.
+    pub fn active_tool(&self) -> TimelineTool {
+        self.active_tool
+    }
+
+    /// Snapshot local timeline UI state for rebuild preservation.
+    pub fn state(&self) -> TimelineViewState {
+        TimelineViewState {
+            active_tool: self.active_tool,
+            scroll_x: self.scroll_x,
+            scroll_y: self.scroll_y,
+            pixels_per_frame: self.pixels_per_frame,
+        }
+    }
+
+    /// Restore local timeline UI state after rebuilding from fresh models.
+    pub fn restore_state(&mut self, state: &TimelineViewState) {
+        self.active_tool = state.active_tool;
+        self.pixels_per_frame = state.pixels_per_frame.clamp(0.25, 64.0);
+        self.scroll_x = state.scroll_x.max(0.0);
+        self.scroll_y = state.scroll_y.max(0.0);
+        if self.body_rect.width > 0.0 || self.body_rect.height > 0.0 {
+            self.clamp_scroll();
+        }
     }
 
     fn content_width(&self) -> f32 {
@@ -809,12 +866,12 @@ impl TimelineView {
     }
 
     fn track_add_button_rect(&self, kind: TimelineTrackKind) -> Rect {
-        let size = 20.0;
-        let gap = 6.0;
+        let size = TIMELINE_TOOL_BUTTON_SIZE;
+        let gap = TIMELINE_TOOL_BUTTON_GAP;
         let x = self.bounds.x
             + match kind {
-                TimelineTrackKind::Video => 8.0,
-                TimelineTrackKind::Audio => 8.0 + size + gap,
+                TimelineTrackKind::Video => 8.0 + (size + gap) * 2.0 + 2.0,
+                TimelineTrackKind::Audio => 8.0 + (size + gap) * 3.0 + 2.0,
             };
         Rect::new(
             x,
@@ -831,6 +888,31 @@ impl TimelineView {
         [TimelineTrackKind::Video, TimelineTrackKind::Audio]
             .into_iter()
             .find(|kind| self.track_add_button_rect(*kind).contains(point))
+    }
+
+    fn tool_button_rect(&self, tool: TimelineTool) -> Rect {
+        let size = TIMELINE_TOOL_BUTTON_SIZE;
+        let gap = TIMELINE_TOOL_BUTTON_GAP;
+        let x = self.bounds.x
+            + match tool {
+                TimelineTool::Select => 8.0,
+                TimelineTool::Blade => 8.0 + size + gap,
+            };
+        Rect::new(
+            x,
+            self.bounds.y + (self.ruler_height - size) * 0.5,
+            size,
+            size,
+        )
+    }
+
+    fn tool_at(&self, point: Point) -> Option<TimelineTool> {
+        if !self.timeline_corner_rect().contains(point) {
+            return None;
+        }
+        [TimelineTool::Select, TimelineTool::Blade]
+            .into_iter()
+            .find(|tool| self.tool_button_rect(*tool).contains(point))
     }
 
     fn clip_rect(&self, track_index: usize, clip: &TimelineClip) -> Rect {
@@ -1265,6 +1347,38 @@ impl TimelineView {
         EventResult::Handled
     }
 
+    fn set_active_tool(&mut self, tool: TimelineTool, ctx: &mut EventContext) -> EventResult {
+        if self.active_tool != tool {
+            self.active_tool = tool;
+            self.clip_drag = None;
+            self.trim_drag = None;
+            ctx.request_repaint();
+        }
+        EventResult::Handled
+    }
+
+    fn dispatch_edit_command(
+        &mut self,
+        command: TimelineEditCommand,
+        ctx: &mut EventContext,
+    ) -> bool {
+        let Some(factory) = &self.on_edit_command else {
+            return false;
+        };
+        (ctx.dispatch)(factory(command));
+        ctx.request_repaint();
+        true
+    }
+
+    fn split_at_pointer_frame(&mut self, point: Point, ctx: &mut EventContext) -> EventResult {
+        self.seek_from_input(self.x_to_frame(point.x), ctx);
+        if self.dispatch_edit_command(TimelineEditCommand::SplitAtPlayhead, ctx) {
+            EventResult::Handled
+        } else {
+            EventResult::Ignored
+        }
+    }
+
     fn keyboard_seek(
         &mut self,
         key: KeyCode,
@@ -1311,12 +1425,7 @@ impl TimelineView {
             }
             _ => return false,
         };
-        let Some(factory) = &self.on_edit_command else {
-            return false;
-        };
-        (ctx.dispatch)(factory(command));
-        ctx.request_repaint();
-        true
+        self.dispatch_edit_command(command, ctx)
     }
 
     fn zoom_at(&mut self, anchor_x: f32, factor: f32) {
@@ -1399,8 +1508,60 @@ impl TimelineView {
             1.0,
             colors.border,
         );
+        self.paint_tool_button(ctx, TimelineTool::Select);
+        self.paint_tool_button(ctx, TimelineTool::Blade);
         self.paint_track_add_button(ctx, TimelineTrackKind::Video);
         self.paint_track_add_button(ctx, TimelineTrackKind::Audio);
+    }
+
+    fn paint_tool_button(&self, ctx: &mut PaintContext, tool: TimelineTool) {
+        let colors = &ctx.theme.colors;
+        let rect = self.tool_button_rect(tool);
+        let active = self.active_tool == tool;
+        let hovered = self.hovered_tool == Some(tool);
+        let mut bg = if active {
+            colors.accent
+        } else if hovered {
+            colors.secondary
+        } else {
+            colors.card
+        };
+        bg.a = if active || hovered { 0.92 } else { 0.32 };
+        ctx.encoder.draw_rect(rect, bg, ctx.theme.spacing.radius_sm);
+
+        let icon = if active {
+            colors.accent_foreground
+        } else {
+            colors.muted_foreground
+        };
+        match tool {
+            TimelineTool::Select => {
+                let p0 = Point::new(rect.x + 5.0, rect.y + 4.0);
+                let p1 = Point::new(rect.x + 5.0, rect.y + 14.0);
+                let p2 = Point::new(rect.x + 12.5, rect.y + 10.5);
+                ctx.encoder.draw_triangles(&[p0, p1, p2], icon);
+                ctx.encoder.draw_line(
+                    Point::new(rect.x + 9.0, rect.y + 10.5),
+                    Point::new(rect.x + 12.0, rect.y + 15.0),
+                    1.2,
+                    icon,
+                );
+            }
+            TimelineTool::Blade => {
+                ctx.encoder.draw_line(
+                    Point::new(rect.x + 5.0, rect.y + 13.0),
+                    Point::new(rect.x + 13.0, rect.y + 5.0),
+                    1.8,
+                    icon,
+                );
+                ctx.encoder.draw_line(
+                    Point::new(rect.x + 6.0, rect.y + 5.5),
+                    Point::new(rect.x + 13.5, rect.y + 13.0),
+                    1.2,
+                    icon,
+                );
+            }
+        }
     }
 
     fn paint_track_add_button(&self, ctx: &mut PaintContext, kind: TimelineTrackKind) {
@@ -2065,6 +2226,7 @@ impl Widget for TimelineView {
             self.scrollbar_drag = None;
             self.hovered_clip = None;
             self.hovered_track_control = None;
+            self.hovered_tool = None;
             self.hovered_track_add = None;
             self.horizontal_scrollbar_hovered = false;
             self.vertical_scrollbar_hovered = false;
@@ -2156,6 +2318,9 @@ impl Widget for TimelineView {
                         return EventResult::Handled;
                     }
                 }
+                if let Some(tool) = self.tool_at(*position) {
+                    return self.set_active_tool(tool, ctx);
+                }
                 if let Some(kind) = self.track_add_at(*position) {
                     return self.activate_track_add_from_input(kind, ctx);
                 }
@@ -2175,6 +2340,9 @@ impl Widget for TimelineView {
                     return result;
                 }
                 if let Some(clip_ref) = self.hit_clip(*position) {
+                    if self.active_tool == TimelineTool::Blade {
+                        return self.split_at_pointer_frame(*position, ctx);
+                    }
                     let result = self.select_clip_from_input(clip_ref, ctx);
                     if let Some(edge) = self.hit_clip_edge(clip_ref, *position) {
                         self.start_trim_drag(clip_ref, edge);
@@ -2187,6 +2355,9 @@ impl Widget for TimelineView {
                     return result;
                 }
                 if self.body_rect.contains(*position) {
+                    if self.active_tool == TimelineTool::Blade {
+                        return self.split_at_pointer_frame(*position, ctx);
+                    }
                     self.seek_from_input(self.x_to_frame(position.x), ctx);
                     return EventResult::Handled;
                 }
@@ -2223,6 +2394,12 @@ impl Widget for TimelineView {
                     return EventResult::Handled;
                 }
                 if self.set_scrollbar_hovered(*position) {
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
+                let hovered_tool = self.tool_at(*position);
+                if hovered_tool != self.hovered_tool {
+                    self.hovered_tool = hovered_tool;
                     ctx.request_repaint();
                     return EventResult::Handled;
                 }
@@ -2286,10 +2463,18 @@ impl Widget for TimelineView {
                 self.clip_drag = None;
                 self.trim_drag = None;
                 self.scrollbar_drag = None;
+                self.hovered_tool = None;
                 ctx.release_pointer_capture(self.id);
                 return EventResult::Handled;
             }
             UiEvent::KeyDown { key, modifiers } if self.focused => {
+                if !modifiers.ctrl && !modifiers.meta && !modifiers.alt && !modifiers.shift {
+                    match key {
+                        KeyCode::V => return self.set_active_tool(TimelineTool::Select, ctx),
+                        KeyCode::B => return self.set_active_tool(TimelineTool::Blade, ctx),
+                        _ => {}
+                    }
+                }
                 if self.keyboard_edit_command(*key, *modifiers, ctx) {
                     return EventResult::Handled;
                 }
@@ -2364,6 +2549,14 @@ impl Widget for TimelineView {
 
     fn can_focus(&self) -> bool {
         self.enabled
+    }
+
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
     }
 }
 
@@ -2833,7 +3026,7 @@ mod tests {
 
         let result = view.event(
             &UiEvent::MouseDown {
-                position: Point::new(16.0, 15.0),
+                position: Point::new(63.0, 15.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -2849,7 +3042,7 @@ mod tests {
         ctx.requests.repaint = false;
         let result = view.event(
             &UiEvent::MouseDown {
-                position: Point::new(42.0, 15.0),
+                position: Point::new(85.0, 15.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -3873,6 +4066,127 @@ mod tests {
             &[TimelineEditCommand::SplitAtPlayhead]
         );
         assert_eq!(actions.borrow().as_slice(), &[Action::SplitClipAtPlayhead]);
+    }
+
+    #[test]
+    fn timeline_tool_buttons_and_shortcuts_switch_active_tool() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut view = timeline();
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(view.active_tool(), TimelineTool::Select);
+        assert_eq!(
+            view.event(
+                &UiEvent::MouseDown {
+                    position: Point::new(39.0, 15.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(view.active_tool(), TimelineTool::Blade);
+
+        view.event(&UiEvent::FocusGained, &mut ctx);
+        assert_eq!(
+            view.event(
+                &UiEvent::KeyDown { key: KeyCode::V, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(view.active_tool(), TimelineTool::Select);
+        assert_eq!(
+            view.event(
+                &UiEvent::KeyDown { key: KeyCode::B, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(view.active_tool(), TimelineTool::Blade);
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn blade_tool_click_seeks_and_dispatches_split_without_dragging_clip() {
+        let actions = RefCell::new(Vec::new());
+        let commands = Rc::new(RefCell::new(Vec::new()));
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let command_log = Rc::clone(&commands);
+        let mut view = timeline()
+            .on_seek(|frame| Action::Custom {
+                namespace: "timeline.seek".into(),
+                name: frame.to_string(),
+                payload: Default::default(),
+            })
+            .on_edit_command(move |command| {
+                command_log.borrow_mut().push(command);
+                Action::SplitClipAtPlayhead
+            });
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        view.event(
+            &UiEvent::MouseDown {
+                position: Point::new(39.0, 15.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        let result = view.event(
+            &UiEvent::MouseDown {
+                position: Point::new(104.0, 42.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(view.active_tool(), TimelineTool::Blade);
+        assert_eq!(view.playhead_frame(), 2);
+        assert_eq!(
+            commands.borrow().as_slice(),
+            &[TimelineEditCommand::SplitAtPlayhead]
+        );
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[
+                Action::Custom {
+                    namespace: "timeline.seek".into(),
+                    name: "2".into(),
+                    payload: Default::default(),
+                },
+                Action::SplitClipAtPlayhead,
+            ]
+        );
+        assert!(ctx.requests.pointer_capture.is_none());
     }
 
     #[test]
