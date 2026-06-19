@@ -15,9 +15,9 @@ use mondrian_assets::AssetKind;
 use mondrian_core::types::{AssetId, BlendMode};
 use mondrian_effects::CompiledEffectGraph;
 use mondrian_renderer::{
-    build_timeline_render_plan, composite_timeline_elements, TimelineCompositeElement,
-    TimelineCompositeOptions, TimelineCompositeScratch, TimelineMediaLayer,
-    TimelineRenderPlanElement, TimelineSolidColorLayer,
+    build_timeline_render_plan, composite_timeline_elements, TimelineAdjustmentLayer,
+    TimelineCompositeElement, TimelineCompositeOptions, TimelineCompositeScratch,
+    TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
 };
 use mondrian_ui_widgets::ViewerFrameImage;
 
@@ -128,8 +128,17 @@ impl SelfHostedPreviewService {
                         frame_seed: media.frame_seed,
                     });
                 }
-                TimelineRenderPlanElement::Adjustment(_)
-                | TimelineRenderPlanElement::NestedSequence(_) => return None,
+                TimelineRenderPlanElement::Adjustment(adjustment) => {
+                    resolved.push(ResolvedPreviewElement::Adjustment(
+                        TimelineAdjustmentLayer {
+                            effect_graph: adjustment.effect_graph,
+                            opacity: adjustment.opacity,
+                            blend_mode: Some(adjustment.blend_mode),
+                            frame_seed: adjustment.frame_seed,
+                        },
+                    ));
+                }
+                TimelineRenderPlanElement::NestedSequence(_) => return None,
             }
         }
 
@@ -138,6 +147,9 @@ impl SelfHostedPreviewService {
             .map(|element| match element {
                 ResolvedPreviewElement::SolidColor(layer) => {
                     TimelineCompositeElement::SolidColor(layer.clone())
+                }
+                ResolvedPreviewElement::Adjustment(layer) => {
+                    TimelineCompositeElement::Adjustment(layer.clone())
                 }
                 ResolvedPreviewElement::Media {
                     frame,
@@ -172,6 +184,7 @@ impl SelfHostedPreviewService {
 
 enum ResolvedPreviewElement {
     SolidColor(TimelineSolidColorLayer),
+    Adjustment(TimelineAdjustmentLayer),
     Media {
         frame: MediaPreviewFrame,
         opacity: f32,

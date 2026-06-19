@@ -1218,9 +1218,10 @@ self-hosted path renders solid-color timeline elements directly via the shared
 host-owned background preview worker. Model refresh never blocks on media
 decode: missing media frames are queued, `SelfHostedUiHost::poll_background_tasks`
 collects completions, and a later refresh composites only when all required
-media RGBA inputs are available. Adjustment and nested-sequence plans still
-return no frame until their full render inputs exist; this avoids presenting
-partial previews as correct output.
+media RGBA inputs are available. Adjustment-layer plans are forwarded to the
+same compositor pass once preceding visual layers exist. Nested-sequence plans
+still return no frame until their recursive render inputs exist; this avoids
+presenting partial previews as correct output.
 Viewer transport controls are part of this chrome but stay domain-light: the
 widget draws geometry buttons for mark in/out, jump start/end, step back/forward,
 and play/pause. By default these controls emit shared editor actions
