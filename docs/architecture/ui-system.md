@@ -661,8 +661,11 @@ edits emit stable inspector actions that mutate the selected clip through
 undoable app state commands. Basic transform controls show position in sequence
 pixels, uniform scale in percent units, and rotation in degrees; the app action
 handler converts those UI values back into `Transform2D` property mutations.
-Timing controls show absolute timeline frames and dispatch the same trim
-payloads as the Timeline view.
+Timing controls show absolute timeline frames and dispatch the same
+`ui.timeline.trim_clips` payloads as the Timeline view. Single-clip controls
+wrap their target in a one-element `clip_ids` list; multi-clip operations use
+the same payload shape so app handlers can keep linked-clip behavior, locked
+track validation, undo snapshots, and event publication centralized.
 Timeline selection actions treat the clip id as authoritative and resolve the
 current track from `AppState`; track ids in widget snapshots are context only
 because they can be stale after moves, undo/redo, or refresh lag.
@@ -717,6 +720,12 @@ domain-light `TimelineEditCommand`s, and the app adapter maps them onto shared
 editor actions such as `Action::DeleteSelection` and
 `Action::RippleDeleteSelection`. Split-at-playhead uses the same path via
 `TimelineEditCommand::SplitAtPlayhead` and `Action::SplitClipAtPlayhead`.
+Trim-to-playhead menu commands use explicit
+`TimelineEditCommand::TrimSelectionInToPlayhead` /
+`TimelineEditCommand::TrimSelectionOutToPlayhead` commands; the app adapter
+resolves the current validated selection and playhead into a batch
+`ui.timeline.trim_clips` payload instead of letting the widget inspect or mutate
+the sequence.
 Mark In / Mark Out shortcuts use `TimelineEditCommand::MarkInAtPlayhead` and
 `TimelineEditCommand::MarkOutAtPlayhead`, then route through shared app actions
 so timeline and viewer shortcuts can converge on the same command boundary.

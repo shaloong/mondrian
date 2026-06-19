@@ -130,6 +130,10 @@ pub enum TimelineEditCommand {
     RippleDeleteSelection,
     /// Split clips intersecting the playhead.
     SplitAtPlayhead,
+    /// Trim selected clip starts to the playhead frame.
+    TrimSelectionInToPlayhead,
+    /// Trim selected clip ends to the playhead frame.
+    TrimSelectionOutToPlayhead,
     /// Mark the current playhead frame as the sequence in point.
     MarkInAtPlayhead,
     /// Mark the current playhead frame as the sequence out point.
@@ -1408,6 +1412,15 @@ impl TimelineView {
             ),
             MenuItem::separator(),
             Self::menu_item(
+                "Trim In to Playhead",
+                self.edit_command_action(TimelineEditCommand::TrimSelectionInToPlayhead),
+            ),
+            Self::menu_item(
+                "Trim Out to Playhead",
+                self.edit_command_action(TimelineEditCommand::TrimSelectionOutToPlayhead),
+            ),
+            MenuItem::separator(),
+            Self::menu_item(
                 "Mark In",
                 self.edit_command_action(TimelineEditCommand::MarkInAtPlayhead),
             ),
@@ -1424,6 +1437,15 @@ impl TimelineView {
                 "Split at Playhead",
                 self.edit_command_action(TimelineEditCommand::SplitAtPlayhead),
             ),
+            Self::menu_item(
+                "Trim Selection In to Playhead",
+                self.edit_command_action(TimelineEditCommand::TrimSelectionInToPlayhead),
+            ),
+            Self::menu_item(
+                "Trim Selection Out to Playhead",
+                self.edit_command_action(TimelineEditCommand::TrimSelectionOutToPlayhead),
+            ),
+            MenuItem::separator(),
             Self::menu_item(
                 "Mark In",
                 self.edit_command_action(TimelineEditCommand::MarkInAtPlayhead),
@@ -4197,6 +4219,8 @@ mod tests {
                 TimelineEditCommand::DeleteSelection => Action::DeleteSelection,
                 TimelineEditCommand::RippleDeleteSelection => Action::RippleDeleteSelection,
                 TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
+                TimelineEditCommand::TrimSelectionInToPlayhead => Action::Cut,
+                TimelineEditCommand::TrimSelectionOutToPlayhead => Action::Copy,
                 TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
                 TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
             }
@@ -4243,6 +4267,8 @@ mod tests {
             TimelineEditCommand::DeleteSelection => Action::DeleteSelection,
             TimelineEditCommand::RippleDeleteSelection => Action::RippleDeleteSelection,
             TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
+            TimelineEditCommand::TrimSelectionInToPlayhead => Action::Cut,
+            TimelineEditCommand::TrimSelectionOutToPlayhead => Action::Copy,
             TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
             TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
         });
@@ -4302,6 +4328,8 @@ mod tests {
                 TimelineEditCommand::DeleteSelection => Action::DeleteSelection,
                 TimelineEditCommand::RippleDeleteSelection => Action::RippleDeleteSelection,
                 TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
+                TimelineEditCommand::TrimSelectionInToPlayhead => Action::Cut,
+                TimelineEditCommand::TrimSelectionOutToPlayhead => Action::Copy,
                 TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
                 TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
             })
@@ -4336,7 +4364,7 @@ mod tests {
 
         let result = view.event(
             &UiEvent::MouseDown {
-                position: Point::new(510.0, 155.0),
+                position: Point::new(510.0, 235.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },

@@ -20,8 +20,8 @@ pub const TIMELINE_NAMESPACE: &str = "ui.timeline";
 pub const TIMELINE_SELECT_CLIP: &str = "select_clip";
 /// Action name for moving a timeline clip.
 pub const TIMELINE_MOVE_CLIP: &str = "move_clip";
-/// Action name for trimming a timeline clip.
-pub const TIMELINE_TRIM_CLIP: &str = "trim_clip";
+/// Action name for trimming timeline clips.
+pub const TIMELINE_TRIM_CLIPS: &str = "trim_clips";
 /// Action name for seeking the active timeline.
 pub const TIMELINE_SEEK: &str = "seek";
 /// Action name for changing one timeline track header control.
@@ -236,11 +236,11 @@ pub struct TimelineMoveClipPayload {
     pub frame: i64,
 }
 
-/// Trim one clip edge to a target timeline frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TimelineTrimClipPayload {
-    /// Clip being trimmed.
-    pub clip_id: ClipId,
+/// Trim one or more clip edges to a target timeline frame.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineTrimClipsPayload {
+    /// Clips being trimmed.
+    pub clip_ids: Vec<ClipId>,
     /// Edge that should be trimmed.
     pub edge: TimelineTrimPayloadEdge,
     /// Target timeline frame for the selected edge.
@@ -656,9 +656,9 @@ pub fn timeline_move_clip_action(payload: TimelineMoveClipPayload) -> Action {
     custom_timeline_action(TIMELINE_MOVE_CLIP, payload)
 }
 
-/// Build an action that trims a clip edge in the active timeline.
-pub fn timeline_trim_clip_action(payload: TimelineTrimClipPayload) -> Action {
-    custom_timeline_action(TIMELINE_TRIM_CLIP, payload)
+/// Build an action that trims clip edges in the active timeline.
+pub fn timeline_trim_clips_action(payload: TimelineTrimClipsPayload) -> Action {
+    custom_timeline_action(TIMELINE_TRIM_CLIPS, payload)
 }
 
 /// Build an action that seeks the active timeline.

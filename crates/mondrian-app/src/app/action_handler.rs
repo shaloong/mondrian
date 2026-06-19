@@ -25,7 +25,7 @@ use crate::app::ui_actions::{
     ProjectRecoverFromAutosavePayload, TimelineAddTrackKind, TimelineAddTrackPayload,
     TimelineDropAssetPayload, TimelineMoveClipPayload, TimelineMoveTrackPayload,
     TimelineSeekPayload, TimelineSelectClipPayload, TimelineSetTrackControlPayload,
-    TimelineTrackControlPayloadKind, TimelineTrimClipPayload, TimelineTrimPayloadEdge,
+    TimelineTrackControlPayloadKind, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
     ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR,
     ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_DELETE_SELECTION, ASSETS_IMPORT_FILES,
     ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE,
@@ -37,7 +37,7 @@ use crate::app::ui_actions::{
     INSPECTOR_SET_EFFECT_ENABLED, INSPECTOR_SET_EFFECT_PROPERTY, PROJECT_CREATE_WITH_SETTINGS,
     PROJECT_NAMESPACE, PROJECT_RECOVER_FROM_AUTOSAVE, TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET,
     TIMELINE_MOVE_CLIP, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_SEEK,
-    TIMELINE_SELECT_CLIP, TIMELINE_SET_TRACK_CONTROL, TIMELINE_TRIM_CLIP,
+    TIMELINE_SELECT_CLIP, TIMELINE_SET_TRACK_CONTROL, TIMELINE_TRIM_CLIPS,
 };
 use crate::app::{AppClipboardKind, AppState, ClipOverlapMode, SelectedClipRef};
 use glam::Vec2;
@@ -1021,8 +1021,8 @@ impl AppState {
                     payload.frame,
                 )
             }
-            TIMELINE_TRIM_CLIP => {
-                let payload = parse_ui_payload::<TimelineTrimClipPayload>(
+            TIMELINE_TRIM_CLIPS => {
+                let payload = parse_ui_payload::<TimelineTrimClipsPayload>(
                     "timeline_ui_action",
                     name,
                     payload,
@@ -1031,7 +1031,7 @@ impl AppState {
                     TimelineTrimPayloadEdge::In => TrimEdge::In,
                     TimelineTrimPayloadEdge::Out => TrimEdge::Out,
                 };
-                self.trim_clips_bulk_to_frame(&[payload.clip_id], edge, payload.frame)
+                self.trim_clips_bulk_to_frame(&payload.clip_ids, edge, payload.frame)
                     .map(|_| ())
             }
             TIMELINE_SEEK => {
@@ -1926,7 +1926,7 @@ mod tests {
         project_recover_from_autosave_action, timeline_add_track_action,
         timeline_drop_asset_action, timeline_move_clip_action, timeline_move_track_action,
         timeline_seek_action, timeline_select_clip_action, timeline_set_track_control_action,
-        timeline_trim_clip_action, AssetsCreateAssetPayload, AssetsCreateFolderPayload,
+        timeline_trim_clips_action, AssetsCreateAssetPayload, AssetsCreateFolderPayload,
         AssetsDeleteAssetPayload, AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload,
         AssetsImportFilesPayload, AssetsMoveAssetPayload, AssetsMoveFolderPayload,
         AssetsMoveSelectionPayload, AssetsPrepareDragPayload, AssetsRelinkAssetPayload,
@@ -1939,7 +1939,7 @@ mod tests {
         InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload,
         ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload, TimelineAddTrackKind,
         TimelineAddTrackPayload, TimelineDropAssetPayload, TimelineMoveTrackPayload,
-        TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind,
+        TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipsPayload,
     };
     use mondrian_assets::AssetLibrary;
     use mondrian_core::types::{AssetId, EffectId, MaskId, TimeCode, TrackId};
@@ -2386,8 +2386,8 @@ mod tests {
         let (mut state, _, clip_id) = state_with_two_video_tracks();
 
         state
-            .dispatch_action(timeline_trim_clip_action(TimelineTrimClipPayload {
-                clip_id,
+            .dispatch_action(timeline_trim_clips_action(TimelineTrimClipsPayload {
+                clip_ids: vec![clip_id],
                 edge: TimelineTrimPayloadEdge::In,
                 frame: 16,
             }))
@@ -2397,6 +2397,33 @@ mod tests {
         let clip = &sequence.video_tracks[0].clips[0];
         assert_eq!(clip.position.frame, 16);
         assert_eq!(clip.duration.frame, 14);
+    }
+
+    #[test]
+    fn dispatch_timeline_ui_trims_multiple_clip_edges() {
+        let (mut state, _, first_clip_id) = state_with_two_video_tracks();
+        let tb = state.sequence.as_ref().expect("sequence").time_base();
+        let second_clip = Clip::new(AssetId::new(), TimeCode::new(12, tb), TimeCode::new(30, tb));
+        let second_clip_id = second_clip.id;
+        state.sequence.as_mut().expect("sequence").video_tracks[1]
+            .add_clip(second_clip)
+            .expect("add second clip");
+
+        state
+            .dispatch_action(timeline_trim_clips_action(TimelineTrimClipsPayload {
+                clip_ids: vec![first_clip_id, second_clip_id],
+                edge: TimelineTrimPayloadEdge::In,
+                frame: 16,
+            }))
+            .expect("dispatch batch trim");
+
+        let sequence = state.sequence.as_ref().expect("sequence");
+        let first = &sequence.video_tracks[0].clips[0];
+        let second = &sequence.video_tracks[1].clips[0];
+        assert_eq!(first.position.frame, 16);
+        assert_eq!(first.duration.frame, 14);
+        assert_eq!(second.position.frame, 16);
+        assert_eq!(second.duration.frame, 26);
     }
 
     #[test]
