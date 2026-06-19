@@ -566,16 +566,8 @@ impl ViewerPanelModel {
         let duration_frame = sequence.total_duration().frame.max(0);
         let fps = sequence.settings.frame_rate.to_f64();
         let frame_image = preview.and_then(|preview| preview.viewer_frame_for_state(state));
-        let preview_quality_label = frame_image
-            .as_ref()
-            .map(|frame| {
-                if frame.width == resolution.width && frame.height == resolution.height {
-                    "Full".into()
-                } else {
-                    format!("{}x{}", frame.width, frame.height)
-                }
-            })
-            .unwrap_or_else(|| "Full".into());
+        let preview_quality_label =
+            viewer_preview_quality_label(sequence.settings.preview.resolution_scale);
 
         Self {
             title: sequence.name.clone(),
@@ -626,6 +618,15 @@ impl ViewerPanelModel {
             frame_image: None,
             empty_message: Some("No sequence loaded".into()),
         }
+    }
+}
+
+fn viewer_preview_quality_label(scale: f32) -> String {
+    let scale = scale.clamp(0.125, 1.0);
+    if (scale - 1.0).abs() <= f32::EPSILON {
+        "Full".into()
+    } else {
+        format!("{:.0}%", scale * 100.0)
     }
 }
 
@@ -5419,7 +5420,7 @@ mod tests {
         assert_eq!(models.viewer.empty_message, None);
         assert!(models.viewer.resolution_label.contains("1920x1080"));
         assert_eq!(models.viewer.zoom_label, "Fit");
-        assert_eq!(models.viewer.preview_quality_label, "Full");
+        assert_eq!(models.viewer.preview_quality_label, "50%");
         assert_eq!(models.timeline.playhead_frame, 7);
         assert!(models.timeline.tracks[0].clips[0].selected);
         assert!(models.timeline.tracks[0].clips[0].disabled);
@@ -5528,7 +5529,19 @@ mod tests {
         assert_eq!(frame.key, "test-preview");
         assert_eq!(frame.width, 320);
         assert_eq!(frame.height, 180);
-        assert_eq!(models.viewer.preview_quality_label, "320x180");
+        assert_eq!(models.viewer.preview_quality_label, "50%");
+    }
+
+    #[test]
+    fn app_state_models_label_full_resolution_viewer_preview_scale() {
+        let mut state = AppState::new();
+        let mut sequence = Sequence::new("edit");
+        sequence.settings.preview.resolution_scale = 1.0;
+        state.sequence = Some(sequence);
+
+        let models = SelfHostedPanelModels::from_app_state(&state);
+
+        assert_eq!(models.viewer.preview_quality_label, "Full");
     }
 
     #[test]
