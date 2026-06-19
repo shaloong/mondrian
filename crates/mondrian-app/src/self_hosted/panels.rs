@@ -218,8 +218,6 @@ pub struct PanelListModel {
     pub subtitle: String,
     pub items: Vec<PanelListItem>,
     pub filter_placeholder: Option<String>,
-    #[cfg(test)]
-    pub demo_activate_prefix: Option<String>,
 }
 
 /// Asset-browser card-grid data independent from a concrete widget instance.
@@ -231,8 +229,6 @@ pub struct AssetGridModel {
     pub filter_placeholder: Option<String>,
     pub accepts_file_drop: bool,
     pub current_folder_id: Option<String>,
-    #[cfg(test)]
-    pub demo_activate_prefix: Option<String>,
 }
 
 impl AssetGridModel {
@@ -244,8 +240,6 @@ impl AssetGridModel {
             filter_placeholder: None,
             accepts_file_drop: false,
             current_folder_id: None,
-            #[cfg(test)]
-            demo_activate_prefix: None,
         }
     }
 
@@ -261,13 +255,6 @@ impl AssetGridModel {
 
     pub fn accepts_file_drop(mut self, accepts: bool) -> Self {
         self.accepts_file_drop = accepts;
-        self
-    }
-
-    /// Attach a synthetic activation prefix for developer fixtures.
-    #[cfg(test)]
-    pub fn with_demo_activate_prefix(mut self, prefix: impl Into<String>) -> Self {
-        self.demo_activate_prefix = Some(prefix.into());
         self
     }
 
@@ -416,8 +403,6 @@ impl PanelListModel {
             subtitle: String::new(),
             items,
             filter_placeholder: None,
-            #[cfg(test)]
-            demo_activate_prefix: None,
         }
     }
 
@@ -428,16 +413,6 @@ impl PanelListModel {
 
     pub fn with_filter_placeholder(mut self, placeholder: impl Into<String>) -> Self {
         self.filter_placeholder = Some(placeholder.into());
-        self
-    }
-
-    /// Attach a synthetic activation prefix for developer fixtures.
-    ///
-    /// Product panel models should assign stable explicit actions to each item
-    /// instead of deriving commands from list labels.
-    #[cfg(test)]
-    pub fn with_demo_activate_prefix(mut self, prefix: impl Into<String>) -> Self {
-        self.demo_activate_prefix = Some(prefix.into());
         self
     }
 
@@ -1795,12 +1770,6 @@ fn panel_list(model: &PanelListModel) -> PanelList {
     if let Some(placeholder) = &model.filter_placeholder {
         list = list.with_filter(placeholder.clone());
     }
-    #[cfg(test)]
-    if let Some(prefix) = model.demo_activate_prefix.clone() {
-        return list.on_activate(move |index, item| {
-            demo_panel_action(&format!("{prefix}.{index}.{}", item.title))
-        });
-    }
     list
 }
 
@@ -1867,12 +1836,6 @@ fn asset_grid(model: &AssetGridModel) -> AssetGrid {
                 model.current_folder_id.as_deref(),
             ))
             .with_selection_context_menu(asset_grid_selection_context_menu_items);
-    }
-    #[cfg(test)]
-    if let Some(prefix) = model.demo_activate_prefix.clone() {
-        return grid.on_activate(move |index, item| {
-            demo_panel_action(&format!("{prefix}.{index}.{}", item.title))
-        });
     }
     grid
 }
@@ -1996,28 +1959,32 @@ fn demo_asset_model() -> AssetGridModel {
                 AssetGridItem::new("demo-footage", "Footage", colors.media_video)
                     .with_subtitle("Imported camera clips")
                     .with_badge("12")
-                    .with_select_action(demo_panel_action("assets.select.footage")),
+                    .with_select_action(demo_panel_action("assets.select.footage"))
+                    .with_activate_action(demo_panel_action("assets.activate.footage")),
                 AppIcon::Film,
             ),
             with_asset_icon(
                 AssetGridItem::new("demo-audio", "Audio", colors.media_audio)
                     .with_subtitle("Music, voiceover, and ambience")
                     .with_badge("5")
-                    .with_select_action(demo_panel_action("assets.select.audio")),
+                    .with_select_action(demo_panel_action("assets.select.audio"))
+                    .with_activate_action(demo_panel_action("assets.activate.audio")),
                 AppIcon::Music,
             ),
             with_asset_icon(
                 AssetGridItem::new("demo-images", "Images", colors.media_solid)
                     .with_subtitle("Still frames and references")
                     .with_badge("8")
-                    .with_select_action(demo_panel_action("assets.select.images")),
+                    .with_select_action(demo_panel_action("assets.select.images"))
+                    .with_activate_action(demo_panel_action("assets.activate.images")),
                 AppIcon::Rectangle,
             ),
             with_asset_icon(
                 AssetGridItem::new("demo-sequences", "Sequences", colors.media_adjustment)
                     .with_subtitle("Nested edits and reusable timelines")
                     .with_badge("2")
-                    .with_select_action(demo_panel_action("assets.select.sequences")),
+                    .with_select_action(demo_panel_action("assets.select.sequences"))
+                    .with_activate_action(demo_panel_action("assets.activate.sequences")),
                 AppIcon::Film,
             ),
         ],
@@ -2025,7 +1992,6 @@ fn demo_asset_model() -> AssetGridModel {
     .with_subtitle("Project library")
     .with_filter_placeholder("Search assets")
     .accepts_file_drop(true)
-    .with_demo_activate_prefix("assets.activate")
 }
 
 #[cfg(test)]
@@ -5016,7 +4982,6 @@ mod tests {
             models.assets.filter_placeholder.as_deref(),
             Some("Search assets")
         );
-        assert!(models.assets.demo_activate_prefix.is_none());
         let item = &models.assets.items[0];
         assert_eq!(item.title, "Brand Purple");
         assert_eq!(badge_labels(item), ["CLR"]);
@@ -5304,7 +5269,6 @@ mod tests {
         let model = PanelListModel::from_effect_registry(None);
 
         assert_eq!(model.filter_placeholder.as_deref(), Some("Search effects"));
-        assert!(model.demo_activate_prefix.is_none());
         assert!(model.items.iter().all(|item| item.select_action.is_none()));
         assert!(model.items.iter().all(|item| item.activate_action.is_none()));
         assert!(model.items.iter().all(|item| item.icon.is_some()));
@@ -5323,7 +5287,6 @@ mod tests {
 
         let model = PanelListModel::from_effect_registry(Some(selection));
 
-        assert!(model.demo_activate_prefix.is_none());
         assert!(model.items.iter().all(|item| item.icon.is_some()));
         assert!(model.items.iter().all(|item| !item.disabled));
         assert!(model.items.iter().all(|item| item.badge.is_some()));
@@ -5639,14 +5602,10 @@ mod tests {
     }
 
     #[test]
-    fn demo_asset_model_is_the_only_dynamic_activation_fixture() {
+    fn demo_asset_model_uses_explicit_item_actions() {
         let model = demo_asset_model();
 
-        assert_eq!(
-            model.demo_activate_prefix.as_deref(),
-            Some("assets.activate")
-        );
-        assert!(model.items.iter().all(|item| item.activate_action.is_none()));
+        assert!(model.items.iter().all(|item| item.activate_action.is_some()));
         assert!(model.items.iter().all(|item| item.select_action.is_some()));
         let action = model.items[0].select_action.as_ref().expect("select");
         let Action::Custom { namespace, name, payload } = action else {
@@ -5654,6 +5613,14 @@ mod tests {
         };
         assert_eq!(namespace, "ui.demo_panel");
         assert_eq!(name, "assets.select.footage");
+        assert!(payload.is_null());
+
+        let action = model.items[0].activate_action.as_ref().expect("activate");
+        let Action::Custom { namespace, name, payload } = action else {
+            panic!("expected demo custom action, got {action:?}");
+        };
+        assert_eq!(namespace, "ui.demo_panel");
+        assert_eq!(name, "assets.activate.footage");
         assert!(payload.is_null());
     }
 

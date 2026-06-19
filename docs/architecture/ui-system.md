@@ -913,12 +913,11 @@ and future browsers can share neutral, accent, success, warning, and error
 treatments without hard-coded colors or fixed-width text assumptions. Demo
 fixture colors that represent clip media content may remain fixture data,
 because they are not theme chrome.
-`PanelListModel::demo_activate_prefix` is compiled only for tests and exists
-for synthetic fixture commands; product panel models must attach explicit
-stable actions to rows instead of deriving commands from titles or indices.
-Synthetic demo rows use the `ui.demo_panel` action namespace so they cannot be
-confused with the app-layer `ui.assets`, `ui.effects`, `ui.timeline`, or
-`ui.inspector` protocols.
+Panel models must attach explicit stable actions to rows instead of deriving
+commands from titles, indices, or fixture-only prefixes. Synthetic demo rows
+use explicit `ui.demo_panel` actions so they exercise the same select/activate
+contracts as product panels without being confused with app-layer `ui.assets`,
+`ui.effects`, `ui.timeline`, or `ui.inspector` protocols.
 The default editing dock follows a conventional NLE shape: Assets/Effects,
 Viewer, and Inspector occupy the upper workspace, while Timeline owns the full
 bottom span. Project commands remain in the shell/menu layer, and export uses
