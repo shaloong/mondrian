@@ -963,6 +963,9 @@ immediately target the same effect; the selection update is navigation state and
 does not create a second undo entry. Project lifecycle state
 belongs to the shell and File menu surfaces instead of a dock panel, so editing
 workspaces do not expose a separate project-status panel beside creative panels.
+The lighter `List` widget remains available for demos and simple generic
+surfaces; it follows the same unmodified-key navigation and activation contract
+so Ctrl/Shift/Alt/Meta chords can continue through the central shortcut path.
 The self-hosted Assets panel uses the dedicated `AssetGrid` card browser
 instead of the row-list surface. `AssetGrid` keeps the same framework-owned
 interaction contract as `PanelList`: filter input is a real `TextInput`, local

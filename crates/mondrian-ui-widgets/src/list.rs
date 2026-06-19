@@ -173,7 +173,9 @@ impl Widget for List {
                 self.focus_visible = false;
                 return EventResult::Handled;
             }
-            UiEvent::KeyDown { key: KeyCode::Down, .. } if self.focused => {
+            UiEvent::KeyDown { key: KeyCode::Down, modifiers }
+                if self.focused && *modifiers == Modifiers::none() =>
+            {
                 if self.items.is_empty() {
                     return EventResult::Ignored;
                 }
@@ -181,7 +183,9 @@ impl Widget for List {
                 self.set_selected(Some(next));
                 return EventResult::Handled;
             }
-            UiEvent::KeyDown { key: KeyCode::Up, .. } if self.focused => {
+            UiEvent::KeyDown { key: KeyCode::Up, modifiers }
+                if self.focused && *modifiers == Modifiers::none() =>
+            {
                 if self.items.is_empty() {
                     return EventResult::Ignored;
                 }
@@ -189,7 +193,9 @@ impl Widget for List {
                 self.set_selected(Some(next));
                 return EventResult::Handled;
             }
-            UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, .. } if self.focused => {
+            UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, modifiers }
+                if self.focused && *modifiers == Modifiers::none() =>
+            {
                 if let Some(idx) = self.selected.filter(|index| *index < self.items.len()) {
                     if let Some(action) = &self.items[idx].action {
                         (ctx.dispatch)(action.clone());
@@ -386,6 +392,7 @@ mod tests {
     use mondrian_platform::NoopPlatformService;
     use mondrian_ui_core::widget::{DrawCommandEncoder, EventRequests};
     use mondrian_ui_theme::ThemePreset;
+    use std::cell::RefCell;
 
     #[derive(Default)]
     struct PaintRecorder {
@@ -573,6 +580,38 @@ mod tests {
         assert_eq!(down, EventResult::Ignored);
         assert_eq!(enter, EventResult::Ignored);
         assert_eq!(list.selected_index(), None);
+    }
+
+    #[test]
+    fn list_keyboard_navigation_ignores_modified_keys() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut list = List::new(vec![
+            ListItem::new("A").with_action(Action::Play),
+            ListItem::new("B").with_action(Action::TogglePlay),
+        ]);
+        list.set_selected(Some(1));
+        list.layout(Rect::new(0.0, 0.0, 200.0, 100.0));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = event_ctx(&mut f, &mut s, &mut t, &dispatch);
+
+        list.event(&UiEvent::FocusGained, &mut ctx);
+        for (key, modifiers) in [
+            (KeyCode::Down, Modifiers::ctrl()),
+            (KeyCode::Up, Modifiers::shift()),
+            (KeyCode::Enter, Modifiers::ctrl()),
+            (KeyCode::Space, Modifiers::shift()),
+        ] {
+            assert_eq!(
+                list.event(&UiEvent::KeyDown { key, modifiers }, &mut ctx),
+                EventResult::Ignored
+            );
+            assert_eq!(list.selected_index(), Some(1));
+        }
+        assert!(actions.borrow().is_empty());
     }
 
     #[test]
