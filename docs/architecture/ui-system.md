@@ -425,7 +425,12 @@ letting users type partial values without mutating domain state from malformed
 input. Enter and focus loss are display commit points: valid text is reformatted
 to the clamped/stepped value with the configured decimal precision, while
 invalid text reverts to the most recent valid number already accepted by the
-control.
+control. Focused numeric fields also support Up/Down and PageUp/PageDown
+keyboard nudging; configured steps are reused, Shift multiplies the arrow step
+by ten, and decimal precision supplies a predictable default when no explicit
+step is available. Changing decimal precision must reformat the committed value
+itself so fractional app-state snapshots such as `0.5` do not round through an
+intermediate integer display.
 Panel adapters may set a preferred `NumberInput` width when composing compact
 property rows; the input still receives its final bounds from layout and must
 not own row-level sizing policy.
