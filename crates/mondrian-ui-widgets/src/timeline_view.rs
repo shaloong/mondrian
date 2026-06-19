@@ -18,6 +18,8 @@ const SCROLLBAR_THICKNESS: f32 = 8.0;
 const SCROLLBAR_MIN_THUMB: f32 = 28.0;
 const TIMELINE_TOOL_BUTTON_SIZE: f32 = 18.0;
 const TIMELINE_TOOL_BUTTON_GAP: f32 = 4.0;
+const TIMELINE_ZOOM_BUTTON_SIZE: f32 = 18.0;
+const TIMELINE_ZOOM_BUTTON_GAP: f32 = 4.0;
 
 /// Action factory for clip selection.
 pub type TimelineClipAction = dyn Fn(TimelineClipRef, &TimelineClip) -> Action;
@@ -177,6 +179,12 @@ pub enum TimelineTool {
     /// Split clips at the clicked frame by seeking there and dispatching
     /// [`TimelineEditCommand::SplitAtPlayhead`].
     Blade,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimelineZoomButton {
+    Out,
+    In,
 }
 
 /// Local UI state preserved across [`TimelineView`] model rebuilds.
@@ -342,6 +350,7 @@ pub struct TimelineView {
     hovered_track_control: Option<(TimelineTrackRef, TimelineTrackControl)>,
     hovered_tool: Option<TimelineTool>,
     hovered_track_add: Option<TimelineTrackKind>,
+    hovered_zoom: Option<TimelineZoomButton>,
     active_tool: TimelineTool,
     playhead_frame: i64,
     in_point_frame: i64,
@@ -451,6 +460,7 @@ impl TimelineView {
             hovered_track_control: None,
             hovered_tool: None,
             hovered_track_add: None,
+            hovered_zoom: None,
             active_tool: TimelineTool::Select,
             playhead_frame: 0,
             in_point_frame: 0,
@@ -540,6 +550,7 @@ impl TimelineView {
             self.hovered_track_control = None;
             self.hovered_tool = None;
             self.hovered_track_add = None;
+            self.hovered_zoom = None;
             self.active_tool = TimelineTool::Select;
             self.selected_track = None;
             self.asset_drop_hover = None;
@@ -1009,6 +1020,36 @@ impl TimelineView {
         [TimelineTool::Select, TimelineTool::Blade]
             .into_iter()
             .find(|tool| self.tool_button_rect(*tool).contains(point))
+    }
+
+    fn zoom_button_rect(&self, button: TimelineZoomButton) -> Option<Rect> {
+        let size = TIMELINE_ZOOM_BUTTON_SIZE;
+        let gap = TIMELINE_ZOOM_BUTTON_GAP;
+        let available_width = self.ruler_rect.width;
+        let group_width = size * 2.0 + gap;
+        if available_width < group_width + 16.0 {
+            return None;
+        }
+        let right = self.ruler_rect.x + self.ruler_rect.width - 8.0;
+        let x = match button {
+            TimelineZoomButton::Out => right - group_width,
+            TimelineZoomButton::In => right - size,
+        };
+        Some(Rect::new(
+            x,
+            self.ruler_rect.y + (self.ruler_rect.height - size) * 0.5,
+            size,
+            size,
+        ))
+    }
+
+    fn zoom_button_at(&self, point: Point) -> Option<TimelineZoomButton> {
+        if !self.ruler_rect.contains(point) {
+            return None;
+        }
+        [TimelineZoomButton::Out, TimelineZoomButton::In]
+            .into_iter()
+            .find(|button| self.zoom_button_rect(*button).is_some_and(|rect| rect.contains(point)))
     }
 
     fn clip_rect(&self, track_index: usize, clip: &TimelineClip) -> Rect {
@@ -1736,14 +1777,31 @@ impl TimelineView {
         self.dispatch_edit_command(command, ctx)
     }
 
-    fn zoom_at(&mut self, anchor_x: f32, factor: f32) {
+    fn activate_zoom_button(
+        &mut self,
+        button: TimelineZoomButton,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        let factor = match button {
+            TimelineZoomButton::Out => 1.0 / 1.25,
+            TimelineZoomButton::In => 1.25,
+        };
+        if self.zoom_at(self.body_rect.center().x, factor) {
+            ctx.request_repaint();
+        }
+        EventResult::Handled
+    }
+
+    fn zoom_at(&mut self, anchor_x: f32, factor: f32) -> bool {
         let frame_at_anchor = self.x_to_frame(anchor_x) as f32;
         let old = self.pixels_per_frame;
         self.pixels_per_frame = (self.pixels_per_frame * factor).clamp(0.25, 64.0);
         if (old - self.pixels_per_frame).abs() > f32::EPSILON {
             self.scroll_x = frame_at_anchor * self.pixels_per_frame - (anchor_x - self.body_rect.x);
             self.clamp_scroll();
+            return true;
         }
+        false
     }
 
     fn tick_step_frames(&self) -> i64 {
@@ -1798,6 +1856,7 @@ impl TimelineView {
             1.0,
             colors.border,
         );
+        self.paint_zoom_buttons(ctx);
     }
 
     fn paint_timeline_corner(&self, ctx: &mut PaintContext) {
@@ -1820,6 +1879,45 @@ impl TimelineView {
         self.paint_tool_button(ctx, TimelineTool::Blade);
         self.paint_track_add_button(ctx, TimelineTrackKind::Video);
         self.paint_track_add_button(ctx, TimelineTrackKind::Audio);
+    }
+
+    fn paint_zoom_buttons(&self, ctx: &mut PaintContext) {
+        self.paint_zoom_button(ctx, TimelineZoomButton::Out);
+        self.paint_zoom_button(ctx, TimelineZoomButton::In);
+    }
+
+    fn paint_zoom_button(&self, ctx: &mut PaintContext, button: TimelineZoomButton) {
+        let Some(rect) = self.zoom_button_rect(button) else {
+            return;
+        };
+        let colors = &ctx.theme.colors;
+        let hovered = self.hovered_zoom == Some(button);
+        let mut bg = if hovered {
+            colors.secondary
+        } else {
+            colors.card
+        };
+        bg.a = if hovered { 0.9 } else { 0.48 };
+        ctx.encoder.draw_rect(rect, bg, ctx.theme.spacing.radius_sm);
+
+        let icon = if hovered {
+            colors.foreground
+        } else {
+            colors.muted_foreground
+        };
+        let cy = rect.y + rect.height * 0.5;
+        let left = rect.x + 5.0;
+        let right = rect.x + rect.width - 5.0;
+        ctx.encoder.draw_line(Point::new(left, cy), Point::new(right, cy), 1.6, icon);
+        if button == TimelineZoomButton::In {
+            let cx = rect.x + rect.width * 0.5;
+            ctx.encoder.draw_line(
+                Point::new(cx, rect.y + 5.0),
+                Point::new(cx, rect.y + rect.height - 5.0),
+                1.6,
+                icon,
+            );
+        }
     }
 
     fn paint_tool_button(&self, ctx: &mut PaintContext, tool: TimelineTool) {
@@ -2538,6 +2636,7 @@ impl Widget for TimelineView {
             self.hovered_track_control = None;
             self.hovered_tool = None;
             self.hovered_track_add = None;
+            self.hovered_zoom = None;
             self.horizontal_scrollbar_hovered = false;
             self.vertical_scrollbar_hovered = false;
             return EventResult::Ignored;
@@ -2669,6 +2768,9 @@ impl Widget for TimelineView {
                 if let Some(kind) = self.track_add_at(*position) {
                     return self.activate_track_add_from_input(kind, ctx);
                 }
+                if let Some(button) = self.zoom_button_at(*position) {
+                    return self.activate_zoom_button(button, ctx);
+                }
                 if self.ruler_rect.contains(*position) {
                     if let Some(point) = self.in_out_marker_at(*position) {
                         self.start_in_out_drag(point);
@@ -2764,6 +2866,12 @@ impl Widget for TimelineView {
                     ctx.request_repaint();
                     return EventResult::Handled;
                 }
+                let hovered_zoom = self.zoom_button_at(*position);
+                if hovered_zoom != self.hovered_zoom {
+                    self.hovered_zoom = hovered_zoom;
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
                 let hovered_track_control = self.track_control_at(*position);
                 if hovered_track_control != self.hovered_track_control {
                     self.hovered_track_control = hovered_track_control;
@@ -2826,6 +2934,8 @@ impl Widget for TimelineView {
                 self.scrollbar_drag = None;
                 self.context_menu = None;
                 self.hovered_tool = None;
+                self.hovered_track_add = None;
+                self.hovered_zoom = None;
                 ctx.release_pointer_capture(self.id);
                 return EventResult::Handled;
             }
@@ -2850,9 +2960,7 @@ impl Widget for TimelineView {
                 }
                 if modifiers.ctrl || modifiers.meta {
                     let factor = if *delta < 0.0 { 1.12 } else { 1.0 / 1.12 };
-                    let old = self.pixels_per_frame;
-                    self.zoom_at(position.x, factor);
-                    if (self.pixels_per_frame - old).abs() > 0.001 {
+                    if self.zoom_at(position.x, factor) {
                         ctx.request_repaint();
                     }
                 } else if modifiers.shift {
@@ -4293,6 +4401,92 @@ mod tests {
 
         assert!(view.scroll_x() > 0.0);
         assert_eq!(view.playhead_frame(), 12);
+    }
+
+    #[test]
+    fn timeline_zoom_buttons_adjust_zoom_without_seeking() {
+        let mut view = timeline();
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+        let initial_zoom = view.pixels_per_frame();
+        let initial_playhead = view.playhead_frame();
+        let zoom_in = view
+            .zoom_button_rect(TimelineZoomButton::In)
+            .expect("wide ruler should show zoom controls")
+            .center();
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let dispatch = |_| {};
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let result = view.event(
+            &UiEvent::MouseDown {
+                position: zoom_in,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert!(view.pixels_per_frame() > initial_zoom);
+        assert_eq!(view.playhead_frame(), initial_playhead);
+        assert!(ctx.requests.repaint);
+    }
+
+    #[test]
+    fn timeline_zoom_buttons_hide_when_ruler_is_too_narrow() {
+        let mut view = timeline();
+        view.layout(Rect::new(0.0, 0.0, 130.0, 180.0));
+
+        assert!(view.zoom_button_rect(TimelineZoomButton::Out).is_none());
+        assert!(view.zoom_button_rect(TimelineZoomButton::In).is_none());
+        assert_eq!(view.zoom_button_at(Point::new(120.0, 12.0)), None);
+    }
+
+    #[test]
+    fn disabled_timeline_ignores_zoom_button_input() {
+        let mut view = timeline().disabled();
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+        let initial_zoom = view.pixels_per_frame();
+        let zoom_in = view
+            .zoom_button_rect(TimelineZoomButton::In)
+            .expect("wide ruler should show zoom controls")
+            .center();
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let dispatch = |_| {};
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let result = view.event(
+            &UiEvent::MouseDown {
+                position: zoom_in,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(view.pixels_per_frame(), initial_zoom);
+        assert!(!ctx.requests.repaint);
     }
 
     #[test]
