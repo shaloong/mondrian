@@ -13,12 +13,14 @@ pub enum AppIcon {
     Add,
     /// Anchor point icon.
     Anchor,
-    /// Down arrow icon.
-    ArrowDown,
-    /// Right arrow icon.
-    ArrowRight,
-    /// Up arrow icon.
-    ArrowUp,
+    /// Down caret icon.
+    CaretDown,
+    /// Left caret icon.
+    CaretLeft,
+    /// Right caret icon.
+    CaretRight,
+    /// Up caret icon.
+    CaretUp,
     /// Circle shape icon.
     Circle,
     /// Clipboard text icon.
@@ -109,12 +111,13 @@ pub enum AppIcon {
 
 impl AppIcon {
     /// Every bundled product icon that should remain parseable by the custom UI.
-    pub const ALL: [Self; 48] = [
+    pub const ALL: [Self; 49] = [
         Self::Add,
         Self::Anchor,
-        Self::ArrowDown,
-        Self::ArrowRight,
-        Self::ArrowUp,
+        Self::CaretDown,
+        Self::CaretLeft,
+        Self::CaretRight,
+        Self::CaretUp,
         Self::Circle,
         Self::ClipboardText,
         Self::Clock,
@@ -165,9 +168,10 @@ impl AppIcon {
         match self {
             Self::Add => "app.add",
             Self::Anchor => "app.anchor",
-            Self::ArrowDown => "app.arrow-down",
-            Self::ArrowRight => "app.arrow-right",
-            Self::ArrowUp => "app.arrow-up",
+            Self::CaretDown => "app.caret-down",
+            Self::CaretLeft => "app.caret-left",
+            Self::CaretRight => "app.caret-right",
+            Self::CaretUp => "app.caret-up",
             Self::Circle => "app.circle",
             Self::ClipboardText => "app.clipboard-text",
             Self::Clock => "app.clock",
@@ -219,9 +223,10 @@ impl AppIcon {
         match self {
             Self::Add => include_str!("../../assets/icons/add.svg"),
             Self::Anchor => include_str!("../../assets/icons/anchor.svg"),
-            Self::ArrowDown => include_str!("../../assets/icons/arrow_down.svg"),
-            Self::ArrowRight => include_str!("../../assets/icons/arrow_right.svg"),
-            Self::ArrowUp => include_str!("../../assets/icons/arrow_up.svg"),
+            Self::CaretDown => include_str!("../../assets/icons/caret_down.svg"),
+            Self::CaretLeft => include_str!("../../assets/icons/caret_left.svg"),
+            Self::CaretRight => include_str!("../../assets/icons/caret_right.svg"),
+            Self::CaretUp => include_str!("../../assets/icons/caret_up.svg"),
             Self::Circle => include_str!("../../assets/icons/circle.svg"),
             Self::ClipboardText => include_str!("../../assets/icons/clipboard_text.svg"),
             Self::Clock => include_str!("../../assets/icons/clock.svg"),

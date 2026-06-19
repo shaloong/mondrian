@@ -128,7 +128,7 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
                         "Return to Parent Sequence",
                         sequence_return_to_parent_action(),
                     ),
-                    AppIcon::ArrowUp,
+                    AppIcon::CaretLeft,
                 ),
                 menu_item_with_icon(
                     MenuItem::new(
@@ -212,7 +212,7 @@ fn sequence_menu_items_for_app_state(state: &AppState) -> Vec<MenuItem> {
                 "Return to Parent Sequence",
                 sequence_return_to_parent_action(),
             ),
-            AppIcon::ArrowUp,
+            AppIcon::CaretLeft,
         ),
         menu_item_with_icon(
             MenuItem::new(
@@ -260,7 +260,7 @@ fn sequence_menu_items_for_app_state(state: &AppState) -> Vec<MenuItem> {
                 label.push_str(" (Default)");
             }
             let icon = if is_active {
-                AppIcon::ArrowRight
+                AppIcon::CaretRight
             } else {
                 AppIcon::Clock
             };

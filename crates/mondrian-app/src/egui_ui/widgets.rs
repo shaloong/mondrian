@@ -338,9 +338,9 @@ pub fn collapsible_section<R>(
 
     // Caret icon
     let caret = if collapsed {
-        UiIcon::ArrowRight
+        UiIcon::CaretRight
     } else {
-        UiIcon::ArrowDown
+        UiIcon::CaretDown
     };
     let icon_size = tokens::icon_size();
     let caret_rect = egui::Rect::from_center_size(

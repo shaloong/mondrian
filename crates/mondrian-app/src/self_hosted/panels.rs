@@ -1686,7 +1686,7 @@ fn asset_grid_parent_item(parent_id: Option<String>) -> AssetGridItem {
             .with_activate_action(assets_open_folder_action(AssetsOpenFolderPayload {
                 folder_id: parent_id,
             })),
-        AppIcon::ArrowUp,
+        AppIcon::CaretLeft,
     )
 }
 
@@ -2726,9 +2726,9 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                                 1.0,
                             ),
                             FlexChild::fixed(Box::new(
-                                AppIcon::ArrowUp
+                                AppIcon::CaretUp
                                     .icon_button()
-                                    .expect("bundled ArrowUp icon asset should parse")
+                                    .expect("bundled CaretUp icon asset should parse")
                                     .with_tooltip("Move effect up")
                                     .enabled(can_move_up)
                                     .on_click(inspector_reorder_effect_action(
@@ -2738,9 +2738,9 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                                     )),
                             )),
                             FlexChild::fixed(Box::new(
-                                AppIcon::ArrowDown
+                                AppIcon::CaretDown
                                     .icon_button()
-                                    .expect("bundled ArrowDown icon asset should parse")
+                                    .expect("bundled CaretDown icon asset should parse")
                                     .with_tooltip("Move effect down")
                                     .enabled(can_move_down)
                                     .on_click(inspector_reorder_effect_action(

@@ -80,9 +80,9 @@ impl EffectLibraryPanel {
                 );
             }
             let caret = if collapsed {
-                theme::UiIcon::ArrowRight
+                theme::UiIcon::CaretRight
             } else {
-                theme::UiIcon::ArrowDown
+                theme::UiIcon::CaretDown
             };
             let caret_x = rect.left() + indent + 4.0;
             let caret_rect = egui::Rect::from_center_size(

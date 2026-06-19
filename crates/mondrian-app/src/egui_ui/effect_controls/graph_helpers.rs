@@ -194,9 +194,9 @@ pub(crate) fn draw_group_header_row(
             ui.painter(),
             caret_rect,
             if collapsed {
-                theme::UiIcon::ArrowRight
+                theme::UiIcon::CaretRight
             } else {
-                theme::UiIcon::ArrowDown
+                theme::UiIcon::CaretDown
             },
             palette::text_muted(),
         );
