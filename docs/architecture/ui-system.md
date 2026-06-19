@@ -866,6 +866,9 @@ Timeline move actions must call the same semantic AppState command path as
 keyboard/menu moves, rather than invoking low-level sequence mutation helpers
 directly, so linked selections, undo snapshots, overlap policy, and locked-track
 checks stay identical across UI surfaces.
+The self-hosted timeline adapter must reject cross-media clip move proposals
+before emitting an app action: video clips cannot be mapped onto audio target
+tracks, and audio clips cannot be mapped onto video target tracks.
 `primary_selected_clip()` resolves the current sequence before returning so
 single-target panels do not inherit stale track metadata.
 Panel models should also resolve selected clips by clip id when reading a

@@ -813,6 +813,9 @@ impl TimelinePanelModel {
     fn move_payload(&self, movement: TimelineClipMove) -> Option<TimelineMoveClipPayload> {
         let clip = self.clip_identity(movement.clip_ref)?;
         let target = *self.track_refs.get(movement.new_track_index)?;
+        if clip.is_video_track != target.is_video_track {
+            return None;
+        }
         Some(TimelineMoveClipPayload {
             target_track_id: target.track_id,
             is_video_track: target.is_video_track,
@@ -4732,6 +4735,25 @@ mod tests {
         assert_eq!(movement.clip_id, identity.clip_id);
         assert_eq!(movement.frame, 120);
         assert_eq!(movement.target_track_id, model.track_refs[2].track_id);
+    }
+
+    #[test]
+    fn timeline_model_rejects_cross_media_clip_moves() {
+        let model = demo_timeline_model();
+        let audio_track_index = model
+            .track_refs
+            .iter()
+            .position(|track| !track.is_video_track)
+            .expect("demo audio track");
+
+        assert!(model
+            .move_payload(TimelineClipMove {
+                clip_ref: TimelineClipRef { track_index: 1, clip_index: 1 },
+                old_start_frame: 112,
+                new_start_frame: 120,
+                new_track_index: audio_track_index,
+            })
+            .is_none());
     }
 
     #[test]
