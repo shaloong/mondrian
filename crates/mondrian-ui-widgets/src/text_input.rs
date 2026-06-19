@@ -10,6 +10,7 @@
 //! - 基于 grapheme cluster 的光标（正确处理 emoji / 组合字符）
 //! - 时间驱动的闪烁光标（500ms 周期）
 
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::time::Instant;
 
@@ -34,6 +35,55 @@ fn measure_text_width(text: &str, font_size: f32) -> f32 {
         return 0.0;
     }
     TEXT_METRICS.with_borrow_mut(|renderer| renderer.measure_text(text, font_size).0)
+}
+
+fn normalize_single_line_input(input: &str) -> Cow<'_, str> {
+    let mut output = None;
+    let mut previous_was_cr = false;
+    for (idx, ch) in input.char_indices() {
+        match ch {
+            '\r' => {
+                let output = output.get_or_insert_with(|| {
+                    let mut normalized = String::with_capacity(input.len());
+                    normalized.push_str(&input[..idx]);
+                    normalized
+                });
+                output.push(' ');
+                previous_was_cr = true;
+            }
+            '\n' => {
+                let output = output.get_or_insert_with(|| {
+                    let mut normalized = String::with_capacity(input.len());
+                    normalized.push_str(&input[..idx]);
+                    normalized
+                });
+                if !previous_was_cr {
+                    output.push(' ');
+                }
+                previous_was_cr = false;
+            }
+            '\u{2028}' | '\u{2029}' => {
+                let output = output.get_or_insert_with(|| {
+                    let mut normalized = String::with_capacity(input.len());
+                    normalized.push_str(&input[..idx]);
+                    normalized
+                });
+                output.push(' ');
+                previous_was_cr = false;
+            }
+            _ => {
+                if let Some(output) = output.as_mut() {
+                    output.push(ch);
+                }
+                previous_was_cr = false;
+            }
+        }
+    }
+    output.map_or(Cow::Borrowed(input), Cow::Owned)
+}
+
+fn grapheme_is_whitespace(grapheme: &str) -> bool {
+    grapheme.chars().all(char::is_whitespace)
 }
 
 /// Adapter that maps the current input value to an editor [`Action`].
@@ -363,9 +413,10 @@ impl TextInput {
 
     /// Insert text at cursor, updating cursor by grapheme count.
     fn insert_at_cursor(&mut self, s: &str) {
-        let count = self.grapheme_count(s);
+        let normalized = normalize_single_line_input(s);
+        let count = self.grapheme_count(&normalized);
         let idx = self.cursor_byte_idx();
-        self.text.insert_str(idx, s);
+        self.text.insert_str(idx, &normalized);
         self.cursor += count;
         self.update_scroll(DEFAULT_FONT_SIZE);
     }
@@ -391,7 +442,7 @@ impl TextInput {
         while i < total {
             let b = self.grapheme_byte_idx(i);
             let nb = self.grapheme_byte_idx((i + 1).min(total));
-            if &self.text[b..nb] != " " {
+            if !grapheme_is_whitespace(&self.text[b..nb]) {
                 i += 1;
             } else {
                 break;
@@ -401,7 +452,7 @@ impl TextInput {
         while i < total {
             let b = self.grapheme_byte_idx(i);
             let nb = self.grapheme_byte_idx((i + 1).min(total));
-            if &self.text[b..nb] == " " {
+            if grapheme_is_whitespace(&self.text[b..nb]) {
                 i += 1;
             } else {
                 break;
@@ -420,7 +471,7 @@ impl TextInput {
         while i > 0 {
             let b = self.grapheme_byte_idx(i - 1);
             let nb = self.grapheme_byte_idx(i.min(total));
-            if &self.text[b..nb] == " " {
+            if grapheme_is_whitespace(&self.text[b..nb]) {
                 i -= 1;
             } else {
                 break;
@@ -430,7 +481,7 @@ impl TextInput {
         while i > 0 {
             let b = self.grapheme_byte_idx(i - 1);
             let nb = self.grapheme_byte_idx(i.min(total));
-            if &self.text[b..nb] != " " {
+            if !grapheme_is_whitespace(&self.text[b..nb]) {
                 i -= 1;
             } else {
                 break;
@@ -830,9 +881,11 @@ mod tests {
     use super::*;
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_editor_state::Action;
-    use mondrian_ui_core::widget::DrawCommandEncoder;
+    use mondrian_platform::{FileFilter, PlatformService};
+    use mondrian_ui_core::widget::{DrawCommandEncoder, EventRequests};
     use mondrian_ui_theme::ThemePreset;
     use std::cell::RefCell;
+    use std::path::{Path, PathBuf};
 
     fn layout(ti: &mut TextInput) {
         ti.layout(Rect::new(0.0, 0.0, 200.0, 28.0));
@@ -904,6 +957,41 @@ mod tests {
             name: format!("change:{text}"),
             payload: Default::default(),
         }
+    }
+
+    struct ClipboardPlatform {
+        text: String,
+    }
+
+    impl PlatformService for ClipboardPlatform {
+        fn clipboard_copy(&self, _text: &str) {}
+
+        fn clipboard_paste(&self) -> Option<String> {
+            Some(self.text.clone())
+        }
+
+        fn open_file_dialog(&self, _title: &str, _filters: &[FileFilter]) -> Option<Vec<PathBuf>> {
+            None
+        }
+
+        fn save_file_dialog(
+            &self,
+            _title: &str,
+            _default_name: &str,
+            _filters: &[FileFilter],
+        ) -> Option<PathBuf> {
+            None
+        }
+
+        fn open_folder_dialog(&self, _title: &str) -> Option<PathBuf> {
+            None
+        }
+
+        fn open_url(&self, _url: &str) {}
+
+        fn reveal_in_file_manager(&self, _path: &Path) {}
+
+        fn send_notification(&self, _title: &str, _body: &str) {}
     }
 
     #[derive(Debug, PartialEq)]
@@ -1147,6 +1235,57 @@ mod tests {
         tp(&mut ti, "你好", &mut ctx);
         assert_eq!(ti.text(), "你好");
         assert_eq!(ti.cursor, 2);
+    }
+
+    #[test]
+    fn text_input_normalizes_line_breaks_for_single_line_editing() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+        let mut input = TextInput::new("ph").on_change(change_action);
+        input.focused = true;
+
+        input.event(
+            &UiEvent::TextInput("a\nb\r\nc\u{2028}d\u{2029}e".to_owned()),
+            &mut ctx,
+        );
+
+        assert_eq!(input.text(), "a b c d e");
+        assert_eq!(actions.borrow().as_slice(), &[change_action("a b c d e")]);
+    }
+
+    #[test]
+    fn paste_normalizes_line_breaks_for_single_line_editing() {
+        let platform = ClipboardPlatform { text: "first\r\nsecond\u{2028}third".to_owned() };
+        let mut ti = TextInput::new("ph").with_text("before after").on_change(change_action);
+        ti.focused = true;
+        ti.selection_start = Some(7);
+        ti.cursor = 12;
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = EventContext {
+            focus: &mut focus,
+            shortcut: &mut shortcuts,
+            tooltip: &mut tooltip,
+            dispatch: &dispatch,
+            platform: &platform,
+            requests: &mut requests,
+        };
+
+        kd_ctrl(&mut ti, KeyCode::V, &mut ctx);
+
+        assert_eq!(ti.text(), "before first second third");
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[change_action("before first second third")]
+        );
     }
 
     #[test]
@@ -1408,6 +1547,27 @@ mod tests {
         assert_eq!(ti.cursor, 6); // past "hello" + space, at "world" start
         kd_ctrl(&mut ti, KeyCode::Right, &mut ctx);
         assert_eq!(ti.cursor, 11); // past "world", at end
+    }
+
+    #[test]
+    fn ctrl_word_navigation_uses_unicode_whitespace_boundaries() {
+        let mut ti = TextInput::new("ph").with_text("alpha\tbeta\n\u{00A0}gamma");
+        ti.focused = true;
+        ti.cursor = ti.len_graphemes();
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
+
+        kd_ctrl(&mut ti, KeyCode::Left, &mut ctx);
+        assert_eq!(ti.cursor, 12);
+        kd_ctrl(&mut ti, KeyCode::Left, &mut ctx);
+        assert_eq!(ti.cursor, 6);
+        kd_ctrl(&mut ti, KeyCode::Home, &mut ctx);
+        kd_ctrl(&mut ti, KeyCode::Right, &mut ctx);
+        assert_eq!(ti.cursor, 6);
+        kd_ctrl(&mut ti, KeyCode::Right, &mut ctx);
+        assert_eq!(ti.cursor, 12);
     }
 
     // ── Shift selection ──────────────────────────────────────────────────

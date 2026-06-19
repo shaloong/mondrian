@@ -396,6 +396,11 @@ cursor is scrolled into view after layout, editing, navigation, or selection
 changes; pointer hit testing accounts for the current scroll offset. IME cursor
 areas use the caret rect rather than the full widget bounds so platform
 composition windows can anchor near the insertion point.
+Because `TextInput` is currently a single-line control, committed user input
+normalizes line separators from typing, IME commit, and clipboard paste into
+spaces before insertion. Word navigation uses Unicode whitespace boundaries
+instead of ASCII-space-only checks, so pasted names or paths containing tabs,
+non-breaking spaces, or platform line endings still behave predictably.
 
 Text content is clipped to the padded content rect, not the outer widget
 bounds. App shells should show an I-beam cursor for text inputs only after the
