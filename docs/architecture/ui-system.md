@@ -727,7 +727,10 @@ Timeline clipboard context-menu entries use
 `TimelineEditCommand::CutSelection`, `CopySelection`, `PasteAtPlayhead`, and
 `DuplicateSelection`, then map to the existing app-level `Action::Cut`,
 `Action::Copy`, `Action::Paste`, and `Action::Duplicate` paths. Widget and
-panel code must not own clipboard state or paste placement rules.
+panel code must not own clipboard state or paste placement rules. Shortcut
+labels for these menu rows are supplied by the host adapter from the active
+shortcut table; `mondrian-ui-widgets` must not hardcode platform-specific
+`Ctrl` / `Cmd` display strings.
 Trim-to-playhead menu commands use explicit
 `TimelineEditCommand::TrimSelectionInToPlayhead` /
 `TimelineEditCommand::TrimSelectionOutToPlayhead` commands; the app adapter

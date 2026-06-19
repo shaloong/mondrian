@@ -38,6 +38,9 @@ pub type TimelineTrackAddAction = dyn Fn(TimelineTrackKind) -> Action;
 /// Action factory for timeline-scoped editing commands.
 pub type TimelineEditCommandAction = dyn Fn(TimelineEditCommand) -> Action;
 
+/// Shortcut-label factory for timeline-scoped editing commands.
+pub type TimelineEditCommandShortcut = dyn Fn(TimelineEditCommand) -> Option<String>;
+
 /// Action factory for playhead seeking.
 pub type TimelineSeekAction = dyn Fn(i64) -> Action;
 
@@ -345,6 +348,7 @@ pub struct TimelineView {
     on_track_control: Option<Box<TimelineTrackControlAction>>,
     on_track_add: Option<Box<TimelineTrackAddAction>>,
     on_edit_command: Option<Box<TimelineEditCommandAction>>,
+    on_edit_command_shortcut: Option<Box<TimelineEditCommandShortcut>>,
     on_seek: Option<Box<TimelineSeekAction>>,
     on_asset_drop: Option<Box<TimelineAssetDropAction>>,
     on_clip_move: Option<Box<TimelineClipMoveAction>>,
@@ -443,6 +447,7 @@ impl TimelineView {
             on_track_control: None,
             on_track_add: None,
             on_edit_command: None,
+            on_edit_command_shortcut: None,
             on_seek: None,
             on_asset_drop: None,
             on_clip_move: None,
@@ -562,6 +567,15 @@ impl TimelineView {
         action: impl Fn(TimelineEditCommand) -> Action + 'static,
     ) -> Self {
         self.on_edit_command = Some(Box::new(action));
+        self
+    }
+
+    /// Set a shortcut label factory for edit-command context menu rows.
+    pub fn on_edit_command_shortcut(
+        mut self,
+        shortcut: impl Fn(TimelineEditCommand) -> Option<String> + 'static,
+    ) -> Self {
+        self.on_edit_command_shortcut = Some(Box::new(shortcut));
         self
     }
 
@@ -1395,6 +1409,10 @@ impl TimelineView {
         self.on_edit_command.as_ref().map_or(Action::NoOp, |factory| factory(command))
     }
 
+    fn edit_command_shortcut(&self, command: TimelineEditCommand) -> Option<String> {
+        self.on_edit_command_shortcut.as_ref().and_then(|factory| factory(command))
+    }
+
     fn track_add_action(&self, kind: TimelineTrackKind) -> Action {
         self.on_track_add.as_ref().map_or(Action::NoOp, |factory| factory(kind))
     }
@@ -1408,68 +1426,43 @@ impl TimelineView {
         }
     }
 
+    fn edit_menu_item(&self, label: &str, command: TimelineEditCommand) -> MenuItem {
+        let item = Self::menu_item(label, self.edit_command_action(command));
+        if let Some(shortcut) = self.edit_command_shortcut(command) {
+            item.with_shortcut(shortcut)
+        } else {
+            item
+        }
+    }
+
     fn clip_context_menu_items(&self) -> Vec<MenuItem> {
         vec![
-            Self::menu_item(
-                "Cut Clip",
-                self.edit_command_action(TimelineEditCommand::CutSelection),
-            )
-            .with_shortcut("Ctrl+X"),
-            Self::menu_item(
-                "Copy Clip",
-                self.edit_command_action(TimelineEditCommand::CopySelection),
-            )
-            .with_shortcut("Ctrl+C"),
-            Self::menu_item(
-                "Paste",
-                self.edit_command_action(TimelineEditCommand::PasteAtPlayhead),
-            )
-            .with_shortcut("Ctrl+V"),
-            Self::menu_item(
-                "Duplicate Clip",
-                self.edit_command_action(TimelineEditCommand::DuplicateSelection),
-            )
-            .with_shortcut("Ctrl+D"),
+            self.edit_menu_item("Cut Clip", TimelineEditCommand::CutSelection),
+            self.edit_menu_item("Copy Clip", TimelineEditCommand::CopySelection),
+            self.edit_menu_item("Paste", TimelineEditCommand::PasteAtPlayhead),
+            self.edit_menu_item("Duplicate Clip", TimelineEditCommand::DuplicateSelection),
             MenuItem::separator(),
-            Self::menu_item(
-                "Delete Clip",
-                self.edit_command_action(TimelineEditCommand::DeleteSelection),
-            ),
-            Self::menu_item(
+            self.edit_menu_item("Delete Clip", TimelineEditCommand::DeleteSelection),
+            self.edit_menu_item(
                 "Ripple Delete Clip",
-                self.edit_command_action(TimelineEditCommand::RippleDeleteSelection),
+                TimelineEditCommand::RippleDeleteSelection,
             ),
-            Self::menu_item(
-                "Split at Playhead",
-                self.edit_command_action(TimelineEditCommand::SplitAtPlayhead),
-            ),
+            self.edit_menu_item("Split at Playhead", TimelineEditCommand::SplitAtPlayhead),
             MenuItem::separator(),
-            Self::menu_item(
+            self.edit_menu_item(
                 "Trim In to Playhead",
-                self.edit_command_action(TimelineEditCommand::TrimSelectionInToPlayhead),
+                TimelineEditCommand::TrimSelectionInToPlayhead,
             ),
-            Self::menu_item(
+            self.edit_menu_item(
                 "Trim Out to Playhead",
-                self.edit_command_action(TimelineEditCommand::TrimSelectionOutToPlayhead),
+                TimelineEditCommand::TrimSelectionOutToPlayhead,
             ),
             MenuItem::separator(),
-            Self::menu_item(
-                "Enable Clip",
-                self.edit_command_action(TimelineEditCommand::EnableSelection),
-            ),
-            Self::menu_item(
-                "Disable Clip",
-                self.edit_command_action(TimelineEditCommand::DisableSelection),
-            ),
+            self.edit_menu_item("Enable Clip", TimelineEditCommand::EnableSelection),
+            self.edit_menu_item("Disable Clip", TimelineEditCommand::DisableSelection),
             MenuItem::separator(),
-            Self::menu_item(
-                "Mark In",
-                self.edit_command_action(TimelineEditCommand::MarkInAtPlayhead),
-            ),
-            Self::menu_item(
-                "Mark Out",
-                self.edit_command_action(TimelineEditCommand::MarkOutAtPlayhead),
-            ),
+            self.edit_menu_item("Mark In", TimelineEditCommand::MarkInAtPlayhead),
+            self.edit_menu_item("Mark Out", TimelineEditCommand::MarkOutAtPlayhead),
         ]
     }
 
@@ -1484,58 +1477,30 @@ impl TimelineView {
                 self.track_add_action(TimelineTrackKind::Audio),
             ),
             MenuItem::separator(),
-            Self::menu_item(
-                "Paste at Playhead",
-                self.edit_command_action(TimelineEditCommand::PasteAtPlayhead),
-            )
-            .with_shortcut("Ctrl+V"),
+            self.edit_menu_item("Paste at Playhead", TimelineEditCommand::PasteAtPlayhead),
             MenuItem::separator(),
-            Self::menu_item(
-                "Cut Selection",
-                self.edit_command_action(TimelineEditCommand::CutSelection),
-            )
-            .with_shortcut("Ctrl+X"),
-            Self::menu_item(
-                "Copy Selection",
-                self.edit_command_action(TimelineEditCommand::CopySelection),
-            )
-            .with_shortcut("Ctrl+C"),
-            Self::menu_item(
+            self.edit_menu_item("Cut Selection", TimelineEditCommand::CutSelection),
+            self.edit_menu_item("Copy Selection", TimelineEditCommand::CopySelection),
+            self.edit_menu_item(
                 "Duplicate Selection",
-                self.edit_command_action(TimelineEditCommand::DuplicateSelection),
-            )
-            .with_shortcut("Ctrl+D"),
-            MenuItem::separator(),
-            Self::menu_item(
-                "Split at Playhead",
-                self.edit_command_action(TimelineEditCommand::SplitAtPlayhead),
+                TimelineEditCommand::DuplicateSelection,
             ),
-            Self::menu_item(
+            MenuItem::separator(),
+            self.edit_menu_item("Split at Playhead", TimelineEditCommand::SplitAtPlayhead),
+            self.edit_menu_item(
                 "Trim Selection In to Playhead",
-                self.edit_command_action(TimelineEditCommand::TrimSelectionInToPlayhead),
+                TimelineEditCommand::TrimSelectionInToPlayhead,
             ),
-            Self::menu_item(
+            self.edit_menu_item(
                 "Trim Selection Out to Playhead",
-                self.edit_command_action(TimelineEditCommand::TrimSelectionOutToPlayhead),
+                TimelineEditCommand::TrimSelectionOutToPlayhead,
             ),
             MenuItem::separator(),
-            Self::menu_item(
-                "Enable Selection",
-                self.edit_command_action(TimelineEditCommand::EnableSelection),
-            ),
-            Self::menu_item(
-                "Disable Selection",
-                self.edit_command_action(TimelineEditCommand::DisableSelection),
-            ),
+            self.edit_menu_item("Enable Selection", TimelineEditCommand::EnableSelection),
+            self.edit_menu_item("Disable Selection", TimelineEditCommand::DisableSelection),
             MenuItem::separator(),
-            Self::menu_item(
-                "Mark In",
-                self.edit_command_action(TimelineEditCommand::MarkInAtPlayhead),
-            ),
-            Self::menu_item(
-                "Mark Out",
-                self.edit_command_action(TimelineEditCommand::MarkOutAtPlayhead),
-            ),
+            self.edit_menu_item("Mark In", TimelineEditCommand::MarkInAtPlayhead),
+            self.edit_menu_item("Mark Out", TimelineEditCommand::MarkOutAtPlayhead),
         ]
     }
 
@@ -4402,6 +4367,23 @@ mod tests {
             &[Action::SaveProject, Action::DeleteSelection]
         );
         assert!(!view.overlay_hit_test(Point::new(900.0, 900.0)));
+    }
+
+    #[test]
+    fn context_menu_shortcuts_come_from_host_callback() {
+        let view =
+            timeline()
+                .on_edit_command(|_| Action::Copy)
+                .on_edit_command_shortcut(|command| match command {
+                    TimelineEditCommand::CopySelection => Some("Host+Copy".to_owned()),
+                    _ => None,
+                });
+
+        let items = view.clip_context_menu_items();
+
+        assert_eq!(items[0].shortcut, None);
+        assert_eq!(items[1].shortcut.as_deref(), Some("Host+Copy"));
+        assert_eq!(items[2].shortcut, None);
     }
 
     #[test]

@@ -75,6 +75,7 @@ use crate::app::ui_actions::{
 };
 use crate::app::{AppState, SelectedClipRef};
 use crate::self_hosted::icons::AppIcon;
+use crate::self_hosted::shortcuts::shortcut_label_for_action;
 
 /// Supplies already-decoded thumbnails for asset-grid cards.
 ///
@@ -2196,6 +2197,7 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
             }
         })
         .on_edit_command(timeline_edit_command_action)
+        .on_edit_command_shortcut(timeline_edit_command_shortcut_label)
         .on_clip_move({
             let action_model = action_model.clone();
             move |movement, _clip| {
@@ -2249,6 +2251,10 @@ fn timeline_edit_command_action(command: TimelineEditCommand) -> Action {
         TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
         TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
     }
+}
+
+fn timeline_edit_command_shortcut_label(command: TimelineEditCommand) -> Option<String> {
+    shortcut_label_for_action(&timeline_edit_command_action(command)).map(str::to_owned)
 }
 
 fn node_graph_panel(model: &NodeGraphPanelModel) -> NodeGraphView {
@@ -4852,6 +4858,19 @@ mod tests {
         assert_eq!(
             timeline_edit_command_action(TimelineEditCommand::DuplicateSelection),
             Action::Duplicate
+        );
+        assert_eq!(
+            timeline_edit_command_shortcut_label(TimelineEditCommand::CopySelection).as_deref(),
+            Some("Ctrl+C")
+        );
+        assert_eq!(
+            timeline_edit_command_shortcut_label(TimelineEditCommand::DuplicateSelection)
+                .as_deref(),
+            Some("Ctrl+D")
+        );
+        assert_eq!(
+            timeline_edit_command_shortcut_label(TimelineEditCommand::TrimSelectionInToPlayhead),
+            None
         );
 
         let trim_action =

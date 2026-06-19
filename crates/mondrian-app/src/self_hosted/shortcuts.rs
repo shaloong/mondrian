@@ -79,6 +79,11 @@ pub fn default_shortcuts() -> Vec<SelfHostedShortcut> {
         shortcut(ShortcutBinding::ctrl(KeyCode::C), Action::Copy, "Ctrl+C"),
         shortcut(ShortcutBinding::ctrl(KeyCode::V), Action::Paste, "Ctrl+V"),
         shortcut(
+            ShortcutBinding::ctrl(KeyCode::D),
+            Action::Duplicate,
+            "Ctrl+D",
+        ),
+        shortcut(
             ShortcutBinding::new(KeyCode::Digit1, ctrl_alt()),
             Action::SwitchWorkspace(WorkspacePreset::Editing),
             "Ctrl+Alt+1",
@@ -242,6 +247,14 @@ mod tests {
         );
         assert_eq!(
             router.shortcut_manager().resolve(
+                KeyCode::D,
+                Modifiers::ctrl(),
+                ShortcutContext::default()
+            ),
+            Some(Action::Duplicate)
+        );
+        assert_eq!(
+            router.shortcut_manager().resolve(
                 KeyCode::W,
                 Modifiers::ctrl(),
                 ShortcutContext::default()
@@ -257,6 +270,10 @@ mod tests {
             Some("Ctrl+S")
         );
         assert_eq!(shortcut_label_for_action(&Action::Copy), Some("Ctrl+C"));
+        assert_eq!(
+            shortcut_label_for_action(&Action::Duplicate),
+            Some("Ctrl+D")
+        );
         assert_eq!(
             shortcut_label_for_action(&Action::SwitchWorkspace(WorkspacePreset::Audio)),
             Some("Ctrl+Alt+3")
