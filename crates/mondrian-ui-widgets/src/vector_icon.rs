@@ -31,12 +31,12 @@ const TESSELLATION_TOLERANCE: f32 = 0.08;
 /// glyphs on the browser-like resvg/tiny-skia path while still preventing a
 /// single oversized SVG from consuming a disproportionate atlas row.
 const MAX_RASTER_ICON_SIZE: u32 = 512;
-/// Quality multiplier for small SVG icon rasters.
+/// Maximum quality multiplier for small SVG icon rasters.
 ///
 /// The supersampled bitmap is cached once in the renderer image atlas and drawn
 /// back into the requested logical bounds with linear filtering. This improves
 /// diagonal and curve coverage for small icons without changing widget layout.
-const RASTER_ICON_SUPERSAMPLE: u32 = 2;
+const MAX_RASTER_ICON_SUPERSAMPLE: u32 = 4;
 
 static STATIC_SVG_ICON_CACHE: OnceLock<Mutex<std::collections::HashMap<&'static str, VectorIcon>>> =
     OnceLock::new();
@@ -234,13 +234,14 @@ fn raster_target_edge(logical_edge: f32) -> u32 {
 }
 
 fn raster_supersample_scale(target_width: u32, target_height: u32) -> u32 {
-    if target_width.saturating_mul(RASTER_ICON_SUPERSAMPLE) <= MAX_RASTER_ICON_SIZE
-        && target_height.saturating_mul(RASTER_ICON_SUPERSAMPLE) <= MAX_RASTER_ICON_SIZE
-    {
-        RASTER_ICON_SUPERSAMPLE
-    } else {
-        1
+    for scale in (2..=MAX_RASTER_ICON_SUPERSAMPLE).rev() {
+        if target_width.saturating_mul(scale) <= MAX_RASTER_ICON_SIZE
+            && target_height.saturating_mul(scale) <= MAX_RASTER_ICON_SIZE
+        {
+            return scale;
+        }
     }
+    1
 }
 
 fn hash_str(value: &str) -> u64 {
@@ -639,6 +640,14 @@ mod tests {
     }
 
     #[test]
+    fn raster_supersample_scale_prioritizes_small_icon_quality() {
+        assert_eq!(raster_supersample_scale(16, 16), 4);
+        assert_eq!(raster_supersample_scale(128, 128), 4);
+        assert_eq!(raster_supersample_scale(256, 256), 2);
+        assert_eq!(raster_supersample_scale(512, 512), 1);
+    }
+
+    #[test]
     fn paints_svg_icons_as_cached_raster_images_for_browser_like_aa() {
         let icon = VectorIcon::from_svg_str(
             r#"<svg viewBox="0 0 24 24"><path d="M4 4L20 4L12 20Z" fill="black"/></svg>"#,
@@ -677,7 +686,7 @@ mod tests {
             recorder.raster_bounds,
             vec![Rect::new(10.2, 20.6, 16.0, 16.0)]
         );
-        assert_eq!(recorder.raster_sizes, vec![(32, 32)]);
+        assert_eq!(recorder.raster_sizes, vec![(64, 64)]);
     }
 
     #[test]
@@ -700,7 +709,7 @@ mod tests {
             recorder.raster_bounds,
             vec![Rect::new(5.25, 8.0, 15.2, 15.2)]
         );
-        assert_eq!(recorder.raster_sizes, vec![(32, 32)]);
+        assert_eq!(recorder.raster_sizes, vec![(64, 64)]);
     }
 
     #[test]
@@ -776,8 +785,8 @@ mod tests {
             .raster_icon_for_bounds(Rect::new(0.0, 0.0, 32.0, 32.0))
             .expect("large raster");
 
-        assert_eq!((small.width, small.height), (32, 34));
-        assert_eq!((large.width, large.height), (64, 64));
+        assert_eq!((small.width, small.height), (64, 68));
+        assert_eq!((large.width, large.height), (128, 128));
         assert_ne!(small.rgba.len(), large.rgba.len());
     }
 

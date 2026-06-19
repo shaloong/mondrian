@@ -1270,15 +1270,15 @@ usvg so basic shapes, inherited paint, relative path commands, arcs, and
 transforms become renderable path data. The icon keeps lyon-tessellated
 theme-tinted triangle meshes as a geometry fallback and metadata path, while
 normal small-icon painting rasterizes the SVG source with resvg/tiny-skia at the
-ceil of the fitted logical size or a capped 2x supersampled size, then submits a
-stable raster-image key to the renderer. Raster cache dimensions may be integer
-or supersampled, but the draw command keeps the original fitted subpixel bounds
-so resize, scroll, and DPI scaling do not introduce pixel-snap jitter.
-Supersampling is used only while the generated bitmap still fits within the
-512px per-edge raster icon budget, so common small SVG controls get smoother
-diagonal and curve coverage without letting one oversized SVG consume a
-disproportionate slice of the shared 2048px image atlas. Larger bounds may fall
-back to the lyon mesh path.
+ceil of the fitted logical size or an adaptively supersampled size, then submits
+a stable raster-image key to the renderer. Raster cache dimensions may be
+integer or supersampled, but the draw command keeps the original fitted subpixel
+bounds so resize, scroll, and DPI scaling do not introduce pixel-snap jitter.
+Supersampling prioritizes small-icon quality up to 4x and steps down only when
+the generated bitmap would exceed the 512px per-edge raster icon budget, so
+common SVG controls get smoother diagonal and curve coverage without letting one
+oversized SVG consume a disproportionate slice of the shared 2048px image atlas.
+Larger bounds may fall back to the lyon mesh path.
 Text buttons that need command glyphs use the same optional leading
 `VectorIcon` path, so icon-only and icon-plus-label controls share parsing,
 caching, focus, disabled, and text clipping behavior. Icon-only buttons expose
