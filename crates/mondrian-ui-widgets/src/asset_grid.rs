@@ -877,6 +877,17 @@ impl AssetGrid {
         EventResult::Ignored
     }
 
+    fn clear_selection_from_input(&mut self, ctx: &mut EventContext) -> EventResult {
+        if self.selected.is_none() && self.selected_indices.is_empty() {
+            return EventResult::Ignored;
+        }
+        self.selected = None;
+        self.selected_indices.clear();
+        self.selection_anchor = None;
+        ctx.request_repaint();
+        EventResult::Handled
+    }
+
     fn dispatch_select(&self, index: usize, ctx: &mut EventContext) {
         let Some(item) = self.items.get(index) else {
             return;
@@ -1555,6 +1566,11 @@ impl Widget for AssetGrid {
                     return self.start_rename(index, ctx);
                 }
                 return EventResult::Ignored;
+            }
+            UiEvent::KeyDown { key: KeyCode::Escape, modifiers }
+                if self.focused && *modifiers == Modifiers::none() =>
+            {
+                return self.clear_selection_from_input(ctx);
             }
             UiEvent::KeyDown {
                 key: KeyCode::Delete | KeyCode::Backspace,
@@ -2616,6 +2632,71 @@ mod tests {
         );
 
         assert_eq!(grid.selected_indices(), vec![0, 2]);
+    }
+
+    #[test]
+    fn escape_clears_local_selection_when_focused() {
+        let mut grid = AssetGrid::new("Assets", vec![item("a", "A"), item("b", "B")]);
+        grid.layout(Rect::new(0.0, 0.0, 420.0, 260.0));
+        grid.set_selected(Some(1));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let _ = grid.event(&UiEvent::FocusGained, &mut ctx);
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(grid.selected_index(), None);
+        assert!(grid.selected_indices().is_empty());
+        assert!(actions.borrow().is_empty());
+        assert!(ctx.requests.repaint);
+    }
+
+    #[test]
+    fn escape_without_local_selection_is_ignored() {
+        let mut grid = AssetGrid::new("Assets", vec![item("a", "A")]);
+        grid.layout(Rect::new(0.0, 0.0, 320.0, 220.0));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let _ = grid.event(&UiEvent::FocusGained, &mut ctx);
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+
+        assert!(actions.borrow().is_empty());
+        assert!(!ctx.requests.repaint);
     }
 
     #[test]

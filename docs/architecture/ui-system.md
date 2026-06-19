@@ -979,17 +979,20 @@ native file picker returns.
 Asset selection is local browser state owned by `AssetGrid`. Single click
 selects one card, Ctrl-click toggles cards, Shift-click or Shift-key navigation
 selects a visible range from the anchor, and Ctrl+A selects all enabled cards in
-the current filtered view. `selected_index` remains the primary keyboard/focus
-item while `selected_indices` stores the multi-selection set. When a selected
-card starts a drag, `AssetGrid` can aggregate selected asset and folder card
-payloads into `DragPayload::AssetSelection`; the Assets panel maps that payload
-to `ui.assets.move_selection` so moving a multi-selection into a bin publishes
-one app-layer operation. `AppState` must prevalidate every target asset and
-folder reparent, including folder-cycle rejection, before applying any member of
-that batch so a failed multi-selection move cannot leave assets or bins
-partially moved. Timeline drops intentionally still accept only single-asset
-payloads until the timeline insertion UX defines ordering and track placement
-for multiple assets.
+the current filtered view. Escape clears this local browser selection when one
+exists; with no local selection it stays ignored so the shell-level
+`Action::DeselectAll` fallback can still clear editor selections. `selected_index`
+remains the primary keyboard/focus item while `selected_indices` stores the
+multi-selection set. When a selected card starts a drag, `AssetGrid` can
+aggregate selected asset and folder card payloads into
+`DragPayload::AssetSelection`; the Assets panel maps that payload to
+`ui.assets.move_selection` so moving a multi-selection into a bin publishes one
+app-layer operation. `AppState` must prevalidate every target asset and folder
+reparent, including folder-cycle rejection, before applying any member of that
+batch so a failed multi-selection move cannot leave assets or bins partially
+moved. Timeline drops intentionally still accept only single-asset payloads
+until the timeline insertion UX defines ordering and track placement for
+multiple assets.
 Adjustment-layer and solid-color creation actions also carry the current
 browser folder id as `folder_id`, while folder creation uses `parent_folder_id`.
 Creating any asset-browser item inside a bin therefore remains an app-layer
