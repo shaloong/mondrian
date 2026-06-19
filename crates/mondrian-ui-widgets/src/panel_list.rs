@@ -11,6 +11,8 @@ use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use std::time::{Duration, Instant};
 
+use crate::paint::color_with_alpha;
+use crate::text_metrics::measure_single_line;
 use crate::vector_icon::VectorIcon;
 use crate::TextInput;
 
@@ -48,13 +50,50 @@ pub struct PanelListState {
 pub struct PanelListItem {
     pub title: String,
     pub subtitle: String,
-    pub badge: Option<String>,
+    pub badge: Option<PanelListBadge>,
     pub accent: Option<Color>,
     pub icon: Option<VectorIcon>,
     pub disabled: bool,
     pub select_action: Option<Action>,
     pub activate_action: Option<Action>,
     pub drag_payload: Option<DragPayload>,
+}
+
+/// Semantic visual tone for a [`PanelListBadge`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelListBadgeTone {
+    /// Neutral metadata, such as effect category or item count.
+    Neutral,
+    /// Accent metadata tied to the active theme primary/accent color.
+    Accent,
+    /// Positive/ready status.
+    Success,
+    /// Attention-needed status.
+    Warning,
+    /// Error or unavailable status.
+    Error,
+}
+
+/// Compact right-aligned label painted in a [`PanelList`] row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PanelListBadge {
+    pub label: String,
+    pub tone: PanelListBadgeTone,
+}
+
+impl PanelListBadge {
+    /// Create a neutral badge.
+    pub fn new(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            tone: PanelListBadgeTone::Neutral,
+        }
+    }
+
+    /// Create a badge with a semantic tone.
+    pub fn with_tone(label: impl Into<String>, tone: PanelListBadgeTone) -> Self {
+        Self { label: label.into(), tone }
+    }
 }
 
 impl PanelListItem {
@@ -81,7 +120,13 @@ impl PanelListItem {
 
     /// Set a compact right-aligned status badge.
     pub fn with_badge(mut self, badge: impl Into<String>) -> Self {
-        self.badge = Some(badge.into());
+        self.badge = Some(PanelListBadge::new(badge));
+        self
+    }
+
+    /// Set a compact right-aligned status badge with a semantic tone.
+    pub fn with_badge_tone(mut self, badge: impl Into<String>, tone: PanelListBadgeTone) -> Self {
+        self.badge = Some(PanelListBadge::with_tone(badge, tone));
         self
     }
 
@@ -418,7 +463,10 @@ impl PanelList {
 
         item.title.to_lowercase().contains(query)
             || item.subtitle.to_lowercase().contains(query)
-            || item.badge.as_ref().is_some_and(|badge| badge.to_lowercase().contains(query))
+            || item
+                .badge
+                .as_ref()
+                .is_some_and(|badge| badge.label.to_lowercase().contains(query))
     }
 
     fn item_matches_filter(&self, item: &PanelListItem) -> bool {
@@ -728,7 +776,16 @@ impl PanelList {
         let swatch = Rect::new(row.x + 8.0, row.y + 13.0, 6.0, row.height - 26.0);
         ctx.encoder.draw_rect(swatch, accent, 3.0);
 
-        let badge_reserved = if item.badge.is_some() { 58.0 } else { 8.0 };
+        let badge_width = item
+            .badge
+            .as_ref()
+            .map(|badge| panel_list_badge_width(ctx, &badge.label, row.width))
+            .unwrap_or(0.0);
+        let badge_reserved = if item.badge.is_some() {
+            badge_width + 14.0
+        } else {
+            8.0
+        };
         let title_color = if item.disabled {
             colors.muted_foreground
         } else if selected {
@@ -775,17 +832,40 @@ impl PanelList {
         ctx.pop_clip();
 
         if let Some(badge) = &item.badge {
-            let badge_rect = Rect::new(row.x + row.width - 54.0, row.y + 13.0, 44.0, 22.0);
-            ctx.encoder.draw_rect(badge_rect, colors.secondary, spacing.radius_sm);
-            ctx.push_clip(badge_rect);
+            let badge_rect = Rect::new(
+                row.x + row.width - badge_width - 10.0,
+                row.y + 13.0,
+                badge_width,
+                22.0,
+            );
+            let (fill, text) = panel_list_badge_colors(ctx, badge);
+            ctx.encoder.draw_rect(badge_rect, fill, spacing.radius_sm);
+            ctx.push_clip(badge_rect.inset(6.0, 1.0));
             ctx.encoder.draw_text(
-                badge,
+                &badge.label,
                 ctx.theme.typography.small.font_size,
                 snap_point(Point::new(badge_rect.x + 8.0, badge_rect.y + 4.0)),
-                colors.secondary_foreground,
+                text,
             );
             ctx.pop_clip();
         }
+    }
+}
+
+fn panel_list_badge_width(ctx: &PaintContext, label: &str, row_width: f32) -> f32 {
+    let text_width = measure_single_line(label, ctx.theme.typography.small.font_size).0;
+    let max_width = (row_width * 0.34).clamp(32.0, 96.0);
+    (text_width + 16.0).clamp(32.0, max_width)
+}
+
+fn panel_list_badge_colors(ctx: &PaintContext, badge: &PanelListBadge) -> (Color, Color) {
+    let colors = &ctx.theme.colors;
+    match badge.tone {
+        PanelListBadgeTone::Neutral => (colors.secondary, colors.secondary_foreground),
+        PanelListBadgeTone::Accent => (color_with_alpha(colors.primary, 0.22), colors.primary),
+        PanelListBadgeTone::Success => (color_with_alpha(colors.success, 0.22), colors.success),
+        PanelListBadgeTone::Warning => (color_with_alpha(colors.warning, 0.22), colors.warning),
+        PanelListBadgeTone::Error => (color_with_alpha(colors.error, 0.22), colors.error),
     }
 }
 
@@ -1180,6 +1260,7 @@ mod tests {
     struct RecordingEncoder {
         rects: usize,
         rect_bounds: Vec<Rect>,
+        rect_colors: Vec<Color>,
         lines: usize,
         triangles: usize,
         raster_images: usize,
@@ -1194,9 +1275,10 @@ mod tests {
 
         fn pop_clip(&mut self) {}
 
-        fn draw_rect(&mut self, bounds: Rect, _color: Color, _corner_radius: f32) {
+        fn draw_rect(&mut self, bounds: Rect, color: Color, _corner_radius: f32) {
             self.rects += 1;
             self.rect_bounds.push(bounds);
+            self.rect_colors.push(color);
         }
 
         fn draw_line(&mut self, _start: Point, _end: Point, _width: f32, _color: Color) {
@@ -2004,6 +2086,66 @@ mod tests {
         assert!(encoder.clips >= 2);
         assert!(encoder.texts.iter().any(|text| text == "Assets"));
         assert!(encoder.texts.iter().any(|text| text == "Imported footage"));
+    }
+
+    #[test]
+    fn paint_badge_uses_dynamic_width_and_semantic_tone() {
+        let mut list = PanelList::new(
+            "Effects",
+            vec![PanelListItem::new("Chroma Key")
+                .with_subtitle("Keying")
+                .with_badge_tone("KEYING", PanelListBadgeTone::Warning)],
+        );
+        list.layout(Rect::new(0.0, 0.0, 260.0, 140.0));
+
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 260.0, 140.0),
+        };
+        list.paint(&mut ctx);
+
+        assert!(encoder.texts.iter().any(|text| text == "KEYING"));
+        assert!(
+            encoder.rect_bounds.iter().any(|rect| rect.width > 44.0 && rect.height == 22.0),
+            "long badges should measure wider than the previous fixed badge width"
+        );
+        assert!(
+            encoder
+                .rect_colors
+                .iter()
+                .any(|color| *color == color_with_alpha(theme.colors.warning, 0.22)),
+            "warning badges should use the theme warning token"
+        );
+    }
+
+    #[test]
+    fn filter_query_matches_badge_label_after_badge_model_upgrade() {
+        let mut list = PanelList::new(
+            "Effects",
+            vec![
+                PanelListItem::new("Gaussian Blur").with_badge("GPU"),
+                PanelListItem::new("Chroma Key")
+                    .with_badge_tone("KEY", PanelListBadgeTone::Warning),
+            ],
+        )
+        .with_filter("Search effects");
+        list.set_filter_query("key");
+        list.layout(Rect::new(0.0, 0.0, 260.0, 180.0));
+
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 260.0, 180.0),
+        };
+        list.paint(&mut ctx);
+
+        assert!(encoder.texts.iter().any(|text| text == "Chroma Key"));
+        assert!(!encoder.texts.iter().any(|text| text == "Gaussian Blur"));
     }
 
     #[test]

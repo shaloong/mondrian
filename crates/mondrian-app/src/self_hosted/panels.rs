@@ -29,11 +29,12 @@ use mondrian_ui_widgets::panel_slot::SlotKind;
 use mondrian_ui_widgets::{
     AssetGrid, AssetGridBadgeTone, AssetGridItem, Checkbox, ColorPickerAreaMode,
     ColorPickerTrigger, CurveEditor, CurvePoint, DockPanel, Dropdown, FlexChild, FlexContainer,
-    Label, MenuItem, NodeGraphEdge, NodeGraphNode, NodeGraphView, PanelList, PanelListItem,
-    PropertyPanel, PropertyRow, PropertySection, RasterImage, ScrollView, Slider, TextInput,
-    TimelineAssetDrop, TimelineClip, TimelineClipMove, TimelineClipRef, TimelineClipTrim,
-    TimelineEditCommand, TimelineTrack, TimelineTrackControl, TimelineTrackMove, TimelineTrackRef,
-    TimelineTrimEdge, TimelineView, ViewerFrameImage, ViewerStatusTone, ViewerSurface,
+    Label, MenuItem, NodeGraphEdge, NodeGraphNode, NodeGraphView, PanelList, PanelListBadgeTone,
+    PanelListItem, PropertyPanel, PropertyRow, PropertySection, RasterImage, ScrollView, Slider,
+    TextInput, TimelineAssetDrop, TimelineClip, TimelineClipMove, TimelineClipRef,
+    TimelineClipTrim, TimelineEditCommand, TimelineTrack, TimelineTrackControl, TimelineTrackMove,
+    TimelineTrackRef, TimelineTrimEdge, TimelineView, ViewerFrameImage, ViewerStatusTone,
+    ViewerSurface,
 };
 
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
@@ -489,9 +490,11 @@ impl PanelListModel {
                     let name = effect_display_name(&effect_type);
                     let category = effect_type.category_path().join(" / ");
                     let subtitle = disabled_reason.map(str::to_owned).unwrap_or(category);
-                    let mut item = PanelListItem::new(name)
-                        .with_subtitle(subtitle)
-                        .with_badge(effect_badge(&effect_type));
+                    let mut item =
+                        PanelListItem::new(name).with_subtitle(subtitle).with_badge_tone(
+                            effect_badge(&effect_type),
+                            effect_badge_tone(&effect_type),
+                        );
                     if disabled_reason.is_some() {
                         item = item.disabled(true);
                     } else if let Some(selection) = effect_target {
@@ -1668,6 +1671,16 @@ fn effect_badge(effect_type: &EffectType) -> &'static str {
         EffectType::Lut3D => "3D",
         EffectType::ChromaKey | EffectType::LumaKey => "KEY",
         _ => "FX",
+    }
+}
+
+fn effect_badge_tone(effect_type: &EffectType) -> PanelListBadgeTone {
+    match effect_type {
+        EffectType::Plugin(_) => PanelListBadgeTone::Accent,
+        EffectType::Lut3D => PanelListBadgeTone::Success,
+        EffectType::ChromaKey | EffectType::LumaKey => PanelListBadgeTone::Warning,
+        EffectType::GaussianBlur | EffectType::Sharpen => PanelListBadgeTone::Neutral,
+        _ => PanelListBadgeTone::Neutral,
     }
 }
 
@@ -5165,6 +5178,7 @@ mod tests {
         assert!(model.demo_activate_prefix.is_none());
         assert!(model.items.iter().all(|item| item.icon.is_some()));
         assert!(model.items.iter().all(|item| !item.disabled));
+        assert!(model.items.iter().all(|item| item.badge.is_some()));
         let action = model
             .items
             .iter()
@@ -5180,6 +5194,30 @@ mod tests {
         assert_eq!(payload.clip.clip_id, clip_id);
         assert_eq!(payload.clip.track_id, track_id);
         assert!(payload.clip.is_video_track);
+    }
+
+    #[test]
+    fn effect_badges_use_semantic_panel_list_tones() {
+        assert_eq!(
+            effect_badge_tone(&EffectType::Plugin("demo".to_owned())),
+            PanelListBadgeTone::Accent
+        );
+        assert_eq!(
+            effect_badge_tone(&EffectType::Lut3D),
+            PanelListBadgeTone::Success
+        );
+        assert_eq!(
+            effect_badge_tone(&EffectType::ChromaKey),
+            PanelListBadgeTone::Warning
+        );
+        assert_eq!(
+            effect_badge_tone(&EffectType::LumaKey),
+            PanelListBadgeTone::Warning
+        );
+        assert_eq!(
+            effect_badge_tone(&EffectType::GaussianBlur),
+            PanelListBadgeTone::Neutral
+        );
     }
 
     #[test]

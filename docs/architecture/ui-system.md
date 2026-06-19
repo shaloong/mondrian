@@ -886,8 +886,12 @@ Product-shell accent colors for asset kinds, timeline fallback clip colors,
 effect categories, status errors, and node-graph source/output nodes are
 semantic `ColorTokens`. Panel adapters may map domain enums such as
 `AssetKind` or `EffectType` onto those tokens, but should not introduce
-panel-local hex literals for UI chrome. Demo fixture colors that represent
-clip media content may remain fixture data, because they are not theme chrome.
+panel-local hex literals for UI chrome. Reusable list rows use
+`PanelListBadgeTone` for compact metadata/status badges so Effects, presets,
+and future browsers can share neutral, accent, success, warning, and error
+treatments without hard-coded colors or fixed-width text assumptions. Demo
+fixture colors that represent clip media content may remain fixture data,
+because they are not theme chrome.
 `PanelListModel::demo_activate_prefix` is compiled only for tests and exists
 for synthetic fixture commands; product panel models must attach explicit
 stable actions to rows instead of deriving commands from titles or indices.
