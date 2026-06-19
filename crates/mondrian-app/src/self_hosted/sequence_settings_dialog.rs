@@ -16,7 +16,7 @@ use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, Widget};
 use mondrian_ui_widgets::menu::{Dropdown, MenuItem};
-use mondrian_ui_widgets::{Button, Checkbox, DialogSurface, Label, Slider, TextInput};
+use mondrian_ui_widgets::{Button, Checkbox, DialogSurface, Label, NumberInput, Slider, TextInput};
 
 use crate::app::ui_actions::{
     app_shell_close_modal_action, app_shell_confirm_sequence_settings_action,
@@ -70,6 +70,12 @@ impl SelfHostedSequenceSettingsDraft {
             SequenceSettingsDraftUpdatePayload::Resolution(resolution) => {
                 self.settings.resolution = resolution;
             }
+            SequenceSettingsDraftUpdatePayload::ResolutionWidth(width) => {
+                self.settings.resolution.width = width;
+            }
+            SequenceSettingsDraftUpdatePayload::ResolutionHeight(height) => {
+                self.settings.resolution.height = height;
+            }
             SequenceSettingsDraftUpdatePayload::FrameRate(frame_rate) => {
                 if Rational::SEQUENCE_FRAME_RATES.contains(&frame_rate) {
                     self.settings.frame_rate = frame_rate;
@@ -83,6 +89,9 @@ impl SelfHostedSequenceSettingsDraft {
             }
             SequenceSettingsDraftUpdatePayload::VideoDisplayFormat(display_format) => {
                 self.settings.video_display_format = display_format;
+            }
+            SequenceSettingsDraftUpdatePayload::StartTimecodeFrame(frame) => {
+                self.settings.start_timecode_frame = frame.max(0);
             }
             SequenceSettingsDraftUpdatePayload::ColorSpace(color_space) => {
                 self.settings.color_space = color_space;
@@ -660,12 +669,57 @@ fn resolution_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dropdown 
     .with_max_visible_items(4)
 }
 
+fn resolution_width_input_for(draft: &SelfHostedSequenceSettingsDraft) -> NumberInput {
+    NumberInput::new(
+        draft.settings.resolution.width as f64,
+        SequenceSettings::MIN_WIDTH as f64,
+        SequenceSettings::MAX_WIDTH as f64,
+    )
+    .with_placeholder("Width")
+    .with_step(1.0)
+    .on_change(|value| {
+        app_shell_sequence_settings_draft_changed_action(
+            SequenceSettingsDraftUpdatePayload::ResolutionWidth(value.round() as u32),
+        )
+    })
+}
+
+fn resolution_height_input_for(draft: &SelfHostedSequenceSettingsDraft) -> NumberInput {
+    NumberInput::new(
+        draft.settings.resolution.height as f64,
+        SequenceSettings::MIN_HEIGHT as f64,
+        SequenceSettings::MAX_HEIGHT as f64,
+    )
+    .with_placeholder("Height")
+    .with_step(1.0)
+    .on_change(|value| {
+        app_shell_sequence_settings_draft_changed_action(
+            SequenceSettingsDraftUpdatePayload::ResolutionHeight(value.round() as u32),
+        )
+    })
+}
+
 fn frame_rate_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dropdown {
     Dropdown::new(
         frame_rate_label(draft.settings.frame_rate),
         frame_rate_items(),
     )
     .with_max_visible_items(7)
+}
+
+fn start_timecode_input_for(draft: &SelfHostedSequenceSettingsDraft) -> NumberInput {
+    NumberInput::new(
+        draft.settings.start_timecode_frame as f64,
+        0.0,
+        (24 * 60 * 60 * 240) as f64,
+    )
+    .with_placeholder("Start frame")
+    .with_step(1.0)
+    .on_change(|value| {
+        app_shell_sequence_settings_draft_changed_action(
+            SequenceSettingsDraftUpdatePayload::StartTimecodeFrame(value.round() as i64),
+        )
+    })
 }
 
 fn pixel_aspect_ratio_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dropdown {
@@ -822,8 +876,8 @@ fn preserve_hdr_metadata_checkbox_for(draft: &SelfHostedSequenceSettingsDraft) -
 
 const CARD_MIN_WIDTH: f32 = 420.0;
 const CARD_WIDTH: f32 = 680.0;
-const CARD_MIN_HEIGHT: f32 = 460.0;
-const CARD_HEIGHT: f32 = 560.0;
+const CARD_MIN_HEIGHT: f32 = 500.0;
+const CARD_HEIGHT: f32 = 620.0;
 const CONTENT_PADDING: f32 = 20.0;
 const FIELD_HEIGHT: f32 = 34.0;
 const DROPDOWN_HEIGHT: f32 = 28.0;
@@ -836,8 +890,10 @@ const FORMAT_LABEL_BASELINE_Y: f32 = 188.0;
 const FORMAT_ROW_1_Y: f32 = 204.0;
 const FORMAT_ROW_2_Y: f32 = 252.0;
 const FORMAT_ROW_3_Y: f32 = 300.0;
-const AUDIO_LABEL_BASELINE_Y: f32 = 360.0;
-const AUDIO_ROW_Y: f32 = 376.0;
+const FORMAT_ROW_4_Y: f32 = 348.0;
+const FORMAT_ROW_5_Y: f32 = 396.0;
+const AUDIO_LABEL_BASELINE_Y: f32 = 456.0;
+const AUDIO_ROW_Y: f32 = 472.0;
 const PREVIEW_LABEL_BASELINE_Y: f32 = 126.0;
 const PREVIEW_ROW_Y: f32 = 142.0;
 const PREVIEW_SCALE_LABEL_Y: f32 = 188.0;
@@ -865,6 +921,8 @@ pub struct SequenceSettingsDialog {
     tab_buttons: Vec<Button>,
     name_label: Label,
     format_label: Label,
+    frame_size_label: Label,
+    start_timecode_label: Label,
     audio_label: Label,
     preview_label: Label,
     color_label: Label,
@@ -872,10 +930,13 @@ pub struct SequenceSettingsDialog {
     name_input: TextInput,
     editing_mode_dropdown: Dropdown,
     resolution_dropdown: Dropdown,
+    resolution_width_input: NumberInput,
+    resolution_height_input: NumberInput,
     frame_rate_dropdown: Dropdown,
     pixel_aspect_ratio_dropdown: Dropdown,
     field_order_dropdown: Dropdown,
     video_display_format_dropdown: Dropdown,
+    start_timecode_input: NumberInput,
     color_space_dropdown: Dropdown,
     output_color_space_dropdown: Dropdown,
     color_workflow_dropdown: Dropdown,
@@ -923,6 +984,14 @@ impl SequenceSettingsDialog {
             .muted()
             .with_font_size(LABEL_FONT_SIZE)
             .with_padding(0.0, 0.0);
+        let frame_size_label = Label::new("Custom frame size")
+            .muted()
+            .with_font_size(LABEL_FONT_SIZE)
+            .with_padding(0.0, 0.0);
+        let start_timecode_label = Label::new("Start timecode frame")
+            .muted()
+            .with_font_size(LABEL_FONT_SIZE)
+            .with_padding(0.0, 0.0);
         let audio_label = Label::new("Audio")
             .muted()
             .with_font_size(LABEL_FONT_SIZE)
@@ -949,10 +1018,13 @@ impl SequenceSettingsDialog {
         });
         let editing_mode_dropdown = editing_mode_dropdown_for(&draft);
         let resolution_dropdown = resolution_dropdown_for(&draft);
+        let resolution_width_input = resolution_width_input_for(&draft);
+        let resolution_height_input = resolution_height_input_for(&draft);
         let frame_rate_dropdown = frame_rate_dropdown_for(&draft);
         let pixel_aspect_ratio_dropdown = pixel_aspect_ratio_dropdown_for(&draft);
         let field_order_dropdown = field_order_dropdown_for(&draft);
         let video_display_format_dropdown = video_display_format_dropdown_for(&draft);
+        let start_timecode_input = start_timecode_input_for(&draft);
         let color_space_dropdown = color_space_dropdown_for(&draft);
         let output_color_space_dropdown = output_color_space_dropdown_for(&draft);
         let color_workflow_dropdown = color_workflow_dropdown_for(&draft);
@@ -984,6 +1056,8 @@ impl SequenceSettingsDialog {
             tab_buttons,
             name_label,
             format_label,
+            frame_size_label,
+            start_timecode_label,
             audio_label,
             preview_label,
             color_label,
@@ -991,10 +1065,13 @@ impl SequenceSettingsDialog {
             name_input,
             editing_mode_dropdown,
             resolution_dropdown,
+            resolution_width_input,
+            resolution_height_input,
             frame_rate_dropdown,
             pixel_aspect_ratio_dropdown,
             field_order_dropdown,
             video_display_format_dropdown,
+            start_timecode_input,
             color_space_dropdown,
             output_color_space_dropdown,
             color_workflow_dropdown,
@@ -1025,10 +1102,13 @@ impl SequenceSettingsDialog {
         if rebuild_controls {
             self.editing_mode_dropdown = editing_mode_dropdown_for(&self.draft);
             self.resolution_dropdown = resolution_dropdown_for(&self.draft);
+            self.resolution_width_input = resolution_width_input_for(&self.draft);
+            self.resolution_height_input = resolution_height_input_for(&self.draft);
             self.frame_rate_dropdown = frame_rate_dropdown_for(&self.draft);
             self.pixel_aspect_ratio_dropdown = pixel_aspect_ratio_dropdown_for(&self.draft);
             self.field_order_dropdown = field_order_dropdown_for(&self.draft);
             self.video_display_format_dropdown = video_display_format_dropdown_for(&self.draft);
+            self.start_timecode_input = start_timecode_input_for(&self.draft);
             self.color_space_dropdown = color_space_dropdown_for(&self.draft);
             self.output_color_space_dropdown = output_color_space_dropdown_for(&self.draft);
             self.color_workflow_dropdown = color_workflow_dropdown_for(&self.draft);
@@ -1140,29 +1220,59 @@ impl Widget for SequenceSettingsDialog {
                     half,
                     DROPDOWN_HEIGHT,
                 ));
-                self.frame_rate_dropdown.layout(Rect::new(
+                self.frame_size_label.layout(Rect::new(
+                    content.x,
+                    content.y + FORMAT_ROW_2_Y - 16.0,
+                    content.width,
+                    LABEL_FONT_SIZE * 1.5,
+                ));
+                self.resolution_width_input.layout(Rect::new(
                     content.x,
                     content.y + FORMAT_ROW_2_Y,
+                    half,
+                    FIELD_HEIGHT,
+                ));
+                self.resolution_height_input.layout(Rect::new(
+                    right_x,
+                    content.y + FORMAT_ROW_2_Y,
+                    half,
+                    FIELD_HEIGHT,
+                ));
+                self.frame_rate_dropdown.layout(Rect::new(
+                    content.x,
+                    content.y + FORMAT_ROW_3_Y,
                     half,
                     DROPDOWN_HEIGHT,
                 ));
                 self.pixel_aspect_ratio_dropdown.layout(Rect::new(
                     right_x,
-                    content.y + FORMAT_ROW_2_Y,
+                    content.y + FORMAT_ROW_3_Y,
                     half,
                     DROPDOWN_HEIGHT,
                 ));
                 self.field_order_dropdown.layout(Rect::new(
                     content.x,
-                    content.y + FORMAT_ROW_3_Y,
+                    content.y + FORMAT_ROW_4_Y,
                     half,
                     DROPDOWN_HEIGHT,
                 ));
                 self.video_display_format_dropdown.layout(Rect::new(
                     right_x,
-                    content.y + FORMAT_ROW_3_Y,
+                    content.y + FORMAT_ROW_4_Y,
                     half,
                     DROPDOWN_HEIGHT,
+                ));
+                self.start_timecode_label.layout(Rect::new(
+                    content.x,
+                    content.y + FORMAT_ROW_5_Y - 16.0,
+                    half,
+                    LABEL_FONT_SIZE * 1.5,
+                ));
+                self.start_timecode_input.layout(Rect::new(
+                    content.x,
+                    content.y + FORMAT_ROW_5_Y,
+                    half,
+                    FIELD_HEIGHT,
                 ));
                 self.audio_label.layout(Rect::new(
                     content.x,
@@ -1334,10 +1444,13 @@ impl Widget for SequenceSettingsDialog {
                 if self.name_input.event(event, ctx) == EventResult::Handled
                     || self.editing_mode_dropdown.event(event, ctx) == EventResult::Handled
                     || self.resolution_dropdown.event(event, ctx) == EventResult::Handled
+                    || self.resolution_width_input.event(event, ctx) == EventResult::Handled
+                    || self.resolution_height_input.event(event, ctx) == EventResult::Handled
                     || self.frame_rate_dropdown.event(event, ctx) == EventResult::Handled
                     || self.pixel_aspect_ratio_dropdown.event(event, ctx) == EventResult::Handled
                     || self.field_order_dropdown.event(event, ctx) == EventResult::Handled
                     || self.video_display_format_dropdown.event(event, ctx) == EventResult::Handled
+                    || self.start_timecode_input.event(event, ctx) == EventResult::Handled
                     || self.audio_sample_rate_dropdown.event(event, ctx) == EventResult::Handled
                     || self.audio_channel_layout_dropdown.event(event, ctx) == EventResult::Handled
                     || self.audio_display_format_dropdown.event(event, ctx) == EventResult::Handled
@@ -1387,10 +1500,15 @@ impl Widget for SequenceSettingsDialog {
                 self.format_label.paint(ctx);
                 self.editing_mode_dropdown.paint(ctx);
                 self.resolution_dropdown.paint(ctx);
+                self.frame_size_label.paint(ctx);
+                self.resolution_width_input.paint(ctx);
+                self.resolution_height_input.paint(ctx);
                 self.frame_rate_dropdown.paint(ctx);
                 self.pixel_aspect_ratio_dropdown.paint(ctx);
                 self.field_order_dropdown.paint(ctx);
                 self.video_display_format_dropdown.paint(ctx);
+                self.start_timecode_label.paint(ctx);
+                self.start_timecode_input.paint(ctx);
                 self.audio_label.paint(ctx);
                 self.audio_sample_rate_dropdown.paint(ctx);
                 self.audio_channel_layout_dropdown.paint(ctx);
@@ -1425,7 +1543,7 @@ impl Widget for SequenceSettingsDialog {
     }
 
     fn child_count(&self) -> usize {
-        35
+        40
     }
 
     fn child(&self, index: usize) -> Option<&dyn Widget> {
@@ -1435,34 +1553,39 @@ impl Widget for SequenceSettingsDialog {
             2..=4 => self.tab_buttons.get(index - 2).map(|button| button as &dyn Widget),
             5 => Some(&self.name_label),
             6 => Some(&self.format_label),
-            7 => Some(&self.audio_label),
-            8 => Some(&self.preview_label),
-            9 => Some(&self.color_label),
-            10 => Some(&self.preview_scale_label),
-            11 => Some(&self.name_input),
-            12 => Some(&self.editing_mode_dropdown),
-            13 => Some(&self.resolution_dropdown),
-            14 => Some(&self.frame_rate_dropdown),
-            15 => Some(&self.pixel_aspect_ratio_dropdown),
-            16 => Some(&self.field_order_dropdown),
-            17 => Some(&self.video_display_format_dropdown),
-            18 => Some(&self.color_space_dropdown),
-            19 => Some(&self.output_color_space_dropdown),
-            20 => Some(&self.color_workflow_dropdown),
-            21 => Some(&self.missing_color_metadata_dropdown),
-            22 => Some(&self.nested_color_processing_dropdown),
-            23 => Some(&self.video_range_dropdown),
-            24 => Some(&self.export_bit_depth_dropdown),
-            25 => Some(&self.auto_tone_map_checkbox),
-            26 => Some(&self.preserve_hdr_metadata_checkbox),
-            27 => Some(&self.audio_sample_rate_dropdown),
-            28 => Some(&self.audio_channel_layout_dropdown),
-            29 => Some(&self.audio_display_format_dropdown),
-            30 => Some(&self.preview_render_format_dropdown),
-            31 => Some(&self.preview_cache_checkbox),
-            32 => Some(&self.preview_scale_slider),
-            33 => Some(&self.cancel_button),
-            34 => Some(&self.apply_button),
+            7 => Some(&self.frame_size_label),
+            8 => Some(&self.start_timecode_label),
+            9 => Some(&self.audio_label),
+            10 => Some(&self.preview_label),
+            11 => Some(&self.color_label),
+            12 => Some(&self.preview_scale_label),
+            13 => Some(&self.name_input),
+            14 => Some(&self.editing_mode_dropdown),
+            15 => Some(&self.resolution_dropdown),
+            16 => Some(&self.resolution_width_input),
+            17 => Some(&self.resolution_height_input),
+            18 => Some(&self.frame_rate_dropdown),
+            19 => Some(&self.pixel_aspect_ratio_dropdown),
+            20 => Some(&self.field_order_dropdown),
+            21 => Some(&self.video_display_format_dropdown),
+            22 => Some(&self.start_timecode_input),
+            23 => Some(&self.color_space_dropdown),
+            24 => Some(&self.output_color_space_dropdown),
+            25 => Some(&self.color_workflow_dropdown),
+            26 => Some(&self.missing_color_metadata_dropdown),
+            27 => Some(&self.nested_color_processing_dropdown),
+            28 => Some(&self.video_range_dropdown),
+            29 => Some(&self.export_bit_depth_dropdown),
+            30 => Some(&self.auto_tone_map_checkbox),
+            31 => Some(&self.preserve_hdr_metadata_checkbox),
+            32 => Some(&self.audio_sample_rate_dropdown),
+            33 => Some(&self.audio_channel_layout_dropdown),
+            34 => Some(&self.audio_display_format_dropdown),
+            35 => Some(&self.preview_render_format_dropdown),
+            36 => Some(&self.preview_cache_checkbox),
+            37 => Some(&self.preview_scale_slider),
+            38 => Some(&self.cancel_button),
+            39 => Some(&self.apply_button),
             _ => None,
         }
     }
@@ -1474,34 +1597,39 @@ impl Widget for SequenceSettingsDialog {
             2..=4 => self.tab_buttons.get_mut(index - 2).map(|button| button as &mut dyn Widget),
             5 => Some(&mut self.name_label),
             6 => Some(&mut self.format_label),
-            7 => Some(&mut self.audio_label),
-            8 => Some(&mut self.preview_label),
-            9 => Some(&mut self.color_label),
-            10 => Some(&mut self.preview_scale_label),
-            11 => Some(&mut self.name_input),
-            12 => Some(&mut self.editing_mode_dropdown),
-            13 => Some(&mut self.resolution_dropdown),
-            14 => Some(&mut self.frame_rate_dropdown),
-            15 => Some(&mut self.pixel_aspect_ratio_dropdown),
-            16 => Some(&mut self.field_order_dropdown),
-            17 => Some(&mut self.video_display_format_dropdown),
-            18 => Some(&mut self.color_space_dropdown),
-            19 => Some(&mut self.output_color_space_dropdown),
-            20 => Some(&mut self.color_workflow_dropdown),
-            21 => Some(&mut self.missing_color_metadata_dropdown),
-            22 => Some(&mut self.nested_color_processing_dropdown),
-            23 => Some(&mut self.video_range_dropdown),
-            24 => Some(&mut self.export_bit_depth_dropdown),
-            25 => Some(&mut self.auto_tone_map_checkbox),
-            26 => Some(&mut self.preserve_hdr_metadata_checkbox),
-            27 => Some(&mut self.audio_sample_rate_dropdown),
-            28 => Some(&mut self.audio_channel_layout_dropdown),
-            29 => Some(&mut self.audio_display_format_dropdown),
-            30 => Some(&mut self.preview_render_format_dropdown),
-            31 => Some(&mut self.preview_cache_checkbox),
-            32 => Some(&mut self.preview_scale_slider),
-            33 => Some(&mut self.cancel_button),
-            34 => Some(&mut self.apply_button),
+            7 => Some(&mut self.frame_size_label),
+            8 => Some(&mut self.start_timecode_label),
+            9 => Some(&mut self.audio_label),
+            10 => Some(&mut self.preview_label),
+            11 => Some(&mut self.color_label),
+            12 => Some(&mut self.preview_scale_label),
+            13 => Some(&mut self.name_input),
+            14 => Some(&mut self.editing_mode_dropdown),
+            15 => Some(&mut self.resolution_dropdown),
+            16 => Some(&mut self.resolution_width_input),
+            17 => Some(&mut self.resolution_height_input),
+            18 => Some(&mut self.frame_rate_dropdown),
+            19 => Some(&mut self.pixel_aspect_ratio_dropdown),
+            20 => Some(&mut self.field_order_dropdown),
+            21 => Some(&mut self.video_display_format_dropdown),
+            22 => Some(&mut self.start_timecode_input),
+            23 => Some(&mut self.color_space_dropdown),
+            24 => Some(&mut self.output_color_space_dropdown),
+            25 => Some(&mut self.color_workflow_dropdown),
+            26 => Some(&mut self.missing_color_metadata_dropdown),
+            27 => Some(&mut self.nested_color_processing_dropdown),
+            28 => Some(&mut self.video_range_dropdown),
+            29 => Some(&mut self.export_bit_depth_dropdown),
+            30 => Some(&mut self.auto_tone_map_checkbox),
+            31 => Some(&mut self.preserve_hdr_metadata_checkbox),
+            32 => Some(&mut self.audio_sample_rate_dropdown),
+            33 => Some(&mut self.audio_channel_layout_dropdown),
+            34 => Some(&mut self.audio_display_format_dropdown),
+            35 => Some(&mut self.preview_render_format_dropdown),
+            36 => Some(&mut self.preview_cache_checkbox),
+            37 => Some(&mut self.preview_scale_slider),
+            38 => Some(&mut self.cancel_button),
+            39 => Some(&mut self.apply_button),
             _ => None,
         }
     }

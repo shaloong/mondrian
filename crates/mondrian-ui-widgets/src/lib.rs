@@ -19,6 +19,7 @@ pub mod label;
 pub mod list;
 pub mod menu;
 pub mod node_graph_view;
+pub mod number_input;
 mod paint;
 pub mod panel_list;
 pub mod panel_slot;
@@ -60,6 +61,7 @@ pub use label::Label;
 pub use list::{List, ListItem};
 pub use menu::{Dropdown, MenuItem};
 pub use node_graph_view::{NodeGraphEdge, NodeGraphNode, NodeGraphView};
+pub use number_input::{NumberInput, NumberInputChangeAction};
 pub use panel_list::{
     PanelList, PanelListAction, PanelListBadge, PanelListBadgeTone, PanelListItem, PanelListState,
 };

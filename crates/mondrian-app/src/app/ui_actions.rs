@@ -733,6 +733,10 @@ pub enum SequenceSettingsDraftUpdatePayload {
     EditingMode(EditingMode),
     /// Active sequence frame size.
     Resolution(Resolution),
+    /// Active sequence frame width in pixels.
+    ResolutionWidth(u32),
+    /// Active sequence frame height in pixels.
+    ResolutionHeight(u32),
     /// Active sequence frame rate.
     FrameRate(Rational),
     /// Active sequence pixel aspect ratio.
@@ -741,6 +745,8 @@ pub enum SequenceSettingsDraftUpdatePayload {
     FieldOrder(FieldOrder),
     /// Timeline/video display format.
     VideoDisplayFormat(VideoDisplayFormat),
+    /// Sequence start timecode frame.
+    StartTimecodeFrame(i64),
     /// Sequence working color space.
     ColorSpace(ColorSpace),
     /// Whether source media is auto tone-mapped into the sequence.

@@ -2049,6 +2049,20 @@ mod tests {
         );
         root.handle_shell_action(
             app_shell_sequence_settings_draft_changed_action(
+                SequenceSettingsDraftUpdatePayload::ResolutionWidth(2048),
+            ),
+            &platform,
+            None,
+        );
+        root.handle_shell_action(
+            app_shell_sequence_settings_draft_changed_action(
+                SequenceSettingsDraftUpdatePayload::ResolutionHeight(1152),
+            ),
+            &platform,
+            None,
+        );
+        root.handle_shell_action(
+            app_shell_sequence_settings_draft_changed_action(
                 SequenceSettingsDraftUpdatePayload::FrameRate(Rational::FPS_2997),
             ),
             &platform,
@@ -2075,6 +2089,13 @@ mod tests {
                 SequenceSettingsDraftUpdatePayload::VideoDisplayFormat(
                     VideoDisplayFormat::Timecode2997DropFrame,
                 ),
+            ),
+            &platform,
+            None,
+        );
+        root.handle_shell_action(
+            app_shell_sequence_settings_draft_changed_action(
+                SequenceSettingsDraftUpdatePayload::StartTimecodeFrame(120),
             ),
             &platform,
             None,
@@ -2214,7 +2235,10 @@ mod tests {
         assert_eq!(payload.sequence_id, sequence_id);
         assert_eq!(payload.name, "Scene 02");
         assert_eq!(payload.settings.editing_mode, EditingMode::Custom);
-        assert_eq!(payload.settings.resolution, Resolution::UHD4K);
+        assert_eq!(
+            payload.settings.resolution,
+            Resolution { width: 2048, height: 1152 }
+        );
         assert_eq!(payload.settings.frame_rate, Rational::FPS_2997);
         assert_eq!(
             payload.settings.pixel_aspect_ratio,
@@ -2225,6 +2249,7 @@ mod tests {
             payload.settings.video_display_format,
             VideoDisplayFormat::Timecode2997DropFrame
         );
+        assert_eq!(payload.settings.start_timecode_frame, 120);
         assert_eq!(payload.settings.color_space, ColorSpace::Rec2100Pq);
         assert!(!payload.settings.auto_tone_map_media);
         assert_eq!(

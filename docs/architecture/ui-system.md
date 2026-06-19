@@ -245,10 +245,11 @@ snapshot. Shell dialogs must not call `rename_sequence` plus
 The self-hosted sequence settings surface uses shell-local tabs for
 format/audio, color management, and preview. All editable fields use typed draft
 updates: editing mode, frame size, frame rate, pixel aspect ratio, field order,
-video display format, working/output color spaces, tone mapping, color workflow,
-missing metadata policy, nested color processing, video range, export bit depth,
-HDR metadata preservation, audio sample rate, audio channel layout, audio display
-format, preview render format, preview resolution scale, and preview cache.
+video display format, custom width/height, start timecode frame, working/output
+color spaces, tone mapping, color workflow, missing metadata policy, nested color
+processing, video range, export bit depth, HDR metadata preservation, audio
+sample rate, audio channel layout, audio display format, preview render format,
+preview resolution scale, and preview cache.
 `Action::SplitClipAtPlayhead` similarly routes to `AppState::split_at_playhead`,
 which bulk-splits unlocked clips under the playhead and records one undoable
 timeline snapshot only when a split actually occurs.
@@ -389,6 +390,13 @@ event router exposes the latest request, and the app shell applies it to the
 native window (`set_ime_allowed` plus cursor area for winit). Pointer clicks
 outside the focused widget send `FocusLost` so IME is disabled when editing
 ends.
+
+`NumberInput` is a thin composite around `TextInput`, not a second editable-text
+implementation. It reuses text focus, selection, IME, clipboard, clipping, and
+scrolling behavior, then parses committed text changes into clamped/stepped
+numeric actions. Invalid numeric text remains local and dispatches no action,
+letting the next app-state refresh restore the authoritative value without
+mutating domain state from malformed input.
 
 Text copy/cut shortcuts are consumed by `TextInput` only when a selection exists.
 If there is no selection, `Ctrl+C` and `Ctrl+X` are ignored so panel-level
