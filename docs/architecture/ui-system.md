@@ -1378,6 +1378,12 @@ the active sequence preview scale (`Full` at 1.0, percentage labels below full
 resolution), not from whether a preview frame has already arrived. Viewer
 transport chrome collapses its visible control set at narrow widths before
 allowing buttons to overflow panel bounds.
+`ViewerSurface` is focusable when enabled. Pointer clicks inside the viewer give
+it focus, while `FocusGained` shows tokenized focus chrome for keyboard
+navigation. Focused viewers handle unmodified Space, Left/Right, Home/End, and
+I/O through the same transport callback used by clickable chrome; modified keys
+fall through to the shell shortcut router. Space remains intentionally absent
+from global shortcuts so text editing cannot toggle playback.
 Empty app state maps to a disabled viewer model so the product shell can show
 clear no-signal chrome without pretending a preview texture exists.
 `ui_demo` should use the same `ViewerSurface` for the Viewer panel and keep

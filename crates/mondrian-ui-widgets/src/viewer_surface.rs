@@ -13,7 +13,8 @@ use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use std::sync::Arc;
 
 use crate::paint::{
-    color_with_alpha, horizontal_stroke_rect, mix_color, soft_border, vertical_stroke_rect,
+    color_with_alpha, horizontal_stroke_rect, mix_color, paint_focus_ring, soft_border,
+    vertical_stroke_rect,
 };
 use crate::text_metrics::measure_single_line;
 use crate::RasterImage;
@@ -96,6 +97,8 @@ pub struct ViewerSurface {
     pressed_zoom: bool,
     hovered_preview_quality: bool,
     pressed_preview_quality: bool,
+    focused: bool,
+    focus_visible: bool,
     on_control: Option<Box<ViewerControlAction>>,
     on_zoom: Option<Box<ViewerZoomAction>>,
     on_preview_quality: Option<Box<ViewerPreviewQualityAction>>,
@@ -129,6 +132,8 @@ impl ViewerSurface {
             pressed_zoom: false,
             hovered_preview_quality: false,
             pressed_preview_quality: false,
+            focused: false,
+            focus_visible: false,
             on_control: None,
             on_zoom: None,
             on_preview_quality: None,
@@ -412,6 +417,28 @@ impl ViewerSurface {
         let action = self.on_zoom.as_ref().map(|mapper| mapper()).unwrap_or(Action::NoOp);
         (ctx.dispatch)(action);
     }
+
+    fn focus_from_pointer(&mut self, ctx: &mut EventContext) {
+        self.focused = true;
+        self.focus_visible = false;
+        ctx.focus.request_focus(self.id);
+    }
+
+    fn keyboard_control(&self, key: KeyCode, modifiers: Modifiers) -> Option<ViewerControl> {
+        if modifiers != Modifiers::none() {
+            return None;
+        }
+        match key {
+            KeyCode::Space => Some(ViewerControl::PlayPause),
+            KeyCode::Left => Some(ViewerControl::StepBack),
+            KeyCode::Right => Some(ViewerControl::StepForward),
+            KeyCode::Home => Some(ViewerControl::JumpStart),
+            KeyCode::End => Some(ViewerControl::JumpEnd),
+            KeyCode::I => Some(ViewerControl::MarkIn),
+            KeyCode::O => Some(ViewerControl::MarkOut),
+            _ => None,
+        }
+    }
 }
 
 impl Widget for ViewerSurface {
@@ -435,6 +462,8 @@ impl Widget for ViewerSurface {
             self.pressed_zoom = false;
             self.hovered_preview_quality = false;
             self.pressed_preview_quality = false;
+            self.focused = false;
+            self.focus_visible = false;
             return EventResult::Ignored;
         }
 
@@ -460,6 +489,10 @@ impl Widget for ViewerSurface {
                 }
             }
             UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
+                if !self.bounds.contains(*position) {
+                    return EventResult::Ignored;
+                }
+                self.focus_from_pointer(ctx);
                 if let Some(control) = self.control_at(*position) {
                     self.pressed_control = Some(control);
                     self.hovered_control = Some(control);
@@ -478,7 +511,12 @@ impl Widget for ViewerSurface {
                     ctx.request_repaint();
                     return EventResult::Handled;
                 }
-                EventResult::Ignored
+                EventResult::Handled
+            }
+            UiEvent::FocusGained => {
+                self.focused = true;
+                self.focus_visible = true;
+                EventResult::Handled
             }
             UiEvent::MouseUp { position, button: MouseButton::Left, .. } => {
                 let pressed = self.pressed_control.take();
@@ -520,7 +558,17 @@ impl Widget for ViewerSurface {
                 self.pressed_zoom = false;
                 self.hovered_preview_quality = false;
                 self.pressed_preview_quality = false;
+                self.focused = false;
+                self.focus_visible = false;
                 EventResult::Handled
+            }
+            UiEvent::KeyDown { key, modifiers } if self.focused => {
+                if let Some(control) = self.keyboard_control(*key, *modifiers) {
+                    self.dispatch_control(control, ctx);
+                    EventResult::Handled
+                } else {
+                    EventResult::Ignored
+                }
             }
             _ => EventResult::Ignored,
         }
@@ -534,6 +582,9 @@ impl Widget for ViewerSurface {
         let canvas = self.canvas_rect();
 
         ctx.encoder.draw_rect(self.bounds, colors.background, 0.0);
+        if self.focus_visible {
+            paint_focus_ring(ctx, self.bounds.inset(2.0, 2.0), spacing.radius_lg);
+        }
         ctx.encoder.draw_text_box(
             &self.title,
             typography.body.font_size,
@@ -651,6 +702,10 @@ impl Widget for ViewerSurface {
 
     fn hit_test(&self, point: Point) -> bool {
         self.bounds.contains(point)
+    }
+
+    fn can_focus(&self) -> bool {
+        self.enabled
     }
 }
 
@@ -1324,6 +1379,139 @@ mod tests {
                 },
                 &mut ctx,
             ),
+            EventResult::Ignored
+        );
+
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn viewer_keyboard_controls_dispatch_when_focused() {
+        let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080);
+        viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        assert_eq!(
+            viewer.event(&UiEvent::FocusGained, &mut ctx),
+            EventResult::Handled
+        );
+        for key in [
+            KeyCode::I,
+            KeyCode::O,
+            KeyCode::Home,
+            KeyCode::Left,
+            KeyCode::Space,
+            KeyCode::Right,
+            KeyCode::End,
+        ] {
+            assert_eq!(
+                viewer.event(
+                    &UiEvent::KeyDown { key, modifiers: Modifiers::none() },
+                    &mut ctx,
+                ),
+                EventResult::Handled
+            );
+        }
+
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[
+                Action::MarkInAtPlayhead,
+                Action::MarkOutAtPlayhead,
+                Action::GoToStart,
+                Action::StepBack,
+                Action::TogglePlay,
+                Action::StepForward,
+                Action::GoToEnd
+            ]
+        );
+    }
+
+    #[test]
+    fn viewer_keyboard_ignores_without_focus_or_with_modifiers() {
+        let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080);
+        viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        assert_eq!(
+            viewer.event(
+                &UiEvent::KeyDown { key: KeyCode::Space, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+        assert_eq!(
+            viewer.event(&UiEvent::FocusGained, &mut ctx),
+            EventResult::Handled
+        );
+        assert_eq!(
+            viewer.event(
+                &UiEvent::KeyDown { key: KeyCode::Space, modifiers: Modifiers::ctrl() },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn viewer_canvas_click_focuses_without_dispatching_transport_action() {
+        let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080);
+        viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+        let position = viewer.canvas_rect().center();
+
+        assert_eq!(
+            viewer.event(
+                &UiEvent::MouseDown {
+                    position,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            viewer.event(
+                &UiEvent::KeyDown { key: KeyCode::Space, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(actions.borrow().as_slice(), &[Action::TogglePlay]);
+    }
+
+    #[test]
+    fn disabled_viewer_does_not_participate_in_focus() {
+        let mut viewer = ViewerSurface::new("Offline", 1920, 1080).disabled();
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        assert!(!viewer.can_focus());
+        assert_eq!(
+            viewer.event(&UiEvent::FocusGained, &mut ctx),
             EventResult::Ignored
         );
 
