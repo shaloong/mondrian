@@ -809,10 +809,11 @@ blocking, a background worker decodes bounded RGBA frames through
 `mondrian-media`, and the window event loop polls completions before repainting.
 Asset cards expose compact `AssetGridItem::badges` for both media kind and
 project-media status. The app adapter maps domain facts such as video/audio
-kind, offline file paths, and proxy mode into badge strings; `AssetGrid` owns
-badge search participation, right-aligned preview layout, clipping, and
-painting. This keeps status visible in the project media browser without
-turning widgets into asset-library or filesystem readers.
+kind, offline file paths, and proxy mode into badge labels plus semantic badge
+tones; `AssetGrid` owns badge search participation, right-aligned preview
+layout, clipping, and painting through theme status tokens. This keeps status
+visible in the project media browser without turning widgets into asset-library
+or filesystem readers.
 Asset cards expose `ui.assets.delete_asset` through their card-level context
 menu. `AppState` owns the actual deletion, including timeline cleanup for clips
 that referenced the asset, event publication, status hints, and project save.

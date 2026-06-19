@@ -27,13 +27,13 @@ use mondrian_ui_widgets::dock_splitter::DockSplitter;
 use mondrian_ui_widgets::dock_tab_bar::TabInfo;
 use mondrian_ui_widgets::panel_slot::SlotKind;
 use mondrian_ui_widgets::{
-    AssetGrid, AssetGridItem, Checkbox, ColorPickerAreaMode, ColorPickerTrigger, CurveEditor,
-    CurvePoint, DockPanel, Dropdown, FlexChild, FlexContainer, Label, MenuItem, NodeGraphEdge,
-    NodeGraphNode, NodeGraphView, PanelList, PanelListItem, PropertyPanel, PropertyRow,
-    PropertySection, RasterImage, ScrollView, Slider, TextInput, TimelineAssetDrop, TimelineClip,
-    TimelineClipMove, TimelineClipRef, TimelineClipTrim, TimelineEditCommand, TimelineTrack,
-    TimelineTrackControl, TimelineTrackMove, TimelineTrackRef, TimelineTrimEdge, TimelineView,
-    ViewerFrameImage, ViewerSurface,
+    AssetGrid, AssetGridBadgeTone, AssetGridItem, Checkbox, ColorPickerAreaMode,
+    ColorPickerTrigger, CurveEditor, CurvePoint, DockPanel, Dropdown, FlexChild, FlexContainer,
+    Label, MenuItem, NodeGraphEdge, NodeGraphNode, NodeGraphView, PanelList, PanelListItem,
+    PropertyPanel, PropertyRow, PropertySection, RasterImage, ScrollView, Slider, TextInput,
+    TimelineAssetDrop, TimelineClip, TimelineClipMove, TimelineClipRef, TimelineClipTrim,
+    TimelineEditCommand, TimelineTrack, TimelineTrackControl, TimelineTrackMove, TimelineTrackRef,
+    TimelineTrimEdge, TimelineView, ViewerFrameImage, ViewerSurface,
 };
 
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
@@ -1442,9 +1442,9 @@ fn asset_grid_item_from_asset(
         .with_context_menu(context_menu_items)
         .renamable(true);
     if offline {
-        item = item.with_badge("OFFLINE");
+        item = item.with_badge_tone("OFFLINE", AssetGridBadgeTone::Warning);
     } else if proxied {
-        item = item.with_badge("PROXY");
+        item = item.with_badge_tone("PROXY", AssetGridBadgeTone::Success);
     }
     if let Some(state) = thumbnail_state {
         item = match state {
@@ -3048,6 +3048,10 @@ mod tests {
     use std::cell::RefCell;
     use std::path::PathBuf;
 
+    fn badge_labels(item: &AssetGridItem) -> Vec<&str> {
+        item.badges.iter().map(|badge| badge.label.as_str()).collect()
+    }
+
     struct AssetTimelineDragHarness {
         id: WidgetId,
         bounds: Rect,
@@ -3761,7 +3765,8 @@ mod tests {
             false,
         );
 
-        assert_eq!(item.badges, ["VID", "OFFLINE"]);
+        assert_eq!(badge_labels(&item), ["VID", "OFFLINE"]);
+        assert_eq!(item.badges[1].tone, AssetGridBadgeTone::Warning);
         assert_eq!(item.context_menu_items.len(), 4);
         assert_eq!(item.context_menu_items[0].label, "Reveal in File Manager");
         assert_eq!(item.context_menu_items[1].label, "Relink Media...");
@@ -3787,7 +3792,7 @@ mod tests {
         let item =
             asset_grid_item_from_asset(test_video_asset(asset_id, media_path.clone()), None, false);
 
-        assert_eq!(item.badges, ["VID"]);
+        assert_eq!(badge_labels(&item), ["VID"]);
         assert_eq!(item.context_menu_items.len(), 4);
         assert_eq!(item.context_menu_items[0].label, "Reveal in File Manager");
         assert_eq!(item.context_menu_items[1].label, "Enable Proxy Mode");
@@ -3804,7 +3809,8 @@ mod tests {
 
         let proxied =
             asset_grid_item_from_asset(test_video_asset(asset_id, media_path), None, true);
-        assert_eq!(proxied.badges, ["VID", "PROXY"]);
+        assert_eq!(badge_labels(&proxied), ["VID", "PROXY"]);
+        assert_eq!(proxied.badges[1].tone, AssetGridBadgeTone::Success);
         assert_eq!(proxied.context_menu_items[1].label, "Disable Proxy Mode");
         let Action::Custom { payload, .. } = &proxied.context_menu_items[1].action else {
             panic!("expected proxy mode custom action");
@@ -4818,7 +4824,7 @@ mod tests {
         assert!(models.assets.demo_activate_prefix.is_none());
         let item = &models.assets.items[0];
         assert_eq!(item.title, "Brand Purple");
-        assert_eq!(item.badges, ["CLR"]);
+        assert_eq!(badge_labels(item), ["CLR"]);
         assert!(item.icon.is_some());
         assert!(item.select_action.is_none());
         assert_eq!(item.drag_payload, Some(DragPayload::Asset(asset_id)));
@@ -4952,7 +4958,7 @@ mod tests {
         assert_eq!(folder.id, format!("folder:{folder_id}"));
         assert_eq!(folder.title, "Rushes");
         assert_eq!(folder.subtitle, "Folder · 1 item");
-        assert_eq!(folder.badges, ["BIN"]);
+        assert_eq!(badge_labels(folder), ["BIN"]);
         assert!(folder.icon.is_some());
         assert_eq!(
             folder.drag_payload,
@@ -4982,7 +4988,7 @@ mod tests {
 
         let asset = &models.assets.items[1];
         assert_eq!(asset.title, "Root Adjustment");
-        assert_eq!(asset.badges, ["ADJ"]);
+        assert_eq!(badge_labels(asset), ["ADJ"]);
         assert_eq!(asset.drag_payload, Some(DragPayload::Asset(root_asset_id)));
         assert!(
             !models.assets.items.iter().any(|item| item.title == "Nested"),

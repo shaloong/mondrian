@@ -81,7 +81,7 @@ pub struct AssetGridItem {
     pub id: String,
     pub title: String,
     pub subtitle: String,
-    pub badges: Vec<String>,
+    pub badges: Vec<AssetGridBadge>,
     pub accent: Color,
     pub icon: Option<VectorIcon>,
     pub thumbnail: Option<RasterImage>,
@@ -92,6 +92,43 @@ pub struct AssetGridItem {
     pub drag_payload: Option<DragPayload>,
     pub context_menu_items: Vec<MenuItem>,
     pub renamable: bool,
+}
+
+/// Semantic visual tone for an [`AssetGridBadge`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssetGridBadgeTone {
+    /// Neutral metadata, such as media kind.
+    Neutral,
+    /// Accent metadata tied to the active theme primary/accent color.
+    Accent,
+    /// Positive/ready status.
+    Success,
+    /// Attention-needed status.
+    Warning,
+    /// Error or unavailable status.
+    Error,
+}
+
+/// Compact label painted over an [`AssetGridItem`] preview.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssetGridBadge {
+    pub label: String,
+    pub tone: AssetGridBadgeTone,
+}
+
+impl AssetGridBadge {
+    /// Create a neutral badge.
+    pub fn new(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            tone: AssetGridBadgeTone::Neutral,
+        }
+    }
+
+    /// Create a badge with a semantic tone.
+    pub fn with_tone(label: impl Into<String>, tone: AssetGridBadgeTone) -> Self {
+        Self { label: label.into(), tone }
+    }
 }
 
 impl AssetGridItem {
@@ -123,13 +160,19 @@ impl AssetGridItem {
 
     /// Append a compact kind/status badge.
     pub fn with_badge(mut self, badge: impl Into<String>) -> Self {
-        self.badges.push(badge.into());
+        self.badges.push(AssetGridBadge::new(badge));
+        self
+    }
+
+    /// Append a compact kind/status badge with a semantic tone.
+    pub fn with_badge_tone(mut self, badge: impl Into<String>, tone: AssetGridBadgeTone) -> Self {
+        self.badges.push(AssetGridBadge::with_tone(badge, tone));
         self
     }
 
     /// Set all compact kind/status badges.
     pub fn with_badges(mut self, badges: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        self.badges = badges.into_iter().map(Into::into).collect();
+        self.badges = badges.into_iter().map(AssetGridBadge::new).collect();
         self
     }
 
@@ -516,7 +559,7 @@ impl AssetGrid {
         }
         item.title.to_lowercase().contains(query)
             || item.subtitle.to_lowercase().contains(query)
-            || item.badges.iter().any(|badge| badge.to_lowercase().contains(query))
+            || item.badges.iter().any(|badge| badge.label.to_lowercase().contains(query))
     }
 
     fn item_matches_filter(&self, item: &AssetGridItem) -> bool {
@@ -1036,7 +1079,7 @@ impl AssetGrid {
         let mut x = preview.x + preview.width - 8.0;
         let max_badge_width = (preview.width - 12.0).max(24.0);
         for badge in item.badges.iter().rev() {
-            let text_width = measure_single_line(badge, font_size).0;
+            let text_width = measure_single_line(&badge.label, font_size).0;
             let desired_width = (text_width + 12.0).clamp(24.0, max_badge_width);
             let available_width = x - min_x;
             if available_width < 22.0 {
@@ -1044,17 +1087,14 @@ impl AssetGrid {
             }
             let badge_width = desired_width.min(available_width);
             let badge_rect = Rect::new(x - badge_width, preview.y + 6.0, badge_width, 18.0);
-            ctx.encoder.draw_rect(
-                badge_rect,
-                color_with_alpha(ctx.theme.colors.background, 0.56),
-                5.0,
-            );
+            let (fill, text) = badge_colors(ctx, badge, text_color);
+            ctx.encoder.draw_rect(badge_rect, fill, 5.0);
             ctx.push_clip(badge_rect.inset(4.0, 1.0));
             ctx.encoder.draw_text(
-                badge,
+                &badge.label,
                 font_size,
                 snap_point(Point::new(badge_rect.x + 6.0, badge_rect.y + 3.0)),
-                text_color,
+                text,
             );
             ctx.pop_clip();
             x = badge_rect.x - 4.0;
@@ -1693,6 +1733,17 @@ fn paint_thumbnail_failed(ctx: &mut PaintContext, preview: Rect, color: Color) {
     );
 }
 
+fn badge_colors(ctx: &PaintContext, badge: &AssetGridBadge, neutral_text: Color) -> (Color, Color) {
+    let colors = &ctx.theme.colors;
+    match badge.tone {
+        AssetGridBadgeTone::Neutral => (color_with_alpha(colors.background, 0.56), neutral_text),
+        AssetGridBadgeTone::Accent => (color_with_alpha(colors.primary, 0.22), colors.primary),
+        AssetGridBadgeTone::Success => (color_with_alpha(colors.success, 0.22), colors.success),
+        AssetGridBadgeTone::Warning => (color_with_alpha(colors.warning, 0.22), colors.warning),
+        AssetGridBadgeTone::Error => (color_with_alpha(colors.error, 0.22), colors.error),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1707,6 +1758,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingEncoder {
         rects: Vec<Rect>,
+        rect_colors: Vec<Color>,
         clips: Vec<Rect>,
         clip_pops: usize,
         raster_images: Vec<(String, Rect, u32, u32)>,
@@ -1723,8 +1775,9 @@ mod tests {
             self.clip_pops += 1;
         }
 
-        fn draw_rect(&mut self, bounds: Rect, _color: Color, _corner_radius: f32) {
+        fn draw_rect(&mut self, bounds: Rect, color: Color, _corner_radius: f32) {
             self.rects.push(bounds);
+            self.rect_colors.push(color);
         }
 
         fn draw_line(&mut self, _start: Point, _end: Point, _width: f32, _color: Color) {}
@@ -2041,7 +2094,9 @@ mod tests {
     fn multiple_badges_are_searchable_and_paint_inside_preview() {
         let grid = AssetGrid::new(
             "Assets",
-            vec![item("clip-a", "Clip A").with_badges(["VID", "OFFLINE"])],
+            vec![item("clip-a", "Clip A")
+                .with_badge("VID")
+                .with_badge_tone("OFFLINE", AssetGridBadgeTone::Warning)],
         );
         assert!(AssetGrid::item_matches_query(&grid.items[0], "offline"));
 
@@ -2064,6 +2119,13 @@ mod tests {
 
         assert!(encoder.texts.iter().any(|text| text == "VID"));
         assert!(encoder.texts.iter().any(|text| text == "OFFLINE"));
+        assert!(
+            encoder
+                .rect_colors
+                .iter()
+                .any(|color| *color == color_with_alpha(theme.colors.warning, 0.22)),
+            "warning badges should use the theme warning token"
+        );
         let badge_clips: Vec<Rect> = encoder
             .clips
             .iter()

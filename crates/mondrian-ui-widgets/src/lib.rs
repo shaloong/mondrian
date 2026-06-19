@@ -38,7 +38,8 @@ mod component_extreme_tests;
 mod test_utils;
 
 pub use asset_grid::{
-    AssetGrid, AssetGridAction, AssetGridItem, AssetGridState, AssetGridThumbnailStatus,
+    AssetGrid, AssetGridAction, AssetGridBadge, AssetGridBadgeTone, AssetGridItem, AssetGridState,
+    AssetGridThumbnailStatus,
 };
 pub use button::Button;
 pub use checkbox::Checkbox;
