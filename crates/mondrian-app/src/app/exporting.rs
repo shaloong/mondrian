@@ -112,12 +112,13 @@ impl AppState {
         }
 
         let sequences = self.export_sequences_snapshot();
-        let Some(sequence) = request
-            .sequence_id
-            .and_then(|id| sequences.iter().find(|sequence| sequence.id == id))
-            .cloned()
-            .or_else(|| self.sequence.clone())
-        else {
+        let sequence = match request.sequence_id {
+            Some(sequence_id) => {
+                sequences.iter().find(|sequence| sequence.id == sequence_id).cloned()
+            }
+            None => self.sequence.clone(),
+        };
+        let Some(sequence) = sequence else {
             let reason = "当前无序列".to_string();
             self.set_status_hint(format!("导出失败：{reason}"), true);
             return Err(export_error("enqueue_timeline_export", reason));
@@ -329,5 +330,36 @@ mod tests {
         assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
         assert!(state.status_hint.as_ref().is_some_and(|(_, is_error)| *is_error));
         assert!(state.render_queue.list_jobs().is_empty());
+    }
+
+    #[test]
+    fn enqueue_timeline_export_rejects_missing_explicit_sequence_id() {
+        let mut state = AppState {
+            sequence: Some(Sequence::new("active")),
+            ..Default::default()
+        };
+        let temp_root = std::env::temp_dir().join(format!(
+            "mondrian-export-stale-sequence-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        state.asset_library = Some(AssetLibrary::open(temp_root.clone()).expect("open library"));
+
+        let err = state
+            .enqueue_timeline_export(TimelineExportRequest {
+                preset: ExportPreset::youtube_1080p(),
+                sequence_id: Some(SequenceId::new()),
+                range: TimelineExportRange::EntireSequence,
+                output_path: PathBuf::from("E:/renders/out.mp4"),
+            })
+            .expect_err("stale explicit sequence id should be rejected");
+
+        assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
+        assert!(state.status_hint.as_ref().is_some_and(|(_, is_error)| *is_error));
+        assert!(state.render_queue.list_jobs().is_empty());
+
+        let _ = std::fs::remove_dir_all(temp_root);
     }
 }

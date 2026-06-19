@@ -207,7 +207,10 @@ Export follows the same rule. UI frontends may collect a preset, sequence id,
 timeline range, and output path, then dispatch `ui.export.enqueue`; `AppState`
 owns timeline export request validation, recursive asset path collection,
 offline-asset checks, and `RenderJob` creation through
-`app::exporting::TimelineExportRequest`.
+`app::exporting::TimelineExportRequest`. A present sequence id is authoritative:
+if that id no longer resolves to an exportable sequence, enqueue fails with a
+status error instead of silently falling back to the active sequence. Only an
+absent sequence id may use the active sequence fallback.
 Self-hosted export forms persist their editable draft in `AppState::export_draft`
 through `ui.export.set_draft`, so widget-tree refreshes and dock layout changes
 do not reset selected preset, selected sequence, range, or output path.
