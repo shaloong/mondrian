@@ -31,11 +31,12 @@ const TESSELLATION_TOLERANCE: f32 = 0.08;
 /// the browser-like resvg/tiny-skia path while still preventing very large
 /// illustrations from monopolizing the atlas.
 const MAX_RASTER_ICON_SIZE: u32 = 1024;
-/// Maximum quality multiplier for small SVG icon rasters.
+/// Maximum quality multiplier used while rasterizing small SVG icons.
 ///
-/// The supersampled bitmap is cached once in the renderer image atlas and drawn
-/// back into the requested logical bounds with linear filtering. This improves
-/// diagonal and curve coverage for small icons without changing widget layout.
+/// SVGs are rendered into a temporary high-resolution pixmap and box-filtered
+/// back to the requested target pixel size before they enter the renderer image
+/// atlas. This gives diagonals and curves stable coverage without asking the GPU
+/// to minify icon atlases with point-like linear samples.
 const MAX_RASTER_ICON_SUPERSAMPLE: u32 = 4;
 
 static STATIC_SVG_ICON_CACHE: OnceLock<Mutex<std::collections::HashMap<&'static str, VectorIcon>>> =
@@ -209,11 +210,12 @@ impl VectorIcon {
         if target_width > MAX_RASTER_ICON_SIZE || target_height > MAX_RASTER_ICON_SIZE {
             return None;
         }
-        let scale = raster_supersample_scale(target_width, target_height);
-        let width = target_width.checked_mul(scale)?;
-        let height = target_height.checked_mul(scale)?;
-
-        let key = RasterIconKey { id: source.id.clone(), width, height };
+        let supersample = raster_supersample_scale(target_width, target_height);
+        let key = RasterIconKey {
+            id: source.id.clone(),
+            width: target_width,
+            height: target_height,
+        };
         let cache = RASTER_ICON_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
         {
             let guard = cache.lock().ok()?;
@@ -222,7 +224,8 @@ impl VectorIcon {
             }
         }
 
-        let raster = rasterize_svg_to_alpha_rgba(&source.svg, width, height)?;
+        let raster =
+            rasterize_svg_to_alpha_rgba(&source.svg, target_width, target_height, supersample)?;
         let mut guard = cache.lock().ok()?;
         let raster = guard.entry(key.clone()).or_insert(raster).clone();
         Some((raster_draw_key(&key), raster))
@@ -254,24 +257,87 @@ fn raster_draw_key(key: &RasterIconKey) -> String {
     format!("vector-icon:{}:{}x{}", key.id, key.width, key.height)
 }
 
-fn rasterize_svg_to_alpha_rgba(svg: &str, width: u32, height: u32) -> Option<RasterIcon> {
+fn rasterize_svg_to_alpha_rgba(
+    svg: &str,
+    width: u32,
+    height: u32,
+    supersample: u32,
+) -> Option<RasterIcon> {
+    let supersample = supersample.max(1);
+    let render_width = width.checked_mul(supersample)?;
+    let render_height = height.checked_mul(supersample)?;
     let tree = usvg::Tree::from_data(svg.as_bytes(), &usvg::Options::default()).ok()?;
     let source_size = tree.size();
-    let scale_x = width as f32 / source_size.width().max(1.0);
-    let scale_y = height as f32 / source_size.height().max(1.0);
-    let mut pixmap = tiny_skia::Pixmap::new(width, height)?;
+    let scale_x = render_width as f32 / source_size.width().max(1.0);
+    let scale_y = render_height as f32 / source_size.height().max(1.0);
+    let mut pixmap = tiny_skia::Pixmap::new(render_width, render_height)?;
     resvg::render(
         &tree,
         tiny_skia::Transform::from_scale(scale_x, scale_y),
         &mut pixmap.as_mut(),
     );
 
-    let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
-    for pixel in pixmap.data().chunks_exact(4) {
-        rgba.extend_from_slice(&[255, 255, 255, pixel[3]]);
-    }
+    let rgba = if supersample == 1 {
+        alpha_rgba_from_tiny_skia_data(pixmap.data())
+    } else {
+        downsample_alpha_rgba_box(
+            pixmap.data(),
+            render_width,
+            render_height,
+            width,
+            height,
+            supersample,
+        )?
+    };
 
     Some(RasterIcon { width, height, rgba: Arc::from(rgba) })
+}
+
+fn alpha_rgba_from_tiny_skia_data(pixels: &[u8]) -> Vec<u8> {
+    let mut rgba = Vec::with_capacity(pixels.len());
+    for pixel in pixels.chunks_exact(4) {
+        rgba.extend_from_slice(&[255, 255, 255, pixel[3]]);
+    }
+    rgba
+}
+
+fn downsample_alpha_rgba_box(
+    pixels: &[u8],
+    source_width: u32,
+    source_height: u32,
+    target_width: u32,
+    target_height: u32,
+    supersample: u32,
+) -> Option<Vec<u8>> {
+    if supersample == 0
+        || source_width != target_width.checked_mul(supersample)?
+        || source_height != target_height.checked_mul(supersample)?
+    {
+        return None;
+    }
+    let expected_len = source_width.checked_mul(source_height)?.checked_mul(4)? as usize;
+    if pixels.len() != expected_len {
+        return None;
+    }
+
+    let mut rgba = Vec::with_capacity(target_width as usize * target_height as usize * 4);
+    let sample_count = supersample.checked_mul(supersample)?;
+    for y in 0..target_height {
+        for x in 0..target_width {
+            let mut alpha_sum = 0u32;
+            for sy in 0..supersample {
+                let source_y = y * supersample + sy;
+                for sx in 0..supersample {
+                    let source_x = x * supersample + sx;
+                    let offset = ((source_y * source_width + source_x) * 4 + 3) as usize;
+                    alpha_sum += u32::from(pixels[offset]);
+                }
+            }
+            let alpha = ((alpha_sum + sample_count / 2) / sample_count).min(255) as u8;
+            rgba.extend_from_slice(&[255, 255, 255, alpha]);
+        }
+    }
+    Some(rgba)
 }
 
 fn collect_usvg_group(
@@ -649,6 +715,20 @@ mod tests {
     }
 
     #[test]
+    fn downsample_alpha_rgba_box_averages_supersampled_coverage() {
+        let source = vec![
+            0, 0, 0, 255, //
+            0, 0, 0, 0, //
+            0, 0, 0, 0, //
+            0, 0, 0, 0,
+        ];
+
+        let rgba = downsample_alpha_rgba_box(&source, 2, 2, 1, 1, 2).expect("downsample");
+
+        assert_eq!(rgba, vec![255, 255, 255, 64]);
+    }
+
+    #[test]
     fn paints_svg_icons_as_cached_raster_images_for_browser_like_aa() {
         let icon = VectorIcon::from_svg_str(
             r#"<svg viewBox="0 0 24 24"><path d="M4 4L20 4L12 20Z" fill="black"/></svg>"#,
@@ -668,7 +748,7 @@ mod tests {
     }
 
     #[test]
-    fn small_svg_icons_are_supersampled_without_changing_layout_bounds() {
+    fn small_svg_icons_are_prefiltered_without_changing_layout_bounds() {
         let icon = VectorIcon::from_svg_str(
             r#"<svg viewBox="0 0 24 24"><path d="M4 4L20 4L12 20Z" fill="black"/></svg>"#,
         )
@@ -687,7 +767,7 @@ mod tests {
             recorder.raster_bounds,
             vec![Rect::new(10.2, 20.6, 16.0, 16.0)]
         );
-        assert_eq!(recorder.raster_sizes, vec![(64, 64)]);
+        assert_eq!(recorder.raster_sizes, vec![(16, 16)]);
     }
 
     #[test]
@@ -710,7 +790,7 @@ mod tests {
             recorder.raster_bounds,
             vec![Rect::new(5.25, 8.0, 15.2, 15.2)]
         );
-        assert_eq!(recorder.raster_sizes, vec![(64, 64)]);
+        assert_eq!(recorder.raster_sizes, vec![(16, 16)]);
     }
 
     #[test]
@@ -805,8 +885,8 @@ mod tests {
             .raster_icon_for_bounds(Rect::new(0.0, 0.0, 32.0, 32.0))
             .expect("large raster");
 
-        assert_eq!((small.width, small.height), (64, 68));
-        assert_eq!((large.width, large.height), (128, 128));
+        assert_eq!((small.width, small.height), (16, 17));
+        assert_eq!((large.width, large.height), (32, 32));
         assert_ne!(small.rgba.len(), large.rgba.len());
     }
 

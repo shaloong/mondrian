@@ -1475,15 +1475,15 @@ usvg so basic shapes, inherited paint, relative path commands, arcs, and
 transforms become renderable path data. The icon keeps lyon-tessellated
 theme-tinted triangle meshes as a geometry fallback and metadata path, while
 normal small-icon painting rasterizes the SVG source with resvg/tiny-skia at the
-ceil of the fitted logical size or an adaptively supersampled size, then submits
-a stable raster-image key to the renderer. Raster cache dimensions may be
-integer or supersampled, but the draw command keeps the original fitted subpixel
-bounds so resize, scroll, and DPI scaling do not introduce pixel-snap jitter.
-Supersampling prioritizes small-icon quality up to 4x and steps down only when
-the generated bitmap would exceed the 1024px per-edge raster icon budget, so
-common SVG controls and large empty-state glyphs get smoother diagonal and curve
-coverage without letting oversized illustrations consume a disproportionate
-slice of the shared 2048px image atlas.
+ceil of the fitted logical size. For small icons, the widget layer may render a
+temporary higher-resolution pixmap with resvg/tiny-skia, then CPU box-filter it
+back to the target pixel size before submitting a stable raster-image key to the
+renderer. The draw command keeps the original fitted subpixel bounds so resize,
+scroll, and DPI scaling do not introduce pixel-snap jitter. Supersampling
+prioritizes small-icon coverage up to 4x and steps down only when the temporary
+pixmap would exceed the 1024px per-edge raster icon budget, so common SVG
+controls get smoother diagonal and curve coverage without letting icon rasters
+consume a disproportionate slice of the shared 2048px image atlas.
 Icons above that budget fall back to lyon-tessellated triangles; this is a
 capacity guard, not the normal visual-quality path.
 Larger bounds may fall back to the lyon mesh path.
@@ -1516,12 +1516,12 @@ commands is avoided because it degrades curved/vector geometry and can misalign
 glyph bitmap bearings.
 The GPU UI pass renders through a cached 4x MSAA target and resolves into the
 surface view. Raster icon images use a separate renderer-owned image atlas with
-linear sampling so small SVG icons receive browser-like coverage from
-resvg/tiny-skia without sharing mutable atlas state with text glyphs. Small SVG
-rasters may be cached at a higher pixel resolution than their layout bounds and
-downsampled by the GPU; layout bounds remain the authoritative hit-test and
-composition geometry. Image UVs remain unsnapped because they are texture
-coordinates rather than screen-space geometry.
+linear sampling so SVG icons receive browser-like coverage from resvg/tiny-skia
+without sharing mutable atlas state with text glyphs. Small SVG rasters are
+prefiltered before atlas upload rather than relying on GPU minification as a
+box filter; layout bounds remain the authoritative hit-test and composition
+geometry. Image UVs remain unsnapped because they are texture coordinates rather
+than screen-space geometry.
 Linear-sampled atlas entries must upload their full allocated rectangle,
 including edge-dilated padding around the inner content UV. Padding is not just
 reserved packing space: it is sampled by the GPU at fractional edges, so leaving
