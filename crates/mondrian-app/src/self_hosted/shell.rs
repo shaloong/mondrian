@@ -17,7 +17,6 @@ use mondrian_ui_widgets::{
     AssetGrid, AssetGridState, PanelList, PanelListState, ScrollView, ScrollViewState,
     TimelineView, TimelineViewState,
 };
-use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::app::ui_actions::{
@@ -62,6 +61,20 @@ const STATUS_BAR_HEIGHT: f32 = 24.0;
 struct DockPanelState {
     owner: PanelKind,
     active_index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct AssetGridLocalState {
+    owner: PanelKind,
+    ordinal: usize,
+    state: AssetGridState,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PanelListLocalState {
+    owner: PanelKind,
+    ordinal: usize,
+    state: PanelListState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1103,68 +1116,120 @@ fn restore_dock_panel_state(widget: &mut dyn Widget, states: &[DockPanelState]) 
     }
 }
 
-fn collect_asset_grid_state(widget: &dyn Widget) -> BTreeMap<String, AssetGridState> {
-    let mut states = BTreeMap::new();
-    collect_asset_grid_state_into(widget, &mut states);
+fn collect_asset_grid_state(widget: &dyn Widget) -> Vec<AssetGridLocalState> {
+    let mut states = Vec::new();
+    collect_asset_grid_state_into(widget, None, &mut states);
     states
 }
 
 fn collect_asset_grid_state_into(
     widget: &dyn Widget,
-    states: &mut BTreeMap<String, AssetGridState>,
+    owner: Option<PanelKind>,
+    states: &mut Vec<AssetGridLocalState>,
 ) {
+    let owner = widget.panel_kind().or(owner);
     if let Some(grid) = widget.as_any().and_then(|any| any.downcast_ref::<AssetGrid>()) {
-        states.insert(grid.title().to_owned(), grid.state());
+        if let Some(owner) = owner {
+            states.push(AssetGridLocalState {
+                owner,
+                ordinal: states.iter().filter(|state| state.owner == owner).count(),
+                state: grid.state(),
+            });
+        }
     }
     for index in 0..widget.child_count() {
         if let Some(child) = widget.child(index) {
-            collect_asset_grid_state_into(child, states);
+            collect_asset_grid_state_into(child, owner, states);
         }
     }
 }
 
-fn restore_asset_grid_state(widget: &mut dyn Widget, states: &BTreeMap<String, AssetGridState>) {
-    if let Some(grid) = widget.as_any_mut().and_then(|any| any.downcast_mut::<AssetGrid>()) {
-        if let Some(state) = states.get(grid.title()) {
-            grid.restore_state(state);
+fn restore_asset_grid_state(widget: &mut dyn Widget, states: &[AssetGridLocalState]) {
+    let mut restored = Vec::new();
+    restore_asset_grid_state_into(widget, None, states, &mut restored);
+}
+
+fn restore_asset_grid_state_into(
+    widget: &mut dyn Widget,
+    owner: Option<PanelKind>,
+    states: &[AssetGridLocalState],
+    restored: &mut Vec<(PanelKind, usize)>,
+) {
+    let owner = widget.panel_kind().or(owner);
+    if let Some(owner) = owner {
+        if let Some(grid) = widget.as_any_mut().and_then(|any| any.downcast_mut::<AssetGrid>()) {
+            let ordinal =
+                restored.iter().filter(|(restored_owner, _)| *restored_owner == owner).count();
+            if let Some(state) =
+                states.iter().find(|state| state.owner == owner && state.ordinal == ordinal)
+            {
+                grid.restore_state(&state.state);
+            }
+            restored.push((owner, ordinal));
         }
     }
     for index in 0..widget.child_count() {
         if let Some(child) = widget.child_mut(index) {
-            restore_asset_grid_state(child, states);
+            restore_asset_grid_state_into(child, owner, states, restored);
         }
     }
 }
 
-fn collect_panel_list_state(widget: &dyn Widget) -> BTreeMap<String, PanelListState> {
-    let mut states = BTreeMap::new();
-    collect_panel_list_state_into(widget, &mut states);
+fn collect_panel_list_state(widget: &dyn Widget) -> Vec<PanelListLocalState> {
+    let mut states = Vec::new();
+    collect_panel_list_state_into(widget, None, &mut states);
     states
 }
 
 fn collect_panel_list_state_into(
     widget: &dyn Widget,
-    states: &mut BTreeMap<String, PanelListState>,
+    owner: Option<PanelKind>,
+    states: &mut Vec<PanelListLocalState>,
 ) {
+    let owner = widget.panel_kind().or(owner);
     if let Some(list) = widget.as_any().and_then(|any| any.downcast_ref::<PanelList>()) {
-        states.insert(list.title().to_owned(), list.state());
+        if let Some(owner) = owner {
+            states.push(PanelListLocalState {
+                owner,
+                ordinal: states.iter().filter(|state| state.owner == owner).count(),
+                state: list.state(),
+            });
+        }
     }
     for index in 0..widget.child_count() {
         if let Some(child) = widget.child(index) {
-            collect_panel_list_state_into(child, states);
+            collect_panel_list_state_into(child, owner, states);
         }
     }
 }
 
-fn restore_panel_list_state(widget: &mut dyn Widget, states: &BTreeMap<String, PanelListState>) {
-    if let Some(list) = widget.as_any_mut().and_then(|any| any.downcast_mut::<PanelList>()) {
-        if let Some(state) = states.get(list.title()) {
-            list.restore_state(state);
+fn restore_panel_list_state(widget: &mut dyn Widget, states: &[PanelListLocalState]) {
+    let mut restored = Vec::new();
+    restore_panel_list_state_into(widget, None, states, &mut restored);
+}
+
+fn restore_panel_list_state_into(
+    widget: &mut dyn Widget,
+    owner: Option<PanelKind>,
+    states: &[PanelListLocalState],
+    restored: &mut Vec<(PanelKind, usize)>,
+) {
+    let owner = widget.panel_kind().or(owner);
+    if let Some(owner) = owner {
+        if let Some(list) = widget.as_any_mut().and_then(|any| any.downcast_mut::<PanelList>()) {
+            let ordinal =
+                restored.iter().filter(|(restored_owner, _)| *restored_owner == owner).count();
+            if let Some(state) =
+                states.iter().find(|state| state.owner == owner && state.ordinal == ordinal)
+            {
+                list.restore_state(&state.state);
+            }
+            restored.push((owner, ordinal));
         }
     }
     for index in 0..widget.child_count() {
         if let Some(child) = widget.child_mut(index) {
-            restore_panel_list_state(child, states);
+            restore_panel_list_state_into(child, owner, states, restored);
         }
     }
 }
@@ -3005,6 +3070,28 @@ mod tests {
     }
 
     #[test]
+    fn set_models_preserves_asset_grid_state_when_title_changes() {
+        let mut root = SelfHostedAppRoot::demo();
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        assert!(with_asset_grid_mut_for_title(
+            root.dock_mut(),
+            "Assets",
+            &mut |grid| {
+                grid.set_filter_query("audio");
+                grid.set_selected(Some(1));
+            },
+        ));
+        let mut models = SelfHostedPanelModels::demo();
+        models.assets.title = "Media".to_owned();
+
+        root.set_models(models);
+
+        let state = asset_grid_state_for_title(&root, "Media").expect("renamed assets state");
+        assert_eq!(state.filter_query, "audio");
+        assert_eq!(state.selected_item_id.as_deref(), Some("demo-audio"));
+    }
+
+    #[test]
     fn set_models_preserves_grouped_panel_active_tab_and_visible_list_state() {
         let platform = FakePlatform::default();
         let mut root = SelfHostedAppRoot::demo();
@@ -3029,6 +3116,28 @@ mod tests {
             Some(1)
         );
         let state = panel_list_state_for_title(&root, "Effects").expect("effects state");
+        assert_eq!(state.filter_query, "blur");
+    }
+
+    #[test]
+    fn set_models_preserves_panel_list_state_when_title_changes() {
+        let platform = FakePlatform::default();
+        let mut root = SelfHostedAppRoot::demo();
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        root.handle_shell_action(Action::FocusPanel(PanelKind::Effects), &platform, None);
+        assert!(with_panel_list_mut_for_title(
+            root.dock_mut(),
+            "Effects",
+            &mut |list| {
+                list.set_filter_query("blur");
+            },
+        ));
+        let mut models = SelfHostedPanelModels::demo();
+        models.effects.title = "FX".to_owned();
+
+        root.set_models(models);
+
+        let state = panel_list_state_for_title(&root, "FX").expect("renamed effects state");
         assert_eq!(state.filter_query, "blur");
     }
 

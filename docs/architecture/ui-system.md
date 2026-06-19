@@ -1613,6 +1613,10 @@ widgets expose small explicit state snapshots for UI-local affordances such as
 `PanelList` filters, selection, and scroll offsets. Dock containers expose their
 active tab through widget APIs, and `SelfHostedAppRoot` captures that shell-local
 navigation state before rebuilding dock content from fresh `AppState` models.
+Refresh restoration must use stable ownership, such as `PanelKind` plus a
+per-panel ordinal, rather than visible titles or labels. Display text can change
+for localization, product naming, or dynamic folder context, and must not decide
+whether filter, selection, scroll, or active-tab state survives a model rebuild.
 It restores active tabs before list state so grouped panels such as
 Assets/Effects keep showing the surface the user was working in. Export is an
 independent panel/workspace. Splitter layout restoration remains owned by
