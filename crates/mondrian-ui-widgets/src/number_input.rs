@@ -21,6 +21,8 @@ pub struct NumberInput {
     max: f64,
     step: Option<f64>,
     decimals: usize,
+    committed_value: f64,
+    focused: bool,
     width: f32,
     on_change: Option<Box<NumberInputChangeAction>>,
 }
@@ -36,6 +38,8 @@ impl NumberInput {
             max,
             step: None,
             decimals: 0,
+            committed_value: value,
+            focused: false,
             width: 200.0,
             on_change: None,
         }
@@ -93,6 +97,10 @@ impl NumberInput {
 
     /// Current parsed and normalized value, if the raw text is numeric.
     pub fn value(&self) -> Option<f64> {
+        self.normalized_text_value()
+    }
+
+    fn normalized_text_value(&self) -> Option<f64> {
         parse_number(self.input.text()).map(|value| self.normalize(value))
     }
 
@@ -106,14 +114,26 @@ impl NumberInput {
         }
     }
 
-    fn dispatch_if_valid(&self, ctx: &mut EventContext) {
+    fn dispatch_if_valid(&mut self, ctx: &mut EventContext) {
+        let Some(value) = self.normalized_text_value() else {
+            return;
+        };
+        self.committed_value = value;
         let Some(factory) = &self.on_change else {
             return;
         };
-        let Some(value) = self.value() else {
-            return;
-        };
         (ctx.dispatch)(factory(value));
+    }
+
+    fn commit_display_text(&mut self) -> bool {
+        let value = self.normalized_text_value().unwrap_or(self.committed_value);
+        self.committed_value = value;
+        let text = format_number(value, self.decimals);
+        if self.input.text() == text {
+            return false;
+        }
+        self.input.set_text(text);
+        true
     }
 }
 
@@ -134,10 +154,26 @@ impl Widget for NumberInput {
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if self.focused && matches!(event, UiEvent::KeyDown { key: KeyCode::Enter, .. }) {
+            if self.commit_display_text() {
+                ctx.request_repaint();
+            }
+            return EventResult::Handled;
+        }
         let before = self.input.text().to_owned();
         let result = self.input.event(event, ctx);
         if result == EventResult::Handled && self.input.text() != before {
             self.dispatch_if_valid(ctx);
+        }
+        if result == EventResult::Handled && matches!(event, UiEvent::FocusLost) {
+            self.focused = false;
+            if self.commit_display_text() {
+                ctx.request_repaint();
+            }
+        } else if result == EventResult::Handled
+            && matches!(event, UiEvent::FocusGained | UiEvent::MouseDown { .. })
+        {
+            self.focused = true;
         }
         result
     }
@@ -259,6 +295,114 @@ mod tests {
         assert_eq!(input.text(), "abc");
         assert_eq!(input.value(), None);
         assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn enter_formats_valid_text_to_normalized_number_without_duplicate_dispatch() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+        let mut input = NumberInput::new(0.0, 0.0, 1.0)
+            .with_step(0.25)
+            .with_decimals(2)
+            .on_change(number_action);
+        layout(&mut input);
+
+        click(&mut input, &mut ctx);
+        input.event(
+            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &mut ctx,
+        );
+        input.event(&UiEvent::TextInput("0.62".into()), &mut ctx);
+
+        assert_eq!(input.text(), "0.62");
+        assert_eq!(input.value(), Some(0.5));
+        assert_eq!(actions.borrow().len(), 1);
+
+        assert_eq!(
+            input.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(input.text(), "0.50");
+        assert_eq!(input.value(), Some(0.5));
+        assert_eq!(actions.borrow().len(), 1);
+    }
+
+    #[test]
+    fn focus_lost_reverts_invalid_text_to_last_committed_number() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+        let mut input = NumberInput::new(12.0, 0.0, 100.0).on_change(number_action);
+        layout(&mut input);
+
+        click(&mut input, &mut ctx);
+        input.event(
+            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &mut ctx,
+        );
+        input.event(&UiEvent::TextInput("abc".into()), &mut ctx);
+
+        assert_eq!(input.text(), "abc");
+        assert_eq!(input.value(), None);
+        assert!(actions.borrow().is_empty());
+
+        assert_eq!(
+            input.event(&UiEvent::FocusLost, &mut ctx),
+            EventResult::Handled
+        );
+
+        assert_eq!(input.text(), "12");
+        assert_eq!(input.value(), Some(12.0));
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn invalid_text_reverts_to_most_recent_valid_number() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+        let mut input = NumberInput::new(12.0, 0.0, 100.0).with_step(5.0).on_change(number_action);
+        layout(&mut input);
+
+        click(&mut input, &mut ctx);
+        input.event(
+            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &mut ctx,
+        );
+        input.event(&UiEvent::TextInput("42".into()), &mut ctx);
+        assert_eq!(input.value(), Some(40.0));
+        assert_eq!(actions.borrow().len(), 1);
+
+        input.event(
+            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &mut ctx,
+        );
+        input.event(&UiEvent::TextInput("abc".into()), &mut ctx);
+        assert_eq!(input.text(), "abc");
+        assert_eq!(input.value(), None);
+
+        assert_eq!(
+            input.event(&UiEvent::FocusLost, &mut ctx),
+            EventResult::Handled
+        );
+
+        assert_eq!(input.text(), "40");
+        assert_eq!(input.value(), Some(40.0));
+        assert_eq!(actions.borrow().len(), 1);
     }
 
     #[test]

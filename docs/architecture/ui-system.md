@@ -421,8 +421,11 @@ ends.
 implementation. It reuses text focus, selection, IME, clipboard, clipping, and
 scrolling behavior, then parses committed text changes into clamped/stepped
 numeric actions. Invalid numeric text remains local and dispatches no action,
-letting the next app-state refresh restore the authoritative value without
-mutating domain state from malformed input.
+letting users type partial values without mutating domain state from malformed
+input. Enter and focus loss are display commit points: valid text is reformatted
+to the clamped/stepped value with the configured decimal precision, while
+invalid text reverts to the most recent valid number already accepted by the
+control.
 Panel adapters may set a preferred `NumberInput` width when composing compact
 property rows; the input still receives its final bounds from layout and must
 not own row-level sizing policy.
