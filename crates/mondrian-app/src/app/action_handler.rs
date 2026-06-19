@@ -24,20 +24,21 @@ use crate::app::ui_actions::{
     InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload,
     ProjectRecoverFromAutosavePayload, TimelineAddTrackKind, TimelineAddTrackPayload,
     TimelineDropAssetPayload, TimelineMoveClipPayload, TimelineMoveTrackPayload,
-    TimelineSeekPayload, TimelineSelectClipPayload, TimelineSetSelectedClipsEnabledPayload,
-    TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipsPayload,
-    TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
-    ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR,
-    ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_DELETE_SELECTION, ASSETS_IMPORT_FILES,
-    ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE,
-    ASSETS_PREPARE_DRAG, ASSETS_RELINK_ASSET, ASSETS_RENAME_ASSET, ASSETS_RENAME_FOLDER,
-    ASSETS_SET_PROXY_MODE, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, EXPORT_ENQUEUE,
-    EXPORT_NAMESPACE, EXPORT_SET_DRAFT, INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT,
-    INSPECTOR_SELECT_EFFECT, INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_CLIP_ENABLED,
-    INSPECTOR_SET_CLIP_OPACITY, INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD,
-    INSPECTOR_SET_EFFECT_ENABLED, INSPECTOR_SET_EFFECT_PROPERTY, PROJECT_CREATE_WITH_SETTINGS,
-    PROJECT_NAMESPACE, PROJECT_RECOVER_FROM_AUTOSAVE, TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET,
-    TIMELINE_MOVE_CLIP, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_SEEK,
+    TimelineOpenNestedSequencePayload, TimelineSeekPayload, TimelineSelectClipPayload,
+    TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
+    TimelineTrackControlPayloadKind, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
+    TimelineTrimSelectedClipsToPlayheadPayload, ASSETS_CREATE_ADJUSTMENT_LAYER,
+    ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR, ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER,
+    ASSETS_DELETE_SELECTION, ASSETS_IMPORT_FILES, ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER,
+    ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG, ASSETS_RELINK_ASSET,
+    ASSETS_RENAME_ASSET, ASSETS_RENAME_FOLDER, ASSETS_SET_PROXY_MODE, EFFECTS_ADD_TO_CLIP,
+    EFFECTS_NAMESPACE, EXPORT_ENQUEUE, EXPORT_NAMESPACE, EXPORT_SET_DRAFT, INSPECTOR_NAMESPACE,
+    INSPECTOR_REMOVE_EFFECT, INSPECTOR_SELECT_EFFECT, INSPECTOR_SET_CLIP_CURVE,
+    INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY, INSPECTOR_SET_CLIP_TINT,
+    INSPECTOR_SET_CLIP_TRANSFORM_FIELD, INSPECTOR_SET_EFFECT_ENABLED,
+    INSPECTOR_SET_EFFECT_PROPERTY, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
+    PROJECT_RECOVER_FROM_AUTOSAVE, TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET, TIMELINE_MOVE_CLIP,
+    TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_SEEK,
     TIMELINE_SELECT_CLIP, TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL,
     TIMELINE_TRIM_CLIPS, TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD,
 };
@@ -1121,6 +1122,14 @@ impl AppState {
                 )?;
                 self.drop_asset_from_ui(payload)
             }
+            TIMELINE_OPEN_NESTED_SEQUENCE => {
+                let payload = parse_ui_payload::<TimelineOpenNestedSequencePayload>(
+                    "timeline_ui_action",
+                    name,
+                    payload,
+                )?;
+                self.open_nested_sequence(payload.sequence_id)
+            }
             _ => Err(unknown_ui_action_error("timeline_ui_action", name)),
         }
     }
@@ -1996,7 +2005,7 @@ mod tests {
         inspector_set_effect_property_action, project_create_with_settings_action,
         project_recover_from_autosave_action, timeline_add_track_action,
         timeline_drop_asset_action, timeline_move_clip_action, timeline_move_track_action,
-        timeline_seek_action, timeline_select_clip_action,
+        timeline_open_nested_sequence_action, timeline_seek_action, timeline_select_clip_action,
         timeline_set_selected_clips_enabled_action, timeline_set_track_control_action,
         timeline_trim_clips_action, timeline_trim_selected_clips_to_playhead_action,
         AssetsCreateAssetPayload, AssetsCreateFolderPayload, AssetsDeleteAssetPayload,
@@ -2011,9 +2020,10 @@ mod tests {
         InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
         InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload,
         ProjectRecoverFromAutosavePayload, TimelineAddTrackKind, TimelineAddTrackPayload,
-        TimelineDropAssetPayload, TimelineMoveTrackPayload, TimelineSetSelectedClipsEnabledPayload,
-        TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipsPayload,
-        TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
+        TimelineDropAssetPayload, TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
+        TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
+        TimelineTrackControlPayloadKind, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
+        TimelineTrimSelectedClipsToPlayheadPayload,
     };
     use mondrian_assets::AssetLibrary;
     use mondrian_core::types::{AssetId, EffectId, MaskId, TimeCode, TrackId};
@@ -2248,6 +2258,39 @@ mod tests {
         state.dispatch_action(timeline_seek_action(33)).expect("dispatch seek");
 
         assert_eq!(state.current_frame(), 33);
+    }
+
+    #[test]
+    fn dispatch_timeline_ui_opens_nested_sequence() {
+        let mut state = AppState::new();
+        let child = Sequence::new("child");
+        let child_id = child.id;
+        let mut parent = Sequence::new("parent");
+        let tb = parent.time_base();
+        parent.video_tracks[0]
+            .add_clip(Clip::new_nested_sequence(
+                child_id,
+                TimeCode::new(0, tb),
+                TimeCode::new(24, tb),
+                Some("child".to_owned()),
+            ))
+            .expect("add nested clip");
+        state.active_sequence_id = Some(parent.id);
+        state.sequence = Some(parent);
+        state.sequences.push(child);
+
+        state
+            .dispatch_action(timeline_open_nested_sequence_action(
+                TimelineOpenNestedSequencePayload { sequence_id: child_id },
+            ))
+            .expect("open nested sequence");
+
+        assert_eq!(state.active_sequence_id, Some(child_id));
+        assert_eq!(
+            state.sequence.as_ref().map(|sequence| sequence.id),
+            Some(child_id)
+        );
+        assert_eq!(state.sequence_navigation_stack.len(), 1);
     }
 
     #[test]

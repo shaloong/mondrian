@@ -149,6 +149,8 @@ pub enum TimelineEditCommand {
     EnableSelection,
     /// Disable the current timeline clip selection.
     DisableSelection,
+    /// Open one nested sequence clip.
+    OpenNestedSequence(TimelineClipRef),
     /// Mark the current playhead frame as the sequence in point.
     MarkInAtPlayhead,
     /// Mark the current playhead frame as the sequence out point.
@@ -187,6 +189,7 @@ pub struct TimelineClip {
     pub color: Option<Color>,
     pub selected: bool,
     pub disabled: bool,
+    pub nested: bool,
     pub select_action: Option<Action>,
 }
 
@@ -200,6 +203,7 @@ impl TimelineClip {
             color: None,
             selected: false,
             disabled: false,
+            nested: false,
             select_action: None,
         }
     }
@@ -219,6 +223,12 @@ impl TimelineClip {
     /// Mark this clip as disabled.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    /// Mark this clip as a nested sequence.
+    pub fn nested(mut self, nested: bool) -> Self {
+        self.nested = nested;
         self
     }
 
@@ -1436,7 +1446,7 @@ impl TimelineView {
     }
 
     fn clip_context_menu_items(&self) -> Vec<MenuItem> {
-        vec![
+        let mut items = vec![
             self.edit_menu_item("Cut Clip", TimelineEditCommand::CutSelection),
             self.edit_menu_item("Copy Clip", TimelineEditCommand::CopySelection),
             self.edit_menu_item("Paste", TimelineEditCommand::PasteAtPlayhead),
@@ -1460,10 +1470,23 @@ impl TimelineView {
             MenuItem::separator(),
             self.edit_menu_item("Enable Clip", TimelineEditCommand::EnableSelection),
             self.edit_menu_item("Disable Clip", TimelineEditCommand::DisableSelection),
+        ];
+        if let Some(clip_ref) = self
+            .selected_clip
+            .filter(|clip_ref| self.clip(*clip_ref).is_some_and(|clip| clip.nested))
+        {
+            items.push(MenuItem::separator());
+            items.push(self.edit_menu_item(
+                "Open Nested Sequence",
+                TimelineEditCommand::OpenNestedSequence(clip_ref),
+            ));
+        }
+        items.extend([
             MenuItem::separator(),
             self.edit_menu_item("Mark In", TimelineEditCommand::MarkInAtPlayhead),
             self.edit_menu_item("Mark Out", TimelineEditCommand::MarkOutAtPlayhead),
-        ]
+        ]);
+        items
     }
 
     fn timeline_context_menu_items(&self) -> Vec<MenuItem> {
@@ -4265,6 +4288,7 @@ mod tests {
                 TimelineEditCommand::TrimSelectionOutToPlayhead => Action::Copy,
                 TimelineEditCommand::EnableSelection => Action::Play,
                 TimelineEditCommand::DisableSelection => Action::Pause,
+                TimelineEditCommand::OpenNestedSequence(_) => Action::NoOp,
                 TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
                 TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
             }
@@ -4319,6 +4343,7 @@ mod tests {
             TimelineEditCommand::TrimSelectionOutToPlayhead => Action::Copy,
             TimelineEditCommand::EnableSelection => Action::Play,
             TimelineEditCommand::DisableSelection => Action::Pause,
+            TimelineEditCommand::OpenNestedSequence(_) => Action::NoOp,
             TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
             TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
         });
@@ -4387,6 +4412,43 @@ mod tests {
     }
 
     #[test]
+    fn nested_clip_context_menu_includes_open_nested_sequence_command() {
+        let mut view = TimelineView::new(vec![TimelineTrack::video(
+            "V1",
+            vec![TimelineClip::new("Nested", 0, 24).nested(true)],
+        )])
+        .on_edit_command(|command| match command {
+            TimelineEditCommand::OpenNestedSequence(_) => Action::OpenProject("nested".into()),
+            _ => Action::NoOp,
+        });
+        view.selected_clip = Some(TimelineClipRef { track_index: 0, clip_index: 0 });
+
+        let items = view.clip_context_menu_items();
+
+        let open = items
+            .iter()
+            .find(|item| item.label == "Open Nested Sequence")
+            .expect("open nested menu item");
+        assert!(open.enabled);
+    }
+
+    #[test]
+    fn normal_clip_context_menu_omits_open_nested_sequence_command() {
+        let mut view = TimelineView::new(vec![TimelineTrack::video(
+            "V1",
+            vec![TimelineClip::new("Clip", 0, 24)],
+        )]);
+        view.selected_clip = Some(TimelineClipRef { track_index: 0, clip_index: 0 });
+
+        let items = view.clip_context_menu_items();
+
+        assert!(
+            items.iter().all(|item| item.label != "Open Nested Sequence"),
+            "normal clips must not expose nested navigation"
+        );
+    }
+
+    #[test]
     fn right_click_timeline_empty_space_context_menu_can_add_track() {
         let actions = RefCell::new(Vec::new());
         let dispatch = |action| actions.borrow_mut().push(action);
@@ -4403,6 +4465,7 @@ mod tests {
                 TimelineEditCommand::TrimSelectionOutToPlayhead => Action::Copy,
                 TimelineEditCommand::EnableSelection => Action::Play,
                 TimelineEditCommand::DisableSelection => Action::Pause,
+                TimelineEditCommand::OpenNestedSequence(_) => Action::NoOp,
                 TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
                 TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
             })

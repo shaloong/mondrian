@@ -51,8 +51,8 @@ use crate::app::ui_actions::{
     inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
     inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
     inspector_set_effect_property_action, timeline_add_track_action, timeline_drop_asset_action,
-    timeline_move_clip_action, timeline_move_track_action, timeline_seek_action,
-    timeline_select_clip_action, timeline_set_selected_clips_enabled_action,
+    timeline_move_clip_action, timeline_move_track_action, timeline_open_nested_sequence_action,
+    timeline_seek_action, timeline_select_clip_action, timeline_set_selected_clips_enabled_action,
     timeline_set_track_control_action, timeline_trim_clips_action,
     timeline_trim_selected_clips_to_playhead_action, AppShellRelinkAssetDialogPayload,
     AppShellRevealInFileManagerPayload, AssetsCreateAssetPayload, AssetsCreateFolderPayload,
@@ -68,9 +68,10 @@ use crate::app::ui_actions::{
     InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
     InspectorSetEffectPropertyPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
     TimelineDropAssetPayload, TimelineMoveClipPayload, TimelineMoveTrackPayload,
-    TimelineSelectClipPayload, TimelineSetSelectedClipsEnabledPayload,
-    TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipsPayload,
-    TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
+    TimelineOpenNestedSequencePayload, TimelineSelectClipPayload,
+    TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
+    TimelineTrackControlPayloadKind, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
+    TimelineTrimSelectedClipsToPlayheadPayload,
 };
 use crate::app::{AppState, SelectedClipRef};
 use crate::self_hosted::icons::AppIcon;
@@ -633,6 +634,7 @@ pub struct TimelinePanelModel {
     pub out_point_frame: Option<i64>,
     track_refs: Vec<AppTimelineTrackRef>,
     clip_refs: Vec<Vec<ClipId>>,
+    nested_sequence_refs: Vec<Vec<Option<SequenceId>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -656,6 +658,7 @@ impl TimelinePanelModel {
             (
                 AppTimelineTrackRef { track_id: track.id, is_video_track: true },
                 track.clips.iter().map(|clip| clip.id).collect::<Vec<_>>(),
+                track.clips.iter().map(|clip| clip.nested_sequence_id).collect::<Vec<_>>(),
                 timeline_track_from_sequence_track(track, true, selected_clips, selected_tracks),
             )
         });
@@ -663,6 +666,7 @@ impl TimelinePanelModel {
             (
                 AppTimelineTrackRef { track_id: track.id, is_video_track: false },
                 track.clips.iter().map(|clip| clip.id).collect::<Vec<_>>(),
+                track.clips.iter().map(|clip| clip.nested_sequence_id).collect::<Vec<_>>(),
                 timeline_track_from_sequence_track(track, false, selected_clips, selected_tracks),
             )
         });
@@ -670,9 +674,11 @@ impl TimelinePanelModel {
         let mut tracks = Vec::new();
         let mut track_refs = Vec::new();
         let mut clip_refs = Vec::new();
-        for (track_ref, clip_ids, track) in video_tracks.chain(audio_tracks) {
+        let mut nested_sequence_refs = Vec::new();
+        for (track_ref, clip_ids, nested_ids, track) in video_tracks.chain(audio_tracks) {
             track_refs.push(track_ref);
             clip_refs.push(clip_ids);
+            nested_sequence_refs.push(nested_ids);
             tracks.push(track);
         }
         Self {
@@ -682,6 +688,7 @@ impl TimelinePanelModel {
             out_point_frame: sequence.out_point_frame(),
             track_refs,
             clip_refs,
+            nested_sequence_refs,
         }
     }
 
@@ -700,6 +707,19 @@ impl TimelinePanelModel {
             is_video_track: track.is_video_track,
             clip_id,
         })
+    }
+
+    fn open_nested_payload(
+        &self,
+        clip_ref: TimelineClipRef,
+    ) -> Option<TimelineOpenNestedSequencePayload> {
+        let sequence_id = self
+            .nested_sequence_refs
+            .get(clip_ref.track_index)?
+            .get(clip_ref.clip_index)
+            .copied()
+            .flatten()?;
+        Some(TimelineOpenNestedSequencePayload { sequence_id })
     }
 
     fn track_identity(&self, track_ref: TimelineTrackRef) -> Option<AppTimelineTrackRef> {
@@ -1423,7 +1443,8 @@ fn timeline_clip_from_sequence_clip(
         clip.duration.frame.max(1),
     )
     .selected(selected)
-    .disabled(clip.is_disabled);
+    .disabled(clip.is_disabled)
+    .nested(clip.is_nested_sequence());
     if let Some(color) = timeline_clip_color(clip, is_video_track) {
         view = view.with_color(color);
     }
@@ -2239,7 +2260,10 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
                     .unwrap_or(Action::NoOp)
             }
         })
-        .on_edit_command(timeline_edit_command_action)
+        .on_edit_command({
+            let action_model = action_model.clone();
+            move |command| timeline_edit_command_action(&action_model, command)
+        })
         .on_edit_command_shortcut(timeline_edit_command_shortcut_label)
         .on_clip_move({
             let action_model = action_model.clone();
@@ -2262,8 +2286,50 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
         .on_seek(timeline_seek_action)
 }
 
-fn timeline_edit_command_action(command: TimelineEditCommand) -> Action {
+fn timeline_edit_command_action(
+    model: &TimelinePanelModel,
+    command: TimelineEditCommand,
+) -> Action {
     match command {
+        TimelineEditCommand::CutSelection => Action::Cut,
+        TimelineEditCommand::CopySelection => Action::Copy,
+        TimelineEditCommand::PasteAtPlayhead => Action::Paste,
+        TimelineEditCommand::DuplicateSelection => Action::Duplicate,
+        TimelineEditCommand::DeleteSelection => Action::DeleteSelection,
+        TimelineEditCommand::RippleDeleteSelection => Action::RippleDeleteSelection,
+        TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
+        TimelineEditCommand::TrimSelectionInToPlayhead => {
+            timeline_trim_selected_clips_to_playhead_action(
+                TimelineTrimSelectedClipsToPlayheadPayload { edge: TimelineTrimPayloadEdge::In },
+            )
+        }
+        TimelineEditCommand::TrimSelectionOutToPlayhead => {
+            timeline_trim_selected_clips_to_playhead_action(
+                TimelineTrimSelectedClipsToPlayheadPayload { edge: TimelineTrimPayloadEdge::Out },
+            )
+        }
+        TimelineEditCommand::EnableSelection => {
+            timeline_set_selected_clips_enabled_action(TimelineSetSelectedClipsEnabledPayload {
+                enabled: true,
+            })
+        }
+        TimelineEditCommand::DisableSelection => {
+            timeline_set_selected_clips_enabled_action(TimelineSetSelectedClipsEnabledPayload {
+                enabled: false,
+            })
+        }
+        TimelineEditCommand::OpenNestedSequence(clip_ref) => model
+            .open_nested_payload(clip_ref)
+            .map(timeline_open_nested_sequence_action)
+            .unwrap_or(Action::NoOp),
+        TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
+        TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
+    }
+}
+
+fn timeline_edit_command_shortcut_label(command: TimelineEditCommand) -> Option<String> {
+    let action = match command {
+        TimelineEditCommand::OpenNestedSequence(_) => return None,
         TimelineEditCommand::CutSelection => Action::Cut,
         TimelineEditCommand::CopySelection => Action::Copy,
         TimelineEditCommand::PasteAtPlayhead => Action::Paste,
@@ -2293,11 +2359,8 @@ fn timeline_edit_command_action(command: TimelineEditCommand) -> Action {
         }
         TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
         TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
-    }
-}
-
-fn timeline_edit_command_shortcut_label(command: TimelineEditCommand) -> Option<String> {
-    shortcut_label_for_action(&timeline_edit_command_action(command)).map(str::to_owned)
+    };
+    shortcut_label_for_action(&action).map(str::to_owned)
 }
 
 fn node_graph_panel(model: &NodeGraphPanelModel) -> NodeGraphView {
@@ -3172,8 +3235,9 @@ mod tests {
         ASSETS_OPEN_FOLDER, ASSETS_PREPARE_DRAG, ASSETS_RENAME_ASSET, ASSETS_SET_PROXY_MODE,
         EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE, INSPECTOR_SELECT_EFFECT,
         INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_EFFECT_PROPERTY, TIMELINE_ADD_TRACK,
-        TIMELINE_DROP_ASSET, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_SELECT_CLIP,
-        TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD,
+        TIMELINE_DROP_ASSET, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
+        TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_SELECT_CLIP, TIMELINE_SET_SELECTED_CLIPS_ENABLED,
+        TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD,
     };
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
@@ -4886,20 +4950,21 @@ mod tests {
 
     #[test]
     fn timeline_edit_command_mapping_emits_selection_trim_and_enable_actions() {
+        let model = TimelinePanelModel::default();
         assert_eq!(
-            timeline_edit_command_action(TimelineEditCommand::CutSelection),
+            timeline_edit_command_action(&model, TimelineEditCommand::CutSelection),
             Action::Cut
         );
         assert_eq!(
-            timeline_edit_command_action(TimelineEditCommand::CopySelection),
+            timeline_edit_command_action(&model, TimelineEditCommand::CopySelection),
             Action::Copy
         );
         assert_eq!(
-            timeline_edit_command_action(TimelineEditCommand::PasteAtPlayhead),
+            timeline_edit_command_action(&model, TimelineEditCommand::PasteAtPlayhead),
             Action::Paste
         );
         assert_eq!(
-            timeline_edit_command_action(TimelineEditCommand::DuplicateSelection),
+            timeline_edit_command_action(&model, TimelineEditCommand::DuplicateSelection),
             Action::Duplicate
         );
         assert_eq!(
@@ -4917,7 +4982,7 @@ mod tests {
         );
 
         let trim_action =
-            timeline_edit_command_action(TimelineEditCommand::TrimSelectionInToPlayhead);
+            timeline_edit_command_action(&model, TimelineEditCommand::TrimSelectionInToPlayhead);
         let Action::Custom { namespace, name, payload } = trim_action else {
             panic!("expected selected trim action");
         };
@@ -4927,7 +4992,8 @@ mod tests {
             serde_json::from_value(payload).expect("trim payload");
         assert_eq!(payload.edge, TimelineTrimPayloadEdge::In);
 
-        let disable_action = timeline_edit_command_action(TimelineEditCommand::DisableSelection);
+        let disable_action =
+            timeline_edit_command_action(&model, TimelineEditCommand::DisableSelection);
         let Action::Custom { namespace, name, payload } = disable_action else {
             panic!("expected selected enable action");
         };
@@ -4936,6 +5002,39 @@ mod tests {
         let payload: TimelineSetSelectedClipsEnabledPayload =
             serde_json::from_value(payload).expect("enabled payload");
         assert!(!payload.enabled);
+    }
+
+    #[test]
+    fn timeline_open_nested_command_maps_clip_ref_to_nested_sequence_action() {
+        let nested_id = SequenceId::new();
+        let mut sequence = Sequence::new("parent");
+        let tb = sequence.time_base();
+        sequence.video_tracks[0]
+            .add_clip(Clip::new_nested_sequence(
+                nested_id,
+                TimeCode::new(0, tb),
+                TimeCode::new(24, tb),
+                Some("Nested".to_owned()),
+            ))
+            .expect("add nested clip");
+        let model = TimelinePanelModel::from_sequence(&sequence, &[], &[]);
+
+        let action = timeline_edit_command_action(
+            &model,
+            TimelineEditCommand::OpenNestedSequence(TimelineClipRef {
+                track_index: 0,
+                clip_index: 0,
+            }),
+        );
+
+        let Action::Custom { namespace, name, payload } = action else {
+            panic!("expected open nested custom action");
+        };
+        assert_eq!(namespace, TIMELINE_NAMESPACE);
+        assert_eq!(name, TIMELINE_OPEN_NESTED_SEQUENCE);
+        let payload: TimelineOpenNestedSequencePayload =
+            serde_json::from_value(payload).expect("open nested payload");
+        assert_eq!(payload.sequence_id, nested_id);
     }
 
     #[test]

@@ -36,6 +36,8 @@ pub const TIMELINE_ADD_TRACK: &str = "add_track";
 pub const TIMELINE_MOVE_TRACK: &str = "move_track";
 /// Action name for dropping one prepared asset onto a timeline track.
 pub const TIMELINE_DROP_ASSET: &str = "drop_asset";
+/// Action name for opening a nested sequence clip.
+pub const TIMELINE_OPEN_NESTED_SEQUENCE: &str = "open_nested_sequence";
 
 /// Custom action namespace for inspector UI operations.
 pub const INSPECTOR_NAMESPACE: &str = "ui.inspector";
@@ -263,6 +265,13 @@ pub struct TimelineTrimSelectedClipsToPlayheadPayload {
 pub struct TimelineSetSelectedClipsEnabledPayload {
     /// `true` when selected clips should participate in rendering/playback.
     pub enabled: bool,
+}
+
+/// Open one nested sequence from a timeline clip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineOpenNestedSequencePayload {
+    /// Nested sequence to make active.
+    pub sequence_id: SequenceId,
 }
 
 /// Seek the active timeline to a frame.
@@ -716,6 +725,11 @@ pub fn timeline_move_track_action(payload: TimelineMoveTrackPayload) -> Action {
 /// Build an action that drops an asset onto a timeline track.
 pub fn timeline_drop_asset_action(payload: TimelineDropAssetPayload) -> Action {
     custom_timeline_action(TIMELINE_DROP_ASSET, payload)
+}
+
+/// Build an action that opens one nested sequence from the timeline.
+pub fn timeline_open_nested_sequence_action(payload: TimelineOpenNestedSequencePayload) -> Action {
+    custom_timeline_action(TIMELINE_OPEN_NESTED_SEQUENCE, payload)
 }
 
 /// Build an action that toggles a clip enabled state from an inspector panel.

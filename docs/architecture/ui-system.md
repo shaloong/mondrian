@@ -738,6 +738,13 @@ domain-light `TimelineEditCommand`s, and the app adapter maps them onto shared
 editor actions such as `Action::DeleteSelection` and
 `Action::RippleDeleteSelection`. Split-at-playhead uses the same path via
 `TimelineEditCommand::SplitAtPlayhead` and `Action::SplitClipAtPlayhead`.
+Nested-sequence navigation stays in this boundary as well. `TimelineClip` only
+marks that a clip is nested, never stores a `SequenceId`; when the clip context
+menu is opened the widget emits `TimelineEditCommand::OpenNestedSequence` with
+the local `TimelineClipRef`, and the app adapter resolves that ref to
+`ui.timeline.open_nested_sequence`. `AppState` then calls the same
+`open_nested_sequence` path used by the egui timeline, preserving sequence
+navigation stack behavior.
 Timeline clipboard context-menu entries use
 `TimelineEditCommand::CutSelection`, `CopySelection`, `PasteAtPlayhead`, and
 `DuplicateSelection`, then map to the existing app-level `Action::Cut`,
