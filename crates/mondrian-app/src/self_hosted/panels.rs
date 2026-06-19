@@ -498,8 +498,11 @@ pub struct ViewerPanelModel {
     pub status: String,
     pub status_tone: ViewerStatusTone,
     pub resolution_label: String,
+    pub timecode_label: String,
     pub frame_label: String,
     pub duration_label: String,
+    pub zoom_label: String,
+    pub preview_quality_label: String,
     pub width: u32,
     pub height: u32,
     pub playing: bool,
@@ -516,6 +519,10 @@ impl ViewerPanelModel {
         };
         let resolution = sequence.settings.resolution;
         let current_frame = state.current_frame().max(0);
+        let timecode_label = state
+            .current_time_code()
+            .map(|timecode| timecode.to_smpte())
+            .unwrap_or_else(|| TimeCode::new(current_frame, sequence.time_base()).to_smpte());
         let duration_frame = sequence.total_duration().frame.max(0);
         let fps = sequence.settings.frame_rate.to_f64();
         Self {
@@ -534,8 +541,11 @@ impl ViewerPanelModel {
                 "{}x{} @ {:.2} fps",
                 resolution.width, resolution.height, fps
             ),
+            timecode_label,
             frame_label: format!("F{current_frame}"),
             duration_label: format!("{duration_frame} frames"),
+            zoom_label: "Fit".into(),
+            preview_quality_label: "Full".into(),
             width: resolution.width,
             height: resolution.height,
             playing: state.is_playing(),
@@ -552,8 +562,11 @@ impl ViewerPanelModel {
             status: "No sequence".into(),
             status_tone: ViewerStatusTone::Neutral,
             resolution_label: "No signal".into(),
+            timecode_label: "00:00:00:00".into(),
             frame_label: "F0".into(),
             duration_label: String::new(),
+            zoom_label: "Fit".into(),
+            preview_quality_label: "Full".into(),
             width: 16,
             height: 9,
             playing: false,
@@ -1305,8 +1318,11 @@ fn viewer_panel(model: &ViewerPanelModel) -> ViewerSurface {
         .with_status(model.status.clone())
         .with_status_tone(model.status_tone)
         .with_resolution_label(model.resolution_label.clone())
+        .with_timecode_label(model.timecode_label.clone())
         .with_frame_label(model.frame_label.clone())
         .with_duration_label(model.duration_label.clone())
+        .with_zoom_label(model.zoom_label.clone())
+        .with_preview_quality_label(model.preview_quality_label.clone())
         .playing(model.playing)
         .enabled(model.enabled);
     let surface = if let Some(message) = model.empty_message.clone() {
@@ -3155,6 +3171,8 @@ mod tests {
         assert!(models.viewer.enabled);
         assert_eq!(models.viewer.status_tone, ViewerStatusTone::Neutral);
         assert_eq!(models.viewer.empty_message, None);
+        assert_eq!(models.viewer.zoom_label, "Fit");
+        assert_eq!(models.viewer.preview_quality_label, "Full");
         assert!(!models.timeline.tracks.is_empty());
         assert!(!models.inspector.curve_points.is_empty());
         assert!(!models.node_graph.nodes.is_empty());
@@ -3290,6 +3308,9 @@ mod tests {
             Some("No sequence loaded")
         );
         assert_eq!(models.viewer.resolution_label, "No signal");
+        assert_eq!(models.viewer.timecode_label, "00:00:00:00");
+        assert_eq!(models.viewer.zoom_label, "Fit");
+        assert_eq!(models.viewer.preview_quality_label, "Full");
         assert_eq!(models.inspector.selected_clip, None);
         assert!(!models.inspector.is_editable);
         assert_eq!(models.inspector.edit_disabled_reason, None);
@@ -4786,9 +4807,12 @@ mod tests {
 
         assert_eq!(models.viewer.title, "edit");
         assert_eq!(models.viewer.frame_label, "F7");
+        assert!(models.viewer.timecode_label.ends_with(":07"));
         assert_eq!(models.viewer.status_tone, ViewerStatusTone::Neutral);
         assert_eq!(models.viewer.empty_message, None);
         assert!(models.viewer.resolution_label.contains("1920x1080"));
+        assert_eq!(models.viewer.zoom_label, "Fit");
+        assert_eq!(models.viewer.preview_quality_label, "Full");
         assert_eq!(models.timeline.playhead_frame, 7);
         assert!(models.timeline.tracks[0].clips[0].selected);
         assert!(models.timeline.tracks[0].clips[0].disabled);

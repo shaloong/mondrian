@@ -21,7 +21,8 @@ use crate::RasterImage;
 const DEFAULT_WIDTH: f32 = 480.0;
 const DEFAULT_HEIGHT: f32 = 270.0;
 const TRANSPORT_BUTTON_SIZE: f32 = 26.0;
-const TRANSPORT_BUTTON_GAP: f32 = 8.0;
+const TRANSPORT_MARK_BUTTON_WIDTH: f32 = 24.0;
+const TRANSPORT_BUTTON_GAP: f32 = 7.0;
 
 /// RGBA preview image presented by [`ViewerSurface`].
 pub type ViewerFrameImage = RasterImage;
@@ -41,12 +42,27 @@ pub enum ViewerStatusTone {
     Error,
 }
 
+/// Transport or mark control rendered by [`ViewerSurface`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ViewerControl {
+pub enum ViewerControl {
+    /// Mark an in point at the current playhead.
+    MarkIn,
+    /// Mark an out point at the current playhead.
+    MarkOut,
+    /// Jump to the first frame of the active sequence.
+    JumpStart,
+    /// Step one frame backward.
     StepBack,
+    /// Toggle preview playback.
     PlayPause,
+    /// Step one frame forward.
     StepForward,
+    /// Jump to the last content frame of the active sequence.
+    JumpEnd,
 }
+
+/// Maps a viewer chrome control to an editor action.
+pub type ViewerControlAction = dyn Fn(ViewerControl) -> Action;
 
 /// Preview viewer surface.
 pub struct ViewerSurface {
@@ -56,8 +72,11 @@ pub struct ViewerSurface {
     status: String,
     status_tone: ViewerStatusTone,
     resolution_label: String,
+    timecode_label: String,
     frame_label: String,
     duration_label: String,
+    zoom_label: String,
+    preview_quality_label: String,
     source_width: u32,
     source_height: u32,
     playing: bool,
@@ -66,6 +85,7 @@ pub struct ViewerSurface {
     empty_message: Option<String>,
     hovered_control: Option<ViewerControl>,
     pressed_control: Option<ViewerControl>,
+    on_control: Option<Box<ViewerControlAction>>,
 }
 
 impl ViewerSurface {
@@ -78,8 +98,11 @@ impl ViewerSurface {
             status: "No signal".into(),
             status_tone: ViewerStatusTone::Neutral,
             resolution_label: String::new(),
+            timecode_label: "00:00:00:00".into(),
             frame_label: "F0".into(),
             duration_label: String::new(),
+            zoom_label: "Fit".into(),
+            preview_quality_label: "Full".into(),
             source_width: source_width.max(1),
             source_height: source_height.max(1),
             playing: false,
@@ -88,6 +111,7 @@ impl ViewerSurface {
             empty_message: None,
             hovered_control: None,
             pressed_control: None,
+            on_control: None,
         }
     }
 
@@ -109,6 +133,12 @@ impl ViewerSurface {
         self
     }
 
+    /// Set the SMPTE-style current timecode label.
+    pub fn with_timecode_label(mut self, label: impl Into<String>) -> Self {
+        self.timecode_label = label.into();
+        self
+    }
+
     /// Set the formatted current frame label.
     pub fn with_frame_label(mut self, label: impl Into<String>) -> Self {
         self.frame_label = label.into();
@@ -118,6 +148,18 @@ impl ViewerSurface {
     /// Set the formatted duration label.
     pub fn with_duration_label(mut self, label: impl Into<String>) -> Self {
         self.duration_label = label.into();
+        self
+    }
+
+    /// Set the displayed canvas zoom mode label.
+    pub fn with_zoom_label(mut self, label: impl Into<String>) -> Self {
+        self.zoom_label = label.into();
+        self
+    }
+
+    /// Set the displayed preview quality / resolution mode label.
+    pub fn with_preview_quality_label(mut self, label: impl Into<String>) -> Self {
+        self.preview_quality_label = label.into();
         self
     }
 
@@ -153,6 +195,12 @@ impl ViewerSurface {
         self
     }
 
+    /// Set a custom action mapper for viewer controls.
+    pub fn on_control(mut self, action: impl Fn(ViewerControl) -> Action + 'static) -> Self {
+        self.on_control = Some(Box::new(action));
+        self
+    }
+
     /// Whether the surface represents an available preview target.
     pub fn is_enabled(&self) -> bool {
         self.enabled
@@ -177,6 +225,9 @@ impl ViewerSurface {
 
     fn metadata_text(&self) -> String {
         let mut parts = Vec::new();
+        if !self.timecode_label.is_empty() {
+            parts.push(self.timecode_label.as_str());
+        }
         if !self.resolution_label.is_empty() {
             parts.push(self.resolution_label.as_str());
         }
@@ -188,7 +239,9 @@ impl ViewerSurface {
     }
 
     fn control_strip_rect(&self) -> Rect {
-        let width = TRANSPORT_BUTTON_SIZE * 3.0 + TRANSPORT_BUTTON_GAP * 2.0;
+        let controls = self.visible_controls();
+        let width = controls.iter().map(|control| self.control_width(*control)).sum::<f32>()
+            + TRANSPORT_BUTTON_GAP * (controls.len().saturating_sub(1) as f32);
         Rect::new(
             self.bounds.x + (self.bounds.width - width) * 0.5,
             self.bounds.y + self.bounds.height - 34.0,
@@ -197,37 +250,55 @@ impl ViewerSurface {
         )
     }
 
+    fn visible_controls(&self) -> &'static [ViewerControl] {
+        if self.bounds.width >= 236.0 {
+            &FULL_VIEWER_CONTROLS
+        } else if self.bounds.width >= 180.0 {
+            &JUMP_VIEWER_CONTROLS
+        } else if self.bounds.width >= 116.0 {
+            &BASIC_VIEWER_CONTROLS
+        } else {
+            &MINIMAL_VIEWER_CONTROLS
+        }
+    }
+
+    fn control_width(&self, control: ViewerControl) -> f32 {
+        match control {
+            ViewerControl::MarkIn | ViewerControl::MarkOut => TRANSPORT_MARK_BUTTON_WIDTH,
+            ViewerControl::JumpStart
+            | ViewerControl::StepBack
+            | ViewerControl::PlayPause
+            | ViewerControl::StepForward
+            | ViewerControl::JumpEnd => TRANSPORT_BUTTON_SIZE,
+        }
+    }
+
     fn control_rect(&self, control: ViewerControl) -> Rect {
         let strip = self.control_strip_rect();
-        let index = match control {
-            ViewerControl::StepBack => 0.0,
-            ViewerControl::PlayPause => 1.0,
-            ViewerControl::StepForward => 2.0,
-        };
-        Rect::new(
-            strip.x + index * (TRANSPORT_BUTTON_SIZE + TRANSPORT_BUTTON_GAP),
-            strip.y,
-            TRANSPORT_BUTTON_SIZE,
-            TRANSPORT_BUTTON_SIZE,
-        )
+        let mut x = strip.x;
+        for &candidate in self.visible_controls() {
+            let width = self.control_width(candidate);
+            if candidate == control {
+                return Rect::new(x, strip.y, width, TRANSPORT_BUTTON_SIZE);
+            }
+            x += width + TRANSPORT_BUTTON_GAP;
+        }
+        Rect::ZERO
     }
 
     fn control_at(&self, point: Point) -> Option<ViewerControl> {
-        [
-            ViewerControl::StepBack,
-            ViewerControl::PlayPause,
-            ViewerControl::StepForward,
-        ]
-        .into_iter()
-        .find(|control| self.control_rect(*control).contains(point))
+        self.visible_controls()
+            .iter()
+            .copied()
+            .find(|control| self.control_rect(*control).contains(point))
     }
 
     fn dispatch_control(&self, control: ViewerControl, ctx: &mut EventContext) {
-        let action = match control {
-            ViewerControl::StepBack => Action::StepBack,
-            ViewerControl::PlayPause => Action::TogglePlay,
-            ViewerControl::StepForward => Action::StepForward,
-        };
+        let action = self
+            .on_control
+            .as_ref()
+            .map(|mapper| mapper(control))
+            .unwrap_or_else(|| default_viewer_control_action(control));
         (ctx.dispatch)(action);
     }
 }
@@ -395,6 +466,19 @@ impl Widget for ViewerSurface {
             (control_strip.x - self.bounds.x - 28.0).max(1.0),
             colors.muted_foreground,
         );
+
+        let right_chrome = format!("{}  {}", self.zoom_label, self.preview_quality_label);
+        ctx.encoder.draw_text_box(
+            &right_chrome,
+            typography.small.font_size,
+            Point::new(
+                control_strip.x + control_strip.width + 14.0,
+                self.bounds.y + self.bounds.height - 24.0,
+            ),
+            (self.bounds.x + self.bounds.width - control_strip.x - control_strip.width - 28.0)
+                .max(1.0),
+            colors.muted_foreground,
+        );
     }
 
     fn hit_test(&self, point: Point) -> bool {
@@ -404,11 +488,7 @@ impl Widget for ViewerSurface {
 
 impl ViewerSurface {
     fn paint_transport_controls(&self, ctx: &mut PaintContext) {
-        for control in [
-            ViewerControl::StepBack,
-            ViewerControl::PlayPause,
-            ViewerControl::StepForward,
-        ] {
+        for &control in self.visible_controls() {
             self.paint_transport_control(ctx, control);
         }
     }
@@ -434,20 +514,22 @@ impl ViewerSurface {
 
         ctx.encoder.draw_rect(rect, bg, radius);
         match control {
-            ViewerControl::StepBack => {
+            ViewerControl::MarkIn => {
+                self.paint_mark_control(ctx, rect, "I", icon);
+            }
+            ViewerControl::MarkOut => {
+                self.paint_mark_control(ctx, rect, "O", icon);
+            }
+            ViewerControl::JumpStart => {
                 ctx.encoder.draw_rect(
                     Rect::new(rect.x + 7.0, rect.y + 7.0, 2.0, 12.0),
                     color_with_alpha(icon, 0.9),
                     1.0,
                 );
-                ctx.encoder.draw_triangles(
-                    &[
-                        Point::new(rect.x + 18.0, rect.y + 6.0),
-                        Point::new(rect.x + 18.0, rect.y + 20.0),
-                        Point::new(rect.x + 9.0, rect.y + 13.0),
-                    ],
-                    icon,
-                );
+                paint_left_triangle(ctx, rect, 10.0, icon);
+            }
+            ViewerControl::StepBack => {
+                paint_left_triangle(ctx, rect, 8.0, icon);
             }
             ViewerControl::PlayPause if self.playing => {
                 ctx.encoder
@@ -466,14 +548,10 @@ impl ViewerSurface {
                 );
             }
             ViewerControl::StepForward => {
-                ctx.encoder.draw_triangles(
-                    &[
-                        Point::new(rect.x + 8.0, rect.y + 6.0),
-                        Point::new(rect.x + 8.0, rect.y + 20.0),
-                        Point::new(rect.x + 17.0, rect.y + 13.0),
-                    ],
-                    icon,
-                );
+                paint_right_triangle(ctx, rect, 8.0, icon);
+            }
+            ViewerControl::JumpEnd => {
+                paint_right_triangle(ctx, rect, 8.0, icon);
                 ctx.encoder.draw_rect(
                     Rect::new(rect.x + 17.0, rect.y + 7.0, 2.0, 12.0),
                     color_with_alpha(icon, 0.9),
@@ -482,6 +560,75 @@ impl ViewerSurface {
             }
         }
     }
+
+    fn paint_mark_control(&self, ctx: &mut PaintContext, rect: Rect, label: &str, color: Color) {
+        ctx.encoder.draw_text(
+            label,
+            ctx.theme.typography.small.font_size,
+            Point::new(rect.x + 8.0, rect.y + 6.0),
+            color,
+        );
+    }
+}
+
+const FULL_VIEWER_CONTROLS: [ViewerControl; 7] = [
+    ViewerControl::MarkIn,
+    ViewerControl::MarkOut,
+    ViewerControl::JumpStart,
+    ViewerControl::StepBack,
+    ViewerControl::PlayPause,
+    ViewerControl::StepForward,
+    ViewerControl::JumpEnd,
+];
+
+const JUMP_VIEWER_CONTROLS: [ViewerControl; 5] = [
+    ViewerControl::JumpStart,
+    ViewerControl::StepBack,
+    ViewerControl::PlayPause,
+    ViewerControl::StepForward,
+    ViewerControl::JumpEnd,
+];
+
+const BASIC_VIEWER_CONTROLS: [ViewerControl; 3] = [
+    ViewerControl::StepBack,
+    ViewerControl::PlayPause,
+    ViewerControl::StepForward,
+];
+
+const MINIMAL_VIEWER_CONTROLS: [ViewerControl; 1] = [ViewerControl::PlayPause];
+
+fn default_viewer_control_action(control: ViewerControl) -> Action {
+    match control {
+        ViewerControl::MarkIn => Action::MarkInAtPlayhead,
+        ViewerControl::MarkOut => Action::MarkOutAtPlayhead,
+        ViewerControl::JumpStart => Action::GoToStart,
+        ViewerControl::StepBack => Action::StepBack,
+        ViewerControl::PlayPause => Action::TogglePlay,
+        ViewerControl::StepForward => Action::StepForward,
+        ViewerControl::JumpEnd => Action::GoToEnd,
+    }
+}
+
+fn paint_left_triangle(ctx: &mut PaintContext, rect: Rect, left: f32, color: Color) {
+    ctx.encoder.draw_triangles(
+        &[
+            Point::new(rect.x + left + 10.0, rect.y + 6.0),
+            Point::new(rect.x + left + 10.0, rect.y + 20.0),
+            Point::new(rect.x + left, rect.y + 13.0),
+        ],
+        color,
+    );
+}
+
+fn paint_right_triangle(ctx: &mut PaintContext, rect: Rect, left: f32, color: Color) {
+    ctx.encoder.draw_triangles(
+        &[
+            Point::new(rect.x + left, rect.y + 6.0),
+            Point::new(rect.x + left, rect.y + 20.0),
+            Point::new(rect.x + left + 10.0, rect.y + 13.0),
+        ],
+        color,
+    );
 }
 
 fn fit_aspect(bounds: Rect, aspect: f32) -> Rect {
@@ -648,8 +795,11 @@ mod tests {
         let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080)
             .with_status("Playing")
             .with_resolution_label("1920x1080")
+            .with_timecode_label("00:00:01:18")
             .with_frame_label("F42")
             .with_duration_label("240 frames")
+            .with_zoom_label("Fit")
+            .with_preview_quality_label("Full")
             .playing(true);
         viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
         let theme = ThemePreset::Dark.build();
@@ -664,8 +814,11 @@ mod tests {
 
         assert!(encoder.texts.iter().any(|text| text == "Scene 01"));
         assert!(encoder.texts.iter().any(|text| text == "Playing"));
+        assert!(encoder.texts.iter().any(|text| text.contains("00:00:01:18")));
         assert!(encoder.texts.iter().any(|text| text.contains("1920x1080")));
         assert!(encoder.texts.iter().any(|text| text.contains("F42")));
+        assert!(encoder.texts.iter().any(|text| text.contains("Fit")));
+        assert!(encoder.texts.iter().any(|text| text.contains("Full")));
         assert!(
             encoder
                 .rect_colors
@@ -719,9 +872,13 @@ mod tests {
         let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
 
         for control in [
+            ViewerControl::MarkIn,
+            ViewerControl::MarkOut,
+            ViewerControl::JumpStart,
             ViewerControl::StepBack,
             ViewerControl::PlayPause,
             ViewerControl::StepForward,
+            ViewerControl::JumpEnd,
         ] {
             let position = viewer.control_rect(control).center();
             assert_eq!(
@@ -750,7 +907,78 @@ mod tests {
 
         assert_eq!(
             actions.borrow().as_slice(),
-            &[Action::StepBack, Action::TogglePlay, Action::StepForward]
+            &[
+                Action::MarkInAtPlayhead,
+                Action::MarkOutAtPlayhead,
+                Action::GoToStart,
+                Action::StepBack,
+                Action::TogglePlay,
+                Action::StepForward,
+                Action::GoToEnd
+            ]
+        );
+    }
+
+    #[test]
+    fn custom_control_mapper_overrides_default_actions() {
+        let mut viewer =
+            ViewerSurface::new("Scene 01", 1920, 1080).on_control(|control| match control {
+                ViewerControl::MarkIn => Action::SaveProject,
+                _ => Action::NoOp,
+            });
+        viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
+        let position = viewer.control_rect(ViewerControl::MarkIn).center();
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        assert_eq!(
+            viewer.event(
+                &UiEvent::MouseDown {
+                    position,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            viewer.event(
+                &UiEvent::MouseUp {
+                    position,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(actions.borrow().as_slice(), &[Action::SaveProject]);
+    }
+
+    #[test]
+    fn narrow_viewer_collapses_transport_controls() {
+        let mut viewer = ViewerSurface::new("Narrow", 1920, 1080);
+        viewer.layout(Rect::new(0.0, 0.0, 90.0, 120.0));
+
+        assert_eq!(viewer.visible_controls(), &[ViewerControl::PlayPause]);
+        assert_eq!(
+            viewer.control_at(viewer.control_rect(ViewerControl::MarkIn).center()),
+            None
+        );
+        assert_eq!(
+            viewer.control_at(viewer.control_rect(ViewerControl::PlayPause).center()),
+            Some(ViewerControl::PlayPause)
+        );
+        assert!(viewer.control_strip_rect().x >= 0.0);
+        assert!(
+            viewer.control_strip_rect().x + viewer.control_strip_rect().width
+                <= viewer.bounds.width
         );
     }
 
@@ -795,7 +1023,10 @@ mod tests {
 
         viewer.paint(&mut ctx);
 
-        assert_eq!(encoder.triangles, 6, "step buttons still paint triangles");
+        assert_eq!(
+            encoder.triangles, 12,
+            "jump and step buttons still paint triangles"
+        );
         assert!(
             encoder.rects.len() >= 18,
             "playing transport should add pause-bar geometry"

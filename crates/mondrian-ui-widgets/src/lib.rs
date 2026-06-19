@@ -78,4 +78,6 @@ pub use timeline_view::{
     TimelineTrackRef, TimelineTrimEdge, TimelineView, TimelineViewState,
 };
 pub use vector_icon::{VectorIcon, VectorIconError};
-pub use viewer_surface::{ViewerFrameImage, ViewerStatusTone, ViewerSurface};
+pub use viewer_surface::{
+    ViewerControl, ViewerControlAction, ViewerFrameImage, ViewerStatusTone, ViewerSurface,
+};
