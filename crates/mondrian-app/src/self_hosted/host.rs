@@ -241,21 +241,19 @@ impl SelfHostedUiHost {
                 continue;
             }
 
-            let switched_workspace = match &action {
-                Action::SwitchWorkspace(preset) => Some(*preset),
-                _ => None,
-            };
+            let workspace_before = self.root.workspace_preset();
             let current_project_path = self.app_state.borrow().current_project_path.clone();
             let action = match self.root.try_handle_shell_action(
                 action,
                 platform,
                 current_project_path.as_deref(),
             ) {
-                Ok(Some(action)) => action,
+                Ok(Some(action)) => {
+                    self.persist_root_workspace_change(workspace_before);
+                    action
+                }
                 Ok(None) => {
-                    if let Some(preset) = switched_workspace {
-                        self.persist_workspace_preset(preset);
-                    }
+                    self.persist_root_workspace_change(workspace_before);
                     needs_layout = true;
                     continue;
                 }
@@ -325,6 +323,13 @@ impl SelfHostedUiHost {
                 true,
             );
             self.mark_dirty();
+        }
+    }
+
+    fn persist_root_workspace_change(&mut self, previous: WorkspacePreset) {
+        let current = self.root.workspace_preset();
+        if current != previous {
+            self.persist_workspace_preset(current);
         }
     }
 
@@ -682,6 +687,7 @@ mod tests {
     use super::*;
     use mondrian_assets::AssetLibrary;
     use mondrian_core::types::AssetId;
+    use mondrian_editor_state::state::PanelKind;
     use mondrian_editor_state::Action;
     use mondrian_platform::{FileFilter, NoopPlatformService};
     use mondrian_ui_theme::{current_theme, ThemePreset};
@@ -1038,6 +1044,40 @@ mod tests {
         let loaded = load_self_hosted_preferences_from(&path);
         assert_eq!(loaded.workspace_preset, WorkspacePreset::Export);
         assert_eq!(loaded.theme_preset, ThemePreset::Dark);
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn host_persists_workspace_changes_from_panel_focus_fallback() {
+        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let path = temp_preferences_path("workspace-focus-preferences");
+        let mut host = SelfHostedUiHost::new_with_preferences_path(
+            AppState::new(),
+            SelfHostedPreferences {
+                version: 1,
+                theme_preset: ThemePreset::Dark,
+                workspace_preset: WorkspacePreset::Editing,
+                recent_projects: Vec::new(),
+            },
+            path.clone(),
+        );
+        let pending = PendingUiActions::default();
+
+        pending.push(Action::FocusPanel(PanelKind::Export));
+        let commands = host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+
+        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert_eq!(host.root().workspace_preset(), WorkspacePreset::Export);
+        assert_eq!(host.preferences().workspace_preset, WorkspacePreset::Export);
+        assert_eq!(
+            load_self_hosted_preferences_from(&path).workspace_preset,
+            WorkspacePreset::Export
+        );
 
         std::fs::remove_file(path).ok();
     }

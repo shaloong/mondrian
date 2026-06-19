@@ -1592,9 +1592,11 @@ The self-hosted product shell persists user-facing shell preferences through
 `SelfHostedUiHost`, not reusable widgets or `SelfHostedAppRoot`. Theme preset
 and workspace preset are restored before the first root widget is built, so the
 initial dock tree matches the last product workspace. Shell-only actions such as
-`Action::SwitchWorkspace` update the root immediately and then write the
-workspace preset back through `self_hosted::preferences_store`; editor-state
-actions and widget models remain disk-I/O free.
+`Action::SwitchWorkspace` or `FocusPanel` fallback update the root immediately;
+`SelfHostedUiHost` then compares the root workspace before/after handled shell
+actions and writes any changed workspace preset back through
+`self_hosted::preferences_store`. Editor-state actions and widget models remain
+disk-I/O free.
 
 Panel model refreshes must not erase local panel interaction state. Reusable
 widgets expose small explicit state snapshots for UI-local affordances such as
