@@ -1220,8 +1220,10 @@ decode: missing media frames are queued, `SelfHostedUiHost::poll_background_task
 collects completions, and a later refresh composites only when all required
 media RGBA inputs are available. Adjustment-layer plans are forwarded to the
 same compositor pass once preceding visual layers exist. Nested-sequence plans
-still return no frame until their recursive render inputs exist; this avoids
-presenting partial previews as correct output.
+render recursively through the same service with a fixed depth guard; if a child
+sequence is missing or any recursive media input is still unavailable, the
+viewer returns no frame instead of presenting a partial preview as correct
+output.
 Viewer transport controls are part of this chrome but stay domain-light: the
 widget draws geometry buttons for mark in/out, jump start/end, step back/forward,
 and play/pause. By default these controls emit shared editor actions

@@ -19,10 +19,13 @@ use mondrian_renderer::{
     TimelineCompositeElement, TimelineCompositeOptions, TimelineCompositeScratch,
     TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
 };
+use mondrian_timeline::sequence::Sequence;
 use mondrian_ui_widgets::ViewerFrameImage;
 
 use crate::app::AppState;
 use crate::self_hosted::panels::ViewerPreviewSource;
+
+const MAX_NESTED_PREVIEW_DEPTH: usize = 4;
 
 /// Host-owned preview renderer used by the self-hosted viewer panel.
 ///
@@ -89,7 +92,41 @@ impl SelfHostedPreviewService {
     fn render_preview(&self, state: &AppState) -> Option<ViewerFrameImage> {
         let sequence = state.sequence.as_ref()?;
         let frame = state.current_frame().max(0);
-        let (width, height) = preview_dimensions(state)?;
+        let (width, height) = preview_dimensions_for_sequence(sequence);
+        let resolved = self.resolve_sequence_elements(state, sequence, frame, width, height, 0)?;
+        let rgba =
+            composite_resolved_preview(width, height, &resolved, &mut self.scratch.borrow_mut());
+        let key = preview_cache_key(frame, width, height, &rgba);
+        ViewerFrameImage::new(key, width, height, rgba)
+    }
+
+    fn render_nested_sequence_frame(
+        &self,
+        state: &AppState,
+        sequence: &Sequence,
+        frame: i64,
+        depth: usize,
+    ) -> Option<MediaPreviewFrame> {
+        if depth >= MAX_NESTED_PREVIEW_DEPTH {
+            return None;
+        }
+        let (width, height) = preview_dimensions_for_sequence(sequence);
+        let resolved =
+            self.resolve_sequence_elements(state, sequence, frame.max(0), width, height, depth)?;
+        let mut scratch = TimelineCompositeScratch::default();
+        let rgba = composite_resolved_preview(width, height, &resolved, &mut scratch);
+        Some(MediaPreviewFrame { width, height, rgba })
+    }
+
+    fn resolve_sequence_elements(
+        &self,
+        state: &AppState,
+        sequence: &Sequence,
+        frame: i64,
+        width: u32,
+        height: u32,
+        depth: usize,
+    ) -> Option<Vec<ResolvedPreviewElement>> {
         let plan = build_timeline_render_plan(sequence, frame);
         if plan.is_empty() {
             return None;
@@ -138,47 +175,27 @@ impl SelfHostedPreviewService {
                         },
                     ));
                 }
-                TimelineRenderPlanElement::NestedSequence(_) => return None,
+                TimelineRenderPlanElement::NestedSequence(nested) => {
+                    let nested_sequence = state.sequence_by_id(nested.sequence_id)?;
+                    let frame = self.render_nested_sequence_frame(
+                        state,
+                        nested_sequence,
+                        nested.source_frame,
+                        depth + 1,
+                    )?;
+                    resolved.push(ResolvedPreviewElement::Media {
+                        frame,
+                        opacity: nested.opacity,
+                        blend_mode: nested.blend_mode,
+                        transform: nested.transform,
+                        effect_graph: nested.effect_graph,
+                        frame_seed: nested.frame_seed,
+                    });
+                }
             }
         }
 
-        let elements: Vec<_> = resolved
-            .iter()
-            .map(|element| match element {
-                ResolvedPreviewElement::SolidColor(layer) => {
-                    TimelineCompositeElement::SolidColor(layer.clone())
-                }
-                ResolvedPreviewElement::Adjustment(layer) => {
-                    TimelineCompositeElement::Adjustment(layer.clone())
-                }
-                ResolvedPreviewElement::Media {
-                    frame,
-                    opacity,
-                    blend_mode,
-                    transform,
-                    effect_graph,
-                    frame_seed,
-                } => TimelineCompositeElement::Media(TimelineMediaLayer {
-                    rgba: frame.rgba.as_slice(),
-                    width: frame.width,
-                    height: frame.height,
-                    opacity: *opacity,
-                    blend_mode: *blend_mode,
-                    transform: *transform,
-                    effect_graph: Arc::clone(effect_graph),
-                    frame_seed: *frame_seed,
-                }),
-            })
-            .collect();
-        let rgba = composite_timeline_elements(
-            width,
-            height,
-            &elements,
-            TimelineCompositeOptions::default(),
-            &mut self.scratch.borrow_mut(),
-        );
-        let key = preview_cache_key(frame, width, height, &rgba);
-        ViewerFrameImage::new(key, width, height, rgba)
+        Some(resolved)
     }
 }
 
@@ -303,13 +320,55 @@ impl SelfHostedPreviewService {
     }
 }
 
-fn preview_dimensions(state: &AppState) -> Option<(u32, u32)> {
-    let sequence = state.sequence.as_ref()?;
+fn preview_dimensions_for_sequence(sequence: &Sequence) -> (u32, u32) {
     let resolution = sequence.settings.resolution;
     let scale = sequence.settings.preview.resolution_scale.clamp(0.125, 1.0);
     let width = ((resolution.width as f32 * scale).round() as u32).max(1);
     let height = ((resolution.height as f32 * scale).round() as u32).max(1);
-    Some((width, height))
+    (width, height)
+}
+
+fn composite_resolved_preview(
+    width: u32,
+    height: u32,
+    resolved: &[ResolvedPreviewElement],
+    scratch: &mut TimelineCompositeScratch,
+) -> Vec<u8> {
+    let elements: Vec<_> = resolved
+        .iter()
+        .map(|element| match element {
+            ResolvedPreviewElement::SolidColor(layer) => {
+                TimelineCompositeElement::SolidColor(layer.clone())
+            }
+            ResolvedPreviewElement::Adjustment(layer) => {
+                TimelineCompositeElement::Adjustment(layer.clone())
+            }
+            ResolvedPreviewElement::Media {
+                frame,
+                opacity,
+                blend_mode,
+                transform,
+                effect_graph,
+                frame_seed,
+            } => TimelineCompositeElement::Media(TimelineMediaLayer {
+                rgba: frame.rgba.as_slice(),
+                width: frame.width,
+                height: frame.height,
+                opacity: *opacity,
+                blend_mode: *blend_mode,
+                transform: *transform,
+                effect_graph: Arc::clone(effect_graph),
+                frame_seed: *frame_seed,
+            }),
+        })
+        .collect();
+    composite_timeline_elements(
+        width,
+        height,
+        &elements,
+        TimelineCompositeOptions::default(),
+        scratch,
+    )
 }
 
 fn preview_cache_key(frame: i64, width: u32, height: u32, rgba: &[u8]) -> String {
@@ -411,6 +470,46 @@ mod tests {
         assert_eq!(frame.height, 540);
         assert_eq!(frame.rgba.len(), 960 * 540 * 4);
         assert!(frame.key.contains("self-hosted-viewer:960x540:f4:"));
+    }
+
+    #[test]
+    fn nested_solid_color_sequence_returns_preview_frame() {
+        let mut state = AppState::new();
+        let mut child = Sequence::new("child");
+        let child_id = child.id;
+        let child_tb = child.time_base();
+        child.video_tracks[0]
+            .add_clip(Clip::new_solid_color(
+                AssetId::new(),
+                Color::from_rgba8(48, 120, 220, 255),
+                TimeCode::new(0, child_tb),
+                TimeCode::new(24, child_tb),
+            ))
+            .expect("child solid clip");
+
+        let mut parent = Sequence::new("parent");
+        let parent_tb = parent.time_base();
+        parent.video_tracks[0]
+            .add_clip(Clip::new_nested_sequence(
+                child_id,
+                TimeCode::new(0, parent_tb),
+                TimeCode::new(24, parent_tb),
+                Some("child".to_owned()),
+            ))
+            .expect("parent nested clip");
+
+        state.sequences.push(child);
+        state.sequence = Some(parent);
+        state.seek(3);
+
+        let service = SelfHostedPreviewService::new();
+        let frame = service
+            .viewer_frame_for_state(&state)
+            .expect("nested solid sequence should preview");
+
+        assert_eq!(frame.width, 960);
+        assert_eq!(frame.height, 540);
+        assert_eq!(frame.rgba.len(), 960 * 540 * 4);
     }
 
     #[test]
