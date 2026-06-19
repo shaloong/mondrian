@@ -471,7 +471,7 @@ impl AppState {
         &mut self,
         selection: SelectedClipRef,
         effect_type: EffectType,
-    ) -> mondrian_core::Result<bool> {
+    ) -> mondrian_core::Result<EffectId> {
         self.insert_effect_at_index(selection, effect_type, usize::MAX)
     }
 
@@ -480,7 +480,7 @@ impl AppState {
         selection: SelectedClipRef,
         effect_type: EffectType,
         index: usize,
-    ) -> mondrian_core::Result<bool> {
+    ) -> mondrian_core::Result<EffectId> {
         if !selection.is_video_track {
             return Err(mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "add_effect_to_clip".to_string(),
@@ -488,7 +488,7 @@ impl AppState {
             });
         }
 
-        let (sequence_id, before, after) = {
+        let (sequence_id, effect_id, before, after) = {
             let seq = self.sequence.as_mut().ok_or_else(|| {
                 mondrian_core::MondrianError::WorkflowStepFailed {
                     step_id: "add_effect_to_clip".to_string(),
@@ -515,8 +515,8 @@ impl AppState {
                 }
             })?;
             let effect = EffectNode::with_defaults(effect_type.clone());
-            clip.insert_effect_node_at(index, effect);
-            (seq.id, before, seq.clone())
+            let effect_id = clip.insert_effect_node_at(index, effect);
+            (seq.id, effect_id, before, seq.clone())
         };
 
         self.record_sequence_snapshot_command(
@@ -526,7 +526,7 @@ impl AppState {
         );
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         let _ = self.save_project_file();
-        Ok(true)
+        Ok(effect_id)
     }
 
     pub fn set_clip_effect_enabled(

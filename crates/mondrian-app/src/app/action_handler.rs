@@ -1299,15 +1299,15 @@ impl AppState {
                     name,
                     payload,
                 )?;
-                self.add_effect_to_clip(
-                    SelectedClipRef {
-                        track_id: payload.clip.track_id,
-                        is_video_track: payload.clip.is_video_track,
-                        clip_id: payload.clip.clip_id,
-                    },
-                    payload.effect_type,
+                let selection = SelectedClipRef {
+                    track_id: payload.clip.track_id,
+                    is_video_track: payload.clip.is_video_track,
+                    clip_id: payload.clip.clip_id,
+                };
+                let effect_id = self.add_effect_to_clip(selection, payload.effect_type)?;
+                self.select_effect_by_id(selection.clip_id, effect_id).map(|_| ()).ok_or_else(
+                    || missing_effect_error("effects_add_to_clip", selection.clip_id, effect_id),
                 )
-                .map(|_| ())
             }
             _ => Err(unknown_ui_action_error("effects_ui_action", name)),
         }
@@ -4937,7 +4937,17 @@ mod tests {
         let clip = &state.sequence.as_ref().expect("sequence").video_tracks[0].clips[0];
         assert_eq!(clip.effects.len(), 1);
         assert_eq!(clip.effects[0].effect_type, EffectType::GaussianBlur);
+        let selected = state.primary_selected_effect().expect("new effect should be selected");
+        assert_eq!(selected.clip.clip_id, clip_id);
+        assert_eq!(selected.effect_id, clip.effects[0].id);
         assert!(state.can_undo_action());
+        assert_eq!(state.cmd_history.undo_description(), Some("添加高斯模糊"));
+
+        assert!(state.undo_timeline().expect("undo add effect"));
+        let clip = &state.sequence.as_ref().expect("sequence").video_tracks[0].clips[0];
+        assert!(clip.effects.is_empty());
+        assert!(!state.can_undo_action());
+        assert!(state.primary_selected_effect().is_none());
     }
 
     #[test]

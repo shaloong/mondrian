@@ -2339,13 +2339,12 @@ impl TimelinePanel {
                                 clip_id: selection.clip_id,
                             };
                             match state.add_effect_to_clip(sel_ref, effect_type.clone()) {
-                                Ok(true) => {
+                                Ok(_) => {
                                     state.set_status_hint(
                                         format!("已添加{}", effect_type.display_name()),
                                         false,
                                     );
                                 }
-                                Ok(false) => {}
                                 Err(err) => {
                                     state.set_status_hint(format!("添加特效失败：{err}"), true);
                                 }
@@ -2418,13 +2417,12 @@ impl TimelinePanel {
                                 clip_id: selection.clip_id,
                             };
                             match state.add_effect_to_clip(sel_ref, effect_type.clone()) {
-                                Ok(true) => {
+                                Ok(_) => {
                                     state.set_status_hint(
                                         format!("已添加{}", effect_type.display_name()),
                                         false,
                                     );
                                 }
-                                Ok(false) => {}
                                 Err(err) => {
                                     state.set_status_hint(format!("添加特效失败：{err}"), true);
                                 }

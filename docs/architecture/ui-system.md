@@ -924,10 +924,12 @@ framework-owned. Filtering changes only visible row order; original item
 indices, row actions, drag payloads, badges, icons, and disabled state remain
 the item identity used for dispatch. The self-hosted Effects panel builds rows
 from the shared effect registry and, when a video clip is selected, activates
-rows through undoable `AppState::add_effect_to_clip` commands. Project lifecycle
-state belongs to the shell and File menu surfaces instead of a dock panel, so
-editing workspaces do not expose a separate project-status panel beside
-creative panels.
+rows through undoable `AppState::add_effect_to_clip` commands. The app action
+selects the newly created effect instance after the mutation so Inspector and
+Node Graph immediately target the same effect; the selection update is
+navigation state and does not create a second undo entry. Project lifecycle state
+belongs to the shell and File menu surfaces instead of a dock panel, so editing
+workspaces do not expose a separate project-status panel beside creative panels.
 The self-hosted Assets panel uses the dedicated `AssetGrid` card browser
 instead of the row-list surface. `AssetGrid` keeps the same framework-owned
 interaction contract as `PanelList`: filter input is a real `TextInput`, local
