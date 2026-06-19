@@ -69,6 +69,38 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
                     MenuItem::new("Paste", Action::Paste),
                     AppIcon::ClipboardText,
                 ),
+                menu_item_with_icon(MenuItem::new("Duplicate", Action::Duplicate), AppIcon::Copy),
+                MenuItem::separator(),
+                menu_item_with_icon(
+                    MenuItem::new("Select All", Action::SelectAll),
+                    AppIcon::Cursor,
+                ),
+                menu_item_with_icon(
+                    MenuItem::new("Deselect All", Action::DeselectAll),
+                    AppIcon::CursorFilled,
+                ),
+                MenuItem::separator(),
+                menu_item_with_icon(
+                    MenuItem::new("Delete Selection", Action::DeleteSelection),
+                    AppIcon::Trash,
+                ),
+                menu_item_with_icon(
+                    MenuItem::new("Ripple Delete", Action::RippleDeleteSelection),
+                    AppIcon::Trash,
+                ),
+                menu_item_with_icon(
+                    MenuItem::new("Split Clip at Playhead", Action::SplitClipAtPlayhead),
+                    AppIcon::Cut,
+                ),
+                MenuItem::separator(),
+                menu_item_with_icon(
+                    MenuItem::new("Mark In", Action::MarkInAtPlayhead),
+                    AppIcon::Stopwatch,
+                ),
+                menu_item_with_icon(
+                    MenuItem::new("Mark Out", Action::MarkOutAtPlayhead),
+                    AppIcon::Stopwatch,
+                ),
                 MenuItem::separator(),
                 menu_item_with_icon(
                     MenuItem::new("Preferences...", app_shell_preferences_action()),
@@ -311,8 +343,10 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
         Action::Cut => state.can_cut_to_app_clipboard(),
         Action::Copy => state.can_copy_to_app_clipboard(),
         Action::Paste => state.can_paste_from_app_clipboard(),
-        Action::DeleteSelection | Action::RippleDeleteSelection => has_timeline_selection(state),
-        Action::Duplicate => state.can_copy_to_app_clipboard(),
+        Action::DeleteSelection | Action::RippleDeleteSelection => {
+            has_deletable_timeline_selection(state)
+        }
+        Action::Duplicate => state.can_cut_to_app_clipboard(),
         Action::SplitClipAtPlayhead => can_split_at_playhead(state),
         Action::MarkInAtPlayhead
         | Action::MarkOutAtPlayhead
@@ -369,6 +403,27 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
 
 fn has_timeline_selection(state: &AppState) -> bool {
     !state.selection.selected_clips.is_empty() || !state.selection.selected_track_ids.is_empty()
+}
+
+fn has_deletable_timeline_selection(state: &AppState) -> bool {
+    if !state.selection.selected_track_ids.is_empty() {
+        return true;
+    }
+    let Some(sequence) = state.sequence.as_ref() else {
+        return false;
+    };
+    !state.selection.selected_clips.is_empty()
+        && state.selection.selected_clips.iter().all(|selection| {
+            let tracks = if selection.is_video_track {
+                &sequence.video_tracks
+            } else {
+                &sequence.audio_tracks
+            };
+            tracks
+                .iter()
+                .find(|track| track.id == selection.track_id)
+                .is_some_and(|track| !track.is_locked)
+        })
 }
 
 fn has_any_app_selection(state: &AppState) -> bool {
@@ -715,6 +770,14 @@ mod tests {
             ("Edit", "Cut"),
             ("Edit", "Copy"),
             ("Edit", "Paste"),
+            ("Edit", "Duplicate"),
+            ("Edit", "Select All"),
+            ("Edit", "Deselect All"),
+            ("Edit", "Delete Selection"),
+            ("Edit", "Ripple Delete"),
+            ("Edit", "Split Clip at Playhead"),
+            ("Edit", "Mark In"),
+            ("Edit", "Mark Out"),
             ("Edit", "Preferences..."),
             ("View", "Timeline"),
             ("View", "Effects"),
@@ -745,6 +808,14 @@ mod tests {
             ("Edit", "Cut", "Ctrl+X"),
             ("Edit", "Copy", "Ctrl+C"),
             ("Edit", "Paste", "Ctrl+V"),
+            ("Edit", "Duplicate", "Ctrl+D"),
+            ("Edit", "Select All", "Ctrl+A"),
+            ("Edit", "Deselect All", "Esc"),
+            ("Edit", "Delete Selection", "Delete"),
+            ("Edit", "Ripple Delete", "Shift+Delete"),
+            ("Edit", "Split Clip at Playhead", "Ctrl+K"),
+            ("Edit", "Mark In", "I"),
+            ("Edit", "Mark Out", "O"),
             ("View", "Timeline", "Ctrl+Alt+T"),
             ("View", "Toggle Fullscreen", "F11"),
             ("Workspace", "Editing", "Ctrl+Alt+1"),
@@ -774,6 +845,14 @@ mod tests {
         assert!(!menu_item(&menu_items, "Edit", "Cut").enabled);
         assert!(!menu_item(&menu_items, "Edit", "Copy").enabled);
         assert!(!menu_item(&menu_items, "Edit", "Paste").enabled);
+        assert!(!menu_item(&menu_items, "Edit", "Duplicate").enabled);
+        assert!(!menu_item(&menu_items, "Edit", "Select All").enabled);
+        assert!(!menu_item(&menu_items, "Edit", "Deselect All").enabled);
+        assert!(!menu_item(&menu_items, "Edit", "Delete Selection").enabled);
+        assert!(!menu_item(&menu_items, "Edit", "Ripple Delete").enabled);
+        assert!(!menu_item(&menu_items, "Edit", "Split Clip at Playhead").enabled);
+        assert!(!menu_item(&menu_items, "Edit", "Mark In").enabled);
+        assert!(!menu_item(&menu_items, "Edit", "Mark Out").enabled);
         assert!(menu_item(&menu_items, "Sequence", "New Sequence").enabled);
         assert!(!menu_item(&menu_items, "Sequence", "Return to Parent Sequence").enabled);
         assert!(!menu_item(&menu_items, "Sequence", "Set Active as Default").enabled);
@@ -985,13 +1064,22 @@ mod tests {
 
     #[test]
     fn app_state_menu_items_enable_cut_copy_for_selected_clip() {
-        let state = state_with_selected_clip();
+        let mut state = state_with_selected_clip();
+        state.seek(15);
 
         let menu_items = default_menu_items_for_app_state(&state);
 
         assert!(menu_item(&menu_items, "Edit", "Cut").enabled);
         assert!(menu_item(&menu_items, "Edit", "Copy").enabled);
         assert!(!menu_item(&menu_items, "Edit", "Paste").enabled);
+        assert!(menu_item(&menu_items, "Edit", "Duplicate").enabled);
+        assert!(menu_item(&menu_items, "Edit", "Select All").enabled);
+        assert!(menu_item(&menu_items, "Edit", "Deselect All").enabled);
+        assert!(menu_item(&menu_items, "Edit", "Delete Selection").enabled);
+        assert!(menu_item(&menu_items, "Edit", "Ripple Delete").enabled);
+        assert!(menu_item(&menu_items, "Edit", "Split Clip at Playhead").enabled);
+        assert!(menu_item(&menu_items, "Edit", "Mark In").enabled);
+        assert!(menu_item(&menu_items, "Edit", "Mark Out").enabled);
     }
 
     #[test]
@@ -1003,6 +1091,9 @@ mod tests {
 
         assert!(!menu_item(&menu_items, "Edit", "Cut").enabled);
         assert!(menu_item(&menu_items, "Edit", "Copy").enabled);
+        assert!(!menu_item(&menu_items, "Edit", "Duplicate").enabled);
+        assert!(!menu_item(&menu_items, "Edit", "Delete Selection").enabled);
+        assert!(!menu_item(&menu_items, "Edit", "Ripple Delete").enabled);
     }
 
     #[test]

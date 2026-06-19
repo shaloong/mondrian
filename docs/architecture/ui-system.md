@@ -70,6 +70,11 @@ icon assets and converts them into
 `mondrian-ui-widgets::VectorIcon` / `IconButton` values without depending on
 legacy egui theme types. `self_hosted::panels` owns panel adapters that map
 application-facing concepts into generic widget view models.
+Common editor operations should not be keyboard-only. When a self-hosted global
+shortcut is added for a visible NLE operation such as duplicate, delete, ripple
+delete, split, mark in/out, select all, or deselect all, the corresponding menu
+row should use the same action, shortcut descriptor table, and
+`app_state_action_enabled` gate.
 `self_hosted::host::SelfHostedUiHost` owns the reusable product
 state bridge: it keeps the startup root, workspace root, current `AppState`,
 dirty refresh flag, visible shell mode, and queued-action draining together so
