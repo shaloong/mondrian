@@ -24,6 +24,7 @@ use mondrian_ui_widgets::ViewerFrameImage;
 
 use crate::app::AppState;
 use crate::self_hosted::panels::ViewerPreviewSource;
+use crate::self_hosted::preview_scale::normalize_preview_resolution_scale;
 
 const MAX_NESTED_PREVIEW_DEPTH: usize = 4;
 
@@ -322,7 +323,7 @@ impl SelfHostedPreviewService {
 
 fn preview_dimensions_for_sequence(sequence: &Sequence) -> (u32, u32) {
     let resolution = sequence.settings.resolution;
-    let scale = sequence.settings.preview.resolution_scale.clamp(0.125, 1.0);
+    let scale = normalize_preview_resolution_scale(sequence.settings.preview.resolution_scale);
     let width = ((resolution.width as f32 * scale).round() as u32).max(1);
     let height = ((resolution.height as f32 * scale).round() as u32).max(1);
     (width, height)
@@ -470,6 +471,21 @@ mod tests {
         assert_eq!(frame.height, 540);
         assert_eq!(frame.rgba.len(), 960 * 540 * 4);
         assert!(frame.key.contains("self-hosted-viewer:960x540:f4:"));
+    }
+
+    #[test]
+    fn preview_dimensions_clamp_invalid_resolution_scale() {
+        let mut below_min = Sequence::new("below");
+        below_min.settings.preview.resolution_scale = 0.0;
+        assert_eq!(preview_dimensions_for_sequence(&below_min), (240, 135));
+
+        let mut above_max = Sequence::new("above");
+        above_max.settings.preview.resolution_scale = 2.0;
+        assert_eq!(preview_dimensions_for_sequence(&above_max), (1920, 1080));
+
+        let mut invalid = Sequence::new("invalid");
+        invalid.settings.preview.resolution_scale = f32::NAN;
+        assert_eq!(preview_dimensions_for_sequence(&invalid), (960, 540));
     }
 
     #[test]

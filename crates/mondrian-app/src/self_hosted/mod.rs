@@ -16,6 +16,7 @@ pub mod panels;
 pub mod preferences_dialog;
 pub mod preferences_store;
 pub mod preview;
+pub(crate) mod preview_scale;
 pub mod rendering;
 pub mod runtime;
 pub mod sequence_settings_dialog;

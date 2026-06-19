@@ -79,6 +79,9 @@ use crate::app::ui_actions::{
 };
 use crate::app::{AppState, SelectedClipRef};
 use crate::self_hosted::icons::AppIcon;
+use crate::self_hosted::preview_scale::{
+    normalize_preview_resolution_scale, preview_scale_percent_label,
+};
 use crate::self_hosted::shortcuts::shortcut_label_for_action;
 
 /// Supplies already-decoded thumbnails for asset-grid cards.
@@ -622,11 +625,11 @@ impl ViewerPanelModel {
 }
 
 fn viewer_preview_quality_label(scale: f32) -> String {
-    let scale = scale.clamp(0.125, 1.0);
+    let scale = normalize_preview_resolution_scale(scale);
     if (scale - 1.0).abs() <= f32::EPSILON {
         "Full".into()
     } else {
-        format!("{:.0}%", scale * 100.0)
+        preview_scale_percent_label(scale)
     }
 }
 
@@ -5542,6 +5545,18 @@ mod tests {
         let models = SelfHostedPanelModels::from_app_state(&state);
 
         assert_eq!(models.viewer.preview_quality_label, "Full");
+    }
+
+    #[test]
+    fn app_state_models_clamp_viewer_preview_scale_label() {
+        let mut state = AppState::new();
+        let mut sequence = Sequence::new("edit");
+        sequence.settings.preview.resolution_scale = 0.0;
+        state.sequence = Some(sequence);
+
+        let models = SelfHostedPanelModels::from_app_state(&state);
+
+        assert_eq!(models.viewer.preview_quality_label, "12.5%");
     }
 
     #[test]

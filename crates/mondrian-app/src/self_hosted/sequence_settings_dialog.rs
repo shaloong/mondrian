@@ -25,6 +25,7 @@ use crate::app::ui_actions::{
     SequenceSettingsTabPayload, SequenceUpdateSettingsPayload,
 };
 use crate::self_hosted::icons::AppIcon;
+use crate::self_hosted::preview_scale::preview_scale_percent_label;
 
 /// Shell-local sequence settings form state.
 #[derive(Debug, Clone)]
@@ -426,7 +427,7 @@ fn export_bit_depth_label(value: ExportBitDepth) -> &'static str {
 }
 
 fn preview_scale_label(scale: f32) -> String {
-    format!("{:.0}%", scale.clamp(0.125, 1.0) * 100.0)
+    preview_scale_percent_label(scale)
 }
 
 fn resolution_items() -> Vec<MenuItem> {
