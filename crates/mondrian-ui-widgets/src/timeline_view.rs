@@ -12,6 +12,8 @@ use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
+use crate::{ContextMenu, MenuItem};
+
 const SCROLLBAR_THICKNESS: f32 = 8.0;
 const SCROLLBAR_MIN_THUMB: f32 = 28.0;
 const TIMELINE_TOOL_BUTTON_SIZE: f32 = 18.0;
@@ -318,6 +320,7 @@ pub struct TimelineView {
     clip_drag: Option<TimelineClipDrag>,
     trim_drag: Option<TimelineTrimDrag>,
     scrollbar_drag: Option<TimelineScrollbarDrag>,
+    context_menu: Option<ContextMenu>,
     horizontal_scrollbar_hovered: bool,
     vertical_scrollbar_hovered: bool,
     on_clip_select: Option<Box<TimelineClipAction>>,
@@ -415,6 +418,7 @@ impl TimelineView {
             clip_drag: None,
             trim_drag: None,
             scrollbar_drag: None,
+            context_menu: None,
             horizontal_scrollbar_hovered: false,
             vertical_scrollbar_hovered: false,
             on_clip_select: None,
@@ -485,6 +489,10 @@ impl TimelineView {
             self.selected_track = None;
             self.asset_drop_hover = None;
             self.track_drag = None;
+            self.clip_drag = None;
+            self.trim_drag = None;
+            self.scrollbar_drag = None;
+            self.context_menu = None;
             self.horizontal_scrollbar_hovered = false;
             self.vertical_scrollbar_hovered = false;
         }
@@ -1367,6 +1375,118 @@ impl TimelineView {
         true
     }
 
+    fn edit_command_action(&self, command: TimelineEditCommand) -> Action {
+        self.on_edit_command.as_ref().map_or(Action::NoOp, |factory| factory(command))
+    }
+
+    fn track_add_action(&self, kind: TimelineTrackKind) -> Action {
+        self.on_track_add.as_ref().map_or(Action::NoOp, |factory| factory(kind))
+    }
+
+    fn menu_item(label: &str, action: Action) -> MenuItem {
+        let item = MenuItem::new(label, action.clone());
+        if matches!(action, Action::NoOp) {
+            item.disabled()
+        } else {
+            item
+        }
+    }
+
+    fn clip_context_menu_items(&self) -> Vec<MenuItem> {
+        vec![
+            Self::menu_item(
+                "Delete Clip",
+                self.edit_command_action(TimelineEditCommand::DeleteSelection),
+            ),
+            Self::menu_item(
+                "Ripple Delete Clip",
+                self.edit_command_action(TimelineEditCommand::RippleDeleteSelection),
+            ),
+            Self::menu_item(
+                "Split at Playhead",
+                self.edit_command_action(TimelineEditCommand::SplitAtPlayhead),
+            ),
+            MenuItem::separator(),
+            Self::menu_item(
+                "Mark In",
+                self.edit_command_action(TimelineEditCommand::MarkInAtPlayhead),
+            ),
+            Self::menu_item(
+                "Mark Out",
+                self.edit_command_action(TimelineEditCommand::MarkOutAtPlayhead),
+            ),
+        ]
+    }
+
+    fn timeline_context_menu_items(&self) -> Vec<MenuItem> {
+        vec![
+            Self::menu_item(
+                "Split at Playhead",
+                self.edit_command_action(TimelineEditCommand::SplitAtPlayhead),
+            ),
+            Self::menu_item(
+                "Mark In",
+                self.edit_command_action(TimelineEditCommand::MarkInAtPlayhead),
+            ),
+            Self::menu_item(
+                "Mark Out",
+                self.edit_command_action(TimelineEditCommand::MarkOutAtPlayhead),
+            ),
+            MenuItem::separator(),
+            Self::menu_item(
+                "Add Video Track",
+                self.track_add_action(TimelineTrackKind::Video),
+            ),
+            Self::menu_item(
+                "Add Audio Track",
+                self.track_add_action(TimelineTrackKind::Audio),
+            ),
+        ]
+    }
+
+    fn open_context_menu(
+        &mut self,
+        position: Point,
+        items: Vec<MenuItem>,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        if items.iter().all(|item| !item.is_activatable()) {
+            return EventResult::Ignored;
+        }
+        let mut menu = ContextMenu::new(position, items);
+        menu.layout(self.bounds);
+        self.context_menu = Some(menu);
+        ctx.request_repaint();
+        EventResult::Handled
+    }
+
+    fn route_context_menu_event(
+        &mut self,
+        event: &UiEvent,
+        ctx: &mut EventContext,
+    ) -> Option<EventResult> {
+        let replace_with_new_menu = matches!(
+            event,
+            UiEvent::MouseDown {
+                position,
+                button: MouseButton::Right,
+                ..
+            } if self.bounds.contains(*position)
+        );
+        if replace_with_new_menu {
+            self.context_menu = None;
+            return None;
+        }
+
+        let menu = self.context_menu.as_mut()?;
+        let result = menu.event(event, ctx);
+        if !menu.is_visible() {
+            self.context_menu = None;
+            ctx.request_repaint();
+        }
+        (result == EventResult::Handled).then_some(result)
+    }
+
     fn split_at_pointer_frame(&mut self, point: Point, ctx: &mut EventContext) -> EventResult {
         self.seek_from_input(self.x_to_frame(point.x), ctx);
         if self.dispatch_edit_command(TimelineEditCommand::SplitAtPlayhead, ctx) {
@@ -2230,6 +2350,10 @@ impl Widget for TimelineView {
             return EventResult::Ignored;
         }
 
+        if let Some(result) = self.route_context_menu_event(event, ctx) {
+            return result;
+        }
+
         match event {
             UiEvent::DragEnter { payload: DragPayload::Asset(asset_id), position } => {
                 self.hover_asset_drop(*asset_id, *position, ctx);
@@ -2249,10 +2373,40 @@ impl Widget for TimelineView {
             UiEvent::Drop { payload: DragPayload::Asset(asset_id), position } => {
                 return self.finish_asset_drop(*asset_id, *position, ctx);
             }
+            UiEvent::MouseDown { position, button: MouseButton::Right, .. } => {
+                if !self.bounds.contains(*position) {
+                    return EventResult::Ignored;
+                }
+                self.focused = true;
+                self.focus_visible = false;
+                self.playhead_dragging = false;
+                self.track_drag = None;
+                self.clip_drag = None;
+                self.trim_drag = None;
+                self.scrollbar_drag = None;
+                if let Some(clip_ref) = self.hit_clip(*position) {
+                    let _ = self.select_clip_from_input(clip_ref, ctx);
+                    return self.open_context_menu(*position, self.clip_context_menu_items(), ctx);
+                }
+                if let Some(track_ref) = self.track_header_at(*position) {
+                    let _ = self.select_track_from_input(track_ref, ctx);
+                }
+                if self.ruler_rect.contains(*position)
+                    || self.body_rect.contains(*position)
+                    || self.header_rect.contains(*position)
+                {
+                    return self.open_context_menu(
+                        *position,
+                        self.timeline_context_menu_items(),
+                        ctx,
+                    );
+                }
+            }
             UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
                 if !self.bounds.contains(*position) {
                     return EventResult::Ignored;
                 }
+                self.context_menu = None;
                 self.focused = true;
                 self.focus_visible = false;
                 if let Some(thumb) = self.horizontal_scrollbar_thumb_rect() {
@@ -2460,6 +2614,7 @@ impl Widget for TimelineView {
                 self.clip_drag = None;
                 self.trim_drag = None;
                 self.scrollbar_drag = None;
+                self.context_menu = None;
                 self.hovered_tool = None;
                 ctx.release_pointer_capture(self.id);
                 return EventResult::Handled;
@@ -2538,6 +2693,16 @@ impl Widget for TimelineView {
         ctx.push_clip(self.body_rect);
         self.paint_scrollbars(ctx);
         ctx.pop_clip();
+    }
+
+    fn paint_overlay(&self, ctx: &mut PaintContext) {
+        if let Some(menu) = &self.context_menu {
+            menu.paint_overlay(ctx);
+        }
+    }
+
+    fn overlay_hit_test(&self, point: Point) -> bool {
+        self.context_menu.as_ref().is_some_and(|menu| menu.overlay_hit_test(point))
     }
 
     fn hit_test(&self, point: Point) -> bool {
@@ -4068,6 +4233,151 @@ mod tests {
             actions.borrow().as_slice(),
             &[Action::RippleDeleteSelection]
         );
+    }
+
+    #[test]
+    fn right_click_clip_opens_context_menu_and_dispatches_delete() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut view = timeline().on_edit_command(|command| match command {
+            TimelineEditCommand::DeleteSelection => Action::DeleteSelection,
+            TimelineEditCommand::RippleDeleteSelection => Action::RippleDeleteSelection,
+            TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
+            TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
+            TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
+        });
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let result = view.event(
+            &UiEvent::MouseDown {
+                position: Point::new(108.0, 42.0),
+                button: MouseButton::Right,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(
+            view.selected_clip(),
+            Some(TimelineClipRef { track_index: 0, clip_index: 0 })
+        );
+        assert!(view.overlay_hit_test(Point::new(900.0, 900.0)));
+
+        let result = view.event(
+            &UiEvent::MouseDown {
+                position: Point::new(120.0, 55.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[Action::SaveProject, Action::DeleteSelection]
+        );
+        assert!(!view.overlay_hit_test(Point::new(900.0, 900.0)));
+    }
+
+    #[test]
+    fn right_click_timeline_empty_space_context_menu_can_add_track() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut view = timeline()
+            .on_edit_command(|command| match command {
+                TimelineEditCommand::DeleteSelection => Action::DeleteSelection,
+                TimelineEditCommand::RippleDeleteSelection => Action::RippleDeleteSelection,
+                TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
+                TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
+                TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
+            })
+            .on_track_add(|kind| match kind {
+                TimelineTrackKind::Video => Action::Play,
+                TimelineTrackKind::Audio => Action::Pause,
+            });
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let result = view.event(
+            &UiEvent::MouseDown {
+                position: Point::new(500.0, 42.0),
+                button: MouseButton::Right,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(result, EventResult::Handled);
+        assert!(view.overlay_hit_test(Point::new(900.0, 900.0)));
+
+        let result = view.event(
+            &UiEvent::MouseDown {
+                position: Point::new(510.0, 155.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(actions.borrow().as_slice(), &[Action::Play]);
+    }
+
+    #[test]
+    fn right_click_without_command_factories_does_not_open_empty_context_menu() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut view = timeline();
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let result = view.event(
+            &UiEvent::MouseDown {
+                position: Point::new(500.0, 42.0),
+                button: MouseButton::Right,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Ignored);
+        assert!(!view.overlay_hit_test(Point::new(900.0, 900.0)));
+        assert!(actions.borrow().is_empty());
     }
 
     #[test]

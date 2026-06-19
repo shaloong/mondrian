@@ -720,6 +720,11 @@ editor actions such as `Action::DeleteSelection` and
 Mark In / Mark Out shortcuts use `TimelineEditCommand::MarkInAtPlayhead` and
 `TimelineEditCommand::MarkOutAtPlayhead`, then route through shared app actions
 so timeline and viewer shortcuts can converge on the same command boundary.
+The timeline context menu is implemented inside `TimelineView` with the shared
+`ContextMenu` overlay component, but it still emits only the same
+`TimelineEditCommand`s and track-add proposals as keyboard and toolbar input.
+Right-clicking a clip selects that clip first, then menu actions dispatch
+through the existing app adapter; the widget never mutates the sequence itself.
 Modified variants should get explicit semantic commands instead of reusing
 plain delete.
 Timeline structure mutations that can invalidate ids, such as removing tracks,
