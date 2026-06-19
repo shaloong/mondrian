@@ -607,6 +607,12 @@ explicit clip scopes: child content paints under the viewport clip, then
 scrollbar chrome paints under the container-bounds clip. The component
 `PaintContext.clip_rect` and renderer clip stack must match for each scope
 during the pass.
+Layout measurement must use the same viewport and scrollbar-gutter resolution
+as final layout. `FlexLayout` therefore measures children with the parent inner
+bounds instead of an unbounded constraint, and `ScrollView::measure()` performs
+the same iterative gutter reservation used by `ScrollView::layout()`. Wrapped
+text, inspector rows, and scrollable panels must not require a later splitter or
+window resize to settle into their final line breaks.
 Clip rectangles are snapped conservatively by flooring their top-left and
 ceiling their bottom-right edge before GPU scissoring. Ordinary shape, image,
 line, and vector geometry keeps subpixel coordinates so SDF antialiasing, MSAA,
@@ -621,9 +627,9 @@ to at least the viewport size. This avoids narrow natural-size children causing
 unstable text wrapping, clipping, or hit-test geometry inside panels.
 Components that truly need overflow in the other direction must opt into
 `ScrollAxes::Horizontal` or `ScrollAxes::Both`; horizontal scrolling then uses
-Shift+wheel and a draggable bottom scrollbar. Dual-axis scrollbars reserve the
-bottom-right corner from one another, but remain overlay affordances and do not
-reserve child layout width.
+Shift+wheel and a draggable bottom scrollbar. Dual-axis scrollbars reserve
+viewport gutters and the bottom-right corner from one another, while painting
+the scrollbar chrome in a separate clipped scope from child content.
 Thumb drags request pointer capture, map thumb-track movement back to content
 scroll offset, and release capture on mouse up. Clicking the scrollbar track
 outside the thumb pages the viewport by one visible span. Compound widgets that

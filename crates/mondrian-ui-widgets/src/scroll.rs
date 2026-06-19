@@ -216,8 +216,12 @@ impl ScrollView {
         })
     }
 
-    fn resolve_viewport_and_content_size(&self, child: &dyn Widget) -> (Size, Size) {
-        let bounds_size = Size::new(self.bounds.width.max(0.0), self.bounds.height.max(0.0));
+    fn resolve_viewport_and_content_size_for_bounds(
+        &self,
+        bounds_size: Size,
+        child: &dyn Widget,
+    ) -> (Size, Size) {
+        let bounds_size = Size::new(bounds_size.width.max(0.0), bounds_size.height.max(0.0));
         let mut reserve_vertical = false;
         let mut reserve_horizontal = false;
         let mut viewport = bounds_size;
@@ -252,6 +256,13 @@ impl ScrollView {
         }
 
         (viewport, content)
+    }
+
+    fn resolve_viewport_and_content_size(&self, child: &dyn Widget) -> (Size, Size) {
+        self.resolve_viewport_and_content_size_for_bounds(
+            Size::new(self.bounds.width.max(0.0), self.bounds.height.max(0.0)),
+            child,
+        )
     }
 
     fn set_scroll_x(&mut self, x: f32) -> bool {
@@ -443,24 +454,37 @@ impl Widget for ScrollView {
 
     fn measure(&self, constraint: LayoutConstraint) -> Size {
         if let Some(child) = &self.child {
-            let child_size = child.measure(LayoutConstraint {
-                min: Size::ZERO,
-                max: Size::new(
-                    if self.axes.horizontal() {
-                        f32::MAX
-                    } else {
-                        constraint.max.width
-                    },
-                    if self.axes.vertical() {
-                        f32::MAX
-                    } else {
-                        constraint.max.height
-                    },
-                ),
-            });
-            Size {
-                width: child_size.width.min(constraint.max.width).max(constraint.min.width),
-                height: child_size.height.min(constraint.max.height).max(constraint.min.height),
+            if constraint.max.width.is_finite() && constraint.max.height.is_finite() {
+                let bounds_size = Size::new(
+                    constraint.max.width.max(constraint.min.width),
+                    constraint.max.height.max(constraint.min.height),
+                );
+                let (_viewport, content) =
+                    self.resolve_viewport_and_content_size_for_bounds(bounds_size, child.as_ref());
+                constraint.constrain(Size::new(
+                    bounds_size.width.min(content.width + self.scrollbar_width),
+                    bounds_size.height.min(content.height + self.scrollbar_width),
+                ))
+            } else {
+                let child_size = child.measure(LayoutConstraint {
+                    min: Size::ZERO,
+                    max: Size::new(
+                        if self.axes.horizontal() {
+                            f32::MAX
+                        } else {
+                            constraint.max.width
+                        },
+                        if self.axes.vertical() {
+                            f32::MAX
+                        } else {
+                            constraint.max.height
+                        },
+                    ),
+                });
+                Size {
+                    width: child_size.width.min(constraint.max.width).max(constraint.min.width),
+                    height: child_size.height.min(constraint.max.height).max(constraint.min.height),
+                }
             }
         } else {
             Size::ZERO
@@ -1078,6 +1102,46 @@ mod tests {
         assert_eq!(sv.viewport_rect(), Rect::new(0.0, 0.0, 112.0, 80.0));
         assert_eq!(*last_constraint_width.borrow(), Some(112.0));
         assert_eq!(sv.content_size, Size::new(112.0, 320.0));
+    }
+
+    #[test]
+    fn scroll_view_measure_reserves_gutter_before_parent_layout() {
+        struct WidthSensitiveChild {
+            id: WidgetId,
+            constraint_widths: Rc<RefCell<Vec<f32>>>,
+        }
+
+        impl Widget for WidthSensitiveChild {
+            fn id(&self) -> WidgetId {
+                self.id
+            }
+
+            fn measure(&self, constraint: LayoutConstraint) -> Size {
+                self.constraint_widths.borrow_mut().push(constraint.max.width);
+                Size::new(constraint.max.width, 320.0)
+            }
+
+            fn layout(&mut self, _bounds: Rect) {}
+
+            fn event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+                EventResult::Ignored
+            }
+
+            fn paint(&self, _ctx: &mut PaintContext) {}
+        }
+
+        let constraint_widths = Rc::new(RefCell::new(Vec::new()));
+        let child = WidthSensitiveChild {
+            id: WidgetId::new(),
+            constraint_widths: Rc::clone(&constraint_widths),
+        };
+        let sv = ScrollView::new(Some(Box::new(child)));
+
+        let measured =
+            sv.measure(LayoutConstraint { min: Size::ZERO, max: Size::new(120.0, 80.0) });
+
+        assert_eq!(measured, Size::new(120.0, 80.0));
+        assert_eq!(constraint_widths.borrow().as_slice(), &[120.0, 112.0]);
     }
 
     #[test]

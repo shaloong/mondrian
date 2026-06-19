@@ -116,8 +116,17 @@ impl FlexLayout {
         let n = children.len();
 
         // ── Step 1: Measure all children ──
-        let constraint = LayoutConstraint::LOOSE;
-        let measured: Vec<Size> = children.iter().map(|c| c.measure(constraint)).collect();
+        //
+        // The parent bounds are already known during layout, so children must
+        // see the real cross-axis limit. Wrapped text, scroll views, and form
+        // controls derive their preferred main-axis size from that width/height;
+        // measuring them with an unbounded constraint makes the first layout
+        // disagree with the eventual child rects.
+        let child_constraint = LayoutConstraint {
+            min: Size::ZERO,
+            max: Size::new(inner.width.max(0.0), inner.height.max(0.0)),
+        };
+        let measured: Vec<Size> = children.iter().map(|c| c.measure(child_constraint)).collect();
 
         // ── Step 2: Main axis allocation ──
         let main_size = if is_row { inner.width } else { inner.height };
@@ -206,6 +215,8 @@ mod tests {
     use mondrian_ui_core::types::{LayoutConstraint, Size, WidgetId};
     use mondrian_ui_core::widget::{EventContext, PaintContext};
     use mondrian_ui_core::{EventResult, UiEvent};
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     struct TestWidget {
         id: WidgetId,
@@ -222,6 +233,33 @@ mod tests {
         fn event(&mut self, _e: &UiEvent, _ctx: &mut EventContext) -> EventResult {
             EventResult::Ignored
         }
+        fn paint(&self, _ctx: &mut PaintContext) {}
+    }
+
+    struct ConstraintRecordingWidget {
+        id: WidgetId,
+        seen: Rc<RefCell<Vec<LayoutConstraint>>>,
+    }
+
+    impl Widget for ConstraintRecordingWidget {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+
+        fn measure(&self, constraint: LayoutConstraint) -> Size {
+            self.seen.borrow_mut().push(constraint);
+            Size::new(
+                constraint.max.width.min(40.0),
+                constraint.max.height.min(30.0),
+            )
+        }
+
+        fn layout(&mut self, _b: Rect) {}
+
+        fn event(&mut self, _e: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+            EventResult::Ignored
+        }
+
         fn paint(&self, _ctx: &mut PaintContext) {}
     }
 
@@ -385,6 +423,30 @@ mod tests {
         assert_eq!(rects.len(), 1);
         assert!(rects[0].x >= 10.0);
         assert!(rects[0].y >= 10.0);
+    }
+
+    #[test]
+    fn flex_layout_measures_children_with_parent_bounds() {
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let child = ConstraintRecordingWidget { id: WidgetId::new(), seen: Rc::clone(&seen) };
+        let children: Vec<&dyn Widget> = vec![&child];
+        let layout = FlexLayout {
+            padding: crate::constraint::RectInsets {
+                left: 8.0,
+                right: 12.0,
+                top: 4.0,
+                bottom: 6.0,
+            },
+            ..FlexLayout::column()
+        };
+
+        let rects = layout.compute(Rect::new(0.0, 0.0, 100.0, 80.0), &children);
+
+        assert_eq!(
+            seen.borrow().as_slice(),
+            &[LayoutConstraint { min: Size::ZERO, max: Size::new(80.0, 70.0) }]
+        );
+        assert_eq!(rects.len(), 1);
     }
 
     #[test]
