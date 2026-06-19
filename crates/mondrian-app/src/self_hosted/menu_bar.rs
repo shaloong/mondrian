@@ -153,6 +153,31 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
             ],
         ),
         (
+            "Playback",
+            vec![
+                menu_item_with_icon(
+                    MenuItem::new("Go to Start", Action::GoToStart),
+                    AppIcon::HomeFrameFilled,
+                ),
+                menu_item_with_icon(
+                    MenuItem::new("Step Back", Action::StepBack),
+                    AppIcon::LeftFrameFilled,
+                ),
+                menu_item_with_icon(
+                    MenuItem::new("Play/Pause", Action::TogglePlay),
+                    AppIcon::PlayFilled,
+                ),
+                menu_item_with_icon(
+                    MenuItem::new("Step Forward", Action::StepForward),
+                    AppIcon::RightFrameFilled,
+                ),
+                menu_item_with_icon(
+                    MenuItem::new("Go to End", Action::GoToEnd),
+                    AppIcon::EndFrameFilled,
+                ),
+            ],
+        ),
+        (
             "Sequence",
             vec![
                 menu_item_with_icon(
@@ -355,6 +380,7 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
         Action::SplitClipAtPlayhead => can_split_at_playhead(state),
         Action::MarkInAtPlayhead
         | Action::MarkOutAtPlayhead
+        | Action::TogglePlay
         | Action::StepForward
         | Action::StepBack
         | Action::GoToStart
@@ -713,7 +739,7 @@ mod tests {
     fn default_menu_bar_exposes_primary_menu_groups() {
         let menu = MenuBar::default();
 
-        assert_eq!(menu.child_count(), 6);
+        assert_eq!(menu.child_count(), 7);
     }
 
     #[test]
@@ -798,6 +824,11 @@ mod tests {
             ("Edit", "Preferences..."),
             ("View", "Timeline"),
             ("View", "Effects"),
+            ("Playback", "Go to Start"),
+            ("Playback", "Step Back"),
+            ("Playback", "Play/Pause"),
+            ("Playback", "Step Forward"),
+            ("Playback", "Go to End"),
             ("Sequence", "New Sequence"),
             ("Sequence", "Return to Parent Sequence"),
             ("Sequence", "Set Active as Default"),
@@ -833,6 +864,10 @@ mod tests {
             ("Edit", "Split Clip at Playhead", "Ctrl+K"),
             ("Edit", "Mark In", "I"),
             ("Edit", "Mark Out", "O"),
+            ("Playback", "Go to Start", "Home"),
+            ("Playback", "Step Back", "Left"),
+            ("Playback", "Step Forward", "Right"),
+            ("Playback", "Go to End", "End"),
             ("View", "Timeline", "Ctrl+Alt+T"),
             ("View", "Toggle Fullscreen", "F11"),
             ("Workspace", "Editing", "Ctrl+Alt+1"),
@@ -871,6 +906,11 @@ mod tests {
         assert!(!menu_item(&menu_items, "Edit", "Mark In").enabled);
         assert!(!menu_item(&menu_items, "Edit", "Mark Out").enabled);
         assert!(!menu_item(&menu_items, "Edit", "Clear In/Out").enabled);
+        assert!(!menu_item(&menu_items, "Playback", "Go to Start").enabled);
+        assert!(!menu_item(&menu_items, "Playback", "Step Back").enabled);
+        assert!(!menu_item(&menu_items, "Playback", "Play/Pause").enabled);
+        assert!(!menu_item(&menu_items, "Playback", "Step Forward").enabled);
+        assert!(!menu_item(&menu_items, "Playback", "Go to End").enabled);
         assert!(menu_item(&menu_items, "Sequence", "New Sequence").enabled);
         assert!(!menu_item(&menu_items, "Sequence", "Return to Parent Sequence").enabled);
         assert!(!menu_item(&menu_items, "Sequence", "Set Active as Default").enabled);
@@ -890,6 +930,7 @@ mod tests {
             Action::SplitClipAtPlayhead,
             Action::MarkInAtPlayhead,
             Action::MarkOutAtPlayhead,
+            Action::TogglePlay,
             Action::StepBack,
             Action::StepForward,
             Action::GoToStart,
@@ -916,6 +957,7 @@ mod tests {
             Action::SplitClipAtPlayhead,
             Action::MarkInAtPlayhead,
             Action::MarkOutAtPlayhead,
+            Action::TogglePlay,
             Action::StepBack,
             Action::StepForward,
             Action::GoToStart,
@@ -1103,6 +1145,11 @@ mod tests {
         assert!(menu_item(&menu_items, "Edit", "Mark In").enabled);
         assert!(menu_item(&menu_items, "Edit", "Mark Out").enabled);
         assert!(!menu_item(&menu_items, "Edit", "Clear In/Out").enabled);
+        assert!(menu_item(&menu_items, "Playback", "Go to Start").enabled);
+        assert!(menu_item(&menu_items, "Playback", "Step Back").enabled);
+        assert!(menu_item(&menu_items, "Playback", "Play/Pause").enabled);
+        assert!(menu_item(&menu_items, "Playback", "Step Forward").enabled);
+        assert!(menu_item(&menu_items, "Playback", "Go to End").enabled);
     }
 
     #[test]
@@ -1157,7 +1204,7 @@ mod tests {
     #[test]
     fn menu_bar_switches_open_menu_on_trigger_click() {
         let mut menu = MenuBar::default();
-        menu.layout(Rect::new(0.0, 0.0, 500.0, MENU_BAR_HEIGHT));
+        menu.layout(Rect::new(0.0, 0.0, 720.0, MENU_BAR_HEIGHT));
         let dispatched = Rc::new(RefCell::new(Vec::new()));
         let mut focus = DummyFocus;
         let mut shortcut = DummyShortcut;
@@ -1196,7 +1243,7 @@ mod tests {
     #[test]
     fn menu_bar_switches_open_menu_on_trigger_hover() {
         let mut menu = MenuBar::default();
-        menu.layout(Rect::new(0.0, 0.0, 500.0, MENU_BAR_HEIGHT));
+        menu.layout(Rect::new(0.0, 0.0, 720.0, MENU_BAR_HEIGHT));
         let dispatched = Rc::new(RefCell::new(Vec::new()));
         let mut focus = DummyFocus;
         let mut shortcut = DummyShortcut;
