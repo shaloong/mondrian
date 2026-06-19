@@ -1217,6 +1217,9 @@ Disabled color pickers propagate disabled state into their text inputs, close
 the mode menu, cancel pointer/eyedropper interactions, opt out of focus
 traversal, and keep painting the current color in muted chrome for inspector
 empty states.
+Circular color areas are painted as colored triangles clipped by a rounded-rect
+SDF mask. Their triangle fan must overdraw past the mask radius so the shader's
+analytic circle, not polygon chords from the fan, defines the visible edge.
 
 Labels are passive display widgets, but they still clip text to their padded
 content bounds during paint. Wrapped labels measure and paint against the same

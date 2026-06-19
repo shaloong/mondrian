@@ -43,7 +43,8 @@ const ROW_HEIGHT: f32 = 28.0;
 const ROW_GAP: f32 = 6.0;
 const SWATCH_SIZE: f32 = 36.0;
 const HUE_SEGMENTS: usize = 6;
-const WHEEL_SEGMENTS: usize = 72;
+const WHEEL_SEGMENTS: usize = 120;
+const WHEEL_EDGE_OVERDRAW: f32 = 1.5;
 
 /// Editable color model shown by [`ColorPicker`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -991,6 +992,7 @@ impl ColorPicker {
         let wheel = self.color_wheel_rect();
         let center = wheel.center();
         let radius = wheel.width.min(wheel.height) * 0.5;
+        let geometry_radius = radius + WHEEL_EDGE_OVERDRAW;
         ctx.encoder.draw_rect(
             wheel.inset(-2.0, -2.0),
             soft_border(tokens.border),
@@ -1004,8 +1006,14 @@ impl ColorPicker {
             let a1 = (segment + 1) as f32 / WHEEL_SEGMENTS as f32 * TAU;
             let h0 = a0.to_degrees();
             let h1 = a1.to_degrees();
-            let p0 = Point::new(center.x + a0.cos() * radius, center.y + a0.sin() * radius);
-            let p1 = Point::new(center.x + a1.cos() * radius, center.y + a1.sin() * radius);
+            let p0 = Point::new(
+                center.x + a0.cos() * geometry_radius,
+                center.y + a0.sin() * geometry_radius,
+            );
+            let p1 = Point::new(
+                center.x + a1.cos() * geometry_radius,
+                center.y + a1.sin() * geometry_radius,
+            );
             let c0 = Color::from_hsv(HsvColor { h: h0, s: 1.0, v: hsv.v, a: 1.0 });
             let c1 = Color::from_hsv(HsvColor { h: h1, s: 1.0, v: hsv.v, a: 1.0 });
             vertices.push((center, center_color));
@@ -1780,6 +1788,8 @@ mod tests {
         rect_colors: Vec<Color>,
         gradient_rects: Vec<Rect>,
         colored_triangle_vertices: usize,
+        colored_triangle_mask: Option<(Rect, f32)>,
+        colored_triangle_max_radius: f32,
         texts: Vec<String>,
     }
 
@@ -1801,6 +1811,27 @@ mod tests {
 
         fn draw_colored_triangles(&mut self, vertices: &[(Point, Color)]) {
             self.colored_triangle_vertices += vertices.len();
+        }
+
+        fn draw_colored_triangles_in_rect(
+            &mut self,
+            vertices: &[(Point, Color)],
+            mask_bounds: Rect,
+            corner_radius: f32,
+        ) {
+            self.colored_triangle_vertices += vertices.len();
+            self.colored_triangle_mask = Some((mask_bounds, corner_radius));
+            let center = mask_bounds.center();
+            self.colored_triangle_max_radius = self.colored_triangle_max_radius.max(
+                vertices
+                    .iter()
+                    .map(|(point, _)| {
+                        let dx = point.x - center.x;
+                        let dy = point.y - center.y;
+                        (dx * dx + dy * dy).sqrt()
+                    })
+                    .fold(0.0, f32::max),
+            );
         }
 
         fn draw_text(&mut self, text: &str, _font_size: f32, _position: Point, _color: Color) {
@@ -2878,6 +2909,15 @@ mod tests {
         picker.paint(&mut ctx);
 
         assert!(encoder.colored_triangle_vertices >= WHEEL_SEGMENTS * 3);
+        let (mask, corner_radius) = encoder
+            .colored_triangle_mask
+            .expect("wheel should paint through a circular SDF mask");
+        let mask_radius = mask.width.min(mask.height) * 0.5;
+        assert!((corner_radius - mask_radius).abs() < f32::EPSILON);
+        assert!(
+            encoder.colored_triangle_max_radius > mask_radius,
+            "wheel geometry must overdraw the circular mask so the SDF, not polygon chords, defines the edge"
+        );
     }
 
     #[test]
