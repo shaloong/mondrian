@@ -812,7 +812,10 @@ Timeline-focused keyboard editing follows the same rule: `TimelineView` emits
 domain-light `TimelineEditCommand`s, and the app adapter maps them onto shared
 editor actions such as `Action::DeleteSelection` and
 `Action::RippleDeleteSelection`. Split-at-playhead uses the same path via
-`TimelineEditCommand::SplitAtPlayhead` and `Action::SplitClipAtPlayhead`.
+`TimelineEditCommand::SplitAtPlayhead` and `Action::SplitClipAtPlayhead`;
+focused timeline clipboard shortcuts use the clipboard edit commands
+(`CutSelection`, `CopySelection`, `PasteAtPlayhead`, and
+`DuplicateSelection`) before reaching app-level clipboard actions.
 Nested-sequence navigation stays in this boundary as well. `TimelineClip` only
 marks that a clip is nested, never stores a `SequenceId`; when the clip context
 menu is opened the widget emits `TimelineEditCommand::OpenNestedSequence` with

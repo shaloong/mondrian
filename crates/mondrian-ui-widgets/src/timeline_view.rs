@@ -1810,6 +1810,21 @@ impl TimelineView {
             return false;
         }
         let command = match key {
+            KeyCode::X if !modifiers.shift && (modifiers.ctrl || modifiers.meta) => {
+                TimelineEditCommand::CutSelection
+            }
+            KeyCode::C if !modifiers.shift && (modifiers.ctrl || modifiers.meta) => {
+                TimelineEditCommand::CopySelection
+            }
+            KeyCode::V if !modifiers.shift && (modifiers.ctrl || modifiers.meta) => {
+                TimelineEditCommand::PasteAtPlayhead
+            }
+            KeyCode::D if !modifiers.shift && (modifiers.ctrl || modifiers.meta) => {
+                TimelineEditCommand::DuplicateSelection
+            }
+            KeyCode::K if !modifiers.shift && (modifiers.ctrl || modifiers.meta) => {
+                TimelineEditCommand::SplitAtPlayhead
+            }
             KeyCode::B if !modifiers.shift && (modifiers.ctrl || modifiers.meta) => {
                 TimelineEditCommand::SplitAtPlayhead
             }
@@ -4810,6 +4825,70 @@ mod tests {
         assert_eq!(
             actions.borrow().as_slice(),
             &[Action::RippleDeleteSelection]
+        );
+    }
+
+    #[test]
+    fn focused_clipboard_shortcuts_dispatch_timeline_edit_commands() {
+        let actions = RefCell::new(Vec::new());
+        let commands = Rc::new(RefCell::new(Vec::new()));
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let command_log = Rc::clone(&commands);
+        let mut view = timeline().on_edit_command(move |command| {
+            command_log.borrow_mut().push(command);
+            match command {
+                TimelineEditCommand::CutSelection => Action::Cut,
+                TimelineEditCommand::CopySelection => Action::Copy,
+                TimelineEditCommand::PasteAtPlayhead => Action::Paste,
+                TimelineEditCommand::DuplicateSelection => Action::Duplicate,
+                TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
+                _ => Action::NoOp,
+            }
+        });
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        view.event(&UiEvent::FocusGained, &mut ctx);
+        for key in [KeyCode::X, KeyCode::C, KeyCode::V, KeyCode::D, KeyCode::K] {
+            assert_eq!(
+                view.event(
+                    &UiEvent::KeyDown { key, modifiers: Modifiers::ctrl() },
+                    &mut ctx,
+                ),
+                EventResult::Handled
+            );
+        }
+
+        assert_eq!(
+            commands.borrow().as_slice(),
+            &[
+                TimelineEditCommand::CutSelection,
+                TimelineEditCommand::CopySelection,
+                TimelineEditCommand::PasteAtPlayhead,
+                TimelineEditCommand::DuplicateSelection,
+                TimelineEditCommand::SplitAtPlayhead,
+            ]
+        );
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[
+                Action::Cut,
+                Action::Copy,
+                Action::Paste,
+                Action::Duplicate,
+                Action::SplitClipAtPlayhead,
+            ]
         );
     }
 

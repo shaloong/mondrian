@@ -5416,6 +5416,49 @@ mod tests {
     }
 
     #[test]
+    fn timeline_panel_clipboard_keys_emit_shared_edit_actions() {
+        let model = demo_timeline_model();
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut panel = timeline_panel(&model);
+        panel.layout(mondrian_ui_core::types::Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        panel.event(&UiEvent::FocusGained, &mut ctx);
+        for key in [KeyCode::X, KeyCode::C, KeyCode::V, KeyCode::D, KeyCode::K] {
+            assert_eq!(
+                panel.event(
+                    &UiEvent::KeyDown { key, modifiers: Modifiers::ctrl() },
+                    &mut ctx,
+                ),
+                EventResult::Handled
+            );
+        }
+
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[
+                Action::Cut,
+                Action::Copy,
+                Action::Paste,
+                Action::Duplicate,
+                Action::SplitClipAtPlayhead,
+            ]
+        );
+    }
+
+    #[test]
     fn timeline_panel_ctrl_b_emits_shared_split_action() {
         let model = demo_timeline_model();
         let actions = RefCell::new(Vec::<Action>::new());
