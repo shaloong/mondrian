@@ -148,7 +148,7 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                     drain_actions_and_apply_window(
                         &mut host,
                         &pending_actions,
-                        current_bounds.get(),
+                        &current_bounds,
                         &platform,
                         &window,
                         elwt,
@@ -180,7 +180,7 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                 drain_actions_and_apply_window(
                     &mut host,
                     &pending_actions,
-                    current_bounds.get(),
+                    &current_bounds,
                     &platform,
                     &window,
                     elwt,
@@ -203,7 +203,7 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                 drain_actions_and_apply_window(
                     &mut host,
                     &pending_actions,
-                    current_bounds.get(),
+                    &current_bounds,
                     &platform,
                     &window,
                     elwt,
@@ -296,7 +296,7 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                 drain_actions_and_apply_window(
                     &mut host,
                     &pending_actions,
-                    current_bounds.get(),
+                    &current_bounds,
                     &platform,
                     &window,
                     elwt,
@@ -320,7 +320,7 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                 drain_actions_and_apply_window(
                     &mut host,
                     &pending_actions,
-                    current_bounds.get(),
+                    &current_bounds,
                     &platform,
                     &window,
                     elwt,
@@ -368,7 +368,7 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                     drain_actions_and_apply_window(
                         &mut host,
                         &pending_actions,
-                        current_bounds.get(),
+                        &current_bounds,
                         &platform,
                         &window,
                         elwt,
@@ -385,7 +385,7 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                     drain_actions_and_apply_window(
                         &mut host,
                         &pending_actions,
-                        current_bounds.get(),
+                        &current_bounds,
                         &platform,
                         &window,
                         elwt,
@@ -410,7 +410,7 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                 drain_actions_and_apply_window(
                     &mut host,
                     &pending_actions,
-                    current_bounds.get(),
+                    &current_bounds,
                     &platform,
                     &window,
                     elwt,
@@ -441,7 +441,7 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                     drain_actions_and_apply_window(
                         &mut host,
                         &pending_actions,
-                        current_bounds.get(),
+                        &current_bounds,
                         &platform,
                         &window,
                         elwt,
@@ -485,17 +485,19 @@ fn should_route_focus_lost_to_ui(eyedropper_active: bool) -> bool {
 fn drain_actions_and_apply_window(
     host: &mut SelfHostedUiHost,
     pending_actions: &PendingUiActions,
-    bounds: Rect,
+    current_bounds: &std::cell::Cell<Rect>,
     platform: &dyn mondrian_platform::PlatformService,
     window: &winit::window::Window,
     elwt: &winit::event_loop::ActiveEventLoop,
     applied_window_mode: &mut SelfHostedUiMode,
 ) {
-    let commands = host.drain_pending_actions(pending_actions, bounds, platform);
+    let commands = host.drain_pending_actions(pending_actions, current_bounds.get(), platform);
     apply_shell_commands(commands, window, elwt);
     if *applied_window_mode != host.mode() {
         *applied_window_mode = host.mode();
-        apply_window_mode(*applied_window_mode, window);
+        let next_bounds = apply_window_mode(*applied_window_mode, window);
+        current_bounds.set(next_bounds);
+        TreeWalker::layout(host.active_root_mut(), next_bounds);
     }
 }
 
@@ -526,7 +528,7 @@ fn logical_size(width: f32, height: f32) -> winit::dpi::LogicalSize<f64> {
     winit::dpi::LogicalSize::new(width as f64, height as f64)
 }
 
-fn apply_window_mode(mode: SelfHostedUiMode, window: &winit::window::Window) {
+fn apply_window_mode(mode: SelfHostedUiMode, window: &winit::window::Window) -> Rect {
     let chrome = window_chrome_for_mode(mode);
     window.set_title(chrome.title);
     window.set_decorations(chrome.decorations);
@@ -534,6 +536,12 @@ fn apply_window_mode(mode: SelfHostedUiMode, window: &winit::window::Window) {
     window.set_min_inner_size(chrome.min_size.map(|(w, h)| logical_size(w, h)));
     window.set_max_inner_size(chrome.max_size.map(|(w, h)| logical_size(w, h)));
     let _ = window.request_inner_size(logical_size(chrome.width, chrome.height));
+    window_bounds_for_mode(mode)
+}
+
+fn window_bounds_for_mode(mode: SelfHostedUiMode) -> Rect {
+    let chrome = window_chrome_for_mode(mode);
+    Rect::new(0.0, 0.0, chrome.width, chrome.height)
 }
 
 fn apply_shell_commands(
@@ -625,5 +633,18 @@ mod tests {
             Some((WORKSPACE_MIN_WIDTH, WORKSPACE_MIN_HEIGHT))
         );
         assert_eq!(chrome.max_size, None);
+    }
+
+    #[test]
+    fn window_mode_bounds_match_requested_chrome_size() {
+        for mode in [SelfHostedUiMode::Startup, SelfHostedUiMode::Workspace] {
+            let chrome = window_chrome_for_mode(mode);
+            let bounds = window_bounds_for_mode(mode);
+
+            assert_eq!(bounds.x, 0.0);
+            assert_eq!(bounds.y, 0.0);
+            assert_eq!(bounds.width, chrome.width);
+            assert_eq!(bounds.height, chrome.height);
+        }
     }
 }
