@@ -233,6 +233,12 @@ impl NodeGraphView {
         self.select_index_from_input(index, ctx)
     }
 
+    fn focus_from_pointer(&mut self, ctx: &mut EventContext) {
+        self.focused = true;
+        self.focus_visible = false;
+        ctx.focus.request_focus(self.id);
+    }
+
     fn step_selection(&mut self, direction: i32, ctx: &mut EventContext) -> EventResult {
         if self.nodes.is_empty() {
             return EventResult::Ignored;
@@ -284,6 +290,7 @@ impl Widget for NodeGraphView {
                 let Some(node_id) = self.node_id_at(*position) else {
                     return EventResult::Ignored;
                 };
+                self.focus_from_pointer(ctx);
                 self.select_node_from_input(node_id, ctx)
             }
             UiEvent::KeyDown { key: KeyCode::Right | KeyCode::Down, .. } if self.focused => {
@@ -568,6 +575,61 @@ mod tests {
         assert_eq!(result, EventResult::Handled);
         assert_eq!(graph.selected_node_id(), Some("output"));
         assert_eq!(selected.borrow().as_slice(), &[Action::Play]);
+    }
+
+    #[test]
+    fn node_graph_pointer_selection_focuses_for_keyboard_navigation() {
+        let selected = Rc::new(RefCell::new(Vec::new()));
+        let mut graph = NodeGraphView::new(
+            vec![
+                NodeGraphNode::new("source", "Source"),
+                NodeGraphNode::new("grade", "Grade"),
+                NodeGraphNode::new("output", "Output"),
+            ],
+            vec![],
+        )
+        .on_select(|id| Action::OpenProject(std::path::PathBuf::from(id)));
+        graph.layout(Rect::new(0.0, 0.0, 520.0, 240.0));
+        let source = graph.node_rect_by_id("source").expect("source rect").center();
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let dispatch = {
+            let selected = Rc::clone(&selected);
+            move |action| selected.borrow_mut().push(action)
+        };
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        assert_eq!(
+            graph.event(
+                &UiEvent::MouseDown {
+                    position: source,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            graph.event(
+                &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(graph.selected_node_id(), Some("grade"));
+        let actions = selected.borrow();
+        assert_eq!(actions.len(), 2);
+        assert_eq!(
+            actions[0],
+            Action::OpenProject(std::path::PathBuf::from("source"))
+        );
+        assert_eq!(
+            actions[1],
+            Action::OpenProject(std::path::PathBuf::from("grade"))
+        );
     }
 
     #[test]

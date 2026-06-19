@@ -7275,6 +7275,94 @@ mod tests {
         assert_eq!(payload.clip_id, selection.clip_id);
     }
 
+    #[test]
+    fn node_graph_panel_pointer_selection_focuses_keyboard_navigation() {
+        let selection = SelectedClipRef {
+            track_id: TrackId::new(),
+            is_video_track: true,
+            clip_id: ClipId::new(),
+        };
+        let effect_id = EffectId::new();
+        let model = NodeGraphPanelModel {
+            title: "Node Graph".to_owned(),
+            subtitle: "Video / 1 effect(s)".to_owned(),
+            selected_clip: Some(selection),
+            nodes: vec![
+                NodeGraphNode::new("source", "Source"),
+                NodeGraphNode::new("effect:grade", "Grade"),
+                NodeGraphNode::new("output", "Output"),
+            ],
+            edges: vec![
+                NodeGraphEdge::new("source", "effect:grade"),
+                NodeGraphEdge::new("effect:grade", "output"),
+            ],
+            node_targets: vec![
+                NodeGraphNodeTarget {
+                    node_id: "source".to_owned(),
+                    target: NodeGraphTarget::Clip,
+                },
+                NodeGraphNodeTarget {
+                    node_id: "effect:grade".to_owned(),
+                    target: NodeGraphTarget::Effect(effect_id),
+                },
+                NodeGraphNodeTarget {
+                    node_id: "output".to_owned(),
+                    target: NodeGraphTarget::Output,
+                },
+            ],
+            selected_node_id: None,
+        };
+        let mut panel = node_graph_panel(&model);
+        panel.layout(Rect::new(0.0, 0.0, 520.0, 240.0));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            panel.event(
+                &UiEvent::MouseDown {
+                    position: Point::new(103.0, 120.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            panel.event(
+                &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        let recorded = actions.borrow();
+        assert_eq!(recorded.len(), 2);
+        let Action::Custom { namespace, name, payload } = &recorded[1] else {
+            panic!(
+                "expected inspector select effect action, got {:?}",
+                recorded[1]
+            );
+        };
+        assert_eq!(namespace, INSPECTOR_NAMESPACE);
+        assert_eq!(name, INSPECTOR_SELECT_EFFECT);
+        let payload: InspectorSelectEffectPayload =
+            serde_json::from_value(payload.clone()).expect("inspector select effect payload");
+        assert_eq!(payload.clip.clip_id, selection.clip_id);
+        assert_eq!(payload.effect_id, effect_id);
+    }
+
     fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
         let suffix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
