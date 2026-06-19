@@ -1314,10 +1314,13 @@ self-hosted app panel must bind that callback explicitly so the app adapter, not
 the generic widget, owns the command boundary for transport controls. Playback
 state changes, mark semantics, frame stepping semantics, preview scheduling, and
 audio/video sync remain in the app/runtime layers. Zoom and preview-quality
-labels are explicit model fields. Viewer zoom is shell-local display state
-owned by `SelfHostedAppRoot`; `ui.viewer.cycle_zoom` is consumed before AppState
+labels are explicit model fields. Viewer zoom is shell-local display state owned
+by `SelfHostedAppRoot`; `ui.viewer.cycle_zoom` is consumed before AppState
 dispatch, survives model refreshes, and is not undoable because it does not
-change the project. Preview-quality interaction emits
+change the project. The shell injects both zoom label and fixed zoom scale into
+`ViewerPanelModel`, and `ViewerSurface` uses that scale as a real display
+transform while clipping oversized canvases to the viewer viewport.
+Preview-quality interaction emits
 `ui.viewer.set_preview_resolution_scale`; `AppState` updates the active sequence
 preview settings through an undoable sequence snapshot without stopping
 playback, so quality switching remains a viewer operation rather than a

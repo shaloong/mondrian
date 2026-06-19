@@ -82,6 +82,7 @@ pub struct ViewerSurface {
     frame_label: String,
     duration_label: String,
     zoom_label: String,
+    zoom_scale: Option<f32>,
     preview_quality_label: String,
     source_width: u32,
     source_height: u32,
@@ -114,6 +115,7 @@ impl ViewerSurface {
             frame_label: "F0".into(),
             duration_label: String::new(),
             zoom_label: "Fit".into(),
+            zoom_scale: None,
             preview_quality_label: "Full".into(),
             source_width: source_width.max(1),
             source_height: source_height.max(1),
@@ -172,6 +174,14 @@ impl ViewerSurface {
     /// Set the displayed canvas zoom mode label.
     pub fn with_zoom_label(mut self, label: impl Into<String>) -> Self {
         self.zoom_label = label.into();
+        self
+    }
+
+    /// Set a fixed canvas zoom scale, or `None` to fit the source in view.
+    pub fn with_zoom_scale(mut self, scale: Option<f32>) -> Self {
+        self.zoom_scale = scale
+            .filter(|scale| scale.is_finite() && *scale > 0.0)
+            .map(|scale| scale.clamp(0.01, 32.0));
         self
     }
 
@@ -240,16 +250,30 @@ impl ViewerSurface {
         (self.source_width as f32 / self.source_height as f32).clamp(0.1, 10.0)
     }
 
-    fn canvas_rect(&self) -> Rect {
+    fn canvas_viewport_rect(&self) -> Rect {
         let chrome_top = 42.0;
         let chrome_bottom = 44.0;
         let padding = 16.0;
-        let available = Rect::new(
+        Rect::new(
             self.bounds.x + padding,
             self.bounds.y + chrome_top,
             (self.bounds.width - padding * 2.0).max(0.0),
             (self.bounds.height - chrome_top - chrome_bottom).max(0.0),
-        );
+        )
+    }
+
+    fn canvas_rect(&self) -> Rect {
+        let available = self.canvas_viewport_rect();
+        if let Some(scale) = self.zoom_scale {
+            let width = self.source_width as f32 * scale;
+            let height = self.source_height as f32 * scale;
+            return Rect::new(
+                available.x + (available.width - width) * 0.5,
+                available.y + (available.height - height) * 0.5,
+                width.max(0.0),
+                height.max(0.0),
+            );
+        }
         fit_aspect(available, self.aspect_ratio())
     }
 
@@ -506,6 +530,7 @@ impl Widget for ViewerSurface {
         let colors = &ctx.theme.colors;
         let spacing = &ctx.theme.spacing;
         let typography = &ctx.theme.typography;
+        let viewport = self.canvas_viewport_rect();
         let canvas = self.canvas_rect();
 
         ctx.encoder.draw_rect(self.bounds, colors.background, 0.0);
@@ -543,6 +568,12 @@ impl Widget for ViewerSurface {
         ctx.pop_clip();
 
         ctx.encoder.draw_rect(
+            viewport,
+            mix_color(colors.card, colors.background, 0.45),
+            0.0,
+        );
+        ctx.push_clip(viewport);
+        ctx.encoder.draw_rect(
             canvas.inset(-1.0, -1.0),
             soft_border(colors.border),
             spacing.radius_md,
@@ -555,7 +586,6 @@ impl Widget for ViewerSurface {
         ctx.encoder.draw_rect(canvas, canvas_fill, spacing.radius_md);
         if self.enabled {
             if let Some(frame) = &self.frame_image {
-                ctx.push_clip(canvas);
                 ctx.encoder.draw_raster_image(
                     &frame.key,
                     canvas,
@@ -564,7 +594,6 @@ impl Widget for ViewerSurface {
                     Arc::clone(&frame.rgba),
                     Color::WHITE,
                 );
-                ctx.pop_clip();
             }
         }
         if self.frame_image.is_none() {
@@ -577,7 +606,6 @@ impl Widget for ViewerSurface {
                     (canvas.width - 24.0).max(1.0),
                     22.0,
                 );
-                ctx.push_clip(canvas);
                 ctx.encoder.draw_text_box(
                     message,
                     typography.body.font_size,
@@ -585,10 +613,10 @@ impl Widget for ViewerSurface {
                     message_rect.width,
                     colors.muted_foreground,
                 );
-                ctx.pop_clip();
             }
         }
         paint_safe_guides(ctx, canvas, self.enabled);
+        ctx.pop_clip();
 
         self.paint_transport_controls(ctx);
 
@@ -990,6 +1018,20 @@ mod tests {
     }
 
     #[test]
+    fn fixed_zoom_uses_source_pixel_scale_inside_viewport() {
+        let mut viewer = ViewerSurface::new("Demo", 1920, 1080).with_zoom_scale(Some(0.25));
+        viewer.layout(Rect::new(0.0, 0.0, 800.0, 500.0));
+
+        let canvas = viewer.canvas_rect();
+        let viewport = viewer.canvas_viewport_rect();
+
+        assert!((canvas.width - 480.0).abs() < 0.001);
+        assert!((canvas.height - 270.0).abs() < 0.001);
+        assert!((canvas.center().x - viewport.center().x).abs() < 0.001);
+        assert!((canvas.center().y - viewport.center().y).abs() < 0.001);
+    }
+
+    #[test]
     fn paint_draws_chrome_metadata_and_safe_guides() {
         let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080)
             .with_status("Playing")
@@ -1346,6 +1388,7 @@ mod tests {
         let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080).with_frame_image(image);
         viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
         let canvas = viewer.canvas_rect();
+        let viewport = viewer.canvas_viewport_rect();
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
@@ -1361,8 +1404,8 @@ mod tests {
             vec![("preview:42".to_owned(), canvas, 2, 2)]
         );
         assert!(
-            encoder.clips.contains(&canvas),
-            "preview image must be clipped to the fitted canvas"
+            encoder.clips.contains(&viewport),
+            "preview image must be clipped to the viewer viewport"
         );
         assert_eq!(encoder.clip_pops, encoder.clips.len());
     }

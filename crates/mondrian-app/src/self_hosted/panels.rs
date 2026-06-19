@@ -542,6 +542,7 @@ pub struct ViewerPanelModel {
     pub frame_label: String,
     pub duration_label: String,
     pub zoom_label: String,
+    pub zoom_scale: Option<f32>,
     pub preview_quality_label: String,
     pub preview_resolution_scale: f32,
     pub width: u32,
@@ -599,6 +600,7 @@ impl ViewerPanelModel {
             frame_label: format!("F{current_frame}"),
             duration_label: format!("{duration_frame} frames"),
             zoom_label: "Fit".into(),
+            zoom_scale: None,
             preview_quality_label,
             preview_resolution_scale,
             width: resolution.width,
@@ -621,6 +623,7 @@ impl ViewerPanelModel {
             frame_label: "F0".into(),
             duration_label: String::new(),
             zoom_label: "Fit".into(),
+            zoom_scale: None,
             preview_quality_label: "Full".into(),
             preview_resolution_scale: 1.0,
             width: 16,
@@ -1459,6 +1462,7 @@ fn viewer_panel(model: &ViewerPanelModel) -> ViewerSurface {
         .with_frame_label(model.frame_label.clone())
         .with_duration_label(model.duration_label.clone())
         .with_zoom_label(model.zoom_label.clone())
+        .with_zoom_scale(model.zoom_scale)
         .with_preview_quality_label(model.preview_quality_label.clone())
         .playing(model.playing)
         .enabled(model.enabled)

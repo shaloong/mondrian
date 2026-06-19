@@ -501,10 +501,18 @@ impl ViewerZoomMode {
             Self::Fixed(percent) => format!("{percent}%"),
         }
     }
+
+    fn scale(self) -> Option<f32> {
+        match self {
+            Self::Fit => None,
+            Self::Fixed(percent) => Some(percent as f32 / 100.0),
+        }
+    }
 }
 
 fn apply_viewer_zoom_mode(models: &mut SelfHostedPanelModels, mode: ViewerZoomMode) {
     models.viewer.zoom_label = mode.label();
+    models.viewer.zoom_scale = mode.scale();
 }
 
 /// Root widget for the self-hosted editor window.
@@ -3060,9 +3068,11 @@ mod tests {
 
         assert!(resolved.is_none());
         assert_eq!(root.models.viewer.zoom_label, "50%");
+        assert_eq!(root.models.viewer.zoom_scale, Some(0.5));
 
         root.refresh_from_app_state(&state);
 
         assert_eq!(root.models.viewer.zoom_label, "50%");
+        assert_eq!(root.models.viewer.zoom_scale, Some(0.5));
     }
 }
