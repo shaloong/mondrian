@@ -868,14 +868,42 @@ mod tests {
             ("Playback", "Step Back", "Left"),
             ("Playback", "Step Forward", "Right"),
             ("Playback", "Go to End", "End"),
-            ("View", "Timeline", "Ctrl+Alt+T"),
             ("View", "Toggle Fullscreen", "F11"),
-            ("Workspace", "Editing", "Ctrl+Alt+1"),
         ] {
             assert_eq!(
                 menu_item(&menu_items, menu_label, item_label).shortcut.as_deref(),
                 Some(shortcut),
                 "{menu_label}/{item_label} should show {shortcut}"
+            );
+        }
+
+        for (panel_label, shortcut) in [
+            ("Viewer", "Ctrl+Alt+V"),
+            ("Timeline", "Ctrl+Alt+T"),
+            ("Inspector", "Ctrl+Alt+I"),
+            ("Assets", "Ctrl+Alt+A"),
+            ("Effects", "Ctrl+Alt+E"),
+            ("Node Graph", "Ctrl+Alt+G"),
+            ("Export", "Ctrl+Alt+X"),
+        ] {
+            assert_eq!(
+                menu_item(&menu_items, "View", panel_label).shortcut.as_deref(),
+                Some(shortcut),
+                "View/{panel_label} should show {shortcut}"
+            );
+        }
+
+        for (workspace_label, shortcut) in [
+            ("Editing", "Ctrl+Alt+1"),
+            ("Color", "Ctrl+Alt+2"),
+            ("Audio", "Ctrl+Alt+3"),
+            ("Compositing", "Ctrl+Alt+4"),
+            ("Export", "Ctrl+Alt+5"),
+        ] {
+            assert_eq!(
+                menu_item(&menu_items, "Workspace", workspace_label).shortcut.as_deref(),
+                Some(shortcut),
+                "Workspace/{workspace_label} should show {shortcut}"
             );
         }
     }
