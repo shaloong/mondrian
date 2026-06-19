@@ -830,7 +830,10 @@ active sequence's `mark_in(frame)` / `mark_out(frame)` methods so normalization,
 project synchronization, and autosave remain centralized.
 Clearing the range follows the same path through
 `TimelineEditCommand::ClearInOutPoints` and `ui.timeline.clear_in_out_points`;
-widgets and panel adapters do not clear sequence fields directly.
+widgets and panel adapters do not clear sequence fields directly. The top-level
+Edit menu also uses this action and enables it only when the active sequence has
+an explicit in or out point, so global menus, context menus, and future shortcut
+bindings stay on the same AppState-owned mutation path.
 The timeline context menu is implemented inside `TimelineView` with the shared
 `ContextMenu` overlay component, but it still emits only the same
 `TimelineEditCommand`s and track-add proposals as keyboard and toolbar input.

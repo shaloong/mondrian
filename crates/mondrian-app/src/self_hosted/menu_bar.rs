@@ -18,10 +18,11 @@ use crate::app::ui_actions::{
     app_shell_preferences_action, app_shell_quit_action, app_shell_save_project_as_dialog_action,
     app_shell_sequence_settings_action, sequence_delete_action, sequence_duplicate_action,
     sequence_new_action, sequence_return_to_parent_action, sequence_set_active_default_action,
-    sequence_switch_active_action, SequenceTargetPayload, APP_SHELL_IMPORT_MEDIA_DIALOG,
-    APP_SHELL_NAMESPACE, APP_SHELL_SAVE_PROJECT_AS_DIALOG, APP_SHELL_SEQUENCE_SETTINGS,
-    SEQUENCE_DELETE, SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE, SEQUENCE_RETURN_TO_PARENT,
-    SEQUENCE_SET_ACTIVE_DEFAULT, SEQUENCE_SWITCH_ACTIVE,
+    sequence_switch_active_action, timeline_clear_in_out_points_action, SequenceTargetPayload,
+    APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
+    APP_SHELL_SEQUENCE_SETTINGS, SEQUENCE_DELETE, SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE,
+    SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT, SEQUENCE_SWITCH_ACTIVE,
+    TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_NAMESPACE,
 };
 use crate::app::AppState;
 use crate::self_hosted::icons::AppIcon;
@@ -99,6 +100,10 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
                 ),
                 menu_item_with_icon(
                     MenuItem::new("Mark Out", Action::MarkOutAtPlayhead),
+                    AppIcon::Stopwatch,
+                ),
+                menu_item_with_icon(
+                    MenuItem::new("Clear In/Out", timeline_clear_in_out_points_action()),
                     AppIcon::Stopwatch,
                 ),
                 MenuItem::separator(),
@@ -372,6 +377,11 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
             state.sequence.is_some()
         }
         Action::Custom { namespace, name, .. }
+            if namespace == TIMELINE_NAMESPACE && name == TIMELINE_CLEAR_IN_OUT_POINTS =>
+        {
+            sequence_has_in_out_points(state)
+        }
+        Action::Custom { namespace, name, .. }
             if namespace == SEQUENCE_NAMESPACE && name == SEQUENCE_RETURN_TO_PARENT =>
         {
             !state.sequence_navigation_stack.is_empty()
@@ -432,6 +442,12 @@ fn has_any_app_selection(state: &AppState) -> bool {
         || state.selection.selected_mask.is_some()
         || state.animation_selection.active_property.is_some()
         || !state.animation_selection.selected_keyframes.is_empty()
+}
+
+fn sequence_has_in_out_points(state: &AppState) -> bool {
+    state.sequence.as_ref().is_some_and(|sequence| {
+        sequence.in_point_frame.is_some() || sequence.out_point_frame().is_some()
+    })
 }
 
 fn sequence_has_selectable_clips(state: &AppState) -> bool {
@@ -778,6 +794,7 @@ mod tests {
             ("Edit", "Split Clip at Playhead"),
             ("Edit", "Mark In"),
             ("Edit", "Mark Out"),
+            ("Edit", "Clear In/Out"),
             ("Edit", "Preferences..."),
             ("View", "Timeline"),
             ("View", "Effects"),
@@ -853,6 +870,7 @@ mod tests {
         assert!(!menu_item(&menu_items, "Edit", "Split Clip at Playhead").enabled);
         assert!(!menu_item(&menu_items, "Edit", "Mark In").enabled);
         assert!(!menu_item(&menu_items, "Edit", "Mark Out").enabled);
+        assert!(!menu_item(&menu_items, "Edit", "Clear In/Out").enabled);
         assert!(menu_item(&menu_items, "Sequence", "New Sequence").enabled);
         assert!(!menu_item(&menu_items, "Sequence", "Return to Parent Sequence").enabled);
         assert!(!menu_item(&menu_items, "Sequence", "Set Active as Default").enabled);
@@ -863,6 +881,7 @@ mod tests {
     #[test]
     fn app_state_action_gate_disables_timeline_editing_without_targets() {
         let state = AppState::new();
+        let clear_in_out_action = timeline_clear_in_out_points_action();
 
         for action in [
             Action::DeleteSelection,
@@ -877,8 +896,11 @@ mod tests {
             Action::GoToEnd,
             Action::SelectAll,
             Action::DeselectAll,
-        ] {
-            assert!(!app_state_action_enabled(&action, &state), "{action:?}");
+        ]
+        .iter()
+        .chain(std::iter::once(&clear_in_out_action))
+        {
+            assert!(!app_state_action_enabled(action, &state), "{action:?}");
         }
     }
 
@@ -1080,6 +1102,32 @@ mod tests {
         assert!(menu_item(&menu_items, "Edit", "Split Clip at Playhead").enabled);
         assert!(menu_item(&menu_items, "Edit", "Mark In").enabled);
         assert!(menu_item(&menu_items, "Edit", "Mark Out").enabled);
+        assert!(!menu_item(&menu_items, "Edit", "Clear In/Out").enabled);
+    }
+
+    #[test]
+    fn app_state_menu_items_enable_clear_in_out_only_for_active_range() {
+        let mut state = state_with_selected_clip();
+
+        let menu_items = default_menu_items_for_app_state(&state);
+        assert!(!menu_item(&menu_items, "Edit", "Clear In/Out").enabled);
+
+        state.sequence.as_mut().expect("sequence").mark_in(12);
+        let menu_items = default_menu_items_for_app_state(&state);
+        let clear = menu_item(&menu_items, "Edit", "Clear In/Out");
+        assert!(clear.enabled);
+        match &clear.action {
+            Action::Custom { namespace, name, .. } => {
+                assert_eq!(namespace, TIMELINE_NAMESPACE);
+                assert_eq!(name, TIMELINE_CLEAR_IN_OUT_POINTS);
+            }
+            other => panic!("expected timeline clear in/out action, got {other:?}"),
+        }
+
+        state.sequence.as_mut().expect("sequence").clear_in_out();
+        state.sequence.as_mut().expect("sequence").mark_out(18);
+        let menu_items = default_menu_items_for_app_state(&state);
+        assert!(menu_item(&menu_items, "Edit", "Clear In/Out").enabled);
     }
 
     #[test]
