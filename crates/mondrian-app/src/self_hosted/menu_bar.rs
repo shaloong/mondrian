@@ -311,6 +311,17 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
         Action::Cut => state.can_cut_to_app_clipboard(),
         Action::Copy => state.can_copy_to_app_clipboard(),
         Action::Paste => state.can_paste_from_app_clipboard(),
+        Action::DeleteSelection | Action::RippleDeleteSelection => has_timeline_selection(state),
+        Action::Duplicate => state.can_copy_to_app_clipboard(),
+        Action::SplitClipAtPlayhead => can_split_at_playhead(state),
+        Action::MarkInAtPlayhead
+        | Action::MarkOutAtPlayhead
+        | Action::StepForward
+        | Action::StepBack
+        | Action::GoToStart
+        | Action::GoToEnd => state.sequence.is_some(),
+        Action::SelectAll => sequence_has_selectable_clips(state),
+        Action::DeselectAll => has_any_app_selection(state),
         Action::Custom { namespace, name, .. }
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_IMPORT_MEDIA_DIALOG =>
         {
@@ -354,6 +365,41 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
         }
         _ => true,
     }
+}
+
+fn has_timeline_selection(state: &AppState) -> bool {
+    !state.selection.selected_clips.is_empty() || !state.selection.selected_track_ids.is_empty()
+}
+
+fn has_any_app_selection(state: &AppState) -> bool {
+    has_timeline_selection(state)
+        || state.selection.selected_effect.is_some()
+        || state.selection.selected_mask.is_some()
+        || state.animation_selection.active_property.is_some()
+        || !state.animation_selection.selected_keyframes.is_empty()
+}
+
+fn sequence_has_selectable_clips(state: &AppState) -> bool {
+    state.sequence.as_ref().is_some_and(|sequence| {
+        sequence
+            .video_tracks
+            .iter()
+            .chain(sequence.audio_tracks.iter())
+            .any(|track| !track.clips.is_empty())
+    })
+}
+
+fn can_split_at_playhead(state: &AppState) -> bool {
+    let frame = state.current_frame();
+    state.sequence.as_ref().is_some_and(|sequence| {
+        sequence
+            .video_tracks
+            .iter()
+            .filter(|track| !track.is_locked)
+            .chain(sequence.audio_tracks.iter().filter(|track| !track.is_locked))
+            .flat_map(|track| track.clips.iter())
+            .any(|clip| frame > clip.position.frame && frame < clip.end_position().frame)
+    })
 }
 
 fn menu_item_with_icon(item: MenuItem, icon: AppIcon) -> MenuItem {
@@ -733,6 +779,73 @@ mod tests {
         assert!(!menu_item(&menu_items, "Sequence", "Set Active as Default").enabled);
         assert!(!menu_item(&menu_items, "Sequence", "Duplicate Active Sequence").enabled);
         assert!(!menu_item(&menu_items, "Sequence", "Delete Active Sequence").enabled);
+    }
+
+    #[test]
+    fn app_state_action_gate_disables_timeline_editing_without_targets() {
+        let state = AppState::new();
+
+        for action in [
+            Action::DeleteSelection,
+            Action::RippleDeleteSelection,
+            Action::Duplicate,
+            Action::SplitClipAtPlayhead,
+            Action::MarkInAtPlayhead,
+            Action::MarkOutAtPlayhead,
+            Action::StepBack,
+            Action::StepForward,
+            Action::GoToStart,
+            Action::GoToEnd,
+            Action::SelectAll,
+            Action::DeselectAll,
+        ] {
+            assert!(!app_state_action_enabled(&action, &state), "{action:?}");
+        }
+    }
+
+    #[test]
+    fn app_state_action_gate_enables_timeline_editing_with_valid_targets() {
+        let mut state = state_with_selected_clip();
+        state.seek(15);
+
+        for action in [
+            Action::DeleteSelection,
+            Action::RippleDeleteSelection,
+            Action::Duplicate,
+            Action::SplitClipAtPlayhead,
+            Action::MarkInAtPlayhead,
+            Action::MarkOutAtPlayhead,
+            Action::StepBack,
+            Action::StepForward,
+            Action::GoToStart,
+            Action::GoToEnd,
+            Action::SelectAll,
+            Action::DeselectAll,
+        ] {
+            assert!(app_state_action_enabled(&action, &state), "{action:?}");
+        }
+    }
+
+    #[test]
+    fn app_state_action_gate_disables_split_outside_unlocked_clip_body() {
+        let mut state = state_with_selected_clip();
+        state.seek(10);
+        assert!(!app_state_action_enabled(
+            &Action::SplitClipAtPlayhead,
+            &state
+        ));
+
+        state.seek(15);
+        assert!(app_state_action_enabled(
+            &Action::SplitClipAtPlayhead,
+            &state
+        ));
+
+        state.sequence.as_mut().expect("sequence").video_tracks[0].is_locked = true;
+        assert!(!app_state_action_enabled(
+            &Action::SplitClipAtPlayhead,
+            &state
+        ));
     }
 
     #[test]
