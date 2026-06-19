@@ -2219,6 +2219,10 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
 
 fn timeline_edit_command_action(command: TimelineEditCommand) -> Action {
     match command {
+        TimelineEditCommand::CutSelection => Action::Cut,
+        TimelineEditCommand::CopySelection => Action::Copy,
+        TimelineEditCommand::PasteAtPlayhead => Action::Paste,
+        TimelineEditCommand::DuplicateSelection => Action::Duplicate,
         TimelineEditCommand::DeleteSelection => Action::DeleteSelection,
         TimelineEditCommand::RippleDeleteSelection => Action::RippleDeleteSelection,
         TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
@@ -4833,6 +4837,23 @@ mod tests {
 
     #[test]
     fn timeline_edit_command_mapping_emits_selection_trim_and_enable_actions() {
+        assert_eq!(
+            timeline_edit_command_action(TimelineEditCommand::CutSelection),
+            Action::Cut
+        );
+        assert_eq!(
+            timeline_edit_command_action(TimelineEditCommand::CopySelection),
+            Action::Copy
+        );
+        assert_eq!(
+            timeline_edit_command_action(TimelineEditCommand::PasteAtPlayhead),
+            Action::Paste
+        );
+        assert_eq!(
+            timeline_edit_command_action(TimelineEditCommand::DuplicateSelection),
+            Action::Duplicate
+        );
+
         let trim_action =
             timeline_edit_command_action(TimelineEditCommand::TrimSelectionInToPlayhead);
         let Action::Custom { namespace, name, payload } = trim_action else {

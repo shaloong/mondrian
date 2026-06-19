@@ -124,6 +124,14 @@ pub enum TimelineTrackKind {
 /// Domain-light edit command emitted by timeline-focused keyboard input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimelineEditCommand {
+    /// Cut the current timeline selection.
+    CutSelection,
+    /// Copy the current timeline selection.
+    CopySelection,
+    /// Paste clipboard content at the current timeline target.
+    PasteAtPlayhead,
+    /// Duplicate the current timeline selection.
+    DuplicateSelection,
     /// Delete the current timeline selection.
     DeleteSelection,
     /// Ripple-delete the current timeline clip selection.
@@ -1403,6 +1411,27 @@ impl TimelineView {
     fn clip_context_menu_items(&self) -> Vec<MenuItem> {
         vec![
             Self::menu_item(
+                "Cut Clip",
+                self.edit_command_action(TimelineEditCommand::CutSelection),
+            )
+            .with_shortcut("Ctrl+X"),
+            Self::menu_item(
+                "Copy Clip",
+                self.edit_command_action(TimelineEditCommand::CopySelection),
+            )
+            .with_shortcut("Ctrl+C"),
+            Self::menu_item(
+                "Paste",
+                self.edit_command_action(TimelineEditCommand::PasteAtPlayhead),
+            )
+            .with_shortcut("Ctrl+V"),
+            Self::menu_item(
+                "Duplicate Clip",
+                self.edit_command_action(TimelineEditCommand::DuplicateSelection),
+            )
+            .with_shortcut("Ctrl+D"),
+            MenuItem::separator(),
+            Self::menu_item(
                 "Delete Clip",
                 self.edit_command_action(TimelineEditCommand::DeleteSelection),
             ),
@@ -1447,6 +1476,37 @@ impl TimelineView {
     fn timeline_context_menu_items(&self) -> Vec<MenuItem> {
         vec![
             Self::menu_item(
+                "Add Video Track",
+                self.track_add_action(TimelineTrackKind::Video),
+            ),
+            Self::menu_item(
+                "Add Audio Track",
+                self.track_add_action(TimelineTrackKind::Audio),
+            ),
+            MenuItem::separator(),
+            Self::menu_item(
+                "Paste at Playhead",
+                self.edit_command_action(TimelineEditCommand::PasteAtPlayhead),
+            )
+            .with_shortcut("Ctrl+V"),
+            MenuItem::separator(),
+            Self::menu_item(
+                "Cut Selection",
+                self.edit_command_action(TimelineEditCommand::CutSelection),
+            )
+            .with_shortcut("Ctrl+X"),
+            Self::menu_item(
+                "Copy Selection",
+                self.edit_command_action(TimelineEditCommand::CopySelection),
+            )
+            .with_shortcut("Ctrl+C"),
+            Self::menu_item(
+                "Duplicate Selection",
+                self.edit_command_action(TimelineEditCommand::DuplicateSelection),
+            )
+            .with_shortcut("Ctrl+D"),
+            MenuItem::separator(),
+            Self::menu_item(
                 "Split at Playhead",
                 self.edit_command_action(TimelineEditCommand::SplitAtPlayhead),
             ),
@@ -1475,15 +1535,6 @@ impl TimelineView {
             Self::menu_item(
                 "Mark Out",
                 self.edit_command_action(TimelineEditCommand::MarkOutAtPlayhead),
-            ),
-            MenuItem::separator(),
-            Self::menu_item(
-                "Add Video Track",
-                self.track_add_action(TimelineTrackKind::Video),
-            ),
-            Self::menu_item(
-                "Add Audio Track",
-                self.track_add_action(TimelineTrackKind::Audio),
             ),
         ]
     }
@@ -4238,6 +4289,10 @@ mod tests {
         let mut view = timeline().on_edit_command(move |command| {
             command_log.borrow_mut().push(command);
             match command {
+                TimelineEditCommand::CutSelection => Action::Cut,
+                TimelineEditCommand::CopySelection => Action::Copy,
+                TimelineEditCommand::PasteAtPlayhead => Action::Paste,
+                TimelineEditCommand::DuplicateSelection => Action::Duplicate,
                 TimelineEditCommand::DeleteSelection => Action::DeleteSelection,
                 TimelineEditCommand::RippleDeleteSelection => Action::RippleDeleteSelection,
                 TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
@@ -4288,6 +4343,10 @@ mod tests {
         let actions = RefCell::new(Vec::new());
         let dispatch = |action| actions.borrow_mut().push(action);
         let mut view = timeline().on_edit_command(|command| match command {
+            TimelineEditCommand::CutSelection => Action::Cut,
+            TimelineEditCommand::CopySelection => Action::Copy,
+            TimelineEditCommand::PasteAtPlayhead => Action::Paste,
+            TimelineEditCommand::DuplicateSelection => Action::Duplicate,
             TimelineEditCommand::DeleteSelection => Action::DeleteSelection,
             TimelineEditCommand::RippleDeleteSelection => Action::RippleDeleteSelection,
             TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
@@ -4330,7 +4389,7 @@ mod tests {
 
         let result = view.event(
             &UiEvent::MouseDown {
-                position: Point::new(120.0, 55.0),
+                position: Point::new(120.0, 189.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -4351,6 +4410,10 @@ mod tests {
         let dispatch = |action| actions.borrow_mut().push(action);
         let mut view = timeline()
             .on_edit_command(|command| match command {
+                TimelineEditCommand::CutSelection => Action::Cut,
+                TimelineEditCommand::CopySelection => Action::Copy,
+                TimelineEditCommand::PasteAtPlayhead => Action::Paste,
+                TimelineEditCommand::DuplicateSelection => Action::Duplicate,
                 TimelineEditCommand::DeleteSelection => Action::DeleteSelection,
                 TimelineEditCommand::RippleDeleteSelection => Action::RippleDeleteSelection,
                 TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
@@ -4401,7 +4464,7 @@ mod tests {
 
         let result = view.event(
             &UiEvent::MouseDown {
-                position: Point::new(510.0, 281.0),
+                position: Point::new(510.0, 21.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },

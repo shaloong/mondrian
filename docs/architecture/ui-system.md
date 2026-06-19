@@ -723,6 +723,11 @@ domain-light `TimelineEditCommand`s, and the app adapter maps them onto shared
 editor actions such as `Action::DeleteSelection` and
 `Action::RippleDeleteSelection`. Split-at-playhead uses the same path via
 `TimelineEditCommand::SplitAtPlayhead` and `Action::SplitClipAtPlayhead`.
+Timeline clipboard context-menu entries use
+`TimelineEditCommand::CutSelection`, `CopySelection`, `PasteAtPlayhead`, and
+`DuplicateSelection`, then map to the existing app-level `Action::Cut`,
+`Action::Copy`, `Action::Paste`, and `Action::Duplicate` paths. Widget and
+panel code must not own clipboard state or paste placement rules.
 Trim-to-playhead menu commands use explicit
 `TimelineEditCommand::TrimSelectionInToPlayhead` /
 `TimelineEditCommand::TrimSelectionOutToPlayhead` commands; the app adapter
