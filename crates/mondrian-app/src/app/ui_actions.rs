@@ -8,7 +8,10 @@ use mondrian_core::types::{AssetId, ClipId, EffectId, SequenceId, TrackId};
 use mondrian_core::{ProjectSettings, Rational, Resolution};
 use mondrian_editor_state::Action;
 use mondrian_export::preset::{ExportPreset, TimelineExportRange};
-use mondrian_timeline::SequenceSettings;
+use mondrian_timeline::{
+    AudioChannelLayout, AudioDisplayFormat, EditingMode, FieldOrder, PixelAspectRatio,
+    PreviewRenderFormat, SequenceSettings, VideoDisplayFormat,
+};
 use mondrian_ui_theme::ThemePreset;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -720,12 +723,28 @@ pub enum NewProjectDraftUpdatePayload {
 pub enum SequenceSettingsDraftUpdatePayload {
     /// User-facing sequence display name.
     Name(String),
+    /// Sequence editing preset/mode.
+    EditingMode(EditingMode),
     /// Active sequence frame size.
     Resolution(Resolution),
     /// Active sequence frame rate.
     FrameRate(Rational),
+    /// Active sequence pixel aspect ratio.
+    PixelAspectRatio(PixelAspectRatio),
+    /// Active sequence field order.
+    FieldOrder(FieldOrder),
+    /// Timeline/video display format.
+    VideoDisplayFormat(VideoDisplayFormat),
     /// Active sequence audio sample rate in Hz.
     AudioSampleRate(u32),
+    /// Active sequence audio channel layout.
+    AudioChannelLayout(AudioChannelLayout),
+    /// Active sequence audio display format.
+    AudioDisplayFormat(AudioDisplayFormat),
+    /// Active sequence preview render format.
+    PreviewRenderFormat(PreviewRenderFormat),
+    /// Preview resolution scale, from 0.125 to 1.0.
+    PreviewResolutionScale(f32),
     /// Whether preview rendering cache is enabled.
     PreviewCacheEnabled(bool),
 }

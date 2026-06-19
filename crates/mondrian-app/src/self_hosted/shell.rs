@@ -1276,7 +1276,10 @@ mod tests {
     use glam::Vec2;
     use mondrian_core::types::AssetId;
     use mondrian_core::{Rational, Resolution};
-    use mondrian_timeline::sequence::{PreviewRenderFormat, Sequence};
+    use mondrian_timeline::sequence::{
+        AudioChannelLayout, AudioDisplayFormat, EditingMode, FieldOrder, PixelAspectRatio,
+        PreviewRenderFormat, Sequence, VideoDisplayFormat,
+    };
     use mondrian_ui_core::tree::WidgetTreeView;
     use mondrian_ui_core::widget::{DrawCommandEncoder, PaintContext};
     use mondrian_ui_core::EventRequests;
@@ -2008,6 +2011,13 @@ mod tests {
         );
         root.handle_shell_action(
             app_shell_sequence_settings_draft_changed_action(
+                SequenceSettingsDraftUpdatePayload::EditingMode(EditingMode::Custom),
+            ),
+            &platform,
+            None,
+        );
+        root.handle_shell_action(
+            app_shell_sequence_settings_draft_changed_action(
                 SequenceSettingsDraftUpdatePayload::Resolution(Resolution::UHD4K),
             ),
             &platform,
@@ -2022,7 +2032,66 @@ mod tests {
         );
         root.handle_shell_action(
             app_shell_sequence_settings_draft_changed_action(
+                SequenceSettingsDraftUpdatePayload::PixelAspectRatio(
+                    PixelAspectRatio::Anamorphic2x,
+                ),
+            ),
+            &platform,
+            None,
+        );
+        root.handle_shell_action(
+            app_shell_sequence_settings_draft_changed_action(
+                SequenceSettingsDraftUpdatePayload::FieldOrder(FieldOrder::UpperFirst),
+            ),
+            &platform,
+            None,
+        );
+        root.handle_shell_action(
+            app_shell_sequence_settings_draft_changed_action(
+                SequenceSettingsDraftUpdatePayload::VideoDisplayFormat(
+                    VideoDisplayFormat::Timecode2997DropFrame,
+                ),
+            ),
+            &platform,
+            None,
+        );
+        root.handle_shell_action(
+            app_shell_sequence_settings_draft_changed_action(
                 SequenceSettingsDraftUpdatePayload::AudioSampleRate(96_000),
+            ),
+            &platform,
+            None,
+        );
+        root.handle_shell_action(
+            app_shell_sequence_settings_draft_changed_action(
+                SequenceSettingsDraftUpdatePayload::AudioChannelLayout(
+                    AudioChannelLayout::Surround51,
+                ),
+            ),
+            &platform,
+            None,
+        );
+        root.handle_shell_action(
+            app_shell_sequence_settings_draft_changed_action(
+                SequenceSettingsDraftUpdatePayload::AudioDisplayFormat(
+                    AudioDisplayFormat::Milliseconds,
+                ),
+            ),
+            &platform,
+            None,
+        );
+        root.handle_shell_action(
+            app_shell_sequence_settings_draft_changed_action(
+                SequenceSettingsDraftUpdatePayload::PreviewRenderFormat(
+                    PreviewRenderFormat::ProResProxy,
+                ),
+            ),
+            &platform,
+            None,
+        );
+        root.handle_shell_action(
+            app_shell_sequence_settings_draft_changed_action(
+                SequenceSettingsDraftUpdatePayload::PreviewResolutionScale(0.25),
             ),
             &platform,
             None,
@@ -2053,13 +2122,36 @@ mod tests {
             serde_json::from_value(payload).expect("sequence settings payload");
         assert_eq!(payload.sequence_id, sequence_id);
         assert_eq!(payload.name, "Scene 02");
+        assert_eq!(payload.settings.editing_mode, EditingMode::Custom);
         assert_eq!(payload.settings.resolution, Resolution::UHD4K);
         assert_eq!(payload.settings.frame_rate, Rational::FPS_2997);
+        assert_eq!(
+            payload.settings.pixel_aspect_ratio,
+            PixelAspectRatio::Anamorphic2x
+        );
+        assert_eq!(payload.settings.field_order, FieldOrder::UpperFirst);
+        assert_eq!(
+            payload.settings.video_display_format,
+            VideoDisplayFormat::Timecode2997DropFrame
+        );
         assert_eq!(payload.settings.audio_sample_rate, 96_000);
+        assert_eq!(
+            payload.settings.audio_channel_layout,
+            AudioChannelLayout::Surround51
+        );
         assert_eq!(
             payload.settings.audio_channels,
             payload.settings.audio_channel_layout.channels()
         );
+        assert_eq!(
+            payload.settings.audio_display_format,
+            AudioDisplayFormat::Milliseconds
+        );
+        assert_eq!(
+            payload.settings.preview.format,
+            PreviewRenderFormat::ProResProxy
+        );
+        assert_eq!(payload.settings.preview.resolution_scale, 0.25);
         assert!(!payload.settings.preview.cache_enabled);
     }
 

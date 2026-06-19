@@ -242,6 +242,12 @@ is the only layer that mutates the sequence name/settings, validates the full
 `SequenceSettings`, syncs the sequence collection, and records one undoable
 snapshot. Shell dialogs must not call `rename_sequence` plus
 `update_active_sequence_settings` as separate operations.
+The self-hosted sequence settings surface currently owns format/audio/preview
+fields through typed draft updates: editing mode, frame size, frame rate, pixel
+aspect ratio, field order, video display format, audio sample rate, audio
+channel layout, audio display format, preview render format, preview resolution
+scale, and preview cache. Future color-management controls should extend the
+same draft/action boundary instead of introducing a second settings path.
 `Action::SplitClipAtPlayhead` similarly routes to `AppState::split_at_playhead`,
 which bulk-splits unlocked clips under the playhead and records one undoable
 timeline snapshot only when a split actually occurs.
