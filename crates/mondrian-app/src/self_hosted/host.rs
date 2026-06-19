@@ -195,7 +195,9 @@ impl SelfHostedUiHost {
     /// Poll background host tasks. Returns true when a repaint was requested by
     /// refreshed model data.
     pub fn poll_background_tasks(&mut self, bounds: Rect) -> bool {
-        if !self.asset_thumbnails.poll_finished() {
+        let thumbnails_changed = self.asset_thumbnails.poll_finished();
+        let preview_changed = self.preview_service.poll_finished();
+        if !thumbnails_changed && !preview_changed {
             return false;
         }
         self.mark_dirty();
