@@ -1201,7 +1201,11 @@ screen-capture or OS pointer APIs directly. Winit shells complete sampling via
 `mondrian-platform::DesktopEyedropper` and routes the sampled color back as
 `UiEvent::EyedropperSample`. Shell-owned eyedropper overlay chrome uses theme
 tokens for its magnifier shell and contrast dot; the sampled preview color is
-the only dynamic fill.
+the only dynamic fill. While desktop eyedropper sampling is active, a winit
+focus-loss event is not routed as ordinary UI `FocusLost`: external sampling
+commonly moves focus to another app, and clearing widget capture at that point
+would prevent the later global `EyedropperSample` from reaching the picker that
+requested it.
 The trigger owns tree-level focus for its popup. Inner text fields are embedded
 editing state inside the picker; closing the popup must send them `FocusLost`
 and disable IME rather than leaving focus on an internal field id that is not a

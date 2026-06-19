@@ -137,22 +137,26 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
 
             Event::WindowEvent { event: WindowEvent::Focused(false), .. } => {
                 modifiers_state = Modifiers::none();
-                let _ = ui_runtime.route_window_event(
-                    &window,
-                    &mut router,
-                    host.active_root_mut(),
-                    UiEvent::FocusLost,
-                    &dispatch_action,
-                );
-                drain_actions_and_apply_window(
-                    &mut host,
-                    &pending_actions,
-                    current_bounds.get(),
-                    &platform,
-                    &window,
-                    elwt,
-                    &mut applied_window_mode,
-                );
+                if should_route_focus_lost_to_ui(ui_runtime.is_eyedropper_active()) {
+                    let _ = ui_runtime.route_window_event(
+                        &window,
+                        &mut router,
+                        host.active_root_mut(),
+                        UiEvent::FocusLost,
+                        &dispatch_action,
+                    );
+                    drain_actions_and_apply_window(
+                        &mut host,
+                        &pending_actions,
+                        current_bounds.get(),
+                        &platform,
+                        &window,
+                        elwt,
+                        &mut applied_window_mode,
+                    );
+                } else {
+                    elwt.set_control_flow(ControlFlow::Poll);
+                }
                 window.request_redraw();
             }
 
@@ -474,6 +478,10 @@ fn build_self_hosted_background_runtime() -> std::io::Result<tokio::runtime::Run
         .build()
 }
 
+fn should_route_focus_lost_to_ui(eyedropper_active: bool) -> bool {
+    !eyedropper_active
+}
+
 fn drain_actions_and_apply_window(
     host: &mut SelfHostedUiHost,
     pending_actions: &PendingUiActions,
@@ -576,6 +584,12 @@ mod tests {
         assert_eq!(SELF_HOSTED_BACKGROUND_WORKERS, 4);
         let runtime = build_self_hosted_background_runtime().expect("runtime should build");
         runtime.block_on(async {});
+    }
+
+    #[test]
+    fn focus_loss_is_deferred_while_desktop_eyedropper_is_active() {
+        assert!(!should_route_focus_lost_to_ui(true));
+        assert!(should_route_focus_lost_to_ui(false));
     }
 
     #[test]
