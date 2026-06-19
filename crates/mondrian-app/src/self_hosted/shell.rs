@@ -41,7 +41,7 @@ use crate::self_hosted::new_project_dialog::{
     default_project_file_name, SelfHostedNewProjectDraft,
 };
 use crate::self_hosted::panels::{
-    build_dock_tree_for_preset, AssetThumbnailSource, SelfHostedPanelModels,
+    build_dock_tree_for_preset, AssetThumbnailSource, SelfHostedPanelModels, ViewerPreviewSource,
 };
 use crate::self_hosted::preferences_dialog::{PreferencesDialogTab, SelfHostedPreferencesModel};
 use crate::self_hosted::preferences_store::SelfHostedPreferences;
@@ -508,13 +508,29 @@ impl SelfHostedAppRoot {
         preferences: &SelfHostedPreferences,
         thumbnails: Option<&dyn AssetThumbnailSource>,
     ) -> Self {
+        Self::from_app_state_with_preferences_thumbnails_and_preview(
+            state,
+            preferences,
+            thumbnails,
+            None,
+        )
+    }
+
+    /// Build a root widget from app state, preferences, optional thumbnails,
+    /// and an optional viewer preview source.
+    pub fn from_app_state_with_preferences_thumbnails_and_preview(
+        state: &AppState,
+        preferences: &SelfHostedPreferences,
+        thumbnails: Option<&dyn AssetThumbnailSource>,
+        preview: Option<&dyn ViewerPreviewSource>,
+    ) -> Self {
         Self::new_with_preferences(
             TitleBar::new(
                 window_title_for_app_state(state),
                 MenuBar::for_app_state(state),
             ),
-            SelfHostedPanelModels::from_app_state_with_asset_folder_and_thumbnails(
-                state, None, thumbnails,
+            SelfHostedPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
+                state, None, thumbnails, preview,
             ),
             SelfHostedPreferencesModel::from_app_state(
                 state,
@@ -667,16 +683,34 @@ impl SelfHostedAppRoot {
         preferences: &SelfHostedPreferences,
         thumbnails: Option<&dyn AssetThumbnailSource>,
     ) {
+        self.refresh_from_app_state_with_preferences_thumbnails_and_preview(
+            state,
+            preferences,
+            thumbnails,
+            None,
+        );
+    }
+
+    /// Refresh panel contents and preferences with optional asset thumbnail and
+    /// viewer preview sources.
+    pub fn refresh_from_app_state_with_preferences_thumbnails_and_preview(
+        &mut self,
+        state: &AppState,
+        preferences: &SelfHostedPreferences,
+        thumbnails: Option<&dyn AssetThumbnailSource>,
+        preview: Option<&dyn ViewerPreviewSource>,
+    ) {
         self.title_bar = TitleBar::new(
             window_title_for_app_state(state),
             MenuBar::for_app_state(state),
         );
         self.status_bar.set_model(status_bar_model(state));
         self.set_models(
-            SelfHostedPanelModels::from_app_state_with_asset_folder_and_thumbnails(
+            SelfHostedPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
                 state,
                 self.asset_folder_id.as_deref(),
                 thumbnails,
+                preview,
             ),
         );
         let preferences_model = SelfHostedPreferencesModel::from_app_state(

@@ -86,6 +86,15 @@ pub trait AssetThumbnailSource {
     fn thumbnail_for_asset(&self, asset: &AssetRecord) -> AssetThumbnailState;
 }
 
+/// Supplies render-ready viewer preview frames for the active application state.
+///
+/// Implementations own preview caching, media decode, and render-plan execution.
+/// Panel models only receive immutable `ViewerFrameImage` payloads.
+pub trait ViewerPreviewSource {
+    /// Return the current viewer preview frame, or `None` while unavailable.
+    fn viewer_frame_for_state(&self, state: &AppState) -> Option<ViewerFrameImage>;
+}
+
 /// Current thumbnail lifecycle state for one asset card.
 #[derive(Debug, Clone)]
 pub enum AssetThumbnailState {
@@ -134,6 +143,21 @@ impl SelfHostedPanelModels {
         asset_folder_id: Option<&str>,
         thumbnails: Option<&dyn AssetThumbnailSource>,
     ) -> Self {
+        Self::from_app_state_with_asset_folder_thumbnails_and_preview(
+            state,
+            asset_folder_id,
+            thumbnails,
+            None,
+        )
+    }
+
+    /// Snapshot app state with optional thumbnail and viewer preview sources.
+    pub fn from_app_state_with_asset_folder_thumbnails_and_preview(
+        state: &AppState,
+        asset_folder_id: Option<&str>,
+        thumbnails: Option<&dyn AssetThumbnailSource>,
+        preview: Option<&dyn ViewerPreviewSource>,
+    ) -> Self {
         Self {
             assets: AssetGridModel::from_asset_library_in_folder_with_thumbnails(
                 state.asset_library.as_deref(),
@@ -142,7 +166,7 @@ impl SelfHostedPanelModels {
                 Some(&state.proxy_mode_assets),
             ),
             effects: PanelListModel::from_app_effect_registry(state),
-            viewer: ViewerPanelModel::from_app_state(state),
+            viewer: ViewerPanelModel::from_app_state_with_preview(state, preview),
             timeline: state
                 .sequence
                 .as_ref()
@@ -517,6 +541,14 @@ pub struct ViewerPanelModel {
 impl ViewerPanelModel {
     /// Snapshot viewer chrome data from app state.
     pub fn from_app_state(state: &AppState) -> Self {
+        Self::from_app_state_with_preview(state, None)
+    }
+
+    /// Snapshot viewer chrome data and attach an optional render-ready frame.
+    pub fn from_app_state_with_preview(
+        state: &AppState,
+        preview: Option<&dyn ViewerPreviewSource>,
+    ) -> Self {
         let Some(sequence) = state.sequence.as_ref() else {
             return Self::empty();
         };
@@ -528,6 +560,18 @@ impl ViewerPanelModel {
             .unwrap_or_else(|| TimeCode::new(current_frame, sequence.time_base()).to_smpte());
         let duration_frame = sequence.total_duration().frame.max(0);
         let fps = sequence.settings.frame_rate.to_f64();
+        let frame_image = preview.and_then(|preview| preview.viewer_frame_for_state(state));
+        let preview_quality_label = frame_image
+            .as_ref()
+            .map(|frame| {
+                if frame.width == resolution.width && frame.height == resolution.height {
+                    "Full".into()
+                } else {
+                    format!("{}x{}", frame.width, frame.height)
+                }
+            })
+            .unwrap_or_else(|| "Full".into());
+
         Self {
             title: sequence.name.clone(),
             status: if state.is_playing() {
@@ -548,12 +592,12 @@ impl ViewerPanelModel {
             frame_label: format!("F{current_frame}"),
             duration_label: format!("{duration_frame} frames"),
             zoom_label: "Fit".into(),
-            preview_quality_label: "Full".into(),
+            preview_quality_label,
             width: resolution.width,
             height: resolution.height,
             playing: state.is_playing(),
             enabled: true,
-            frame_image: None,
+            frame_image,
             empty_message: None,
         }
     }
@@ -5057,6 +5101,33 @@ mod tests {
             models.node_graph.edges[1],
             NodeGraphEdge::new(format!("effect:{effect_id}"), "output")
         );
+    }
+
+    #[test]
+    fn app_state_models_attach_viewer_preview_frame_from_source() {
+        struct TestPreview;
+
+        impl ViewerPreviewSource for TestPreview {
+            fn viewer_frame_for_state(&self, _state: &AppState) -> Option<ViewerFrameImage> {
+                ViewerFrameImage::new("test-preview", 320, 180, vec![128; 320 * 180 * 4])
+            }
+        }
+
+        let mut state = AppState::new();
+        state.sequence = Some(Sequence::new("edit"));
+
+        let models = SelfHostedPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
+            &state,
+            None,
+            None,
+            Some(&TestPreview),
+        );
+
+        let frame = models.viewer.frame_image.expect("preview frame");
+        assert_eq!(frame.key, "test-preview");
+        assert_eq!(frame.width, 320);
+        assert_eq!(frame.height, 180);
+        assert_eq!(models.viewer.preview_quality_label, "320x180");
     }
 
     #[test]

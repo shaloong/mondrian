@@ -31,6 +31,7 @@ use crate::self_hosted::preferences_store::{
     load_self_hosted_preferences, persist_self_hosted_preferences_to, self_hosted_preferences_path,
     SelfHostedPreferences,
 };
+use crate::self_hosted::preview::SelfHostedPreviewService;
 use crate::self_hosted::shell::{try_resolve_app_shell_action, SelfHostedAppRoot};
 use crate::self_hosted::startup::{
     SelfHostedStartupScreen, StartupRecentProject, StartupRecoveryProject,
@@ -73,6 +74,7 @@ pub struct SelfHostedUiHost {
     preferences_path: PathBuf,
     recovery_candidates: Vec<CrashRecoveryCandidate>,
     asset_thumbnails: AssetThumbnailCache,
+    preview_service: SelfHostedPreviewService,
     mode: SelfHostedUiMode,
     ui_dirty: Cell<bool>,
 }
@@ -95,10 +97,12 @@ impl SelfHostedUiHost {
     ) -> Self {
         set_theme_preset(preferences.theme_preset);
         let asset_thumbnails = AssetThumbnailCache::new();
-        let root = SelfHostedAppRoot::from_app_state_with_preferences_and_thumbnails(
+        let preview_service = SelfHostedPreviewService::new();
+        let root = SelfHostedAppRoot::from_app_state_with_preferences_thumbnails_and_preview(
             &app_state,
             &preferences,
             Some(&asset_thumbnails),
+            Some(&preview_service),
         );
         let mode = if app_state.has_open_project() {
             SelfHostedUiMode::Workspace
@@ -119,6 +123,7 @@ impl SelfHostedUiHost {
             preferences_path,
             recovery_candidates,
             asset_thumbnails,
+            preview_service,
             mode,
             ui_dirty: Cell::new(false),
         }
@@ -177,10 +182,11 @@ impl SelfHostedUiHost {
             return;
         }
         self.normalize_asset_folder_selection();
-        self.root.refresh_from_app_state_with_preferences_and_thumbnails(
+        self.root.refresh_from_app_state_with_preferences_thumbnails_and_preview(
             &self.app_state.borrow(),
             &self.preferences,
             Some(&self.asset_thumbnails),
+            Some(&self.preview_service),
         );
         self.sync_mode_from_app_state(bounds);
         TreeWalker::layout(self.active_root_mut(), bounds);
@@ -289,10 +295,11 @@ impl SelfHostedUiHost {
         };
         if self.mode != next {
             self.mode = next;
-            self.root.refresh_from_app_state_with_preferences_and_thumbnails(
+            self.root.refresh_from_app_state_with_preferences_thumbnails_and_preview(
                 &self.app_state.borrow(),
                 &self.preferences,
                 Some(&self.asset_thumbnails),
+                Some(&self.preview_service),
             );
             TreeWalker::layout(self.active_root_mut(), bounds);
         }
@@ -433,10 +440,11 @@ impl SelfHostedUiHost {
                         .borrow_mut()
                         .set_status_hint(format!("Preferences could not be saved: {err}"), true);
                 }
-                self.root.refresh_from_app_state_with_preferences_and_thumbnails(
+                self.root.refresh_from_app_state_with_preferences_thumbnails_and_preview(
                     &self.app_state.borrow(),
                     &self.preferences,
                     Some(&self.asset_thumbnails),
+                    Some(&self.preview_service),
                 );
                 TreeWalker::layout(&mut self.root, bounds);
                 true
@@ -460,10 +468,11 @@ impl SelfHostedUiHost {
             Ok(payload) => {
                 let folder_id = self.valid_asset_folder_id(payload.folder_id);
                 self.root.set_asset_folder_id(folder_id);
-                self.root.refresh_from_app_state_with_preferences_and_thumbnails(
+                self.root.refresh_from_app_state_with_preferences_thumbnails_and_preview(
                     &self.app_state.borrow(),
                     &self.preferences,
                     Some(&self.asset_thumbnails),
+                    Some(&self.preview_service),
                 );
                 TreeWalker::layout(&mut self.root, bounds);
                 true

@@ -1209,6 +1209,14 @@ source aspect-ratio fitting, raster-image presentation, tokenized status-badge
 tones, empty-canvas messaging, metadata labels, and safe-area guide drawing
 only; frame decoding, preview scheduling, and GPU texture lifecycle remain
 app/runtime responsibilities.
+The product host supplies viewer frames through `ViewerPreviewSource`.
+`SelfHostedPreviewService` is the app-layer boundary that interprets timeline
+render plans, owns compositor scratch state and preview cache keys, and injects
+render-ready `ViewerFrameImage` values into `ViewerPanelModel`. The initial
+self-hosted path renders solid-color timeline elements via the shared
+`mondrian-renderer` CPU compositor and returns no frame for media, adjustment,
+or nested-sequence plans until their decode/composite inputs are implemented;
+this avoids presenting partial previews as correct output.
 Viewer transport controls are part of this chrome but stay domain-light: the
 widget draws geometry buttons for mark in/out, jump start/end, step back/forward,
 and play/pause. By default these controls emit shared editor actions
