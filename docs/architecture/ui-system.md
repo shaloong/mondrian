@@ -939,15 +939,18 @@ selection, disabled rows, keyboard navigation, activation, and internal
 positive-delta scrolling, but exposes static and value-aware action adapters
 plus optional `DragPayload`s so Effects, presets, status rows, and similar
 panels can bind to editor state outside the widget crate. Mouse single-click
-selects a row, a second click on the same row activates it, and keyboard
-Enter/Space uses the same activation path. Escape clears the list-local row
-selection when one exists, and otherwise stays ignored so global `DeselectAll`
-can still clear editor selections. Pointer movement beyond the drag threshold
-asks the router to begin an internal drag; the router, not the source widget,
-owns `DragEnter` / `DragOver` / `DragLeave` / `Drop` delivery so pointer capture
-from the source cannot block target panels. Searchable list panels should use
-`PanelList::with_filter`, which exposes its filter `TextInput` as a real widget
-tree child so focus, IME, and keyboard routing stay framework-owned. Filtering
+selects a row, a second click on the same row activates it, and unmodified
+Enter/Space uses the same activation path. Focused list keyboard navigation is
+limited to unmodified Up/Down/Home/End/Enter/Space; modified chords stay ignored
+so panel and workspace shortcut routing remains centralized. Escape clears the
+list-local row selection when one exists, and otherwise stays ignored so global
+`DeselectAll` can still clear editor selections. Pointer movement beyond the
+drag threshold asks the router to begin an internal drag; the router, not the
+source widget, owns `DragEnter` / `DragOver` / `DragLeave` / `Drop` delivery so
+pointer capture from the source cannot block target panels. Searchable list
+panels should use `PanelList::with_filter`, which exposes its filter `TextInput`
+as a real widget tree child so focus, IME, and keyboard routing stay
+framework-owned. Filtering
 changes only visible row order; original item indices, row actions, drag
 payloads, badges, icons, and disabled state remain the item identity used for
 dispatch. The self-hosted Effects panel builds rows from the shared effect
