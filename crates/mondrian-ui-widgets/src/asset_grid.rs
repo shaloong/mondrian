@@ -891,13 +891,13 @@ impl AssetGrid {
         if let Some(index) = self.index_at(position) {
             if let (Some(factory), Some(item)) = (&self.on_item_drop, self.items.get(index)) {
                 if let Some(action) = factory(payload, index, item) {
-                    (ctx.dispatch)(action);
+                    dispatch_drop_action(action, ctx);
                     return;
                 }
             }
         }
         if let Some(action) = self.on_drop.as_ref().and_then(|factory| factory(payload, position)) {
-            (ctx.dispatch)(action);
+            dispatch_drop_action(action, ctx);
         }
     }
 
@@ -1744,6 +1744,12 @@ fn badge_colors(ctx: &PaintContext, badge: &AssetGridBadge, neutral_text: Color)
     }
 }
 
+fn dispatch_drop_action(action: Action, ctx: &mut EventContext) {
+    if !matches!(action, Action::NoOp) {
+        (ctx.dispatch)(action);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2544,6 +2550,70 @@ mod tests {
             actions.borrow().as_slice(),
             &[Action::SelectAll, Action::DeselectAll]
         );
+    }
+
+    #[test]
+    fn noop_grid_drop_is_consumed_without_dispatch() {
+        let mut grid =
+            AssetGrid::new("Assets", vec![item("drop", "Drop")]).on_drop(|_, _| Some(Action::NoOp));
+        grid.layout(Rect::new(0.0, 0.0, 320.0, 180.0));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let result = grid.event(
+            &UiEvent::Drop {
+                payload: DragPayload::Asset(AssetId::new()),
+                position: Point::new(24.0, 76.0),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn noop_item_drop_blocks_grid_fallback_without_dispatch() {
+        let mut grid = AssetGrid::new("Assets", vec![item("folder:a", "Folder A")])
+            .on_drop(|_, _| Some(Action::DeselectAll))
+            .on_item_drop(|_, _index, _item| Some(Action::NoOp));
+        grid.layout(Rect::new(0.0, 0.0, 320.0, 180.0));
+        let card = grid.card_rect_for_index(0).expect("folder card");
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let result = grid.event(
+            &UiEvent::Drop {
+                payload: DragPayload::Asset(AssetId::new()),
+                position: card.center(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert!(actions.borrow().is_empty());
     }
 
     #[test]

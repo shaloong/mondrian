@@ -829,7 +829,10 @@ the grid surface and individual cards receive plain `MenuItem`s, while the
 widget handles popup placement, overlay painting, dismissal, keyboard
 activation, and dispatch. `AssetGrid` also exposes item-level drop callbacks:
 the widget reports the target card view model, while panel adapters decide
-whether a given payload means move, import, or no-op. The self-hosted app
+whether a given payload means move, import, or no-op. For drop callbacks,
+`None` means "not handled; allow fallback", while `Action::NoOp` means "handled
+without an editor action" so self-drops can consume the event without polluting
+the app action stream. The self-hosted app
 adapter maps the grid menu to
 `app_shell` import requests and `ui.assets` create actions for adjustment
 layers, solid-color assets, folders, and folder-aware imports. File drops
