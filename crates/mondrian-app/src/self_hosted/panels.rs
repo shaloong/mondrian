@@ -2599,7 +2599,7 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
             ))
             .with_row(PropertyRow::new(
                 "Opacity",
-                inspector_numeric_control(
+                numeric_slider_input_control(
                     model.opacity,
                     0.0,
                     100.0,
@@ -2619,7 +2619,7 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
         PropertySection::new("Transform")
             .with_row(PropertyRow::new(
                 "Position X",
-                inspector_numeric_control(
+                numeric_slider_input_control(
                     model.position_x,
                     -4096.0,
                     4096.0,
@@ -2637,7 +2637,7 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
             ))
             .with_row(PropertyRow::new(
                 "Position Y",
-                inspector_numeric_control(
+                numeric_slider_input_control(
                     model.position_y,
                     -4096.0,
                     4096.0,
@@ -2655,7 +2655,7 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
             ))
             .with_row(PropertyRow::new(
                 "Scale",
-                inspector_numeric_control(
+                numeric_slider_input_control(
                     model.scale_percent,
                     0.0,
                     400.0,
@@ -2673,7 +2673,7 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
             ))
             .with_row(PropertyRow::new(
                 "Rotation",
-                inspector_numeric_control(
+                numeric_slider_input_control(
                     model.rotation_degrees,
                     -180.0,
                     180.0,
@@ -2695,7 +2695,7 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
         PropertySection::new("Timing")
             .with_row(PropertyRow::new(
                 "In",
-                inspector_numeric_control(
+                numeric_slider_input_control(
                     model.in_frame,
                     0.0,
                     model.max_frame,
@@ -2709,7 +2709,7 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
             ))
             .with_row(PropertyRow::new(
                 "Out",
-                inspector_numeric_control(
+                numeric_slider_input_control(
                     model.out_frame,
                     0.0,
                     model.max_frame,
@@ -2805,7 +2805,7 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
     )
 }
 
-fn inspector_numeric_control(
+fn numeric_slider_input_control(
     value: f32,
     min: f32,
     max: f32,
@@ -3046,7 +3046,7 @@ fn effect_property_row_height(value: &PropertyValue) -> Option<f32> {
         PropertyValue::Vec4(_) => 4,
         _ => return None,
     };
-    Some(components as f32 * 26.0 + components.saturating_sub(1) as f32 * 4.0)
+    Some(components as f32 * 30.0 + components.saturating_sub(1) as f32 * 4.0)
 }
 
 /// Build a typed value widget for one effect property row.
@@ -3080,17 +3080,21 @@ fn effect_property_value_widget(
             let max = property.max.map(|v| v as f32).unwrap_or(1.0);
             let selected_clip = selection;
             let path = path.clone();
-            Box::new(
-                effect_property_slider(*value, min, max, property.step, None)
-                    .enabled(can_edit)
-                    .on_change(move |v| {
-                        inspector_effect_property_action(
-                            selected_clip,
-                            effect_id,
-                            &path,
-                            PropertyValue::Float(v.clamp(min, max)),
-                        )
-                    }),
+            numeric_slider_input_control(
+                *value,
+                min,
+                max,
+                property_step(property.step, None),
+                numeric_decimals(property.step, *value),
+                can_edit,
+                move |v| {
+                    inspector_effect_property_action(
+                        selected_clip,
+                        effect_id,
+                        &path,
+                        PropertyValue::Float(v.clamp(min, max)),
+                    )
+                },
             )
         }
         PropertyValue::Double(value) => {
@@ -3098,17 +3102,21 @@ fn effect_property_value_widget(
             let max = property.max.unwrap_or(1.0) as f32;
             let selected_clip = selection;
             let path = path.clone();
-            Box::new(
-                effect_property_slider(*value as f32, min, max, property.step, None)
-                    .enabled(can_edit)
-                    .on_change(move |v: f32| {
-                        inspector_effect_property_action(
-                            selected_clip,
-                            effect_id,
-                            &path,
-                            PropertyValue::Double((v as f64).clamp(min as f64, max as f64)),
-                        )
-                    }),
+            numeric_slider_input_control(
+                *value as f32,
+                min,
+                max,
+                property_step(property.step, None),
+                numeric_decimals(property.step, *value as f32),
+                can_edit,
+                move |v: f32| {
+                    inspector_effect_property_action(
+                        selected_clip,
+                        effect_id,
+                        &path,
+                        PropertyValue::Double((v as f64).clamp(min as f64, max as f64)),
+                    )
+                },
             )
         }
         PropertyValue::Int(value) => {
@@ -3116,17 +3124,21 @@ fn effect_property_value_widget(
             let max = property.max.map(|v| v as f32).unwrap_or(100.0);
             let selected_clip = selection;
             let path = path.clone();
-            Box::new(
-                effect_property_slider(*value as f32, min, max, property.step, Some(1.0))
-                    .enabled(can_edit)
-                    .on_change(move |v: f32| {
-                        inspector_effect_property_action(
-                            selected_clip,
-                            effect_id,
-                            &path,
-                            PropertyValue::Int((v.round() as i64).clamp(min as i64, max as i64)),
-                        )
-                    }),
+            numeric_slider_input_control(
+                *value as f32,
+                min,
+                max,
+                property_step(property.step, Some(1.0)),
+                0,
+                can_edit,
+                move |v: f32| {
+                    inspector_effect_property_action(
+                        selected_clip,
+                        effect_id,
+                        &path,
+                        PropertyValue::Int((v.round() as i64).clamp(min as i64, max as i64)),
+                    )
+                },
             )
         }
         PropertyValue::Color(value) => {
@@ -3215,9 +3227,14 @@ fn vector_property_widget(
             let base_values = values.to_vec();
             let selected_clip = selection;
             let path = path.clone();
-            let slider = effect_property_slider(*value, min, max, property.step, None)
-                .enabled(can_edit)
-                .on_change(move |v| {
+            let control = numeric_slider_input_control(
+                *value,
+                min,
+                max,
+                property_step(property.step, None),
+                numeric_decimals(property.step, *value),
+                can_edit,
+                move |v| {
                     let mut next_values = base_values.clone();
                     next_values[component_index] = v.clamp(min, max);
                     inspector_effect_property_action(
@@ -3226,13 +3243,14 @@ fn vector_property_widget(
                         &path,
                         build_value(&next_values),
                     )
-                });
+                },
+            );
             FlexChild::fixed(Box::new(
                 FlexContainer::row(vec![
                     FlexChild::fixed(Box::new(
                         Label::new(*label).muted().with_font_size(11.0).with_padding(0.0, 0.0),
                     )),
-                    FlexChild::flex(Box::new(slider), 1.0),
+                    FlexChild::flex(control, 1.0),
                 ])
                 .with_gap(8.0),
             ))
@@ -3241,23 +3259,34 @@ fn vector_property_widget(
     Box::new(FlexContainer::column(rows).with_gap(4.0))
 }
 
-fn effect_property_slider(
-    value: f32,
-    min: f32,
-    max: f32,
-    descriptor_step: Option<f64>,
-    fallback_step: Option<f32>,
-) -> Slider {
-    let slider = Slider::new(value, min, max);
-    let step = descriptor_step
+fn property_step(descriptor_step: Option<f64>, fallback_step: Option<f32>) -> Option<f32> {
+    descriptor_step
         .filter(|step| step.is_finite() && *step > 0.0)
         .map(|step| step as f32)
         .or(fallback_step)
-        .filter(|step| step.is_finite() && *step > 0.0);
-    match step {
-        Some(step) => slider.with_step(step),
-        None => slider,
+        .filter(|step| step.is_finite() && *step > 0.0)
+}
+
+fn numeric_decimals(descriptor_step: Option<f64>, value: f32) -> usize {
+    if let Some(step) = descriptor_step.filter(|step| step.is_finite() && *step > 0.0) {
+        return decimal_places_for_step(step);
     }
+    if value.fract().abs() > f32::EPSILON {
+        2
+    } else {
+        0
+    }
+}
+
+fn decimal_places_for_step(step: f64) -> usize {
+    let mut scaled = step.abs();
+    for decimals in 0..=4 {
+        if (scaled.round() - scaled).abs() < 1.0e-6 {
+            return decimals;
+        }
+        scaled *= 10.0;
+    }
+    4
 }
 
 fn inspector_effect_property_action(
@@ -5751,11 +5780,11 @@ mod tests {
     fn inspector_effect_vector_property_rows_get_multi_component_height() {
         assert_eq!(
             effect_property_row_height(&PropertyValue::Vec2(glam::Vec2::ZERO)),
-            Some(56.0)
+            Some(64.0)
         );
         assert_eq!(
             effect_property_row_height(&PropertyValue::Vec4([0.0, 0.0, 0.0, 0.0])),
-            Some(116.0)
+            Some(132.0)
         );
         assert_eq!(effect_property_row_height(&PropertyValue::Float(0.5)), None);
     }
@@ -5784,7 +5813,7 @@ mod tests {
             effect_id,
             property.path.clone(),
         );
-        widget.layout(Rect::new(0.0, 0.0, 220.0, 82.0));
+        widget.layout(Rect::new(0.0, 0.0, 220.0, 94.0));
 
         let actions = RefCell::new(Vec::new());
         let dispatch = |action| actions.borrow_mut().push(action);
@@ -5802,7 +5831,7 @@ mod tests {
 
         let result = widget.event(
             &UiEvent::MouseDown {
-                position: Point::new(80.0, 53.0),
+                position: Point::new(80.0, 75.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -5834,7 +5863,7 @@ mod tests {
     }
 
     #[test]
-    fn inspector_effect_float_property_slider_honors_descriptor_step() {
+    fn inspector_effect_float_property_number_input_honors_descriptor_step() {
         let effect_id = EffectId::new();
         let selection = SelectedClipRef {
             track_id: TrackId::new(),
@@ -5857,7 +5886,7 @@ mod tests {
             effect_id,
             property.path.clone(),
         );
-        widget.layout(Rect::new(0.0, 0.0, 220.0, 24.0));
+        widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
         let actions = RefCell::new(Vec::new());
         let dispatch = |action| actions.borrow_mut().push(action);
         let mut focus = DummyFocus;
@@ -5873,15 +5902,27 @@ mod tests {
         );
 
         assert_eq!(
-            widget.event(&UiEvent::FocusGained, &mut ctx),
+            widget.event(
+                &UiEvent::MouseDown {
+                    position: Point::new(190.0, 14.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
             EventResult::Handled
         );
-        let result = widget.event(
-            &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
-            &mut ctx,
+        assert_eq!(
+            widget.event(
+                &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+                &mut ctx,
+            ),
+            EventResult::Handled
         );
-
-        assert_eq!(result, EventResult::Handled);
+        assert_eq!(
+            widget.event(&UiEvent::TextInput("0.62".to_string()), &mut ctx),
+            EventResult::Handled
+        );
         let recorded = actions.borrow();
         assert_eq!(recorded.len(), 1);
         let Action::Custom { payload, .. } = &recorded[0] else {
@@ -5895,12 +5936,12 @@ mod tests {
         };
         assert!(
             (value - 0.5).abs() <= 0.0001,
-            "expected stepped value 0.5, got {value}"
+            "expected stepped value 0.5 from typed 0.62, got {value}"
         );
     }
 
     #[test]
-    fn inspector_effect_int_property_slider_defaults_to_unit_step() {
+    fn inspector_effect_int_property_number_input_defaults_to_unit_step() {
         let effect_id = EffectId::new();
         let selection = SelectedClipRef {
             track_id: TrackId::new(),
@@ -5923,7 +5964,7 @@ mod tests {
             effect_id,
             property.path.clone(),
         );
-        widget.layout(Rect::new(0.0, 0.0, 220.0, 24.0));
+        widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
         let actions = RefCell::new(Vec::new());
         let dispatch = |action| actions.borrow_mut().push(action);
         let mut focus = DummyFocus;
@@ -5939,15 +5980,27 @@ mod tests {
         );
 
         assert_eq!(
-            widget.event(&UiEvent::FocusGained, &mut ctx),
+            widget.event(
+                &UiEvent::MouseDown {
+                    position: Point::new(190.0, 14.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
             EventResult::Handled
         );
-        let result = widget.event(
-            &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
-            &mut ctx,
+        assert_eq!(
+            widget.event(
+                &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+                &mut ctx,
+            ),
+            EventResult::Handled
         );
-
-        assert_eq!(result, EventResult::Handled);
+        assert_eq!(
+            widget.event(&UiEvent::TextInput("12.4".to_string()), &mut ctx),
+            EventResult::Handled
+        );
         let recorded = actions.borrow();
         assert_eq!(recorded.len(), 1);
         let Action::Custom { payload, .. } = &recorded[0] else {
@@ -5956,18 +6009,18 @@ mod tests {
         let payload: InspectorSetEffectPropertyPayload =
             serde_json::from_value(payload.clone()).expect("set effect property payload");
         assert_eq!(payload.path, "levels.iterations");
-        assert_eq!(payload.value, PropertyValue::Int(11));
+        assert_eq!(payload.value, PropertyValue::Int(12));
     }
 
     #[test]
-    fn inspector_numeric_control_text_input_dispatches_typed_transform_action() {
+    fn numeric_slider_input_control_text_input_dispatches_typed_transform_action() {
         let selection = SelectedClipRef {
             track_id: TrackId::new(),
             is_video_track: true,
             clip_id: ClipId::new(),
         };
         let mut widget =
-            inspector_numeric_control(12.0, -180.0, 180.0, Some(0.1), 1, true, move |value| {
+            numeric_slider_input_control(12.0, -180.0, 180.0, Some(0.1), 1, true, move |value| {
                 inspector_transform_action(
                     Some(selection),
                     InspectorClipTransformField::RotationDegrees,
@@ -6028,14 +6081,14 @@ mod tests {
     }
 
     #[test]
-    fn inspector_numeric_control_disabled_text_input_does_not_dispatch() {
+    fn numeric_slider_input_control_disabled_text_input_does_not_dispatch() {
         let selection = SelectedClipRef {
             track_id: TrackId::new(),
             is_video_track: true,
             clip_id: ClipId::new(),
         };
         let mut widget =
-            inspector_numeric_control(50.0, 0.0, 100.0, Some(1.0), 0, false, move |value| {
+            numeric_slider_input_control(50.0, 0.0, 100.0, Some(1.0), 0, false, move |value| {
                 inspector_value_action(Some(selection), "opacity", value)
             });
         widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
