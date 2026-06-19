@@ -14,6 +14,7 @@ use std::sync::Arc;
 use crate::paint::{
     color_with_alpha, horizontal_stroke_rect, mix_color, soft_border, vertical_stroke_rect,
 };
+use crate::text_metrics::measure_single_line;
 use crate::RasterImage;
 
 const DEFAULT_WIDTH: f32 = 480.0;
@@ -22,12 +23,28 @@ const DEFAULT_HEIGHT: f32 = 270.0;
 /// RGBA preview image presented by [`ViewerSurface`].
 pub type ViewerFrameImage = RasterImage;
 
+/// Semantic tone for the viewer status badge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewerStatusTone {
+    /// Neutral idle/ready state.
+    Neutral,
+    /// Active playback or focused preview state.
+    Accent,
+    /// Successful/healthy state.
+    Success,
+    /// Attention-needed preview state.
+    Warning,
+    /// Error/unavailable preview state.
+    Error,
+}
+
 /// Preview viewer surface.
 pub struct ViewerSurface {
     id: WidgetId,
     bounds: Rect,
     title: String,
     status: String,
+    status_tone: ViewerStatusTone,
     resolution_label: String,
     frame_label: String,
     duration_label: String,
@@ -36,6 +53,7 @@ pub struct ViewerSurface {
     playing: bool,
     enabled: bool,
     frame_image: Option<ViewerFrameImage>,
+    empty_message: Option<String>,
 }
 
 impl ViewerSurface {
@@ -46,6 +64,7 @@ impl ViewerSurface {
             bounds: Rect::ZERO,
             title: title.into(),
             status: "No signal".into(),
+            status_tone: ViewerStatusTone::Neutral,
             resolution_label: String::new(),
             frame_label: "F0".into(),
             duration_label: String::new(),
@@ -54,12 +73,19 @@ impl ViewerSurface {
             playing: false,
             enabled: true,
             frame_image: None,
+            empty_message: None,
         }
     }
 
     /// Set the viewer status label.
     pub fn with_status(mut self, status: impl Into<String>) -> Self {
         self.status = status.into();
+        self
+    }
+
+    /// Set the semantic tone used for the viewer status badge.
+    pub fn with_status_tone(mut self, tone: ViewerStatusTone) -> Self {
+        self.status_tone = tone;
         self
     }
 
@@ -84,6 +110,9 @@ impl ViewerSurface {
     /// Set whether playback is active.
     pub fn playing(mut self, playing: bool) -> Self {
         self.playing = playing;
+        if playing && self.status_tone == ViewerStatusTone::Neutral {
+            self.status_tone = ViewerStatusTone::Accent;
+        }
         self
     }
 
@@ -101,6 +130,12 @@ impl ViewerSurface {
     /// Set the rendered preview image shown inside the fitted canvas.
     pub fn with_frame_image(mut self, frame_image: ViewerFrameImage) -> Self {
         self.frame_image = Some(frame_image);
+        self
+    }
+
+    /// Set a short message painted inside the canvas when no frame is shown.
+    pub fn with_empty_message(mut self, message: impl Into<String>) -> Self {
+        self.empty_message = Some(message.into());
         self
     }
 
@@ -175,17 +210,15 @@ impl Widget for ViewerSurface {
             },
         );
 
+        let status_width = (measure_single_line(&self.status, typography.small.font_size).0 + 24.0)
+            .clamp(64.0, (self.bounds.width - 32.0).max(64.0));
         let badge = Rect::new(
-            self.bounds.x + self.bounds.width - 104.0,
+            self.bounds.x + self.bounds.width - status_width - 16.0,
             self.bounds.y + 9.0,
-            88.0,
+            status_width,
             24.0,
         );
-        let badge_fill = if self.playing {
-            mix_color(colors.popover, colors.primary, 0.18)
-        } else {
-            mix_color(colors.popover, colors.foreground, 0.045)
-        };
+        let (badge_fill, badge_text) = status_badge_colors(self, ctx);
         ctx.encoder.draw_rect(badge, soft_border(colors.border), spacing.radius_sm);
         ctx.encoder
             .draw_rect(badge.inset(1.0, 1.0), badge_fill, spacing.radius_sm - 1.0);
@@ -194,11 +227,7 @@ impl Widget for ViewerSurface {
             &self.status,
             typography.small.font_size,
             Point::new(badge.x + 8.0, badge.y + 5.0),
-            if self.enabled {
-                colors.popover_foreground
-            } else {
-                colors.muted_foreground
-            },
+            badge_text,
         );
         ctx.pop_clip();
 
@@ -223,6 +252,27 @@ impl Widget for ViewerSurface {
                     frame.height,
                     Arc::clone(&frame.rgba),
                     Color::WHITE,
+                );
+                ctx.pop_clip();
+            }
+        }
+        if self.frame_image.is_none() {
+            if let Some(message) =
+                self.empty_message.as_deref().filter(|message| !message.is_empty())
+            {
+                let message_rect = Rect::new(
+                    canvas.x + 12.0,
+                    canvas.y + (canvas.height - 22.0) * 0.5,
+                    (canvas.width - 24.0).max(1.0),
+                    22.0,
+                );
+                ctx.push_clip(canvas);
+                ctx.encoder.draw_text_box(
+                    message,
+                    typography.body.font_size,
+                    Point::new(message_rect.x, message_rect.y),
+                    message_rect.width,
+                    colors.muted_foreground,
                 );
                 ctx.pop_clip();
             }
@@ -271,6 +321,29 @@ fn fit_aspect(bounds: Rect, aspect: f32) -> Rect {
     }
 }
 
+fn status_badge_colors(surface: &ViewerSurface, ctx: &PaintContext) -> (Color, Color) {
+    let colors = &ctx.theme.colors;
+    if !surface.enabled {
+        return (
+            mix_color(colors.popover, colors.muted, 0.28),
+            colors.muted_foreground,
+        );
+    }
+    match surface.status_tone {
+        ViewerStatusTone::Neutral => (
+            mix_color(colors.popover, colors.foreground, 0.045),
+            colors.popover_foreground,
+        ),
+        ViewerStatusTone::Accent => (
+            mix_color(colors.popover, colors.primary, 0.18),
+            colors.primary,
+        ),
+        ViewerStatusTone::Success => (color_with_alpha(colors.success, 0.20), colors.success),
+        ViewerStatusTone::Warning => (color_with_alpha(colors.warning, 0.20), colors.warning),
+        ViewerStatusTone::Error => (color_with_alpha(colors.error, 0.20), colors.error),
+    }
+}
+
 fn paint_safe_guides(ctx: &mut PaintContext, canvas: Rect, enabled: bool) {
     if canvas.width <= 0.0 || canvas.height <= 0.0 {
         return;
@@ -315,6 +388,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingEncoder {
         rects: Vec<Rect>,
+        rect_colors: Vec<Color>,
         lines: usize,
         texts: Vec<String>,
         raster_images: Vec<(String, Rect, u32, u32)>,
@@ -329,8 +403,9 @@ mod tests {
         fn pop_clip(&mut self) {
             self.clip_pops += 1;
         }
-        fn draw_rect(&mut self, bounds: Rect, _color: Color, _corner_radius: f32) {
+        fn draw_rect(&mut self, bounds: Rect, color: Color, _corner_radius: f32) {
             self.rects.push(bounds);
+            self.rect_colors.push(color);
         }
         fn draw_line(&mut self, _start: Point, _end: Point, _width: f32, _color: Color) {
             self.lines += 1;
@@ -398,8 +473,38 @@ mod tests {
         assert!(encoder.texts.iter().any(|text| text == "Playing"));
         assert!(encoder.texts.iter().any(|text| text.contains("1920x1080")));
         assert!(encoder.texts.iter().any(|text| text.contains("F42")));
+        assert!(
+            encoder
+                .rect_colors
+                .iter()
+                .any(|color| *color == mix_color(theme.colors.popover, theme.colors.primary, 0.18)),
+            "playing status should use the theme primary token"
+        );
         assert_eq!(encoder.lines, 0);
         assert!(encoder.rects.len() >= 12);
+    }
+
+    #[test]
+    fn disabled_empty_viewer_paints_empty_message_without_frame() {
+        let mut viewer = ViewerSurface::new("Viewer", 16, 9)
+            .with_status("No sequence")
+            .with_empty_message("No sequence loaded")
+            .disabled();
+        viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 500.0, 320.0),
+        };
+
+        viewer.paint(&mut ctx);
+
+        assert!(encoder.raster_images.is_empty());
+        assert!(encoder.texts.iter().any(|text| text == "No sequence"));
+        assert!(encoder.texts.iter().any(|text| text == "No sequence loaded"));
+        assert_eq!(encoder.clip_pops, encoder.clips.len());
     }
 
     #[test]

@@ -33,7 +33,7 @@ use mondrian_ui_widgets::{
     PropertyPanel, PropertyRow, PropertySection, RasterImage, ScrollView, Slider, TextInput,
     TimelineAssetDrop, TimelineClip, TimelineClipMove, TimelineClipRef, TimelineClipTrim,
     TimelineEditCommand, TimelineTrack, TimelineTrackControl, TimelineTrackMove, TimelineTrackRef,
-    TimelineTrimEdge, TimelineView, ViewerFrameImage, ViewerSurface,
+    TimelineTrimEdge, TimelineView, ViewerFrameImage, ViewerStatusTone, ViewerSurface,
 };
 
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
@@ -518,6 +518,7 @@ impl PanelListModel {
 pub struct ViewerPanelModel {
     pub title: String,
     pub status: String,
+    pub status_tone: ViewerStatusTone,
     pub resolution_label: String,
     pub frame_label: String,
     pub duration_label: String,
@@ -526,6 +527,7 @@ pub struct ViewerPanelModel {
     pub playing: bool,
     pub enabled: bool,
     pub frame_image: Option<ViewerFrameImage>,
+    pub empty_message: Option<String>,
 }
 
 impl ViewerPanelModel {
@@ -545,6 +547,11 @@ impl ViewerPanelModel {
             } else {
                 "Ready".into()
             },
+            status_tone: if state.is_playing() {
+                ViewerStatusTone::Accent
+            } else {
+                ViewerStatusTone::Neutral
+            },
             resolution_label: format!(
                 "{}x{} @ {:.2} fps",
                 resolution.width, resolution.height, fps
@@ -556,6 +563,7 @@ impl ViewerPanelModel {
             playing: state.is_playing(),
             enabled: true,
             frame_image: None,
+            empty_message: None,
         }
     }
 
@@ -564,6 +572,7 @@ impl ViewerPanelModel {
         Self {
             title: "Viewer".into(),
             status: "No sequence".into(),
+            status_tone: ViewerStatusTone::Neutral,
             resolution_label: "No signal".into(),
             frame_label: "F0".into(),
             duration_label: String::new(),
@@ -572,6 +581,7 @@ impl ViewerPanelModel {
             playing: false,
             enabled: false,
             frame_image: None,
+            empty_message: Some("No sequence loaded".into()),
         }
     }
 }
@@ -1285,11 +1295,17 @@ fn panel_content_for_slot(kind: SlotKind, models: &SelfHostedPanelModels) -> Box
 fn viewer_panel(model: &ViewerPanelModel) -> ViewerSurface {
     let surface = ViewerSurface::new(model.title.clone(), model.width, model.height)
         .with_status(model.status.clone())
+        .with_status_tone(model.status_tone)
         .with_resolution_label(model.resolution_label.clone())
         .with_frame_label(model.frame_label.clone())
         .with_duration_label(model.duration_label.clone())
         .playing(model.playing)
         .enabled(model.enabled);
+    let surface = if let Some(message) = model.empty_message.clone() {
+        surface.with_empty_message(message)
+    } else {
+        surface
+    };
     match model.frame_image.clone() {
         Some(frame_image) => surface.with_frame_image(frame_image),
         None => surface,
@@ -3125,6 +3141,8 @@ mod tests {
         assert!(!models.effects.items.is_empty());
         assert_eq!(models.viewer.title, "Demo edit");
         assert!(models.viewer.enabled);
+        assert_eq!(models.viewer.status_tone, ViewerStatusTone::Neutral);
+        assert_eq!(models.viewer.empty_message, None);
         assert!(!models.timeline.tracks.is_empty());
         assert!(!models.inspector.curve_points.is_empty());
         assert!(!models.node_graph.nodes.is_empty());
@@ -3154,6 +3172,11 @@ mod tests {
         assert!(!models.effects.items.is_empty());
         assert_eq!(models.viewer.title, "Viewer");
         assert!(!models.viewer.enabled);
+        assert_eq!(models.viewer.status_tone, ViewerStatusTone::Neutral);
+        assert_eq!(
+            models.viewer.empty_message.as_deref(),
+            Some("No sequence loaded")
+        );
         assert_eq!(models.viewer.resolution_label, "No signal");
         assert_eq!(models.inspector.selected_clip, None);
         assert!(!models.inspector.is_editable);
@@ -4633,6 +4656,8 @@ mod tests {
 
         assert_eq!(models.viewer.title, "edit");
         assert_eq!(models.viewer.frame_label, "F7");
+        assert_eq!(models.viewer.status_tone, ViewerStatusTone::Neutral);
+        assert_eq!(models.viewer.empty_message, None);
         assert!(models.viewer.resolution_label.contains("1920x1080"));
         assert_eq!(models.timeline.playhead_frame, 7);
         assert!(models.timeline.tracks[0].clips[0].selected);
@@ -4645,6 +4670,12 @@ mod tests {
             models.inspector.curve_points,
             vec![CurvePoint::new(0.0, 1.0), CurvePoint::new(1.0, 1.0)]
         );
+
+        state.play();
+        let playing_models = SelfHostedPanelModels::from_app_state(&state);
+        assert_eq!(playing_models.viewer.status, "Playing");
+        assert_eq!(playing_models.viewer.status_tone, ViewerStatusTone::Accent);
+        assert!(playing_models.viewer.playing);
         assert_eq!(models.inspector.tint.to_rgba8(), color.to_rgba8());
         assert_eq!(models.inspector.position_x, 192.0);
         assert_eq!(models.inspector.position_y, 108.0);

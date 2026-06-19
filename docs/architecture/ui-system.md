@@ -1100,9 +1100,10 @@ instead of a colored placeholder. App code maps `AppState` / `Sequence` into a
 small `ViewerPanelModel` containing title, playback status, current frame,
 duration, source resolution, and an optional `ViewerFrameImage` alias over the
 shared `RasterImage` payload. The widget owns preview chrome,
-source aspect-ratio fitting, raster-image presentation, metadata labels, and
-safe-area guide drawing only; frame decoding, preview scheduling, and GPU
-texture lifecycle remain app/runtime responsibilities.
+source aspect-ratio fitting, raster-image presentation, tokenized status-badge
+tones, empty-canvas messaging, metadata labels, and safe-area guide drawing
+only; frame decoding, preview scheduling, and GPU texture lifecycle remain
+app/runtime responsibilities.
 Empty app state maps to a disabled viewer model so the product shell can show
 clear no-signal chrome without pretending a preview texture exists.
 `ui_demo` should use the same `ViewerSurface` for the Viewer panel and keep
