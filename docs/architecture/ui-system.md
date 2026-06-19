@@ -1486,9 +1486,9 @@ Node graph rendering starts as a domain-light projection in
 port/edge painting, focus/keyboard selection, disabled presentation, selection
 chrome, and hit testing for generic `NodeGraphNode` / `NodeGraphEdge` values.
 Pointer node selection requests widget focus so arrow-key navigation and
-Enter/Space activation can continue from the clicked node without requiring a
-separate focus shortcut. It does not own effect semantics, undo history, or
-graph mutation rules.
+Home/End edge-node jumps plus Enter/Space activation can continue from the
+clicked node without requiring a separate focus shortcut. It does not own effect
+semantics, undo history, or graph mutation rules.
 
 The self-hosted `PanelKind::NodeGraph` panel maps the currently selected clip to
 a read-only render chain: Source -> each clip effect -> Output. The app adapter
