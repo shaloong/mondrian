@@ -869,6 +869,10 @@ checks stay identical across UI surfaces.
 The self-hosted timeline adapter must reject cross-media clip move proposals
 before emitting an app action: video clips cannot be mapped onto audio target
 tracks, and audio clips cannot be mapped onto video target tracks.
+`AppState` must validate the same media-type invariant when handling
+`ui.timeline.move_clip`, because shortcuts, menus, scripts, and future panel
+surfaces can dispatch the app action without passing through the timeline
+widget adapter.
 `primary_selected_clip()` resolves the current sequence before returning so
 single-target panels do not inherit stale track metadata.
 Panel models should also resolve selected clips by clip id when reading a

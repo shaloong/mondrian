@@ -873,6 +873,9 @@ impl AppState {
         };
         let (current_track_id, current_is_video_track, current_frame) =
             self.clip_action_location("move_clip", clip_id)?;
+        if current_is_video_track != is_video_track {
+            return Err(clip_media_type_mismatch_error("move_clip", clip_id));
+        }
         if current_track_id == target_track_id
             && current_is_video_track == is_video_track
             && current_frame == frame
@@ -2257,6 +2260,13 @@ fn missing_clip_error(step_id: &'static str, clip_id: ClipId) -> MondrianError {
     }
 }
 
+fn clip_media_type_mismatch_error(step_id: &'static str, clip_id: ClipId) -> MondrianError {
+    MondrianError::WorkflowStepFailed {
+        step_id: step_id.to_string(),
+        reason: format!("片段媒体类型与目标轨道类型不匹配: {clip_id}"),
+    }
+}
+
 fn missing_effect_error(
     step_id: &'static str,
     clip_id: ClipId,
@@ -3083,6 +3093,44 @@ mod tests {
             }]
         );
         assert!(state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_timeline_ui_rejects_cross_media_clip_move() {
+        let (mut state, source_track_id, clip_id) = state_with_two_video_tracks();
+        let target_track_id = state.sequence.as_ref().unwrap().audio_tracks[0].id;
+        state.selection.selected_clips = vec![SelectedClipRef {
+            track_id: source_track_id,
+            is_video_track: true,
+            clip_id,
+        }];
+
+        let err = state
+            .dispatch_action(timeline_move_clip_action(TimelineMoveClipPayload {
+                target_track_id,
+                is_video_track: false,
+                clip_id,
+                frame: 42,
+            }))
+            .expect_err("cross-media move should fail");
+
+        assert!(matches!(
+            err,
+            MondrianError::WorkflowStepFailed { step_id, .. } if step_id == "move_clip"
+        ));
+        let sequence = state.sequence.as_ref().expect("sequence");
+        assert_eq!(sequence.video_tracks[0].clips.len(), 1);
+        assert_eq!(sequence.video_tracks[0].clips[0].id, clip_id);
+        assert!(sequence.audio_tracks[0].clips.is_empty());
+        assert_eq!(
+            state.selection.selected_clips,
+            vec![SelectedClipRef {
+                track_id: source_track_id,
+                is_video_track: true,
+                clip_id,
+            }]
+        );
+        assert!(!state.can_undo_action());
     }
 
     #[test]
