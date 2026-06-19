@@ -5,6 +5,8 @@
 //! factories so real `AppState` / `EditorState` adapters can replace it without
 //! changing dock layout or widget construction.
 
+use std::rc::Rc;
+
 use mondrian_assets::library::FolderRecord;
 use mondrian_assets::{AssetKind, AssetLibrary, AssetRecord};
 use mondrian_core::automation::timecode_to_ticks;
@@ -25,6 +27,7 @@ use mondrian_ui_core::Widget;
 use mondrian_ui_theme::current_theme;
 use mondrian_ui_widgets::dock_splitter::DockSplitter;
 use mondrian_ui_widgets::dock_tab_bar::TabInfo;
+use mondrian_ui_widgets::NumberInput;
 use mondrian_ui_widgets::{
     AssetGrid, AssetGridBadgeTone, AssetGridItem, Checkbox, ColorPickerAreaMode,
     ColorPickerTrigger, CurveEditor, CurvePoint, DockPanel, Dropdown, FlexChild, FlexContainer,
@@ -2596,10 +2599,14 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
             ))
             .with_row(PropertyRow::new(
                 "Opacity",
-                Box::new(
-                    Slider::new(model.opacity, 0.0, 100.0).enabled(can_edit).on_change(
-                        move |value| inspector_value_action(selected_clip, "opacity", value),
-                    ),
+                inspector_numeric_control(
+                    model.opacity,
+                    0.0,
+                    100.0,
+                    Some(1.0),
+                    0,
+                    can_edit,
+                    move |value| inspector_value_action(selected_clip, "opacity", value),
                 ),
             ))
             .with_row(PropertyRow::new(
@@ -2612,58 +2619,74 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
         PropertySection::new("Transform")
             .with_row(PropertyRow::new(
                 "Position X",
-                Box::new(
-                    Slider::new(model.position_x, -4096.0, 4096.0).enabled(can_edit).on_change(
-                        move |value| {
-                            inspector_transform_action(
-                                selected_clip,
-                                InspectorClipTransformField::PositionX,
-                                value,
-                            )
-                        },
-                    ),
+                inspector_numeric_control(
+                    model.position_x,
+                    -4096.0,
+                    4096.0,
+                    Some(1.0),
+                    0,
+                    can_edit,
+                    move |value| {
+                        inspector_transform_action(
+                            selected_clip,
+                            InspectorClipTransformField::PositionX,
+                            value,
+                        )
+                    },
                 ),
             ))
             .with_row(PropertyRow::new(
                 "Position Y",
-                Box::new(
-                    Slider::new(model.position_y, -4096.0, 4096.0).enabled(can_edit).on_change(
-                        move |value| {
-                            inspector_transform_action(
-                                selected_clip,
-                                InspectorClipTransformField::PositionY,
-                                value,
-                            )
-                        },
-                    ),
+                inspector_numeric_control(
+                    model.position_y,
+                    -4096.0,
+                    4096.0,
+                    Some(1.0),
+                    0,
+                    can_edit,
+                    move |value| {
+                        inspector_transform_action(
+                            selected_clip,
+                            InspectorClipTransformField::PositionY,
+                            value,
+                        )
+                    },
                 ),
             ))
             .with_row(PropertyRow::new(
                 "Scale",
-                Box::new(
-                    Slider::new(model.scale_percent, 0.0, 400.0).enabled(can_edit).on_change(
-                        move |value| {
-                            inspector_transform_action(
-                                selected_clip,
-                                InspectorClipTransformField::ScalePercent,
-                                value,
-                            )
-                        },
-                    ),
+                inspector_numeric_control(
+                    model.scale_percent,
+                    0.0,
+                    400.0,
+                    Some(1.0),
+                    0,
+                    can_edit,
+                    move |value| {
+                        inspector_transform_action(
+                            selected_clip,
+                            InspectorClipTransformField::ScalePercent,
+                            value,
+                        )
+                    },
                 ),
             ))
             .with_row(PropertyRow::new(
                 "Rotation",
-                Box::new(
-                    Slider::new(model.rotation_degrees, -180.0, 180.0).enabled(can_edit).on_change(
-                        move |value| {
-                            inspector_transform_action(
-                                selected_clip,
-                                InspectorClipTransformField::RotationDegrees,
-                                value,
-                            )
-                        },
-                    ),
+                inspector_numeric_control(
+                    model.rotation_degrees,
+                    -180.0,
+                    180.0,
+                    Some(0.1),
+                    1,
+                    can_edit,
+                    move |value| {
+                        inspector_transform_action(
+                            selected_clip,
+                            InspectorClipTransformField::RotationDegrees,
+                            value,
+                        )
+                    },
                 ),
             )),
     );
@@ -2672,30 +2695,30 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
         PropertySection::new("Timing")
             .with_row(PropertyRow::new(
                 "In",
-                Box::new(
-                    Slider::new(model.in_frame, 0.0, model.max_frame).enabled(can_edit).on_change(
-                        move |value| {
-                            inspector_timing_action(
-                                selected_clip,
-                                TimelineTrimPayloadEdge::In,
-                                value,
-                            )
-                        },
-                    ),
+                inspector_numeric_control(
+                    model.in_frame,
+                    0.0,
+                    model.max_frame,
+                    Some(1.0),
+                    0,
+                    can_edit,
+                    move |value| {
+                        inspector_timing_action(selected_clip, TimelineTrimPayloadEdge::In, value)
+                    },
                 ),
             ))
             .with_row(PropertyRow::new(
                 "Out",
-                Box::new(
-                    Slider::new(model.out_frame, 0.0, model.max_frame).enabled(can_edit).on_change(
-                        move |value| {
-                            inspector_timing_action(
-                                selected_clip,
-                                TimelineTrimPayloadEdge::Out,
-                                value,
-                            )
-                        },
-                    ),
+                inspector_numeric_control(
+                    model.out_frame,
+                    0.0,
+                    model.max_frame,
+                    Some(1.0),
+                    0,
+                    can_edit,
+                    move |value| {
+                        inspector_timing_action(selected_clip, TimelineTrimPayloadEdge::Out, value)
+                    },
                 ),
             )),
     );
@@ -2779,6 +2802,42 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
     panel.with_section(
         PropertySection::new("Animation")
             .with_row(PropertyRow::new("Curve", Box::new(curve)).with_height(118.0)),
+    )
+}
+
+fn inspector_numeric_control(
+    value: f32,
+    min: f32,
+    max: f32,
+    step: Option<f32>,
+    decimals: usize,
+    enabled: bool,
+    action: impl Fn(f32) -> Action + 'static,
+) -> Box<dyn Widget> {
+    let action: Rc<dyn Fn(f32) -> Action> = Rc::new(action);
+    let mut slider = Slider::new(value, min, max).enabled(enabled);
+    if let Some(step) = step.filter(|step| step.is_finite() && *step > 0.0) {
+        slider = slider.with_step(step);
+    }
+    let slider_action = Rc::clone(&action);
+    slider = slider.on_change(move |value| slider_action(value));
+
+    let mut input = NumberInput::new(value as f64, min as f64, max as f64)
+        .with_width(72.0)
+        .with_decimals(decimals)
+        .enabled(enabled);
+    if let Some(step) = step.filter(|step| step.is_finite() && *step > 0.0) {
+        input = input.with_step(step as f64);
+    }
+    let input_action = Rc::clone(&action);
+    input = input.on_change(move |value| input_action(value as f32));
+
+    Box::new(
+        FlexContainer::row(vec![
+            FlexChild::flex(Box::new(slider), 1.0),
+            FlexChild::fixed(Box::new(input)),
+        ])
+        .with_gap(8.0),
     )
 }
 
@@ -3234,9 +3293,10 @@ mod tests {
         ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE,
         ASSETS_OPEN_FOLDER, ASSETS_PREPARE_DRAG, ASSETS_RENAME_ASSET, ASSETS_SET_PROXY_MODE,
         EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE, INSPECTOR_SELECT_EFFECT,
-        INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_EFFECT_PROPERTY, TIMELINE_ADD_TRACK,
-        TIMELINE_DROP_ASSET, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
-        TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_SELECT_CLIP, TIMELINE_SET_SELECTED_CLIPS_ENABLED,
+        INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_CLIP_TRANSFORM_FIELD,
+        INSPECTOR_SET_EFFECT_PROPERTY, TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET,
+        TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_OPEN_NESTED_SEQUENCE,
+        TIMELINE_SELECT_CLIP, TIMELINE_SET_SELECTED_CLIPS_ENABLED,
         TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD,
     };
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
@@ -5897,6 +5957,119 @@ mod tests {
             serde_json::from_value(payload.clone()).expect("set effect property payload");
         assert_eq!(payload.path, "levels.iterations");
         assert_eq!(payload.value, PropertyValue::Int(11));
+    }
+
+    #[test]
+    fn inspector_numeric_control_text_input_dispatches_typed_transform_action() {
+        let selection = SelectedClipRef {
+            track_id: TrackId::new(),
+            is_video_track: true,
+            clip_id: ClipId::new(),
+        };
+        let mut widget =
+            inspector_numeric_control(12.0, -180.0, 180.0, Some(0.1), 1, true, move |value| {
+                inspector_transform_action(
+                    Some(selection),
+                    InspectorClipTransformField::RotationDegrees,
+                    value,
+                )
+            });
+        widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
+
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            widget.event(
+                &UiEvent::MouseDown {
+                    position: Point::new(190.0, 14.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            widget.event(
+                &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            widget.event(&UiEvent::TextInput("45.6".to_string()), &mut ctx),
+            EventResult::Handled
+        );
+
+        let recorded = actions.borrow();
+        assert_eq!(recorded.len(), 1);
+        let Action::Custom { namespace, name, payload } = &recorded[0] else {
+            panic!("expected inspector custom action, got {:?}", recorded[0]);
+        };
+        assert_eq!(namespace, INSPECTOR_NAMESPACE);
+        assert_eq!(name, INSPECTOR_SET_CLIP_TRANSFORM_FIELD);
+        let payload: InspectorSetClipTransformFieldPayload =
+            serde_json::from_value(payload.clone()).expect("transform payload");
+        assert_eq!(payload.clip.clip_id, selection.clip_id);
+        assert_eq!(payload.field, InspectorClipTransformField::RotationDegrees);
+        assert!((payload.value - 45.6).abs() < 0.0001);
+    }
+
+    #[test]
+    fn inspector_numeric_control_disabled_text_input_does_not_dispatch() {
+        let selection = SelectedClipRef {
+            track_id: TrackId::new(),
+            is_video_track: true,
+            clip_id: ClipId::new(),
+        };
+        let mut widget =
+            inspector_numeric_control(50.0, 0.0, 100.0, Some(1.0), 0, false, move |value| {
+                inspector_value_action(Some(selection), "opacity", value)
+            });
+        widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
+
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            widget.event(
+                &UiEvent::MouseDown {
+                    position: Point::new(190.0, 14.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+        assert_eq!(
+            widget.event(&UiEvent::TextInput("75".to_string()), &mut ctx),
+            EventResult::Ignored
+        );
+        assert!(actions.borrow().is_empty());
     }
 
     #[test]

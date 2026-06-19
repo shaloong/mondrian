@@ -21,6 +21,7 @@ pub struct NumberInput {
     max: f64,
     step: Option<f64>,
     decimals: usize,
+    width: f32,
     on_change: Option<Box<NumberInputChangeAction>>,
 }
 
@@ -35,6 +36,7 @@ impl NumberInput {
             max,
             step: None,
             decimals: 0,
+            width: 200.0,
             on_change: None,
         }
     }
@@ -44,6 +46,23 @@ impl NumberInput {
         let text = self.input.text().to_owned();
         self.input = TextInput::new(placeholder).with_text(text);
         self
+    }
+
+    /// Set the preferred layout width.
+    pub fn with_width(mut self, width: f32) -> Self {
+        self.width = width.max(1.0);
+        self
+    }
+
+    /// Set whether the input accepts user interaction.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.input = self.input.enabled(enabled);
+        self
+    }
+
+    /// Disable user interaction.
+    pub fn disabled(self) -> Self {
+        self.enabled(false)
     }
 
     /// Set the number of decimals used for initial/displayed values.
@@ -104,7 +123,10 @@ impl Widget for NumberInput {
     }
 
     fn measure(&self, constraint: LayoutConstraint) -> Size {
-        self.input.measure(constraint)
+        constraint.constrain(Size::new(
+            self.width,
+            self.input.measure(LayoutConstraint::LOOSE).height,
+        ))
     }
 
     fn layout(&mut self, bounds: Rect) {

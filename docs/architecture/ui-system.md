@@ -397,6 +397,9 @@ scrolling behavior, then parses committed text changes into clamped/stepped
 numeric actions. Invalid numeric text remains local and dispatches no action,
 letting the next app-state refresh restore the authoritative value without
 mutating domain state from malformed input.
+Panel adapters may set a preferred `NumberInput` width when composing compact
+property rows; the input still receives its final bounds from layout and must
+not own row-level sizing policy.
 
 Text copy/cut shortcuts are consumed by `TextInput` only when a selection exists.
 If there is no selection, `Ctrl+C` and `Ctrl+X` are ignored so panel-level
@@ -1074,6 +1077,10 @@ Adapters that cannot target editor state should return `Action::NoOp` rather
 than inventing legacy custom action names; `AppState` dispatch treats NoOp as a
 first-class empty action without logging it as an unimplemented command.
 Self-hosted Inspector actions should use typed payloads for clip mutations.
+Scalar clip fields that need both coarse and precise editing, such as opacity,
+transform values, and trim frames, compose `Slider` plus `NumberInput` in the
+panel adapter. Both controls emit the same typed inspector action, so the app
+layer receives one mutation contract independent of the user's edit gesture.
 The curve editor currently emits `ui.inspector.set_clip_curve` with normalized
 points; AppState maps them to opacity keyframes over the selected clip's
 timeline span so curve edits participate in undo/redo and render evaluation.
