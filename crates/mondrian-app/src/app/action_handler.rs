@@ -24,8 +24,9 @@ use crate::app::ui_actions::{
     InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload,
     ProjectRecoverFromAutosavePayload, SequenceTargetPayload, SequenceUpdateSettingsPayload,
     TimelineAddTrackKind, TimelineAddTrackPayload, TimelineDropAssetPayload,
-    TimelineMoveClipPayload, TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
-    TimelineSeekPayload, TimelineSelectClipPayload, TimelineSetSelectedClipsEnabledPayload,
+    TimelineInOutPointPayloadKind, TimelineMoveClipPayload, TimelineMoveTrackPayload,
+    TimelineOpenNestedSequencePayload, TimelineSeekPayload, TimelineSelectClipPayload,
+    TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
     TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipsPayload,
     TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
     ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR,
@@ -41,8 +42,9 @@ use crate::app::ui_actions::{
     SEQUENCE_NAMESPACE, SEQUENCE_NEW, SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT,
     SEQUENCE_SWITCH_ACTIVE, SEQUENCE_UPDATE_SETTINGS, TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET,
     TIMELINE_MOVE_CLIP, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_OPEN_NESTED_SEQUENCE,
-    TIMELINE_SEEK, TIMELINE_SELECT_CLIP, TIMELINE_SET_SELECTED_CLIPS_ENABLED,
-    TIMELINE_SET_TRACK_CONTROL, TIMELINE_TRIM_CLIPS, TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD,
+    TIMELINE_SEEK, TIMELINE_SELECT_CLIP, TIMELINE_SET_IN_OUT_POINT,
+    TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL, TIMELINE_TRIM_CLIPS,
+    TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD,
 };
 use crate::app::{AppClipboardKind, AppState, ClipOverlapMode, SelectedClipRef};
 use glam::Vec2;
@@ -1054,6 +1056,14 @@ impl AppState {
                 };
                 self.trim_selected_clips_to_playhead_from_ui(edge)
             }
+            TIMELINE_SET_IN_OUT_POINT => {
+                let payload = parse_ui_payload::<TimelineSetInOutPointPayload>(
+                    "timeline_ui_action",
+                    name,
+                    payload,
+                )?;
+                self.set_in_out_point_from_ui(payload)
+            }
             TIMELINE_SET_SELECTED_CLIPS_ENABLED => {
                 let payload = parse_ui_payload::<TimelineSetSelectedClipsEnabledPayload>(
                     "timeline_ui_action",
@@ -1644,6 +1654,19 @@ impl AppState {
         self.trim_clips_bulk_to_frame(&clip_ids, edge, target_frame).map(|_| ())
     }
 
+    fn set_in_out_point_from_ui(&mut self, payload: TimelineSetInOutPointPayload) -> Result<()> {
+        let Some(sequence) = self.sequence.as_mut() else {
+            return Err(missing_sequence_error("timeline_set_in_out_point"));
+        };
+        match payload.point {
+            TimelineInOutPointPayloadKind::In => sequence.mark_in(payload.frame),
+            TimelineInOutPointPayloadKind::Out => sequence.mark_out(payload.frame),
+        }
+        self.sync_current_sequence_into_collection();
+        let _ = self.save_project_file();
+        Ok(())
+    }
+
     fn selected_clip_ids_for_timeline_action(&self) -> Vec<ClipId> {
         let mut clip_ids = Vec::new();
         for selection in &self.selection.selected_clips {
@@ -2074,25 +2097,26 @@ mod tests {
         sequence_switch_active_action, sequence_update_settings_action, timeline_add_track_action,
         timeline_drop_asset_action, timeline_move_clip_action, timeline_move_track_action,
         timeline_open_nested_sequence_action, timeline_seek_action, timeline_select_clip_action,
-        timeline_set_selected_clips_enabled_action, timeline_set_track_control_action,
-        timeline_trim_clips_action, timeline_trim_selected_clips_to_playhead_action,
-        AssetsCreateAssetPayload, AssetsCreateFolderPayload, AssetsDeleteAssetPayload,
-        AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload, AssetsImportFilesPayload,
-        AssetsMoveAssetPayload, AssetsMoveFolderPayload, AssetsMoveSelectionPayload,
-        AssetsPrepareDragPayload, AssetsRelinkAssetPayload, AssetsRenameAssetPayload,
-        AssetsRenameFolderPayload, AssetsSetProxyModePayload, EffectsAddToClipPayload,
-        ExportDraftUpdatePayload, ExportEnqueuePayload, InspectorClipRefPayload,
-        InspectorClipTransformField, InspectorCurvePointPayload, InspectorRemoveEffectPayload,
-        InspectorSelectEffectPayload, InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
+        timeline_set_in_out_point_action, timeline_set_selected_clips_enabled_action,
+        timeline_set_track_control_action, timeline_trim_clips_action,
+        timeline_trim_selected_clips_to_playhead_action, AssetsCreateAssetPayload,
+        AssetsCreateFolderPayload, AssetsDeleteAssetPayload, AssetsDeleteFolderPayload,
+        AssetsDeleteSelectionPayload, AssetsImportFilesPayload, AssetsMoveAssetPayload,
+        AssetsMoveFolderPayload, AssetsMoveSelectionPayload, AssetsPrepareDragPayload,
+        AssetsRelinkAssetPayload, AssetsRenameAssetPayload, AssetsRenameFolderPayload,
+        AssetsSetProxyModePayload, EffectsAddToClipPayload, ExportDraftUpdatePayload,
+        ExportEnqueuePayload, InspectorClipRefPayload, InspectorClipTransformField,
+        InspectorCurvePointPayload, InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
+        InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
         InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
         InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
         InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload,
         ProjectRecoverFromAutosavePayload, SequenceTargetPayload, SequenceUpdateSettingsPayload,
         TimelineAddTrackKind, TimelineAddTrackPayload, TimelineDropAssetPayload,
-        TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
-        TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
-        TimelineTrackControlPayloadKind, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
-        TimelineTrimSelectedClipsToPlayheadPayload,
+        TimelineInOutPointPayloadKind, TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
+        TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
+        TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipsPayload,
+        TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
     };
     use mondrian_assets::AssetLibrary;
     use mondrian_core::types::{AssetId, EffectId, MaskId, TimeCode, TrackId};
@@ -4003,6 +4027,31 @@ mod tests {
         assert_eq!(sequence.in_point_frame(), 42);
         assert_eq!(sequence.out_point_frame(), Some(42));
         assert!(!state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_timeline_ui_sets_explicit_in_out_points() {
+        let (mut state, _, _) = state_with_two_video_tracks();
+        state
+            .dispatch_action(timeline_set_in_out_point_action(
+                TimelineSetInOutPointPayload {
+                    point: TimelineInOutPointPayloadKind::In,
+                    frame: 32,
+                },
+            ))
+            .expect("set in point");
+        state
+            .dispatch_action(timeline_set_in_out_point_action(
+                TimelineSetInOutPointPayload {
+                    point: TimelineInOutPointPayloadKind::Out,
+                    frame: 16,
+                },
+            ))
+            .expect("set out point");
+
+        let sequence = state.sequence.as_ref().expect("sequence");
+        assert_eq!(sequence.in_point_frame(), 32);
+        assert_eq!(sequence.out_point_frame(), Some(32));
     }
 
     #[test]

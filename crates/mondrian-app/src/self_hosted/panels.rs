@@ -34,9 +34,9 @@ use mondrian_ui_widgets::{
     Label, MenuItem, NodeGraphEdge, NodeGraphNode, NodeGraphView, PanelList, PanelListBadgeTone,
     PanelListItem, PropertyPanel, PropertyRow, PropertySection, RasterImage, ScrollView, Slider,
     TextInput, TimelineAssetDrop, TimelineClip, TimelineClipMove, TimelineClipRef,
-    TimelineClipTrim, TimelineEditCommand, TimelineTrack, TimelineTrackControl, TimelineTrackMove,
-    TimelineTrackRef, TimelineTrimEdge, TimelineView, ViewerFrameImage, ViewerStatusTone,
-    ViewerSurface,
+    TimelineClipTrim, TimelineEditCommand, TimelineInOutPoint, TimelineTrack, TimelineTrackControl,
+    TimelineTrackMove, TimelineTrackRef, TimelineTrimEdge, TimelineView, ViewerFrameImage,
+    ViewerStatusTone, ViewerSurface,
 };
 
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
@@ -55,26 +55,26 @@ use crate::app::ui_actions::{
     inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
     inspector_set_effect_property_action, timeline_add_track_action, timeline_drop_asset_action,
     timeline_move_clip_action, timeline_move_track_action, timeline_open_nested_sequence_action,
-    timeline_seek_action, timeline_select_clip_action, timeline_set_selected_clips_enabled_action,
-    timeline_set_track_control_action, timeline_trim_clips_action,
-    timeline_trim_selected_clips_to_playhead_action, AppShellRelinkAssetDialogPayload,
-    AppShellRevealInFileManagerPayload, AssetsCreateAssetPayload, AssetsCreateFolderPayload,
-    AssetsDeleteAssetPayload, AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload,
-    AssetsImportFilesPayload, AssetsMoveAssetPayload, AssetsMoveFolderPayload,
-    AssetsMoveSelectionPayload, AssetsOpenFolderPayload, AssetsPrepareDragPayload,
-    AssetsRenameAssetPayload, AssetsRenameFolderPayload, AssetsSetProxyModePayload,
-    EffectsAddToClipPayload, ExportDraftUpdatePayload, ExportEnqueuePayload,
-    ExportOutputDialogPayload, ImportMediaDialogPayload, InspectorClipRefPayload,
-    InspectorClipTransformField, InspectorCurvePointPayload, InspectorRemoveEffectPayload,
-    InspectorSelectEffectPayload, InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
-    InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+    timeline_seek_action, timeline_select_clip_action, timeline_set_in_out_point_action,
+    timeline_set_selected_clips_enabled_action, timeline_set_track_control_action,
+    timeline_trim_clips_action, timeline_trim_selected_clips_to_playhead_action,
+    AppShellRelinkAssetDialogPayload, AppShellRevealInFileManagerPayload, AssetsCreateAssetPayload,
+    AssetsCreateFolderPayload, AssetsDeleteAssetPayload, AssetsDeleteFolderPayload,
+    AssetsDeleteSelectionPayload, AssetsImportFilesPayload, AssetsMoveAssetPayload,
+    AssetsMoveFolderPayload, AssetsMoveSelectionPayload, AssetsOpenFolderPayload,
+    AssetsPrepareDragPayload, AssetsRenameAssetPayload, AssetsRenameFolderPayload,
+    AssetsSetProxyModePayload, EffectsAddToClipPayload, ExportDraftUpdatePayload,
+    ExportEnqueuePayload, ExportOutputDialogPayload, ImportMediaDialogPayload,
+    InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
+    InspectorRemoveEffectPayload, InspectorSelectEffectPayload, InspectorSetClipCurvePayload,
+    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
     InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
     InspectorSetEffectPropertyPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
-    TimelineDropAssetPayload, TimelineMoveClipPayload, TimelineMoveTrackPayload,
-    TimelineOpenNestedSequencePayload, TimelineSelectClipPayload,
-    TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
-    TimelineTrackControlPayloadKind, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
-    TimelineTrimSelectedClipsToPlayheadPayload,
+    TimelineDropAssetPayload, TimelineInOutPointPayloadKind, TimelineMoveClipPayload,
+    TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload, TimelineSelectClipPayload,
+    TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
+    TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipsPayload,
+    TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
 };
 use crate::app::{AppState, SelectedClipRef};
 use crate::self_hosted::icons::AppIcon;
@@ -2286,7 +2286,20 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
                     .unwrap_or_else(|| Action::NoOp)
             }
         })
+        .on_in_out_point(|point, frame| {
+            timeline_set_in_out_point_action(TimelineSetInOutPointPayload {
+                point: timeline_in_out_point_payload_kind(point),
+                frame: frame.max(0),
+            })
+        })
         .on_seek(timeline_seek_action)
+}
+
+fn timeline_in_out_point_payload_kind(point: TimelineInOutPoint) -> TimelineInOutPointPayloadKind {
+    match point {
+        TimelineInOutPoint::In => TimelineInOutPointPayloadKind::In,
+        TimelineInOutPoint::Out => TimelineInOutPointPayloadKind::Out,
+    }
 }
 
 fn timeline_edit_command_action(
@@ -3325,7 +3338,7 @@ mod tests {
         INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_CLIP_TRANSFORM_FIELD,
         INSPECTOR_SET_EFFECT_PROPERTY, TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET,
         TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_OPEN_NESTED_SEQUENCE,
-        TIMELINE_SELECT_CLIP, TIMELINE_SET_SELECTED_CLIPS_ENABLED,
+        TIMELINE_SELECT_CLIP, TIMELINE_SET_IN_OUT_POINT, TIMELINE_SET_SELECTED_CLIPS_ENABLED,
         TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD,
     };
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
@@ -5035,6 +5048,74 @@ mod tests {
             actions.borrow().as_slice(),
             &[Action::MarkInAtPlayhead, Action::MarkOutAtPlayhead]
         );
+    }
+
+    #[test]
+    fn timeline_panel_dragged_in_marker_emits_typed_range_payload() {
+        let mut model = demo_timeline_model();
+        model.in_point_frame = 10;
+        model.out_point_frame = Some(30);
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut panel = timeline_panel(&model);
+        panel.layout(mondrian_ui_core::types::Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            panel.event(
+                &UiEvent::MouseDown {
+                    position: Point::new(168.0, 12.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            panel.event(
+                &UiEvent::MouseMove {
+                    position: Point::new(208.0, 12.0),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            panel.event(
+                &UiEvent::MouseUp {
+                    position: Point::new(208.0, 12.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        let recorded = actions.borrow();
+        assert_eq!(recorded.len(), 1);
+        let Action::Custom { namespace, name, payload } = &recorded[0] else {
+            panic!("expected timeline custom action, got {:?}", recorded[0]);
+        };
+        assert_eq!(namespace, TIMELINE_NAMESPACE);
+        assert_eq!(name, TIMELINE_SET_IN_OUT_POINT);
+        let payload: TimelineSetInOutPointPayload =
+            serde_json::from_value(payload.clone()).expect("timeline in/out payload");
+        assert_eq!(payload.point, TimelineInOutPointPayloadKind::In);
+        assert_eq!(payload.frame, 20);
     }
 
     #[test]

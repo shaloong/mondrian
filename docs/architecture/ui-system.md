@@ -804,6 +804,12 @@ shortcuts, and scripts share the same selected-clip mutation path.
 Mark In / Mark Out shortcuts use `TimelineEditCommand::MarkInAtPlayhead` and
 `TimelineEditCommand::MarkOutAtPlayhead`, then route through shared app actions
 so timeline and viewer shortcuts can converge on the same command boundary.
+Ruler marker dragging is the explicit-frame counterpart: `TimelineView` owns
+only hit testing, pointer capture, and local preview for the in/out marker, then
+emits `ui.timeline.set_in_out_point` on mouse release. The self-hosted adapter
+does no sequence mutation; `AppState` consumes the typed payload and calls the
+active sequence's `mark_in(frame)` / `mark_out(frame)` methods so normalization,
+project synchronization, and autosave remain centralized.
 The timeline context menu is implemented inside `TimelineView` with the shared
 `ContextMenu` overlay component, but it still emits only the same
 `TimelineEditCommand`s and track-add proposals as keyboard and toolbar input.

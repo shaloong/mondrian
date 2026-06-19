@@ -53,6 +53,9 @@ pub type TimelineClipMoveAction = dyn Fn(TimelineClipMove, &TimelineClip) -> Act
 /// Action factory for clip trim commits.
 pub type TimelineClipTrimAction = dyn Fn(TimelineClipTrim, &TimelineClip) -> Action;
 
+/// Action factory for in/out point changes.
+pub type TimelineInOutPointAction = dyn Fn(TimelineInOutPoint, i64) -> Action;
+
 /// Stable view reference to a clip inside the timeline surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimelineClipRef {
@@ -102,6 +105,13 @@ pub struct TimelineAssetDrop {
 /// Clip edge being trimmed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimelineTrimEdge {
+    In,
+    Out,
+}
+
+/// Sequence range marker edited from the timeline ruler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineInOutPoint {
     In,
     Out,
 }
@@ -344,6 +354,7 @@ pub struct TimelineView {
     header_width: f32,
     ruler_height: f32,
     playhead_dragging: bool,
+    in_out_drag: Option<TimelineInOutDrag>,
     asset_drop_hover: Option<TimelineAssetDropHover>,
     track_drag: Option<TimelineTrackDrag>,
     clip_drag: Option<TimelineClipDrag>,
@@ -363,6 +374,7 @@ pub struct TimelineView {
     on_asset_drop: Option<Box<TimelineAssetDropAction>>,
     on_clip_move: Option<Box<TimelineClipMoveAction>>,
     on_clip_trim: Option<Box<TimelineClipTrimAction>>,
+    on_in_out_point: Option<Box<TimelineInOutPointAction>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -397,6 +409,14 @@ struct TimelineTrimDrag {
     old_duration_frames: i64,
     current_start_frame: i64,
     current_duration_frames: i64,
+    moved: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TimelineInOutDrag {
+    point: TimelineInOutPoint,
+    start_frame: i64,
+    current_frame: i64,
     moved: bool,
 }
 
@@ -443,6 +463,7 @@ impl TimelineView {
             header_width: 96.0,
             ruler_height: 30.0,
             playhead_dragging: false,
+            in_out_drag: None,
             asset_drop_hover: None,
             track_drag: None,
             clip_drag: None,
@@ -462,6 +483,7 @@ impl TimelineView {
             on_asset_drop: None,
             on_clip_move: None,
             on_clip_trim: None,
+            on_in_out_point: None,
         }
     }
 
@@ -619,6 +641,15 @@ impl TimelineView {
         action: impl Fn(TimelineClipTrim, &TimelineClip) -> Action + 'static,
     ) -> Self {
         self.on_clip_trim = Some(Box::new(action));
+        self
+    }
+
+    /// Set an action factory for ruler in/out point edits.
+    pub fn on_in_out_point(
+        mut self,
+        action: impl Fn(TimelineInOutPoint, i64) -> Action + 'static,
+    ) -> Self {
+        self.on_in_out_point = Some(Box::new(action));
         self
     }
 
@@ -902,6 +933,21 @@ impl TimelineView {
         .into_iter()
         .find(|control| self.track_control_rect(header, *control).contains(point))
         .map(|control| (track_ref, control))
+    }
+
+    fn in_out_marker_at(&self, point: Point) -> Option<TimelineInOutPoint> {
+        if !self.ruler_rect.contains(point) {
+            return None;
+        }
+        let hit_radius = 5.0;
+        if (point.x - self.frame_to_x(self.in_point_frame)).abs() <= hit_radius {
+            return Some(TimelineInOutPoint::In);
+        }
+        let out = self.out_point_frame?;
+        if (point.x - self.frame_to_x(out.saturating_add(1))).abs() <= hit_radius {
+            return Some(TimelineInOutPoint::Out);
+        }
+        None
     }
 
     fn timeline_corner_rect(&self) -> Rect {
@@ -1328,6 +1374,64 @@ impl TimelineView {
             if let Some(factory) = &self.on_clip_trim {
                 (ctx.dispatch)(factory(trim, clip));
             }
+        }
+        ctx.request_repaint();
+        true
+    }
+
+    fn start_in_out_drag(&mut self, point: TimelineInOutPoint) {
+        let start_frame = match point {
+            TimelineInOutPoint::In => self.in_point_frame,
+            TimelineInOutPoint::Out => self.out_point_frame.unwrap_or(self.in_point_frame),
+        };
+        self.in_out_drag = Some(TimelineInOutDrag {
+            point,
+            start_frame,
+            current_frame: start_frame,
+            moved: false,
+        });
+    }
+
+    fn drag_in_out_to(&mut self, position: Point, ctx: &mut EventContext) -> bool {
+        let Some(mut drag) = self.in_out_drag else {
+            return false;
+        };
+        let frame = self.x_to_frame(position.x).max(0);
+        let frame = match drag.point {
+            TimelineInOutPoint::In => frame,
+            TimelineInOutPoint::Out => frame.max(self.in_point_frame),
+        };
+        if drag.current_frame == frame {
+            return true;
+        }
+        drag.current_frame = frame;
+        drag.moved = true;
+        match drag.point {
+            TimelineInOutPoint::In => {
+                self.in_point_frame = frame;
+                if self.out_point_frame.is_some_and(|out| out < frame) {
+                    self.out_point_frame = Some(frame);
+                }
+            }
+            TimelineInOutPoint::Out => {
+                self.out_point_frame = Some(frame);
+            }
+        }
+        self.in_out_drag = Some(drag);
+        ctx.request_repaint();
+        true
+    }
+
+    fn finish_in_out_drag(&mut self, ctx: &mut EventContext) -> bool {
+        let Some(drag) = self.in_out_drag.take() else {
+            return false;
+        };
+        if !drag.moved || drag.current_frame == drag.start_frame {
+            ctx.request_repaint();
+            return true;
+        }
+        if let Some(factory) = &self.on_in_out_point {
+            (ctx.dispatch)(factory(drag.point, drag.current_frame));
         }
         ctx.request_repaint();
         true
@@ -2408,6 +2512,7 @@ impl Widget for TimelineView {
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
         if !self.enabled {
             if self.playhead_dragging
+                || self.in_out_drag.is_some()
                 || self.track_drag.is_some()
                 || self.clip_drag.is_some()
                 || self.trim_drag.is_some()
@@ -2419,6 +2524,7 @@ impl Widget for TimelineView {
             self.focused = false;
             self.focus_visible = false;
             self.playhead_dragging = false;
+            self.in_out_drag = None;
             self.asset_drop_hover = None;
             self.track_drag = None;
             self.clip_drag = None;
@@ -2463,6 +2569,7 @@ impl Widget for TimelineView {
                 self.focused = true;
                 self.focus_visible = false;
                 self.playhead_dragging = false;
+                self.in_out_drag = None;
                 self.track_drag = None;
                 self.clip_drag = None;
                 self.trim_drag = None;
@@ -2559,6 +2666,12 @@ impl Widget for TimelineView {
                     return self.activate_track_add_from_input(kind, ctx);
                 }
                 if self.ruler_rect.contains(*position) {
+                    if let Some(point) = self.in_out_marker_at(*position) {
+                        self.start_in_out_drag(point);
+                        ctx.request_pointer_capture(self.id);
+                        ctx.request_repaint();
+                        return EventResult::Handled;
+                    }
                     self.playhead_dragging = true;
                     ctx.request_pointer_capture(self.id);
                     self.seek_from_input(self.x_to_frame(position.x), ctx);
@@ -2599,6 +2712,10 @@ impl Widget for TimelineView {
             UiEvent::MouseMove { position, .. } => {
                 if self.playhead_dragging {
                     self.seek_from_input(self.x_to_frame(position.x), ctx);
+                    return EventResult::Handled;
+                }
+                if self.in_out_drag.is_some() {
+                    self.drag_in_out_to(*position, ctx);
                     return EventResult::Handled;
                 }
                 if self.track_drag.is_some() {
@@ -2662,6 +2779,11 @@ impl Widget for TimelineView {
                 ctx.request_repaint();
                 return EventResult::Handled;
             }
+            UiEvent::MouseUp { button: MouseButton::Left, .. } if self.in_out_drag.is_some() => {
+                self.finish_in_out_drag(ctx);
+                ctx.release_pointer_capture(self.id);
+                return EventResult::Handled;
+            }
             UiEvent::MouseUp { button: MouseButton::Left, .. } if self.track_drag.is_some() => {
                 self.finish_track_drag(ctx);
                 ctx.release_pointer_capture(self.id);
@@ -2692,6 +2814,7 @@ impl Widget for TimelineView {
                 self.focused = false;
                 self.focus_visible = false;
                 self.playhead_dragging = false;
+                self.in_out_drag = None;
                 self.asset_drop_hover = None;
                 self.track_drag = None;
                 self.clip_drag = None;
@@ -4766,6 +4889,75 @@ mod tests {
         assert_eq!(
             actions.borrow().as_slice(),
             &[Action::MarkInAtPlayhead, Action::MarkOutAtPlayhead]
+        );
+    }
+
+    #[test]
+    fn dragging_in_out_marker_previews_and_commits_on_release() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut view =
+            timeline().with_in_out_points(10, Some(30)).on_in_out_point(|point, frame| {
+                Action::Custom {
+                    namespace: "timeline.range".into(),
+                    name: format!("{point:?}:{frame}"),
+                    payload: Default::default(),
+                }
+            });
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            view.event(
+                &UiEvent::MouseDown {
+                    position: Point::new(136.0, 12.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            view.event(
+                &UiEvent::MouseMove {
+                    position: Point::new(176.0, 12.0),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(view.in_point_frame(), 20);
+        assert_eq!(
+            view.event(
+                &UiEvent::MouseUp {
+                    position: Point::new(176.0, 12.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[Action::Custom {
+                namespace: "timeline.range".into(),
+                name: "In:20".into(),
+                payload: Default::default(),
+            }]
         );
     }
 

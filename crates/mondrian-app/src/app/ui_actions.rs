@@ -31,6 +31,8 @@ pub const TIMELINE_MOVE_CLIP: &str = "move_clip";
 pub const TIMELINE_TRIM_CLIPS: &str = "trim_clips";
 /// Action name for trimming the current clip selection to the playhead.
 pub const TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD: &str = "trim_selected_clips_to_playhead";
+/// Action name for setting one timeline in/out point to an explicit frame.
+pub const TIMELINE_SET_IN_OUT_POINT: &str = "set_in_out_point";
 /// Action name for toggling the current timeline clip selection.
 pub const TIMELINE_SET_SELECTED_CLIPS_ENABLED: &str = "set_selected_clips_enabled";
 /// Action name for seeking the active timeline.
@@ -291,6 +293,22 @@ pub struct TimelineTrimClipsPayload {
 pub struct TimelineTrimSelectedClipsToPlayheadPayload {
     /// Edge that should be trimmed.
     pub edge: TimelineTrimPayloadEdge,
+}
+
+/// Timeline range point edited by a UI surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TimelineInOutPointPayloadKind {
+    In,
+    Out,
+}
+
+/// Set one active-sequence in/out point to a target timeline frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineSetInOutPointPayload {
+    /// In or out point being changed.
+    pub point: TimelineInOutPointPayloadKind,
+    /// Target timeline frame.
+    pub frame: i64,
 }
 
 /// Toggle the enabled state for the current timeline clip selection.
@@ -810,6 +828,11 @@ pub fn timeline_trim_selected_clips_to_playhead_action(
     payload: TimelineTrimSelectedClipsToPlayheadPayload,
 ) -> Action {
     custom_timeline_action(TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD, payload)
+}
+
+/// Build an action that sets one active-sequence in/out point.
+pub fn timeline_set_in_out_point_action(payload: TimelineSetInOutPointPayload) -> Action {
+    custom_timeline_action(TIMELINE_SET_IN_OUT_POINT, payload)
 }
 
 /// Build an action that toggles the current timeline clip selection.
