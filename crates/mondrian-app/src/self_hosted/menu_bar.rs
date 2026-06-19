@@ -185,6 +185,9 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
         Action::ImportMedia(_) => state.asset_library.is_some(),
         Action::Undo => state.can_undo_action(),
         Action::Redo => state.can_redo_action(),
+        Action::Cut => state.can_cut_to_app_clipboard(),
+        Action::Copy => state.can_copy_to_app_clipboard(),
+        Action::Paste => state.can_paste_from_app_clipboard(),
         Action::Custom { namespace, name, .. }
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_IMPORT_MEDIA_DIALOG =>
         {
@@ -346,7 +349,11 @@ impl Widget for MenuBar {
 mod tests {
     use super::*;
     use crate::app::ui_actions::{APP_SHELL_ABOUT, APP_SHELL_QUIT};
+    use crate::app::SelectedClipRef;
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use mondrian_core::types::{AssetId, TimeCode};
+    use mondrian_timeline::clip::Clip;
+    use mondrian_timeline::sequence::Sequence;
     use mondrian_ui_core::EventRequests;
     use std::cell::RefCell;
     use std::path::PathBuf;
@@ -397,6 +404,20 @@ mod tests {
             .find_map(|(label, items)| (*label == menu_label).then_some(items))
             .and_then(|items| items.iter().find(|item| item.label == item_label))
             .unwrap_or_else(|| panic!("missing {menu_label}/{item_label} menu item"))
+    }
+
+    fn state_with_selected_clip() -> AppState {
+        let mut state = AppState::new();
+        let mut sequence = Sequence::new("Edit");
+        let tb = sequence.time_base();
+        let track_id = sequence.video_tracks[0].id;
+        let clip = Clip::new(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(20, tb));
+        let clip_id = clip.id;
+        sequence.video_tracks[0].add_clip(clip).expect("add clip");
+        state.sequence = Some(sequence);
+        state.selection.selected_clips =
+            vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
+        state
     }
 
     #[test]
@@ -529,6 +550,9 @@ mod tests {
         assert!(menu_item(&menu_items, "File", "Quit").enabled);
         assert!(!menu_item(&menu_items, "Edit", "Undo").enabled);
         assert!(!menu_item(&menu_items, "Edit", "Redo").enabled);
+        assert!(!menu_item(&menu_items, "Edit", "Cut").enabled);
+        assert!(!menu_item(&menu_items, "Edit", "Copy").enabled);
+        assert!(!menu_item(&menu_items, "Edit", "Paste").enabled);
     }
 
     #[test]
@@ -583,6 +607,38 @@ mod tests {
         let menu_items = default_menu_items_for_app_state(&state);
         assert!(!menu_item(&menu_items, "Edit", "Undo").enabled);
         assert!(menu_item(&menu_items, "Edit", "Redo").enabled);
+    }
+
+    #[test]
+    fn app_state_menu_items_enable_cut_copy_for_selected_clip() {
+        let state = state_with_selected_clip();
+
+        let menu_items = default_menu_items_for_app_state(&state);
+
+        assert!(menu_item(&menu_items, "Edit", "Cut").enabled);
+        assert!(menu_item(&menu_items, "Edit", "Copy").enabled);
+        assert!(!menu_item(&menu_items, "Edit", "Paste").enabled);
+    }
+
+    #[test]
+    fn app_state_menu_items_disable_cut_for_locked_selected_track() {
+        let mut state = state_with_selected_clip();
+        state.sequence.as_mut().expect("sequence").video_tracks[0].is_locked = true;
+
+        let menu_items = default_menu_items_for_app_state(&state);
+
+        assert!(!menu_item(&menu_items, "Edit", "Cut").enabled);
+        assert!(menu_item(&menu_items, "Edit", "Copy").enabled);
+    }
+
+    #[test]
+    fn app_state_menu_items_enable_paste_after_copying_clip() {
+        let mut state = state_with_selected_clip();
+        state.copy_selected_clips_to_clipboard().expect("copy clip");
+
+        let menu_items = default_menu_items_for_app_state(&state);
+
+        assert!(menu_item(&menu_items, "Edit", "Paste").enabled);
     }
 
     #[test]

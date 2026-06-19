@@ -248,7 +248,11 @@ otherwise `Copy` stores timeline clips, `Cut` stores then removes selected
 clips, and `Paste` recreates clips at the playhead with fresh clip ids and
 links rebuilt only among pasted entries. `Duplicate` uses the same recreation
 path but places the new group after the selected group's end without mutating
-the active clipboard.
+the active clipboard. Menu rows and shortcut dispatch gates must query
+`AppState` clipboard capability helpers (`can_copy_to_app_clipboard`,
+`can_cut_to_app_clipboard`, `can_paste_from_app_clipboard`) instead of
+reconstructing clip, keyframe, locked-track, or active-clipboard rules in shell
+or widget code.
 Inspector timing controls reuse timeline trim actions for clip In/Out changes
 instead of introducing a parallel editing path. `TrimClipStart` and
 `TrimClipEnd` accept source in/out times from inspector-style controls, convert

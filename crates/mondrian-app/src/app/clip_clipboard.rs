@@ -6,6 +6,30 @@ use crate::app::timeline_editing::{
 };
 
 impl AppState {
+    /// Whether `Copy` can place animation keyframes or timeline clips on the app clipboard.
+    pub fn can_copy_to_app_clipboard(&self) -> bool {
+        self.primary_selected_clip().is_some_and(|selection| {
+            !self.selected_animation_keyframes_for_clip(selection.clip_id).is_empty()
+        }) || self.selected_clip_clipboard_entries(false).is_some()
+    }
+
+    /// Whether `Cut` can remove the selected timeline clips through the app clipboard path.
+    pub fn can_cut_to_app_clipboard(&self) -> bool {
+        self.selected_clip_clipboard_entries(true).is_some()
+    }
+
+    /// Whether `Paste` can apply the currently active app clipboard to the active target.
+    pub fn can_paste_from_app_clipboard(&self) -> bool {
+        let can_paste_animation =
+            self.has_animation_clipboard() && self.primary_selected_clip().is_some();
+        let can_paste_clips = self.has_clip_clipboard() && self.sequence.is_some();
+        match self.active_clipboard_kind {
+            Some(AppClipboardKind::AnimationKeyframes) => can_paste_animation || can_paste_clips,
+            Some(AppClipboardKind::Clips) => can_paste_clips,
+            None => can_paste_animation || can_paste_clips,
+        }
+    }
+
     pub fn has_clip_clipboard(&self) -> bool {
         self.clip_clipboard
             .as_ref()
@@ -35,6 +59,27 @@ impl AppState {
             self.active_clipboard_kind = Some(AppClipboardKind::Clips);
         }
         Ok(self.has_clip_clipboard())
+    }
+
+    fn selected_clip_clipboard_entries(
+        &self,
+        require_unlocked_targets: bool,
+    ) -> Option<Vec<ClipClipboardEntry>> {
+        let seq = self.sequence.as_ref()?;
+        let selected_ids = self
+            .selection
+            .selected_clips
+            .iter()
+            .map(|selection| selection.clip_id)
+            .collect::<Vec<_>>();
+        let entries = collect_clip_clipboard_entries(seq, &selected_ids).ok()?;
+        if entries.is_empty() {
+            return None;
+        }
+        if require_unlocked_targets && validate_clip_clipboard_targets(seq, &entries).is_err() {
+            return None;
+        }
+        Some(entries)
     }
 
     pub fn cut_selected_clips_to_clipboard(&mut self) -> mondrian_core::Result<usize> {
