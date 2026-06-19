@@ -1073,9 +1073,11 @@ Self-hosted `FocusPanel` and current View-menu `TogglePanel` actions activate
 the matching dock panel or grouped tab through shell-local dock traversal and do
 not continue into `AppState`. The traversal first understands grouped tabs in
 the default layout, then falls back to direct panels used by built-in workspace
-presets such as Color, Compositing, and Export. True hide/show panel visibility
-should be added as a separate dock-tree policy so it can handle split collapse
-and restoration deliberately.
+presets. If the active dock tree does not contain the requested panel, the shell
+switches to the panel's preferred built-in workspace and activates it there, so
+View-menu rows and focus shortcuts never silently no-op. True hide/show panel
+visibility should be added as a separate dock-tree policy so it can handle split
+collapse and restoration deliberately.
 Self-hosted `SwitchWorkspace` is also shell-local: it rebuilds the dock tree
 from the current `SelfHostedPanelModels` using named built-in preset factories
 while keeping panel models read-only and app/domain mutation in `AppState`.

@@ -793,6 +793,16 @@ impl SelfHostedAppRoot {
         activated
     }
 
+    /// Activate a panel, switching to a built-in workspace when the current
+    /// dock tree does not contain that panel.
+    pub fn focus_panel(&mut self, panel: PanelKind) {
+        if self.activate_panel(panel) {
+            return;
+        }
+        self.switch_workspace(preferred_workspace_for_panel(panel));
+        self.activate_panel(panel);
+    }
+
     /// Switch to a built-in workspace preset and rebuild the dock tree from the
     /// current shell models.
     pub fn switch_workspace(&mut self, preset: WorkspacePreset) {
@@ -830,7 +840,7 @@ impl SelfHostedAppRoot {
     ) -> Result<Option<Action>> {
         match action {
             Action::FocusPanel(panel) | Action::TogglePanel(panel) => {
-                self.activate_panel(panel);
+                self.focus_panel(panel);
                 Ok(None)
             }
             Action::SwitchWorkspace(preset) => {
@@ -1023,6 +1033,18 @@ fn dock_panel_locations(panel: PanelKind) -> Vec<(PanelKind, usize)> {
         | PanelKind::Inspector
         | PanelKind::NodeGraph
         | PanelKind::Export => vec![(panel, 0)],
+    }
+}
+
+fn preferred_workspace_for_panel(panel: PanelKind) -> WorkspacePreset {
+    match panel {
+        PanelKind::Export => WorkspacePreset::Export,
+        PanelKind::NodeGraph => WorkspacePreset::Compositing,
+        PanelKind::Viewer
+        | PanelKind::Timeline
+        | PanelKind::Assets
+        | PanelKind::Inspector
+        | PanelKind::Effects => WorkspacePreset::Editing,
     }
 }
 
@@ -1710,7 +1732,7 @@ mod tests {
     }
 
     #[test]
-    fn app_root_focus_panel_ignores_absent_export_panel_without_editor_action() {
+    fn app_root_focus_panel_switches_to_workspace_when_panel_is_absent() {
         let platform = FakePlatform::default();
         let mut root = SelfHostedAppRoot::demo();
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
@@ -1719,7 +1741,33 @@ mod tests {
             root.handle_shell_action(Action::FocusPanel(PanelKind::Export), &platform, None);
 
         assert_eq!(action, None);
-        assert_eq!(active_index_for_dock_panel(&root, PanelKind::Export), None);
+        assert_eq!(root.workspace_preset(), WorkspacePreset::Export);
+        assert_eq!(
+            active_index_for_dock_panel(&root, PanelKind::Export),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn app_root_focus_panel_returns_to_editing_for_timeline_when_absent() {
+        let platform = FakePlatform::default();
+        let mut root = SelfHostedAppRoot::demo();
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        root.handle_shell_action(
+            Action::SwitchWorkspace(WorkspacePreset::Export),
+            &platform,
+            None,
+        );
+
+        let action =
+            root.handle_shell_action(Action::FocusPanel(PanelKind::Timeline), &platform, None);
+
+        assert_eq!(action, None);
+        assert_eq!(root.workspace_preset(), WorkspacePreset::Editing);
+        assert_eq!(
+            active_index_for_dock_panel(&root, PanelKind::Timeline),
+            Some(0)
+        );
     }
 
     #[test]
@@ -1778,6 +1826,21 @@ mod tests {
             active_index_for_dock_panel(&root, PanelKind::Effects),
             Some(0)
         );
+    }
+
+    #[test]
+    fn every_panel_has_a_workspace_focus_fallback() {
+        for panel in PanelKind::ALL {
+            let preset = preferred_workspace_for_panel(panel);
+            let mut dock = build_dock_tree_for_preset(SelfHostedPanelModels::demo(), preset);
+
+            assert!(
+                dock_panel_locations(panel).into_iter().any(|(owner, active_index)| {
+                    activate_panel_in_widget(&mut dock, owner, active_index)
+                }),
+                "{panel:?} should be activatable in preferred {preset:?} workspace"
+            );
+        }
     }
 
     #[test]
