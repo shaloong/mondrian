@@ -1255,11 +1255,17 @@ impl ExportPanelModel {
     }
 
     fn enqueue_payload(&self) -> Option<ExportEnqueuePayload> {
+        let preset = self.selected_preset()?.clone();
+        let sequence_id = self.selected_sequence_id?;
+        let output_path = self.output_path.trim();
+        if output_path.is_empty() {
+            return None;
+        }
         Some(ExportEnqueuePayload {
-            preset: self.selected_preset()?.clone(),
-            sequence_id: self.selected_sequence_id,
+            preset,
+            sequence_id: Some(sequence_id),
             range: self.range,
-            output_path: self.output_path.trim().into(),
+            output_path: output_path.into(),
         })
     }
 
@@ -3601,7 +3607,8 @@ mod tests {
         assert_eq!(models.viewer.status_tone, ViewerStatusTone::Neutral);
         assert_eq!(models.viewer.empty_message, None);
         assert_eq!(models.viewer.zoom_label, "Fit");
-        assert_eq!(models.viewer.preview_quality_label, "Full");
+        assert_eq!(models.viewer.preview_quality_label, "50%");
+        assert_eq!(models.viewer.preview_resolution_scale, 0.5);
         assert!(!models.timeline.tracks.is_empty());
         assert!(!models.inspector.curve_points.is_empty());
         assert!(!models.node_graph.nodes.is_empty());
@@ -3886,6 +3893,21 @@ mod tests {
             payload.output_path,
             std::path::PathBuf::from("E:/renders/deliverable.mp4")
         );
+    }
+
+    #[test]
+    fn export_panel_model_does_not_build_enqueue_payload_when_disabled() {
+        let mut state = AppState::new();
+        let sequence = Sequence::new("Deliverable");
+        let sequence_id = sequence.id;
+        state.sequence = Some(sequence);
+        state.set_export_draft_sequence_id(Some(sequence_id));
+        state.set_export_draft_output_path("   ");
+
+        let model = ExportPanelModel::from_app_state(&state);
+
+        assert!(!model.can_enqueue());
+        assert!(model.enqueue_payload().is_none());
     }
 
     #[test]

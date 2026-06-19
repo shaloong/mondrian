@@ -217,6 +217,9 @@ offline-asset checks, and `RenderJob` creation through
 if that id no longer resolves to an exportable sequence, enqueue fails with a
 status error instead of silently falling back to the active sequence. Only an
 absent sequence id may use the active sequence fallback.
+Self-hosted export panel model payload builders must mirror their enabled-state
+validation and return no payload for missing sequences or blank output paths;
+disabled buttons are not the only guardrail against invalid enqueue actions.
 Self-hosted export forms persist their editable draft in `AppState::export_draft`
 through `ui.export.set_draft`, so widget-tree refreshes and dock layout changes
 do not reset selected preset, selected sequence, range, or output path.
