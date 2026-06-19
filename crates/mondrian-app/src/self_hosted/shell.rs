@@ -5,10 +5,11 @@
 
 use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
 use mondrian_editor_state::Action;
+use mondrian_export::queue::JobStatus;
 use mondrian_platform::{FileFilter, PlatformService};
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
-use mondrian_ui_core::{EventResult, Widget};
+use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use mondrian_ui_widgets::dock_panel::DockPanel;
 use mondrian_ui_widgets::dock_splitter::DockSplitter;
 use mondrian_ui_widgets::{
@@ -49,6 +50,7 @@ use mondrian_core::{MondrianError, Result};
 
 /// Default file extension for Mondrian project containers.
 pub const PROJECT_FILE_EXTENSION: &str = "mdp";
+const STATUS_BAR_HEIGHT: f32 = 24.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DockPanelState {
@@ -77,6 +79,180 @@ pub fn media_import_filters() -> Vec<FileFilter> {
         FileFilter::new("Video", vec!["mp4", "mov", "mkv", "webm", "avi"]),
         FileFilter::new("Audio", vec!["mp3", "wav", "aac", "flac", "m4a"]),
     ]
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StatusBarModel {
+    message: String,
+    is_error: bool,
+    is_busy: bool,
+    context: String,
+}
+
+struct StatusBar {
+    id: WidgetId,
+    bounds: Rect,
+    model: StatusBarModel,
+}
+
+impl StatusBar {
+    fn set_model(&mut self, model: StatusBarModel) {
+        self.model = model;
+    }
+}
+
+impl Widget for StatusBar {
+    fn id(&self) -> WidgetId {
+        self.id
+    }
+
+    fn measure(&self, constraint: LayoutConstraint) -> Size {
+        constraint.constrain(Size::new(240.0, STATUS_BAR_HEIGHT))
+    }
+
+    fn layout(&mut self, bounds: Rect) {
+        self.bounds = bounds;
+    }
+
+    fn event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+        EventResult::Ignored
+    }
+
+    fn paint(&self, ctx: &mut PaintContext) {
+        let colors = &ctx.theme.colors;
+        let font_size = ctx.theme.typography.metadata.font_size;
+        let padding = 10.0;
+        let text_gap = 16.0;
+        ctx.push_clip(self.bounds);
+        ctx.encoder.draw_rect(self.bounds, colors.card, 0.0);
+        ctx.encoder.draw_line(
+            Point::new(self.bounds.x, self.bounds.y),
+            Point::new(self.bounds.x + self.bounds.width, self.bounds.y),
+            1.0,
+            colors.border,
+        );
+
+        let message_color = if self.model.is_error {
+            colors.destructive_foreground
+        } else if self.model.is_busy {
+            colors.primary
+        } else {
+            colors.muted_foreground
+        };
+        let text_y = self.bounds.y + 16.0;
+
+        let content_width = (self.bounds.width - padding * 2.0).max(0.0);
+        let context_text = if self.model.context.is_empty() {
+            String::new()
+        } else {
+            elide_text_to_width(&self.model.context, font_size, content_width * 0.38)
+        };
+        let context_width = estimate_text_width(&context_text, font_size);
+        let message_max_width = if context_text.is_empty() {
+            content_width
+        } else {
+            (content_width - context_width - text_gap).max(0.0)
+        };
+        let message_text = elide_text_to_width(&self.model.message, font_size, message_max_width);
+        if !message_text.is_empty() {
+            ctx.encoder.draw_text(
+                &message_text,
+                font_size,
+                Point::new(self.bounds.x + padding, text_y),
+                message_color,
+            );
+        }
+
+        if !context_text.is_empty() {
+            let context_x =
+                (self.bounds.x + self.bounds.width - context_width - padding).max(self.bounds.x);
+            ctx.encoder.draw_text(
+                &context_text,
+                font_size,
+                Point::new(context_x, text_y),
+                colors.muted_foreground,
+            );
+        }
+        ctx.pop_clip();
+    }
+
+    fn hit_test(&self, point: Point) -> bool {
+        self.bounds.contains(point)
+    }
+}
+
+fn elide_text_to_width(text: &str, font_size: f32, max_width: f32) -> String {
+    if text.is_empty() || max_width <= 0.0 {
+        return String::new();
+    }
+    if estimate_text_width(text, font_size) <= max_width {
+        return text.to_owned();
+    }
+
+    let suffix = "...";
+    if estimate_text_width(suffix, font_size) > max_width {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    for ch in text.chars() {
+        out.push(ch);
+        let candidate = format!("{out}{suffix}");
+        if estimate_text_width(&candidate, font_size) > max_width {
+            out.pop();
+            break;
+        }
+    }
+    format!("{out}{suffix}")
+}
+
+fn status_bar_model(state: &AppState) -> StatusBarModel {
+    let jobs = state.render_queue.list_jobs();
+    let active_jobs = jobs
+        .iter()
+        .filter(|job| {
+            matches!(
+                job.status,
+                JobStatus::Pending | JobStatus::Rendering { .. } | JobStatus::Encoding
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let (message, is_error, is_busy) = if let Some(job) = active_jobs.first() {
+        let message = match &job.status {
+            JobStatus::Pending => format!("Export queue processing ({})", active_jobs.len()),
+            JobStatus::Rendering { frame, total_frames } => format!(
+                "Exporting frame {}/{} (queue {})",
+                frame,
+                total_frames,
+                active_jobs.len()
+            ),
+            JobStatus::Encoding => format!("Encoding (queue {})", active_jobs.len()),
+            _ => "Export processing".to_owned(),
+        };
+        (message, false, true)
+    } else if state.is_playing() && state.is_playback_buffering() {
+        ("Preview buffering...".to_owned(), false, true)
+    } else if let Some((message, is_error)) = &state.status_hint {
+        (message.clone(), *is_error, false)
+    } else {
+        ("Ready".to_owned(), false, false)
+    };
+
+    let context = state
+        .sequence
+        .as_ref()
+        .map(|sequence| sequence.name.clone())
+        .or_else(|| {
+            state
+                .current_project_path
+                .as_ref()
+                .and_then(|path| path.file_stem())
+                .map(|stem| stem.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "No project".to_owned());
+
+    StatusBarModel { message, is_error, is_busy, context }
 }
 
 /// File dialog filter for timeline export output commands.
@@ -301,6 +477,7 @@ pub struct SelfHostedAppRoot {
     id: WidgetId,
     title_bar: TitleBar,
     dock: DockSplitter,
+    status_bar: StatusBar,
     models: SelfHostedPanelModels,
     asset_folder_id: Option<String>,
     preferences_model: SelfHostedPreferencesModel,
@@ -345,6 +522,7 @@ impl SelfHostedAppRoot {
                 preferences.theme_preset,
             ),
             preferences.workspace_preset,
+            status_bar_model(state),
         )
     }
 
@@ -378,6 +556,7 @@ impl SelfHostedAppRoot {
             models,
             SelfHostedPreferencesModel::default(),
             workspace_preset,
+            status_bar_model(&AppState::new()),
         )
     }
 
@@ -386,12 +565,18 @@ impl SelfHostedAppRoot {
         models: SelfHostedPanelModels,
         preferences_model: SelfHostedPreferencesModel,
         workspace_preset: WorkspacePreset,
+        status_bar_model: StatusBarModel,
     ) -> Self {
         let dock = build_dock_tree_for_preset(models.clone(), workspace_preset);
         Self {
             id: WidgetId::new(),
             title_bar,
             dock,
+            status_bar: StatusBar {
+                id: WidgetId::new(),
+                bounds: Rect::ZERO,
+                model: status_bar_model,
+            },
             models,
             asset_folder_id: None,
             preferences_model,
@@ -486,6 +671,7 @@ impl SelfHostedAppRoot {
             window_title_for_app_state(state),
             MenuBar::for_app_state(state),
         );
+        self.status_bar.set_model(status_bar_model(state));
         self.set_models(
             SelfHostedPanelModels::from_app_state_with_asset_folder_and_thumbnails(
                 state,
@@ -908,7 +1094,13 @@ impl Widget for SelfHostedAppRoot {
             bounds.x,
             bounds.y + TITLE_BAR_HEIGHT,
             bounds.width,
-            (bounds.height - TITLE_BAR_HEIGHT).max(0.0),
+            (bounds.height - TITLE_BAR_HEIGHT - STATUS_BAR_HEIGHT).max(0.0),
+        ));
+        self.status_bar.layout(Rect::new(
+            bounds.x,
+            (bounds.y + bounds.height - STATUS_BAR_HEIGHT).max(bounds.y + TITLE_BAR_HEIGHT),
+            bounds.width,
+            STATUS_BAR_HEIGHT.min((bounds.height - TITLE_BAR_HEIGHT).max(0.0)),
         ));
         if let Some(modal) = &mut self.modal {
             modal.layout(bounds);
@@ -930,6 +1122,7 @@ impl Widget for SelfHostedAppRoot {
 
     fn paint(&self, ctx: &mut PaintContext) {
         self.dock.paint(ctx);
+        self.status_bar.paint(ctx);
         self.title_bar.paint(ctx);
         if let Some(modal) = &self.modal {
             modal.paint(ctx);
@@ -941,14 +1134,15 @@ impl Widget for SelfHostedAppRoot {
     }
 
     fn child_count(&self) -> usize {
-        2 + usize::from(self.modal.is_some())
+        3 + usize::from(self.modal.is_some())
     }
 
     fn child(&self, index: usize) -> Option<&dyn Widget> {
         match index {
             0 => Some(&self.dock),
-            1 => Some(&self.title_bar),
-            2 => self.modal.as_ref().map(|modal| modal as &dyn Widget),
+            1 => Some(&self.status_bar),
+            2 => Some(&self.title_bar),
+            3 => self.modal.as_ref().map(|modal| modal as &dyn Widget),
             _ => None,
         }
     }
@@ -956,8 +1150,9 @@ impl Widget for SelfHostedAppRoot {
     fn child_mut(&mut self, index: usize) -> Option<&mut dyn Widget> {
         match index {
             0 => Some(&mut self.dock),
-            1 => Some(&mut self.title_bar),
-            2 => self.modal.as_mut().map(|modal| modal as &mut dyn Widget),
+            1 => Some(&mut self.status_bar),
+            2 => Some(&mut self.title_bar),
+            3 => self.modal.as_mut().map(|modal| modal as &mut dyn Widget),
             _ => None,
         }
     }
@@ -1591,7 +1786,7 @@ mod tests {
             None
         );
         assert!(root.modal.as_ref().and_then(ShellModal::as_new_project).is_some());
-        assert_eq!(root.child_count(), 3);
+        assert_eq!(root.child_count(), 4);
 
         assert_eq!(
             root.handle_shell_action(
@@ -1721,7 +1916,7 @@ mod tests {
 
         assert_eq!(action, None);
         assert!(root.modal.as_ref().and_then(ShellModal::as_about).is_some());
-        assert_eq!(root.child_count(), 3);
+        assert_eq!(root.child_count(), 4);
     }
 
     #[test]
@@ -1734,7 +1929,7 @@ mod tests {
 
         assert_eq!(action, None);
         assert!(root.modal.as_ref().and_then(ShellModal::as_preferences).is_some());
-        assert_eq!(root.child_count(), 3);
+        assert_eq!(root.child_count(), 4);
     }
 
     #[test]
@@ -1778,6 +1973,70 @@ mod tests {
         assert!(dialog.model().project_status.contains("live.mdp"));
         assert!(dialog.model().sequence_summary.contains("Live"));
         assert_eq!(dialog.model().proxy_mode, "Enabled");
+    }
+
+    #[test]
+    fn status_bar_model_prefers_active_sequence_context() {
+        let mut state = AppState::new();
+        state.current_project_path = Some(PathBuf::from("E:/projects/rough-cut.mdp"));
+        state.sequence = Some(mondrian_timeline::sequence::Sequence::new("Cut 01"));
+        state.set_status_hint("Project saved", false);
+
+        let model = status_bar_model(&state);
+
+        assert_eq!(model.message, "Project saved");
+        assert!(!model.is_error);
+        assert!(!model.is_busy);
+        assert_eq!(model.context, "Cut 01");
+    }
+
+    #[test]
+    fn status_bar_model_prioritizes_preview_buffering_over_hint() {
+        let mut state = AppState::new();
+        state.set_status_hint("Project saved", false);
+        state.set_playback_frame_running(42);
+        state.set_playback_buffering(true);
+
+        let model = status_bar_model(&state);
+
+        assert_eq!(model.message, "Preview buffering...");
+        assert!(!model.is_error);
+        assert!(model.is_busy);
+    }
+
+    #[test]
+    fn status_bar_text_elision_respects_available_width() {
+        let font_size = 11.0;
+
+        assert_eq!(elide_text_to_width("Saved", font_size, 100.0), "Saved");
+        assert_eq!(elide_text_to_width("Saved", font_size, 1.0), "");
+
+        let elided = elide_text_to_width("A very long project status", font_size, 70.0);
+        assert!(elided.ends_with("..."));
+        assert!(estimate_text_width(&elided, font_size) <= 70.0);
+    }
+
+    #[test]
+    fn app_root_refresh_updates_status_bar_paint_model() {
+        let mut root = SelfHostedAppRoot::demo();
+        let mut state = AppState::new();
+        state.current_project_path = Some(PathBuf::from("E:/projects/rough-cut.mdp"));
+        state.set_status_hint("Import failed", true);
+
+        root.refresh_from_app_state(&state);
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        let theme = mondrian_ui_theme::ThemePreset::Dark.build();
+        let mut encoder = PaintOrderRecorder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 1280.0, 720.0),
+        };
+
+        root.paint(&mut ctx);
+
+        assert!(encoder.texts.iter().any(|text| text == "Import failed"));
+        assert!(encoder.texts.iter().any(|text| text == "rough-cut"));
     }
 
     #[test]
@@ -2028,7 +2287,12 @@ mod tests {
         );
         assert!(!root.dock().hit_test(Point::new(12.0, TITLE_BAR_HEIGHT - 1.0)));
         assert!(root.dock().hit_test(Point::new(12.0, TITLE_BAR_HEIGHT + 1.0)));
-        assert_eq!(root.child_count(), 2);
+        assert!(!root.dock().hit_test(Point::new(12.0, 720.0 - STATUS_BAR_HEIGHT + 1.0)));
+        assert_eq!(
+            root.status_bar.bounds,
+            Rect::new(0.0, 696.0, 1280.0, STATUS_BAR_HEIGHT)
+        );
+        assert_eq!(root.child_count(), 3);
     }
 
     #[test]
@@ -2037,15 +2301,16 @@ mod tests {
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
 
         assert_eq!(root.child(0).map(Widget::id), Some(root.dock.id()));
-        assert_eq!(root.child(1).map(Widget::id), Some(root.title_bar.id()));
+        assert_eq!(root.child(1).map(Widget::id), Some(root.status_bar.id()));
+        assert_eq!(root.child(2).map(Widget::id), Some(root.title_bar.id()));
 
         let platform = FakePlatform::default();
         let action = root.handle_shell_action(app_shell_about_action(), &platform, None);
 
         assert_eq!(action, None);
-        assert_eq!(root.child_count(), 3);
+        assert_eq!(root.child_count(), 4);
         assert_eq!(
-            root.child(2).map(Widget::id),
+            root.child(3).map(Widget::id),
             root.modal.as_ref().map(Widget::id)
         );
     }
@@ -2069,9 +2334,19 @@ mod tests {
             .iter()
             .position(|text| text == "File")
             .expect("menu bar should paint");
+        let status_text = encoder
+            .texts
+            .iter()
+            .position(|text| text == "Ready")
+            .expect("status bar should paint");
         assert!(
             first_menu_text > 0,
             "dock content must paint before menu chrome: {:?}",
+            encoder.texts
+        );
+        assert!(
+            status_text < first_menu_text,
+            "status bar must paint below title/menu chrome: {:?}",
             encoder.texts
         );
 

@@ -897,8 +897,9 @@ filter. The folder browser path is intentionally not stored in `AppState` and
 does not participate in undo/redo.
 `AppState::status_log` remains a bounded internal history fed by
 `set_status_hint`, but it is not presented as a product dock log panel. Transient
-status hints can be surfaced in shell chrome, while runtime diagnostics stay on
-the tracing/logging path and developer preferences.
+status hints surface in the shell-owned bottom status bar together with preview
+buffering, active export progress, and the current sequence/project context.
+Runtime diagnostics stay on the tracing/logging path and developer preferences.
 Real product panels keep single-click row selection local to the widget unless
 the app has a stable domain selection to update; file commands, asset drags,
 and effect insertion are emitted only through activation actions.
@@ -1062,6 +1063,8 @@ of widget code and out of `AppState`.
 Shell chrome that presents transient project status should keep error feedback
 visible without requiring the user to scroll a compact dock panel. Dock panels
 should stay focused on editing surfaces rather than general project diagnostics.
+The workspace root reserves title-bar and status-bar height before laying out
+the dock tree; panels must not assume they own full-window coordinates.
 Registered self-hosted UI action namespaces are strict protocols: known
 namespaces with unknown action names return workflow errors instead of being
 silently ignored, so widget/app wiring mistakes fail during development.
@@ -1080,8 +1083,9 @@ through to menu, dock, panel, or shortcut behavior behind the scrim.
 overlays, such as an already-open menu dropdown, cannot intercept input above
 the active modal.
 The root exposes children in bottom-to-top z-order for routing and overlay
-painting: dock content, menu bar, then the active modal. Normal painting should
-follow the same order so visual stacking and interaction stacking stay aligned.
+painting: dock content, status bar, menu/title bar, then the active modal.
+Normal painting should follow the same order so visual stacking and interaction
+stacking stay aligned.
 Modal card geometry and chrome should be centralized through
 `mondrian-ui-widgets::DialogSurface`; app dialogs should keep only local content
 layout and event semantics.
