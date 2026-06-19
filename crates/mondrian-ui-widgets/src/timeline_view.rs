@@ -4362,6 +4362,15 @@ mod tests {
         assert_eq!(result, EventResult::Handled);
         assert!(view.overlay_hit_test(Point::new(900.0, 900.0)));
 
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut paint_ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 520.0, 320.0),
+        };
+        view.paint_overlay(&mut paint_ctx);
+
         let result = view.event(
             &UiEvent::MouseDown {
                 position: Point::new(510.0, 235.0),

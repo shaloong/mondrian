@@ -9,7 +9,7 @@ use std::cell::Cell;
 
 use crate::menu::{
     anchored_menu_rect, menu_item_text_width, paint_menu_popup_chrome, paint_menu_row,
-    paint_menu_separator, MenuItem, MenuRowPaint,
+    paint_menu_scrollbar, paint_menu_separator, MenuItem, MenuRowPaint,
 };
 
 /// 右键弹出菜单
@@ -26,6 +26,7 @@ pub struct ContextMenu {
     hovered: Option<usize>,
     local_command: Option<String>,
     overlay_viewport: Cell<Option<Rect>>,
+    scroll_offset: Cell<f32>,
 }
 
 const CONTEXT_MENU_PADDING_X: f32 = 8.0;
@@ -45,6 +46,7 @@ impl ContextMenu {
             hovered: None,
             local_command: None,
             overlay_viewport: Cell::new(None),
+            scroll_offset: Cell::new(0.0),
         }
     }
 
@@ -61,7 +63,7 @@ impl ContextMenu {
         anchored_menu_rect(
             Rect::new(self.anchor.x, self.anchor.y, 0.0, 0.0),
             self.menu_width() + CONTEXT_MENU_PADDING_X,
-            8.0 + self.items.len() as f32 * self.item_height,
+            8.0 + self.visible_content_height(),
             0.0,
             self.overlay_viewport.get(),
         )
@@ -71,10 +73,31 @@ impl ContextMenu {
         let bounds = self.bounds_rect();
         Rect::new(
             bounds.x + CONTEXT_MENU_PADDING_X * 0.5,
-            bounds.y + 4.0 + idx as f32 * self.item_height,
+            bounds.y + 4.0 + idx as f32 * self.item_height - self.scroll_offset.get(),
             self.menu_width(),
             self.item_height,
         )
+    }
+
+    fn content_height(&self) -> f32 {
+        self.items.len() as f32 * self.item_height
+    }
+
+    fn visible_content_height(&self) -> f32 {
+        let content_height = self.content_height();
+        let Some(viewport) = self.overlay_viewport.get() else {
+            return content_height;
+        };
+        let available = (viewport.height - 8.0).max(self.item_height);
+        content_height.min(available)
+    }
+
+    fn max_scroll_y(&self) -> f32 {
+        (self.content_height() - self.visible_content_height()).max(0.0)
+    }
+
+    fn clamp_scroll_offset(&self) {
+        self.scroll_offset.set(self.scroll_offset.get().clamp(0.0, self.max_scroll_y()));
     }
 
     fn menu_width(&self) -> f32 {
@@ -97,10 +120,20 @@ impl ContextMenu {
     }
 
     fn item_at(&self, position: Point) -> Option<usize> {
-        self.items
-            .iter()
-            .enumerate()
-            .position(|(i, _)| self.item_rect(i).contains(position))
+        let bounds = self.bounds_rect();
+        if !bounds.contains(position) {
+            return None;
+        }
+        let relative_y = position.y - (bounds.y + 4.0) + self.scroll_offset.get();
+        if relative_y < 0.0 {
+            return None;
+        }
+        let index = (relative_y / self.item_height).floor() as usize;
+        if index < self.items.len() && self.item_rect(index).contains(position) {
+            Some(index)
+        } else {
+            None
+        }
     }
 
     fn first_activatable_index(&self) -> Option<usize> {
@@ -148,6 +181,22 @@ impl ContextMenu {
         };
         self.activate_index(index, ctx)
     }
+
+    fn ensure_hover_visible(&self) {
+        let Some(index) = self.hovered else {
+            return;
+        };
+        let row_top = index as f32 * self.item_height;
+        let row_bottom = row_top + self.item_height;
+        let view_top = self.scroll_offset.get();
+        let view_bottom = view_top + self.visible_content_height();
+        if row_top < view_top {
+            self.scroll_offset.set(row_top);
+        } else if row_bottom > view_bottom {
+            self.scroll_offset.set(row_bottom - self.visible_content_height());
+        }
+        self.clamp_scroll_offset();
+    }
 }
 
 impl Widget for ContextMenu {
@@ -190,6 +239,13 @@ impl Widget for ContextMenu {
                 self.hovered = self.item_at(*position).filter(|i| self.items[*i].is_activatable());
                 EventResult::Handled
             }
+            UiEvent::MouseWheel { delta, position, .. } => {
+                if self.bounds_rect().contains(*position) && self.max_scroll_y() > 0.0 {
+                    self.scroll_offset.set(self.scroll_offset.get() + *delta);
+                    self.clamp_scroll_offset();
+                }
+                EventResult::Handled
+            }
             UiEvent::MouseDown { button: MouseButton::Right, .. } => {
                 self.visible = false;
                 EventResult::Handled
@@ -200,10 +256,12 @@ impl Widget for ContextMenu {
             }
             UiEvent::KeyDown { key: KeyCode::Down, .. } => {
                 self.hovered = self.next_activatable_index(1);
+                self.ensure_hover_visible();
                 EventResult::Handled
             }
             UiEvent::KeyDown { key: KeyCode::Up, .. } => {
                 self.hovered = self.next_activatable_index(-1);
+                self.ensure_hover_visible();
                 EventResult::Handled
             }
             UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, .. } => {
@@ -222,12 +280,17 @@ impl Widget for ContextMenu {
         }
 
         self.overlay_viewport.set(Some(ctx.clip_rect));
+        self.clamp_scroll_offset();
         let bg = self.bounds_rect();
         paint_menu_popup_chrome(ctx, bg);
         let reserve_icon_lane = self.icon_lane_width() > 0.0;
+        ctx.push_clip(bg.inset(1.0, 1.0));
 
         for (i, item) in self.items.iter().enumerate() {
             let r = self.item_rect(i);
+            if !r.intersects(&bg) {
+                continue;
+            }
 
             if item.is_separator() {
                 paint_menu_separator(ctx, r);
@@ -248,6 +311,14 @@ impl Widget for ContextMenu {
                 },
             );
         }
+        ctx.pop_clip();
+        paint_menu_scrollbar(
+            ctx,
+            bg,
+            self.visible_content_height(),
+            self.content_height(),
+            self.scroll_offset.get(),
+        );
     }
 
     fn overlay_hit_test(&self, _point: Point) -> bool {
@@ -622,6 +693,59 @@ mod tests {
         assert_eq!(result, EventResult::Handled);
         assert!(!menu.visible);
         assert_eq!(actions.borrow().as_slice(), &[Action::Copy]);
+    }
+
+    #[test]
+    fn context_menu_scrolls_long_lists_inside_overlay_viewport() {
+        let mut items = (0..19)
+            .map(|index| MenuItem::new(format!("Item {index}"), Action::Copy))
+            .collect::<Vec<_>>();
+        items.push(MenuItem::new("Last", Action::Paste));
+        let mut menu = ContextMenu::new(Point::new(20.0, 20.0), items);
+        let theme = mondrian_ui_theme::ThemePreset::Dark.build();
+        let clip_rect = Rect::new(0.0, 0.0, 240.0, 150.0);
+        let mut encoder = RecordingEncoder::default();
+        let mut paint_ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+
+        menu.paint_overlay(&mut paint_ctx);
+
+        let bounds = menu.bounds_rect();
+        assert!(bounds.height <= clip_rect.height);
+        assert!(menu.max_scroll_y() > 0.0);
+        assert!(menu.item_at(menu.item_rect(19).center()).is_none());
+
+        let actions = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            actions.borrow_mut().push(a);
+        };
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch_fn);
+        let wheel_position = bounds.center();
+        let result = menu.event(
+            &UiEvent::MouseWheel {
+                position: wheel_position,
+                delta: 1_000.0,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(menu.scroll_offset.get(), menu.max_scroll_y());
+
+        let result = menu.event(
+            &UiEvent::MouseDown {
+                position: menu.item_rect(19).center(),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(actions.borrow().as_slice(), &[Action::Paste]);
+        assert!(!menu.visible);
     }
 
     #[test]
