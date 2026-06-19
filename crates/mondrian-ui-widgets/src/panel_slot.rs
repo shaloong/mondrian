@@ -7,8 +7,6 @@ use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
-pub use mondrian_editor_state::state::PanelKind as SlotKind;
-
 /// PanelSlot —— 包装面板内容 Widget
 pub struct PanelSlot {
     id: WidgetId,

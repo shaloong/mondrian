@@ -12,7 +12,7 @@ use mondrian_core::automation::PropertyValue;
 use mondrian_core::effect_data::EffectType;
 use mondrian_core::types::{AssetId, ClipId, EffectId, SequenceId, TimeCode, TrackId};
 use mondrian_core::Color;
-use mondrian_editor_state::state::WorkspacePreset;
+use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
 use mondrian_editor_state::Action;
 use mondrian_effects::{effect_display_name, effect_library_types};
 use mondrian_export::preset::{ExportPreset, TimelineExportRange, VideoCodecConfig};
@@ -25,7 +25,6 @@ use mondrian_ui_core::Widget;
 use mondrian_ui_theme::current_theme;
 use mondrian_ui_widgets::dock_splitter::DockSplitter;
 use mondrian_ui_widgets::dock_tab_bar::TabInfo;
-use mondrian_ui_widgets::panel_slot::SlotKind;
 use mondrian_ui_widgets::{
     AssetGrid, AssetGridBadgeTone, AssetGridItem, Checkbox, ColorPickerAreaMode,
     ColorPickerTrigger, CurveEditor, CurvePoint, DockPanel, Dropdown, FlexChild, FlexContainer,
@@ -1161,20 +1160,20 @@ fn editing_workspace(models: SelfHostedPanelModels) -> DockSplitter {
     let viewer_and_inspector = DockSplitter::new(
         SplitDirection::Horizontal,
         0.68,
-        slot(SlotKind::Viewer, models.clone()),
-        slot(SlotKind::Inspector, models.clone()),
+        slot(PanelKind::Viewer, models.clone()),
+        slot(PanelKind::Inspector, models.clone()),
     );
     let upper = DockSplitter::new(
         SplitDirection::Horizontal,
         0.26,
-        slot(SlotKind::Assets, models.clone()),
+        slot(PanelKind::Assets, models.clone()),
         Box::new(viewer_and_inspector),
     );
     DockSplitter::new(
         SplitDirection::Vertical,
         0.62,
         Box::new(upper),
-        slot(SlotKind::Timeline, models),
+        slot(PanelKind::Timeline, models),
     )
 }
 
@@ -1182,14 +1181,14 @@ fn color_workspace(models: SelfHostedPanelModels) -> DockSplitter {
     let right = DockSplitter::new(
         SplitDirection::Vertical,
         0.56,
-        slot(SlotKind::Inspector, models.clone()),
-        slot(SlotKind::Effects, models.clone()),
+        slot(PanelKind::Inspector, models.clone()),
+        slot(PanelKind::Effects, models.clone()),
     );
     let center = DockSplitter::new(
         SplitDirection::Vertical,
         0.66,
-        slot(SlotKind::Viewer, models.clone()),
-        slot(SlotKind::Timeline, models.clone()),
+        slot(PanelKind::Viewer, models.clone()),
+        slot(PanelKind::Timeline, models.clone()),
     );
     DockSplitter::new(
         SplitDirection::Horizontal,
@@ -1203,14 +1202,14 @@ fn audio_workspace(models: SelfHostedPanelModels) -> DockSplitter {
     let upper = DockSplitter::new(
         SplitDirection::Horizontal,
         0.34,
-        slot(SlotKind::Assets, models.clone()),
-        slot(SlotKind::Viewer, models.clone()),
+        slot(PanelKind::Assets, models.clone()),
+        slot(PanelKind::Viewer, models.clone()),
     );
     let lower = DockSplitter::new(
         SplitDirection::Horizontal,
         0.74,
-        slot(SlotKind::Timeline, models.clone()),
-        slot(SlotKind::Inspector, models.clone()),
+        slot(PanelKind::Timeline, models.clone()),
+        slot(PanelKind::Inspector, models.clone()),
     );
     DockSplitter::new(
         SplitDirection::Vertical,
@@ -1224,14 +1223,14 @@ fn compositing_workspace(models: SelfHostedPanelModels) -> DockSplitter {
     let right = DockSplitter::new(
         SplitDirection::Vertical,
         0.58,
-        slot(SlotKind::Viewer, models.clone()),
-        slot(SlotKind::Inspector, models.clone()),
+        slot(PanelKind::Viewer, models.clone()),
+        slot(PanelKind::Inspector, models.clone()),
     );
     let left = DockSplitter::new(
         SplitDirection::Vertical,
         0.68,
-        slot(SlotKind::NodeGraph, models.clone()),
-        slot(SlotKind::Effects, models.clone()),
+        slot(PanelKind::NodeGraph, models.clone()),
+        slot(PanelKind::Effects, models.clone()),
     );
     DockSplitter::new(
         SplitDirection::Horizontal,
@@ -1245,8 +1244,8 @@ fn export_workspace(models: SelfHostedPanelModels) -> DockSplitter {
     DockSplitter::new(
         SplitDirection::Horizontal,
         0.42,
-        slot(SlotKind::Export, models.clone()),
-        slot(SlotKind::Viewer, models),
+        slot(PanelKind::Export, models.clone()),
+        slot(PanelKind::Viewer, models),
     )
 }
 
@@ -1256,8 +1255,8 @@ pub fn build_demo_dock_tree() -> DockSplitter {
     build_dock_tree(SelfHostedPanelModels::demo())
 }
 
-fn slot(kind: SlotKind, models: SelfHostedPanelModels) -> Box<dyn Widget> {
-    if kind == SlotKind::Inspector {
+fn slot(kind: PanelKind, models: SelfHostedPanelModels) -> Box<dyn Widget> {
+    if kind == PanelKind::Inspector {
         let inspector = models.inspector.clone();
         return Box::new(DockPanel::new(
             kind,
@@ -1268,15 +1267,15 @@ fn slot(kind: SlotKind, models: SelfHostedPanelModels) -> Box<dyn Widget> {
         ));
     }
 
-    if kind == SlotKind::Assets {
+    if kind == PanelKind::Assets {
         return Box::new(DockPanel::new(
             kind,
             asset_browser_tabs(),
             move |_kind, active| {
                 let active_kind = if active == 1 {
-                    SlotKind::Effects
+                    PanelKind::Effects
                 } else {
-                    SlotKind::Assets
+                    PanelKind::Assets
                 };
                 panel_content_for_slot(active_kind, &models)
             },
@@ -1290,7 +1289,7 @@ fn slot(kind: SlotKind, models: SelfHostedPanelModels) -> Box<dyn Widget> {
     ))
 }
 
-fn single_tab(kind: SlotKind) -> Vec<TabInfo> {
+fn single_tab(kind: PanelKind) -> Vec<TabInfo> {
     vec![TabInfo {
         label: kind.display_name().to_string(),
         active: true,
@@ -1304,19 +1303,19 @@ fn asset_browser_tabs() -> Vec<TabInfo> {
     ]
 }
 
-fn panel_content_for_slot(kind: SlotKind, models: &SelfHostedPanelModels) -> Box<dyn Widget> {
+fn panel_content_for_slot(kind: PanelKind, models: &SelfHostedPanelModels) -> Box<dyn Widget> {
     match kind {
-        SlotKind::Assets => Box::new(ScrollView::new(Some(Box::new(asset_grid(&models.assets))))),
-        SlotKind::Effects => Box::new(panel_list(&models.effects)),
-        SlotKind::Viewer => Box::new(viewer_panel(&models.viewer)),
-        SlotKind::Timeline => Box::new(timeline_panel(&models.timeline)),
-        SlotKind::Export => Box::new(ScrollView::new(Some(Box::new(export_panel(
+        PanelKind::Assets => Box::new(ScrollView::new(Some(Box::new(asset_grid(&models.assets))))),
+        PanelKind::Effects => Box::new(panel_list(&models.effects)),
+        PanelKind::Viewer => Box::new(viewer_panel(&models.viewer)),
+        PanelKind::Timeline => Box::new(timeline_panel(&models.timeline)),
+        PanelKind::Export => Box::new(ScrollView::new(Some(Box::new(export_panel(
             &models.export,
         ))))),
-        SlotKind::Inspector => Box::new(ScrollView::new(Some(Box::new(inspector_panel(
+        PanelKind::Inspector => Box::new(ScrollView::new(Some(Box::new(inspector_panel(
             &models.inspector,
         ))))),
-        SlotKind::NodeGraph => Box::new(node_graph_panel(&models.node_graph)),
+        PanelKind::NodeGraph => Box::new(node_graph_panel(&models.node_graph)),
     }
 }
 
@@ -3243,7 +3242,7 @@ mod tests {
         assert_eq!(tabs[1].label, "Effects");
     }
 
-    fn panel_at_point(widget: &dyn Widget, point: Point) -> Option<SlotKind> {
+    fn panel_at_point(widget: &dyn Widget, point: Point) -> Option<PanelKind> {
         if !widget.hit_test(point) {
             return None;
         }
@@ -3265,19 +3264,19 @@ mod tests {
 
         assert_eq!(
             panel_at_point(&dock, Point::new(120.0, 90.0)),
-            Some(SlotKind::Assets)
+            Some(PanelKind::Assets)
         );
         assert_eq!(
             panel_at_point(&dock, Point::new(520.0, 90.0)),
-            Some(SlotKind::Viewer)
+            Some(PanelKind::Viewer)
         );
         assert_eq!(
             panel_at_point(&dock, Point::new(900.0, 90.0)),
-            Some(SlotKind::Inspector)
+            Some(PanelKind::Inspector)
         );
         assert_eq!(
             panel_at_point(&dock, Point::new(500.0, 520.0)),
-            Some(SlotKind::Timeline)
+            Some(PanelKind::Timeline)
         );
     }
 
@@ -3287,47 +3286,47 @@ mod tests {
             (
                 WorkspacePreset::Color,
                 Point::new(500.0, 90.0),
-                SlotKind::Viewer,
+                PanelKind::Viewer,
             ),
             (
                 WorkspacePreset::Color,
                 Point::new(500.0, 520.0),
-                SlotKind::Timeline,
+                PanelKind::Timeline,
             ),
             (
                 WorkspacePreset::Color,
                 Point::new(900.0, 90.0),
-                SlotKind::Inspector,
+                PanelKind::Inspector,
             ),
             (
                 WorkspacePreset::Audio,
                 Point::new(500.0, 520.0),
-                SlotKind::Timeline,
+                PanelKind::Timeline,
             ),
             (
                 WorkspacePreset::Audio,
                 Point::new(900.0, 520.0),
-                SlotKind::Inspector,
+                PanelKind::Inspector,
             ),
             (
                 WorkspacePreset::Compositing,
                 Point::new(180.0, 90.0),
-                SlotKind::NodeGraph,
+                PanelKind::NodeGraph,
             ),
             (
                 WorkspacePreset::Compositing,
                 Point::new(180.0, 520.0),
-                SlotKind::Effects,
+                PanelKind::Effects,
             ),
             (
                 WorkspacePreset::Export,
                 Point::new(180.0, 90.0),
-                SlotKind::Export,
+                PanelKind::Export,
             ),
             (
                 WorkspacePreset::Export,
                 Point::new(700.0, 90.0),
-                SlotKind::Viewer,
+                PanelKind::Viewer,
             ),
         ];
 
@@ -3412,7 +3411,7 @@ mod tests {
         let models = SelfHostedPanelModels::from_app_state(&AppState::new());
         let constraint = LayoutConstraint { min: Size::ZERO, max: Size::new(320.0, 240.0) };
 
-        for kind in SlotKind::ALL {
+        for kind in PanelKind::ALL {
             let widget = panel_content_for_slot(kind, &models);
             let measured = widget.measure(constraint);
 

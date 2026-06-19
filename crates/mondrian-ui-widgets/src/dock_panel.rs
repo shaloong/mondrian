@@ -5,18 +5,19 @@
 //! forwarding for popups owned by panel content.
 
 use crate::dock_tab_bar::{DockTabBar, TabInfo};
-use crate::panel_slot::{PanelSlot, SlotKind};
+use crate::panel_slot::PanelSlot;
+use mondrian_editor_state::state::PanelKind;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
 /// Function used by [`DockPanel`] to rebuild panel content for the active tab.
-pub type DockPanelContentFactory = dyn FnMut(SlotKind, usize) -> Box<dyn Widget>;
+pub type DockPanelContentFactory = dyn FnMut(PanelKind, usize) -> Box<dyn Widget>;
 
 /// Docked panel chrome: tab bar plus one active content slot.
 pub struct DockPanel {
     id: WidgetId,
-    kind: SlotKind,
+    kind: PanelKind,
     tab_bar: DockTabBar,
     content: Box<dyn Widget>,
     content_factory: Box<DockPanelContentFactory>,
@@ -31,9 +32,9 @@ impl DockPanel {
     /// The factory is called immediately for the initially active tab and again
     /// whenever the active tab changes.
     pub fn new(
-        kind: SlotKind,
+        kind: PanelKind,
         tabs: Vec<TabInfo>,
-        mut content_factory: impl FnMut(SlotKind, usize) -> Box<dyn Widget> + 'static,
+        mut content_factory: impl FnMut(PanelKind, usize) -> Box<dyn Widget> + 'static,
     ) -> Self {
         let initial_active = tabs.iter().position(|tab| tab.active).unwrap_or(0);
         let content = Box::new(PanelSlot::new(kind, content_factory(kind, initial_active)));
@@ -61,7 +62,7 @@ impl DockPanel {
     }
 
     /// Panel kind carried by the content slot.
-    pub fn kind(&self) -> SlotKind {
+    pub fn kind(&self) -> PanelKind {
         self.kind
     }
 

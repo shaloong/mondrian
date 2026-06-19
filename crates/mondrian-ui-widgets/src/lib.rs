@@ -63,7 +63,7 @@ pub use node_graph_view::{NodeGraphEdge, NodeGraphNode, NodeGraphView};
 pub use panel_list::{
     PanelList, PanelListAction, PanelListBadge, PanelListBadgeTone, PanelListItem, PanelListState,
 };
-pub use panel_slot::{PanelSlot, SlotKind};
+pub use panel_slot::PanelSlot;
 pub use property_panel::{PropertyPanel, PropertyPanelOptions, PropertyRow, PropertySection};
 pub use raster_image::RasterImage;
 pub use scroll::{ScrollView, ScrollViewState};

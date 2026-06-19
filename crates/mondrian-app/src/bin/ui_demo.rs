@@ -21,6 +21,7 @@ use mondrian_app::self_hosted::runtime::{
     winit_mouse_button_to_ui_button, winit_scroll_delta_to_ui_delta, WinitUiRuntime,
 };
 use mondrian_core::Color;
+use mondrian_editor_state::state::PanelKind;
 use mondrian_editor_state::Action;
 use mondrian_ui_core::tooltip::TooltipState;
 use mondrian_ui_core::types::{self as ui_types, *};
@@ -42,7 +43,6 @@ use mondrian_ui_widgets::label::Label;
 use mondrian_ui_widgets::list::{List, ListItem};
 use mondrian_ui_widgets::menu::{Dropdown, MenuItem};
 use mondrian_ui_widgets::panel_list::{PanelList, PanelListItem};
-use mondrian_ui_widgets::panel_slot::SlotKind;
 use mondrian_ui_widgets::property_panel::{PropertyPanel, PropertyRow, PropertySection};
 use mondrian_ui_widgets::scroll::ScrollView;
 use mondrian_ui_widgets::slider::Slider;
@@ -768,32 +768,32 @@ impl Widget for TextDiagnosticWidget {
 // Tab and panel content factories
 // ═══════════════════════════════════════════════════════════════════════════
 
-fn dock_panel(kind: SlotKind) -> Box<dyn Widget> {
+fn dock_panel(kind: PanelKind) -> Box<dyn Widget> {
     Box::new(DockPanel::new(kind, tab_infos(kind), slot_content_for_tab))
 }
 
-fn tab_infos(kind: SlotKind) -> Vec<TabInfo> {
+fn tab_infos(kind: PanelKind) -> Vec<TabInfo> {
     match kind {
-        SlotKind::Viewer => vec![
+        PanelKind::Viewer => vec![
             TabInfo { label: "查看器".into(), active: true },
             TabInfo { label: "节点图".into(), active: false },
         ],
-        SlotKind::Timeline => vec![
+        PanelKind::Timeline => vec![
             TabInfo { label: "时间线".into(), active: true },
             TabInfo { label: "音频".into(), active: false },
             TabInfo { label: "效果".into(), active: false },
         ],
 
-        SlotKind::Inspector => vec![
+        PanelKind::Inspector => vec![
             TabInfo { label: "检查器".into(), active: true },
             TabInfo { label: "属性".into(), active: false },
         ],
-        SlotKind::Effects => vec![
+        PanelKind::Effects => vec![
             TabInfo { label: "控件".into(), active: true },
             TabInfo { label: "文本".into(), active: false },
             TabInfo { label: "形状".into(), active: false },
         ],
-        SlotKind::Assets => vec![
+        PanelKind::Assets => vec![
             TabInfo { label: "资源".into(), active: true },
             TabInfo { label: "库".into(), active: false },
         ],
@@ -801,26 +801,26 @@ fn tab_infos(kind: SlotKind) -> Vec<TabInfo> {
     }
 }
 
-fn slot_content_for_tab(kind: SlotKind, tab_index: usize) -> Box<dyn Widget> {
+fn slot_content_for_tab(kind: PanelKind, tab_index: usize) -> Box<dyn Widget> {
     match kind {
-        SlotKind::Viewer => match tab_index {
+        PanelKind::Viewer => match tab_index {
             0 => Box::new(demo_viewer_surface()),
             _ => Box::new(demo_node_graph_panel()),
         },
-        SlotKind::Effects => match tab_index {
+        PanelKind::Effects => match tab_index {
             0 => Box::new(GalleryWidget::new()),
             1 => Box::new(TextDiagnosticWidget::new()),
             _ => Box::new(ShapePanelWidget::new()),
         },
-        SlotKind::Assets => match tab_index {
+        PanelKind::Assets => match tab_index {
             0 => Box::new(demo_asset_panel()),
             _ => Box::new(demo_library_panel()),
         },
-        SlotKind::Inspector => match tab_index {
+        PanelKind::Inspector => match tab_index {
             0 => inspector_demo_panel(),
             _ => Box::new(demo_property_browser_panel()),
         },
-        SlotKind::Timeline => match tab_index {
+        PanelKind::Timeline => match tab_index {
             0 => Box::new(demo_timeline_panel()),
             1 => Box::new(demo_audio_panel()),
             _ => Box::new(demo_effect_panel()),
@@ -829,7 +829,7 @@ fn slot_content_for_tab(kind: SlotKind, tab_index: usize) -> Box<dyn Widget> {
     }
 }
 
-fn demo_unsupported_panel(kind: SlotKind) -> PanelList {
+fn demo_unsupported_panel(kind: PanelKind) -> PanelList {
     PanelList::new(
         kind.display_name(),
         vec![with_demo_icon(
@@ -1341,21 +1341,21 @@ fn build_dock_tree() -> DockSplitter {
     let left = DockSplitter::new(
         SplitDirection::Vertical,
         0.35,
-        dock_panel(SlotKind::Assets),
-        dock_panel(SlotKind::Effects),
+        dock_panel(PanelKind::Assets),
+        dock_panel(PanelKind::Effects),
     );
 
     let right_bottom = DockSplitter::new(
         SplitDirection::Horizontal,
         0.65,
-        dock_panel(SlotKind::Timeline),
-        dock_panel(SlotKind::Inspector),
+        dock_panel(PanelKind::Timeline),
+        dock_panel(PanelKind::Inspector),
     );
 
     let right = DockSplitter::new(
         SplitDirection::Vertical,
         0.5,
-        dock_panel(SlotKind::Viewer),
+        dock_panel(PanelKind::Viewer),
         Box::new(right_bottom),
     );
 

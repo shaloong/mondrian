@@ -414,6 +414,11 @@ panel identities. The router normalizes focused-panel state after widget events
 and at the start of routing, so panel shortcuts follow the actual dock location
 even after a panel tree rebuild leaves the focused widget alive under a
 different panel boundary.
+Dock panel chrome currently carries `PanelKind` directly because focus scopes,
+scroll-state restoration, and product menu targeting all use the same app-level
+panel identity. Do not add widget-local aliases for the same enum; a future
+domain-free dock API must migrate `Widget::panel_kind()` and shell mapping
+together.
 
 ## Pointer Capture
 
@@ -1293,7 +1298,7 @@ port/edge painting, focus/keyboard selection, disabled presentation, selection
 chrome, and hit testing for generic `NodeGraphNode` / `NodeGraphEdge` values.
 It does not own effect semantics, undo history, or graph mutation rules.
 
-The self-hosted `SlotKind::NodeGraph` panel maps the currently selected clip to
+The self-hosted `PanelKind::NodeGraph` panel maps the currently selected clip to
 a read-only render chain: Source -> each clip effect -> Output. The app adapter
 derives node titles, disabled state, and semantic accents from the same clip
 and effect data used by the Inspector, so the graph is another view of the same
