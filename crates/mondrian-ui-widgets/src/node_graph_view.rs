@@ -305,10 +305,14 @@ impl Widget for NodeGraphView {
                 self.focus_from_pointer(ctx);
                 self.select_node_from_input(node_id, ctx)
             }
-            UiEvent::KeyDown { key: KeyCode::Right | KeyCode::Down, .. } if self.focused => {
+            UiEvent::KeyDown { key: KeyCode::Right | KeyCode::Down, modifiers }
+                if self.focused && *modifiers == Modifiers::none() =>
+            {
                 self.step_selection(1, ctx)
             }
-            UiEvent::KeyDown { key: KeyCode::Left | KeyCode::Up, .. } if self.focused => {
+            UiEvent::KeyDown { key: KeyCode::Left | KeyCode::Up, modifiers }
+                if self.focused && *modifiers == Modifiers::none() =>
+            {
                 self.step_selection(-1, ctx)
             }
             UiEvent::KeyDown { key: KeyCode::Home, modifiers }
@@ -321,7 +325,9 @@ impl Widget for NodeGraphView {
             {
                 self.select_edge_node(true, ctx)
             }
-            UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, .. } if self.focused => {
+            UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, modifiers }
+                if self.focused && *modifiers == Modifiers::none() =>
+            {
                 let index = self.selected_index().unwrap_or(0);
                 self.select_index_from_input(index, ctx)
             }
@@ -765,6 +771,54 @@ mod tests {
             actions[1],
             Action::OpenProject(std::path::PathBuf::from("output"))
         );
+    }
+
+    #[test]
+    fn node_graph_keyboard_navigation_ignores_modified_keys() {
+        let selected = Rc::new(RefCell::new(Vec::new()));
+        let mut graph = NodeGraphView::new(
+            vec![
+                NodeGraphNode::new("source", "Source"),
+                NodeGraphNode::new("grade", "Grade"),
+                NodeGraphNode::new("output", "Output"),
+            ],
+            vec![],
+        )
+        .with_selected_node("grade")
+        .on_select(|id| Action::OpenProject(std::path::PathBuf::from(id)));
+        graph.layout(Rect::new(0.0, 0.0, 520.0, 240.0));
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let dispatch = {
+            let selected = Rc::clone(&selected);
+            move |action| selected.borrow_mut().push(action)
+        };
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        assert_eq!(
+            graph.event(&UiEvent::FocusGained, &mut ctx),
+            EventResult::Handled
+        );
+        for (key, modifiers) in [
+            (KeyCode::Right, Modifiers::ctrl()),
+            (KeyCode::Left, Modifiers::shift()),
+            (
+                KeyCode::Enter,
+                Modifiers { alt: true, ..Default::default() },
+            ),
+            (
+                KeyCode::Space,
+                Modifiers { meta: true, ..Default::default() },
+            ),
+        ] {
+            assert_eq!(
+                graph.event(&UiEvent::KeyDown { key, modifiers }, &mut ctx),
+                EventResult::Ignored
+            );
+            assert_eq!(graph.selected_node_id(), Some("grade"));
+        }
+        assert!(selected.borrow().is_empty());
     }
 
     #[test]
