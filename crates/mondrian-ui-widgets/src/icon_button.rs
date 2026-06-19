@@ -15,6 +15,7 @@ const ICON_BUTTON_SIZE: f32 = 28.0;
 pub struct IconButton {
     id: WidgetId,
     icon: VectorIcon,
+    tooltip: Option<String>,
     bounds: Rect,
     state: ButtonState,
     enabled: bool,
@@ -28,6 +29,7 @@ impl IconButton {
         Self {
             id: WidgetId::new(),
             icon,
+            tooltip: None,
             bounds: Rect::ZERO,
             state: ButtonState::Normal,
             enabled: true,
@@ -44,6 +46,12 @@ impl IconButton {
     /// Set the action dispatched when the button is activated.
     pub fn on_click(mut self, action: Action) -> Self {
         self.on_click = Some(action);
+        self
+    }
+
+    /// Set a hover tooltip for icon-only buttons.
+    pub fn with_tooltip(mut self, tooltip: impl Into<String>) -> Self {
+        self.tooltip = Some(tooltip.into());
         self
     }
 
@@ -119,11 +127,22 @@ impl Widget for IconButton {
             }
             UiEvent::MouseMove { position, .. } if self.state != ButtonState::Pressed => {
                 let was_hovered = self.state == ButtonState::Hovered;
-                self.state = if self.bounds.contains(*position) {
+                let now_hovered = self.bounds.contains(*position);
+                self.state = if now_hovered {
                     ButtonState::Hovered
                 } else {
                     ButtonState::Normal
                 };
+                if now_hovered {
+                    if let Some(tooltip) = &self.tooltip {
+                        ctx.tooltip.show(
+                            tooltip.clone(),
+                            Point::new(self.bounds.x, self.bounds.y + self.bounds.height),
+                        );
+                    }
+                } else if was_hovered && self.tooltip.is_some() {
+                    ctx.tooltip.hide();
+                }
                 if was_hovered != (self.state == ButtonState::Hovered) {
                     EventResult::Handled
                 } else {
@@ -133,11 +152,20 @@ impl Widget for IconButton {
             UiEvent::FocusGained => {
                 self.focus_visible = true;
                 self.state = ButtonState::Hovered;
+                if let Some(tooltip) = &self.tooltip {
+                    ctx.tooltip.show(
+                        tooltip.clone(),
+                        Point::new(self.bounds.x, self.bounds.y + self.bounds.height),
+                    );
+                }
                 EventResult::Handled
             }
             UiEvent::FocusLost => {
                 self.focus_visible = false;
                 self.state = ButtonState::Normal;
+                if self.tooltip.is_some() {
+                    ctx.tooltip.hide();
+                }
                 EventResult::Handled
             }
             UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, .. } => {
@@ -196,6 +224,7 @@ mod tests {
     use super::*;
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::Color;
+    use mondrian_ui_core::tooltip::{TooltipManager, TooltipState};
     use mondrian_ui_core::widget::DrawCommandEncoder;
     use mondrian_ui_theme::ThemePreset;
     use std::cell::RefCell;
@@ -206,6 +235,29 @@ mod tests {
         triangles: usize,
         raster_images: usize,
         texts: Vec<String>,
+    }
+
+    #[derive(Default)]
+    struct TooltipRecorder {
+        current: Option<TooltipState>,
+        hide_count: usize,
+    }
+
+    impl TooltipManager for TooltipRecorder {
+        fn show(&mut self, text: String, position: Point) {
+            self.current = Some(TooltipState { text, position, visible: true });
+        }
+
+        fn hide(&mut self) {
+            self.current = None;
+            self.hide_count += 1;
+        }
+
+        fn current(&self) -> Option<&TooltipState> {
+            self.current.as_ref()
+        }
+
+        fn update(&mut self, _delta_ms: u64) {}
     }
 
     impl DrawCommandEncoder for PaintRecorder {
@@ -332,5 +384,67 @@ mod tests {
         assert_eq!(recorder.lines, 0);
         assert!(recorder.triangles > 0 || recorder.raster_images > 0);
         assert!(recorder.texts.is_empty());
+    }
+
+    #[test]
+    fn icon_button_shows_and_hides_hover_tooltip() {
+        let mut button = IconButton::new(test_icon()).with_tooltip("Remove effect");
+        button.layout(Rect::new(10.0, 20.0, 28.0, 28.0));
+        let dispatch = |_| {};
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = TooltipRecorder::default();
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        assert_eq!(
+            button.event(
+                &UiEvent::MouseMove {
+                    position: Point::new(18.0, 28.0),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        let current = ctx.tooltip.current().expect("tooltip requested");
+        assert_eq!(current.text, "Remove effect");
+        assert_eq!(current.position, Point::new(10.0, 48.0));
+
+        assert_eq!(
+            button.event(
+                &UiEvent::MouseMove {
+                    position: Point::new(100.0, 28.0),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert!(ctx.tooltip.current().is_none());
+    }
+
+    #[test]
+    fn disabled_icon_button_does_not_request_tooltip() {
+        let mut button = IconButton::new(test_icon()).with_tooltip("Remove effect").disabled();
+        button.layout(Rect::new(10.0, 20.0, 28.0, 28.0));
+        let dispatch = |_| {};
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = TooltipRecorder::default();
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        assert_eq!(
+            button.event(
+                &UiEvent::MouseMove {
+                    position: Point::new(18.0, 28.0),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+
+        assert!(ctx.tooltip.current().is_none());
     }
 }

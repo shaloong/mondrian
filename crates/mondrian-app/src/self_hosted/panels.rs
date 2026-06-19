@@ -2544,6 +2544,7 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                                 AppIcon::ArrowUp
                                     .icon_button()
                                     .expect("bundled ArrowUp icon asset should parse")
+                                    .with_tooltip("Move effect up")
                                     .enabled(can_move_up)
                                     .on_click(inspector_reorder_effect_action(
                                         selected_clip,
@@ -2555,6 +2556,7 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                                 AppIcon::ArrowDown
                                     .icon_button()
                                     .expect("bundled ArrowDown icon asset should parse")
+                                    .with_tooltip("Move effect down")
                                     .enabled(can_move_down)
                                     .on_click(inspector_reorder_effect_action(
                                         selected_clip,
@@ -2564,8 +2566,9 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                             )),
                             FlexChild::fixed(Box::new(
                                 AppIcon::Trash
-                                    .text_button("Remove")
+                                    .icon_button()
                                     .expect("bundled Trash icon asset should parse")
+                                    .with_tooltip("Remove effect")
                                     .enabled(can_edit)
                                     .on_click(inspector_remove_effect_row_action(
                                         selected_clip,

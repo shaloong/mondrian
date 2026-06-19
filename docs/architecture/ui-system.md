@@ -263,7 +263,10 @@ behavior.
 `AppState::reorder_effects_for_clip`, which clamps the target slot, rejects an
 invalid source index, and records one undoable sequence snapshot only when order
 actually changes. Self-hosted Inspector reorder controls emit this typed action
-directly rather than adding an inspector-specific custom action.
+directly rather than adding an inspector-specific custom action. Effect-stack
+toolbars use compact icon-only buttons with tooltips for reorder and removal so
+the inspector stays dense without relying on text labels inside destructive
+controls.
 Effects browser activation uses the same protocol family: when a video clip is
 selected, effect rows carry a `ui.effects` add-to-clip payload with the selected
 clip id and serialized `EffectType`, and `AppState` routes it through
@@ -709,7 +712,9 @@ Attached effects appear as inspector rows with enable checkboxes, using effect
 instance ids rather than list indices so reorder/remove operations can be added
 without changing the widget contract. Removal buttons use the same effect id
 payload and stay in the app-layer action protocol rather than deleting from the
-widget tree directly.
+widget tree directly. Reorder and remove affordances are icon-only app buttons
+backed by designer-authored SVGs and component-level tooltips, preserving the
+same control geometry for short and long localized labels.
 This lets focus routing, overlay popups, repaint requests, shell runtime
 behavior, and editor-state dispatch be validated in the same dock tree that
 future panels will use. Timeline migration should reuse this path after
@@ -1233,7 +1238,10 @@ disproportionate slice of the shared 2048px image atlas. Larger bounds may fall
 back to the lyon mesh path.
 Text buttons that need command glyphs use the same optional leading
 `VectorIcon` path, so icon-only and icon-plus-label controls share parsing,
-caching, focus, disabled, and text clipping behavior.
+caching, focus, disabled, and text clipping behavior. Icon-only buttons expose
+their label through the shared tooltip manager instead of painting visible
+fallback text, which keeps inspector and toolbar density independent of font
+availability and localization length.
 Bundled SVGs should be loaded through `VectorIcon::from_static_svg` with a
 stable icon id so parsing, lyon tessellation, and target-size raster cache reuse
 stay deterministic; repeated widget-tree construction must clone cached geometry
