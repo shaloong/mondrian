@@ -48,7 +48,8 @@ use crate::app::ui_actions::{
 };
 use crate::app::{AppClipboardKind, AppState, ClipOverlapMode, SelectedClipRef};
 use glam::Vec2;
-use mondrian_assets::AssetKind;
+use mondrian_assets::library::FolderRecord;
+use mondrian_assets::{AssetKind, AssetLibrary};
 use mondrian_core::automation::{
     timecode_to_ticks, Keyframe, PropertyHost, PropertyMutation, PropertyValue,
 };
@@ -696,12 +697,27 @@ impl AppState {
                 reason,
             }
         })?;
+        let folders = library.list_folders().map_err(|err| {
+            let reason = err.to_string();
+            self.set_status_hint(format!("移动素材选择失败：{reason}"), true);
+            MondrianError::WorkflowStepFailed {
+                step_id: "move_asset_selection".to_string(),
+                reason,
+            }
+        })?;
+        if let Err(err) = validate_asset_selection_move(&library, &payload, &folders) {
+            let reason = err.to_string();
+            self.set_status_hint(format!("移动素材选择失败：{reason}"), true);
+            return Err(MondrianError::WorkflowStepFailed {
+                step_id: "move_asset_selection".to_string(),
+                reason,
+            });
+        }
         let target_name = match payload.target_folder_id.as_deref() {
-            Some(folder_id) => library
-                .list_folders()?
-                .into_iter()
+            Some(folder_id) => folders
+                .iter()
                 .find(|folder| folder.id == folder_id)
-                .map(|folder| folder.name)
+                .map(|folder| folder.name.clone())
                 .unwrap_or_else(|| folder_id.to_string()),
             None => "All assets".to_string(),
         };
@@ -1940,6 +1956,79 @@ impl AppState {
         }
         Ok(())
     }
+}
+
+fn validate_asset_selection_move(
+    library: &AssetLibrary,
+    payload: &AssetsMoveSelectionPayload,
+    folders: &[FolderRecord],
+) -> Result<()> {
+    if let Some(target_folder_id) = payload.target_folder_id.as_deref() {
+        if !folders.iter().any(|folder| folder.id == target_folder_id) {
+            return Err(MondrianError::AssetDbError {
+                reason: format!("目标文件夹不存在：{target_folder_id}"),
+            });
+        }
+    }
+
+    for asset_id in &payload.asset_ids {
+        if library.get_asset(*asset_id)?.is_none() {
+            return Err(MondrianError::AssetNotFound { asset_id: asset_id.to_string() });
+        }
+    }
+
+    for folder_id in &payload.folder_ids {
+        if Some(folder_id.as_str()) == payload.target_folder_id.as_deref() {
+            continue;
+        }
+        validate_folder_reparent(folders, folder_id, payload.target_folder_id.as_deref())?;
+    }
+
+    Ok(())
+}
+
+fn validate_folder_reparent(
+    folders: &[FolderRecord],
+    folder_id: &str,
+    parent_folder_id: Option<&str>,
+) -> Result<()> {
+    if !folders.iter().any(|folder| folder.id == folder_id) {
+        return Err(MondrianError::AssetDbError {
+            reason: format!("文件夹不存在：{folder_id}")
+        });
+    }
+    let Some(parent_id) = parent_folder_id else {
+        return Ok(());
+    };
+    if parent_id == folder_id {
+        return Err(MondrianError::AssetDbError {
+            reason: "不能将文件夹移动到自身".to_string()
+        });
+    }
+    if !folders.iter().any(|folder| folder.id == parent_id) {
+        return Err(MondrianError::AssetDbError {
+            reason: format!("目标文件夹不存在：{parent_id}"),
+        });
+    }
+    let mut descendants = vec![folder_id.to_string()];
+    let mut index = 0usize;
+    while index < descendants.len() {
+        let current = descendants[index].clone();
+        for folder in folders {
+            if folder.parent_id.as_deref() == Some(current.as_str())
+                && !descendants.iter().any(|id| id == &folder.id)
+            {
+                descendants.push(folder.id.clone());
+            }
+        }
+        index += 1;
+    }
+    if descendants.iter().any(|id| id == parent_id) {
+        return Err(MondrianError::AssetDbError {
+            reason: "不能将文件夹移动到其子文件夹中".to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn source_trim_target_frame(clip: &Clip, edge: TrimEdge, source_time: TimeCode) -> Result<i64> {
@@ -3547,6 +3636,39 @@ mod tests {
                 .filter(|event| matches!(event, AppEvent::AssetLibraryReloaded))
                 .count(),
             1
+        );
+
+        remove_temp_path(&library_root);
+    }
+
+    #[test]
+    fn dispatch_assets_move_selection_rejects_without_partial_asset_moves() {
+        let mut state = AppState::new();
+        let library_root = unique_temp_path("assets-move-selection-rollback-library");
+        let library = AssetLibrary::open(library_root.clone()).expect("library");
+        let original_folder_id = library.create_folder("Original", None).expect("original folder");
+        let parent_id = library.create_folder("Parent", None).expect("parent folder");
+        let child_id = library.create_folder("Child", Some(&parent_id)).expect("child folder");
+        let asset_id = library.create_solid_color_asset(Some("Plate")).expect("asset");
+        library
+            .move_asset_to_folder(asset_id, Some(&original_folder_id))
+            .expect("place asset");
+        state.asset_library = Some(library);
+
+        let err = state
+            .dispatch_action(assets_move_selection_action(AssetsMoveSelectionPayload {
+                asset_ids: vec![asset_id],
+                folder_ids: vec![parent_id],
+                target_folder_id: Some(child_id),
+            }))
+            .expect_err("invalid folder move should fail before moving assets");
+
+        assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
+        let library = state.asset_library.as_ref().expect("library");
+        let asset = library.get_asset(asset_id).expect("get asset").expect("asset");
+        assert_eq!(
+            asset.folder_id.as_deref(),
+            Some(original_folder_id.as_str())
         );
 
         remove_temp_path(&library_root);
