@@ -62,25 +62,25 @@ use crate::app::ui_actions::{
     timeline_select_clip_action, timeline_set_in_out_point_action,
     timeline_set_selected_clips_enabled_action, timeline_set_track_control_action,
     timeline_trim_clips_action, timeline_trim_selected_clips_to_playhead_action,
-    viewer_set_preview_resolution_scale_action, AppShellRelinkAssetDialogPayload,
-    AppShellRevealInFileManagerPayload, AssetsCreateAssetPayload, AssetsCreateFolderPayload,
-    AssetsDeleteAssetPayload, AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload,
-    AssetsImportFilesPayload, AssetsMoveAssetPayload, AssetsMoveFolderPayload,
-    AssetsMoveSelectionPayload, AssetsOpenFolderPayload, AssetsPrepareDragPayload,
-    AssetsRenameAssetPayload, AssetsRenameFolderPayload, AssetsSetProxyModePayload,
-    EffectsAddToClipPayload, ExportDraftUpdatePayload, ExportEnqueuePayload,
-    ExportJobTargetPayload, ExportOutputDialogPayload, ImportMediaDialogPayload,
-    InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
-    InspectorRemoveEffectPayload, InspectorSelectEffectPayload, InspectorSetClipCurvePayload,
-    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
-    InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
-    InspectorSetEffectPropertyPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
-    TimelineDropAssetPayload, TimelineInOutPointPayloadKind, TimelineMoveClipPayload,
-    TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload, TimelineSelectClipPayload,
-    TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
-    TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipsPayload,
-    TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
-    ViewerSetPreviewResolutionScalePayload,
+    viewer_cycle_zoom_action, viewer_set_preview_resolution_scale_action,
+    AppShellRelinkAssetDialogPayload, AppShellRevealInFileManagerPayload, AssetsCreateAssetPayload,
+    AssetsCreateFolderPayload, AssetsDeleteAssetPayload, AssetsDeleteFolderPayload,
+    AssetsDeleteSelectionPayload, AssetsImportFilesPayload, AssetsMoveAssetPayload,
+    AssetsMoveFolderPayload, AssetsMoveSelectionPayload, AssetsOpenFolderPayload,
+    AssetsPrepareDragPayload, AssetsRenameAssetPayload, AssetsRenameFolderPayload,
+    AssetsSetProxyModePayload, EffectsAddToClipPayload, ExportDraftUpdatePayload,
+    ExportEnqueuePayload, ExportJobTargetPayload, ExportOutputDialogPayload,
+    ImportMediaDialogPayload, InspectorClipRefPayload, InspectorClipTransformField,
+    InspectorCurvePointPayload, InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
+    InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
+    InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
+    InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload, TimelineAddTrackKind,
+    TimelineAddTrackPayload, TimelineDropAssetPayload, TimelineInOutPointPayloadKind,
+    TimelineMoveClipPayload, TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
+    TimelineSelectClipPayload, TimelineSetInOutPointPayload,
+    TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
+    TimelineTrackControlPayloadKind, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
+    TimelineTrimSelectedClipsToPlayheadPayload, ViewerSetPreviewResolutionScalePayload,
 };
 use crate::app::{AppState, SelectedClipRef};
 use crate::self_hosted::icons::AppIcon;
@@ -1463,6 +1463,7 @@ fn viewer_panel(model: &ViewerPanelModel) -> ViewerSurface {
         .playing(model.playing)
         .enabled(model.enabled)
         .on_control(viewer_control_action)
+        .on_zoom(viewer_cycle_zoom_action)
         .on_preview_quality(move || {
             viewer_set_preview_resolution_scale_action(ViewerSetPreviewResolutionScalePayload {
                 scale: next_preview_scale,

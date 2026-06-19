@@ -67,6 +67,9 @@ pub type ViewerControlAction = dyn Fn(ViewerControl) -> Action;
 /// Maps a viewer preview-quality chip activation to an editor action.
 pub type ViewerPreviewQualityAction = dyn Fn() -> Action;
 
+/// Maps a viewer zoom chip activation to an editor action.
+pub type ViewerZoomAction = dyn Fn() -> Action;
+
 /// Preview viewer surface.
 pub struct ViewerSurface {
     id: WidgetId,
@@ -88,9 +91,12 @@ pub struct ViewerSurface {
     empty_message: Option<String>,
     hovered_control: Option<ViewerControl>,
     pressed_control: Option<ViewerControl>,
+    hovered_zoom: bool,
+    pressed_zoom: bool,
     hovered_preview_quality: bool,
     pressed_preview_quality: bool,
     on_control: Option<Box<ViewerControlAction>>,
+    on_zoom: Option<Box<ViewerZoomAction>>,
     on_preview_quality: Option<Box<ViewerPreviewQualityAction>>,
 }
 
@@ -117,9 +123,12 @@ impl ViewerSurface {
             empty_message: None,
             hovered_control: None,
             pressed_control: None,
+            hovered_zoom: false,
+            pressed_zoom: false,
             hovered_preview_quality: false,
             pressed_preview_quality: false,
             on_control: None,
+            on_zoom: None,
             on_preview_quality: None,
         }
     }
@@ -213,6 +222,12 @@ impl ViewerSurface {
     /// Set a custom action for clicking the preview-quality chip.
     pub fn on_preview_quality(mut self, action: impl Fn() -> Action + 'static) -> Self {
         self.on_preview_quality = Some(Box::new(action));
+        self
+    }
+
+    /// Set a custom action for clicking the zoom chip.
+    pub fn on_zoom(mut self, action: impl Fn() -> Action + 'static) -> Self {
+        self.on_zoom = Some(Box::new(action));
         self
     }
 
@@ -349,6 +364,11 @@ impl ViewerSurface {
         rect.width > 0.0 && rect.height > 0.0 && rect.contains(point)
     }
 
+    fn zoom_at(&self, point: Point) -> bool {
+        let rect = self.zoom_rect();
+        rect.width > 0.0 && rect.height > 0.0 && rect.contains(point)
+    }
+
     fn dispatch_control(&self, control: ViewerControl, ctx: &mut EventContext) {
         let action = self
             .on_control
@@ -361,6 +381,11 @@ impl ViewerSurface {
     fn dispatch_preview_quality(&self, ctx: &mut EventContext) {
         let action =
             self.on_preview_quality.as_ref().map(|mapper| mapper()).unwrap_or(Action::NoOp);
+        (ctx.dispatch)(action);
+    }
+
+    fn dispatch_zoom(&self, ctx: &mut EventContext) {
+        let action = self.on_zoom.as_ref().map(|mapper| mapper()).unwrap_or(Action::NoOp);
         (ctx.dispatch)(action);
     }
 }
@@ -382,6 +407,8 @@ impl Widget for ViewerSurface {
         if !self.enabled {
             self.hovered_control = None;
             self.pressed_control = None;
+            self.hovered_zoom = false;
+            self.pressed_zoom = false;
             self.hovered_preview_quality = false;
             self.pressed_preview_quality = false;
             return EventResult::Ignored;
@@ -390,16 +417,19 @@ impl Widget for ViewerSurface {
         match event {
             UiEvent::MouseMove { position, .. } => {
                 let hovered = self.control_at(*position);
+                let hovered_zoom = self.zoom_at(*position);
                 let hovered_preview_quality = self.preview_quality_at(*position);
                 if hovered != self.hovered_control
+                    || hovered_zoom != self.hovered_zoom
                     || hovered_preview_quality != self.hovered_preview_quality
                 {
                     self.hovered_control = hovered;
+                    self.hovered_zoom = hovered_zoom;
                     self.hovered_preview_quality = hovered_preview_quality;
                     ctx.request_repaint();
                     return EventResult::Handled;
                 }
-                if hovered.is_some() || hovered_preview_quality {
+                if hovered.is_some() || hovered_zoom || hovered_preview_quality {
                     EventResult::Handled
                 } else {
                     EventResult::Ignored
@@ -409,6 +439,12 @@ impl Widget for ViewerSurface {
                 if let Some(control) = self.control_at(*position) {
                     self.pressed_control = Some(control);
                     self.hovered_control = Some(control);
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
+                if self.zoom_at(*position) {
+                    self.pressed_zoom = true;
+                    self.hovered_zoom = true;
                     ctx.request_repaint();
                     return EventResult::Handled;
                 }
@@ -431,6 +467,16 @@ impl Widget for ViewerSurface {
                     ctx.request_repaint();
                     return EventResult::Handled;
                 }
+                let pressed_zoom = self.pressed_zoom;
+                self.pressed_zoom = false;
+                self.hovered_zoom = self.zoom_at(*position);
+                if pressed_zoom {
+                    if self.hovered_zoom {
+                        self.dispatch_zoom(ctx);
+                    }
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
                 let pressed_preview_quality = self.pressed_preview_quality;
                 self.pressed_preview_quality = false;
                 self.hovered_preview_quality = self.preview_quality_at(*position);
@@ -446,6 +492,8 @@ impl Widget for ViewerSurface {
             UiEvent::FocusLost => {
                 self.hovered_control = None;
                 self.pressed_control = None;
+                self.hovered_zoom = false;
+                self.pressed_zoom = false;
                 self.hovered_preview_quality = false;
                 self.pressed_preview_quality = false;
                 EventResult::Handled
@@ -557,7 +605,13 @@ impl Widget for ViewerSurface {
             colors.muted_foreground,
         );
 
-        self.paint_chrome_chip(ctx, self.zoom_rect(), &self.zoom_label, false, false);
+        self.paint_chrome_chip(
+            ctx,
+            self.zoom_rect(),
+            &self.zoom_label,
+            self.hovered_zoom,
+            self.pressed_zoom,
+        );
         self.paint_chrome_chip(
             ctx,
             self.preview_quality_rect(),
@@ -1113,6 +1167,46 @@ mod tests {
             .on_preview_quality(|| Action::SaveProject);
         viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
         let position = viewer.preview_quality_rect().center();
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        assert_eq!(
+            viewer.event(
+                &UiEvent::MouseDown {
+                    position,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            viewer.event(
+                &UiEvent::MouseUp {
+                    position,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(actions.borrow().as_slice(), &[Action::SaveProject]);
+    }
+
+    #[test]
+    fn zoom_chip_dispatches_custom_action() {
+        let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080)
+            .with_zoom_label("Fit")
+            .on_zoom(|| Action::SaveProject);
+        viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
+        let position = viewer.zoom_rect().center();
         let actions = RefCell::new(Vec::<Action>::new());
         let dispatch = |action| actions.borrow_mut().push(action);
         let mut focus = DummyFocus;

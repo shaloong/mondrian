@@ -131,6 +131,8 @@ pub const VIEWER_NAMESPACE: &str = "ui.viewer";
 
 /// Action name for changing the active sequence preview resolution scale.
 pub const VIEWER_SET_PREVIEW_RESOLUTION_SCALE: &str = "set_preview_resolution_scale";
+/// Shell-local action name for cycling viewer canvas zoom.
+pub const VIEWER_CYCLE_ZOOM: &str = "cycle_zoom";
 
 /// Custom action namespace for project lifecycle operations supplied by shell UI.
 pub const PROJECT_NAMESPACE: &str = "ui.project";
@@ -1058,6 +1060,11 @@ pub fn viewer_set_preview_resolution_scale_action(
     payload: ViewerSetPreviewResolutionScalePayload,
 ) -> Action {
     custom_viewer_action(VIEWER_SET_PREVIEW_RESOLUTION_SCALE, payload)
+}
+
+/// Build a shell-local viewer request for cycling canvas zoom.
+pub fn viewer_cycle_zoom_action() -> Action {
+    custom_viewer_action(VIEWER_CYCLE_ZOOM, ())
 }
 
 /// Build an action that creates a project from shell UI.

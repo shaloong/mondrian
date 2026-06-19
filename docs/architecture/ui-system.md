@@ -1314,16 +1314,18 @@ self-hosted app panel must bind that callback explicitly so the app adapter, not
 the generic widget, owns the command boundary for transport controls. Playback
 state changes, mark semantics, frame stepping semantics, preview scheduling, and
 audio/video sync remain in the app/runtime layers. Zoom and preview-quality
-labels are explicit model fields; they must reflect real host state once the
-self-hosted preview pipeline owns selectable zoom/scale modes. Preview-quality
-interaction emits `ui.viewer.set_preview_resolution_scale`; `AppState` updates
-the active sequence preview settings through an undoable sequence snapshot
-without stopping playback, so quality switching remains a viewer operation
-rather than a sequence-settings-dialog draft mutation. The preview quality label
-comes from the active sequence preview scale (`Full` at 1.0, percentage labels
-below full resolution), not from whether a preview frame has already arrived.
-Viewer transport chrome collapses its visible control set at narrow widths
-before allowing buttons to overflow panel bounds.
+labels are explicit model fields. Viewer zoom is shell-local display state
+owned by `SelfHostedAppRoot`; `ui.viewer.cycle_zoom` is consumed before AppState
+dispatch, survives model refreshes, and is not undoable because it does not
+change the project. Preview-quality interaction emits
+`ui.viewer.set_preview_resolution_scale`; `AppState` updates the active sequence
+preview settings through an undoable sequence snapshot without stopping
+playback, so quality switching remains a viewer operation rather than a
+sequence-settings-dialog draft mutation. The preview quality label comes from
+the active sequence preview scale (`Full` at 1.0, percentage labels below full
+resolution), not from whether a preview frame has already arrived. Viewer
+transport chrome collapses its visible control set at narrow widths before
+allowing buttons to overflow panel bounds.
 Empty app state maps to a disabled viewer model so the product shell can show
 clear no-signal chrome without pretending a preview texture exists.
 `ui_demo` should use the same `ViewerSurface` for the Viewer panel and keep

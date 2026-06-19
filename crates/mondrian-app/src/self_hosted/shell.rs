@@ -37,6 +37,7 @@ use crate::app::ui_actions::{
     APP_SHELL_RECOVER_PROJECT, APP_SHELL_RELINK_ASSET_DIALOG, APP_SHELL_REVEAL_IN_FILE_MANAGER,
     APP_SHELL_SAVE_PROJECT_AS_DIALOG, APP_SHELL_SEQUENCE_SETTINGS,
     APP_SHELL_SEQUENCE_SETTINGS_DRAFT_CHANGED, APP_SHELL_SEQUENCE_SETTINGS_TAB_CHANGED,
+    VIEWER_CYCLE_ZOOM, VIEWER_NAMESPACE,
 };
 use crate::app::AppState;
 use crate::self_hosted::menu_bar::MenuBar;
@@ -477,6 +478,35 @@ fn window_title_for_app_state(state: &AppState) -> String {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewerZoomMode {
+    Fit,
+    Fixed(u16),
+}
+
+impl ViewerZoomMode {
+    fn next(self) -> Self {
+        match self {
+            Self::Fit => Self::Fixed(50),
+            Self::Fixed(50) => Self::Fixed(100),
+            Self::Fixed(100) => Self::Fixed(200),
+            Self::Fixed(200) => Self::Fit,
+            Self::Fixed(_) => Self::Fit,
+        }
+    }
+
+    fn label(self) -> String {
+        match self {
+            Self::Fit => "Fit".to_owned(),
+            Self::Fixed(percent) => format!("{percent}%"),
+        }
+    }
+}
+
+fn apply_viewer_zoom_mode(models: &mut SelfHostedPanelModels, mode: ViewerZoomMode) {
+    models.viewer.zoom_label = mode.label();
+}
+
 /// Root widget for the self-hosted editor window.
 pub struct SelfHostedAppRoot {
     id: WidgetId,
@@ -487,6 +517,7 @@ pub struct SelfHostedAppRoot {
     asset_folder_id: Option<String>,
     preferences_model: SelfHostedPreferencesModel,
     workspace_preset: WorkspacePreset,
+    viewer_zoom_mode: ViewerZoomMode,
     active_sequence: Option<Sequence>,
     modal: Option<ShellModal>,
     bounds: Rect,
@@ -530,14 +561,18 @@ impl SelfHostedAppRoot {
         thumbnails: Option<&dyn AssetThumbnailSource>,
         preview: Option<&dyn ViewerPreviewSource>,
     ) -> Self {
+        let viewer_zoom_mode = ViewerZoomMode::Fit;
+        let mut models =
+            SelfHostedPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
+                state, None, thumbnails, preview,
+            );
+        apply_viewer_zoom_mode(&mut models, viewer_zoom_mode);
         let mut root = Self::new_with_preferences(
             TitleBar::new(
                 window_title_for_app_state(state),
                 MenuBar::for_app_state(state),
             ),
-            SelfHostedPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
-                state, None, thumbnails, preview,
-            ),
+            models,
             SelfHostedPreferencesModel::from_app_state(
                 state,
                 preferences.workspace_preset,
@@ -586,11 +621,13 @@ impl SelfHostedAppRoot {
 
     fn new_with_preferences(
         title_bar: TitleBar,
-        models: SelfHostedPanelModels,
+        mut models: SelfHostedPanelModels,
         preferences_model: SelfHostedPreferencesModel,
         workspace_preset: WorkspacePreset,
         status_bar_model: StatusBarModel,
     ) -> Self {
+        let viewer_zoom_mode = ViewerZoomMode::Fit;
+        apply_viewer_zoom_mode(&mut models, viewer_zoom_mode);
         let dock = build_dock_tree_for_preset(models.clone(), workspace_preset);
         Self {
             id: WidgetId::new(),
@@ -605,6 +642,7 @@ impl SelfHostedAppRoot {
             asset_folder_id: None,
             preferences_model,
             workspace_preset,
+            viewer_zoom_mode,
             active_sequence: None,
             modal: None,
             bounds: Rect::ZERO,
@@ -646,6 +684,7 @@ impl SelfHostedAppRoot {
         let timeline_state = collect_timeline_view_state(&self.dock);
         let panel_scroll_state = collect_panel_scroll_state(&self.dock);
         self.models = models;
+        apply_viewer_zoom_mode(&mut self.models, self.viewer_zoom_mode);
         self.dock = build_dock_tree_for_preset(self.models.clone(), self.workspace_preset);
         self.dock.restore_layout(&layout);
         restore_dock_panel_state(&mut self.dock, &dock_panel_state);
@@ -715,14 +754,15 @@ impl SelfHostedAppRoot {
         );
         self.status_bar.set_model(status_bar_model(state));
         self.active_sequence = state.sequence.clone();
-        self.set_models(
+        let mut models =
             SelfHostedPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
                 state,
                 self.asset_folder_id.as_deref(),
                 thumbnails,
                 preview,
-            ),
-        );
+            );
+        apply_viewer_zoom_mode(&mut models, self.viewer_zoom_mode);
+        self.set_models(models);
         let preferences_model = SelfHostedPreferencesModel::from_app_state(
             state,
             self.workspace_preset,
@@ -787,6 +827,15 @@ impl SelfHostedAppRoot {
             }
             Action::SwitchWorkspace(preset) => {
                 self.switch_workspace(preset);
+                Ok(None)
+            }
+            Action::Custom { namespace, name, .. }
+                if namespace == VIEWER_NAMESPACE && name == VIEWER_CYCLE_ZOOM =>
+            {
+                self.viewer_zoom_mode = self.viewer_zoom_mode.next();
+                let mut models = self.models.clone();
+                apply_viewer_zoom_mode(&mut models, self.viewer_zoom_mode);
+                self.set_models(models);
                 Ok(None)
             }
             Action::Custom { namespace, name, .. }
@@ -1277,15 +1326,16 @@ mod tests {
         app_shell_recover_project_action, app_shell_relink_asset_dialog_action,
         app_shell_reveal_in_file_manager_action, app_shell_save_project_as_dialog_action,
         app_shell_sequence_settings_action, app_shell_sequence_settings_draft_changed_action,
-        app_shell_sequence_settings_tab_changed_action, AppShellOpenRecentProjectPayload,
-        AppShellRelinkAssetDialogPayload, AppShellRevealInFileManagerPayload,
-        AssetsImportFilesPayload, AssetsRelinkAssetPayload, ExportDraftUpdatePayload,
-        ExportOutputDialogPayload, ImportMediaDialogPayload, NewProjectDraftUpdatePayload,
-        PreferencesTabPayload, ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload,
-        SequenceSettingsDraftUpdatePayload, SequenceSettingsTabPayload,
-        SequenceUpdateSettingsPayload, ASSETS_IMPORT_FILES, ASSETS_NAMESPACE, ASSETS_RELINK_ASSET,
-        EXPORT_NAMESPACE, EXPORT_SET_DRAFT, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
-        PROJECT_RECOVER_FROM_AUTOSAVE, SEQUENCE_NAMESPACE, SEQUENCE_UPDATE_SETTINGS,
+        app_shell_sequence_settings_tab_changed_action, viewer_cycle_zoom_action,
+        AppShellOpenRecentProjectPayload, AppShellRelinkAssetDialogPayload,
+        AppShellRevealInFileManagerPayload, AssetsImportFilesPayload, AssetsRelinkAssetPayload,
+        ExportDraftUpdatePayload, ExportOutputDialogPayload, ImportMediaDialogPayload,
+        NewProjectDraftUpdatePayload, PreferencesTabPayload, ProjectCreateWithSettingsPayload,
+        ProjectRecoverFromAutosavePayload, SequenceSettingsDraftUpdatePayload,
+        SequenceSettingsTabPayload, SequenceUpdateSettingsPayload, ASSETS_IMPORT_FILES,
+        ASSETS_NAMESPACE, ASSETS_RELINK_ASSET, EXPORT_NAMESPACE, EXPORT_SET_DRAFT,
+        PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE, PROJECT_RECOVER_FROM_AUTOSAVE,
+        SEQUENCE_NAMESPACE, SEQUENCE_UPDATE_SETTINGS,
     };
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use glam::Vec2;
@@ -2993,5 +3043,26 @@ mod tests {
             active_index_for_dock_panel(&root, PanelKind::NodeGraph),
             Some(0)
         );
+    }
+
+    #[test]
+    fn viewer_zoom_cycle_is_shell_local_and_survives_app_state_refresh() {
+        let mut state = AppState::new();
+        state.sequence = Some(Sequence::new("edit"));
+        let platform = FakePlatform::default();
+        let mut root = SelfHostedAppRoot::from_app_state(&state);
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+
+        assert_eq!(root.models.viewer.zoom_label, "Fit");
+        let resolved = root
+            .try_handle_shell_action(viewer_cycle_zoom_action(), &platform, None)
+            .expect("cycle zoom");
+
+        assert!(resolved.is_none());
+        assert_eq!(root.models.viewer.zoom_label, "50%");
+
+        root.refresh_from_app_state(&state);
+
+        assert_eq!(root.models.viewer.zoom_label, "50%");
     }
 }
