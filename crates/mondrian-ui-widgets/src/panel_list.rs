@@ -710,6 +710,15 @@ impl PanelList {
         EventResult::Handled
     }
 
+    fn clear_selection_from_input(&mut self, ctx: &mut EventContext) -> EventResult {
+        if self.selected.is_none() {
+            return EventResult::Ignored;
+        }
+        self.selected = None;
+        ctx.request_repaint();
+        EventResult::Handled
+    }
+
     fn activate_selected(&self, ctx: &mut EventContext) -> EventResult {
         let Some(index) = self.selected.filter(|idx| self.is_enabled_index(*idx)) else {
             return EventResult::Ignored;
@@ -1063,6 +1072,11 @@ impl Widget for PanelList {
                     return self.select_from_input(index, ctx);
                 }
                 return EventResult::Ignored;
+            }
+            UiEvent::KeyDown { key: KeyCode::Escape, modifiers }
+                if self.focused && *modifiers == Modifiers::none() =>
+            {
+                return self.clear_selection_from_input(ctx);
             }
             UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, .. } if self.focused => {
                 return self.activate_selected(ctx);
@@ -1700,6 +1714,72 @@ mod tests {
 
         assert_eq!(list.selected_index(), Some(2));
         assert_eq!(actions.borrow().last(), Some(&custom_action("activate-c")));
+    }
+
+    #[test]
+    fn escape_clears_local_selection_when_focused() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut list = PanelList::new("Effects", sample_items()).with_selected(Some(2));
+        list.layout(Rect::new(0.0, 0.0, 240.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        list.event(&UiEvent::FocusGained, &mut ctx);
+        assert_eq!(
+            list.event(
+                &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(list.selected_index(), None);
+        assert!(actions.borrow().is_empty());
+        assert!(ctx.requests.repaint);
+    }
+
+    #[test]
+    fn escape_without_local_selection_is_ignored() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut list = PanelList::new("Effects", sample_items());
+        list.layout(Rect::new(0.0, 0.0, 240.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        list.event(&UiEvent::FocusGained, &mut ctx);
+        assert_eq!(
+            list.event(
+                &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+
+        assert_eq!(list.selected_index(), None);
+        assert!(actions.borrow().is_empty());
+        assert!(!ctx.requests.repaint);
     }
 
     #[test]

@@ -940,20 +940,22 @@ positive-delta scrolling, but exposes static and value-aware action adapters
 plus optional `DragPayload`s so Effects, presets, status rows, and similar
 panels can bind to editor state outside the widget crate. Mouse single-click
 selects a row, a second click on the same row activates it, and keyboard
-Enter/Space uses the same activation path. Pointer movement beyond the drag
-threshold asks the router to begin an internal drag; the router, not the source
-widget, owns `DragEnter` / `DragOver` / `DragLeave` / `Drop` delivery so pointer
-capture from the source cannot block target panels. Searchable list panels
-should use `PanelList::with_filter`, which exposes its filter `TextInput` as a
-real widget tree child so focus, IME, and keyboard routing stay
-framework-owned. Filtering changes only visible row order; original item
-indices, row actions, drag payloads, badges, icons, and disabled state remain
-the item identity used for dispatch. The self-hosted Effects panel builds rows
-from the shared effect registry and, when a video clip is selected, activates
-rows through undoable `AppState::add_effect_to_clip` commands. The app action
-selects the newly created effect instance after the mutation so Inspector and
-Node Graph immediately target the same effect; the selection update is
-navigation state and does not create a second undo entry. Project lifecycle state
+Enter/Space uses the same activation path. Escape clears the list-local row
+selection when one exists, and otherwise stays ignored so global `DeselectAll`
+can still clear editor selections. Pointer movement beyond the drag threshold
+asks the router to begin an internal drag; the router, not the source widget,
+owns `DragEnter` / `DragOver` / `DragLeave` / `Drop` delivery so pointer capture
+from the source cannot block target panels. Searchable list panels should use
+`PanelList::with_filter`, which exposes its filter `TextInput` as a real widget
+tree child so focus, IME, and keyboard routing stay framework-owned. Filtering
+changes only visible row order; original item indices, row actions, drag
+payloads, badges, icons, and disabled state remain the item identity used for
+dispatch. The self-hosted Effects panel builds rows from the shared effect
+registry and, when a video clip is selected, activates rows through undoable
+`AppState::add_effect_to_clip` commands. The app action selects the newly
+created effect instance after the mutation so Inspector and Node Graph
+immediately target the same effect; the selection update is navigation state and
+does not create a second undo entry. Project lifecycle state
 belongs to the shell and File menu surfaces instead of a dock panel, so editing
 workspaces do not expose a separate project-status panel beside creative panels.
 The self-hosted Assets panel uses the dedicated `AssetGrid` card browser
