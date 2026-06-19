@@ -84,6 +84,61 @@ pub fn default_shortcuts() -> Vec<SelfHostedShortcut> {
             "Ctrl+D",
         ),
         shortcut(
+            ShortcutBinding::ctrl(KeyCode::A),
+            Action::SelectAll,
+            "Ctrl+A",
+        ),
+        shortcut(
+            ShortcutBinding::new(KeyCode::Escape, Modifiers::none()),
+            Action::DeselectAll,
+            "Esc",
+        ),
+        shortcut(
+            ShortcutBinding::new(KeyCode::Delete, Modifiers::none()),
+            Action::DeleteSelection,
+            "Delete",
+        ),
+        shortcut(
+            ShortcutBinding::new(KeyCode::Delete, Modifiers::shift()),
+            Action::RippleDeleteSelection,
+            "Shift+Delete",
+        ),
+        shortcut(
+            ShortcutBinding::ctrl(KeyCode::K),
+            Action::SplitClipAtPlayhead,
+            "Ctrl+K",
+        ),
+        shortcut(
+            ShortcutBinding::new(KeyCode::I, Modifiers::none()),
+            Action::MarkInAtPlayhead,
+            "I",
+        ),
+        shortcut(
+            ShortcutBinding::new(KeyCode::O, Modifiers::none()),
+            Action::MarkOutAtPlayhead,
+            "O",
+        ),
+        shortcut(
+            ShortcutBinding::new(KeyCode::Home, Modifiers::none()),
+            Action::GoToStart,
+            "Home",
+        ),
+        shortcut(
+            ShortcutBinding::new(KeyCode::End, Modifiers::none()),
+            Action::GoToEnd,
+            "End",
+        ),
+        shortcut(
+            ShortcutBinding::new(KeyCode::Left, Modifiers::none()),
+            Action::StepBack,
+            "Left",
+        ),
+        shortcut(
+            ShortcutBinding::new(KeyCode::Right, Modifiers::none()),
+            Action::StepForward,
+            "Right",
+        ),
+        shortcut(
             ShortcutBinding::new(KeyCode::Digit1, ctrl_alt()),
             Action::SwitchWorkspace(WorkspacePreset::Editing),
             "Ctrl+Alt+1",
@@ -264,6 +319,36 @@ mod tests {
     }
 
     #[test]
+    fn default_shortcuts_cover_core_timeline_editing_commands() {
+        let mut router = EventRouter::new(mondrian_ui_core::types::WidgetId::new());
+
+        register_default_shortcuts(&mut router);
+
+        for (key, modifiers, action) in [
+            (KeyCode::Delete, Modifiers::none(), Action::DeleteSelection),
+            (
+                KeyCode::Delete,
+                Modifiers::shift(),
+                Action::RippleDeleteSelection,
+            ),
+            (KeyCode::K, Modifiers::ctrl(), Action::SplitClipAtPlayhead),
+            (KeyCode::I, Modifiers::none(), Action::MarkInAtPlayhead),
+            (KeyCode::O, Modifiers::none(), Action::MarkOutAtPlayhead),
+            (KeyCode::Home, Modifiers::none(), Action::GoToStart),
+            (KeyCode::End, Modifiers::none(), Action::GoToEnd),
+            (KeyCode::Left, Modifiers::none(), Action::StepBack),
+            (KeyCode::Right, Modifiers::none(), Action::StepForward),
+            (KeyCode::A, Modifiers::ctrl(), Action::SelectAll),
+            (KeyCode::Escape, Modifiers::none(), Action::DeselectAll),
+        ] {
+            assert_eq!(
+                router.shortcut_manager().resolve(key, modifiers, ShortcutContext::default()),
+                Some(action)
+            );
+        }
+    }
+
+    #[test]
     fn shortcut_labels_share_the_default_descriptor_table() {
         assert_eq!(
             shortcut_label_for_action(&Action::SaveProject),
@@ -277,6 +362,18 @@ mod tests {
         assert_eq!(
             shortcut_label_for_action(&Action::SwitchWorkspace(WorkspacePreset::Audio)),
             Some("Ctrl+Alt+3")
+        );
+        assert_eq!(
+            shortcut_label_for_action(&Action::SplitClipAtPlayhead),
+            Some("Ctrl+K")
+        );
+        assert_eq!(
+            shortcut_label_for_action(&Action::RippleDeleteSelection),
+            Some("Shift+Delete")
+        );
+        assert_eq!(
+            shortcut_label_for_action(&Action::MarkInAtPlayhead),
+            Some("I")
         );
     }
 
