@@ -1097,6 +1097,11 @@ panel should render through `paint_overlay` instead of ordinary row paint.
 Reusable labeled-field geometry should flow through
 `mondrian-ui-widgets::FormLayout` / `FormRowOptions` instead of each component
 recalculating label and control rectangles independently.
+`FormLayout` also owns the measurement constraint for the control lane; property
+rows must measure child controls with that bounded lane width and row height
+before laying them out. Inspector controls should not be measured with
+`LayoutConstraint::LOOSE`, because dropdowns, text inputs, color pickers, and
+wrapped labels need the same width during measure and layout.
 Form controls should expose a common `enabled(bool)` / `disabled()` builder
 where practical. Disabled controls must not dispatch actions, request pointer
 capture, or participate in focus traversal, and should render with muted theme

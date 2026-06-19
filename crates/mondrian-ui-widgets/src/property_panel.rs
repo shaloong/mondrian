@@ -274,7 +274,7 @@ impl Widget for PropertyPanel {
             let section_top = y;
             for row in &mut section.rows {
                 let row_h = row.height(self.options.row_height);
-                let measured = row.control.measure(LayoutConstraint::loose(0.0, 0.0));
+                let measured = row.control.measure(form_layout.control_constraint(content, row_h));
                 let rects = form_layout.row_rects(
                     content,
                     y,
@@ -441,6 +441,43 @@ mod tests {
         }
     }
 
+    struct ConstraintRecordingWidget {
+        id: WidgetId,
+        seen: Rc<RefCell<Vec<LayoutConstraint>>>,
+        bounds: Rect,
+    }
+
+    impl ConstraintRecordingWidget {
+        fn new(seen: Rc<RefCell<Vec<LayoutConstraint>>>) -> Self {
+            Self { id: WidgetId::new(), seen, bounds: Rect::ZERO }
+        }
+    }
+
+    impl Widget for ConstraintRecordingWidget {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+
+        fn measure(&self, constraint: LayoutConstraint) -> Size {
+            self.seen.borrow_mut().push(constraint);
+            constraint.constrain(Size::new(80.0, 24.0))
+        }
+
+        fn layout(&mut self, bounds: Rect) {
+            self.bounds = bounds;
+        }
+
+        fn event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+            EventResult::Ignored
+        }
+
+        fn paint(&self, _ctx: &mut PaintContext) {}
+
+        fn hit_test(&self, point: Point) -> bool {
+            self.bounds.contains(point)
+        }
+    }
+
     #[derive(Default)]
     struct RecordingEncoder {
         rects: usize,
@@ -553,6 +590,25 @@ mod tests {
         assert_eq!(row.bounds.height, 118.0);
         assert_eq!(row.label_position.y, row.bounds.y + 20.0);
         assert!(measured.height >= 118.0 + panel.options.margin * 2.0);
+    }
+
+    #[test]
+    fn property_panel_measures_controls_with_form_lane_constraint() {
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let mut panel = PropertyPanel::new("Inspector").with_section(
+            PropertySection::new("Clip").with_row(PropertyRow::new(
+                "Opacity",
+                Box::new(ConstraintRecordingWidget::new(Rc::clone(&seen))),
+            )),
+        );
+
+        panel.layout(Rect::new(0.0, 0.0, 300.0, 180.0));
+
+        assert_eq!(
+            seen.borrow().as_slice(),
+            &[LayoutConstraint { min: Size::ZERO, max: Size::new(176.0, 34.0) }]
+        );
+        assert_eq!(panel.sections[0].rows[0].control_bounds.width, 176.0);
     }
 
     #[test]

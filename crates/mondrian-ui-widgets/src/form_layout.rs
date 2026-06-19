@@ -68,6 +68,20 @@ impl FormLayout {
         self.options
     }
 
+    /// Width available to the control lane inside one form row.
+    pub fn control_width(&self, bounds: Rect) -> f32 {
+        let control_x = bounds.x + self.options.label_width + self.options.control_gap;
+        (bounds.x + bounds.width - control_x).max(1.0)
+    }
+
+    /// Measurement constraint for a row control before final row placement.
+    pub fn control_constraint(&self, bounds: Rect, row_height: f32) -> LayoutConstraint {
+        LayoutConstraint {
+            min: Size::ZERO,
+            max: Size::new(self.control_width(bounds), row_height.max(1.0)),
+        }
+    }
+
     /// Return rectangles for one row inside `bounds`.
     pub fn row_rects(
         &self,
@@ -81,7 +95,7 @@ impl FormLayout {
         let default_row_height = default_row_height.max(1.0);
         let row = Rect::new(bounds.x, row_y, bounds.width, row_height);
         let control_x = bounds.x + self.options.label_width + self.options.control_gap;
-        let control_width = (bounds.x + bounds.width - control_x).max(1.0);
+        let control_width = self.control_width(bounds);
         let control_height = measured_control_height.min(row_height).max(1.0);
         let label_y = if row_height > default_row_height * self.options.tall_row_multiplier {
             row_y + self.options.tall_label_y_offset
@@ -125,6 +139,18 @@ mod tests {
         assert_eq!(rects.row, Rect::new(10.0, 40.0, 300.0, 34.0));
         assert_eq!(rects.label, Rect::new(10.0, 61.0, 92.0, 16.0));
         assert_eq!(rects.control, Rect::new(110.0, 45.0, 200.0, 24.0));
+    }
+
+    #[test]
+    fn control_constraint_matches_row_control_lane() {
+        let layout = FormLayout::default();
+
+        let constraint = layout.control_constraint(Rect::new(10.0, 20.0, 300.0, 200.0), 34.0);
+
+        assert_eq!(
+            constraint,
+            LayoutConstraint { min: Size::ZERO, max: Size::new(200.0, 34.0) }
+        );
     }
 
     #[test]
