@@ -419,6 +419,12 @@ scroll-state restoration, and product menu targeting all use the same app-level
 panel identity. Do not add widget-local aliases for the same enum; a future
 domain-free dock API must migrate `Widget::panel_kind()` and shell mapping
 together.
+`PanelSlot` is also the normal paint and hit-test clipping boundary for docked
+panel content. Ordinary panel widgets are clipped to the slot bounds so fixed
+height diagnostic/demo content cannot bleed into adjacent panels. Popups,
+tooltips, dropdowns, and color-picker overlays intentionally use
+`paint_overlay()` and remain unclipped by the slot; overlay stacking is handled
+by the shell/router overlay pass instead of per-panel paint.
 
 ## Pointer Capture
 
