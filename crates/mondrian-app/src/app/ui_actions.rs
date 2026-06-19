@@ -119,6 +119,14 @@ pub const PROJECT_CREATE_WITH_SETTINGS: &str = "create_with_settings";
 /// Action name for recovering a project from an autosave snapshot.
 pub const PROJECT_RECOVER_FROM_AUTOSAVE: &str = "recover_from_autosave";
 
+/// Custom action namespace for sequence management operations.
+pub const SEQUENCE_NAMESPACE: &str = "ui.sequence";
+
+/// Action name for returning from a nested sequence to its parent sequence.
+pub const SEQUENCE_RETURN_TO_PARENT: &str = "return_to_parent";
+/// Action name for making the active sequence the project default sequence.
+pub const SEQUENCE_SET_ACTIVE_DEFAULT: &str = "set_active_default";
+
 /// Custom action namespace for app-shell operations resolved by native adapters.
 pub const APP_SHELL_NAMESPACE: &str = "app.shell";
 
@@ -882,6 +890,16 @@ pub fn project_recover_from_autosave_action(payload: ProjectRecoverFromAutosaveP
     custom_project_action(PROJECT_RECOVER_FROM_AUTOSAVE, payload)
 }
 
+/// Build an action that returns from a nested sequence to its parent.
+pub fn sequence_return_to_parent_action() -> Action {
+    custom_sequence_action(SEQUENCE_RETURN_TO_PARENT)
+}
+
+/// Build an action that makes the current active sequence the project default.
+pub fn sequence_set_active_default_action() -> Action {
+    custom_sequence_action(SEQUENCE_SET_ACTIVE_DEFAULT)
+}
+
 /// Build an app-shell request for creating a new project.
 pub fn app_shell_new_project_dialog_action() -> Action {
     custom_app_shell_action(APP_SHELL_NEW_PROJECT_DIALOG)
@@ -1044,6 +1062,14 @@ fn custom_project_action<T: Serialize>(name: &'static str, payload: T) -> Action
         namespace: PROJECT_NAMESPACE.into(),
         name: name.into(),
         payload: serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
+    }
+}
+
+fn custom_sequence_action(name: &'static str) -> Action {
+    Action::Custom {
+        namespace: SEQUENCE_NAMESPACE.into(),
+        name: name.into(),
+        payload: serde_json::Value::Null,
     }
 }
 

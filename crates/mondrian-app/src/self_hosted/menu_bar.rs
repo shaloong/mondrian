@@ -16,7 +16,9 @@ use crate::app::ui_actions::{
     app_shell_about_action, app_shell_import_media_dialog_action,
     app_shell_new_project_dialog_action, app_shell_open_project_dialog_action,
     app_shell_preferences_action, app_shell_quit_action, app_shell_save_project_as_dialog_action,
+    sequence_return_to_parent_action, sequence_set_active_default_action,
     APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
+    SEQUENCE_NAMESPACE, SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT,
 };
 use crate::app::AppState;
 use crate::self_hosted::icons::AppIcon;
@@ -111,6 +113,25 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
             ],
         ),
         (
+            "Sequence",
+            vec![
+                menu_item_with_icon(
+                    MenuItem::new(
+                        "Return to Parent Sequence",
+                        sequence_return_to_parent_action(),
+                    ),
+                    AppIcon::ArrowUp,
+                ),
+                menu_item_with_icon(
+                    MenuItem::new(
+                        "Set Active as Default",
+                        sequence_set_active_default_action(),
+                    ),
+                    AppIcon::HomeFrameFilled,
+                ),
+            ],
+        ),
+        (
             "Workspace",
             vec![
                 menu_item_with_icon(
@@ -197,6 +218,17 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_SAVE_PROJECT_AS_DIALOG =>
         {
             state.sequence.is_some()
+        }
+        Action::Custom { namespace, name, .. }
+            if namespace == SEQUENCE_NAMESPACE && name == SEQUENCE_RETURN_TO_PARENT =>
+        {
+            !state.sequence_navigation_stack.is_empty()
+        }
+        Action::Custom { namespace, name, .. }
+            if namespace == SEQUENCE_NAMESPACE && name == SEQUENCE_SET_ACTIVE_DEFAULT =>
+        {
+            state.active_sequence_id.is_some()
+                && state.default_sequence_id != state.active_sequence_id
         }
         _ => true,
     }
@@ -394,6 +426,24 @@ mod tests {
         menu_mouse_up(menu, ctx, position);
     }
 
+    fn press_enter(menu: &mut MenuBar, ctx: &mut EventContext<'_>) -> EventResult {
+        menu.event(
+            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            ctx,
+        )
+    }
+
+    fn trigger_point(menu: &MenuBar, index: usize) -> Point {
+        let right = (menu.bounds.x + menu.bounds.width).ceil() as i32;
+        for x in menu.bounds.x.floor() as i32..=right {
+            let point = Point::new(x as f32 + 0.5, menu.bounds.y + MENU_BAR_HEIGHT * 0.5);
+            if menu.trigger_index_at(point) == Some(index) {
+                return point;
+            }
+        }
+        panic!("missing trigger point for menu index {index}");
+    }
+
     fn menu_item<'a>(
         menu_items: &'a [(&'static str, Vec<MenuItem>)],
         menu_label: &str,
@@ -424,7 +474,7 @@ mod tests {
     fn default_menu_bar_exposes_primary_menu_groups() {
         let menu = MenuBar::default();
 
-        assert_eq!(menu.child_count(), 5);
+        assert_eq!(menu.child_count(), 6);
     }
 
     #[test]
@@ -500,6 +550,8 @@ mod tests {
             ("Edit", "Preferences..."),
             ("View", "Timeline"),
             ("View", "Effects"),
+            ("Sequence", "Return to Parent Sequence"),
+            ("Sequence", "Set Active as Default"),
             ("Workspace", "Audio"),
             ("Help", "About Mondrian"),
         ] {
@@ -553,6 +605,8 @@ mod tests {
         assert!(!menu_item(&menu_items, "Edit", "Cut").enabled);
         assert!(!menu_item(&menu_items, "Edit", "Copy").enabled);
         assert!(!menu_item(&menu_items, "Edit", "Paste").enabled);
+        assert!(!menu_item(&menu_items, "Sequence", "Return to Parent Sequence").enabled);
+        assert!(!menu_item(&menu_items, "Sequence", "Set Active as Default").enabled);
     }
 
     #[test]
@@ -566,6 +620,31 @@ mod tests {
         assert!(!menu_item(&menu_items, "File", "Save").enabled);
         assert!(menu_item(&menu_items, "File", "Save As...").enabled);
         assert!(menu_item(&menu_items, "File", "Close Project").enabled);
+        assert!(!menu_item(&menu_items, "Sequence", "Return to Parent Sequence").enabled);
+        assert!(!menu_item(&menu_items, "Sequence", "Set Active as Default").enabled);
+    }
+
+    #[test]
+    fn app_state_menu_items_reflect_sequence_navigation_state() {
+        let mut state = AppState::new();
+        let parent = Sequence::new("Parent");
+        let parent_id = parent.id;
+        let child = Sequence::new("Child");
+        let child_id = child.id;
+        state.sequence = Some(child);
+        state.active_sequence_id = Some(child_id);
+        state.default_sequence_id = Some(parent_id);
+        state.sequences.push(parent);
+        state.sequence_navigation_stack.push(parent_id);
+
+        let menu_items = default_menu_items_for_app_state(&state);
+        assert!(menu_item(&menu_items, "Sequence", "Return to Parent Sequence").enabled);
+        assert!(menu_item(&menu_items, "Sequence", "Set Active as Default").enabled);
+
+        state.default_sequence_id = Some(child_id);
+        let menu_items = default_menu_items_for_app_state(&state);
+        assert!(menu_item(&menu_items, "Sequence", "Return to Parent Sequence").enabled);
+        assert!(!menu_item(&menu_items, "Sequence", "Set Active as Default").enabled);
     }
 
     #[test]
@@ -662,9 +741,12 @@ mod tests {
             &dispatch,
         );
 
-        click_menu(&mut menu, &mut ctx, Point::new(10.0, 10.0));
-        click_menu(&mut menu, &mut ctx, Point::new(410.0, 10.0));
-        click_menu(&mut menu, &mut ctx, Point::new(410.0, 42.0));
+        let file_trigger = trigger_point(&menu, 0);
+        let help_trigger = trigger_point(&menu, menu.child_count() - 1);
+
+        click_menu(&mut menu, &mut ctx, file_trigger);
+        click_menu(&mut menu, &mut ctx, help_trigger);
+        assert_eq!(press_enter(&mut menu, &mut ctx), EventResult::Handled);
 
         assert_eq!(dispatched.borrow().len(), 1);
         let action = dispatched.borrow()[0].clone();
@@ -698,19 +780,22 @@ mod tests {
             &dispatch,
         );
 
-        click_menu(&mut menu, &mut ctx, Point::new(10.0, 10.0));
+        let file_trigger = trigger_point(&menu, 0);
+        let help_trigger = trigger_point(&menu, menu.child_count() - 1);
+
+        click_menu(&mut menu, &mut ctx, file_trigger);
 
         assert_eq!(
             menu.event(
                 &UiEvent::MouseMove {
-                    position: Point::new(410.0, 10.0),
+                    position: help_trigger,
                     modifiers: Modifiers::none(),
                 },
                 &mut ctx,
             ),
             EventResult::Handled
         );
-        click_menu(&mut menu, &mut ctx, Point::new(410.0, 42.0));
+        assert_eq!(press_enter(&mut menu, &mut ctx), EventResult::Handled);
 
         assert_eq!(dispatched.borrow().len(), 1);
         let action = dispatched.borrow()[0].clone();

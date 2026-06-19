@@ -745,6 +745,12 @@ the local `TimelineClipRef`, and the app adapter resolves that ref to
 `ui.timeline.open_nested_sequence`. `AppState` then calls the same
 `open_nested_sequence` path used by the egui timeline, preserving sequence
 navigation stack behavior.
+Top-level sequence navigation follows the same action boundary. The
+self-hosted Sequence menu emits `ui.sequence.return_to_parent` and
+`ui.sequence.set_active_default`; only `AppState` reads the active sequence,
+updates the navigation stack, or writes the project default sequence. Menu
+availability is derived from the current `AppState` snapshot so the UI does not
+offer a parent-return command when no nested sequence is open.
 Timeline clipboard context-menu entries use
 `TimelineEditCommand::CutSelection`, `CopySelection`, `PasteAtPlayhead`, and
 `DuplicateSelection`, then map to the existing app-level `Action::Cut`,

@@ -37,7 +37,8 @@ use crate::app::ui_actions::{
     INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY, INSPECTOR_SET_CLIP_TINT,
     INSPECTOR_SET_CLIP_TRANSFORM_FIELD, INSPECTOR_SET_EFFECT_ENABLED,
     INSPECTOR_SET_EFFECT_PROPERTY, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
-    PROJECT_RECOVER_FROM_AUTOSAVE, TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET, TIMELINE_MOVE_CLIP,
+    PROJECT_RECOVER_FROM_AUTOSAVE, SEQUENCE_NAMESPACE, SEQUENCE_RETURN_TO_PARENT,
+    SEQUENCE_SET_ACTIVE_DEFAULT, TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET, TIMELINE_MOVE_CLIP,
     TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_SEEK,
     TIMELINE_SELECT_CLIP, TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL,
     TIMELINE_TRIM_CLIPS, TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD,
@@ -198,6 +199,9 @@ impl AppState {
             }
             Action::Custom { namespace, name, payload } if namespace == PROJECT_NAMESPACE => {
                 self.dispatch_project_ui_action(&name, payload)
+            }
+            Action::Custom { namespace, name, payload } if namespace == SEQUENCE_NAMESPACE => {
+                self.dispatch_sequence_ui_action(&name, payload)
             }
 
             // ── 尚未实现的操作（Stage B-F 逐步添加）─────────────────────
@@ -1456,6 +1460,28 @@ impl AppState {
         }
     }
 
+    fn dispatch_sequence_ui_action(
+        &mut self,
+        name: &str,
+        _payload: serde_json::Value,
+    ) -> Result<()> {
+        match name {
+            SEQUENCE_RETURN_TO_PARENT => {
+                self.return_to_parent_sequence()?;
+                Ok(())
+            }
+            SEQUENCE_SET_ACTIVE_DEFAULT => {
+                let sequence_id =
+                    self.active_sequence_id.ok_or_else(|| MondrianError::WorkflowStepFailed {
+                        step_id: "sequence_ui_action".to_owned(),
+                        reason: "当前没有活动序列".to_owned(),
+                    })?;
+                self.set_default_sequence(sequence_id)
+            }
+            _ => Err(unknown_ui_action_error("sequence_ui_action", name)),
+        }
+    }
+
     fn prepare_asset_drag_from_ui(&mut self, payload: AssetsPrepareDragPayload) -> Result<()> {
         let library = self.asset_library.clone().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
@@ -2003,8 +2029,9 @@ mod tests {
         inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
         inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
         inspector_set_effect_property_action, project_create_with_settings_action,
-        project_recover_from_autosave_action, timeline_add_track_action,
-        timeline_drop_asset_action, timeline_move_clip_action, timeline_move_track_action,
+        project_recover_from_autosave_action, sequence_return_to_parent_action,
+        sequence_set_active_default_action, timeline_add_track_action, timeline_drop_asset_action,
+        timeline_move_clip_action, timeline_move_track_action,
         timeline_open_nested_sequence_action, timeline_seek_action, timeline_select_clip_action,
         timeline_set_selected_clips_enabled_action, timeline_set_track_control_action,
         timeline_trim_clips_action, timeline_trim_selected_clips_to_playhead_action,
@@ -2125,6 +2152,7 @@ mod tests {
             (ASSETS_NAMESPACE, "assets_ui_action.unknown"),
             (EXPORT_NAMESPACE, "export_ui_action.unknown"),
             (PROJECT_NAMESPACE, "project_ui_action.unknown"),
+            (SEQUENCE_NAMESPACE, "sequence_ui_action.unknown"),
         ] {
             let mut state = AppState::new();
             let err = state
@@ -2291,6 +2319,46 @@ mod tests {
             Some(child_id)
         );
         assert_eq!(state.sequence_navigation_stack.len(), 1);
+    }
+
+    #[test]
+    fn dispatch_sequence_ui_returns_to_parent_sequence() {
+        let mut state = AppState::new();
+        let child = Sequence::new("child");
+        let child_id = child.id;
+        let parent = Sequence::new("parent");
+        let parent_id = parent.id;
+        state.active_sequence_id = Some(child_id);
+        state.sequence = Some(child);
+        state.sequences.push(parent);
+        state.sequence_navigation_stack.push(parent_id);
+
+        state
+            .dispatch_action(sequence_return_to_parent_action())
+            .expect("return to parent sequence");
+
+        assert_eq!(state.active_sequence_id, Some(parent_id));
+        assert_eq!(
+            state.sequence.as_ref().map(|sequence| sequence.id),
+            Some(parent_id)
+        );
+        assert!(state.sequence_navigation_stack.is_empty());
+    }
+
+    #[test]
+    fn dispatch_sequence_ui_sets_active_sequence_as_default() {
+        let mut state = AppState::new();
+        let sequence = Sequence::new("default candidate");
+        let sequence_id = sequence.id;
+        state.active_sequence_id = Some(sequence_id);
+        state.sequence = Some(sequence.clone());
+        state.sequences.push(sequence);
+
+        state
+            .dispatch_action(sequence_set_active_default_action())
+            .expect("set active default sequence");
+
+        assert_eq!(state.default_sequence_id, Some(sequence_id));
     }
 
     #[test]
