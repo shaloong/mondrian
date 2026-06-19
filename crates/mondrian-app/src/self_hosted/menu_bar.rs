@@ -16,9 +16,12 @@ use crate::app::ui_actions::{
     app_shell_about_action, app_shell_import_media_dialog_action,
     app_shell_new_project_dialog_action, app_shell_open_project_dialog_action,
     app_shell_preferences_action, app_shell_quit_action, app_shell_save_project_as_dialog_action,
+    sequence_delete_action, sequence_duplicate_action, sequence_new_action,
     sequence_return_to_parent_action, sequence_set_active_default_action,
-    APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
+    sequence_switch_active_action, SequenceTargetPayload, APP_SHELL_IMPORT_MEDIA_DIALOG,
+    APP_SHELL_NAMESPACE, APP_SHELL_SAVE_PROJECT_AS_DIALOG, SEQUENCE_DELETE, SEQUENCE_DUPLICATE,
     SEQUENCE_NAMESPACE, SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT,
+    SEQUENCE_SWITCH_ACTIVE,
 };
 use crate::app::AppState;
 use crate::self_hosted::icons::AppIcon;
@@ -116,6 +119,11 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
             "Sequence",
             vec![
                 menu_item_with_icon(
+                    MenuItem::new("New Sequence", sequence_new_action()),
+                    AppIcon::PlusFilled,
+                ),
+                MenuItem::separator(),
+                menu_item_with_icon(
                     MenuItem::new(
                         "Return to Parent Sequence",
                         sequence_return_to_parent_action(),
@@ -177,6 +185,9 @@ pub fn default_menu_items_for_app_state(state: &AppState) -> Vec<(&'static str, 
     default_menu_items()
         .into_iter()
         .map(|(label, items)| {
+            if label == "Sequence" {
+                return (label, sequence_menu_items_for_app_state(state));
+            }
             (
                 label,
                 items
@@ -185,6 +196,89 @@ pub fn default_menu_items_for_app_state(state: &AppState) -> Vec<(&'static str, 
                     .collect(),
             )
         })
+        .collect()
+}
+
+fn sequence_menu_items_for_app_state(state: &AppState) -> Vec<MenuItem> {
+    let active_sequence_id = state.active_sequence_id;
+    let mut items = vec![
+        menu_item_with_icon(
+            MenuItem::new("New Sequence", sequence_new_action()),
+            AppIcon::PlusFilled,
+        ),
+        MenuItem::separator(),
+        menu_item_with_icon(
+            MenuItem::new(
+                "Return to Parent Sequence",
+                sequence_return_to_parent_action(),
+            ),
+            AppIcon::ArrowUp,
+        ),
+        menu_item_with_icon(
+            MenuItem::new(
+                "Set Active as Default",
+                sequence_set_active_default_action(),
+            ),
+            AppIcon::HomeFrameFilled,
+        ),
+    ];
+
+    if let Some(sequence_id) = active_sequence_id {
+        items.push(menu_item_with_icon(
+            MenuItem::new(
+                "Duplicate Active Sequence",
+                sequence_duplicate_action(SequenceTargetPayload { sequence_id }),
+            ),
+            AppIcon::Copy,
+        ));
+        items.push(menu_item_with_icon(
+            MenuItem::new(
+                "Delete Active Sequence",
+                sequence_delete_action(SequenceTargetPayload { sequence_id }),
+            ),
+            AppIcon::Trash,
+        ));
+    } else {
+        items.push(menu_item_with_icon(
+            MenuItem::new("Duplicate Active Sequence", Action::NoOp).disabled(),
+            AppIcon::Copy,
+        ));
+        items.push(menu_item_with_icon(
+            MenuItem::new("Delete Active Sequence", Action::NoOp).disabled(),
+            AppIcon::Trash,
+        ));
+    }
+
+    let sequences = state.export_sequences_snapshot();
+    if !sequences.is_empty() {
+        items.push(MenuItem::separator());
+        for sequence in sequences {
+            let is_active = Some(sequence.id) == active_sequence_id;
+            let is_default = Some(sequence.id) == state.default_sequence_id;
+            let mut label = sequence.name.clone();
+            if is_default {
+                label.push_str(" (Default)");
+            }
+            let icon = if is_active {
+                AppIcon::ArrowRight
+            } else {
+                AppIcon::Clock
+            };
+            items.push(menu_item_with_icon(
+                MenuItem::new(
+                    label,
+                    sequence_switch_active_action(SequenceTargetPayload {
+                        sequence_id: sequence.id,
+                    }),
+                ),
+                icon,
+            ));
+        }
+    }
+
+    items
+        .into_iter()
+        .map(|item| apply_app_state_menu_availability(item, state))
         .collect()
 }
 
@@ -229,6 +323,21 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
         {
             state.active_sequence_id.is_some()
                 && state.default_sequence_id != state.active_sequence_id
+        }
+        Action::Custom { namespace, name, .. }
+            if namespace == SEQUENCE_NAMESPACE && name == SEQUENCE_DUPLICATE =>
+        {
+            state.active_sequence_id.is_some()
+        }
+        Action::Custom { namespace, name, .. }
+            if namespace == SEQUENCE_NAMESPACE && name == SEQUENCE_DELETE =>
+        {
+            state.active_sequence_id.is_some() && state.export_sequences_snapshot().len() > 1
+        }
+        Action::Custom { namespace, name, .. }
+            if namespace == SEQUENCE_NAMESPACE && name == SEQUENCE_SWITCH_ACTIVE =>
+        {
+            state.active_sequence_id.is_some()
         }
         _ => true,
     }
@@ -550,6 +659,7 @@ mod tests {
             ("Edit", "Preferences..."),
             ("View", "Timeline"),
             ("View", "Effects"),
+            ("Sequence", "New Sequence"),
             ("Sequence", "Return to Parent Sequence"),
             ("Sequence", "Set Active as Default"),
             ("Workspace", "Audio"),
@@ -605,8 +715,11 @@ mod tests {
         assert!(!menu_item(&menu_items, "Edit", "Cut").enabled);
         assert!(!menu_item(&menu_items, "Edit", "Copy").enabled);
         assert!(!menu_item(&menu_items, "Edit", "Paste").enabled);
+        assert!(menu_item(&menu_items, "Sequence", "New Sequence").enabled);
         assert!(!menu_item(&menu_items, "Sequence", "Return to Parent Sequence").enabled);
         assert!(!menu_item(&menu_items, "Sequence", "Set Active as Default").enabled);
+        assert!(!menu_item(&menu_items, "Sequence", "Duplicate Active Sequence").enabled);
+        assert!(!menu_item(&menu_items, "Sequence", "Delete Active Sequence").enabled);
     }
 
     #[test]
@@ -622,6 +735,8 @@ mod tests {
         assert!(menu_item(&menu_items, "File", "Close Project").enabled);
         assert!(!menu_item(&menu_items, "Sequence", "Return to Parent Sequence").enabled);
         assert!(!menu_item(&menu_items, "Sequence", "Set Active as Default").enabled);
+        assert!(!menu_item(&menu_items, "Sequence", "Duplicate Active Sequence").enabled);
+        assert!(!menu_item(&menu_items, "Sequence", "Delete Active Sequence").enabled);
     }
 
     #[test]
@@ -640,11 +755,65 @@ mod tests {
         let menu_items = default_menu_items_for_app_state(&state);
         assert!(menu_item(&menu_items, "Sequence", "Return to Parent Sequence").enabled);
         assert!(menu_item(&menu_items, "Sequence", "Set Active as Default").enabled);
+        assert!(menu_item(&menu_items, "Sequence", "Duplicate Active Sequence").enabled);
+        assert!(menu_item(&menu_items, "Sequence", "Delete Active Sequence").enabled);
+        assert!(menu_item(&menu_items, "Sequence", "Child").enabled);
+        assert!(menu_item(&menu_items, "Sequence", "Parent (Default)").enabled);
 
         state.default_sequence_id = Some(child_id);
         let menu_items = default_menu_items_for_app_state(&state);
         assert!(menu_item(&menu_items, "Sequence", "Return to Parent Sequence").enabled);
         assert!(!menu_item(&menu_items, "Sequence", "Set Active as Default").enabled);
+    }
+
+    #[test]
+    fn app_state_menu_sequence_rows_emit_typed_sequence_actions() {
+        let mut state = AppState::new();
+        let first = Sequence::new("First");
+        let first_id = first.id;
+        let second = Sequence::new("Second");
+        let second_id = second.id;
+        state.sequence = Some(first.clone());
+        state.active_sequence_id = Some(first_id);
+        state.default_sequence_id = Some(first_id);
+        state.sequences.push(first);
+        state.sequences.push(second);
+
+        let menu_items = default_menu_items_for_app_state(&state);
+        let duplicate = menu_item(&menu_items, "Sequence", "Duplicate Active Sequence");
+        let delete = menu_item(&menu_items, "Sequence", "Delete Active Sequence");
+        let switch = menu_item(&menu_items, "Sequence", "Second");
+
+        match &duplicate.action {
+            Action::Custom { namespace, name, payload } => {
+                assert_eq!(namespace, SEQUENCE_NAMESPACE);
+                assert_eq!(name, SEQUENCE_DUPLICATE);
+                let payload: SequenceTargetPayload =
+                    serde_json::from_value(payload.clone()).expect("duplicate payload");
+                assert_eq!(payload.sequence_id, first_id);
+            }
+            other => panic!("expected sequence duplicate action, got {other:?}"),
+        }
+        match &delete.action {
+            Action::Custom { namespace, name, payload } => {
+                assert_eq!(namespace, SEQUENCE_NAMESPACE);
+                assert_eq!(name, SEQUENCE_DELETE);
+                let payload: SequenceTargetPayload =
+                    serde_json::from_value(payload.clone()).expect("delete payload");
+                assert_eq!(payload.sequence_id, first_id);
+            }
+            other => panic!("expected sequence delete action, got {other:?}"),
+        }
+        match &switch.action {
+            Action::Custom { namespace, name, payload } => {
+                assert_eq!(namespace, SEQUENCE_NAMESPACE);
+                assert_eq!(name, SEQUENCE_SWITCH_ACTIVE);
+                let payload: SequenceTargetPayload =
+                    serde_json::from_value(payload.clone()).expect("switch payload");
+                assert_eq!(payload.sequence_id, second_id);
+            }
+            other => panic!("expected sequence switch action, got {other:?}"),
+        }
     }
 
     #[test]

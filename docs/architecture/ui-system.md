@@ -747,10 +747,13 @@ the local `TimelineClipRef`, and the app adapter resolves that ref to
 navigation stack behavior.
 Top-level sequence navigation follows the same action boundary. The
 self-hosted Sequence menu emits `ui.sequence.return_to_parent` and
-`ui.sequence.set_active_default`; only `AppState` reads the active sequence,
-updates the navigation stack, or writes the project default sequence. Menu
-availability is derived from the current `AppState` snapshot so the UI does not
-offer a parent-return command when no nested sequence is open.
+`ui.sequence.set_active_default`, and sequence management rows emit
+`ui.sequence.new`, `switch_active`, `duplicate`, or `delete`; only `AppState`
+reads the active sequence, updates the navigation stack, switches sequence
+collections, duplicates/deletes sequences, or writes the project default
+sequence. Menu availability is derived from the current `AppState` snapshot so
+the UI does not offer a parent-return command when no nested sequence is open or
+a destructive delete command when only one sequence exists.
 Timeline clipboard context-menu entries use
 `TimelineEditCommand::CutSelection`, `CopySelection`, `PasteAtPlayhead`, and
 `DuplicateSelection`, then map to the existing app-level `Action::Cut`,

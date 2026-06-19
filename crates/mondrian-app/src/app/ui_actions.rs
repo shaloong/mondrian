@@ -126,6 +126,14 @@ pub const SEQUENCE_NAMESPACE: &str = "ui.sequence";
 pub const SEQUENCE_RETURN_TO_PARENT: &str = "return_to_parent";
 /// Action name for making the active sequence the project default sequence.
 pub const SEQUENCE_SET_ACTIVE_DEFAULT: &str = "set_active_default";
+/// Action name for creating a new sequence with product defaults.
+pub const SEQUENCE_NEW: &str = "new";
+/// Action name for switching the active sequence.
+pub const SEQUENCE_SWITCH_ACTIVE: &str = "switch_active";
+/// Action name for duplicating a sequence.
+pub const SEQUENCE_DUPLICATE: &str = "duplicate";
+/// Action name for deleting a sequence.
+pub const SEQUENCE_DELETE: &str = "delete";
 
 /// Custom action namespace for app-shell operations resolved by native adapters.
 pub const APP_SHELL_NAMESPACE: &str = "app.shell";
@@ -279,6 +287,13 @@ pub struct TimelineSetSelectedClipsEnabledPayload {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimelineOpenNestedSequencePayload {
     /// Nested sequence to make active.
+    pub sequence_id: SequenceId,
+}
+
+/// Target one project sequence from a self-hosted sequence menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SequenceTargetPayload {
+    /// Sequence to operate on.
     pub sequence_id: SequenceId,
 }
 
@@ -900,6 +915,26 @@ pub fn sequence_set_active_default_action() -> Action {
     custom_sequence_action(SEQUENCE_SET_ACTIVE_DEFAULT)
 }
 
+/// Build an action that creates a new sequence with product defaults.
+pub fn sequence_new_action() -> Action {
+    custom_sequence_action(SEQUENCE_NEW)
+}
+
+/// Build an action that switches the active sequence.
+pub fn sequence_switch_active_action(payload: SequenceTargetPayload) -> Action {
+    custom_sequence_action_with_payload(SEQUENCE_SWITCH_ACTIVE, payload)
+}
+
+/// Build an action that duplicates one sequence.
+pub fn sequence_duplicate_action(payload: SequenceTargetPayload) -> Action {
+    custom_sequence_action_with_payload(SEQUENCE_DUPLICATE, payload)
+}
+
+/// Build an action that deletes one sequence.
+pub fn sequence_delete_action(payload: SequenceTargetPayload) -> Action {
+    custom_sequence_action_with_payload(SEQUENCE_DELETE, payload)
+}
+
 /// Build an app-shell request for creating a new project.
 pub fn app_shell_new_project_dialog_action() -> Action {
     custom_app_shell_action(APP_SHELL_NEW_PROJECT_DIALOG)
@@ -1070,6 +1105,14 @@ fn custom_sequence_action(name: &'static str) -> Action {
         namespace: SEQUENCE_NAMESPACE.into(),
         name: name.into(),
         payload: serde_json::Value::Null,
+    }
+}
+
+fn custom_sequence_action_with_payload<T: Serialize>(name: &'static str, payload: T) -> Action {
+    Action::Custom {
+        namespace: SEQUENCE_NAMESPACE.into(),
+        name: name.into(),
+        payload: serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
     }
 }
 

@@ -22,23 +22,24 @@ use crate::app::ui_actions::{
     InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
     InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
     InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload,
-    ProjectRecoverFromAutosavePayload, TimelineAddTrackKind, TimelineAddTrackPayload,
-    TimelineDropAssetPayload, TimelineMoveClipPayload, TimelineMoveTrackPayload,
-    TimelineOpenNestedSequencePayload, TimelineSeekPayload, TimelineSelectClipPayload,
-    TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
-    TimelineTrackControlPayloadKind, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
-    TimelineTrimSelectedClipsToPlayheadPayload, ASSETS_CREATE_ADJUSTMENT_LAYER,
-    ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR, ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER,
-    ASSETS_DELETE_SELECTION, ASSETS_IMPORT_FILES, ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER,
-    ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG, ASSETS_RELINK_ASSET,
-    ASSETS_RENAME_ASSET, ASSETS_RENAME_FOLDER, ASSETS_SET_PROXY_MODE, EFFECTS_ADD_TO_CLIP,
-    EFFECTS_NAMESPACE, EXPORT_ENQUEUE, EXPORT_NAMESPACE, EXPORT_SET_DRAFT, INSPECTOR_NAMESPACE,
-    INSPECTOR_REMOVE_EFFECT, INSPECTOR_SELECT_EFFECT, INSPECTOR_SET_CLIP_CURVE,
-    INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY, INSPECTOR_SET_CLIP_TINT,
-    INSPECTOR_SET_CLIP_TRANSFORM_FIELD, INSPECTOR_SET_EFFECT_ENABLED,
-    INSPECTOR_SET_EFFECT_PROPERTY, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
-    PROJECT_RECOVER_FROM_AUTOSAVE, SEQUENCE_NAMESPACE, SEQUENCE_RETURN_TO_PARENT,
-    SEQUENCE_SET_ACTIVE_DEFAULT, TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET, TIMELINE_MOVE_CLIP,
+    ProjectRecoverFromAutosavePayload, SequenceTargetPayload, TimelineAddTrackKind,
+    TimelineAddTrackPayload, TimelineDropAssetPayload, TimelineMoveClipPayload,
+    TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload, TimelineSeekPayload,
+    TimelineSelectClipPayload, TimelineSetSelectedClipsEnabledPayload,
+    TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipsPayload,
+    TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
+    ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR,
+    ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_DELETE_SELECTION, ASSETS_IMPORT_FILES,
+    ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE,
+    ASSETS_PREPARE_DRAG, ASSETS_RELINK_ASSET, ASSETS_RENAME_ASSET, ASSETS_RENAME_FOLDER,
+    ASSETS_SET_PROXY_MODE, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, EXPORT_ENQUEUE,
+    EXPORT_NAMESPACE, EXPORT_SET_DRAFT, INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT,
+    INSPECTOR_SELECT_EFFECT, INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_CLIP_ENABLED,
+    INSPECTOR_SET_CLIP_OPACITY, INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD,
+    INSPECTOR_SET_EFFECT_ENABLED, INSPECTOR_SET_EFFECT_PROPERTY, PROJECT_CREATE_WITH_SETTINGS,
+    PROJECT_NAMESPACE, PROJECT_RECOVER_FROM_AUTOSAVE, SEQUENCE_DELETE, SEQUENCE_DUPLICATE,
+    SEQUENCE_NAMESPACE, SEQUENCE_NEW, SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT,
+    SEQUENCE_SWITCH_ACTIVE, TIMELINE_ADD_TRACK, TIMELINE_DROP_ASSET, TIMELINE_MOVE_CLIP,
     TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_SEEK,
     TIMELINE_SELECT_CLIP, TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL,
     TIMELINE_TRIM_CLIPS, TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD,
@@ -1463,9 +1464,14 @@ impl AppState {
     fn dispatch_sequence_ui_action(
         &mut self,
         name: &str,
-        _payload: serde_json::Value,
+        payload: serde_json::Value,
     ) -> Result<()> {
         match name {
+            SEQUENCE_NEW => {
+                let next = self.export_sequences_snapshot().len() + 1;
+                self.new_sequence(&format!("Sequence {next}"));
+                Ok(())
+            }
             SEQUENCE_RETURN_TO_PARENT => {
                 self.return_to_parent_sequence()?;
                 Ok(())
@@ -1477,6 +1483,28 @@ impl AppState {
                         reason: "当前没有活动序列".to_owned(),
                     })?;
                 self.set_default_sequence(sequence_id)
+            }
+            SEQUENCE_SWITCH_ACTIVE => {
+                let payload =
+                    parse_ui_payload::<SequenceTargetPayload>("sequence_ui_action", name, payload)?;
+                self.switch_active_sequence(payload.sequence_id)
+            }
+            SEQUENCE_DUPLICATE => {
+                let payload =
+                    parse_ui_payload::<SequenceTargetPayload>("sequence_ui_action", name, payload)?;
+                let source = self.sequence_by_id(payload.sequence_id).ok_or_else(|| {
+                    MondrianError::WorkflowStepFailed {
+                        step_id: "sequence_ui_action".to_owned(),
+                        reason: format!("序列不存在: {}", payload.sequence_id),
+                    }
+                })?;
+                let name = format!("{} Copy", source.name);
+                self.duplicate_sequence(payload.sequence_id, name).map(|_| ())
+            }
+            SEQUENCE_DELETE => {
+                let payload =
+                    parse_ui_payload::<SequenceTargetPayload>("sequence_ui_action", name, payload)?;
+                self.delete_sequence(payload.sequence_id)
             }
             _ => Err(unknown_ui_action_error("sequence_ui_action", name)),
         }
@@ -2029,8 +2057,9 @@ mod tests {
         inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
         inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
         inspector_set_effect_property_action, project_create_with_settings_action,
-        project_recover_from_autosave_action, sequence_return_to_parent_action,
-        sequence_set_active_default_action, timeline_add_track_action, timeline_drop_asset_action,
+        project_recover_from_autosave_action, sequence_delete_action, sequence_duplicate_action,
+        sequence_new_action, sequence_return_to_parent_action, sequence_set_active_default_action,
+        sequence_switch_active_action, timeline_add_track_action, timeline_drop_asset_action,
         timeline_move_clip_action, timeline_move_track_action,
         timeline_open_nested_sequence_action, timeline_seek_action, timeline_select_clip_action,
         timeline_set_selected_clips_enabled_action, timeline_set_track_control_action,
@@ -2046,11 +2075,11 @@ mod tests {
         InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
         InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
         InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload,
-        ProjectRecoverFromAutosavePayload, TimelineAddTrackKind, TimelineAddTrackPayload,
-        TimelineDropAssetPayload, TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
-        TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
-        TimelineTrackControlPayloadKind, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
-        TimelineTrimSelectedClipsToPlayheadPayload,
+        ProjectRecoverFromAutosavePayload, SequenceTargetPayload, TimelineAddTrackKind,
+        TimelineAddTrackPayload, TimelineDropAssetPayload, TimelineMoveTrackPayload,
+        TimelineOpenNestedSequencePayload, TimelineSetSelectedClipsEnabledPayload,
+        TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipsPayload,
+        TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
     };
     use mondrian_assets::AssetLibrary;
     use mondrian_core::types::{AssetId, EffectId, MaskId, TimeCode, TrackId};
@@ -2359,6 +2388,98 @@ mod tests {
             .expect("set active default sequence");
 
         assert_eq!(state.default_sequence_id, Some(sequence_id));
+    }
+
+    #[test]
+    fn dispatch_sequence_ui_creates_new_sequence() {
+        let mut state = AppState::new();
+
+        state.dispatch_action(sequence_new_action()).expect("create sequence");
+
+        assert_eq!(state.sequences.len(), 1);
+        assert_eq!(
+            state.sequence.as_ref().map(|sequence| sequence.name.as_str()),
+            Some("Sequence 1")
+        );
+        assert_eq!(
+            state.active_sequence_id,
+            state.sequence.as_ref().map(|sequence| sequence.id)
+        );
+    }
+
+    #[test]
+    fn dispatch_sequence_ui_switches_active_sequence() {
+        let mut state = AppState::new();
+        let first = Sequence::new("first");
+        let second = Sequence::new("second");
+        let second_id = second.id;
+        state.active_sequence_id = Some(first.id);
+        state.sequence = Some(first.clone());
+        state.sequences.push(first);
+        state.sequences.push(second);
+
+        state
+            .dispatch_action(sequence_switch_active_action(SequenceTargetPayload {
+                sequence_id: second_id,
+            }))
+            .expect("switch sequence");
+
+        assert_eq!(state.active_sequence_id, Some(second_id));
+        assert_eq!(
+            state.sequence.as_ref().map(|sequence| sequence.name.as_str()),
+            Some("second")
+        );
+    }
+
+    #[test]
+    fn dispatch_sequence_ui_duplicates_sequence_and_activates_copy() {
+        let mut state = AppState::new();
+        let source = Sequence::new("source");
+        let source_id = source.id;
+        state.active_sequence_id = Some(source_id);
+        state.sequence = Some(source.clone());
+        state.sequences.push(source);
+
+        state
+            .dispatch_action(sequence_duplicate_action(SequenceTargetPayload {
+                sequence_id: source_id,
+            }))
+            .expect("duplicate sequence");
+
+        assert_eq!(state.sequences.len(), 2);
+        assert_ne!(state.active_sequence_id, Some(source_id));
+        assert_eq!(
+            state.sequence.as_ref().map(|sequence| sequence.name.as_str()),
+            Some("source Copy")
+        );
+    }
+
+    #[test]
+    fn dispatch_sequence_ui_deletes_sequence_and_keeps_fallback_active() {
+        let mut state = AppState::new();
+        let first = Sequence::new("first");
+        let first_id = first.id;
+        let second = Sequence::new("second");
+        let second_id = second.id;
+        state.active_sequence_id = Some(second_id);
+        state.default_sequence_id = Some(second_id);
+        state.sequence = Some(second.clone());
+        state.sequences.push(first);
+        state.sequences.push(second);
+
+        state
+            .dispatch_action(sequence_delete_action(SequenceTargetPayload {
+                sequence_id: second_id,
+            }))
+            .expect("delete sequence");
+
+        assert_eq!(state.sequences.len(), 1);
+        assert_eq!(state.active_sequence_id, Some(first_id));
+        assert_eq!(state.default_sequence_id, Some(first_id));
+        assert_eq!(
+            state.sequence.as_ref().map(|sequence| sequence.name.as_str()),
+            Some("first")
+        );
     }
 
     #[test]
