@@ -1301,9 +1301,12 @@ a stable raster-image key to the renderer. Raster cache dimensions may be
 integer or supersampled, but the draw command keeps the original fitted subpixel
 bounds so resize, scroll, and DPI scaling do not introduce pixel-snap jitter.
 Supersampling prioritizes small-icon quality up to 4x and steps down only when
-the generated bitmap would exceed the 512px per-edge raster icon budget, so
-common SVG controls get smoother diagonal and curve coverage without letting one
-oversized SVG consume a disproportionate slice of the shared 2048px image atlas.
+the generated bitmap would exceed the 1024px per-edge raster icon budget, so
+common SVG controls and large empty-state glyphs get smoother diagonal and curve
+coverage without letting oversized illustrations consume a disproportionate
+slice of the shared 2048px image atlas.
+Icons above that budget fall back to lyon-tessellated triangles; this is a
+capacity guard, not the normal visual-quality path.
 Larger bounds may fall back to the lyon mesh path.
 Text buttons that need command glyphs use the same optional leading
 `VectorIcon` path, so icon-only and icon-plus-label controls share parsing,

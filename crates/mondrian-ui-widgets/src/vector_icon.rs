@@ -27,10 +27,10 @@ const TESSELLATION_TOLERANCE: f32 = 0.08;
 /// Largest SVG icon edge rasterized into the renderer image atlas.
 ///
 /// The UI image atlas is currently 2048x2048 with transparent padding around
-/// each allocation. 512px keeps designer-authored icons and medium empty-state
-/// glyphs on the browser-like resvg/tiny-skia path while still preventing a
-/// single oversized SVG from consuming a disproportionate atlas row.
-const MAX_RASTER_ICON_SIZE: u32 = 512;
+/// each allocation. 1024px keeps large designer-authored empty-state glyphs on
+/// the browser-like resvg/tiny-skia path while still preventing very large
+/// illustrations from monopolizing the atlas.
+const MAX_RASTER_ICON_SIZE: u32 = 1024;
 /// Maximum quality multiplier for small SVG icon rasters.
 ///
 /// The supersampled bitmap is cached once in the renderer image atlas and drawn
@@ -643,8 +643,9 @@ mod tests {
     fn raster_supersample_scale_prioritizes_small_icon_quality() {
         assert_eq!(raster_supersample_scale(16, 16), 4);
         assert_eq!(raster_supersample_scale(128, 128), 4);
-        assert_eq!(raster_supersample_scale(256, 256), 2);
-        assert_eq!(raster_supersample_scale(512, 512), 1);
+        assert_eq!(raster_supersample_scale(256, 256), 4);
+        assert_eq!(raster_supersample_scale(512, 512), 2);
+        assert_eq!(raster_supersample_scale(1024, 1024), 1);
     }
 
     #[test]
@@ -752,7 +753,7 @@ mod tests {
     }
 
     #[test]
-    fn falls_back_to_tessellated_triangles_for_oversized_icon_bounds() {
+    fn large_svg_icons_stay_on_raster_path_for_smooth_edges() {
         let icon = VectorIcon::from_svg_str(
             r#"<svg viewBox="0 0 24 24"><path d="M4 4L20 4L12 20Z" fill="black"/></svg>"#,
         )
@@ -763,6 +764,25 @@ mod tests {
         icon.paint(
             &mut ctx,
             Rect::new(0.0, 0.0, 1024.0, 1024.0),
+            Color::from_hex(0xFFFFFF),
+        );
+
+        assert_eq!(recorder.raster_images, 1);
+        assert_eq!(recorder.triangles, 0);
+    }
+
+    #[test]
+    fn falls_back_to_tessellated_triangles_for_oversized_icon_bounds() {
+        let icon = VectorIcon::from_svg_str(
+            r#"<svg viewBox="0 0 24 24"><path d="M4 4L20 4L12 20Z" fill="black"/></svg>"#,
+        )
+        .expect("icon");
+        let mut recorder = PaintRecorder::default();
+        let mut ctx = paint_ctx(&mut recorder);
+
+        icon.paint(
+            &mut ctx,
+            Rect::new(0.0, 0.0, 1025.0, 1025.0),
             Color::from_hex(0xFFFFFF),
         );
 
