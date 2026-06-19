@@ -808,7 +808,7 @@ fn slot_content_for_tab(kind: PanelKind, tab_index: usize) -> Box<dyn Widget> {
             _ => Box::new(demo_node_graph_panel()),
         },
         PanelKind::Effects => match tab_index {
-            0 => Box::new(GalleryWidget::new()),
+            0 => Box::new(ScrollView::new(Some(Box::new(GalleryWidget::new())))),
             1 => Box::new(TextDiagnosticWidget::new()),
             _ => Box::new(ShapePanelWidget::new()),
         },
@@ -1865,5 +1865,15 @@ mod gallery_tests {
 
         assert_eq!(scroll_targets, vec![8]);
         assert_eq!(list_targets, vec![7]);
+    }
+
+    #[test]
+    fn effects_gallery_tab_is_hosted_in_outer_scroll_view() {
+        let widget = slot_content_for_tab(PanelKind::Effects, 0);
+
+        assert!(
+            widget.as_any().and_then(|any| any.downcast_ref::<ScrollView>()).is_some(),
+            "component gallery must remain reachable in compact dock panels"
+        );
     }
 }

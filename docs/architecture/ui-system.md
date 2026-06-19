@@ -606,6 +606,10 @@ events. Directly routed events, compound-widget delegation, and unit tests must
 therefore obey the same clipping rule as tree hit testing: normal child content
 outside the viewport is inert, while open child overlays may still receive
 overlay-routed input.
+Nested scroll surfaces use child-first wheel routing. A `ScrollView` forwards
+wheel input to the hit child before changing its own offset; only ignored wheel
+events scroll the parent. This matches desktop editor behavior for scrollable
+lists, dropdowns, and diagnostic panels embedded inside a larger scroll surface.
 
 Renderer clip state is hierarchical. When a child widget pushes its own text or
 content clip inside a `ScrollView`, the renderer intersects that child clip with

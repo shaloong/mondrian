@@ -606,6 +606,13 @@ impl Widget for ScrollView {
                     }
                     return EventResult::Ignored;
                 }
+                if self.should_forward_pointer_to_child(*position) {
+                    if let Some(ref mut child) = self.child {
+                        if child.event(event, ctx) == EventResult::Handled {
+                            return EventResult::Handled;
+                        }
+                    }
+                }
                 let changed = if modifiers.shift {
                     self.set_scroll_x(self.scroll_offset.x + *delta)
                 } else {
@@ -853,6 +860,41 @@ mod tests {
 
         fn hit_test(&self, _point: Point) -> bool {
             false
+        }
+    }
+
+    struct WheelChild {
+        id: WidgetId,
+        preferred: Size,
+        handled: bool,
+        wheel_positions: Rc<RefCell<Vec<Point>>>,
+    }
+
+    impl Widget for WheelChild {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+
+        fn measure(&self, _constraint: LayoutConstraint) -> Size {
+            self.preferred
+        }
+
+        fn layout(&mut self, _bounds: Rect) {}
+
+        fn event(&mut self, event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+            if let UiEvent::MouseWheel { position, .. } = event {
+                self.wheel_positions.borrow_mut().push(*position);
+                if self.handled {
+                    return EventResult::Handled;
+                }
+            }
+            EventResult::Ignored
+        }
+
+        fn paint(&self, _ctx: &mut PaintContext) {}
+
+        fn hit_test(&self, _point: Point) -> bool {
+            true
         }
     }
 
@@ -1163,6 +1205,76 @@ mod tests {
                 modifiers: Modifiers::none(),
             },
             &mut ctx,
+        );
+        assert!(sv.scroll_offset().y > 0.0);
+    }
+
+    #[test]
+    fn scroll_view_routes_wheel_to_child_before_scrolling_self() {
+        let wheel_positions = Rc::new(RefCell::new(Vec::new()));
+        let child = WheelChild {
+            id: WidgetId::new(),
+            preferred: Size::new(100.0, 800.0),
+            handled: true,
+            wheel_positions: Rc::clone(&wheel_positions),
+        };
+        let mut sv = ScrollView::new(Some(Box::new(child)));
+        sv.layout(Rect::new(0.0, 0.0, 100.0, 100.0));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let dispatch = |_| {};
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch);
+
+        let result = sv.event(
+            &UiEvent::MouseWheel {
+                delta: 40.0,
+                position: Point::new(20.0, 20.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(
+            wheel_positions.borrow().as_slice(),
+            &[Point::new(20.0, 20.0)]
+        );
+        assert_eq!(sv.scroll_offset().y, 0.0);
+    }
+
+    #[test]
+    fn scroll_view_scrolls_self_when_child_ignores_wheel() {
+        let wheel_positions = Rc::new(RefCell::new(Vec::new()));
+        let child = WheelChild {
+            id: WidgetId::new(),
+            preferred: Size::new(100.0, 800.0),
+            handled: false,
+            wheel_positions: Rc::clone(&wheel_positions),
+        };
+        let mut sv = ScrollView::new(Some(Box::new(child)));
+        sv.layout(Rect::new(0.0, 0.0, 100.0, 100.0));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let dispatch = |_| {};
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch);
+
+        let result = sv.event(
+            &UiEvent::MouseWheel {
+                delta: 40.0,
+                position: Point::new(20.0, 20.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(
+            wheel_positions.borrow().as_slice(),
+            &[Point::new(20.0, 20.0)]
         );
         assert!(sv.scroll_offset().y > 0.0);
     }
