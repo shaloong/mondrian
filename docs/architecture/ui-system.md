@@ -1067,6 +1067,10 @@ for a selection context menu. The self-hosted Assets adapter maps that menu to
 `ui.assets.delete_selection`, so bulk deletion keeps timeline cleanup, asset
 events, one library reload, project save, and status reporting in `AppState`
 rather than dispatching a burst of widget-owned single-item commands.
+Focused asset grids route Delete/Backspace through the same selection-menu
+action factory rather than the global timeline-oriented `Action::DeleteSelection`,
+so keyboard deletion and right-click deletion stay on the same typed asset
+payload path.
 Asset and folder cards can be dragged within the asset browser. Dropping an
 asset on a folder card emits `ui.assets.move_asset` with that folder as the
 target; dropping a folder on another folder emits `ui.assets.move_folder`.

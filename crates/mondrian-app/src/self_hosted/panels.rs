@@ -4754,6 +4754,62 @@ mod tests {
     }
 
     #[test]
+    fn assets_panel_delete_key_dispatches_delete_selection() {
+        let root = unique_temp_dir("asset-panel-delete-selection-key");
+        let library = AssetLibrary::open(root.clone()).expect("open asset library");
+        let folder_id = library.create_folder("Rushes", None).expect("create folder");
+        let asset_id = library.create_solid_color_asset(Some("Temp Plate")).expect("create asset");
+        let mut state = AppState::new();
+        state.asset_library = Some(library);
+        let model = SelfHostedPanelModels::from_app_state(&state).assets;
+        let mut grid = asset_grid(&model);
+        grid.layout(Rect::new(0.0, 0.0, 520.0, 260.0));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let _ = grid.event(&UiEvent::FocusGained, &mut ctx);
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Delete, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        let actions = actions.borrow();
+        assert_eq!(actions.len(), 1);
+        let Action::Custom { namespace, name, payload } = &actions[0] else {
+            panic!("expected delete selection action");
+        };
+        assert_eq!(namespace, ASSETS_NAMESPACE);
+        assert_eq!(name, ASSETS_DELETE_SELECTION);
+        let payload: AssetsDeleteSelectionPayload =
+            serde_json::from_value(payload.clone()).expect("delete selection payload");
+        assert_eq!(payload.folder_ids, vec![folder_id]);
+        assert_eq!(payload.asset_ids, vec![asset_id]);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn demo_timeline_model_carries_stable_clip_identity() {
         let model = demo_timeline_model();
         let identity = model

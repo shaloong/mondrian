@@ -863,6 +863,20 @@ impl AssetGrid {
         EventResult::Handled
     }
 
+    fn dispatch_selection_menu_action(&self, ctx: &mut EventContext) -> EventResult {
+        for item in self.selection_context_menu_items() {
+            if item.is_activatable()
+                && item.local_command.is_none()
+                && !matches!(item.action, Action::NoOp)
+            {
+                (ctx.dispatch)(item.action);
+                ctx.request_repaint();
+                return EventResult::Handled;
+            }
+        }
+        EventResult::Ignored
+    }
+
     fn dispatch_select(&self, index: usize, ctx: &mut EventContext) {
         let Some(item) = self.items.get(index) else {
             return;
@@ -1541,6 +1555,12 @@ impl Widget for AssetGrid {
                     return self.start_rename(index, ctx);
                 }
                 return EventResult::Ignored;
+            }
+            UiEvent::KeyDown {
+                key: KeyCode::Delete | KeyCode::Backspace,
+                modifiers,
+            } if self.focused && !modifiers.ctrl && !modifiers.alt && !modifiers.meta => {
+                return self.dispatch_selection_menu_action(ctx);
             }
             UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, .. } if self.focused => {
                 return self.activate_selected(ctx);
@@ -2935,6 +2955,89 @@ mod tests {
         );
 
         assert_eq!(actions.borrow().as_slice(), &[Action::DeleteSelection]);
+    }
+
+    #[test]
+    fn delete_key_dispatches_selection_context_action() {
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![item("asset-a", "Asset A"), item("asset-b", "Asset B")],
+        )
+        .with_selection_context_menu(|indices, _items| {
+            assert_eq!(indices, &[0, 1]);
+            vec![
+                MenuItem::separator(),
+                MenuItem::new("Unavailable", Action::DeselectAll).disabled(),
+                MenuItem::new("Delete selected", Action::DeleteSelection),
+            ]
+        });
+        grid.layout(Rect::new(0.0, 0.0, 420.0, 260.0));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let _ = grid.event(&UiEvent::FocusGained, &mut ctx);
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Delete, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(actions.borrow().as_slice(), &[Action::DeleteSelection]);
+    }
+
+    #[test]
+    fn backspace_key_without_selection_action_is_ignored() {
+        let mut grid = AssetGrid::new("Assets", vec![item("asset-a", "Asset A")])
+            .with_selection_context_menu(|_, _| vec![MenuItem::separator()]);
+        grid.layout(Rect::new(0.0, 0.0, 320.0, 220.0));
+        grid.set_selected(Some(0));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let _ = grid.event(&UiEvent::FocusGained, &mut ctx);
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown {
+                    key: KeyCode::Backspace,
+                    modifiers: Modifiers::none()
+                },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+
+        assert!(actions.borrow().is_empty());
     }
 
     #[test]
