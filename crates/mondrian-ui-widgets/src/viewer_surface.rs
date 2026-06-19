@@ -64,6 +64,9 @@ pub enum ViewerControl {
 /// Maps a viewer chrome control to an editor action.
 pub type ViewerControlAction = dyn Fn(ViewerControl) -> Action;
 
+/// Maps a viewer preview-quality chip activation to an editor action.
+pub type ViewerPreviewQualityAction = dyn Fn() -> Action;
+
 /// Preview viewer surface.
 pub struct ViewerSurface {
     id: WidgetId,
@@ -85,7 +88,10 @@ pub struct ViewerSurface {
     empty_message: Option<String>,
     hovered_control: Option<ViewerControl>,
     pressed_control: Option<ViewerControl>,
+    hovered_preview_quality: bool,
+    pressed_preview_quality: bool,
     on_control: Option<Box<ViewerControlAction>>,
+    on_preview_quality: Option<Box<ViewerPreviewQualityAction>>,
 }
 
 impl ViewerSurface {
@@ -111,7 +117,10 @@ impl ViewerSurface {
             empty_message: None,
             hovered_control: None,
             pressed_control: None,
+            hovered_preview_quality: false,
+            pressed_preview_quality: false,
             on_control: None,
+            on_preview_quality: None,
         }
     }
 
@@ -198,6 +207,12 @@ impl ViewerSurface {
     /// Set a custom action mapper for viewer controls.
     pub fn on_control(mut self, action: impl Fn(ViewerControl) -> Action + 'static) -> Self {
         self.on_control = Some(Box::new(action));
+        self
+    }
+
+    /// Set a custom action for clicking the preview-quality chip.
+    pub fn on_preview_quality(mut self, action: impl Fn() -> Action + 'static) -> Self {
+        self.on_preview_quality = Some(Box::new(action));
         self
     }
 
@@ -293,12 +308,59 @@ impl ViewerSurface {
             .find(|control| self.control_rect(*control).contains(point))
     }
 
+    fn preview_quality_rect(&self) -> Rect {
+        let control_strip = self.control_strip_rect();
+        let left = control_strip.x + control_strip.width + 12.0;
+        let right = self.bounds.x + self.bounds.width - 14.0;
+        let available = right - left;
+        if available < 48.0 {
+            return Rect::ZERO;
+        }
+        let wanted =
+            (self.preview_quality_label.chars().count() as f32 * 7.0 + 18.0).clamp(48.0, 82.0);
+        let width = wanted.min(available);
+        Rect::new(
+            right - width,
+            self.bounds.y + self.bounds.height - 29.0,
+            width,
+            22.0,
+        )
+    }
+
+    fn zoom_rect(&self) -> Rect {
+        let quality = self.preview_quality_rect();
+        if quality.width <= 0.0 {
+            return Rect::ZERO;
+        }
+        let control_strip = self.control_strip_rect();
+        let left = control_strip.x + control_strip.width + 12.0;
+        let right = quality.x - 6.0;
+        let available = right - left;
+        if available < 42.0 {
+            return Rect::ZERO;
+        }
+        let wanted = (self.zoom_label.chars().count() as f32 * 7.0 + 18.0).clamp(42.0, 74.0);
+        let width = wanted.min(available);
+        Rect::new(right - width, quality.y, width, quality.height)
+    }
+
+    fn preview_quality_at(&self, point: Point) -> bool {
+        let rect = self.preview_quality_rect();
+        rect.width > 0.0 && rect.height > 0.0 && rect.contains(point)
+    }
+
     fn dispatch_control(&self, control: ViewerControl, ctx: &mut EventContext) {
         let action = self
             .on_control
             .as_ref()
             .map(|mapper| mapper(control))
             .unwrap_or_else(|| default_viewer_control_action(control));
+        (ctx.dispatch)(action);
+    }
+
+    fn dispatch_preview_quality(&self, ctx: &mut EventContext) {
+        let action =
+            self.on_preview_quality.as_ref().map(|mapper| mapper()).unwrap_or(Action::NoOp);
         (ctx.dispatch)(action);
     }
 }
@@ -320,23 +382,39 @@ impl Widget for ViewerSurface {
         if !self.enabled {
             self.hovered_control = None;
             self.pressed_control = None;
+            self.hovered_preview_quality = false;
+            self.pressed_preview_quality = false;
             return EventResult::Ignored;
         }
 
         match event {
             UiEvent::MouseMove { position, .. } => {
                 let hovered = self.control_at(*position);
-                if hovered != self.hovered_control {
+                let hovered_preview_quality = self.preview_quality_at(*position);
+                if hovered != self.hovered_control
+                    || hovered_preview_quality != self.hovered_preview_quality
+                {
                     self.hovered_control = hovered;
+                    self.hovered_preview_quality = hovered_preview_quality;
                     ctx.request_repaint();
                     return EventResult::Handled;
                 }
-                hovered.map_or(EventResult::Ignored, |_| EventResult::Handled)
+                if hovered.is_some() || hovered_preview_quality {
+                    EventResult::Handled
+                } else {
+                    EventResult::Ignored
+                }
             }
             UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
                 if let Some(control) = self.control_at(*position) {
                     self.pressed_control = Some(control);
                     self.hovered_control = Some(control);
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
+                if self.preview_quality_at(*position) {
+                    self.pressed_preview_quality = true;
+                    self.hovered_preview_quality = true;
                     ctx.request_repaint();
                     return EventResult::Handled;
                 }
@@ -353,11 +431,23 @@ impl Widget for ViewerSurface {
                     ctx.request_repaint();
                     return EventResult::Handled;
                 }
+                let pressed_preview_quality = self.pressed_preview_quality;
+                self.pressed_preview_quality = false;
+                self.hovered_preview_quality = self.preview_quality_at(*position);
+                if pressed_preview_quality {
+                    if self.hovered_preview_quality {
+                        self.dispatch_preview_quality(ctx);
+                    }
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
                 EventResult::Ignored
             }
             UiEvent::FocusLost => {
                 self.hovered_control = None;
                 self.pressed_control = None;
+                self.hovered_preview_quality = false;
+                self.pressed_preview_quality = false;
                 EventResult::Handled
             }
             _ => EventResult::Ignored,
@@ -467,17 +557,13 @@ impl Widget for ViewerSurface {
             colors.muted_foreground,
         );
 
-        let right_chrome = format!("{}  {}", self.zoom_label, self.preview_quality_label);
-        ctx.encoder.draw_text_box(
-            &right_chrome,
-            typography.small.font_size,
-            Point::new(
-                control_strip.x + control_strip.width + 14.0,
-                self.bounds.y + self.bounds.height - 24.0,
-            ),
-            (self.bounds.x + self.bounds.width - control_strip.x - control_strip.width - 28.0)
-                .max(1.0),
-            colors.muted_foreground,
+        self.paint_chrome_chip(ctx, self.zoom_rect(), &self.zoom_label, false, false);
+        self.paint_chrome_chip(
+            ctx,
+            self.preview_quality_rect(),
+            &self.preview_quality_label,
+            self.hovered_preview_quality,
+            self.pressed_preview_quality,
         );
     }
 
@@ -559,6 +645,46 @@ impl ViewerSurface {
                 );
             }
         }
+    }
+
+    fn paint_chrome_chip(
+        &self,
+        ctx: &mut PaintContext,
+        rect: Rect,
+        label: &str,
+        hovered: bool,
+        pressed: bool,
+    ) {
+        if rect.width <= 0.0 || rect.height <= 0.0 || label.is_empty() {
+            return;
+        }
+        let colors = &ctx.theme.colors;
+        let fill = if pressed {
+            colors.muted
+        } else if hovered {
+            colors.accent
+        } else {
+            colors.card
+        };
+        ctx.encoder.draw_rect(
+            rect,
+            soft_border(colors.border),
+            ctx.theme.spacing.radius_sm,
+        );
+        ctx.encoder.draw_rect(
+            rect.inset(1.0, 1.0),
+            fill,
+            ctx.theme.spacing.radius_sm - 1.0,
+        );
+        ctx.push_clip(rect.inset(4.0, 0.0));
+        ctx.encoder.draw_text_box(
+            label,
+            ctx.theme.typography.small.font_size,
+            Point::new(rect.x + 8.0, rect.y + 4.0),
+            (rect.width - 16.0).max(1.0),
+            colors.muted_foreground,
+        );
+        ctx.pop_clip();
     }
 }
 
@@ -947,6 +1073,46 @@ mod tests {
             });
         viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
         let position = viewer.control_rect(ViewerControl::MarkIn).center();
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        assert_eq!(
+            viewer.event(
+                &UiEvent::MouseDown {
+                    position,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            viewer.event(
+                &UiEvent::MouseUp {
+                    position,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(actions.borrow().as_slice(), &[Action::SaveProject]);
+    }
+
+    #[test]
+    fn preview_quality_chip_dispatches_custom_action() {
+        let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080)
+            .with_preview_quality_label("50%")
+            .on_preview_quality(|| Action::SaveProject);
+        viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
+        let position = viewer.preview_quality_rect().center();
         let actions = RefCell::new(Vec::<Action>::new());
         let dispatch = |action| actions.borrow_mut().push(action);
         let mut focus = DummyFocus;

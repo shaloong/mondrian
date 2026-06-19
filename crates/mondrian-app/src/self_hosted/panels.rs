@@ -62,24 +62,25 @@ use crate::app::ui_actions::{
     timeline_select_clip_action, timeline_set_in_out_point_action,
     timeline_set_selected_clips_enabled_action, timeline_set_track_control_action,
     timeline_trim_clips_action, timeline_trim_selected_clips_to_playhead_action,
-    AppShellRelinkAssetDialogPayload, AppShellRevealInFileManagerPayload, AssetsCreateAssetPayload,
-    AssetsCreateFolderPayload, AssetsDeleteAssetPayload, AssetsDeleteFolderPayload,
-    AssetsDeleteSelectionPayload, AssetsImportFilesPayload, AssetsMoveAssetPayload,
-    AssetsMoveFolderPayload, AssetsMoveSelectionPayload, AssetsOpenFolderPayload,
-    AssetsPrepareDragPayload, AssetsRenameAssetPayload, AssetsRenameFolderPayload,
-    AssetsSetProxyModePayload, EffectsAddToClipPayload, ExportDraftUpdatePayload,
-    ExportEnqueuePayload, ExportJobTargetPayload, ExportOutputDialogPayload,
-    ImportMediaDialogPayload, InspectorClipRefPayload, InspectorClipTransformField,
-    InspectorCurvePointPayload, InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
-    InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
-    InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
-    InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload, TimelineAddTrackKind,
-    TimelineAddTrackPayload, TimelineDropAssetPayload, TimelineInOutPointPayloadKind,
-    TimelineMoveClipPayload, TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
-    TimelineSelectClipPayload, TimelineSetInOutPointPayload,
-    TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
-    TimelineTrackControlPayloadKind, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
-    TimelineTrimSelectedClipsToPlayheadPayload,
+    viewer_set_preview_resolution_scale_action, AppShellRelinkAssetDialogPayload,
+    AppShellRevealInFileManagerPayload, AssetsCreateAssetPayload, AssetsCreateFolderPayload,
+    AssetsDeleteAssetPayload, AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload,
+    AssetsImportFilesPayload, AssetsMoveAssetPayload, AssetsMoveFolderPayload,
+    AssetsMoveSelectionPayload, AssetsOpenFolderPayload, AssetsPrepareDragPayload,
+    AssetsRenameAssetPayload, AssetsRenameFolderPayload, AssetsSetProxyModePayload,
+    EffectsAddToClipPayload, ExportDraftUpdatePayload, ExportEnqueuePayload,
+    ExportJobTargetPayload, ExportOutputDialogPayload, ImportMediaDialogPayload,
+    InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
+    InspectorRemoveEffectPayload, InspectorSelectEffectPayload, InspectorSetClipCurvePayload,
+    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+    InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
+    InspectorSetEffectPropertyPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
+    TimelineDropAssetPayload, TimelineInOutPointPayloadKind, TimelineMoveClipPayload,
+    TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload, TimelineSelectClipPayload,
+    TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
+    TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipsPayload,
+    TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
+    ViewerSetPreviewResolutionScalePayload,
 };
 use crate::app::{AppState, SelectedClipRef};
 use crate::self_hosted::icons::AppIcon;
@@ -542,6 +543,7 @@ pub struct ViewerPanelModel {
     pub duration_label: String,
     pub zoom_label: String,
     pub preview_quality_label: String,
+    pub preview_resolution_scale: f32,
     pub width: u32,
     pub height: u32,
     pub playing: bool,
@@ -573,8 +575,9 @@ impl ViewerPanelModel {
         let duration_frame = sequence.total_duration().frame.max(0);
         let fps = sequence.settings.frame_rate.to_f64();
         let frame_image = preview.and_then(|preview| preview.viewer_frame_for_state(state));
-        let preview_quality_label =
-            viewer_preview_quality_label(sequence.settings.preview.resolution_scale);
+        let preview_resolution_scale =
+            normalize_preview_resolution_scale(sequence.settings.preview.resolution_scale);
+        let preview_quality_label = viewer_preview_quality_label(preview_resolution_scale);
 
         Self {
             title: sequence.name.clone(),
@@ -597,6 +600,7 @@ impl ViewerPanelModel {
             duration_label: format!("{duration_frame} frames"),
             zoom_label: "Fit".into(),
             preview_quality_label,
+            preview_resolution_scale,
             width: resolution.width,
             height: resolution.height,
             playing: state.is_playing(),
@@ -618,6 +622,7 @@ impl ViewerPanelModel {
             duration_label: String::new(),
             zoom_label: "Fit".into(),
             preview_quality_label: "Full".into(),
+            preview_resolution_scale: 1.0,
             width: 16,
             height: 9,
             playing: false,
@@ -634,6 +639,19 @@ fn viewer_preview_quality_label(scale: f32) -> String {
         "Full".into()
     } else {
         preview_scale_percent_label(scale)
+    }
+}
+
+fn next_viewer_preview_resolution_scale(scale: f32) -> f32 {
+    let scale = normalize_preview_resolution_scale(scale);
+    if scale >= 1.0 {
+        0.5
+    } else if scale >= 0.5 {
+        0.25
+    } else if scale >= 0.25 {
+        0.125
+    } else {
+        1.0
     }
 }
 
@@ -1432,6 +1450,7 @@ fn panel_content_for_slot(kind: PanelKind, models: &SelfHostedPanelModels) -> Bo
 }
 
 fn viewer_panel(model: &ViewerPanelModel) -> ViewerSurface {
+    let next_preview_scale = next_viewer_preview_resolution_scale(model.preview_resolution_scale);
     let surface = ViewerSurface::new(model.title.clone(), model.width, model.height)
         .with_status(model.status.clone())
         .with_status_tone(model.status_tone)
@@ -1443,7 +1462,12 @@ fn viewer_panel(model: &ViewerPanelModel) -> ViewerSurface {
         .with_preview_quality_label(model.preview_quality_label.clone())
         .playing(model.playing)
         .enabled(model.enabled)
-        .on_control(viewer_control_action);
+        .on_control(viewer_control_action)
+        .on_preview_quality(move || {
+            viewer_set_preview_resolution_scale_action(ViewerSetPreviewResolutionScalePayload {
+                scale: next_preview_scale,
+            })
+        });
     let surface = if let Some(message) = model.empty_message.clone() {
         surface.with_empty_message(message)
     } else {
@@ -5673,6 +5697,7 @@ mod tests {
         assert_eq!(frame.width, 320);
         assert_eq!(frame.height, 180);
         assert_eq!(models.viewer.preview_quality_label, "50%");
+        assert_eq!(models.viewer.preview_resolution_scale, 0.5);
     }
 
     #[test]
@@ -5685,6 +5710,7 @@ mod tests {
         let models = SelfHostedPanelModels::from_app_state(&state);
 
         assert_eq!(models.viewer.preview_quality_label, "Full");
+        assert_eq!(models.viewer.preview_resolution_scale, 1.0);
     }
 
     #[test]
@@ -5697,6 +5723,7 @@ mod tests {
         let models = SelfHostedPanelModels::from_app_state(&state);
 
         assert_eq!(models.viewer.preview_quality_label, "12.5%");
+        assert_eq!(models.viewer.preview_resolution_scale, 0.125);
     }
 
     #[test]

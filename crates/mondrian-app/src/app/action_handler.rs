@@ -29,13 +29,14 @@ use crate::app::ui_actions::{
     TimelineSelectClipPayload, TimelineSetInOutPointPayload,
     TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
     TimelineTrackControlPayloadKind, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
-    TimelineTrimSelectedClipsToPlayheadPayload, ASSETS_CREATE_ADJUSTMENT_LAYER,
-    ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR, ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER,
-    ASSETS_DELETE_SELECTION, ASSETS_IMPORT_FILES, ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER,
-    ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG, ASSETS_RELINK_ASSET,
-    ASSETS_RENAME_ASSET, ASSETS_RENAME_FOLDER, ASSETS_SET_PROXY_MODE, EFFECTS_ADD_TO_CLIP,
-    EFFECTS_NAMESPACE, EXPORT_CANCEL_JOB, EXPORT_CLEAR_COMPLETED, EXPORT_ENQUEUE, EXPORT_NAMESPACE,
-    EXPORT_SET_DRAFT, INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT, INSPECTOR_SELECT_EFFECT,
+    TimelineTrimSelectedClipsToPlayheadPayload, ViewerSetPreviewResolutionScalePayload,
+    ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR,
+    ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_DELETE_SELECTION, ASSETS_IMPORT_FILES,
+    ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE,
+    ASSETS_PREPARE_DRAG, ASSETS_RELINK_ASSET, ASSETS_RENAME_ASSET, ASSETS_RENAME_FOLDER,
+    ASSETS_SET_PROXY_MODE, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, EXPORT_CANCEL_JOB,
+    EXPORT_CLEAR_COMPLETED, EXPORT_ENQUEUE, EXPORT_NAMESPACE, EXPORT_SET_DRAFT,
+    INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT, INSPECTOR_SELECT_EFFECT,
     INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY,
     INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD, INSPECTOR_SET_EFFECT_ENABLED,
     INSPECTOR_SET_EFFECT_PROPERTY, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
@@ -45,7 +46,8 @@ use crate::app::ui_actions::{
     TIMELINE_DROP_ASSET, TIMELINE_MOVE_CLIP, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
     TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_SEEK, TIMELINE_SELECT_CLIP, TIMELINE_SET_IN_OUT_POINT,
     TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL, TIMELINE_TRIM_CLIPS,
-    TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD,
+    TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD, VIEWER_NAMESPACE,
+    VIEWER_SET_PREVIEW_RESOLUTION_SCALE,
 };
 use crate::app::{AppClipboardKind, AppState, ClipOverlapMode, SelectedClipRef};
 use glam::Vec2;
@@ -201,6 +203,9 @@ impl AppState {
             }
             Action::Custom { namespace, name, payload } if namespace == EXPORT_NAMESPACE => {
                 self.dispatch_export_ui_action(&name, payload)
+            }
+            Action::Custom { namespace, name, payload } if namespace == VIEWER_NAMESPACE => {
+                self.dispatch_viewer_ui_action(&name, payload)
             }
             Action::Custom { namespace, name, payload } if namespace == PROJECT_NAMESPACE => {
                 self.dispatch_project_ui_action(&name, payload)
@@ -1477,6 +1482,20 @@ impl AppState {
         }
     }
 
+    fn dispatch_viewer_ui_action(&mut self, name: &str, payload: serde_json::Value) -> Result<()> {
+        match name {
+            VIEWER_SET_PREVIEW_RESOLUTION_SCALE => {
+                let payload = parse_ui_payload::<ViewerSetPreviewResolutionScalePayload>(
+                    "viewer_ui_action",
+                    name,
+                    payload,
+                )?;
+                self.set_preview_resolution_scale_from_ui(payload.scale)
+            }
+            _ => Err(unknown_ui_action_error("viewer_ui_action", name)),
+        }
+    }
+
     fn dispatch_project_ui_action(&mut self, name: &str, payload: serde_json::Value) -> Result<()> {
         match name {
             PROJECT_CREATE_WITH_SETTINGS => {
@@ -1558,6 +1577,60 @@ impl AppState {
             }
             _ => Err(unknown_ui_action_error("sequence_ui_action", name)),
         }
+    }
+
+    fn set_preview_resolution_scale_from_ui(&mut self, scale: f32) -> Result<()> {
+        let scale = normalize_viewer_preview_resolution_scale(scale);
+        self.sync_current_sequence_into_collection();
+        let sequence_id = self
+            .active_sequence_id
+            .or_else(|| self.sequence.as_ref().map(|sequence| sequence.id))
+            .ok_or_else(|| MondrianError::WorkflowStepFailed {
+                step_id: "viewer_ui_action".to_string(),
+                reason: "当前无序列".to_string(),
+            })?;
+        let before = self
+            .sequences
+            .iter()
+            .find(|sequence| sequence.id == sequence_id)
+            .cloned()
+            .or_else(|| {
+                self.sequence.as_ref().filter(|sequence| sequence.id == sequence_id).cloned()
+            })
+            .ok_or_else(|| MondrianError::WorkflowStepFailed {
+                step_id: "viewer_ui_action".to_string(),
+                reason: format!("序列不存在: {sequence_id}"),
+            })?;
+
+        let current =
+            normalize_viewer_preview_resolution_scale(before.settings.preview.resolution_scale);
+        if (current - scale).abs() <= f32::EPSILON {
+            return Ok(());
+        }
+
+        let mut after = before.clone();
+        let mut settings = after.settings.clone();
+        settings.preview.resolution_scale = scale;
+        after.apply_settings_preserve_frames(settings)?;
+
+        if let Some(sequence) =
+            self.sequences.iter_mut().find(|sequence| sequence.id == sequence_id)
+        {
+            *sequence = after.clone();
+        }
+        if self.active_sequence_id == Some(sequence_id)
+            || self.sequence.as_ref().is_some_and(|sequence| sequence.id == sequence_id)
+        {
+            self.sequence = Some(after.clone());
+        }
+        self.record_sequence_snapshot_command("修改预览分辨率", before, after);
+        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
+        self.set_status_hint(
+            format!("预览分辨率：{}", preview_resolution_scale_label(scale)),
+            false,
+        );
+        let _ = self.save_project_file();
+        Ok(())
     }
 
     fn prepare_asset_drag_from_ui(&mut self, payload: AssetsPrepareDragPayload) -> Result<()> {
@@ -2153,6 +2226,23 @@ fn unknown_ui_action_error(step_prefix: &'static str, name: &str) -> MondrianErr
     }
 }
 
+fn normalize_viewer_preview_resolution_scale(scale: f32) -> f32 {
+    if scale.is_finite() {
+        scale.clamp(0.125, 1.0)
+    } else {
+        0.5
+    }
+}
+
+fn preview_resolution_scale_label(scale: f32) -> String {
+    let percent = normalize_viewer_preview_resolution_scale(scale) * 100.0;
+    if (percent.fract()).abs() <= f32::EPSILON {
+        format!("{}%", percent.round() as u32)
+    } else {
+        format!("{percent:.1}%")
+    }
+}
+
 fn missing_sequence_error(step_id: &'static str) -> MondrianError {
     MondrianError::WorkflowStepFailed {
         step_id: step_id.to_string(),
@@ -2212,24 +2302,25 @@ mod tests {
         timeline_select_clip_action, timeline_set_in_out_point_action,
         timeline_set_selected_clips_enabled_action, timeline_set_track_control_action,
         timeline_trim_clips_action, timeline_trim_selected_clips_to_playhead_action,
-        AssetsCreateAssetPayload, AssetsCreateFolderPayload, AssetsDeleteAssetPayload,
-        AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload, AssetsImportFilesPayload,
-        AssetsMoveAssetPayload, AssetsMoveFolderPayload, AssetsMoveSelectionPayload,
-        AssetsPrepareDragPayload, AssetsRelinkAssetPayload, AssetsRenameAssetPayload,
-        AssetsRenameFolderPayload, AssetsSetProxyModePayload, EffectsAddToClipPayload,
-        ExportDraftUpdatePayload, ExportEnqueuePayload, ExportJobTargetPayload,
-        InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
-        InspectorRemoveEffectPayload, InspectorSelectEffectPayload, InspectorSetClipCurvePayload,
-        InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
-        InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
-        InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload,
-        ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload, SequenceTargetPayload,
-        SequenceUpdateSettingsPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
-        TimelineDropAssetPayload, TimelineInOutPointPayloadKind, TimelineMoveTrackPayload,
-        TimelineOpenNestedSequencePayload, TimelineSetInOutPointPayload,
-        TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
-        TimelineTrackControlPayloadKind, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
-        TimelineTrimSelectedClipsToPlayheadPayload,
+        viewer_set_preview_resolution_scale_action, AssetsCreateAssetPayload,
+        AssetsCreateFolderPayload, AssetsDeleteAssetPayload, AssetsDeleteFolderPayload,
+        AssetsDeleteSelectionPayload, AssetsImportFilesPayload, AssetsMoveAssetPayload,
+        AssetsMoveFolderPayload, AssetsMoveSelectionPayload, AssetsPrepareDragPayload,
+        AssetsRelinkAssetPayload, AssetsRenameAssetPayload, AssetsRenameFolderPayload,
+        AssetsSetProxyModePayload, EffectsAddToClipPayload, ExportDraftUpdatePayload,
+        ExportEnqueuePayload, ExportJobTargetPayload, InspectorClipRefPayload,
+        InspectorClipTransformField, InspectorCurvePointPayload, InspectorRemoveEffectPayload,
+        InspectorSelectEffectPayload, InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
+        InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+        InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
+        InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload,
+        ProjectRecoverFromAutosavePayload, SequenceTargetPayload, SequenceUpdateSettingsPayload,
+        TimelineAddTrackKind, TimelineAddTrackPayload, TimelineDropAssetPayload,
+        TimelineInOutPointPayloadKind, TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
+        TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
+        TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipsPayload,
+        TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
+        ViewerSetPreviewResolutionScalePayload,
     };
     use mondrian_assets::AssetLibrary;
     use mondrian_core::types::{AssetId, EffectId, MaskId, TimeCode, TrackId};
@@ -2717,6 +2808,76 @@ mod tests {
         assert_eq!(active.name, "original");
         assert_eq!(active.settings, SequenceSettings::default());
         assert!(!state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_viewer_ui_updates_preview_scale_without_stopping_playback() {
+        let mut state = AppState::new();
+        let sequence = Sequence::new("preview");
+        let sequence_id = sequence.id;
+        state.active_sequence_id = Some(sequence_id);
+        state.sequence = Some(sequence.clone());
+        state.sequences.push(sequence);
+        state.play();
+
+        state
+            .dispatch_action(viewer_set_preview_resolution_scale_action(
+                ViewerSetPreviewResolutionScalePayload { scale: 0.25 },
+            ))
+            .expect("set preview scale");
+
+        assert_eq!(
+            state
+                .sequence
+                .as_ref()
+                .expect("active sequence")
+                .settings
+                .preview
+                .resolution_scale,
+            0.25
+        );
+        assert_eq!(state.sequences[0].settings.preview.resolution_scale, 0.25);
+        assert!(state.is_playing());
+        assert!(state.can_undo_action());
+
+        state.undo_timeline().expect("undo");
+        assert_eq!(
+            state
+                .sequence
+                .as_ref()
+                .expect("active sequence")
+                .settings
+                .preview
+                .resolution_scale,
+            SequenceSettings::default().preview.resolution_scale
+        );
+    }
+
+    #[test]
+    fn dispatch_viewer_ui_clamps_out_of_range_preview_scale() {
+        let mut state = AppState::new();
+        let sequence = Sequence::new("preview");
+        let sequence_id = sequence.id;
+        state.active_sequence_id = Some(sequence_id);
+        state.sequence = Some(sequence.clone());
+        state.sequences.push(sequence);
+
+        state
+            .dispatch_action(viewer_set_preview_resolution_scale_action(
+                ViewerSetPreviewResolutionScalePayload { scale: 0.0 },
+            ))
+            .expect("set preview scale");
+
+        assert_eq!(
+            state
+                .sequence
+                .as_ref()
+                .expect("active sequence")
+                .settings
+                .preview
+                .resolution_scale,
+            0.125
+        );
     }
 
     #[test]

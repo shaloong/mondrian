@@ -126,6 +126,12 @@ pub const EXPORT_CANCEL_JOB: &str = "cancel_job";
 /// Action name for clearing completed export queue jobs.
 pub const EXPORT_CLEAR_COMPLETED: &str = "clear_completed";
 
+/// Custom action namespace for viewer operations.
+pub const VIEWER_NAMESPACE: &str = "ui.viewer";
+
+/// Action name for changing the active sequence preview resolution scale.
+pub const VIEWER_SET_PREVIEW_RESOLUTION_SCALE: &str = "set_preview_resolution_scale";
+
 /// Custom action namespace for project lifecycle operations supplied by shell UI.
 pub const PROJECT_NAMESPACE: &str = "ui.project";
 
@@ -347,6 +353,13 @@ pub struct SequenceUpdateSettingsPayload {
     pub name: String,
     /// Full sequence settings after applying shell-local edits.
     pub settings: SequenceSettings,
+}
+
+/// Change the active viewer preview resolution scale.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ViewerSetPreviewResolutionScalePayload {
+    /// Preview resolution scale requested by the UI.
+    pub scale: f32,
 }
 
 /// Seek the active timeline to a frame.
@@ -1040,6 +1053,13 @@ pub fn export_clear_completed_action() -> Action {
     custom_export_action(EXPORT_CLEAR_COMPLETED, ())
 }
 
+/// Build a viewer request for changing preview resolution scale.
+pub fn viewer_set_preview_resolution_scale_action(
+    payload: ViewerSetPreviewResolutionScalePayload,
+) -> Action {
+    custom_viewer_action(VIEWER_SET_PREVIEW_RESOLUTION_SCALE, payload)
+}
+
 /// Build an action that creates a project from shell UI.
 pub fn project_create_with_settings_action(payload: ProjectCreateWithSettingsPayload) -> Action {
     custom_project_action(PROJECT_CREATE_WITH_SETTINGS, payload)
@@ -1261,6 +1281,14 @@ fn custom_assets_action<T: Serialize>(name: &'static str, payload: T) -> Action 
 fn custom_export_action<T: Serialize>(name: &'static str, payload: T) -> Action {
     Action::Custom {
         namespace: EXPORT_NAMESPACE.into(),
+        name: name.into(),
+        payload: serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
+    }
+}
+
+fn custom_viewer_action<T: Serialize>(name: &'static str, payload: T) -> Action {
+    Action::Custom {
+        namespace: VIEWER_NAMESPACE.into(),
         name: name.into(),
         payload: serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
     }
