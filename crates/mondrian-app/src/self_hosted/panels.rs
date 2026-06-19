@@ -3693,6 +3693,23 @@ mod tests {
     }
 
     #[test]
+    fn viewer_control_action_maps_every_transport_control() {
+        let cases = [
+            (ViewerControl::MarkIn, Action::MarkInAtPlayhead),
+            (ViewerControl::MarkOut, Action::MarkOutAtPlayhead),
+            (ViewerControl::JumpStart, Action::GoToStart),
+            (ViewerControl::StepBack, Action::StepBack),
+            (ViewerControl::PlayPause, Action::TogglePlay),
+            (ViewerControl::StepForward, Action::StepForward),
+            (ViewerControl::JumpEnd, Action::GoToEnd),
+        ];
+
+        for (control, action) in cases {
+            assert_eq!(viewer_control_action(control), action);
+        }
+    }
+
+    #[test]
     fn export_panel_model_reads_app_export_draft() {
         let mut state = AppState::new();
         let sequence = Sequence::new("Deliverable");
