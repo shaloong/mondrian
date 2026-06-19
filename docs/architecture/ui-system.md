@@ -94,14 +94,15 @@ actions. The official `mondrian` entrypoint starts from a real empty
 that same boundary after dispatched actions. Component fixtures remain in
 `ui_demo` and explicit `SelfHostedPanelModels::demo()` tests only.
 
-The product window starts in startup mode when `AppState` has no open project.
-After create/open resolves to a concrete editor action and `AppState` owns an
-open project, the host switches the active root to the workspace and the winit
-adapter applies workspace chrome: resizable, decorated, and constrained by the
-workspace minimum size. The winit adapter must also update the current UI bounds
-and relayout the active root immediately after a mode change; it must not wait
-for the OS resize event before laying out the first workspace frame. Closing the
-project moves the host back to startup mode.
+The self-hosted entrypoint uses distinct native window roles for startup and
+workspace. Startup owns a fixed transparent undecorated winit window. Once
+create/open resolves to a concrete editor action and `AppState` owns an open
+project, the host switches the active root to the workspace and the winit
+adapter replaces the native session: it hides/drops the startup window, creates
+a decorated resizable workspace window, builds a fresh surface/router/runtime
+for that root, updates the UI bounds, and relayouts before the first workspace
+frame. Closing the project follows the same boundary in reverse rather than
+mutating creation-time window attributes in place.
 Recent-project recovery, crash recovery, and future onboarding belong in the
 startup model and should be surfaced through app-layer actions rather than
 reintroducing a separate project browser or console panel.

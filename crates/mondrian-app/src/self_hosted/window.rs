@@ -38,15 +38,37 @@ const WORKSPACE_WINDOW_HEIGHT: f32 = 900.0;
 const WORKSPACE_MIN_WIDTH: f32 = 1024.0;
 const WORKSPACE_MIN_HEIGHT: f32 = 600.0;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelfHostedWindowRole {
+    Startup,
+    Workspace,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct WindowChrome {
     title: &'static str,
     width: f32,
     height: f32,
+    transparent: bool,
     decorations: bool,
     resizable: bool,
     min_size: Option<(f32, f32)>,
     max_size: Option<(f32, f32)>,
+}
+
+struct SelfHostedWindowSession {
+    role: SelfHostedWindowRole,
+    window: Arc<winit::window::Window>,
+    surface: wgpu::Surface<'static>,
+    config: wgpu::SurfaceConfiguration,
+    frame_renderer: SelfHostedFrameRenderer,
+    render_diagnostic_reporter: SelfHostedRenderDiagnosticReporter,
+    router: EventRouter,
+    ui_runtime: WinitUiRuntime,
+    last_cursor: Point,
+    current_bounds: std::cell::Cell<Rect>,
+    modifiers_state: Modifiers,
+    pending_initial_redraw: bool,
 }
 
 /// Run the self-hosted Mondrian editor window.
@@ -59,25 +81,16 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
 
     use winit::event_loop::EventLoop;
     let event_loop = EventLoop::new()?;
-    let startup_chrome = window_chrome_for_mode(SelfHostedUiMode::Startup);
-    let window_attrs = winit::window::Window::default_attributes()
-        .with_title(startup_chrome.title)
-        .with_inner_size(winit::dpi::LogicalSize::new(
-            startup_chrome.width as f64,
-            startup_chrome.height as f64,
-        ))
-        .with_transparent(true)
-        .with_decorations(startup_chrome.decorations)
-        .with_resizable(startup_chrome.resizable)
-        .with_visible(false);
-    let window = Arc::new(event_loop.create_window(window_attrs)?);
+    let startup_window = Arc::new(
+        event_loop.create_window(window_attributes_for_role(SelfHostedWindowRole::Startup))?,
+    );
 
     let instance_desc = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
     let instance = wgpu::Instance::new(instance_desc);
-    let surface = instance.create_surface(window.clone())?;
+    let startup_surface = instance.create_surface(startup_window.clone())?;
 
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        compatible_surface: Some(&surface),
+        compatible_surface: Some(&startup_surface),
         power_preference: wgpu::PowerPreference::HighPerformance,
         ..Default::default()
     }))
@@ -86,38 +99,25 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
     let (device, queue) =
         pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))?;
 
-    let size = window.inner_size();
-    let mut config = surface
-        .get_default_config(&adapter, size.width, size.height)
-        .ok_or("Failed surface config")?;
-    surface.configure(&device, &config);
-
-    let mut frame_renderer = SelfHostedFrameRenderer::new(&device, config.format);
-    let mut render_diagnostic_reporter = SelfHostedRenderDiagnosticReporter::default();
-
     let mut host = SelfHostedUiHost::new(AppState::new());
-    let bounds = Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
-    TreeWalker::layout(host.active_root_mut(), bounds);
-    let mut router = EventRouter::with_platform_and_tooltip(
-        host.active_root().id(),
-        Box::new(SystemPlatformService),
-        Box::new(TooltipManagerImpl::new(450)),
-    );
-    register_default_shortcuts(&mut router);
-    let mut ui_runtime = WinitUiRuntime::new();
-
-    let mut last_cursor = Point::new(0.0, 0.0);
-    let current_bounds = std::cell::Cell::new(bounds);
-    let mut modifiers_state = Modifiers::none();
-    let mut pending_initial_redraw = true;
+    let mut session = SelfHostedWindowSession::from_window_and_surface(
+        SelfHostedWindowRole::Startup,
+        startup_window,
+        startup_surface,
+        &adapter,
+        &device,
+        &mut host,
+    )?;
     let pending_actions = PendingUiActions::default();
     let platform = SystemPlatformService;
-    let mut applied_window_mode = host.mode();
-    apply_window_mode(applied_window_mode, &window);
 
-    tracing::info!("UI initialized — {}x{}", size.width, size.height);
-    window.set_visible(true);
-    window.request_redraw();
+    tracing::info!(
+        "UI initialized — {}x{}",
+        session.config.width,
+        session.config.height
+    );
+    session.window.set_visible(true);
+    session.window.request_redraw();
 
     event_loop.run(move |event, elwt| {
         use winit::event::ElementState;
@@ -127,327 +127,365 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
         let dispatch_action = |action| pending_actions.push(action);
 
         match event {
-            Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => elwt.exit(),
+            Event::WindowEvent { window_id, event } if window_id == session.window.id() => {
+                match event {
+                    WindowEvent::CloseRequested => elwt.exit(),
 
-            Event::WindowEvent {
-                event: WindowEvent::ModifiersChanged(modifiers), ..
-            } => {
-                modifiers_state = winit_modifiers_to_ui_modifiers(modifiers);
-            }
+                    WindowEvent::ModifiersChanged(modifiers) => {
+                        session.modifiers_state = winit_modifiers_to_ui_modifiers(modifiers);
+                    }
 
-            Event::WindowEvent { event: WindowEvent::Focused(false), .. } => {
-                modifiers_state = Modifiers::none();
-                if should_route_focus_lost_to_ui(ui_runtime.is_eyedropper_active()) {
-                    let _ = ui_runtime.route_window_event(
-                        &window,
-                        &mut router,
-                        host.active_root_mut(),
-                        UiEvent::FocusLost,
-                        &dispatch_action,
-                    );
-                    drain_actions_and_apply_window(
-                        &mut host,
-                        &pending_actions,
-                        &current_bounds,
-                        &platform,
-                        &window,
-                        elwt,
-                        &mut applied_window_mode,
-                    );
-                } else {
-                    elwt.set_control_flow(ControlFlow::Poll);
+                    WindowEvent::Focused(false) => {
+                        session.modifiers_state = Modifiers::none();
+                        if should_route_focus_lost_to_ui(session.ui_runtime.is_eyedropper_active())
+                        {
+                            let _ = session.ui_runtime.route_window_event(
+                                &session.window,
+                                &mut session.router,
+                                host.active_root_mut(),
+                                UiEvent::FocusLost,
+                                &dispatch_action,
+                            );
+                            drain_actions_and_sync_window_session(
+                                &mut host,
+                                &pending_actions,
+                                &platform,
+                                elwt,
+                                &instance,
+                                &adapter,
+                                &device,
+                                &mut session,
+                            );
+                        } else {
+                            elwt.set_control_flow(ControlFlow::Poll);
+                        }
+                        session.window.request_redraw();
+                    }
+
+                    WindowEvent::KeyboardInput { event: key_event, .. } => {
+                        let is_escape = matches!(
+                            key_event.logical_key,
+                            winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape)
+                        );
+                        let pressed = key_event.state == ElementState::Pressed;
+                        let result = session.ui_runtime.route_keyboard_input(
+                            &session.window,
+                            &mut session.router,
+                            host.active_root_mut(),
+                            &key_event,
+                            &mut session.modifiers_state,
+                            &dispatch_action,
+                        );
+                        drain_actions_and_sync_window_session(
+                            &mut host,
+                            &pending_actions,
+                            &platform,
+                            elwt,
+                            &instance,
+                            &adapter,
+                            &device,
+                            &mut session,
+                        );
+                        if pressed && is_escape && result == EventResult::Ignored {
+                            elwt.exit();
+                        }
+                        session.window.request_redraw();
+                    }
+
+                    WindowEvent::Ime(ime) => {
+                        let _ = session.ui_runtime.route_ime_event(
+                            &session.window,
+                            &mut session.router,
+                            host.active_root_mut(),
+                            ime,
+                            &dispatch_action,
+                        );
+                        drain_actions_and_sync_window_session(
+                            &mut host,
+                            &pending_actions,
+                            &platform,
+                            elwt,
+                            &instance,
+                            &adapter,
+                            &device,
+                            &mut session,
+                        );
+                        session.window.request_redraw();
+                    }
+
+                    WindowEvent::RedrawRequested => {
+                        host.refresh_if_dirty(session.current_bounds.get());
+                        sync_window_session_role(
+                            &mut host,
+                            elwt,
+                            &instance,
+                            &adapter,
+                            &device,
+                            &mut session,
+                        );
+                        let mut encoder = DrawEncoder::new();
+                        let theme = mondrian_ui_theme::current_theme();
+                        let b = session.current_bounds.get();
+                        encoder.draw_rect(b, theme.colors.background, 0.0);
+                        TreeWalker::paint_clipped(host.active_root(), &mut encoder, &theme, b);
+                        session.ui_runtime.paint_shell_overlays(
+                            &mut encoder,
+                            &theme,
+                            b,
+                            session.last_cursor,
+                            &session.router,
+                        );
+                        let size = session.window.inner_size();
+                        let frame_result = session.frame_renderer.render_draw_commands(
+                            &device,
+                            &queue,
+                            &session.surface,
+                            &session.config,
+                            (size.width, size.height),
+                            encoder.finish(),
+                        );
+                        if let Some(diagnostics) =
+                            session.render_diagnostic_reporter.changed_failure(frame_result)
+                        {
+                            tracing::warn!(
+                                "self-hosted UI render resource failures: missing_glyphs={}, raster_image_failures={}",
+                                diagnostics.text_missing_glyphs,
+                                diagnostics.raster_image_failures
+                            );
+                            host.mark_dirty();
+                            session.window.request_redraw();
+                        }
+                        if frame_result.needs_follow_up_redraw() {
+                            session.window.request_redraw();
+                        }
+                        session.pending_initial_redraw = false;
+                    }
+
+                    WindowEvent::Resized(new_size) => {
+                        if new_size.width > 0 && new_size.height > 0 {
+                            session.config.width = new_size.width;
+                            session.config.height = new_size.height;
+                            session.surface.configure(&device, &session.config);
+                            let b = Rect::new(
+                                0.0,
+                                0.0,
+                                new_size.width as f32,
+                                new_size.height as f32,
+                            );
+                            session.current_bounds.set(b);
+                            TreeWalker::layout(host.active_root_mut(), b);
+                            session.window.request_redraw();
+                        }
+                    }
+
+                    WindowEvent::HoveredFile(path) => {
+                        let _ = session.ui_runtime.route_hovered_file(
+                            &session.window,
+                            &mut session.router,
+                            host.active_root_mut(),
+                            path,
+                            session.last_cursor,
+                            &dispatch_action,
+                        );
+                        session.window.request_redraw();
+                    }
+
+                    WindowEvent::HoveredFileCancelled => {
+                        let _ = session.ui_runtime.route_hovered_file_cancelled(
+                            &session.window,
+                            &mut session.router,
+                            host.active_root_mut(),
+                            &dispatch_action,
+                        );
+                        session.window.request_redraw();
+                    }
+
+                    WindowEvent::DroppedFile(path) => {
+                        let ui_path = path.clone();
+                        let paths = vec![path];
+                        let result = session.ui_runtime.route_dropped_file(
+                            &session.window,
+                            &mut session.router,
+                            host.active_root_mut(),
+                            ui_path,
+                            session.last_cursor,
+                            &dispatch_action,
+                        );
+                        if result == EventResult::Ignored {
+                            pending_actions.push(mondrian_editor_state::Action::ImportMedia(paths));
+                        }
+                        drain_actions_and_sync_window_session(
+                            &mut host,
+                            &pending_actions,
+                            &platform,
+                            elwt,
+                            &instance,
+                            &adapter,
+                            &device,
+                            &mut session,
+                        );
+                        session.window.request_redraw();
+                    }
+
+                    WindowEvent::CursorMoved { position, .. } => {
+                        session.last_cursor = Point::new(position.x as f32, position.y as f32);
+                        session
+                            .ui_runtime
+                            .update_eyedropper_preview_at_window_point(
+                                &session.window,
+                                session.last_cursor,
+                            );
+                        let _ = session.ui_runtime.route_window_event(
+                            &session.window,
+                            &mut session.router,
+                            host.active_root_mut(),
+                            UiEvent::MouseMove {
+                                position: session.last_cursor,
+                                modifiers: session.modifiers_state,
+                            },
+                            &dispatch_action,
+                        );
+                        drain_actions_and_sync_window_session(
+                            &mut host,
+                            &pending_actions,
+                            &platform,
+                            elwt,
+                            &instance,
+                            &adapter,
+                            &device,
+                            &mut session,
+                        );
+                        let dir = if host.mode() == SelfHostedUiMode::Workspace {
+                            let zones = host.root().dock().collect_grab_zones();
+                            zones
+                                .iter()
+                                .find(|(z, _)| z.contains(session.last_cursor))
+                                .map(|(_, d)| *d)
+                        } else {
+                            None
+                        };
+                        session.window.set_cursor_icon(winit_cursor_icon_for_ui_state(
+                            session.ui_runtime.is_eyedropper_active(),
+                            dir,
+                            false,
+                        ));
+                        session.window.request_redraw();
+                    }
+
+                    WindowEvent::MouseInput { state, button, .. } => {
+                        let evt = match state {
+                            ElementState::Pressed => UiEvent::MouseDown {
+                                position: session.last_cursor,
+                                button: winit_mouse_button_to_ui_button(button),
+                                modifiers: session.modifiers_state,
+                            },
+                            ElementState::Released => UiEvent::MouseUp {
+                                position: session.last_cursor,
+                                button: winit_mouse_button_to_ui_button(button),
+                                modifiers: session.modifiers_state,
+                            },
+                        };
+                        let is_press =
+                            matches!(evt, UiEvent::MouseDown { button: MouseButton::Left, .. });
+                        if is_press && session.ui_runtime.is_eyedropper_active() {
+                            session.ui_runtime.finish_eyedropper_at_window_point(
+                                &session.window,
+                                &mut session.router,
+                                host.active_root_mut(),
+                                session.last_cursor,
+                                &dispatch_action,
+                            );
+                        } else {
+                            let _ = session.ui_runtime.route_window_event(
+                                &session.window,
+                                &mut session.router,
+                                host.active_root_mut(),
+                                evt,
+                                &dispatch_action,
+                            );
+                        }
+                        drain_actions_and_sync_window_session(
+                            &mut host,
+                            &pending_actions,
+                            &platform,
+                            elwt,
+                            &instance,
+                            &adapter,
+                            &device,
+                            &mut session,
+                        );
+                        session.window.request_redraw();
+                    }
+
+                    WindowEvent::MouseWheel { delta, .. } => {
+                        let _ = session.ui_runtime.route_window_event(
+                            &session.window,
+                            &mut session.router,
+                            host.active_root_mut(),
+                            UiEvent::MouseWheel {
+                                delta: winit_scroll_delta_to_ui_delta(delta),
+                                position: session.last_cursor,
+                                modifiers: session.modifiers_state,
+                            },
+                            &dispatch_action,
+                        );
+                        drain_actions_and_sync_window_session(
+                            &mut host,
+                            &pending_actions,
+                            &platform,
+                            elwt,
+                            &instance,
+                            &adapter,
+                            &device,
+                            &mut session,
+                        );
+                        session.window.request_redraw();
+                    }
+
+                    _ => {}
                 }
-                window.request_redraw();
-            }
-
-            Event::WindowEvent {
-                event: WindowEvent::KeyboardInput { event: key_event, .. },
-                ..
-            } => {
-                let is_escape = matches!(
-                    key_event.logical_key,
-                    winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape)
-                );
-                let pressed = key_event.state == ElementState::Pressed;
-                let result = ui_runtime.route_keyboard_input(
-                    &window,
-                    &mut router,
-                    host.active_root_mut(),
-                    &key_event,
-                    &mut modifiers_state,
-                    &dispatch_action,
-                );
-                drain_actions_and_apply_window(
-                    &mut host,
-                    &pending_actions,
-                    &current_bounds,
-                    &platform,
-                    &window,
-                    elwt,
-                    &mut applied_window_mode,
-                );
-                if pressed && is_escape && result == EventResult::Ignored {
-                    elwt.exit();
-                }
-                window.request_redraw();
-            }
-
-            Event::WindowEvent { event: WindowEvent::Ime(ime), .. } => {
-                let _ = ui_runtime.route_ime_event(
-                    &window,
-                    &mut router,
-                    host.active_root_mut(),
-                    ime,
-                    &dispatch_action,
-                );
-                drain_actions_and_apply_window(
-                    &mut host,
-                    &pending_actions,
-                    &current_bounds,
-                    &platform,
-                    &window,
-                    elwt,
-                    &mut applied_window_mode,
-                );
-                window.request_redraw();
-            }
-
-            Event::WindowEvent { event: WindowEvent::RedrawRequested, .. } => {
-                host.refresh_if_dirty(current_bounds.get());
-                let mut encoder = DrawEncoder::new();
-                let theme = mondrian_ui_theme::current_theme();
-                let b = current_bounds.get();
-                encoder.draw_rect(b, theme.colors.background, 0.0);
-                TreeWalker::paint_clipped(host.active_root(), &mut encoder, &theme, b);
-                ui_runtime.paint_shell_overlays(&mut encoder, &theme, b, last_cursor, &router);
-                let size = window.inner_size();
-                let frame_result = frame_renderer.render_draw_commands(
-                    &device,
-                    &queue,
-                    &surface,
-                    &config,
-                    (size.width, size.height),
-                    encoder.finish(),
-                );
-                if let Some(diagnostics) = render_diagnostic_reporter.changed_failure(frame_result)
-                {
-                    tracing::warn!(
-                        "self-hosted UI render resource failures: missing_glyphs={}, raster_image_failures={}",
-                        diagnostics.text_missing_glyphs,
-                        diagnostics.raster_image_failures
-                    );
-                    host.mark_dirty();
-                    window.request_redraw();
-                }
-                if frame_result.needs_follow_up_redraw() {
-                    window.request_redraw();
-                }
-                pending_initial_redraw = false;
-            }
-
-            Event::WindowEvent { event: WindowEvent::Resized(new_size), .. } => {
-                if new_size.width > 0 && new_size.height > 0 {
-                    config.width = new_size.width;
-                    config.height = new_size.height;
-                    surface.configure(&device, &config);
-                    let b = Rect::new(0.0, 0.0, new_size.width as f32, new_size.height as f32);
-                    current_bounds.set(b);
-                    TreeWalker::layout(host.active_root_mut(), b);
-                    window.request_redraw();
-                }
-            }
-
-            Event::WindowEvent { event: WindowEvent::HoveredFile(path), .. } => {
-                let _ = ui_runtime.route_hovered_file(
-                    &window,
-                    &mut router,
-                    host.active_root_mut(),
-                    path,
-                    last_cursor,
-                    &dispatch_action,
-                );
-                window.request_redraw();
-            }
-
-            Event::WindowEvent { event: WindowEvent::HoveredFileCancelled, .. } => {
-                let _ = ui_runtime.route_hovered_file_cancelled(
-                    &window,
-                    &mut router,
-                    host.active_root_mut(),
-                    &dispatch_action,
-                );
-                window.request_redraw();
-            }
-
-            Event::WindowEvent { event: WindowEvent::DroppedFile(path), .. } => {
-                let ui_path = path.clone();
-                let paths = vec![path];
-                let result = ui_runtime.route_dropped_file(
-                    &window,
-                    &mut router,
-                    host.active_root_mut(),
-                    ui_path,
-                    last_cursor,
-                    &dispatch_action,
-                );
-                if result == EventResult::Ignored {
-                    pending_actions.push(mondrian_editor_state::Action::ImportMedia(paths));
-                }
-                drain_actions_and_apply_window(
-                    &mut host,
-                    &pending_actions,
-                    &current_bounds,
-                    &platform,
-                    &window,
-                    elwt,
-                    &mut applied_window_mode,
-                );
-                window.request_redraw();
-            }
-
-            Event::WindowEvent {
-                event: WindowEvent::CursorMoved { position, .. }, ..
-            } => {
-                last_cursor = Point::new(position.x as f32, position.y as f32);
-                ui_runtime.update_eyedropper_preview_at_window_point(&window, last_cursor);
-                let _ = ui_runtime.route_window_event(
-                    &window,
-                    &mut router,
-                    host.active_root_mut(),
-                    UiEvent::MouseMove { position: last_cursor, modifiers: modifiers_state },
-                    &dispatch_action,
-                );
-                drain_actions_and_apply_window(
-                    &mut host,
-                    &pending_actions,
-                    &current_bounds,
-                    &platform,
-                    &window,
-                    elwt,
-                    &mut applied_window_mode,
-                );
-                let dir = if host.mode() == SelfHostedUiMode::Workspace {
-                    let zones = host.root().dock().collect_grab_zones();
-                    zones.iter().find(|(z, _)| z.contains(last_cursor)).map(|(_, d)| *d)
-                } else {
-                    None
-                };
-                window.set_cursor_icon(winit_cursor_icon_for_ui_state(
-                    ui_runtime.is_eyedropper_active(),
-                    dir,
-                    false,
-                ));
-                window.request_redraw();
-            }
-
-            Event::WindowEvent {
-                event: WindowEvent::MouseInput { state, button, .. },
-                ..
-            } => {
-                let evt = match state {
-                    ElementState::Pressed => UiEvent::MouseDown {
-                        position: last_cursor,
-                        button: winit_mouse_button_to_ui_button(button),
-                        modifiers: modifiers_state,
-                    },
-                    ElementState::Released => UiEvent::MouseUp {
-                        position: last_cursor,
-                        button: winit_mouse_button_to_ui_button(button),
-                        modifiers: modifiers_state,
-                    },
-                };
-                let is_press = matches!(evt, UiEvent::MouseDown { button: MouseButton::Left, .. });
-                if is_press && ui_runtime.is_eyedropper_active() {
-                    ui_runtime.finish_eyedropper_at_window_point(
-                        &window,
-                        &mut router,
-                        host.active_root_mut(),
-                        last_cursor,
-                        &dispatch_action,
-                    );
-                    drain_actions_and_apply_window(
-                        &mut host,
-                        &pending_actions,
-                        &current_bounds,
-                        &platform,
-                        &window,
-                        elwt,
-                        &mut applied_window_mode,
-                    );
-                } else {
-                    let _ = ui_runtime.route_window_event(
-                        &window,
-                        &mut router,
-                        host.active_root_mut(),
-                        evt,
-                        &dispatch_action,
-                    );
-                    drain_actions_and_apply_window(
-                        &mut host,
-                        &pending_actions,
-                        &current_bounds,
-                        &platform,
-                        &window,
-                        elwt,
-                        &mut applied_window_mode,
-                    );
-                }
-                window.request_redraw();
-            }
-
-            Event::WindowEvent { event: WindowEvent::MouseWheel { delta, .. }, .. } => {
-                let _ = ui_runtime.route_window_event(
-                    &window,
-                    &mut router,
-                    host.active_root_mut(),
-                    UiEvent::MouseWheel {
-                        delta: winit_scroll_delta_to_ui_delta(delta),
-                        position: last_cursor,
-                        modifiers: modifiers_state,
-                    },
-                    &dispatch_action,
-                );
-                drain_actions_and_apply_window(
-                    &mut host,
-                    &pending_actions,
-                    &current_bounds,
-                    &platform,
-                    &window,
-                    elwt,
-                    &mut applied_window_mode,
-                );
-                window.request_redraw();
             }
 
             Event::AboutToWait => {
-                ui_runtime.drive_timers(&window, &mut router, elwt);
-                if host.poll_background_tasks(current_bounds.get()) {
-                    window.request_redraw();
+                session
+                    .ui_runtime
+                    .drive_timers(&session.window, &mut session.router, elwt);
+                if host.poll_background_tasks(session.current_bounds.get()) {
+                    sync_window_session_role(
+                        &mut host,
+                        elwt,
+                        &instance,
+                        &adapter,
+                        &device,
+                        &mut session,
+                    );
+                    session.window.request_redraw();
                     elwt.set_control_flow(ControlFlow::Poll);
                 }
-                if pending_initial_redraw {
-                    window.request_redraw();
+                if session.pending_initial_redraw {
+                    session.window.request_redraw();
                     elwt.set_control_flow(ControlFlow::Poll);
                 }
-                if ui_runtime.is_eyedropper_active() {
-                    ui_runtime.poll_eyedropper(
-                        &window,
-                        &mut router,
+                if session.ui_runtime.is_eyedropper_active() {
+                    session.ui_runtime.poll_eyedropper(
+                        &session.window,
+                        &mut session.router,
                         host.active_root_mut(),
-                        &mut last_cursor,
-                        modifiers_state,
+                        &mut session.last_cursor,
+                        session.modifiers_state,
                         &dispatch_action,
                     );
-                    drain_actions_and_apply_window(
+                    drain_actions_and_sync_window_session(
                         &mut host,
                         &pending_actions,
-                        &current_bounds,
                         &platform,
-                        &window,
                         elwt,
-                        &mut applied_window_mode,
+                        &instance,
+                        &adapter,
+                        &device,
+                        &mut session,
                     );
-                    window.request_redraw();
+                    session.window.request_redraw();
                     elwt.set_control_flow(ControlFlow::Poll);
                 }
             }
@@ -482,40 +520,134 @@ fn should_route_focus_lost_to_ui(eyedropper_active: bool) -> bool {
     !eyedropper_active
 }
 
-fn drain_actions_and_apply_window(
-    host: &mut SelfHostedUiHost,
-    pending_actions: &PendingUiActions,
-    current_bounds: &std::cell::Cell<Rect>,
-    platform: &dyn mondrian_platform::PlatformService,
-    window: &winit::window::Window,
-    elwt: &winit::event_loop::ActiveEventLoop,
-    applied_window_mode: &mut SelfHostedUiMode,
-) {
-    let commands = host.drain_pending_actions(pending_actions, current_bounds.get(), platform);
-    apply_shell_commands(commands, window, elwt);
-    if *applied_window_mode != host.mode() {
-        *applied_window_mode = host.mode();
-        let next_bounds = apply_window_mode(*applied_window_mode, window);
-        current_bounds.set(next_bounds);
-        TreeWalker::layout(host.active_root_mut(), next_bounds);
+impl SelfHostedWindowSession {
+    fn from_window_and_surface(
+        role: SelfHostedWindowRole,
+        window: Arc<winit::window::Window>,
+        surface: wgpu::Surface<'static>,
+        adapter: &wgpu::Adapter,
+        device: &wgpu::Device,
+        host: &mut SelfHostedUiHost,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let size = window.inner_size();
+        let config = surface
+            .get_default_config(adapter, size.width, size.height)
+            .ok_or("Failed surface config")?;
+        surface.configure(device, &config);
+
+        let bounds = Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        Ok(Self {
+            role,
+            window,
+            surface,
+            config: config.clone(),
+            frame_renderer: SelfHostedFrameRenderer::new(device, config.format),
+            render_diagnostic_reporter: SelfHostedRenderDiagnosticReporter::default(),
+            router: build_event_router(host.active_root().id()),
+            ui_runtime: WinitUiRuntime::new(),
+            last_cursor: Point::new(0.0, 0.0),
+            current_bounds: std::cell::Cell::new(bounds),
+            modifiers_state: Modifiers::none(),
+            pending_initial_redraw: true,
+        })
     }
 }
 
-fn window_chrome_for_mode(mode: SelfHostedUiMode) -> WindowChrome {
+fn build_event_router(root_id: mondrian_ui_core::types::WidgetId) -> EventRouter {
+    let mut router = EventRouter::with_platform_and_tooltip(
+        root_id,
+        Box::new(SystemPlatformService),
+        Box::new(TooltipManagerImpl::new(450)),
+    );
+    register_default_shortcuts(&mut router);
+    router
+}
+
+fn drain_actions_and_sync_window_session(
+    host: &mut SelfHostedUiHost,
+    pending_actions: &PendingUiActions,
+    platform: &dyn mondrian_platform::PlatformService,
+    elwt: &winit::event_loop::ActiveEventLoop,
+    instance: &wgpu::Instance,
+    adapter: &wgpu::Adapter,
+    device: &wgpu::Device,
+    session: &mut SelfHostedWindowSession,
+) {
+    let commands =
+        host.drain_pending_actions(pending_actions, session.current_bounds.get(), platform);
+    apply_shell_commands(commands, &session.window, elwt);
+    sync_window_session_role(host, elwt, instance, adapter, device, session);
+}
+
+fn sync_window_session_role(
+    host: &mut SelfHostedUiHost,
+    elwt: &winit::event_loop::ActiveEventLoop,
+    instance: &wgpu::Instance,
+    adapter: &wgpu::Adapter,
+    device: &wgpu::Device,
+    session: &mut SelfHostedWindowSession,
+) {
+    let target_role = window_role_for_mode(host.mode());
+    if session.role == target_role {
+        return;
+    }
+    if let Err(err) =
+        replace_window_session(target_role, elwt, instance, adapter, device, host, session)
+    {
+        tracing::error!("failed to replace self-hosted native window: {err}");
+        elwt.exit();
+    }
+}
+
+fn replace_window_session(
+    role: SelfHostedWindowRole,
+    elwt: &winit::event_loop::ActiveEventLoop,
+    instance: &wgpu::Instance,
+    adapter: &wgpu::Adapter,
+    device: &wgpu::Device,
+    host: &mut SelfHostedUiHost,
+    session: &mut SelfHostedWindowSession,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let old_role = session.role;
+    session.window.set_visible(false);
+
+    let window = Arc::new(elwt.create_window(window_attributes_for_role(role))?);
+    let surface = instance.create_surface(window.clone())?;
+    let next_session = SelfHostedWindowSession::from_window_and_surface(
+        role, window, surface, adapter, device, host,
+    )?;
+    tracing::info!(?old_role, ?role, "self-hosted native window replaced");
+    next_session.window.set_visible(true);
+    next_session.window.request_redraw();
+    *session = next_session;
+    Ok(())
+}
+
+fn window_role_for_mode(mode: SelfHostedUiMode) -> SelfHostedWindowRole {
     match mode {
-        SelfHostedUiMode::Startup => WindowChrome {
+        SelfHostedUiMode::Startup => SelfHostedWindowRole::Startup,
+        SelfHostedUiMode::Workspace => SelfHostedWindowRole::Workspace,
+    }
+}
+
+fn window_chrome_for_role(role: SelfHostedWindowRole) -> WindowChrome {
+    match role {
+        SelfHostedWindowRole::Startup => WindowChrome {
             title: "Mondrian",
             width: STARTUP_WINDOW_WIDTH,
             height: STARTUP_WINDOW_HEIGHT,
+            transparent: true,
             decorations: false,
             resizable: false,
             min_size: Some((STARTUP_WINDOW_WIDTH, STARTUP_WINDOW_HEIGHT)),
             max_size: Some((STARTUP_WINDOW_WIDTH, STARTUP_WINDOW_HEIGHT)),
         },
-        SelfHostedUiMode::Workspace => WindowChrome {
+        SelfHostedWindowRole::Workspace => WindowChrome {
             title: "Mondrian - 自研 UI",
             width: WORKSPACE_WINDOW_WIDTH,
             height: WORKSPACE_WINDOW_HEIGHT,
+            transparent: false,
             decorations: true,
             resizable: true,
             min_size: Some((WORKSPACE_MIN_WIDTH, WORKSPACE_MIN_HEIGHT)),
@@ -528,19 +660,27 @@ fn logical_size(width: f32, height: f32) -> winit::dpi::LogicalSize<f64> {
     winit::dpi::LogicalSize::new(width as f64, height as f64)
 }
 
-fn apply_window_mode(mode: SelfHostedUiMode, window: &winit::window::Window) -> Rect {
-    let chrome = window_chrome_for_mode(mode);
-    window.set_title(chrome.title);
-    window.set_decorations(chrome.decorations);
-    window.set_resizable(chrome.resizable);
-    window.set_min_inner_size(chrome.min_size.map(|(w, h)| logical_size(w, h)));
-    window.set_max_inner_size(chrome.max_size.map(|(w, h)| logical_size(w, h)));
-    let _ = window.request_inner_size(logical_size(chrome.width, chrome.height));
-    window_bounds_for_mode(mode)
+fn window_attributes_for_role(role: SelfHostedWindowRole) -> winit::window::WindowAttributes {
+    let chrome = window_chrome_for_role(role);
+    let mut attrs = winit::window::Window::default_attributes()
+        .with_title(chrome.title)
+        .with_inner_size(logical_size(chrome.width, chrome.height))
+        .with_transparent(chrome.transparent)
+        .with_decorations(chrome.decorations)
+        .with_resizable(chrome.resizable)
+        .with_visible(false);
+    if let Some((w, h)) = chrome.min_size {
+        attrs = attrs.with_min_inner_size(logical_size(w, h));
+    }
+    if let Some((w, h)) = chrome.max_size {
+        attrs = attrs.with_max_inner_size(logical_size(w, h));
+    }
+    attrs
 }
 
-fn window_bounds_for_mode(mode: SelfHostedUiMode) -> Rect {
-    let chrome = window_chrome_for_mode(mode);
+#[cfg(test)]
+fn window_bounds_for_role(role: SelfHostedWindowRole) -> Rect {
+    let chrome = window_chrome_for_role(role);
     Rect::new(0.0, 0.0, chrome.width, chrome.height)
 }
 
@@ -602,11 +742,12 @@ mod tests {
 
     #[test]
     fn startup_window_chrome_is_fixed_and_undecorated() {
-        let chrome = window_chrome_for_mode(SelfHostedUiMode::Startup);
+        let chrome = window_chrome_for_role(SelfHostedWindowRole::Startup);
 
         assert_eq!(chrome.title, "Mondrian");
         assert_eq!(chrome.width, STARTUP_WINDOW_WIDTH);
         assert_eq!(chrome.height, STARTUP_WINDOW_HEIGHT);
+        assert!(chrome.transparent);
         assert!(!chrome.decorations);
         assert!(!chrome.resizable);
         assert_eq!(
@@ -621,11 +762,12 @@ mod tests {
 
     #[test]
     fn workspace_window_chrome_is_resizable_product_workspace() {
-        let chrome = window_chrome_for_mode(SelfHostedUiMode::Workspace);
+        let chrome = window_chrome_for_role(SelfHostedWindowRole::Workspace);
 
         assert_eq!(chrome.title, "Mondrian - 自研 UI");
         assert_eq!(chrome.width, WORKSPACE_WINDOW_WIDTH);
         assert_eq!(chrome.height, WORKSPACE_WINDOW_HEIGHT);
+        assert!(!chrome.transparent);
         assert!(chrome.decorations);
         assert!(chrome.resizable);
         assert_eq!(
@@ -636,15 +778,30 @@ mod tests {
     }
 
     #[test]
-    fn window_mode_bounds_match_requested_chrome_size() {
-        for mode in [SelfHostedUiMode::Startup, SelfHostedUiMode::Workspace] {
-            let chrome = window_chrome_for_mode(mode);
-            let bounds = window_bounds_for_mode(mode);
+    fn window_role_bounds_match_requested_chrome_size() {
+        for role in [
+            SelfHostedWindowRole::Startup,
+            SelfHostedWindowRole::Workspace,
+        ] {
+            let chrome = window_chrome_for_role(role);
+            let bounds = window_bounds_for_role(role);
 
             assert_eq!(bounds.x, 0.0);
             assert_eq!(bounds.y, 0.0);
             assert_eq!(bounds.width, chrome.width);
             assert_eq!(bounds.height, chrome.height);
         }
+    }
+
+    #[test]
+    fn ui_modes_map_to_distinct_native_window_roles() {
+        assert_eq!(
+            window_role_for_mode(SelfHostedUiMode::Startup),
+            SelfHostedWindowRole::Startup
+        );
+        assert_eq!(
+            window_role_for_mode(SelfHostedUiMode::Workspace),
+            SelfHostedWindowRole::Workspace
+        );
     }
 }
