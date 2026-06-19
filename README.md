@@ -48,7 +48,7 @@
 | `mondrian-ai`       | AI Agent 编排、视频生成 API、自动剪辑 | reqwest, tokio         |
 | `mondrian-effects`  | DAG 效果图、GPU compute 加速效果、LUT 调色、滤镜、转场 | mondrian-core          |
 | `mondrian-export`   | 导出编码、渲染队列、硬件加速          | ffmpeg-next            |
-| `mondrian-app`      | 主程序入口、自研 UI 壳、UI 状态机、面板布局 | winit, wgpu, egui 迁移参考 |
+| `mondrian-app`      | 主程序入口、自研 UI 壳、UI 状态机、面板布局 | winit, wgpu, legacy egui reference |
 
 ## 🚀 快速开始
 
