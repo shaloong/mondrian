@@ -609,8 +609,10 @@ opens must not, because the next release belongs to a fresh menu-item click.
 
 Keyboard activation for focused controls follows desktop conventions: Button
 handles Enter/Space as an activation gesture, and Checkbox handles Enter/Space
-as a toggle gesture. KeyDown performs the semantic action and enters the pressed
-visual state; the matching KeyUp clears the pressed state. Keyboard events are
+as a toggle gesture. Only unmodified KeyDown starts the semantic action and
+enters the pressed visual state; modified chords stay ignored so application
+shortcuts remain centralized. The matching KeyUp clears an existing pressed
+state even if the modifier state changed before release. Keyboard events are
 routed by focus, so these handlers do not perform hit testing.
 
 Color pickers reuse the shared color model conversions from `mondrian-core`

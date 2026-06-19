@@ -168,7 +168,9 @@ impl Widget for IconButton {
                 }
                 EventResult::Handled
             }
-            UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, .. } => {
+            UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, modifiers }
+                if *modifiers == Modifiers::none() =>
+            {
                 self.state = ButtonState::Pressed;
                 EventResult::Handled
             }
@@ -339,6 +341,62 @@ mod tests {
             EventResult::Handled
         );
 
+        assert_eq!(actions.borrow().as_slice(), &[Action::Play]);
+    }
+
+    #[test]
+    fn icon_button_keyboard_activation_ignores_modified_key_down() {
+        let mut button = IconButton::new(test_icon()).on_click(Action::Play);
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        for (key, modifiers) in [
+            (KeyCode::Enter, Modifiers::ctrl()),
+            (KeyCode::Space, Modifiers::shift()),
+        ] {
+            assert_eq!(
+                button.event(&UiEvent::KeyDown { key, modifiers }, &mut ctx),
+                EventResult::Ignored
+            );
+            assert_eq!(
+                button.event(&UiEvent::KeyUp { key, modifiers }, &mut ctx),
+                EventResult::Ignored
+            );
+            assert_eq!(button.state(), ButtonState::Normal);
+        }
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn icon_button_key_up_activates_even_when_modifiers_changed() {
+        let mut button = IconButton::new(test_icon()).on_click(Action::Play);
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        assert_eq!(
+            button.event(
+                &UiEvent::KeyDown { key: KeyCode::Space, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            button.event(
+                &UiEvent::KeyUp { key: KeyCode::Space, modifiers: Modifiers::shift() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(button.state(), ButtonState::Hovered);
         assert_eq!(actions.borrow().as_slice(), &[Action::Play]);
     }
 

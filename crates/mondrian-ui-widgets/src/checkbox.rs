@@ -147,7 +147,9 @@ impl Widget for Checkbox {
                 self.pressed = false;
                 EventResult::Handled
             }
-            UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, .. } => {
+            UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, modifiers }
+                if *modifiers == Modifiers::none() =>
+            {
                 self.pressed = true;
                 self.toggle(ctx);
                 EventResult::Handled
@@ -653,6 +655,63 @@ mod tests {
 
         assert_eq!(result, EventResult::Handled);
         assert!(!cb.pressed);
+    }
+
+    #[test]
+    fn checkbox_keyboard_activation_ignores_modified_key_down() {
+        let mut cb = Checkbox::new("Opt", false).on_toggle(Action::TogglePlay);
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let cell = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch_fn);
+
+        for (key, modifiers) in [
+            (KeyCode::Enter, Modifiers::ctrl()),
+            (KeyCode::Space, Modifiers::shift()),
+        ] {
+            assert_eq!(
+                cb.event(&UiEvent::KeyDown { key, modifiers }, &mut ctx),
+                EventResult::Ignored
+            );
+            assert!(!cb.is_checked());
+            assert!(!cb.pressed);
+        }
+        assert!(cell.borrow().is_empty());
+    }
+
+    #[test]
+    fn checkbox_key_up_releases_press_even_when_modifiers_changed() {
+        let mut cb = Checkbox::new("Opt", false).on_toggle(Action::TogglePlay);
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let cell = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch_fn);
+
+        assert_eq!(
+            cb.event(
+                &UiEvent::KeyDown { key: KeyCode::Space, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            cb.event(
+                &UiEvent::KeyUp { key: KeyCode::Space, modifiers: Modifiers::shift() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert!(!cb.pressed);
+        assert!(cb.is_checked());
+        assert_eq!(cell.borrow().as_slice(), &[Action::TogglePlay]);
     }
 
     #[test]
