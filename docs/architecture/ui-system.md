@@ -435,6 +435,9 @@ global shortcuts at the router boundary, not inside widgets: file commands use
 Ctrl/Ctrl+Shift combinations, workspace switching uses Ctrl+Alt+number, and
 panel focus uses Ctrl+Alt+mnemonics. Plain Space is intentionally not registered
 globally so text input cannot accidentally toggle playback while typing.
+Every product `PanelKind` exposed by the View menu must also have a default
+focus shortcut descriptor so menu rows, shortcut labels, and router bindings
+stay in one access model.
 Common NLE editing keys such as Delete, Shift+Delete, Ctrl+K, I/O, Home/End,
 arrow frame stepping, Ctrl+A, and Escape are registered as global fallback
 bindings only; focused `TextInput`s, IME composition, dropdowns, sliders, and

@@ -174,6 +174,11 @@ pub fn default_shortcuts() -> Vec<SelfHostedShortcut> {
             "Ctrl+Alt+T",
         ),
         shortcut(
+            ShortcutBinding::new(KeyCode::I, ctrl_alt()),
+            Action::FocusPanel(PanelKind::Inspector),
+            "Ctrl+Alt+I",
+        ),
+        shortcut(
             ShortcutBinding::new(KeyCode::A, ctrl_alt()),
             Action::FocusPanel(PanelKind::Assets),
             "Ctrl+Alt+A",
@@ -270,12 +275,20 @@ mod tests {
             ),
             Some(Action::SwitchWorkspace(WorkspacePreset::Compositing))
         );
-        assert_eq!(
-            router
-                .shortcut_manager()
-                .resolve(KeyCode::T, ctrl_alt(), ShortcutContext::default()),
-            Some(Action::FocusPanel(PanelKind::Timeline))
-        );
+        for (key, panel) in [
+            (KeyCode::V, PanelKind::Viewer),
+            (KeyCode::T, PanelKind::Timeline),
+            (KeyCode::I, PanelKind::Inspector),
+            (KeyCode::A, PanelKind::Assets),
+            (KeyCode::E, PanelKind::Effects),
+            (KeyCode::G, PanelKind::NodeGraph),
+            (KeyCode::X, PanelKind::Export),
+        ] {
+            assert_eq!(
+                router.shortcut_manager().resolve(key, ctrl_alt(), ShortcutContext::default()),
+                Some(Action::FocusPanel(panel))
+            );
+        }
         assert_eq!(
             router.shortcut_manager().resolve(
                 KeyCode::C,
@@ -362,6 +375,10 @@ mod tests {
         assert_eq!(
             shortcut_label_for_action(&Action::SwitchWorkspace(WorkspacePreset::Audio)),
             Some("Ctrl+Alt+3")
+        );
+        assert_eq!(
+            shortcut_label_for_action(&Action::FocusPanel(PanelKind::Inspector)),
+            Some("Ctrl+Alt+I")
         );
         assert_eq!(
             shortcut_label_for_action(&Action::SplitClipAtPlayhead),
