@@ -1285,7 +1285,9 @@ widget draws geometry buttons for mark in/out, jump start/end, step back/forward
 and play/pause. By default these controls emit shared editor actions
 (`MarkInAtPlayhead`, `MarkOutAtPlayhead`, `GoToStart`, `StepBack`,
 `TogglePlay`, `StepForward`, `GoToEnd`), and embedders may override the mapping
-with a control callback when a host needs a custom command boundary. Playback
+with a control callback when a host needs a custom command boundary. The
+self-hosted app panel must bind that callback explicitly so the app adapter, not
+the generic widget, owns the command boundary for transport controls. Playback
 state changes, mark semantics, frame stepping semantics, preview scheduling, and
 audio/video sync remain in the app/runtime layers. Zoom and preview-quality
 labels are explicit model fields; they must reflect real host state once the

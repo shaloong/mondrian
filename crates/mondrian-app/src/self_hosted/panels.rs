@@ -35,8 +35,8 @@ use mondrian_ui_widgets::{
     PanelListItem, PropertyPanel, PropertyRow, PropertySection, RasterImage, ScrollView, Slider,
     TextInput, TimelineAssetDrop, TimelineClip, TimelineClipMove, TimelineClipRef,
     TimelineClipTrim, TimelineEditCommand, TimelineInOutPoint, TimelineTrack, TimelineTrackControl,
-    TimelineTrackMove, TimelineTrackRef, TimelineTrimEdge, TimelineView, ViewerFrameImage,
-    ViewerStatusTone, ViewerSurface,
+    TimelineTrackMove, TimelineTrackRef, TimelineTrimEdge, TimelineView, ViewerControl,
+    ViewerFrameImage, ViewerStatusTone, ViewerSurface,
 };
 
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
@@ -1398,7 +1398,8 @@ fn viewer_panel(model: &ViewerPanelModel) -> ViewerSurface {
         .with_zoom_label(model.zoom_label.clone())
         .with_preview_quality_label(model.preview_quality_label.clone())
         .playing(model.playing)
-        .enabled(model.enabled);
+        .enabled(model.enabled)
+        .on_control(viewer_control_action);
     let surface = if let Some(message) = model.empty_message.clone() {
         surface.with_empty_message(message)
     } else {
@@ -1407,6 +1408,18 @@ fn viewer_panel(model: &ViewerPanelModel) -> ViewerSurface {
     match model.frame_image.clone() {
         Some(frame_image) => surface.with_frame_image(frame_image),
         None => surface,
+    }
+}
+
+fn viewer_control_action(control: ViewerControl) -> Action {
+    match control {
+        ViewerControl::MarkIn => Action::MarkInAtPlayhead,
+        ViewerControl::MarkOut => Action::MarkOutAtPlayhead,
+        ViewerControl::JumpStart => Action::GoToStart,
+        ViewerControl::StepBack => Action::StepBack,
+        ViewerControl::PlayPause => Action::TogglePlay,
+        ViewerControl::StepForward => Action::StepForward,
+        ViewerControl::JumpEnd => Action::GoToEnd,
     }
 }
 
@@ -3587,6 +3600,96 @@ mod tests {
         assert!(!models.export.can_enqueue());
         assert!(models.node_graph.nodes.is_empty());
         assert!(models.node_graph.edges.is_empty());
+    }
+
+    #[test]
+    fn viewer_panel_play_pause_control_dispatches_toggle_play() {
+        let mut viewer = viewer_panel(&SelfHostedPanelModels::demo().viewer);
+        viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
+        let play_pause_center = Point::new(281.0, 299.0);
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            viewer.event(
+                &UiEvent::MouseDown {
+                    position: play_pause_center,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::default(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            viewer.event(
+                &UiEvent::MouseUp {
+                    position: play_pause_center,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::default(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(actions.borrow().as_slice(), &[Action::TogglePlay]);
+    }
+
+    #[test]
+    fn viewer_panel_disabled_controls_do_not_dispatch() {
+        let mut viewer = viewer_panel(&ViewerPanelModel::empty());
+        viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
+        let play_pause_center = Point::new(281.0, 299.0);
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            viewer.event(
+                &UiEvent::MouseDown {
+                    position: play_pause_center,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::default(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+        assert_eq!(
+            viewer.event(
+                &UiEvent::MouseUp {
+                    position: play_pause_center,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::default(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+
+        assert!(actions.borrow().is_empty());
     }
 
     #[test]
