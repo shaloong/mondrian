@@ -3263,8 +3263,7 @@ fn effect_property_value_widget(
             )
         }
         PropertyValue::Float(value) => {
-            let min = property.min.map(|v| v as f32).unwrap_or(0.0);
-            let max = property.max.map(|v| v as f32).unwrap_or(1.0);
+            let (min, max) = numeric_property_range(property.min, property.max, 0.0, 1.0);
             let selected_clip = selection;
             let path = path.clone();
             numeric_slider_input_control(
@@ -3285,8 +3284,7 @@ fn effect_property_value_widget(
             )
         }
         PropertyValue::Double(value) => {
-            let min = property.min.unwrap_or(0.0) as f32;
-            let max = property.max.unwrap_or(1.0) as f32;
+            let (min, max) = numeric_property_range(property.min, property.max, 0.0, 1.0);
             let selected_clip = selection;
             let path = path.clone();
             numeric_slider_input_control(
@@ -3307,8 +3305,7 @@ fn effect_property_value_widget(
             )
         }
         PropertyValue::Int(value) => {
-            let min = property.min.map(|v| v as f32).unwrap_or(0.0);
-            let max = property.max.map(|v| v as f32).unwrap_or(100.0);
+            let (min, max) = numeric_property_range(property.min, property.max, 0.0, 100.0);
             let selected_clip = selection;
             let path = path.clone();
             numeric_slider_input_control(
@@ -3404,8 +3401,11 @@ fn vector_property_widget(
     path: String,
     build_value: fn(&[f32]) -> PropertyValue,
 ) -> Box<dyn Widget> {
-    let min = property.min.map(|v| v as f32).unwrap_or(0.0);
-    let max = property.max.map(|v| v as f32).unwrap_or(1.0);
+    let (min, max) = numeric_property_range(property.min, property.max, 0.0, 1.0);
+    let values = values
+        .iter()
+        .map(|value| finite_f32_from_f32(*value).unwrap_or(min).clamp(min, max))
+        .collect::<Vec<_>>();
     let rows = labels
         .iter()
         .zip(values.iter())
@@ -3444,6 +3444,41 @@ fn vector_property_widget(
         })
         .collect();
     Box::new(FlexContainer::column(rows).with_gap(4.0))
+}
+
+fn numeric_property_range(
+    descriptor_min: Option<f64>,
+    descriptor_max: Option<f64>,
+    default_min: f32,
+    default_max: f32,
+) -> (f32, f32) {
+    let (default_min, default_max) = ordered_numeric_range(default_min, default_max);
+    let min = descriptor_min.and_then(finite_f32);
+    let max = descriptor_max.and_then(finite_f32);
+    match (min, max) {
+        (Some(min), Some(max)) => ordered_numeric_range(min, max),
+        (Some(min), None) => (min, default_max.max(min)),
+        (None, Some(max)) => (default_min.min(max), max),
+        (None, None) => (default_min, default_max),
+    }
+}
+
+fn ordered_numeric_range(min: f32, max: f32) -> (f32, f32) {
+    let min = finite_f32_from_f32(min).unwrap_or(0.0);
+    let max = finite_f32_from_f32(max).unwrap_or(1.0);
+    if min <= max {
+        (min, max)
+    } else {
+        (max, min)
+    }
+}
+
+fn finite_f32(value: f64) -> Option<f32> {
+    finite_f32_from_f32(value as f32)
+}
+
+fn finite_f32_from_f32(value: f32) -> Option<f32> {
+    value.is_finite().then_some(value)
 }
 
 fn property_step(descriptor_step: Option<f64>, fallback_step: Option<f32>) -> Option<f32> {
@@ -6394,6 +6429,81 @@ mod tests {
         assert!(
             (value - 0.5).abs() <= 0.0001,
             "expected stepped value 0.5 from typed 0.62, got {value}"
+        );
+    }
+
+    #[test]
+    fn inspector_effect_float_property_keyboard_nudge_sanitizes_descriptor_bounds() {
+        let effect_id = EffectId::new();
+        let selection = SelectedClipRef {
+            track_id: TrackId::new(),
+            is_video_track: true,
+            clip_id: ClipId::new(),
+        };
+        let property = InspectorEffectPropertyModel {
+            path: "color.exposure".to_string(),
+            label: "Exposure".to_string(),
+            value: PropertyValue::Float(0.2),
+            min: Some(f64::NAN),
+            max: Some(f64::INFINITY),
+            step: Some(0.25),
+            is_animatable: true,
+        };
+        let mut widget = effect_property_value_widget(
+            &property,
+            true,
+            Some(selection),
+            effect_id,
+            property.path.clone(),
+        );
+        widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            widget.event(
+                &UiEvent::MouseDown {
+                    position: Point::new(190.0, 14.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            widget.event(
+                &UiEvent::KeyDown { key: KeyCode::Up, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        let recorded = actions.borrow();
+        assert_eq!(recorded.len(), 1);
+        let Action::Custom { payload, .. } = &recorded[0] else {
+            panic!("expected inspector custom action, got {:?}", recorded[0]);
+        };
+        let payload: InspectorSetEffectPropertyPayload =
+            serde_json::from_value(payload.clone()).expect("set effect property payload");
+        assert_eq!(payload.path, "color.exposure");
+        let PropertyValue::Float(value) = payload.value else {
+            panic!("expected Float payload");
+        };
+        assert!(
+            (value - 0.5).abs() <= 0.0001,
+            "expected finite stepped nudge, got {value}"
         );
     }
 

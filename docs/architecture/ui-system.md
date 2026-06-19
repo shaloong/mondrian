@@ -431,6 +431,9 @@ by ten, and decimal precision supplies a predictable default when no explicit
 step is available. Changing decimal precision must reformat the committed value
 itself so fractional app-state snapshots such as `0.5` do not round through an
 intermediate integer display.
+Numeric widgets must sanitize inverted or non-finite ranges and values before
+clamping so plugin descriptors and stale app snapshots cannot panic the UI
+thread.
 Panel adapters may set a preferred `NumberInput` width when composing compact
 property rows; the input still receives its final bounds from layout and must
 not own row-level sizing policy.
@@ -1169,6 +1172,9 @@ vector components in the emitted payload. Numeric effect rows pass descriptor
 min/max/step metadata into both controls; integer properties default to unit
 steps so typed, keyboard, and dragged values stay on the same grid as the
 underlying effect property rather than relying on lossy float-to-int truncation.
+The adapter must sanitize descriptor numeric bounds before constructing controls
+or clamping emitted values; plugin-provided NaN, infinite, missing, or reversed
+min/max values are not allowed to panic the Inspector.
 Inspector clip mutations are validated at the AppState boundary, including
 locked-track protection; widgets stay domain-light and do not decide whether a
 clip can be edited.

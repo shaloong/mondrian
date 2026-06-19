@@ -30,9 +30,10 @@ pub struct Slider {
 impl Slider {
     /// Create a slider with a clamped initial value.
     pub fn new(value: f32, min: f32, max: f32) -> Self {
+        let (min, max) = ordered_range(min, max);
         Self {
             id: WidgetId::new(),
-            value: value.clamp(min, max),
+            value: clamp_finite(value, min, max),
             min,
             max,
             bounds: Rect::ZERO,
@@ -128,6 +129,9 @@ impl Slider {
     }
 
     fn quantize_value(&self, value: f32) -> f32 {
+        if !value.is_finite() {
+            return self.value;
+        }
         let clamped = value.clamp(self.min, self.max);
         let Some(step) = self.step else {
             return clamped;
@@ -348,6 +352,25 @@ impl Slider {
     }
 }
 
+fn ordered_range(min: f32, max: f32) -> (f32, f32) {
+    if !min.is_finite() || !max.is_finite() {
+        return (0.0, 1.0);
+    }
+    if min <= max {
+        (min, max)
+    } else {
+        (max, min)
+    }
+}
+
+fn clamp_finite(value: f32, min: f32, max: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(min, max)
+    } else {
+        min
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,6 +448,20 @@ mod tests {
     fn slider_new_value_in_range() {
         let s = Slider::new(50.0, 0.0, 100.0);
         assert_eq!(s.value(), 50.0);
+    }
+
+    #[test]
+    fn slider_new_orders_inverted_range() {
+        let s = Slider::new(50.0, 100.0, 0.0);
+
+        assert_eq!(s.value(), 50.0);
+    }
+
+    #[test]
+    fn slider_new_recovers_non_finite_range_and_value() {
+        let s = Slider::new(f32::NAN, f32::NAN, f32::INFINITY);
+
+        assert_eq!(s.value(), 0.0);
     }
 
     #[test]

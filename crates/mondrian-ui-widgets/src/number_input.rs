@@ -31,7 +31,7 @@ impl NumberInput {
     /// Create a number input with a clamped initial value.
     pub fn new(value: f64, min: f64, max: f64) -> Self {
         let (min, max) = ordered_range(min, max);
-        let value = value.clamp(min, max);
+        let value = clamp_finite(value, min, max);
         Self {
             input: TextInput::new("").with_text(format_number(value, 0)),
             min,
@@ -103,6 +103,9 @@ impl NumberInput {
     }
 
     fn normalize(&self, value: f64) -> f64 {
+        if !value.is_finite() {
+            return self.committed_value;
+        }
         let clamped = value.clamp(self.min, self.max);
         if let Some(step) = self.step {
             let steps = ((clamped - self.min) / step).round();
@@ -249,10 +252,21 @@ impl Widget for NumberInput {
 }
 
 fn ordered_range(min: f64, max: f64) -> (f64, f64) {
+    if !min.is_finite() || !max.is_finite() {
+        return (0.0, 1.0);
+    }
     if min <= max {
         (min, max)
     } else {
         (max, min)
+    }
+}
+
+fn clamp_finite(value: f64, min: f64, max: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(min, max)
+    } else {
+        min
     }
 }
 
@@ -365,6 +379,22 @@ mod tests {
 
         assert_eq!(input.text(), "0.50");
         assert_eq!(input.value(), Some(0.5));
+    }
+
+    #[test]
+    fn new_orders_inverted_range() {
+        let input = NumberInput::new(50.0, 100.0, 0.0);
+
+        assert_eq!(input.text(), "50");
+        assert_eq!(input.value(), Some(50.0));
+    }
+
+    #[test]
+    fn new_recovers_non_finite_range_and_value() {
+        let input = NumberInput::new(f64::NAN, f64::NAN, f64::INFINITY).with_decimals(2);
+
+        assert_eq!(input.text(), "0.00");
+        assert_eq!(input.value(), Some(0.0));
     }
 
     #[test]
