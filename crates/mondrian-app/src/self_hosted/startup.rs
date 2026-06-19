@@ -10,7 +10,9 @@ use mondrian_platform::PlatformService;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
+use mondrian_ui_widgets::RasterImage;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use crate::app::ui_actions::{
     app_shell_new_project_dialog_action, app_shell_open_project_dialog_action,
@@ -436,35 +438,37 @@ impl Widget for SelfHostedStartupScreen {
         let radius = spacing.radius_lg;
 
         ctx.encoder.draw_rect(self.panel_rect, colors.border, radius);
-        ctx.encoder.draw_gradient_rect(
-            self.left_rect,
-            [
-                colors.primary.lerp(colors.background, 0.15),
-                colors.accent.lerp(colors.primary, 0.30),
-                colors.background.lerp(colors.primary, 0.22),
-                colors.card.lerp(colors.primary, 0.18),
-            ],
-            radius,
-        );
+        paint_startup_banner(ctx, self.left_rect, radius);
         ctx.encoder.draw_rect(self.right_rect, colors.popover, radius);
 
         let brand_x = self.left_rect.x + 30.0;
         let brand_y = self.left_rect.y + 54.0;
-        let mark = Rect::new(brand_x, brand_y, 54.0, 54.0);
-        ctx.encoder.draw_rect(mark, colors.primary_foreground, 14.0);
-        ctx.encoder.draw_rect(mark.inset(7.0, 7.0), colors.primary, 9.0);
+        let mark = Rect::new(brand_x, brand_y, 28.0, 28.0);
+        if let Some(icon) = startup_app_icon_image() {
+            ctx.encoder.draw_raster_image(
+                &icon.key,
+                mark,
+                icon.width,
+                icon.height,
+                icon.rgba.clone(),
+                Color::WHITE,
+            );
+        } else {
+            ctx.encoder.draw_rect(mark, colors.primary_foreground, 8.0);
+            ctx.encoder.draw_rect(mark.inset(5.0, 5.0), colors.primary, 5.0);
+        }
         ctx.encoder.draw_text(
             "Mondrian",
-            typography.heading_h1.font_size,
-            Point::new(brand_x, brand_y + 92.0),
+            typography.heading_h2.font_size,
+            Point::new(mark.x + mark.width + 10.0, mark.y + 21.0),
             colors.primary_foreground,
         );
         ctx.encoder.draw_text_box(
-            "AI-native video editing workspace",
-            typography.body.font_size,
-            Point::new(brand_x, brand_y + 126.0),
+            "重构节奏，\n帧帧精彩",
+            typography.heading_h1.font_size,
+            Point::new(brand_x, self.left_rect.y + self.left_rect.height * 0.43),
             self.left_rect.width - 60.0,
-            colors.primary_foreground.lerp(colors.background, 0.18),
+            colors.primary_foreground,
         );
 
         let accent = Rect::new(
@@ -684,6 +688,81 @@ impl SelfHostedStartupScreen {
     }
 }
 
+fn paint_startup_banner(ctx: &mut PaintContext, rect: Rect, radius: f32) {
+    let colors = &ctx.theme.colors;
+    if let Some(image) = startup_banner_image() {
+        ctx.push_clip(rect);
+        let image_rect = cover_image_rect(rect, image.width, image.height);
+        ctx.encoder.draw_raster_image(
+            &image.key,
+            image_rect,
+            image.width,
+            image.height,
+            image.rgba.clone(),
+            Color::WHITE,
+        );
+        ctx.pop_clip();
+        ctx.encoder
+            .draw_rect(rect, startup_overlay_color(colors.background, 0.52), radius);
+    } else {
+        ctx.encoder.draw_gradient_rect(
+            rect,
+            [
+                colors.primary.lerp(colors.background, 0.15),
+                colors.accent.lerp(colors.primary, 0.30),
+                colors.background.lerp(colors.primary, 0.22),
+                colors.card.lerp(colors.primary, 0.18),
+            ],
+            radius,
+        );
+    }
+}
+
+fn cover_image_rect(bounds: Rect, image_width: u32, image_height: u32) -> Rect {
+    let image_width = image_width.max(1) as f32;
+    let image_height = image_height.max(1) as f32;
+    let scale = (bounds.width / image_width).max(bounds.height / image_height);
+    let width = image_width * scale;
+    let height = image_height * scale;
+    Rect::new(
+        bounds.x + (bounds.width - width) * 0.5,
+        bounds.y + (bounds.height - height) * 0.5,
+        width,
+        height,
+    )
+}
+
+fn startup_banner_image() -> Option<&'static RasterImage> {
+    static IMAGE: OnceLock<Option<RasterImage>> = OnceLock::new();
+    IMAGE
+        .get_or_init(|| {
+            decode_startup_png("startup.banner", include_bytes!("../../assets/banner.png"))
+        })
+        .as_ref()
+}
+
+fn startup_app_icon_image() -> Option<&'static RasterImage> {
+    static IMAGE: OnceLock<Option<RasterImage>> = OnceLock::new();
+    IMAGE
+        .get_or_init(|| {
+            decode_startup_png(
+                "startup.app-icon",
+                include_bytes!("../../assets/app-ico.png"),
+            )
+        })
+        .as_ref()
+}
+
+fn decode_startup_png(key: &str, bytes: &[u8]) -> Option<RasterImage> {
+    let image = image::load_from_memory(bytes).ok()?.into_rgba8();
+    RasterImage::new(key, image.width(), image.height(), image.into_raw())
+}
+
+fn startup_overlay_color(mut color: Color, alpha: f32) -> Color {
+    color.a *= alpha.clamp(0.0, 1.0);
+    color
+}
+
 fn startup_shell_action_error(name: &str, err: serde_json::Error) -> MondrianError {
     MondrianError::WorkflowStepFailed {
         step_id: format!("startup_shell_action.{name}"),
@@ -702,9 +781,10 @@ mod tests {
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_editor_state::Action;
     use mondrian_platform::{FileFilter, PlatformService};
-    use mondrian_ui_core::widget::EventRequests;
+    use mondrian_ui_core::widget::{DrawCommandEncoder, EventRequests};
     use std::cell::RefCell;
     use std::path::Path;
+    use std::sync::Arc;
 
     struct SaveProjectPlatform {
         project_file: PathBuf,
@@ -787,6 +867,62 @@ mod tests {
         actions.into_inner()
     }
 
+    #[derive(Default)]
+    struct StartupPaintRecorder {
+        rects: usize,
+        texts: Vec<String>,
+        raster_images: Vec<(String, Rect, u32, u32)>,
+        clips: Vec<Rect>,
+        clip_pops: usize,
+    }
+
+    impl DrawCommandEncoder for StartupPaintRecorder {
+        fn push_clip(&mut self, bounds: Rect) {
+            self.clips.push(bounds);
+        }
+
+        fn pop_clip(&mut self) {
+            self.clip_pops += 1;
+        }
+
+        fn draw_rect(&mut self, _bounds: Rect, _color: Color, _corner_radius: f32) {
+            self.rects += 1;
+        }
+
+        fn draw_line(&mut self, _start: Point, _end: Point, _width: f32, _color: Color) {}
+
+        fn draw_text(&mut self, text: &str, _font_size: f32, _position: Point, _color: Color) {
+            self.texts.push(text.to_owned());
+        }
+
+        fn draw_text_box(
+            &mut self,
+            text: &str,
+            _font_size: f32,
+            _position: Point,
+            _max_width: f32,
+            _color: Color,
+        ) {
+            self.texts.push(text.to_owned());
+        }
+
+        fn draw_raster_image(
+            &mut self,
+            key: &str,
+            bounds: Rect,
+            width: u32,
+            height: u32,
+            _rgba: Arc<[u8]>,
+            _tint: Color,
+        ) {
+            self.raster_images.push((key.to_owned(), bounds, width, height));
+        }
+
+        fn push_translate(&mut self, _offset: glam::Vec2) {}
+
+        fn pop_transform(&mut self) {}
+    }
+
     #[test]
     fn startup_screen_measures_to_product_startup_window_size() {
         let screen = SelfHostedStartupScreen::new();
@@ -795,6 +931,37 @@ mod tests {
             screen.measure(LayoutConstraint::LOOSE),
             Size::new(STARTUP_WINDOW_WIDTH, STARTUP_WINDOW_HEIGHT)
         );
+    }
+
+    #[test]
+    fn startup_screen_paints_embedded_banner_and_app_icon() {
+        let mut screen = SelfHostedStartupScreen::new();
+        screen.layout(Rect::new(
+            0.0,
+            0.0,
+            STARTUP_WINDOW_WIDTH,
+            STARTUP_WINDOW_HEIGHT,
+        ));
+        let theme = mondrian_ui_theme::ThemePreset::Dark.build();
+        let mut encoder = StartupPaintRecorder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, STARTUP_WINDOW_WIDTH, STARTUP_WINDOW_HEIGHT),
+        };
+
+        screen.paint(&mut ctx);
+
+        assert!(
+            encoder.raster_images.iter().any(|(key, _, _, _)| key == "startup.banner"),
+            "startup banner should use the embedded raster asset"
+        );
+        assert!(
+            encoder.raster_images.iter().any(|(key, _, _, _)| key == "startup.app-icon"),
+            "startup icon should use the embedded raster asset"
+        );
+        assert_eq!(encoder.clip_pops, encoder.clips.len());
+        assert!(encoder.texts.iter().any(|text| text == "Mondrian"));
     }
 
     #[test]

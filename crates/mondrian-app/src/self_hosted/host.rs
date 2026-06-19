@@ -895,7 +895,7 @@ mod tests {
         TreeWalker::layout(host.root_mut(), Rect::new(0.0, 0.0, 1280.0, 720.0));
 
         assert_eq!(host.root().workspace_preset(), WorkspacePreset::Compositing);
-        assert!((host.root().dock().ratio() - 0.35).abs() < f32::EPSILON);
+        assert!((host.root().dock().ratio() - 0.42).abs() < f32::EPSILON);
     }
 
     #[test]

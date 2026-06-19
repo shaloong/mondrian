@@ -97,6 +97,11 @@ workspace minimum size. Closing the project moves the host back to startup mode.
 Recent-project recovery, crash recovery, and future onboarding belong in the
 startup model and should be surfaced through app-layer actions rather than
 reintroducing a separate project browser or console panel.
+The startup surface may use app-owned embedded raster resources, such as the
+bootstrap banner and app icon, decoded once inside `self_hosted::startup` and
+sent through the renderer raster-image path. Those resources are product shell
+assets, not reusable widget-crate dependencies; generic widgets should continue
+receiving already-decoded image view models when they need raster content.
 The workspace panel set follows NLE product surfaces only: Viewer, Timeline,
 Assets, Inspector, Effects, Node Graph, and Export. Project media browsing lives
 inside Assets as the project library; self-hosted menus and dock factories must
