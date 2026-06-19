@@ -1052,6 +1052,58 @@ impl TimelineView {
             .find(|button| self.zoom_button_rect(*button).is_some_and(|rect| rect.contains(point)))
     }
 
+    fn chrome_tooltip(&self) -> Option<(&'static str, Rect)> {
+        if let Some(tool) = self.hovered_tool {
+            let label = match tool {
+                TimelineTool::Select => "Select Tool (V)",
+                TimelineTool::Blade => "Blade Tool (B)",
+            };
+            return Some((label, self.tool_button_rect(tool)));
+        }
+        if let Some(kind) = self.hovered_track_add {
+            let label = match kind {
+                TimelineTrackKind::Video => "Add Video Track",
+                TimelineTrackKind::Audio => "Add Audio Track",
+            };
+            return Some((label, self.track_add_button_rect(kind)));
+        }
+        if let Some(button) = self.hovered_zoom {
+            let label = match button {
+                TimelineZoomButton::Out => "Zoom Out",
+                TimelineZoomButton::In => "Zoom In",
+            };
+            if let Some(rect) = self.zoom_button_rect(button) {
+                return Some((label, rect));
+            }
+        }
+        None
+    }
+
+    fn update_chrome_hover(&mut self, position: Point, ctx: &mut EventContext) -> bool {
+        let hovered_tool = self.tool_at(position);
+        let hovered_track_add = self.track_add_at(position);
+        let hovered_zoom = self.zoom_button_at(position);
+        let changed = hovered_tool != self.hovered_tool
+            || hovered_track_add != self.hovered_track_add
+            || hovered_zoom != self.hovered_zoom;
+        if !changed {
+            return false;
+        }
+
+        let had_tooltip = self.chrome_tooltip().is_some();
+        self.hovered_tool = hovered_tool;
+        self.hovered_track_add = hovered_track_add;
+        self.hovered_zoom = hovered_zoom;
+
+        if let Some((text, rect)) = self.chrome_tooltip() {
+            ctx.tooltip.show(text.to_owned(), Point::new(rect.x, rect.y + rect.height));
+        } else if had_tooltip {
+            ctx.tooltip.hide();
+        }
+        ctx.request_repaint();
+        true
+    }
+
     fn clip_rect(&self, track_index: usize, clip: &TimelineClip) -> Rect {
         self.clip_rect_at(track_index, clip.start_frame, clip)
     }
@@ -2613,6 +2665,9 @@ impl Widget for TimelineView {
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
         if !self.enabled {
+            if self.chrome_tooltip().is_some() {
+                ctx.tooltip.hide();
+            }
             if self.playhead_dragging
                 || self.in_out_drag.is_some()
                 || self.track_drag.is_some()
@@ -2816,6 +2871,23 @@ impl Widget for TimelineView {
                 }
             }
             UiEvent::MouseMove { position, .. } => {
+                if !self.bounds.contains(*position) && !self.playhead_dragging {
+                    if self.chrome_tooltip().is_some() {
+                        ctx.tooltip.hide();
+                    }
+                    self.hovered_tool = None;
+                    self.hovered_track_add = None;
+                    self.hovered_zoom = None;
+                    self.hovered_track_control = None;
+                    self.hovered_clip = None;
+                    if self.horizontal_scrollbar_hovered || self.vertical_scrollbar_hovered {
+                        self.horizontal_scrollbar_hovered = false;
+                        self.vertical_scrollbar_hovered = false;
+                        ctx.request_repaint();
+                        return EventResult::Handled;
+                    }
+                    return EventResult::Ignored;
+                }
                 if self.playhead_dragging {
                     self.seek_from_input(self.x_to_frame(position.x), ctx);
                     return EventResult::Handled;
@@ -2854,22 +2926,7 @@ impl Widget for TimelineView {
                     ctx.request_repaint();
                     return EventResult::Handled;
                 }
-                let hovered_tool = self.tool_at(*position);
-                if hovered_tool != self.hovered_tool {
-                    self.hovered_tool = hovered_tool;
-                    ctx.request_repaint();
-                    return EventResult::Handled;
-                }
-                let hovered_track_add = self.track_add_at(*position);
-                if hovered_track_add != self.hovered_track_add {
-                    self.hovered_track_add = hovered_track_add;
-                    ctx.request_repaint();
-                    return EventResult::Handled;
-                }
-                let hovered_zoom = self.zoom_button_at(*position);
-                if hovered_zoom != self.hovered_zoom {
-                    self.hovered_zoom = hovered_zoom;
-                    ctx.request_repaint();
+                if self.update_chrome_hover(*position, ctx) {
                     return EventResult::Handled;
                 }
                 let hovered_track_control = self.track_control_at(*position);
@@ -2933,6 +2990,9 @@ impl Widget for TimelineView {
                 self.trim_drag = None;
                 self.scrollbar_drag = None;
                 self.context_menu = None;
+                if self.chrome_tooltip().is_some() {
+                    ctx.tooltip.hide();
+                }
                 self.hovered_tool = None;
                 self.hovered_track_add = None;
                 self.hovered_zoom = None;
@@ -3048,6 +3108,7 @@ mod tests {
     use std::rc::Rc;
 
     use mondrian_platform::NoopPlatformService;
+    use mondrian_ui_core::tooltip::{TooltipManager, TooltipState};
     use mondrian_ui_core::widget::{DrawCommandEncoder, EventRequests, PointerCaptureRequest};
     use mondrian_ui_theme::ThemePreset;
 
@@ -3070,7 +3131,7 @@ mod tests {
     fn dispatching_ctx<'a>(
         focus: &'a mut DummyFocus,
         shortcut: &'a mut DummyShortcut,
-        tooltip: &'a mut DummyTooltip,
+        tooltip: &'a mut dyn TooltipManager,
         requests: &'a mut EventRequests,
         dispatch: &'a dyn Fn(Action),
     ) -> EventContext<'a> {
@@ -3082,6 +3143,29 @@ mod tests {
             platform: &NoopPlatformService,
             requests,
         }
+    }
+
+    #[derive(Default)]
+    struct TooltipRecorder {
+        current: Option<TooltipState>,
+        hide_count: usize,
+    }
+
+    impl TooltipManager for TooltipRecorder {
+        fn show(&mut self, text: String, position: Point) {
+            self.current = Some(TooltipState { text, position, visible: true });
+        }
+
+        fn hide(&mut self) {
+            self.current = None;
+            self.hide_count += 1;
+        }
+
+        fn current(&self) -> Option<&TooltipState> {
+            self.current.as_ref()
+        }
+
+        fn update(&mut self, _delta_ms: u64) {}
     }
 
     #[derive(Default)]
@@ -4450,6 +4534,80 @@ mod tests {
         assert!(view.zoom_button_rect(TimelineZoomButton::Out).is_none());
         assert!(view.zoom_button_rect(TimelineZoomButton::In).is_none());
         assert_eq!(view.zoom_button_at(Point::new(120.0, 12.0)), None);
+    }
+
+    #[test]
+    fn timeline_chrome_buttons_update_and_hide_tooltips() {
+        let mut view = timeline();
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let select = view.tool_button_rect(TimelineTool::Select).center();
+        let add_audio = view.track_add_button_rect(TimelineTrackKind::Audio).center();
+        let zoom_out = view
+            .zoom_button_rect(TimelineZoomButton::Out)
+            .expect("wide ruler should show zoom controls")
+            .center();
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = TooltipRecorder::default();
+        let mut requests = EventRequests::default();
+        let dispatch = |_| {};
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            view.event(
+                &UiEvent::MouseMove { position: select, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            ctx.tooltip.current().map(|state| state.text.as_str()),
+            Some("Select Tool (V)")
+        );
+
+        assert_eq!(
+            view.event(
+                &UiEvent::MouseMove { position: add_audio, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            ctx.tooltip.current().map(|state| state.text.as_str()),
+            Some("Add Audio Track")
+        );
+
+        assert_eq!(
+            view.event(
+                &UiEvent::MouseMove { position: zoom_out, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            ctx.tooltip.current().map(|state| state.text.as_str()),
+            Some("Zoom Out")
+        );
+
+        assert_eq!(
+            view.event(
+                &UiEvent::MouseMove {
+                    position: Point::new(-10.0, -10.0),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+        assert!(ctx.tooltip.current().is_none());
     }
 
     #[test]

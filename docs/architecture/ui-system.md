@@ -771,6 +771,9 @@ preserves timeline working context across panel model rebuilds without storing
 that UI session data in `AppState`. Visible timeline zoom controls live on the
 ruler and mutate the same widget-local `pixels_per_frame` value as Ctrl+wheel
 zoom; they do not emit editor actions because display zoom is not project data.
+Timeline chrome buttons, including pointer tools, add-track controls, and zoom
+controls, publish hover hints through the shared tooltip manager rather than
+painting local text labels inside the compact toolbar.
 Asset drops follow the same boundary. `TimelineView` accepts
 `DragPayload::Asset` only as a domain-light drop proposal with a view track ref
 and frame. The self-hosted adapter resolves that view ref to a stable
