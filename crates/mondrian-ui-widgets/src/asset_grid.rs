@@ -1017,9 +1017,10 @@ impl AssetGrid {
     }
 
     fn commit_rename(&mut self, ctx: &mut EventContext) -> EventResult {
-        let Some(editor) = self.rename_editor.take() else {
+        let Some(mut editor) = self.rename_editor.take() else {
             return EventResult::Ignored;
         };
+        let _ = editor.input.event(&UiEvent::FocusLost, ctx);
         let text = editor.input.text().trim().to_owned();
         if !text.is_empty() {
             if let (Some(item), Some(factory)) =
@@ -1030,13 +1031,20 @@ impl AssetGrid {
                 }
             }
         }
+        self.focused = true;
+        self.focus_visible = false;
+        ctx.focus.request_focus(self.id);
         ctx.request_repaint();
         EventResult::Handled
     }
 
     fn cancel_rename(&mut self, ctx: &mut EventContext) -> EventResult {
-        if self.rename_editor.take().is_some() {
+        if let Some(mut editor) = self.rename_editor.take() {
+            let _ = editor.input.event(&UiEvent::FocusLost, ctx);
             self.context_menu_target = None;
+            self.focused = true;
+            self.focus_visible = false;
+            ctx.focus.request_focus(self.id);
             ctx.request_repaint();
             EventResult::Handled
         } else {
@@ -1756,6 +1764,7 @@ mod tests {
     use crate::test_utils::{DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::types::AssetId;
     use mondrian_platform::NoopPlatformService;
+    use mondrian_ui_core::focus::FocusManager;
     use mondrian_ui_core::widget::{DrawCommandEncoder, EventContext, EventRequests};
     use mondrian_ui_theme::ThemePreset;
     use std::cell::RefCell;
@@ -1817,8 +1826,41 @@ mod tests {
         AssetGridItem::new(id, title, Color::from_hex(0x6688CC))
     }
 
+    #[derive(Default)]
+    struct RecordingFocus {
+        focused: Option<WidgetId>,
+    }
+
+    impl FocusManager for RecordingFocus {
+        fn focused_widget(&self) -> Option<WidgetId> {
+            self.focused
+        }
+
+        fn focused_panel(&self) -> Option<mondrian_editor_state::state::PanelKind> {
+            None
+        }
+
+        fn request_focus(&mut self, widget: WidgetId) {
+            self.focused = Some(widget);
+        }
+
+        fn release_focus(&mut self, widget: WidgetId) {
+            if self.focused == Some(widget) {
+                self.focused = None;
+            }
+        }
+
+        fn focus_next(&mut self) {}
+
+        fn focus_prev(&mut self) {}
+
+        fn clear_focus(&mut self) {
+            self.focused = None;
+        }
+    }
+
     fn event_ctx<'a>(
-        focus: &'a mut DummyFocus,
+        focus: &'a mut dyn FocusManager,
         shortcut: &'a mut DummyShortcut,
         tooltip: &'a mut DummyTooltip,
         requests: &'a mut EventRequests,
@@ -1975,6 +2017,110 @@ mod tests {
 
         assert!(actions.borrow().is_empty());
         assert_eq!(grid.child_count(), 0);
+    }
+
+    #[test]
+    fn inline_rename_commit_returns_focus_to_grid_and_disables_ime() {
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = RecordingFocus::default();
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        let mut grid = AssetGrid::new("Assets", vec![item("clip-a", "Old").renamable(true)])
+            .on_rename(|_, _, name| Action::OpenProject(PathBuf::from(name)));
+        let grid_id = grid.id();
+        grid.layout(Rect::new(0.0, 0.0, 360.0, 220.0));
+        grid.event(&UiEvent::FocusGained, &mut ctx);
+        grid.event(
+            &UiEvent::MouseDown {
+                position: grid.card_rect_for_index(0).expect("card").center(),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        grid.event(
+            &UiEvent::KeyDown { key: KeyCode::F2, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+
+        assert_eq!(grid.child_count(), 1);
+        assert_ne!(ctx.focus.focused_widget(), Some(grid_id));
+        assert!(ctx.requests.ime.as_ref().is_some_and(|ime| ime.enabled));
+
+        grid.event(&UiEvent::TextInput("New".into()), &mut ctx);
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(grid.child_count(), 0);
+        assert_eq!(ctx.focus.focused_widget(), Some(grid_id));
+        assert!(ctx.requests.ime.as_ref().is_some_and(|ime| !ime.enabled));
+        assert_eq!(actions.borrow().len(), 1);
+    }
+
+    #[test]
+    fn inline_rename_cancel_returns_focus_to_grid_and_disables_ime() {
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = RecordingFocus::default();
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        let mut grid = AssetGrid::new("Assets", vec![item("clip-a", "Old").renamable(true)])
+            .on_rename(|_, _, name| Action::OpenProject(PathBuf::from(name)));
+        let grid_id = grid.id();
+        grid.layout(Rect::new(0.0, 0.0, 360.0, 220.0));
+        grid.event(&UiEvent::FocusGained, &mut ctx);
+        grid.event(
+            &UiEvent::MouseDown {
+                position: grid.card_rect_for_index(0).expect("card").center(),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        grid.event(
+            &UiEvent::KeyDown { key: KeyCode::F2, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+
+        assert_eq!(grid.child_count(), 1);
+        assert_ne!(ctx.focus.focused_widget(), Some(grid_id));
+        assert!(ctx.requests.ime.as_ref().is_some_and(|ime| ime.enabled));
+
+        grid.event(&UiEvent::TextInput("New".into()), &mut ctx);
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(grid.child_count(), 0);
+        assert_eq!(ctx.focus.focused_widget(), Some(grid_id));
+        assert!(ctx.requests.ime.as_ref().is_some_and(|ime| !ime.enabled));
+        assert!(actions.borrow().is_empty());
     }
 
     #[test]

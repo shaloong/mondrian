@@ -369,7 +369,10 @@ the new UI.
 Ancestors receive `after_child_event()` after a descendant handles an event.
 This hook is for parent-owned state synchronization, such as rebuilding tab
 content after a tab bar changes active index. It must not redispatch the event
-to children.
+to children. Router-generated `FocusLost` is still a child event: when a
+focused child handles it because focus moved elsewhere, ancestors receive the
+same post-hook so composite widgets can commit editors, close transient state,
+or restore wrapper focus without waiting for stale-widget pruning.
 
 The router treats widget ids as frame-local routing handles. Before routing a
 new event it drops hovered, focused, or captured ids that are no longer present
@@ -1033,7 +1036,11 @@ menus expose the same rename flow through `MenuItem::local`, so choosing Rename
 starts the component's existing inline editor instead of dispatching a partial
 app action with no edited text. `ContextMenu` still dispatches normal
 `MenuItem::new` actions directly; local commands are intentionally interpreted
-only by the component that created the popup.
+only by the component that created the popup. When inline rename commits or
+cancels, `AssetGrid` sends `FocusLost` to the temporary `TextInput`, disables
+IME through the normal text-input request path, and returns focus to the grid so
+follow-up keyboard navigation or F2 editing does not depend on router stale-node
+cleanup.
 Folder cards expose `ui.assets.delete_folder` through the same card-level menu
 surface. Folder deletion is an app/library mutation: `AssetLibrary` removes the
 selected folder subtree, unlinks assets assigned to any deleted folder, and

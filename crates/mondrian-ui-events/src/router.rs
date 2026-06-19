@@ -607,13 +607,19 @@ impl EventRouter {
         widget_id: WidgetId,
         dispatch: &dyn Fn(Action),
     ) {
-        if let Some(widget) = tree.get_mut(widget_id) {
+        let result = if let Some(widget) = tree.get_mut(widget_id) {
             let mut requests = EventRequests::default();
-            {
+            let result = {
                 let mut ctx = self.make_event_context(dispatch, &mut requests);
-                widget.event(&UiEvent::FocusLost, &mut ctx);
-            }
+                widget.event(&UiEvent::FocusLost, &mut ctx)
+            };
             self.apply_event_requests(requests);
+            result
+        } else {
+            EventResult::Ignored
+        };
+        if result == EventResult::Handled {
+            self.after_child_handled(tree, widget_id, &UiEvent::FocusLost, dispatch);
         }
     }
 
@@ -1904,6 +1910,57 @@ mod tests {
 
         assert_eq!(result, EventResult::Handled);
         assert!(log.borrow().contains(&"parent-after".into()));
+    }
+
+    #[test]
+    fn router_calls_parent_after_child_focus_lost() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let child = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let child_id = child.id();
+        let parent = ParentPostWidget {
+            id: WidgetId::new(),
+            bounds: Rect::new(0.0, 0.0, 100.0, 30.0),
+            child_id,
+            handle_before: false,
+            log: Rc::clone(&log),
+        };
+        let root = parent.id;
+        let mut tree = ParentChildTree { parent, child };
+        let mut router = EventRouter::new(root);
+
+        let _ = router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.focused(), Some(child_id));
+        let _ = router.route(
+            UiEvent::MouseUp {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        log.borrow_mut().clear();
+
+        let result = router.route(
+            UiEvent::MouseDown {
+                position: Point::new(200.0, 200.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(log.borrow().as_slice(), ["focus-lost", "parent-after"]);
     }
 
     #[test]
