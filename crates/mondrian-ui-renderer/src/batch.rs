@@ -948,6 +948,38 @@ mod tests {
     }
 
     #[test]
+    fn build_batches_masked_colored_triangles_normalize_winding_with_vertex_data() {
+        let cmds = [DrawCommand::ColoredTriangles {
+            vertices: vec![
+                (Point::new(10.0, 10.0), Color::from_rgba8(255, 0, 0, 255)),
+                (Point::new(90.0, 10.0), Color::from_rgba8(0, 255, 0, 255)),
+                (Point::new(10.0, 90.0), Color::from_rgba8(0, 0, 255, 255)),
+            ],
+            mask: Some(crate::command::ShapeMask {
+                bounds: Rect::new(10.0, 10.0, 80.0, 80.0),
+                corner_radius: 40.0,
+            }),
+        }];
+
+        let batches = build_batches(&cmds, (100, 100));
+
+        assert_eq!(batches.len(), 1);
+        let vertices = &batches[0].vertices;
+        assert_eq!(vertices.len(), 3);
+        let tri = &vertices[..3];
+        let a = (tri[0].position[0], tri[0].position[1]);
+        let b = (tri[1].position[0], tri[1].position[1]);
+        let c = (tri[2].position[0], tri[2].position[1]);
+        assert!(signed_triangle_area(a, b, c) > 0.0);
+        assert_eq!(tri[0].color, [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(tri[0].tex_coord, [0.0, 0.0]);
+        assert_eq!(tri[1].color, [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(tri[1].tex_coord, [0.0, 1.0]);
+        assert_eq!(tri[2].color, [0.0, 1.0, 0.0, 1.0]);
+        assert_eq!(tri[2].tex_coord, [1.0, 0.0]);
+    }
+
+    #[test]
     fn build_batches_multiple_rects_same_batch() {
         let cmds = [
             DrawCommand::Rect {
