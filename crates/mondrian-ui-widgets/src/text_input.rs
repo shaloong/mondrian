@@ -609,10 +609,11 @@ impl Widget for TextInput {
                         }
                     }
                     KeyCode::V if ctrl => {
-                        self.delete_selection();
                         if let Some(clip) = ctx.platform.clipboard_paste() {
-                            if !clip.is_empty() {
-                                self.insert_at_cursor(&clip);
+                            let normalized = normalize_single_line_input(&clip);
+                            if !normalized.is_empty() {
+                                self.delete_selection();
+                                self.insert_at_cursor(&normalized);
                             }
                         }
                         EventResult::Handled
@@ -1286,6 +1287,35 @@ mod tests {
             actions.borrow().as_slice(),
             &[change_action("before first second third")]
         );
+    }
+
+    #[test]
+    fn paste_empty_clipboard_preserves_selection_without_dispatching_change() {
+        let platform = ClipboardPlatform { text: String::new() };
+        let mut ti = TextInput::new("ph").with_text("before after").on_change(change_action);
+        ti.focused = true;
+        ti.selection_start = Some(7);
+        ti.cursor = 12;
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = EventContext {
+            focus: &mut focus,
+            shortcut: &mut shortcuts,
+            tooltip: &mut tooltip,
+            dispatch: &dispatch,
+            platform: &platform,
+            requests: &mut requests,
+        };
+
+        kd_ctrl(&mut ti, KeyCode::V, &mut ctx);
+
+        assert_eq!(ti.text(), "before after");
+        assert_eq!(ti.selection_byte_range(), Some((7, 12)));
+        assert!(actions.borrow().is_empty());
     }
 
     #[test]
