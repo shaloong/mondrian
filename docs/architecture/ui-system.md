@@ -1516,7 +1516,10 @@ it focus, while `FocusGained` shows tokenized focus chrome for keyboard
 navigation. Focused viewers handle unmodified Space, Left/Right, Home/End, and
 I/O through the same transport callback used by clickable chrome; modified keys
 fall through to the shell shortcut router. Space remains intentionally absent
-from global shortcuts so text editing cannot toggle playback.
+from global shortcuts so text editing cannot toggle playback. Focus loss and
+disabled cleanup clear hover, pressed, and focus-ring chrome and request repaint
+when any of those visual states changed, so transport buttons and chips cannot
+remain visually pressed after focus or availability changes.
 Empty app state maps to a disabled viewer model so the product shell can show
 clear no-signal chrome without pretending a preview texture exists.
 `ui_demo` should use the same `ViewerSurface` for the Viewer panel and keep

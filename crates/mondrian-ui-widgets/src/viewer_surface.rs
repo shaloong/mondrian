@@ -440,6 +440,26 @@ impl ViewerSurface {
             _ => None,
         }
     }
+
+    fn clear_interaction_state(&mut self) -> bool {
+        let changed = self.hovered_control.is_some()
+            || self.pressed_control.is_some()
+            || self.hovered_zoom
+            || self.pressed_zoom
+            || self.hovered_preview_quality
+            || self.pressed_preview_quality
+            || self.focused
+            || self.focus_visible;
+        self.hovered_control = None;
+        self.pressed_control = None;
+        self.hovered_zoom = false;
+        self.pressed_zoom = false;
+        self.hovered_preview_quality = false;
+        self.pressed_preview_quality = false;
+        self.focused = false;
+        self.focus_visible = false;
+        changed
+    }
 }
 
 impl Widget for ViewerSurface {
@@ -457,14 +477,9 @@ impl Widget for ViewerSurface {
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
         if !self.enabled {
-            self.hovered_control = None;
-            self.pressed_control = None;
-            self.hovered_zoom = false;
-            self.pressed_zoom = false;
-            self.hovered_preview_quality = false;
-            self.pressed_preview_quality = false;
-            self.focused = false;
-            self.focus_visible = false;
+            if self.clear_interaction_state() {
+                ctx.request_repaint();
+            }
             return EventResult::Ignored;
         }
 
@@ -553,14 +568,9 @@ impl Widget for ViewerSurface {
                 EventResult::Ignored
             }
             UiEvent::FocusLost => {
-                self.hovered_control = None;
-                self.pressed_control = None;
-                self.hovered_zoom = false;
-                self.pressed_zoom = false;
-                self.hovered_preview_quality = false;
-                self.pressed_preview_quality = false;
-                self.focused = false;
-                self.focus_visible = false;
+                if self.clear_interaction_state() {
+                    ctx.request_repaint();
+                }
                 EventResult::Handled
             }
             UiEvent::KeyDown { key, modifiers } if self.focused => {
@@ -1542,6 +1552,84 @@ mod tests {
         );
 
         assert_eq!(actions.borrow().as_slice(), &[Action::TogglePlay]);
+    }
+
+    #[test]
+    fn viewer_focus_lost_clears_pressed_chrome_and_repaints() {
+        let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080);
+        viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
+        let position = viewer.control_rect(ViewerControl::PlayPause).center();
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        assert_eq!(
+            viewer.event(
+                &UiEvent::MouseDown {
+                    position,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        ctx.requests.repaint = false;
+
+        assert_eq!(
+            viewer.event(&UiEvent::FocusLost, &mut ctx),
+            EventResult::Handled
+        );
+
+        assert!(ctx.requests.repaint);
+        assert_eq!(viewer.pressed_control, None);
+        assert_eq!(viewer.hovered_control, None);
+        assert!(!viewer.focused);
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn disabled_viewer_next_event_clears_pressed_chrome_and_repaints() {
+        let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080);
+        viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
+        let position = viewer.control_rect(ViewerControl::PlayPause).center();
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        assert_eq!(
+            viewer.event(
+                &UiEvent::MouseDown {
+                    position,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        viewer.enabled = false;
+        ctx.requests.repaint = false;
+
+        assert_eq!(
+            viewer.event(
+                &UiEvent::MouseMove { position, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+
+        assert!(ctx.requests.repaint);
+        assert_eq!(viewer.pressed_control, None);
+        assert_eq!(viewer.hovered_control, None);
+        assert!(!viewer.focused);
+        assert!(actions.borrow().is_empty());
     }
 
     #[test]
