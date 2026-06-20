@@ -1649,11 +1649,17 @@ the GPU rounded-rect SDF path; line commands use a dedicated capsule SDF with
 as a bare quad can miss MSAA sample positions and appear broken or intermittent.
 Together with 4x MSAA resolve and linear atlas sampling, this keeps circles,
 SVG raster icons, diagonals, and text glyph images smooth during resize and
-scroll. Clip bounds are the exception: they are expanded conservatively with
-floor/ceil when the command is recorded, then intersected hierarchically by the
-renderer and applied as GPU scissors. Widgets may still opt into stable pixel
-placement at semantic edges with `snap_point()` or local layout policy, but
-whole-sale snapping of draw commands is avoided because it degrades
+scroll. The renderer batch builder is the final primitive-safety boundary: it
+rejects zero-sized surfaces, non-finite or non-positive draw bounds, non-finite
+colors, invalid UV rectangles, and invalid corner radii before generating GPU
+vertices. Clip bounds are the exception to normal draw rejection: they are
+expanded conservatively with floor/ceil when the command is recorded, then
+intersected hierarchically by the renderer and applied as GPU scissors; invalid
+clip scopes become empty clips so enclosed content cannot leak outside the
+broken scope. Invalid translate pushes become zero-offset stack entries so later
+pop commands still preserve transform-stack balance. Widgets may still opt into
+stable pixel placement at semantic edges with `snap_point()` or local layout
+policy, but whole-sale snapping of draw commands is avoided because it degrades
 curved/vector geometry and can misalign glyph bitmap bearings.
 The GPU UI pass renders through a cached 4x MSAA target and resolves into the
 surface view. Raster icon images use a separate renderer-owned image atlas with

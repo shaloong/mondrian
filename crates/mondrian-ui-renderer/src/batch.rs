@@ -27,6 +27,10 @@ pub struct DrawBatch {
 /// 输入像素坐标的原点为左上角。输出 NDC 坐标 y=1 为顶部，y=-1 为底部。
 /// 每个批次最多容纳 16384 个顶点；溢出时自动分割批次并保留裁剪状态。
 pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<DrawBatch> {
+    if screen_size.0 == 0 || screen_size.1 == 0 {
+        return Vec::new();
+    }
+
     let mut batches: Vec<DrawBatch> = Vec::new();
     let mut current_batch = DrawBatch {
         vertices: Vec::new(),
@@ -51,11 +55,15 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                     clip_stack.last().copied(),
                 );
                 let transformed = apply_transform(bounds, &transform_stack);
-                let effective = clip_stack
-                    .last()
-                    .copied()
-                    .map(|parent| intersect_rect(parent, transformed))
-                    .unwrap_or(transformed);
+                let effective = if rect_is_visible(transformed) {
+                    clip_stack
+                        .last()
+                        .copied()
+                        .map(|parent| intersect_rect(parent, transformed))
+                        .unwrap_or(transformed)
+                } else {
+                    Rect::new(0.0, 0.0, 0.0, 0.0)
+                };
                 clip_stack.push(effective);
             }
             DrawCommand::PopClip => {
@@ -67,17 +75,34 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                 clip_stack.pop();
             }
             DrawCommand::PushTranslate { offset } => {
-                transform_stack.push(*offset);
+                transform_stack.push(if offset.x.is_finite() && offset.y.is_finite() {
+                    *offset
+                } else {
+                    glam::Vec2::ZERO
+                });
             }
             DrawCommand::PopTransform => {
                 transform_stack.pop();
             }
             DrawCommand::Rect { bounds, color, corner_radius } => {
+                if !rect_is_visible(*bounds)
+                    || !color_is_finite(*color)
+                    || !corner_radius.is_finite()
+                {
+                    continue;
+                }
+
                 let pixel_w = bounds.width.max(1.0);
                 let pixel_h = bounds.height.max(1.0);
 
                 let rect = apply_transform(bounds, &transform_stack);
+                if !rect_is_visible(rect) {
+                    continue;
+                }
                 let screen_rect = pixel_to_ndc_rect(rect, sx, sy, tx, ty);
+                if !rect_is_visible(screen_rect) {
+                    continue;
+                }
 
                 let vertices = generate_rect_vertices(
                     screen_rect,
@@ -93,11 +118,24 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                 current_batch.vertices.extend(vertices);
             }
             DrawCommand::GradientRect { bounds, colors, corner_radius } => {
+                if !rect_is_visible(*bounds)
+                    || !colors.iter().all(|color| color_is_finite(*color))
+                    || !corner_radius.is_finite()
+                {
+                    continue;
+                }
+
                 let pixel_w = bounds.width.max(1.0);
                 let pixel_h = bounds.height.max(1.0);
 
                 let rect = apply_transform(bounds, &transform_stack);
+                if !rect_is_visible(rect) {
+                    continue;
+                }
                 let screen_rect = pixel_to_ndc_rect(rect, sx, sy, tx, ty);
+                if !rect_is_visible(screen_rect) {
+                    continue;
+                }
 
                 let vertices = generate_gradient_rect_vertices(
                     screen_rect,
@@ -114,6 +152,11 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                 // reach this low-level batch builder.
             }
             DrawCommand::Image { bounds, uv_rect, tint } => {
+                if !rect_is_visible(*bounds) || !rect_is_finite(*uv_rect) || !color_is_finite(*tint)
+                {
+                    continue;
+                }
+
                 ensure_texture_key(
                     &mut batches,
                     &mut current_batch,
@@ -121,7 +164,13 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                     None,
                 );
                 let rect = apply_transform(bounds, &transform_stack);
+                if !rect_is_visible(rect) {
+                    continue;
+                }
                 let screen_rect = pixel_to_ndc_rect(rect, sx, sy, tx, ty);
+                if !rect_is_visible(screen_rect) {
+                    continue;
+                }
 
                 // Generate vertices with UV coords and render_mode=Glyph
                 let x0 = screen_rect.x;
@@ -154,6 +203,11 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                 // The renderer resolves these into RasterAtlasImage before batching.
             }
             DrawCommand::RasterAtlasImage { bounds, uv_rect, tint } => {
+                if !rect_is_visible(*bounds) || !rect_is_finite(*uv_rect) || !color_is_finite(*tint)
+                {
+                    continue;
+                }
+
                 ensure_texture_key(
                     &mut batches,
                     &mut current_batch,
@@ -161,7 +215,13 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                     Some("image".to_string()),
                 );
                 let rect = apply_transform(bounds, &transform_stack);
+                if !rect_is_visible(rect) {
+                    continue;
+                }
                 let screen_rect = pixel_to_ndc_rect(rect, sx, sy, tx, ty);
+                if !rect_is_visible(screen_rect) {
+                    continue;
+                }
 
                 let x0 = screen_rect.x;
                 let y0 = screen_rect.y;
@@ -294,6 +354,7 @@ fn line_vertices(
         || !end.x.is_finite()
         || !end.y.is_finite()
         || !width.is_finite()
+        || !color_is_finite(*color)
     {
         return None;
     }
@@ -462,6 +523,14 @@ fn signed_triangle_area(a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> f32 {
     (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)
 }
 
+fn rect_is_finite(rect: Rect) -> bool {
+    rect.x.is_finite() && rect.y.is_finite() && rect.width.is_finite() && rect.height.is_finite()
+}
+
+fn rect_is_visible(rect: Rect) -> bool {
+    rect_is_finite(rect) && rect.width > 0.0 && rect.height > 0.0
+}
+
 fn point_is_finite(point: Point) -> bool {
     point.x.is_finite() && point.y.is_finite()
 }
@@ -579,6 +648,18 @@ mod tests {
     }
 
     #[test]
+    fn build_batches_zero_sized_surface_returns_empty() {
+        let cmds = [DrawCommand::Rect {
+            bounds: Rect::new(0.0, 0.0, 100.0, 50.0),
+            color: Color::WHITE,
+            corner_radius: 0.0,
+        }];
+
+        assert!(build_batches(&cmds, (0, 100)).is_empty());
+        assert!(build_batches(&cmds, (100, 0)).is_empty());
+    }
+
+    #[test]
     fn build_batches_single_rect_returns_one_batch() {
         let cmds = [DrawCommand::Rect {
             bounds: Rect::new(0.0, 0.0, 100.0, 50.0),
@@ -588,6 +669,41 @@ mod tests {
         let batches = build_batches(&cmds, (1920, 1080));
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].vertices.len(), 6);
+    }
+
+    #[test]
+    fn build_batches_rects_skip_invalid_geometry_and_colors() {
+        let cmds = [
+            DrawCommand::Rect {
+                bounds: Rect::new(0.0, 0.0, 20.0, 20.0),
+                color: Color::WHITE,
+                corner_radius: 0.0,
+            },
+            DrawCommand::Rect {
+                bounds: Rect::new(f32::NAN, 0.0, 20.0, 20.0),
+                color: Color::WHITE,
+                corner_radius: 0.0,
+            },
+            DrawCommand::Rect {
+                bounds: Rect::new(0.0, 0.0, 0.0, 20.0),
+                color: Color::WHITE,
+                corner_radius: 0.0,
+            },
+            DrawCommand::Rect {
+                bounds: Rect::new(0.0, 0.0, 20.0, 20.0),
+                color: Color { r: 1.0, g: 1.0, b: f32::INFINITY, a: 1.0 },
+                corner_radius: 0.0,
+            },
+        ];
+
+        let batches = build_batches(&cmds, (100, 100));
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].vertices.len(), 6);
+        for vertex in &batches[0].vertices {
+            assert!(vertex.position.iter().all(|value| value.is_finite()));
+            assert!(vertex.color.iter().all(|value| value.is_finite()));
+        }
     }
 
     #[test]
@@ -613,6 +729,42 @@ mod tests {
         assert_eq!(vertices[1].color, [0.0, 1.0, 0.0, 1.0]);
         assert_eq!(vertices[2].color, [0.0, 0.0, 1.0, 1.0]);
         assert_eq!(vertices[5].color, [1.0, 1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn build_batches_gradient_rects_skip_invalid_inputs() {
+        let invalid_colors = [
+            Color::WHITE,
+            Color::BLACK,
+            Color { r: f32::NAN, g: 0.0, b: 0.0, a: 1.0 },
+            Color::TRANSPARENT,
+        ];
+        let cmds = [
+            DrawCommand::GradientRect {
+                bounds: Rect::new(0.0, 0.0, 20.0, 20.0),
+                colors: [Color::WHITE, Color::BLACK, Color::TRANSPARENT, Color::WHITE],
+                corner_radius: 0.0,
+            },
+            DrawCommand::GradientRect {
+                bounds: Rect::new(0.0, 0.0, -1.0, 20.0),
+                colors: [Color::WHITE, Color::BLACK, Color::TRANSPARENT, Color::WHITE],
+                corner_radius: 0.0,
+            },
+            DrawCommand::GradientRect {
+                bounds: Rect::new(0.0, 0.0, 20.0, 20.0),
+                colors: invalid_colors,
+                corner_radius: 0.0,
+            },
+        ];
+
+        let batches = build_batches(&cmds, (100, 100));
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].vertices.len(), 6);
+        assert!(batches[0]
+            .vertices
+            .iter()
+            .all(|vertex| vertex.color.iter().all(|value| value.is_finite())));
     }
 
     #[test]
@@ -846,6 +998,28 @@ mod tests {
         assert_eq!(batches[0].clip_rect, Some(Rect::new(20.0, 30.0, 0.0, 0.0)));
     }
 
+    #[test]
+    fn build_batches_invalid_clip_becomes_empty_clip() {
+        let cmds = [
+            DrawCommand::PushClip { bounds: Rect::new(f32::NAN, 0.0, 100.0, 80.0) },
+            DrawCommand::Rect {
+                bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
+                color: Color::WHITE,
+                corner_radius: 0.0,
+            },
+            DrawCommand::PopClip,
+        ];
+
+        let batches = build_batches(&cmds, (300, 200));
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].clip_rect, Some(Rect::new(0.0, 0.0, 0.0, 0.0)));
+        assert!(batches[0].vertices.iter().all(|vertex| {
+            vertex.position.iter().all(|value| value.is_finite())
+                && vertex.color.iter().all(|value| value.is_finite())
+        }));
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // Transform stack
     // ═══════════════════════════════════════════════════════════════════════
@@ -865,6 +1039,34 @@ mod tests {
         assert_eq!(batches.len(), 1);
         let v0 = &batches[0].vertices[0];
         assert!(v0.position[0] > -1.0 && v0.position[0] < 1.0);
+    }
+
+    #[test]
+    fn build_batches_invalid_transform_preserves_stack_balance_without_moving_geometry() {
+        let cmds = [
+            DrawCommand::PushTranslate { offset: glam::Vec2::new(50.0, 0.0) },
+            DrawCommand::PushTranslate { offset: glam::Vec2::new(f32::NAN, 10.0) },
+            DrawCommand::Rect {
+                bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                color: Color::WHITE,
+                corner_radius: 0.0,
+            },
+            DrawCommand::PopTransform,
+            DrawCommand::Rect {
+                bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                color: Color::BLACK,
+                corner_radius: 0.0,
+            },
+            DrawCommand::PopTransform,
+        ];
+
+        let batches = build_batches(&cmds, (1000, 1000));
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].vertices.len(), 12);
+        let first_rect_x = batches[0].vertices[0].position[0];
+        let second_rect_x = batches[0].vertices[6].position[0];
+        assert!((first_rect_x - second_rect_x).abs() < 0.0001);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -981,6 +1183,18 @@ mod tests {
         assert!((max_x - 0.82).abs() < 0.001);
     }
 
+    #[test]
+    fn build_batches_lines_skip_invalid_color() {
+        let cmds = [DrawCommand::Line {
+            start: Point::new(10.0, 50.0),
+            end: Point::new(90.0, 50.0),
+            width: 2.0,
+            color: Color { r: 1.0, g: f32::NAN, b: 1.0, a: 1.0 },
+        }];
+
+        assert!(build_batches(&cmds, (100, 100)).is_empty());
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // Triangle command
     // ═══════════════════════════════════════════════════════════════════════
@@ -1080,6 +1294,42 @@ mod tests {
         let batches = build_batches(&cmds, (1920, 1080));
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].vertices.len(), 6);
+    }
+
+    #[test]
+    fn build_batches_images_skip_invalid_bounds_uvs_and_tints() {
+        let cmds = [
+            DrawCommand::Image {
+                bounds: Rect::new(0.0, 0.0, 16.0, 16.0),
+                uv_rect: Rect::new(0.0, 0.0, 1.0, 1.0),
+                tint: Color::WHITE,
+            },
+            DrawCommand::Image {
+                bounds: Rect::new(0.0, 0.0, 0.0, 16.0),
+                uv_rect: Rect::new(0.0, 0.0, 1.0, 1.0),
+                tint: Color::WHITE,
+            },
+            DrawCommand::Image {
+                bounds: Rect::new(0.0, 0.0, 16.0, 16.0),
+                uv_rect: Rect::new(0.0, f32::NAN, 1.0, 1.0),
+                tint: Color::WHITE,
+            },
+            DrawCommand::RasterAtlasImage {
+                bounds: Rect::new(0.0, 0.0, 16.0, 16.0),
+                uv_rect: Rect::new(0.0, 0.0, 1.0, 1.0),
+                tint: Color { r: 1.0, g: 1.0, b: 1.0, a: f32::INFINITY },
+            },
+        ];
+
+        let batches = build_batches(&cmds, (100, 100));
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].vertices.len(), 6);
+        assert!(batches[0].vertices.iter().all(|vertex| {
+            vertex.position.iter().all(|value| value.is_finite())
+                && vertex.tex_coord.iter().all(|value| value.is_finite())
+                && vertex.color.iter().all(|value| value.is_finite())
+        }));
     }
 
     #[test]
