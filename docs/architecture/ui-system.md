@@ -505,6 +505,10 @@ If no widget handles a `KeyDown` and no registered shortcut matches it,
 `EventRouter` returns `EventResult::Ignored`; unmatched keys must not be
 converted into `Action::NoOp`, because that would consume user-level tool,
 input-method, and platform shortcut paths without a Mondrian command.
+The winit shell adapter must preserve that result: ignored shortcut chords are
+not promoted to shell actions, so external tools, OS-level input switching, and
+user-remapped shortcuts remain available outside Mondrian's registered command
+table.
 Self-hosted default shortcuts are descriptors with stable ids. The shell loads
 `SelfHostedPreferences.shortcut_overrides` before registering router bindings:
 an override can replace the binding or set it to `None` to disable a default

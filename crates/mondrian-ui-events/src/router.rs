@@ -1312,6 +1312,32 @@ mod tests {
     }
 
     #[test]
+    fn router_leaves_unmatched_shortcut_chords_unhandled() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let root = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(root);
+        router.shortcut_manager_mut().register_global(
+            mondrian_ui_core::shortcut::ShortcutBinding::ctrl(KeyCode::S),
+            Action::SaveProject,
+        );
+        let dispatched = RefCell::new(Vec::new());
+
+        let result = router.route(
+            UiEvent::KeyDown {
+                key: KeyCode::F,
+                modifiers: Modifiers { ctrl: true, alt: true, ..Modifiers::none() },
+            },
+            &mut tree,
+            &|action| dispatched.borrow_mut().push(action),
+        );
+
+        assert_eq!(result, EventResult::Ignored);
+        assert!(dispatched.borrow().is_empty());
+    }
+
+    #[test]
     fn router_keeps_printable_shortcuts_out_of_focused_text_input() {
         let widget = TextAcceptingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0));
         let root = widget.id();
