@@ -674,9 +674,12 @@ is over another widget. The opening click's release is suppressed so it cannot
 accidentally select the first item under the cursor; item actions dispatch only
 when a press and release land on the same enabled row. Long dropdown menus clip
 their item list and scroll with the same positive-delta-means-content-down
-offset convention as `ScrollView`. Menu separators are explicit non-action
-items and paint geometric divider rects; disabled items only mute their text and
-must not draw strikethroughs or divider-like chrome.
+offset convention as `ScrollView`; offset-changing menu wheel input must
+request repaint, while boundary wheel input may remain handled without
+scheduling redundant redraws because the open popup still owns wheel capture
+above panels beneath it. Menu separators are explicit non-action items and paint
+geometric divider rects; disabled items only mute their text and must not draw
+strikethroughs or divider-like chrome.
 Open menus support keyboard navigation: unmodified Up/Down cycles through
 enabled action rows while skipping separators and disabled rows, unmodified
 Enter/Space activates the highlighted row, and Escape closes the popup. Modified

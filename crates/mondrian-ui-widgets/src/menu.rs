@@ -768,8 +768,12 @@ impl Widget for Dropdown {
                 }
                 UiEvent::MouseWheel { delta, position, .. } => {
                     if self.menu_rect().contains(*position) && self.max_scroll_y() > 0.0 {
+                        let old = self.scroll_offset;
                         self.scroll_offset += *delta;
                         self.clamp_scroll_offset();
+                        if (self.scroll_offset - old).abs() > 0.01 {
+                            ctx.request_repaint();
+                        }
                     }
                     return EventResult::Handled;
                 }
@@ -1272,6 +1276,8 @@ mod tests {
             &mut ctx,
         );
         assert!(d.scroll_offset > 0.0);
+        assert!(ctx.requests.repaint);
+        ctx.requests.repaint = false;
 
         d.event(
             &UiEvent::MouseWheel {
@@ -1282,6 +1288,19 @@ mod tests {
             &mut ctx,
         );
         assert_eq!(d.scroll_offset, 0.0);
+        assert!(ctx.requests.repaint);
+        ctx.requests.repaint = false;
+
+        d.event(
+            &UiEvent::MouseWheel {
+                delta: -999.0,
+                position: Point::new(60.0, 40.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(d.scroll_offset, 0.0);
+        assert!(!ctx.requests.repaint);
     }
 
     #[test]

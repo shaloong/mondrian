@@ -241,8 +241,12 @@ impl Widget for ContextMenu {
             }
             UiEvent::MouseWheel { delta, position, .. } => {
                 if self.bounds_rect().contains(*position) && self.max_scroll_y() > 0.0 {
+                    let old = self.scroll_offset.get();
                     self.scroll_offset.set(self.scroll_offset.get() + *delta);
                     self.clamp_scroll_offset();
+                    if (self.scroll_offset.get() - old).abs() > 0.01 {
+                        ctx.request_repaint();
+                    }
                 }
                 EventResult::Handled
             }
@@ -773,6 +777,20 @@ mod tests {
         );
         assert_eq!(result, EventResult::Handled);
         assert_eq!(menu.scroll_offset.get(), menu.max_scroll_y());
+        assert!(ctx.requests.repaint);
+        ctx.requests.repaint = false;
+
+        let result = menu.event(
+            &UiEvent::MouseWheel {
+                position: wheel_position,
+                delta: 1_000.0,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(menu.scroll_offset.get(), menu.max_scroll_y());
+        assert!(!ctx.requests.repaint);
 
         let result = menu.event(
             &UiEvent::MouseDown {
