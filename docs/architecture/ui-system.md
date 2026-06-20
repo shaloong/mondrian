@@ -1245,7 +1245,10 @@ therefore reach widgets and the central router as `KeyDown` without also
 inserting text into focused fields.
 Entrypoints must also consume `WindowEvent::ModifiersChanged` through
 `winit_modifiers_to_ui_modifiers`; key-edge tracking is only a fallback for the
-current keyboard event and must not be the sole source of modifier state.
+current keyboard event and must not be the sole source of modifier state. The
+fallback still tracks Super/Meta/Hyper as the UI `meta` modifier so OS and tool
+shortcut chords do not drift into printable text handling if a platform delivers
+keyboard edges before a fresh modifier snapshot.
 When a winit window reports `WindowEvent::Focused(false)`, entrypoints must
 route `UiEvent::FocusLost` and reset the tracked modifiers to
 `Modifiers::none()`. The router treats that as a window-level blur: active

@@ -497,6 +497,9 @@ fn update_modifiers_from_key(key: &Key, pressed: bool, modifiers: &mut Modifiers
         Key::Named(NamedKey::Control) => modifiers.ctrl = pressed,
         Key::Named(NamedKey::Alt) | Key::Named(NamedKey::AltGraph) => modifiers.alt = pressed,
         Key::Named(NamedKey::Shift) => modifiers.shift = pressed,
+        Key::Named(NamedKey::Super | NamedKey::Meta | NamedKey::Hyper) => {
+            modifiers.meta = pressed;
+        }
         _ => {}
     }
 }
@@ -670,6 +673,27 @@ mod tests {
 
         update_modifiers_from_key(&Key::Named(NamedKey::Control), false, &mut modifiers);
         assert_eq!(modifiers, Modifiers { shift: true, ..Modifiers::none() });
+    }
+
+    #[test]
+    fn modifier_key_edge_tracking_updates_system_meta_keys() {
+        for key in [NamedKey::Super, NamedKey::Meta, NamedKey::Hyper] {
+            let mut modifiers = Modifiers::none();
+
+            update_modifiers_from_key(&Key::Named(key), true, &mut modifiers);
+            assert_eq!(
+                modifiers,
+                Modifiers { meta: true, ..Modifiers::none() },
+                "{key:?} press should set meta"
+            );
+
+            update_modifiers_from_key(&Key::Named(key), false, &mut modifiers);
+            assert_eq!(
+                modifiers,
+                Modifiers::none(),
+                "{key:?} release should clear meta"
+            );
+        }
     }
 
     #[test]
