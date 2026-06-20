@@ -200,13 +200,15 @@ impl Widget for NumberInput {
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
         if self.focused && self.input.can_focus() {
             if let UiEvent::KeyDown { key, modifiers } = event {
-                let step = self.keyboard_step(*modifiers);
-                match key {
-                    KeyCode::Up => return self.nudge(step, ctx),
-                    KeyCode::Down => return self.nudge(-step, ctx),
-                    KeyCode::PageUp => return self.nudge(self.page_step(), ctx),
-                    KeyCode::PageDown => return self.nudge(-self.page_step(), ctx),
-                    _ => {}
+                if !modifiers.ctrl && !modifiers.meta {
+                    let step = self.keyboard_step(*modifiers);
+                    match key {
+                        KeyCode::Up => return self.nudge(step, ctx),
+                        KeyCode::Down => return self.nudge(-step, ctx),
+                        KeyCode::PageUp => return self.nudge(self.page_step(), ctx),
+                        KeyCode::PageDown => return self.nudge(-self.page_step(), ctx),
+                        _ => {}
+                    }
                 }
             }
         }
@@ -588,6 +590,72 @@ mod tests {
 
         assert_eq!(input.text(), "0.61");
         assert_eq!(values.borrow().as_slice(), &[0.51, 0.61]);
+    }
+
+    #[test]
+    fn arrow_keys_alt_uses_fine_decimal_step_when_step_is_unspecified() {
+        let values = Rc::new(RefCell::new(Vec::new()));
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+        let mut input = NumberInput::new(0.5, 0.0, 1.0)
+            .with_decimals(2)
+            .on_change(record_value(Rc::clone(&values)));
+        layout(&mut input);
+        click(&mut input, &mut ctx);
+
+        assert_eq!(
+            input.event(
+                &UiEvent::KeyDown {
+                    key: KeyCode::Up,
+                    modifiers: Modifiers { alt: true, ..Default::default() },
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(input.text(), "0.50");
+        assert_eq!(values.borrow().as_slice(), &[0.501]);
+    }
+
+    #[test]
+    fn arrow_keys_ignore_ctrl_and_meta_chords() {
+        let values = Rc::new(RefCell::new(Vec::new()));
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+        let mut input = NumberInput::new(10.0, 0.0, 100.0)
+            .with_step(2.0)
+            .on_change(record_value(Rc::clone(&values)));
+        layout(&mut input);
+        click(&mut input, &mut ctx);
+
+        for (key, modifiers) in [
+            (KeyCode::Up, Modifiers::ctrl()),
+            (
+                KeyCode::Down,
+                Modifiers { meta: true, ..Default::default() },
+            ),
+            (
+                KeyCode::PageUp,
+                Modifiers { ctrl: true, shift: true, ..Default::default() },
+            ),
+        ] {
+            assert_eq!(
+                input.event(&UiEvent::KeyDown { key, modifiers }, &mut ctx),
+                EventResult::Ignored
+            );
+        }
+
+        assert_eq!(input.text(), "10");
+        assert!(values.borrow().is_empty());
     }
 
     #[test]
