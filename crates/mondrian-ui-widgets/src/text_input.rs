@@ -588,6 +588,20 @@ impl Widget for TextInput {
                 EventResult::Handled
             }
             // ── Keyboard ───────────────────────────────────────────────
+            UiEvent::KeyDown { key: KeyCode::Escape, modifiers }
+                if self.focused
+                    && !self.ime_preedit.is_empty()
+                    && *modifiers == Modifiers::none() =>
+            {
+                self.ime_preedit.clear();
+                self.refresh_ime_area(ctx);
+                ctx.request_repaint();
+                EventResult::Handled
+            }
+            UiEvent::KeyDown { .. } if self.focused && !self.ime_preedit.is_empty() => {
+                self.refresh_ime_area(ctx);
+                EventResult::Handled
+            }
             UiEvent::KeyDown { key, modifiers } if self.focused => {
                 let shift = modifiers.shift;
                 let exact_ctrl =
@@ -1388,6 +1402,66 @@ mod tests {
             + measure_text_width("ab", DEFAULT_FONT_SIZE)
             + measure_text_width("ni", DEFAULT_FONT_SIZE);
         assert!((area.x - expected_x).abs() <= 0.1);
+    }
+
+    #[test]
+    fn ime_preedit_owns_keydown_without_mutating_committed_text() {
+        let mut ti = TextInput::new("ph").with_text("abc").on_change(change_action);
+        layout(&mut ti);
+        ti.focused = true;
+        ti.cursor = 3;
+        ti.ime_preedit = "ni".into();
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch);
+
+        for (key, modifiers) in [
+            (KeyCode::Backspace, Modifiers::none()),
+            (KeyCode::Delete, Modifiers::none()),
+            (KeyCode::Left, Modifiers::none()),
+            (KeyCode::Right, Modifiers::none()),
+            (KeyCode::A, Modifiers::ctrl()),
+        ] {
+            assert_eq!(
+                ti.event(&UiEvent::KeyDown { key, modifiers }, &mut ctx),
+                EventResult::Handled
+            );
+            assert_eq!(ti.text(), "abc");
+            assert_eq!(ti.cursor, 3);
+            assert_eq!(ti.ime_preedit, "ni");
+            assert!(!ti.has_selection());
+        }
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn ime_preedit_escape_clears_composition_without_committing_text() {
+        let mut ti = TextInput::new("ph").with_text("abc").on_change(change_action);
+        layout(&mut ti);
+        ti.focused = true;
+        ti.cursor = 3;
+        ti.ime_preedit = "ni".into();
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch);
+
+        let result = ti.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(ti.text(), "abc");
+        assert!(ti.ime_preedit.is_empty());
+        assert!(ctx.requests.repaint);
+        assert!(ctx.requests.ime.is_some_and(|ime| ime.enabled));
+        assert!(actions.borrow().is_empty());
     }
 
     #[test]

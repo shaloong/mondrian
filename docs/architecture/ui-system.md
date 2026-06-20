@@ -390,6 +390,11 @@ Keyboard, text, and IME events route to `FocusManager::focused_widget()`.
 `TextInput` requests focus on click, enables IME while focused, stores preedit
 composition text, and inserts committed IME text through the same grapheme-aware
 editing path as normal text input.
+While preedit composition is active, the text input owns `KeyDown` events so
+Backspace, Delete, arrows, and global shortcut fallbacks cannot mutate committed
+text or dispatch editor actions before the platform sends the next preedit or
+commit update. Escape clears the local preedit preview without committing text
+and requests repaint.
 Focus traversal treats a cycle back to the same widget as a no-op: the router
 handles Tab but does not emit `FocusLost`/`FocusGained`, avoiding selection and
 IME flicker when only one focusable control is present.
