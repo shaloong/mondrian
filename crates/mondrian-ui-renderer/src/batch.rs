@@ -12,6 +12,7 @@ use crate::shape::{
 const LINE_AA_PADDING_PX: f32 = 1.0;
 const MIN_LINE_WIDTH_PX: f32 = 1.0;
 const MIN_LINE_DIRECTION_LEN: f32 = 0.001;
+const MIN_TRIANGLE_AREA_NDC: f32 = 1.0e-12;
 
 /// 一个绘制批次 —— 一组顶点 + 可选的裁剪矩形
 #[derive(Debug, Clone)]
@@ -218,7 +219,9 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                             ty,
                         ),
                     ];
-                    current_batch.vertices.extend(triangle_vertices(points, color));
+                    if let Some(vertices) = triangle_vertices(points, color) {
+                        current_batch.vertices.extend(vertices);
+                    }
                 }
             }
             DrawCommand::ColoredTriangles { vertices, mask } => {
@@ -244,11 +247,11 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                         .map(|mask| [mask.bounds.width.max(1.0), mask.bounds.height.max(1.0)])
                         .unwrap_or([1.0, 1.0]);
                     let corner_radius = mask.map(|mask| mask.corner_radius).unwrap_or(0.0);
-                    current_batch.vertices.extend(colored_triangle_vertices(
-                        points,
-                        rect_size,
-                        corner_radius,
-                    ));
+                    if let Some(vertices) =
+                        colored_triangle_vertices(points, rect_size, corner_radius)
+                    {
+                        current_batch.vertices.extend(vertices);
+                    }
                 }
             }
         }
@@ -372,17 +375,25 @@ fn line_vertices(
     }))
 }
 
-fn triangle_vertices(points: [Point; 3], color: &mondrian_core::Color) -> [RectVertex; 3] {
+fn triangle_vertices(points: [Point; 3], color: &mondrian_core::Color) -> Option<[RectVertex; 3]> {
+    if !points.iter().all(|point| point_is_finite(*point)) || !color_is_finite(*color) {
+        return None;
+    }
+
     let mut points = [
         (points[0].x, points[0].y),
         (points[1].x, points[1].y),
         (points[2].x, points[2].y),
     ];
-    if signed_triangle_area(points[0], points[1], points[2]) < 0.0 {
+    let area = signed_triangle_area(points[0], points[1], points[2]);
+    if !area.is_finite() || area.abs() <= MIN_TRIANGLE_AREA_NDC {
+        return None;
+    }
+    if area < 0.0 {
         points.swap(1, 2);
     }
 
-    points.map(|(x, y)| {
+    Some(points.map(|(x, y)| {
         RectVertex::new(
             x,
             y,
@@ -397,24 +408,39 @@ fn triangle_vertices(points: [Point; 3], color: &mondrian_core::Color) -> [RectV
             0.0,
             RenderMode::Shape,
         )
-    })
+    }))
 }
 
 fn colored_triangle_vertices(
     points: [(Point, mondrian_core::Color, [f32; 2]); 3],
     rect_size: [f32; 2],
     corner_radius: f32,
-) -> [RectVertex; 3] {
+) -> Option<[RectVertex; 3]> {
+    if !points.iter().all(|(point, color, tex_coord)| {
+        point_is_finite(*point)
+            && color_is_finite(*color)
+            && tex_coord[0].is_finite()
+            && tex_coord[1].is_finite()
+    }) || !rect_size.iter().all(|value| value.is_finite())
+        || !corner_radius.is_finite()
+    {
+        return None;
+    }
+
     let mut points = [
         ((points[0].0.x, points[0].0.y), points[0].1, points[0].2),
         ((points[1].0.x, points[1].0.y), points[1].1, points[1].2),
         ((points[2].0.x, points[2].0.y), points[2].1, points[2].2),
     ];
-    if signed_triangle_area(points[0].0, points[1].0, points[2].0) < 0.0 {
+    let area = signed_triangle_area(points[0].0, points[1].0, points[2].0);
+    if !area.is_finite() || area.abs() <= MIN_TRIANGLE_AREA_NDC {
+        return None;
+    }
+    if area < 0.0 {
         points.swap(1, 2);
     }
 
-    points.map(|((x, y), color, tex_coord)| {
+    Some(points.map(|((x, y), color, tex_coord)| {
         RectVertex::new(
             x,
             y,
@@ -429,11 +455,19 @@ fn colored_triangle_vertices(
             corner_radius,
             RenderMode::Shape,
         )
-    })
+    }))
 }
 
 fn signed_triangle_area(a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> f32 {
     (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)
+}
+
+fn point_is_finite(point: Point) -> bool {
+    point.x.is_finite() && point.y.is_finite()
+}
+
+fn color_is_finite(color: mondrian_core::Color) -> bool {
+    color.r.is_finite() && color.g.is_finite() && color.b.is_finite() && color.a.is_finite()
 }
 
 fn finish_batch_if_needed(
@@ -973,6 +1007,62 @@ mod tests {
             let b = (tri[1].position[0], tri[1].position[1]);
             let c = (tri[2].position[0], tri[2].position[1]);
             assert!(signed_triangle_area(a, b, c) > 0.0);
+        }
+    }
+
+    #[test]
+    fn build_batches_triangles_skip_invalid_and_degenerate_geometry() {
+        let cmds = [DrawCommand::Triangles {
+            vertices: vec![
+                Point::new(10.0, 10.0),
+                Point::new(90.0, 10.0),
+                Point::new(10.0, 90.0),
+                Point::new(f32::NAN, 0.0),
+                Point::new(20.0, 0.0),
+                Point::new(0.0, 20.0),
+                Point::new(40.0, 40.0),
+                Point::new(40.0, 40.0),
+                Point::new(40.0, 40.0),
+            ],
+            color: Color::WHITE,
+        }];
+
+        let batches = build_batches(&cmds, (100, 100));
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].vertices.len(), 3);
+        for vertex in &batches[0].vertices {
+            assert!(vertex.position[0].is_finite());
+            assert!(vertex.position[1].is_finite());
+        }
+    }
+
+    #[test]
+    fn build_batches_colored_triangles_skip_invalid_geometry_and_colors() {
+        let invalid_color = Color { r: 1.0, g: f32::INFINITY, b: 0.0, a: 1.0 };
+        let cmds = [DrawCommand::ColoredTriangles {
+            vertices: vec![
+                (Point::new(10.0, 10.0), Color::from_rgba8(255, 0, 0, 255)),
+                (Point::new(90.0, 10.0), Color::from_rgba8(0, 255, 0, 255)),
+                (Point::new(10.0, 90.0), Color::from_rgba8(0, 0, 255, 255)),
+                (Point::new(0.0, f32::NEG_INFINITY), Color::WHITE),
+                (Point::new(20.0, 0.0), Color::WHITE),
+                (Point::new(0.0, 20.0), Color::WHITE),
+                (Point::new(40.0, 40.0), Color::WHITE),
+                (Point::new(50.0, 40.0), invalid_color),
+                (Point::new(40.0, 50.0), Color::WHITE),
+            ],
+            mask: None,
+        }];
+
+        let batches = build_batches(&cmds, (100, 100));
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].vertices.len(), 3);
+        for vertex in &batches[0].vertices {
+            assert!(vertex.position[0].is_finite());
+            assert!(vertex.position[1].is_finite());
+            assert!(vertex.color.iter().all(|channel| channel.is_finite()));
         }
     }
 

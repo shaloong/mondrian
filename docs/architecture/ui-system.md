@@ -1729,9 +1729,12 @@ round caps come from the fragment shader. This matters for splitter handles and
 tool icons because the UI pipeline keeps back-face culling enabled and thin
 diagonal strokes must not depend on sample coverage alone. Filled triangle-list
 commands are also normalized to front-facing winding after the pixel-to-NDC y
-flip. Checkbox checkmarks use one filled triangle-list shape on the 16px
-checkbox grid instead of two independent line strokes, so the elbow has a single
-joined fill and cannot form a visual X.
+flip. The batch builder rejects non-finite triangle positions, non-finite vertex
+colors, and zero-area or near-zero-area triangle primitives before they reach the
+GPU vertex buffer; `DrawEncoder` still preserves valid subpixel vertices and only
+drops incomplete triangle tails. Checkbox checkmarks use one filled triangle-list
+shape on the 16px checkbox grid instead of two independent line strokes, so the
+elbow has a single joined fill and cannot form a visual X.
 
 Node graph widgets stay domain-light: `mondrian-ui-widgets::NodeGraphView`
 only knows stable node ids, screen-space layout, and selection chrome. The app
