@@ -1501,7 +1501,9 @@ impl Widget for AssetGrid {
                 ctx.request_repaint();
                 return EventResult::Handled;
             }
-            UiEvent::KeyDown { key: KeyCode::Right, modifiers } if self.focused => {
+            UiEvent::KeyDown { key: KeyCode::Right, modifiers }
+                if self.focused && !modifiers.ctrl && !modifiers.alt && !modifiers.meta =>
+            {
                 if let Some(index) = self.move_selection(1) {
                     return if modifiers.shift {
                         self.extend_selection_from_input(index, ctx)
@@ -1511,7 +1513,9 @@ impl Widget for AssetGrid {
                 }
                 return EventResult::Ignored;
             }
-            UiEvent::KeyDown { key: KeyCode::Left, modifiers } if self.focused => {
+            UiEvent::KeyDown { key: KeyCode::Left, modifiers }
+                if self.focused && !modifiers.ctrl && !modifiers.alt && !modifiers.meta =>
+            {
                 if let Some(index) = self.move_selection(-1) {
                     return if modifiers.shift {
                         self.extend_selection_from_input(index, ctx)
@@ -1521,7 +1525,9 @@ impl Widget for AssetGrid {
                 }
                 return EventResult::Ignored;
             }
-            UiEvent::KeyDown { key: KeyCode::Down, modifiers } if self.focused => {
+            UiEvent::KeyDown { key: KeyCode::Down, modifiers }
+                if self.focused && !modifiers.ctrl && !modifiers.alt && !modifiers.meta =>
+            {
                 if let Some(index) = self.move_selection(self.columns as i32) {
                     return if modifiers.shift {
                         self.extend_selection_from_input(index, ctx)
@@ -1531,7 +1537,9 @@ impl Widget for AssetGrid {
                 }
                 return EventResult::Ignored;
             }
-            UiEvent::KeyDown { key: KeyCode::Up, modifiers } if self.focused => {
+            UiEvent::KeyDown { key: KeyCode::Up, modifiers }
+                if self.focused && !modifiers.ctrl && !modifiers.alt && !modifiers.meta =>
+            {
                 if let Some(index) = self.move_selection(-(self.columns as i32)) {
                     return if modifiers.shift {
                         self.extend_selection_from_input(index, ctx)
@@ -1541,7 +1549,9 @@ impl Widget for AssetGrid {
                 }
                 return EventResult::Ignored;
             }
-            UiEvent::KeyDown { key: KeyCode::Home, modifiers } if self.focused => {
+            UiEvent::KeyDown { key: KeyCode::Home, modifiers }
+                if self.focused && !modifiers.ctrl && !modifiers.alt && !modifiers.meta =>
+            {
                 if let Some(index) = self.first_enabled() {
                     return if modifiers.shift {
                         self.extend_selection_from_input(index, ctx)
@@ -1551,7 +1561,9 @@ impl Widget for AssetGrid {
                 }
                 return EventResult::Ignored;
             }
-            UiEvent::KeyDown { key: KeyCode::End, modifiers } if self.focused => {
+            UiEvent::KeyDown { key: KeyCode::End, modifiers }
+                if self.focused && !modifiers.ctrl && !modifiers.alt && !modifiers.meta =>
+            {
                 if let Some(index) = self.last_enabled() {
                     return if modifiers.shift {
                         self.extend_selection_from_input(index, ctx)
@@ -1561,7 +1573,9 @@ impl Widget for AssetGrid {
                 }
                 return EventResult::Ignored;
             }
-            UiEvent::KeyDown { key: KeyCode::F2, .. } if self.focused => {
+            UiEvent::KeyDown { key: KeyCode::F2, modifiers }
+                if self.focused && *modifiers == Modifiers::none() =>
+            {
                 if let Some(index) = self.selected {
                     return self.start_rename(index, ctx);
                 }
@@ -1578,7 +1592,9 @@ impl Widget for AssetGrid {
             } if self.focused && !modifiers.ctrl && !modifiers.alt && !modifiers.meta => {
                 return self.dispatch_selection_menu_action(ctx);
             }
-            UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, .. } if self.focused => {
+            UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, modifiers }
+                if self.focused && *modifiers == Modifiers::none() =>
+            {
                 return self.activate_selected(ctx);
             }
             _ => {}
@@ -2595,6 +2611,91 @@ mod tests {
 
         assert_eq!(grid.selected_index(), Some(1));
         assert_eq!(grid.selected_indices(), vec![1]);
+    }
+
+    #[test]
+    fn keyboard_shift_navigation_extends_asset_selection() {
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![item("a", "A"), item("b", "B"), item("c", "C")],
+        );
+        grid.layout(Rect::new(0.0, 0.0, 520.0, 260.0));
+        grid.set_selected(Some(0));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let _ = grid.event(&UiEvent::FocusGained, &mut ctx);
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::shift() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(grid.selected_index(), Some(1));
+        assert_eq!(grid.selected_indices(), vec![0, 1]);
+    }
+
+    #[test]
+    fn keyboard_navigation_rename_and_activation_ignore_unowned_modified_keys() {
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![
+                item("a", "A").renamable(true).with_activate_action(Action::Play),
+                item("b", "B").with_activate_action(Action::TogglePlay),
+            ],
+        )
+        .on_rename(|_, _, _| Action::SaveProject);
+        grid.layout(Rect::new(0.0, 0.0, 420.0, 260.0));
+        grid.set_selected(Some(0));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let _ = grid.event(&UiEvent::FocusGained, &mut ctx);
+        for (key, modifiers) in [
+            (KeyCode::Right, Modifiers::ctrl()),
+            (KeyCode::Left, Modifiers { alt: true, ..Default::default() }),
+            (
+                KeyCode::Home,
+                Modifiers { meta: true, ..Default::default() },
+            ),
+            (KeyCode::F2, Modifiers::shift()),
+            (KeyCode::Enter, Modifiers::ctrl()),
+            (KeyCode::Space, Modifiers::shift()),
+        ] {
+            assert_eq!(
+                grid.event(&UiEvent::KeyDown { key, modifiers }, &mut ctx),
+                EventResult::Ignored
+            );
+            assert_eq!(grid.selected_index(), Some(0));
+            assert_eq!(grid.selected_indices(), vec![0]);
+        }
+
+        assert!(grid.rename_editor.is_none());
+        assert!(actions.borrow().is_empty());
     }
 
     #[test]

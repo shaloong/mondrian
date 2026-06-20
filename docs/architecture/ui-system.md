@@ -990,8 +990,10 @@ native file picker returns.
 Asset selection is local browser state owned by `AssetGrid`. Single click
 selects one card, Ctrl-click toggles cards, Shift-click or Shift-key navigation
 selects a visible range from the anchor, and Ctrl+A selects all enabled cards in
-the current filtered view. Escape clears this local browser selection when one
-exists; with no local selection it stays ignored so the shell-level
+the current filtered view. Arrow/Home/End navigation ignores Ctrl/Alt/Meta
+chords, while F2 rename and Enter/Space activation are unmodified-key gestures
+so global shortcuts remain centralized. Escape clears this local browser
+selection when one exists; with no local selection it stays ignored so the shell-level
 `Action::DeselectAll` fallback can still clear editor selections. `selected_index`
 remains the primary keyboard/focus item while `selected_indices` stores the
 multi-selection set. When a selected card starts a drag, `AssetGrid` can
