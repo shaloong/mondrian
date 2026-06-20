@@ -421,7 +421,10 @@ bounds. App shells should show an I-beam cursor for text inputs only after the
 input owns focus; hover alone should not switch the pointer shape. The
 self-hosted product window derives this from the focused widget's
 `accepts_text_input()` state when choosing the native cursor, while eyedropper
-and splitter cursors keep higher priority.
+and splitter cursors keep higher priority. Native cursor refresh must run after
+focus-changing keyboard and pointer events as well as pointer movement, so
+clicking into a text field or tabbing focus does not wait for the next mouse
+move before showing the I-beam.
 Text inputs use the same `mondrian-ui-text` measurement path as glyph rendering
 for cursor movement, selection geometry, hit testing, and horizontal scroll;
 approximate width estimates are not used for editable text internals.

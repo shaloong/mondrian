@@ -191,6 +191,7 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                         if pressed && is_escape && result == EventResult::Ignored {
                             elwt.exit();
                         }
+                        update_window_cursor_icon(&host, &session);
                         session.window.request_redraw();
                     }
 
@@ -357,24 +358,7 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                             &device,
                             &mut session,
                         );
-                        let dir = if host.mode() == SelfHostedUiMode::Workspace {
-                            let zones = host.root().dock().collect_grab_zones();
-                            zones
-                                .iter()
-                                .find(|(z, _)| z.contains(session.last_cursor))
-                                .map(|(_, d)| *d)
-                        } else {
-                            None
-                        };
-                        let focused_text = focused_widget_accepts_text_input(
-                            host.active_root(),
-                            session.router.focus_manager().focused_widget(),
-                        );
-                        session.window.set_cursor_icon(winit_cursor_icon_for_ui_state(
-                            session.ui_runtime.is_eyedropper_active(),
-                            dir,
-                            focused_text,
-                        ));
+                        update_window_cursor_icon(&host, &session);
                         session.window.request_redraw();
                     }
 
@@ -420,6 +404,7 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                             &device,
                             &mut session,
                         );
+                        update_window_cursor_icon(&host, &session);
                         session.window.request_redraw();
                     }
 
@@ -690,6 +675,36 @@ fn window_attributes_for_role(role: SelfHostedWindowRole) -> winit::window::Wind
         attrs = attrs.with_max_inner_size(logical_size(w, h));
     }
     attrs
+}
+
+fn update_window_cursor_icon(host: &SelfHostedUiHost, session: &SelfHostedWindowSession) {
+    session.window.set_cursor_icon(window_cursor_icon(host, session));
+}
+
+fn window_cursor_icon(
+    host: &SelfHostedUiHost,
+    session: &SelfHostedWindowSession,
+) -> winit::window::CursorIcon {
+    winit_cursor_icon_for_ui_state(
+        session.ui_runtime.is_eyedropper_active(),
+        splitter_direction_at_cursor(host, session.last_cursor),
+        focused_widget_accepts_text_input(
+            host.active_root(),
+            session.router.focus_manager().focused_widget(),
+        ),
+    )
+}
+
+fn splitter_direction_at_cursor(host: &SelfHostedUiHost, cursor: Point) -> Option<SplitDirection> {
+    if host.mode() != SelfHostedUiMode::Workspace {
+        return None;
+    }
+    host.root()
+        .dock()
+        .collect_grab_zones()
+        .iter()
+        .find(|(zone, _)| zone.contains(cursor))
+        .map(|(_, direction)| *direction)
 }
 
 fn focused_widget_accepts_text_input(
