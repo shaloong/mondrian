@@ -1343,16 +1343,31 @@ mod tests {
         );
         let dispatched = RefCell::new(Vec::new());
 
-        let result = router.route(
-            UiEvent::KeyDown {
-                key: KeyCode::F,
-                modifiers: Modifiers { ctrl: true, alt: true, ..Modifiers::none() },
-            },
-            &mut tree,
-            &|action| dispatched.borrow_mut().push(action),
-        );
+        for (key, modifiers) in [
+            (
+                KeyCode::F,
+                Modifiers { ctrl: true, alt: true, ..Modifiers::none() },
+            ),
+            (KeyCode::Space, Modifiers::ctrl()),
+            (
+                KeyCode::Space,
+                Modifiers { meta: true, ..Modifiers::none() },
+            ),
+            (
+                KeyCode::LeftShift,
+                Modifiers { alt: true, shift: true, ..Modifiers::none() },
+            ),
+        ] {
+            let result = router.route(UiEvent::KeyDown { key, modifiers }, &mut tree, &|action| {
+                dispatched.borrow_mut().push(action)
+            });
 
-        assert_eq!(result, EventResult::Ignored);
+            assert_eq!(
+                result,
+                EventResult::Ignored,
+                "unmatched shortcut chord {modifiers:?}+{key:?} should not be consumed"
+            );
+        }
         assert!(dispatched.borrow().is_empty());
     }
 
