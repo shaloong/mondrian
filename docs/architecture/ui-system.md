@@ -1621,10 +1621,12 @@ Curve editing starts as a domain-independent widget primitive in
 hit testing, pointer capture, monotonic-x dragging, keyboard nudging, and themed
 grid/curve/handle painting. Nudging selected points handles unmodified arrows
 and Shift large-step arrows only; Ctrl/Alt/Meta arrow chords stay ignored so
-shortcut routing remains centralized. Timeline keyframes, effect graph curves,
-and color curves should map their domain data into this primitive and commit
-semantic mutations at the panel/app layer instead of teaching the widget about
-clips, effects, or undo history.
+shortcut routing remains centralized. Focus loss or disabling the control may
+cancel an active point drag, but it must release pointer capture only when such
+a drag exists; keyboard focus alone does not imply capture ownership. Timeline
+keyframes, effect graph curves, and color curves should map their domain data
+into this primitive and commit semantic mutations at the panel/app layer
+instead of teaching the widget about clips, effects, or undo history.
 
 ## Rendering Notes
 

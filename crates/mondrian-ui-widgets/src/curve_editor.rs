@@ -347,7 +347,7 @@ impl Widget for CurveEditor {
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
         if !self.enabled {
-            if self.dragging.is_some() || self.focused {
+            if self.dragging.is_some() {
                 ctx.release_pointer_capture(self.id);
             }
             self.focused = false;
@@ -393,11 +393,14 @@ impl Widget for CurveEditor {
                 EventResult::Handled
             }
             UiEvent::FocusLost => {
+                let was_dragging = self.dragging.is_some();
                 self.focused = false;
                 self.focus_visible = false;
                 self.selected = None;
                 self.dragging = None;
-                ctx.release_pointer_capture(self.id);
+                if was_dragging {
+                    ctx.release_pointer_capture(self.id);
+                }
                 EventResult::Handled
             }
             UiEvent::KeyDown { key: KeyCode::Escape, .. } if self.selected.is_some() => {
@@ -892,6 +895,33 @@ mod tests {
     }
 
     #[test]
+    fn disabled_focused_editor_does_not_release_unowned_capture() {
+        let mut editor = CurveEditor::with_points(vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.5, 0.5),
+            CurvePoint::new(1.0, 1.0),
+        ]);
+        editor.focused = true;
+        editor.set_enabled(false);
+        let mut ctx = event_ctx();
+
+        assert_eq!(
+            editor.event(
+                &UiEvent::MouseMove {
+                    position: Point::new(100.0, 50.0),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+
+        assert_eq!(ctx.requests.pointer_capture, None);
+        assert!(!editor.focused);
+        assert!(editor.dragging.is_none());
+    }
+
+    #[test]
     fn disabling_while_dragging_releases_capture_on_next_event() {
         let mut editor = CurveEditor::with_points(vec![
             CurvePoint::new(0.0, 0.0),
@@ -932,6 +962,65 @@ mod tests {
             ))
         );
         assert_eq!(editor.points()[1], CurvePoint::new(0.5, 0.5));
+    }
+
+    #[test]
+    fn focus_lost_without_drag_does_not_release_pointer_capture() {
+        let mut editor = CurveEditor::with_points(vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.5, 0.5),
+            CurvePoint::new(1.0, 1.0),
+        ]);
+        editor.select(Some(1));
+        let mut ctx = event_ctx();
+
+        assert_eq!(
+            editor.event(&UiEvent::FocusGained, &mut ctx),
+            EventResult::Handled
+        );
+        assert_eq!(
+            editor.event(&UiEvent::FocusLost, &mut ctx),
+            EventResult::Handled
+        );
+
+        assert_eq!(ctx.requests.pointer_capture, None);
+        assert!(!editor.focused);
+        assert_eq!(editor.selected_index(), None);
+    }
+
+    #[test]
+    fn focus_lost_during_drag_releases_pointer_capture() {
+        let mut editor = CurveEditor::with_points(vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.5, 0.5),
+            CurvePoint::new(1.0, 1.0),
+        ]);
+        editor.layout(Rect::new(0.0, 0.0, 200.0, 100.0));
+        let start = editor.to_screen(editor.points()[1]);
+        let mut ctx = event_ctx();
+
+        editor.event(
+            &UiEvent::MouseDown {
+                position: start,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        ctx.requests.pointer_capture = None;
+
+        assert_eq!(
+            editor.event(&UiEvent::FocusLost, &mut ctx),
+            EventResult::Handled
+        );
+
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(mondrian_ui_core::widget::PointerCaptureRequest::Release(
+                editor.id()
+            ))
+        );
+        assert!(editor.dragging.is_none());
     }
 
     #[test]
