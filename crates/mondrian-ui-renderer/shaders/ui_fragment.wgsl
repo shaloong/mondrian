@@ -4,6 +4,7 @@
 
 const RENDER_MODE_SHAPE: u32 = 0u;
 const RENDER_MODE_GLYPH: u32 = 1u;
+const RENDER_MODE_LINE: u32 = 2u;
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -23,11 +24,31 @@ fn sd_rounded_box_px(p: vec2<f32>, size: vec2<f32>, r: f32) -> f32 {
     return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - r;
 }
 
+fn sd_segment_px(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
+    let pa = p - a;
+    let ba = b - a;
+    let h = clamp(dot(pa, ba) / max(dot(ba, ba), 0.000001), 0.0, 1.0);
+    return length(pa - ba * h);
+}
+
 @fragment
 fn main(in: VertexOutput) -> @location(0) vec4<f32> {
     if in.render_mode == RENDER_MODE_GLYPH {
         let sampled = textureSample(glyph_texture, glyph_sampler, in.tex_coord);
         return vec4<f32>(in.color.rgb, in.color.a * sampled.a);
+    }
+
+    if in.render_mode == RENDER_MODE_LINE {
+        let radius = max(in.corner_radius_px, 0.0);
+        let center_y = in.rect_size.y * 0.5;
+        let padding = max(center_y - radius, 0.0);
+        let a = vec2<f32>(padding, center_y);
+        let b = vec2<f32>(max(in.rect_size.x - padding, padding), center_y);
+        let d = sd_segment_px(in.tex_coord, a, b) - radius;
+        let aa = clamp(fwidth(d), 0.75, 1.5);
+        let alpha = smoothstep(aa * 0.5, -aa * 0.5, d);
+        if alpha <= 0.001 { discard; }
+        return vec4<f32>(in.color.rgb, in.color.a * alpha);
     }
 
     let r = clamp(in.corner_radius_px, 0.0, min(in.rect_size.x, in.rect_size.y) * 0.5);

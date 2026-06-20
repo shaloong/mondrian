@@ -1643,15 +1643,18 @@ focus borders, may keep local painting while preserving the same theme token
 vocabulary.
 
 `DrawEncoder` preserves subpixel geometry for rectangles, gradients, lines,
-images, raster icons, and arbitrary triangle meshes. This lets the GPU shape SDF
-path, 4x MSAA resolve, and linear atlas sampling keep circles, SVG raster icons,
-diagonals, and text glyph images smooth during resize and scroll. Clip bounds
-are the exception: they are expanded conservatively with floor/ceil when the
-command is recorded, then intersected hierarchically by the renderer and applied
-as GPU scissors. Widgets may still opt into stable pixel placement at semantic
-edges with `snap_point()` or local layout policy, but whole-sale snapping of draw
-commands is avoided because it degrades curved/vector geometry and can misalign
-glyph bitmap bearings.
+images, raster icons, and arbitrary triangle meshes. Rectangles and circles use
+the GPU rounded-rect SDF path; line commands use a dedicated capsule SDF with
+1px analytic-AA padding and round caps, because a 1px 45-degree stroke rendered
+as a bare quad can miss MSAA sample positions and appear broken or intermittent.
+Together with 4x MSAA resolve and linear atlas sampling, this keeps circles,
+SVG raster icons, diagonals, and text glyph images smooth during resize and
+scroll. Clip bounds are the exception: they are expanded conservatively with
+floor/ceil when the command is recorded, then intersected hierarchically by the
+renderer and applied as GPU scissors. Widgets may still opt into stable pixel
+placement at semantic edges with `snap_point()` or local layout policy, but
+whole-sale snapping of draw commands is avoided because it degrades
+curved/vector geometry and can misalign glyph bitmap bearings.
 The GPU UI pass renders through a cached 4x MSAA target and resolves into the
 surface view. Raster icon images use a separate renderer-owned image atlas with
 linear sampling so SVG icons receive browser-like coverage from resvg/tiny-skia
@@ -1719,12 +1722,16 @@ image uploads, because some backends make freshly written atlas texels visible
 one frame later. Window loops should depend on `SelfHostedFrameResult` for this
 warm-up redraw instead of adding entrypoint-specific repaint hacks.
 
-Line commands are expanded to quads with front-facing triangle winding for every
-orientation. This matters for splitter handles because the UI pipeline keeps
-back-face culling enabled. Filled triangle-list commands are also normalized to
-front-facing winding after the pixel-to-NDC y flip. Checkbox checkmarks use one
-filled triangle-list shape on the 16px checkbox grid instead of two independent
-line strokes, so the elbow has a single joined fill and cannot form a visual X.
+Line commands are expanded to coverage quads with front-facing triangle winding
+for every orientation, then shaded as capsule SDFs in local line coordinates.
+The quad is only the conservative draw bounds; the visible stroke edge, AA, and
+round caps come from the fragment shader. This matters for splitter handles and
+tool icons because the UI pipeline keeps back-face culling enabled and thin
+diagonal strokes must not depend on sample coverage alone. Filled triangle-list
+commands are also normalized to front-facing winding after the pixel-to-NDC y
+flip. Checkbox checkmarks use one filled triangle-list shape on the 16px
+checkbox grid instead of two independent line strokes, so the elbow has a single
+joined fill and cannot form a visual X.
 
 Node graph widgets stay domain-light: `mondrian-ui-widgets::NodeGraphView`
 only knows stable node ids, screen-space layout, and selection chrome. The app

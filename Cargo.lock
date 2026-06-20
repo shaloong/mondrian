@@ -3417,6 +3417,7 @@ dependencies = [
  "mondrian-core",
  "mondrian-ui-core",
  "mondrian-ui-theme",
+ "naga",
  "parking_lot",
  "wgpu",
 ]

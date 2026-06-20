@@ -111,3 +111,24 @@ impl UiPipeline {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ui_shaders_parse_and_validate() {
+        validate_wgsl(UI_VERTEX_SHADER);
+        validate_wgsl(UI_FRAGMENT_SHADER);
+    }
+
+    fn validate_wgsl(source: &str) {
+        let module = naga::front::wgsl::parse_str(source).expect("WGSL should parse");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .expect("WGSL should validate");
+    }
+}

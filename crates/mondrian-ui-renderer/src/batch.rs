@@ -9,6 +9,10 @@ use crate::shape::{
     generate_gradient_rect_vertices, generate_rect_vertices, RectVertex, RenderMode,
 };
 
+const LINE_AA_PADDING_PX: f32 = 1.0;
+const MIN_LINE_WIDTH_PX: f32 = 1.0;
+const MIN_LINE_DIRECTION_LEN: f32 = 0.001;
+
 /// 一个绘制批次 —— 一组顶点 + 可选的裁剪矩形
 #[derive(Debug, Clone)]
 pub struct DrawBatch {
@@ -183,35 +187,11 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                 current_batch.vertices.extend(vertices);
             }
             DrawCommand::Line { start, end, width, color } => {
-                let dx = end.x - start.x;
-                let dy = end.y - start.y;
-                let len = (dx * dx + dy * dy).sqrt().max(0.001);
-                let nx = -dy / len;
-                let ny = dx / len;
-                let hw = (*width).max(1.0) * 0.5;
-
                 let n_start = apply_transform_point(start, &transform_stack);
                 let n_end = apply_transform_point(end, &transform_stack);
-
-                let screen_start = Point::new(sx * n_start.x + tx, sy * n_start.y + ty);
-                let screen_end = Point::new(sx * n_end.x + tx, sy * n_end.y + ty);
-                // Scale pixel half-width to NDC separately per axis so the line
-                // appears uniformly wide regardless of orientation.
-                let off_x = nx * hw * sx;
-                let off_y = ny * hw * sy.abs();
-
-                // Build a thin quad extruded along the line normal
-                let x0 = screen_start.x - off_x;
-                let y0 = screen_start.y - off_y;
-                let x1 = screen_start.x + off_x;
-                let y1 = screen_start.y + off_y;
-                let x2 = screen_end.x - off_x;
-                let y2 = screen_end.y - off_y;
-                let x3 = screen_end.x + off_x;
-                let y3 = screen_end.y + off_y;
-
-                let verts = line_vertices([(x0, y0), (x1, y1), (x2, y2), (x3, y3)], color);
-                current_batch.vertices.extend(verts);
+                if let Some(verts) = line_vertices(n_start, n_end, *width, color, sx, sy, tx, ty) {
+                    current_batch.vertices.extend(verts);
+                }
             }
             DrawCommand::Triangles { vertices, color } => {
                 for triangle in vertices.chunks_exact(3) {
@@ -296,30 +276,100 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
     batches
 }
 
-fn line_vertices(points: [(f32, f32); 4], color: &mondrian_core::Color) -> [RectVertex; 6] {
+fn line_vertices(
+    start: Point,
+    end: Point,
+    width: f32,
+    color: &mondrian_core::Color,
+    sx: f32,
+    sy: f32,
+    tx: f32,
+    ty: f32,
+) -> Option<[RectVertex; 6]> {
+    if !start.x.is_finite()
+        || !start.y.is_finite()
+        || !end.x.is_finite()
+        || !end.y.is_finite()
+        || !width.is_finite()
+    {
+        return None;
+    }
+
+    let dx = end.x - start.x;
+    let dy = end.y - start.y;
+    let len = (dx * dx + dy * dy).sqrt();
+    let (ux, uy) = if len > MIN_LINE_DIRECTION_LEN {
+        (dx / len, dy / len)
+    } else {
+        (1.0, 0.0)
+    };
+    let nx = -uy;
+    let ny = ux;
+    let stroke_width = width.max(MIN_LINE_WIDTH_PX);
+    let radius = stroke_width * 0.5;
+    let half_geometry_width = radius + LINE_AA_PADDING_PX;
+    let geometry_len = len + LINE_AA_PADDING_PX * 2.0;
+    let geometry_width = half_geometry_width * 2.0;
+
+    let start_x = start.x - ux * LINE_AA_PADDING_PX;
+    let start_y = start.y - uy * LINE_AA_PADDING_PX;
+    let end_x = end.x + ux * LINE_AA_PADDING_PX;
+    let end_y = end.y + uy * LINE_AA_PADDING_PX;
+    let pixel_points = [
+        (
+            Point::new(
+                start_x - nx * half_geometry_width,
+                start_y - ny * half_geometry_width,
+            ),
+            [0.0, 0.0],
+        ),
+        (
+            Point::new(
+                start_x + nx * half_geometry_width,
+                start_y + ny * half_geometry_width,
+            ),
+            [0.0, geometry_width],
+        ),
+        (
+            Point::new(
+                end_x - nx * half_geometry_width,
+                end_y - ny * half_geometry_width,
+            ),
+            [geometry_len, 0.0],
+        ),
+        (
+            Point::new(
+                end_x + nx * half_geometry_width,
+                end_y + ny * half_geometry_width,
+            ),
+            [geometry_len, geometry_width],
+        ),
+    ];
+    let points =
+        pixel_points.map(|(point, tex_coord)| ((sx * point.x + tx, sy * point.y + ty), tex_coord));
     let [p0, p1, p2, p3] = points;
-    let order = if signed_triangle_area(p0, p2, p1) >= 0.0 {
+    let order = if signed_triangle_area(p0.0, p2.0, p1.0) >= 0.0 {
         [p0, p2, p1, p1, p2, p3]
     } else {
         [p0, p1, p2, p2, p1, p3]
     };
 
-    order.map(|(x, y)| {
+    Some(order.map(|((x, y), tex_coord)| {
         RectVertex::new(
             x,
             y,
-            0.0,
-            0.0,
+            tex_coord[0],
+            tex_coord[1],
             color.r,
             color.g,
             color.b,
             color.a,
-            1.0,
-            1.0,
-            0.0,
-            RenderMode::Shape,
+            geometry_len,
+            geometry_width,
+            radius,
+            RenderMode::Line,
         )
-    })
+    }))
 }
 
 fn triangle_vertices(points: [Point; 3], color: &mondrian_core::Color) -> [RectVertex; 3] {
@@ -465,6 +515,21 @@ fn point_to_ndc(point: Point, sx: f32, sy: f32, tx: f32, ty: f32) -> Point {
 }
 
 #[cfg(test)]
+fn line_signed_distance_px(local: [f32; 2], rect_size: [f32; 2], radius: f32) -> f32 {
+    let center_y = rect_size[1] * 0.5;
+    let padding = (center_y - radius).max(0.0);
+    let a = [padding, center_y];
+    let b = [(rect_size[0] - padding).max(padding), center_y];
+    let pa = [local[0] - a[0], local[1] - a[1]];
+    let ba = [b[0] - a[0], b[1] - a[1]];
+    let denom = (ba[0] * ba[0] + ba[1] * ba[1]).max(0.000001);
+    let h = ((pa[0] * ba[0] + pa[1] * ba[1]) / denom).clamp(0.0, 1.0);
+    let dx = pa[0] - ba[0] * h;
+    let dy = pa[1] - ba[1] * h;
+    (dx * dx + dy * dy).sqrt() - radius
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use mondrian_core::Color;
@@ -536,6 +601,61 @@ mod tests {
         assert!(colors.contains(&[1.0, 0.0, 0.0, 1.0]));
         assert!(colors.contains(&[0.0, 1.0, 0.0, 1.0]));
         assert!(colors.contains(&[0.0, 0.0, 1.0, 1.0]));
+    }
+
+    #[test]
+    fn build_batches_diagonal_hairline_uses_analytic_line_sdf_data() {
+        let cmds = [DrawCommand::Line {
+            start: Point::new(8.0, 8.0),
+            end: Point::new(56.0, 56.0),
+            width: 1.0,
+            color: Color::WHITE,
+        }];
+
+        let batches = build_batches(&cmds, (64, 64));
+
+        assert_eq!(batches.len(), 1);
+        let vertices = &batches[0].vertices;
+        assert_eq!(vertices.len(), 6);
+        for vertex in vertices {
+            assert_eq!(vertex.render_mode, RenderMode::Line as u32);
+            assert!(
+                vertex.rect_size[1] > 1.0,
+                "line quad must include AA padding beyond the requested stroke width"
+            );
+            assert!(
+                vertex.corner_radius_px >= 0.5,
+                "line shader must receive the stroke radius for round caps"
+            );
+        }
+        assert!(
+            vertices.iter().any(|vertex| vertex.tex_coord[0] > vertex.rect_size[0] - 0.01),
+            "line vertices must carry local-pixel coordinates for the fragment SDF"
+        );
+    }
+
+    #[test]
+    fn analytic_line_sdf_keeps_45_degree_centerline_continuous() {
+        let radius = 0.5;
+        let rect_size = [48.0_f32.hypot(48.0) + LINE_AA_PADDING_PX * 2.0, 3.0];
+        for step in 0..=48 {
+            let local_x = LINE_AA_PADDING_PX + step as f32 * 2.0_f32.sqrt();
+            let d = line_signed_distance_px([local_x, rect_size[1] * 0.5], rect_size, radius);
+            assert!(d <= -0.49, "centerline step {step} has weak coverage d={d}");
+        }
+    }
+
+    #[test]
+    fn analytic_line_sdf_preserves_round_caps_for_zero_length_lines() {
+        let radius = 2.0;
+        let rect_size = [
+            LINE_AA_PADDING_PX * 2.0,
+            radius * 2.0 + LINE_AA_PADDING_PX * 2.0,
+        ];
+        let center = [LINE_AA_PADDING_PX, rect_size[1] * 0.5];
+        assert!((line_signed_distance_px(center, rect_size, radius) + radius).abs() < 0.001);
+        let cap_edge = [LINE_AA_PADDING_PX + radius, rect_size[1] * 0.5];
+        assert!(line_signed_distance_px(cap_edge, rect_size, radius).abs() < 0.001);
     }
 
     #[test]
@@ -808,7 +928,7 @@ mod tests {
     }
 
     #[test]
-    fn build_batches_line_uses_stable_butt_caps() {
+    fn build_batches_line_uses_stable_round_caps_with_aa_padding() {
         let cmds = [DrawCommand::Line {
             start: Point::new(10.0, 50.0),
             end: Point::new(90.0, 50.0),
@@ -823,8 +943,8 @@ mod tests {
             .map(|v| v.position[0])
             .fold(f32::NEG_INFINITY, f32::max);
 
-        assert!((min_x - (-0.8)).abs() < 0.001);
-        assert!((max_x - 0.8).abs() < 0.001);
+        assert!((min_x - (-0.82)).abs() < 0.001);
+        assert!((max_x - 0.82).abs() < 0.001);
     }
 
     // ═══════════════════════════════════════════════════════════════════════

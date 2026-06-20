@@ -11,6 +11,7 @@ use mondrian_ui_core::types::Rect;
 pub enum RenderMode {
     Shape = 0,
     Glyph = 1,
+    Line = 2,
 }
 
 /// UI 渲染的顶点格式 (48 bytes, packed).
@@ -24,7 +25,7 @@ pub enum RenderMode {
 ///   2: color
 ///   3: rect_size (pixels, for pixel-space rounded-rect SDF)
 ///   4: corner_radius_px (0 = sharp rect)
-///   5: render_mode (0 = shape, 1 = glyph)
+///   5: render_mode (0 = shape, 1 = glyph, 2 = analytic line)
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct RectVertex {
