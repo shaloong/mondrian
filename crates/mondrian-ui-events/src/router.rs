@@ -433,7 +433,8 @@ impl EventRouter {
         let Some(payload) = self.active_drag.as_ref().map(|drag| drag.payload.clone()) else {
             return EventResult::Ignored;
         };
-        let target = hit_test_deepest(tree, position);
+        let target =
+            overlay_hit_test_deepest(tree, position).or_else(|| hit_test_deepest(tree, position));
         let old_target = self.active_drag.as_ref().and_then(|drag| drag.target);
         if old_target != target {
             if let Some(old) = old_target {
@@ -490,7 +491,9 @@ impl EventRouter {
             return EventResult::Ignored;
         };
         self.captured = None;
-        let target = hit_test_deepest(tree, position).or(active_drag.target);
+        let target = overlay_hit_test_deepest(tree, position)
+            .or_else(|| hit_test_deepest(tree, position))
+            .or(active_drag.target);
         if let Some(target) = target {
             return self.dispatch_bubbling_event(
                 tree,
@@ -1033,6 +1036,18 @@ mod tests {
                 }
                 UiEvent::MouseMove { .. } => {
                     self.log.borrow_mut().push(format!("{}:move", self.label));
+                    EventResult::Handled
+                }
+                UiEvent::DragEnter { .. } => {
+                    self.log.borrow_mut().push(format!("{}:drag-enter", self.label));
+                    EventResult::Handled
+                }
+                UiEvent::DragOver { .. } => {
+                    self.log.borrow_mut().push(format!("{}:drag-over", self.label));
+                    EventResult::Handled
+                }
+                UiEvent::Drop { .. } => {
+                    self.log.borrow_mut().push(format!("{}:drop", self.label));
                     EventResult::Handled
                 }
                 _ => EventResult::Ignored,
@@ -1793,6 +1808,73 @@ mod tests {
         assert_eq!(log.borrow().as_slice(), ["drag-enter", "drag-over", "drop"]);
         assert!(router.active_drag_payload().is_none());
         assert_eq!(router.captured(), None);
+    }
+
+    #[test]
+    fn router_routes_active_drag_to_overlay_target_before_normal_content() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let root = OverlayRecordingWidget::new(
+            "root",
+            Rect::new(0.0, 0.0, 500.0, 500.0),
+            false,
+            false,
+            Rc::clone(&log),
+        );
+        let root_id = root.id();
+        let overlay = OverlayRecordingWidget::new(
+            "overlay",
+            Rect::new(900.0, 900.0, 80.0, 80.0),
+            true,
+            false,
+            Rc::clone(&log),
+        );
+        let overlay_id = overlay.id();
+        let mut tree = TestTree {
+            root: root_id,
+            nodes: HashMap::from([
+                (root_id, Box::new(root) as Box<dyn Widget>),
+                (overlay_id, Box::new(overlay) as Box<dyn Widget>),
+            ]),
+            parents: HashMap::from([(overlay_id, root_id)]),
+            children: HashMap::from([(root_id, vec![overlay_id])]),
+        };
+        let mut router = EventRouter::new(root_id);
+        router.active_drag = Some(ActiveDrag {
+            payload: DragPayload::Asset(AssetId::new()),
+            target: None,
+        });
+
+        let result = router.route(
+            UiEvent::MouseMove {
+                position: Point::new(20.0, 20.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(
+            router.active_drag.as_ref().and_then(|drag| drag.target),
+            Some(overlay_id)
+        );
+        assert_eq!(log.borrow().as_slice(), ["overlay:drag-enter"]);
+
+        router.route(
+            UiEvent::MouseUp {
+                position: Point::new(20.0, 20.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(
+            log.borrow().as_slice(),
+            ["overlay:drag-enter", "overlay:drop"]
+        );
+        assert!(router.active_drag_payload().is_none());
     }
 
     #[test]

@@ -707,6 +707,9 @@ overlay keep receiving move/up events so sliders, scrubbers, and drag handles do
 not lose capture just because their modal or popup exposes a broad overlay
 boundary. Dragging popup internals should use pointer capture so move/up events
 remain routed to the owning widget.
+Active drag-and-drop uses the same overlay-first target resolution as pointer
+events: open context menus, dropdowns, popovers, and modal surfaces must receive
+`DragEnter`, `DragOver`, and `Drop` before normal panel content beneath them.
 
 Application render loops must call `TreeWalker::paint_clipped()` with the
 current window or surface bounds. Overlay placement uses `PaintContext.clip_rect`
