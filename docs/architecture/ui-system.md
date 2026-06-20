@@ -1888,14 +1888,16 @@ image uploads, because some backends make freshly written atlas texels visible
 one frame later. Window loops should depend on `SelfHostedFrameResult` for this
 warm-up redraw instead of adding entrypoint-specific repaint hacks.
 
-Line commands are expanded to coverage quads with front-facing triangle winding
+Line commands are expanded to coverage quads with deterministic triangle winding
 for every orientation, then shaded as capsule SDFs in local line coordinates.
-The quad is only the conservative draw bounds; the visible stroke edge, AA, and
-round caps come from the fragment shader. Its bounds must still include the
-round-cap radius on the line axis, not only AA padding, otherwise valid wide or
-zero-length strokes can be clipped before shading. This matters for splitter
-handles and tool icons because the UI pipeline keeps back-face culling enabled
-and thin diagonal strokes must not depend on sample coverage alone.
+The UI pipeline disables back-face culling for 2D primitives: winding remains a
+batch-builder quality contract and a regression-test signal, but a missed
+orientation must not make a production UI stroke disappear. The quad is only the
+conservative draw bounds; the visible stroke edge, AA, and round caps come from
+the fragment shader. Its bounds must still include the round-cap radius on the
+line axis, not only AA padding, otherwise valid wide or zero-length strokes can
+be clipped before shading. This matters for splitter handles and tool icons
+because thin diagonal strokes must not depend on sample coverage alone.
 Line regressions should be tested as angle families, not only as horizontal and
 vertical strokes: 1px lines at common diagonal angles must keep front-facing
 winding, local pixel-space SDF coordinates, a continuous centerline, and stable

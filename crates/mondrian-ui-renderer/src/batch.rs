@@ -1134,7 +1134,9 @@ mod tests {
         let screen_size = (120, 120);
         let length = 40.0_f32;
 
-        for angle in [0.0_f32, 15.0, 30.0, 45.0, 60.0, 75.0, 90.0, 135.0] {
+        for angle in [
+            0.0_f32, 15.0, 30.0, 45.0, 60.0, 75.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0,
+        ] {
             let radians = angle.to_radians();
             let unit = (radians.cos(), radians.sin());
             let normal = (-unit.1, unit.0);
@@ -1212,7 +1214,9 @@ mod tests {
     #[test]
     fn analytic_line_sdf_keeps_centerline_continuous_for_primary_angles() {
         let radius = 0.5;
-        let angles = [0.0_f32, 15.0, 30.0, 45.0, 60.0, 75.0, 90.0, 135.0];
+        let angles = [
+            0.0_f32, 15.0, 30.0, 45.0, 60.0, 75.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0,
+        ];
 
         for angle in angles {
             let radians = angle.to_radians();
@@ -1235,7 +1239,9 @@ mod tests {
 
     #[test]
     fn build_batches_hairline_angles_keep_front_faces_and_local_line_space() {
-        let angles = [0.0_f32, 15.0, 30.0, 45.0, 60.0, 75.0, 90.0, 135.0, 180.0];
+        let angles = [
+            0.0_f32, 15.0, 30.0, 45.0, 60.0, 75.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0,
+        ];
 
         for angle in angles {
             let radians = angle.to_radians();

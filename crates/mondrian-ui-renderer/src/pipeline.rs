@@ -9,6 +9,14 @@ use crate::shape::RectVertex;
 pub const UI_VERTEX_SHADER: &str = include_str!("../shaders/ui_vertex.wgsl");
 pub const UI_FRAGMENT_SHADER: &str = include_str!("../shaders/ui_fragment.wgsl");
 
+fn ui_primitive_state() -> wgpu::PrimitiveState {
+    wgpu::PrimitiveState {
+        topology: wgpu::PrimitiveTopology::TriangleList,
+        cull_mode: None,
+        ..Default::default()
+    }
+}
+
 /// 2D UI 渲染管线
 pub struct UiPipeline {
     pub render_pipeline: wgpu::RenderPipeline,
@@ -93,11 +101,7 @@ impl UiPipeline {
                 })],
                 compilation_options: Default::default(),
             }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: Some(wgpu::Face::Back),
-                ..Default::default()
-            },
+            primitive: ui_primitive_state(),
             multisample: wgpu::MultisampleState { count: sample_count, ..Default::default() },
             depth_stencil: None,
             multiview_mask: None,
@@ -143,6 +147,14 @@ mod tests {
             fragment.contains(&smoothstep_expr),
             "fragment shader must keep line alpha edge scale {smoothstep_expr:?} in sync with CPU coverage tests"
         );
+    }
+
+    #[test]
+    fn ui_pipeline_2d_primitives_do_not_depend_on_backface_culling() {
+        let primitive = ui_primitive_state();
+
+        assert_eq!(primitive.topology, wgpu::PrimitiveTopology::TriangleList);
+        assert_eq!(primitive.cull_mode, None);
     }
 
     fn validate_wgsl(source: &str) {
