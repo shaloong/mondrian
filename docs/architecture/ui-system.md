@@ -909,6 +909,10 @@ preserves timeline working context across panel model rebuilds without storing
 that UI session data in `AppState`. Visible timeline zoom controls live on the
 ruler and mutate the same widget-local `pixels_per_frame` value as Ctrl+wheel
 zoom; they do not emit editor actions because display zoom is not project data.
+Timeline wheel input follows the same consumption rule as scroll containers:
+vertical scroll, Shift+horizontal scroll, or Ctrl/Meta zoom handles the event
+only when the corresponding offset or zoom value changes, so boundary wheel
+input can bubble to an enclosing surface.
 Timeline chrome buttons, including pointer tools, add-track controls, and zoom
 controls, publish hover hints through the shared tooltip manager rather than
 painting local text labels inside the compact toolbar.

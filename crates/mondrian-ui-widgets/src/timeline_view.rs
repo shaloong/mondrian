@@ -3046,19 +3046,19 @@ impl Widget for TimelineView {
                 if !self.bounds.contains(*position) {
                     return EventResult::Ignored;
                 }
-                if modifiers.ctrl || modifiers.meta {
+                let changed = if modifiers.ctrl || modifiers.meta {
                     let factor = if *delta < 0.0 { 1.12 } else { 1.0 / 1.12 };
-                    if self.zoom_at(position.x, factor) {
-                        ctx.request_repaint();
-                    }
+                    self.zoom_at(position.x, factor)
                 } else if modifiers.shift {
-                    if self.set_scroll_x(self.scroll_x + *delta) {
-                        ctx.request_repaint();
-                    }
-                } else if self.set_scroll_y(self.scroll_y + *delta) {
+                    self.set_scroll_x(self.scroll_x + *delta)
+                } else {
+                    self.set_scroll_y(self.scroll_y + *delta)
+                };
+                if changed {
                     ctx.request_repaint();
+                    return EventResult::Handled;
                 }
-                return EventResult::Handled;
+                return EventResult::Ignored;
             }
             _ => {}
         }
@@ -4485,7 +4485,7 @@ mod tests {
             &dispatch,
         );
 
-        view.event(
+        let vertical_result = view.event(
             &UiEvent::MouseWheel {
                 delta: 60.0,
                 position: Point::new(180.0, 90.0),
@@ -4493,9 +4493,10 @@ mod tests {
             },
             &mut ctx,
         );
+        assert_eq!(vertical_result, EventResult::Handled);
         assert!(view.scroll_y() > 0.0);
 
-        view.event(
+        let horizontal_result = view.event(
             &UiEvent::MouseWheel {
                 delta: 80.0,
                 position: Point::new(180.0, 90.0),
@@ -4503,7 +4504,79 @@ mod tests {
             },
             &mut ctx,
         );
+        assert_eq!(horizontal_result, EventResult::Handled);
         assert!(view.scroll_x() > 0.0);
+    }
+
+    #[test]
+    fn wheel_at_timeline_scroll_boundary_is_ignored_for_parent_bubbling() {
+        let mut view = TimelineView::new(vec![TimelineTrack::video(
+            "V1",
+            vec![TimelineClip::new("Clip", 0, 60)],
+        )]);
+        view.layout(Rect::new(0.0, 0.0, 640.0, 240.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let dispatch = |_| {};
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let result = view.event(
+            &UiEvent::MouseWheel {
+                delta: -60.0,
+                position: Point::new(180.0, 90.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(view.scroll_y(), 0.0);
+        assert!(!requests.repaint);
+    }
+
+    #[test]
+    fn ctrl_wheel_at_zoom_limit_is_ignored_for_parent_bubbling() {
+        let mut view = TimelineView::new(vec![TimelineTrack::video(
+            "V1",
+            vec![TimelineClip::new("Clip", 0, 240)],
+        )]);
+        view.layout(Rect::new(0.0, 0.0, 640.0, 240.0));
+        view.pixels_per_frame = 64.0;
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let dispatch = |_| {};
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let result = view.event(
+            &UiEvent::MouseWheel {
+                delta: -60.0,
+                position: Point::new(180.0, 90.0),
+                modifiers: Modifiers::ctrl(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(view.pixels_per_frame(), 64.0);
+        assert!(!requests.repaint);
     }
 
     #[test]
