@@ -438,7 +438,7 @@ mod tests {
     }
 
     #[test]
-    fn circle_100x100_inscribed_sdf_golden_angle() {
+    fn circle_100x100_inscribed_sdf_diagonal_angle() {
         // 45° 对角线方向：距圆心 50px 正好在圆上
         // cos(45°) = sin(45°) = 0.7071..., 50 * 0.7071... ≈ 35.355
         // 圆心在 (50,50)，圆上点为 (50±35.355, 50±35.355)
@@ -449,6 +449,55 @@ mod tests {
             50.0,
         );
         assert!(d.abs() < 0.001, "45° point sd={} should be 0", d);
+    }
+
+    #[test]
+    fn circle_100x100_inscribed_sdf_primary_angles_are_on_boundary() {
+        let center = [50.0, 50.0];
+        let radius = 50.0;
+        let angles = [
+            0.0_f32, 15.0, 30.0, 45.0, 60.0, 75.0, 90.0, 120.0, 135.0, 150.0, 180.0, 225.0, 270.0,
+            315.0,
+        ];
+
+        for angle in angles {
+            let radians = angle.to_radians();
+            let point = [
+                center[0] + radius * radians.cos(),
+                center[1] + radius * radians.sin(),
+            ];
+            let d = sd_rounded_box_px_rust(point, [100.0, 100.0], radius);
+
+            assert!(
+                d.abs() < 0.01,
+                "circle boundary at {angle} degrees produced sd={d}"
+            );
+        }
+    }
+
+    #[test]
+    fn circle_3x3_inscribed_sdf_stays_finite_at_primary_angles() {
+        let center = [1.5, 1.5];
+        let radius = 1.5;
+        let angles = [0.0_f32, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0];
+
+        for angle in angles {
+            let radians = angle.to_radians();
+            let point = [
+                center[0] + radius * radians.cos(),
+                center[1] + radius * radians.sin(),
+            ];
+            let d = sd_rounded_box_px_rust(point, [3.0, 3.0], radius);
+
+            assert!(
+                d.is_finite(),
+                "tiny circle angle {angle} produced non-finite sd={d}"
+            );
+            assert!(
+                d.abs() < 0.001,
+                "tiny circle boundary at {angle} degrees produced sd={d}"
+            );
+        }
     }
 
     #[test]
