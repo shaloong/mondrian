@@ -420,6 +420,85 @@ mod tests {
         }
     }
 
+    struct PaintOrderChild {
+        id: WidgetId,
+        normal: Color,
+        overlay: Option<Color>,
+    }
+
+    impl PaintOrderChild {
+        fn new(normal: Color, overlay: Option<Color>) -> Self {
+            Self { id: WidgetId::new(), normal, overlay }
+        }
+    }
+
+    impl Widget for PaintOrderChild {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+
+        fn measure(&self, _constraint: LayoutConstraint) -> Size {
+            Size::new(100.0, 100.0)
+        }
+
+        fn layout(&mut self, _bounds: Rect) {}
+
+        fn event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+            EventResult::Ignored
+        }
+
+        fn paint(&self, ctx: &mut PaintContext) {
+            ctx.encoder.draw_rect(Rect::ZERO, self.normal, 0.0);
+        }
+
+        fn paint_overlay(&self, ctx: &mut PaintContext) {
+            if let Some(color) = self.overlay {
+                ctx.encoder.draw_rect(Rect::ZERO, color, 0.0);
+            }
+        }
+    }
+
+    struct PaintOrderRoot {
+        id: WidgetId,
+        children: Vec<Box<dyn Widget>>,
+    }
+
+    impl PaintOrderRoot {
+        fn new(children: Vec<Box<dyn Widget>>) -> Self {
+            Self { id: WidgetId::new(), children }
+        }
+    }
+
+    impl Widget for PaintOrderRoot {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+
+        fn measure(&self, _constraint: LayoutConstraint) -> Size {
+            Size::new(200.0, 100.0)
+        }
+
+        fn layout(&mut self, _bounds: Rect) {}
+
+        fn event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+            EventResult::Ignored
+        }
+
+        fn paint(&self, ctx: &mut PaintContext) {
+            for child in self.children() {
+                child.paint(ctx);
+            }
+        }
+
+        fn children(&self) -> &[Box<dyn Widget>] {
+            &self.children
+        }
+
+        fn children_mut(&mut self) -> &mut [Box<dyn Widget>] {
+            &mut self.children
+        }
+    }
+
     #[test]
     fn tree_walker_paint_draws_overlay_after_normal_content() {
         let root = OverlayWidget::new();
@@ -431,6 +510,27 @@ mod tests {
         assert_eq!(
             encoder.rect_colors,
             vec![Color::from_hex(0x111111), Color::from_hex(0xEEEEEE)]
+        );
+    }
+
+    #[test]
+    fn tree_walker_paint_draws_child_overlays_after_later_sibling_content() {
+        let first_normal = Color::from_hex(0x111111);
+        let second_normal = Color::from_hex(0x222222);
+        let first_overlay = Color::from_hex(0xEEEEEE);
+        let root = PaintOrderRoot::new(vec![
+            Box::new(PaintOrderChild::new(first_normal, Some(first_overlay))),
+            Box::new(PaintOrderChild::new(second_normal, None)),
+        ]);
+        let mut encoder = MockEncoder::new();
+        let theme = mondrian_ui_theme::ThemePreset::Dark.build();
+
+        TreeWalker::paint(&root, &mut encoder, &theme);
+
+        assert_eq!(
+            encoder.rect_colors,
+            vec![first_normal, second_normal, first_overlay],
+            "all overlay chrome must paint after the complete normal content pass"
         );
     }
 

@@ -731,6 +731,12 @@ router resolves overlay hits before normal content hits and searches child
 overlays before a parent's broad close layer, so a nested or visually topmost
 popup receives pointer and wheel events before an ancestor outside-click
 catcher or a sibling panel.
+Overlay paint ordering is a two-pass tree contract, not a local per-parent
+style: the whole normal content pass completes first, then child overlays paint
+through `paint_overlay()`. Regression tests should include an earlier child's
+overlay painting after a later sibling's normal content, because this is the
+case that prevents dropdowns, context menus, and tooltips from being hidden
+behind adjacent dock panels.
 Pointer capture remains authoritative for drags and open popup internals, but
 only inside the current top-layer overlay scope: if a newer sibling overlay such
 as a modal is visually above the captured widget, pointer routing targets that
