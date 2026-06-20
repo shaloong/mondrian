@@ -635,17 +635,32 @@ pub fn default_shortcuts() -> Vec<SelfHostedShortcut> {
 
 /// Resolve the active shortcut table after applying user overrides.
 pub fn active_shortcuts(overrides: &[SelfHostedShortcutOverride]) -> Vec<SelfHostedShortcut> {
-    default_shortcuts()
-        .into_iter()
-        .filter_map(|mut shortcut| {
-            if let Some(override_entry) = overrides.iter().find(|entry| entry.id == shortcut.id) {
-                let binding = override_entry.binding?;
-                shortcut.binding = binding.to_core();
-                shortcut.label = binding.label();
+    let mut active: Vec<(SelfHostedShortcut, bool)> = Vec::new();
+
+    for mut shortcut in default_shortcuts() {
+        let mut overridden = false;
+        if let Some(override_entry) = overrides.iter().find(|entry| entry.id == shortcut.id) {
+            let Some(binding) = override_entry.binding else {
+                continue;
+            };
+            shortcut.binding = binding.to_core();
+            shortcut.label = binding.label();
+            overridden = true;
+        }
+
+        if let Some(existing_index) =
+            active.iter().position(|(existing, _)| existing.binding == shortcut.binding)
+        {
+            let existing_overridden = active[existing_index].1;
+            if overridden || !existing_overridden {
+                active[existing_index] = (shortcut, overridden);
             }
-            Some(shortcut)
-        })
-        .collect()
+        } else {
+            active.push((shortcut, overridden));
+        }
+    }
+
+    active.into_iter().map(|(shortcut, _)| shortcut).collect()
 }
 
 /// Shortcut hint shown for an action in self-hosted menus.
@@ -940,6 +955,44 @@ mod tests {
         assert_eq!(
             shortcut_label_for_action_with_overrides(&Action::SaveProject, &overrides),
             Some("Ctrl+Alt+S".to_owned())
+        );
+    }
+
+    #[test]
+    fn shortcut_overrides_take_ownership_of_conflicting_default_bindings() {
+        let mut router = EventRouter::new(mondrian_ui_core::types::WidgetId::new());
+        let replacement = SelfHostedShortcutBinding {
+            key: SelfHostedShortcutKey::O,
+            ctrl: true,
+            alt: false,
+            shift: false,
+            meta: false,
+        };
+        let overrides = vec![SelfHostedShortcutOverride {
+            id: "file.save_project".to_owned(),
+            binding: Some(replacement),
+        }];
+
+        register_shortcuts(&mut router, &overrides);
+
+        assert_eq!(
+            router.shortcut_manager().resolve(
+                KeyCode::O,
+                Modifiers::ctrl(),
+                ShortcutContext::default()
+            ),
+            Some(Action::SaveProject)
+        );
+        assert_eq!(
+            shortcut_label_for_action_with_overrides(&Action::SaveProject, &overrides),
+            Some("Ctrl+O".to_owned())
+        );
+        assert_eq!(
+            shortcut_label_for_action_with_overrides(
+                &app_shell_open_project_dialog_action(),
+                &overrides
+            ),
+            None
         );
     }
 }

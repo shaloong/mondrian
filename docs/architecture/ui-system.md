@@ -527,6 +527,14 @@ Shortcut resolution receives a `ShortcutContext` from the router focus state and
 must search scopes in a fixed order: focused widget, focused panel, workspace,
 then global. Same-scope duplicate registrations replace the older binding so
 the active command is deterministic.
+Self-hosted shortcut overrides must be resolved into a conflict-free active
+descriptor table before router registration, menu hint lookup, and Preferences
+row construction. A user override owns its chosen chord: any default descriptor
+that would collide is omitted from the active table and shown as disabled in
+Preferences, so visible shortcut hints never advertise a binding that dispatches
+a different command. Same-priority default/default or override/override
+collisions remain deterministic by descriptor order, matching router
+replacement semantics.
 If no widget handles a `KeyDown` and no registered shortcut matches it,
 `EventRouter` returns `EventResult::Ignored`; unmatched keys must not be
 converted into `Action::NoOp`, because that would consume user-level tool,
@@ -547,11 +555,10 @@ shell-local Disable, Default, and Rebind actions keyed by descriptor id. Rebind
 captures the next supported `KeyDown` inside the Preferences modal, consumes
 Escape as cancel, and serializes only the shortcut key plus modifier booleans in
 the shell action payload. `SelfHostedUiHost` persists those updates, makes the
-new binding win by disabling any default descriptor that used the same chord,
-and the native window session immediately rebuilds the router's global shortcut
-scope from the new active table. These preference updates are shell-local
-navigation/preferences state, not editor actions, and must not create undo
-history.
+new binding win through the conflict-free active descriptor table, and the
+native window session immediately rebuilds the router's global shortcut scope
+from that table. These preference updates are shell-local navigation/preferences
+state, not editor actions, and must not create undo history.
 Because the descriptor table is longer than the compact Preferences modal, the
 Shortcuts tab keeps its heading fixed and scrolls the shortcut rows inside a
 clipped viewport with a token-painted scrollbar; row buttons must use the same

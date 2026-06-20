@@ -20,7 +20,7 @@ use crate::app::ui_actions::{
 };
 use crate::app::AppState;
 use crate::self_hosted::shortcuts::{
-    default_shortcuts, SelfHostedShortcutKey, SelfHostedShortcutOverride,
+    active_shortcuts, default_shortcuts, SelfHostedShortcutKey, SelfHostedShortcutOverride,
 };
 use crate::self_hosted::window::{DEFAULT_SELF_HOSTED_LOG_FILTER, SELF_HOSTED_BACKGROUND_WORKERS};
 
@@ -863,20 +863,17 @@ fn pointer_position(event: &UiEvent) -> Option<Point> {
 fn shortcut_preference_rows(
     overrides: &[SelfHostedShortcutOverride],
 ) -> Vec<ShortcutPreferenceRow> {
+    let active = active_shortcuts(overrides);
     default_shortcuts()
         .into_iter()
         .map(|default| {
             let override_entry = overrides.iter().find(|entry| entry.id == default.id);
-            let disabled = override_entry.is_some_and(|entry| entry.binding.is_none());
-            let label = override_entry
-                .and_then(|entry| entry.binding.map(|binding| binding.label()))
-                .unwrap_or_else(|| {
-                    if disabled {
-                        "Disabled".to_owned()
-                    } else {
-                        default.label.clone()
-                    }
-                });
+            let active_entry = active.iter().find(|shortcut| shortcut.id == default.id);
+            let disabled = override_entry.is_some_and(|entry| entry.binding.is_none())
+                || active_entry.is_none();
+            let label = active_entry
+                .map(|shortcut| shortcut.label.clone())
+                .unwrap_or_else(|| "Disabled".to_owned());
             ShortcutPreferenceRow {
                 id: default.id.to_owned(),
                 label,
@@ -1094,6 +1091,44 @@ mod tests {
             .shortcut_rows
             .iter()
             .any(|row| row.id == "file.save_project" && row.label == "Ctrl+S"));
+    }
+
+    #[test]
+    fn preferences_shortcut_rows_hide_bindings_taken_by_overrides() {
+        let overrides = vec![SelfHostedShortcutOverride {
+            id: "file.save_project".to_owned(),
+            binding: Some(crate::self_hosted::shortcuts::SelfHostedShortcutBinding {
+                key: SelfHostedShortcutKey::O,
+                ctrl: true,
+                alt: false,
+                shift: false,
+                meta: false,
+            }),
+        }];
+        let model = SelfHostedPreferencesModel::from_app_state_with_shortcut_overrides(
+            &AppState::new(),
+            WorkspacePreset::Editing,
+            ThemePreset::Dark,
+            &overrides,
+        );
+
+        let save = model
+            .shortcut_rows
+            .iter()
+            .find(|row| row.id == "file.save_project")
+            .expect("save row");
+        let open = model
+            .shortcut_rows
+            .iter()
+            .find(|row| row.id == "file.open_project")
+            .expect("open row");
+
+        assert_eq!(save.label, "Ctrl+O");
+        assert!(!save.disabled);
+        assert!(save.overridden);
+        assert_eq!(open.label, "Disabled");
+        assert!(open.disabled);
+        assert!(!open.overridden);
     }
 
     #[test]
