@@ -1005,8 +1005,9 @@ impl Widget for PanelList {
                 if self.bounds.contains(*position) {
                     if self.set_scroll_y(self.scroll_y + *delta) {
                         ctx.request_repaint();
+                        return EventResult::Handled;
                     }
-                    return EventResult::Handled;
+                    return EventResult::Ignored;
                 }
             }
             UiEvent::DragEnter { position, .. } | UiEvent::DragOver { position, .. }
@@ -1941,7 +1942,7 @@ mod tests {
             &dispatch,
         );
 
-        list.event(
+        let result = list.event(
             &UiEvent::MouseWheel {
                 delta: 90.0,
                 position: Point::new(30.0, 80.0),
@@ -1950,8 +1951,74 @@ mod tests {
             &mut ctx,
         );
 
+        assert_eq!(result, EventResult::Handled);
         assert!(list.scroll_offset_y() > 0.0);
         assert!(requests.repaint);
+    }
+
+    #[test]
+    fn wheel_at_scroll_boundary_is_ignored_for_parent_bubbling() {
+        let items = (0..12).map(|index| PanelListItem::new(format!("Item {index}"))).collect();
+        let mut list = PanelList::new("Long", items);
+        list.layout(Rect::new(0.0, 0.0, 240.0, 140.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let dispatch = |_| {};
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let result = list.event(
+            &UiEvent::MouseWheel {
+                delta: -90.0,
+                position: Point::new(30.0, 80.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(list.scroll_offset_y(), 0.0);
+        assert!(!requests.repaint);
+    }
+
+    #[test]
+    fn wheel_without_overflow_is_ignored_for_parent_bubbling() {
+        let mut list = PanelList::new("Short", sample_items());
+        list.layout(Rect::new(0.0, 0.0, 240.0, 500.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let dispatch = |_| {};
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let result = list.event(
+            &UiEvent::MouseWheel {
+                delta: 90.0,
+                position: Point::new(30.0, 80.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(list.scroll_offset_y(), 0.0);
+        assert!(!requests.repaint);
     }
 
     #[test]

@@ -1064,10 +1064,12 @@ drag threshold asks the router to begin an internal drag; the router, not the
 source widget, owns `DragEnter` / `DragOver` / `DragLeave` / `Drop` delivery so
 pointer capture from the source cannot block target panels. Focus loss cancels
 an active row drag candidate or internal scrollbar drag and releases the list's
-capture; idle lists must not release capture they do not own. Searchable list
-panels should use `PanelList::with_filter`, which exposes its filter `TextInput`
-as a real widget tree child so focus, IME, and keyboard routing stay
-framework-owned. Filtering
+capture; idle lists must not release capture they do not own. List wheel events
+follow the same bubbling contract as `ScrollView`: scrolling consumes the event,
+while boundary or non-overflow wheel input remains ignored for parent panels.
+Searchable list panels should use `PanelList::with_filter`, which exposes its
+filter `TextInput` as a real widget tree child so focus, IME, and keyboard
+routing stay framework-owned. Filtering
 changes only visible row order; original item indices, row actions, drag
 payloads, badges, icons, and disabled state remain the item identity used for
 dispatch. The self-hosted Effects panel builds rows from the shared effect
