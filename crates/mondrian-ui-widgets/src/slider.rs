@@ -248,10 +248,13 @@ impl Widget for Slider {
                 EventResult::Handled
             }
             UiEvent::FocusLost => {
+                let was_dragging = self.dragging;
                 self.focused = false;
                 self.focus_visible = false;
                 self.dragging = false;
-                ctx.release_pointer_capture(self.id);
+                if was_dragging {
+                    ctx.release_pointer_capture(self.id);
+                }
                 EventResult::Handled
             }
             UiEvent::KeyDown { key, modifiers } if self.focused => {
@@ -376,7 +379,7 @@ fn clamp_finite(value: f32, min: f32, max: f32) -> f32 {
 mod tests {
     use super::*;
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
-    use mondrian_ui_core::widget::DrawCommandEncoder;
+    use mondrian_ui_core::widget::{DrawCommandEncoder, PointerCaptureRequest};
     use mondrian_ui_theme::ThemePreset;
     use std::cell::RefCell;
 
@@ -667,6 +670,45 @@ mod tests {
             &mut ctx,
         );
         assert_eq!(s.value(), 0.0); // unchanged from MouseDown at x=0
+    }
+
+    #[test]
+    fn slider_focus_lost_without_drag_does_not_release_pointer_capture() {
+        let mut s = Slider::new(0.0, 0.0, 100.0);
+        let mut ctx = event_ctx();
+
+        assert_eq!(
+            s.event(&UiEvent::FocusGained, &mut ctx),
+            EventResult::Handled
+        );
+        assert_eq!(s.event(&UiEvent::FocusLost, &mut ctx), EventResult::Handled);
+
+        assert_eq!(ctx.requests.pointer_capture, None);
+    }
+
+    #[test]
+    fn slider_focus_lost_during_drag_releases_pointer_capture() {
+        let mut s = Slider::new(0.0, 0.0, 100.0);
+        s.layout(Rect::new(0.0, 0.0, 200.0, 20.0));
+        let mut ctx = event_ctx();
+
+        s.event(
+            &UiEvent::MouseDown {
+                position: Point::new(100.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        ctx.requests.pointer_capture = None;
+
+        assert_eq!(s.event(&UiEvent::FocusLost, &mut ctx), EventResult::Handled);
+
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Release(s.id()))
+        );
+        assert!(!s.dragging);
     }
 
     #[test]

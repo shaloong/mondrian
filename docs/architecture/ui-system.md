@@ -556,7 +556,9 @@ by the shell/router overlay pass instead of per-panel paint.
 Drag widgets request capture on mouse down and release capture on mouse up.
 `Slider`, `DockSplitter`, and text selection depend on this behavior. Future
 Timeline clip drags, curve editor handles, and color picker gestures should use
-the same request path.
+the same request path. Focus loss may cancel an active drag, but widgets must
+only emit a capture-release request when they actually own an active drag; a
+keyboard-focused idle control must not clear unrelated router capture.
 
 Composite widgets that own internal popup controls must not leak private child
 `WidgetId`s into router-level capture. If the inner control is not a real node
@@ -1258,7 +1260,9 @@ unmodified keys and Shift large-step variants. Focused number inputs follow the
 same rule for Up/Down/Page nudging before delegating other keys to their inner
 `TextInput`. Ctrl, Alt, and Meta chords stay ignored by value widgets so
 workspace shortcuts, input methods, and user-level tool hotkeys remain
-centralized outside the component.
+centralized outside the component. Slider focus loss clears keyboard focus and
+an active drag if present, but it must not release pointer capture when the
+slider was only keyboard focused.
 Self-hosted Inspector actions should use typed payloads for clip mutations.
 Scalar clip fields that need both coarse and precise editing, such as opacity,
 transform values, and trim frames, compose `Slider` plus `NumberInput` in the
