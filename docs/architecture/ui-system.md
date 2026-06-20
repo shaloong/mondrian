@@ -465,6 +465,12 @@ global shortcuts at the router boundary, not inside widgets: file commands use
 Ctrl/Ctrl+Shift combinations, workspace switching uses Ctrl+Alt+number, and
 panel focus uses Ctrl+Alt+mnemonics. Plain Space is intentionally not registered
 globally so text input cannot accidentally toggle playback while typing.
+Text-capable widgets expose `Widget::accepts_text_input()` while their editable
+field is active. When that is true, the router does not resolve unmodified or
+Shift-modified printable `KeyDown`s as shortcuts; the matching `TextInput` or
+IME commit event remains the authoritative text mutation path. Ctrl, Alt, and
+Meta chords still reach shortcut resolution so explicit editing shortcuts such
+as copy, paste, select-all, and user-defined command chords keep working.
 Every product `PanelKind` exposed by the View menu must also have a default
 focus shortcut descriptor so menu rows, shortcut labels, and router bindings
 stay in one access model.

@@ -246,6 +246,10 @@ impl Widget for NumberInput {
         self.input.can_focus()
     }
 
+    fn accepts_text_input(&self) -> bool {
+        self.input.accepts_text_input()
+    }
+
     fn panel_kind(&self) -> Option<mondrian_editor_state::state::PanelKind> {
         self.input.panel_kind()
     }

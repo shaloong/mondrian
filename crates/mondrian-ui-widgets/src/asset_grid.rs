@@ -1735,6 +1735,14 @@ impl Widget for AssetGrid {
     fn can_focus(&self) -> bool {
         true
     }
+
+    fn accepts_text_input(&self) -> bool {
+        self.filter_input.as_ref().is_some_and(|input| input.accepts_text_input())
+            || self
+                .rename_editor
+                .as_ref()
+                .is_some_and(|editor| editor.input.accepts_text_input())
+    }
 }
 
 fn grid_columns_for_width(width: f32) -> usize {

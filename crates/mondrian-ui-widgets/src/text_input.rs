@@ -890,6 +890,10 @@ impl Widget for TextInput {
         self.enabled
     }
 
+    fn accepts_text_input(&self) -> bool {
+        self.enabled && self.focused
+    }
+
     fn as_any(&self) -> Option<&dyn std::any::Any> {
         Some(self)
     }

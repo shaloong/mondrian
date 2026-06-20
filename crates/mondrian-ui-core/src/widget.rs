@@ -415,6 +415,17 @@ pub trait Widget {
     fn can_focus(&self) -> bool {
         false
     }
+
+    /// Whether the currently focused state of this widget accepts committed
+    /// text input.
+    ///
+    /// Text-capable widgets return `true` only while their editable field is
+    /// active. The event router uses this to keep unmodified printable key
+    /// presses out of shortcut resolution until the platform sends the matching
+    /// `TextInput` or IME commit event.
+    fn accepts_text_input(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]

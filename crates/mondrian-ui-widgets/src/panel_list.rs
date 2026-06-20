@@ -1209,6 +1209,10 @@ impl Widget for PanelList {
         true
     }
 
+    fn accepts_text_input(&self) -> bool {
+        self.filter_input.as_ref().is_some_and(|input| input.accepts_text_input())
+    }
+
     fn child_count(&self) -> usize {
         usize::from(self.filter_input.is_some())
     }

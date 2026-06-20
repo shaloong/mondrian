@@ -10,7 +10,7 @@ use mondrian_ui_core::focus::FocusManager;
 use mondrian_ui_core::shortcut::{ShortcutContext, ShortcutManager};
 use mondrian_ui_core::tooltip::{TooltipManager, TooltipState};
 use mondrian_ui_core::types::{
-    DragPayload, EventResult, KeyCode, MouseButton, Point, UiEvent, WidgetId,
+    DragPayload, EventResult, KeyCode, Modifiers, MouseButton, Point, UiEvent, WidgetId,
 };
 use mondrian_ui_core::widget::{
     CursorRequest, DragRequest, EventContext, EventRequests, EyedropperRequest, ImeRequest,
@@ -410,11 +410,18 @@ impl EventRouter {
                         self.focus_mgr.focused_widget(),
                         self.focus_mgr.focused_panel(),
                     );
-                    if let Some(action) =
-                        self.shortcut_mgr.resolve(*key, *modifiers, shortcut_context)
-                    {
-                        dispatch(action);
-                        return EventResult::Handled;
+                    if !focused_text_input_owns_key(
+                        tree,
+                        self.focus_mgr.focused_widget(),
+                        *key,
+                        *modifiers,
+                    ) {
+                        if let Some(action) =
+                            self.shortcut_mgr.resolve(*key, *modifiers, shortcut_context)
+                        {
+                            dispatch(action);
+                            return EventResult::Handled;
+                        }
                     }
                 }
 
@@ -763,6 +770,64 @@ fn normalize_focused_panel(focus: &mut FocusManagerImpl, tree: &dyn WidgetTree) 
     }
 }
 
+fn focused_text_input_owns_key(
+    tree: &dyn WidgetTree,
+    focused: Option<WidgetId>,
+    key: KeyCode,
+    modifiers: Modifiers,
+) -> bool {
+    focused
+        .and_then(|id| tree.get(id))
+        .is_some_and(|widget| widget.accepts_text_input())
+        && is_text_entry_key(key)
+        && !modifiers.ctrl
+        && !modifiers.alt
+        && !modifiers.meta
+}
+
+fn is_text_entry_key(key: KeyCode) -> bool {
+    matches!(
+        key,
+        KeyCode::A
+            | KeyCode::B
+            | KeyCode::C
+            | KeyCode::D
+            | KeyCode::E
+            | KeyCode::F
+            | KeyCode::G
+            | KeyCode::H
+            | KeyCode::I
+            | KeyCode::J
+            | KeyCode::K
+            | KeyCode::L
+            | KeyCode::M
+            | KeyCode::N
+            | KeyCode::O
+            | KeyCode::P
+            | KeyCode::Q
+            | KeyCode::R
+            | KeyCode::S
+            | KeyCode::T
+            | KeyCode::U
+            | KeyCode::V
+            | KeyCode::W
+            | KeyCode::X
+            | KeyCode::Y
+            | KeyCode::Z
+            | KeyCode::Digit0
+            | KeyCode::Digit1
+            | KeyCode::Digit2
+            | KeyCode::Digit3
+            | KeyCode::Digit4
+            | KeyCode::Digit5
+            | KeyCode::Digit6
+            | KeyCode::Digit7
+            | KeyCode::Digit8
+            | KeyCode::Digit9
+            | KeyCode::Space
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1048,6 +1113,49 @@ mod tests {
         }
     }
 
+    struct TextAcceptingWidget {
+        id: WidgetId,
+        bounds: Rect,
+    }
+
+    impl TextAcceptingWidget {
+        fn new(bounds: Rect) -> Self {
+            Self { id: WidgetId::new(), bounds }
+        }
+    }
+
+    impl Widget for TextAcceptingWidget {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+
+        fn measure(&self, _constraint: LayoutConstraint) -> Size {
+            Size::new(self.bounds.width, self.bounds.height)
+        }
+
+        fn layout(&mut self, bounds: Rect) {
+            self.bounds = bounds;
+        }
+
+        fn event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+            EventResult::Ignored
+        }
+
+        fn paint(&self, _ctx: &mut PaintContext) {}
+
+        fn hit_test(&self, point: Point) -> bool {
+            self.bounds.contains(point)
+        }
+
+        fn can_focus(&self) -> bool {
+            true
+        }
+
+        fn accepts_text_input(&self) -> bool {
+            true
+        }
+    }
+
     #[derive(Default)]
     struct ImmediateTooltip {
         state: Option<TooltipState>,
@@ -1116,6 +1224,55 @@ mod tests {
                 key: KeyCode::S,
                 modifiers: mondrian_ui_core::types::Modifiers::ctrl(),
             },
+            &mut tree,
+            &|action| dispatched.borrow_mut().push(action),
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(dispatched.borrow().as_slice(), &[Action::SaveProject]);
+    }
+
+    #[test]
+    fn router_keeps_printable_shortcuts_out_of_focused_text_input() {
+        let widget = TextAcceptingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0));
+        let root = widget.id();
+        let mut tree = TestTree::single(RecordingWidget::new(
+            Rect::new(200.0, 200.0, 10.0, 10.0),
+            Rc::new(RefCell::new(Vec::new())),
+        ));
+        tree.root = root;
+        tree.nodes.clear();
+        tree.nodes.insert(root, Box::new(widget));
+        let mut router = EventRouter::new(root);
+        router
+            .focus_manager_mut()
+            .set_focused_widget(Some(root), Some(PanelKind::Viewer));
+        router.shortcut_manager_mut().register_global(
+            mondrian_ui_core::shortcut::ShortcutBinding::key_only(KeyCode::S),
+            Action::SaveProject,
+        );
+        router.shortcut_manager_mut().register_global(
+            mondrian_ui_core::shortcut::ShortcutBinding::new(KeyCode::S, Modifiers::shift()),
+            Action::SaveProject,
+        );
+        router.shortcut_manager_mut().register_global(
+            mondrian_ui_core::shortcut::ShortcutBinding::ctrl(KeyCode::S),
+            Action::SaveProject,
+        );
+        let dispatched = RefCell::new(Vec::new());
+
+        for modifiers in [Modifiers::none(), Modifiers::shift()] {
+            let result = router.route(
+                UiEvent::KeyDown { key: KeyCode::S, modifiers },
+                &mut tree,
+                &|action| dispatched.borrow_mut().push(action),
+            );
+            assert_eq!(result, EventResult::Ignored);
+        }
+        assert!(dispatched.borrow().is_empty());
+
+        let result = router.route(
+            UiEvent::KeyDown { key: KeyCode::S, modifiers: Modifiers::ctrl() },
             &mut tree,
             &|action| dispatched.borrow_mut().push(action),
         );

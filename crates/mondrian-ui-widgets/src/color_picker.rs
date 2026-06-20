@@ -1433,6 +1433,10 @@ impl Widget for ColorPicker {
     fn can_focus(&self) -> bool {
         self.enabled
     }
+
+    fn accepts_text_input(&self) -> bool {
+        self.enabled && self.focused_field.is_some()
+    }
 }
 
 fn parse_u8_channel(input: &str) -> Option<f32> {
