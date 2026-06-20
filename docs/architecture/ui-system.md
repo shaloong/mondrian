@@ -1739,7 +1739,11 @@ The renderer must flush draw batches when clip state changes and must apply the
 batch clip rect as a GPU scissor before drawing. A command emitted inside
 `PushClip`/`PopClip` must not share a batch with unclipped geometry, otherwise
 glyph images and other later-resolved commands can bleed outside their widget
-content rects.
+content rects. Clip commands are resolved through the active translate stack
+when the batch is built, producing a screen-space effective clip that is then
+intersected with parent clips. That effective clip travels with the batch; later
+draw transforms must not reinterpret it or mix clipped and unclipped vertices in
+one batch.
 The text resolver preserves surrounding draw-state commands. A `Text` command
 inside `PushClip`/`PopClip` resolves into glyph `Image` commands at the same
 sequence position, still enclosed by the original clip scope.

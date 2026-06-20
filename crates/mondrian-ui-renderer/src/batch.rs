@@ -1177,6 +1177,44 @@ mod tests {
         assert!((first_rect_x - second_rect_x).abs() < 0.0001);
     }
 
+    #[test]
+    fn build_batches_translated_clip_uses_screen_space_effective_bounds() {
+        let cmds = [
+            DrawCommand::Rect {
+                bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
+                color: Color::WHITE,
+                corner_radius: 0.0,
+            },
+            DrawCommand::PushTranslate { offset: glam::Vec2::new(40.0, 30.0) },
+            DrawCommand::PushClip { bounds: Rect::new(5.0, 7.0, 20.0, 11.0) },
+            DrawCommand::Rect {
+                bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                color: Color::BLACK,
+                corner_radius: 0.0,
+            },
+            DrawCommand::PopClip,
+            DrawCommand::PopTransform,
+            DrawCommand::Rect {
+                bounds: Rect::new(70.0, 80.0, 10.0, 10.0),
+                color: Color::WHITE,
+                corner_radius: 0.0,
+            },
+        ];
+
+        let batches = build_batches(&cmds, (200, 200));
+
+        assert_eq!(batches.len(), 3);
+        assert_eq!(batches[0].clip_rect, None);
+        assert_eq!(
+            batches[1].clip_rect,
+            Some(Rect::new(45.0, 37.0, 20.0, 11.0))
+        );
+        assert_eq!(batches[2].clip_rect, None);
+        assert_eq!(batches[0].vertices.len(), 6);
+        assert_eq!(batches[1].vertices.len(), 6);
+        assert_eq!(batches[2].vertices.len(), 6);
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // Batch splitting (large commands)
     // ═══════════════════════════════════════════════════════════════════════
