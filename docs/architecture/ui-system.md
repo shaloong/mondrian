@@ -1797,10 +1797,13 @@ and thin diagonal strokes must not depend on sample coverage alone.
 Line regressions should be tested as angle families, not only as horizontal and
 vertical strokes: 1px lines at common diagonal angles must keep front-facing
 winding, local pixel-space SDF coordinates, a continuous centerline, and stable
-pixel-center coverage at subpixel offsets. Axis aligned semantic separators may
-snap to pixel centers locally, but arbitrary
-angle lines should keep their authored subpixel endpoints so diagonal strokes
-do not shimmer or change slope during resize and scroll. Filled triangle-list
+pixel-center coverage at subpixel offsets. Renderer tests should reconstruct
+line coverage from the final batch triangles, not only from ideal SDF-local
+coordinates, so pixel-to-NDC conversion, y-axis flipping, triangle winding, and
+local coordinate interpolation stay covered as one contract. Axis aligned
+semantic separators may snap to pixel centers locally, but arbitrary angle
+lines should keep their authored subpixel endpoints so diagonal strokes do not
+shimmer or change slope during resize and scroll. Filled triangle-list
 commands are also normalized to front-facing winding after the pixel-to-NDC y
 flip. Per-vertex colored triangles must swap color and mask-local coordinates
 with their corresponding point when winding is normalized; otherwise masked

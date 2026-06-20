@@ -676,6 +676,60 @@ fn line_local_point(point: Point, start: Point, end: Point, radius: f32) -> ([f3
 }
 
 #[cfg(test)]
+fn ndc_from_pixel(point: Point, screen_size: (u32, u32)) -> (f32, f32) {
+    (
+        point.x * (2.0 / screen_size.0 as f32) - 1.0,
+        point.y * (-2.0 / screen_size.1 as f32) + 1.0,
+    )
+}
+
+#[cfg(test)]
+fn barycentric_weights(
+    p: (f32, f32),
+    a: (f32, f32),
+    b: (f32, f32),
+    c: (f32, f32),
+) -> Option<[f32; 3]> {
+    let denom = (b.1 - c.1) * (a.0 - c.0) + (c.0 - b.0) * (a.1 - c.1);
+    if denom.abs() <= f32::EPSILON {
+        return None;
+    }
+    let w0 = ((b.1 - c.1) * (p.0 - c.0) + (c.0 - b.0) * (p.1 - c.1)) / denom;
+    let w1 = ((c.1 - a.1) * (p.0 - c.0) + (a.0 - c.0) * (p.1 - c.1)) / denom;
+    let w2 = 1.0 - w0 - w1;
+    let epsilon = -0.0001;
+    (w0 >= epsilon && w1 >= epsilon && w2 >= epsilon).then_some([w0, w1, w2])
+}
+
+#[cfg(test)]
+fn sample_line_alpha_from_vertices(
+    vertices: &[RectVertex],
+    screen_size: (u32, u32),
+    point: Point,
+) -> f32 {
+    let ndc = ndc_from_pixel(point, screen_size);
+    vertices
+        .chunks_exact(3)
+        .filter_map(|tri| {
+            let a = (tri[0].position[0], tri[0].position[1]);
+            let b = (tri[1].position[0], tri[1].position[1]);
+            let c = (tri[2].position[0], tri[2].position[1]);
+            let weights = barycentric_weights(ndc, a, b, c)?;
+            let local = [
+                tri[0].tex_coord[0] * weights[0]
+                    + tri[1].tex_coord[0] * weights[1]
+                    + tri[2].tex_coord[0] * weights[2],
+                tri[0].tex_coord[1] * weights[0]
+                    + tri[1].tex_coord[1] * weights[1]
+                    + tri[2].tex_coord[1] * weights[2],
+            ];
+            let d = line_signed_distance_px(local, tri[0].rect_size, tri[0].corner_radius_px);
+            Some(line_alpha_from_signed_distance(d))
+        })
+        .fold(0.0, f32::max)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use mondrian_core::Color;
@@ -906,6 +960,65 @@ mod tests {
                     strongest_alpha >= 0.5,
                     "45 degree line has weak pixel coverage at offset {normal_offset}, step {step}: alpha {strongest_alpha}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn batch_line_vertices_keep_primary_angle_subpixel_pixel_coverage() {
+        let screen_size = (120, 120);
+        let length = 40.0_f32;
+
+        for angle in [0.0_f32, 15.0, 30.0, 45.0, 60.0, 75.0, 90.0, 135.0] {
+            let radians = angle.to_radians();
+            let unit = (radians.cos(), radians.sin());
+            let normal = (-unit.1, unit.0);
+
+            for phase in [0.0_f32, 0.25, 0.5, 0.75] {
+                let start = Point::new(60.0 + phase, 60.0 + phase);
+                let end = Point::new(start.x + unit.0 * length, start.y + unit.1 * length);
+                let cmds = [DrawCommand::Line { start, end, width: 1.0, color: Color::WHITE }];
+                let batches = build_batches(&cmds, screen_size);
+
+                assert!(
+                    batches.len() == 1,
+                    "angle {angle} phase {phase} should produce one line batch"
+                );
+                let vertices = &batches[0].vertices;
+
+                for step in 0..=length as i32 {
+                    let center = Point::new(
+                        start.x + unit.0 * step as f32,
+                        start.y + unit.1 * step as f32,
+                    );
+                    let mut strongest_alpha = 0.0_f32;
+
+                    for normal_offset in [-0.5_f32, -0.25, 0.0, 0.25, 0.5] {
+                        let sample = Point::new(
+                            center.x + normal.0 * normal_offset,
+                            center.y + normal.1 * normal_offset,
+                        );
+                        let base_x = sample.x.floor() as i32;
+                        let base_y = sample.y.floor() as i32;
+
+                        for y in (base_y - 1)..=(base_y + 1) {
+                            for x in (base_x - 1)..=(base_x + 1) {
+                                let pixel_center = Point::new(x as f32 + 0.5, y as f32 + 0.5);
+                                strongest_alpha =
+                                    strongest_alpha.max(sample_line_alpha_from_vertices(
+                                        vertices,
+                                        screen_size,
+                                        pixel_center,
+                                    ));
+                            }
+                        }
+                    }
+
+                    assert!(
+                        strongest_alpha >= 0.5,
+                        "angle {angle} line has weak batch-generated pixel coverage at phase {phase}, step {step}: alpha {strongest_alpha}"
+                    );
+                }
             }
         }
     }
