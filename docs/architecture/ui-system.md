@@ -1729,8 +1729,12 @@ the GPU rounded-rect SDF path; a true circle is a square bounds whose corner
 radius clamps to half the side, while non-square bounds intentionally render as
 a rounded rectangle or capsule rather than an ellipse. Circle SDF tests should
 sample boundary points across angle families and tiny sizes so roundness and
-numeric stability do not depend on only the cardinal points. Line commands use
-a dedicated capsule SDF with 1px analytic-AA padding and round caps, because a
+numeric stability do not depend on only the cardinal points. Batch-level circle
+tests should also reconstruct signed distance from the final generated
+triangles, so pixel-to-NDC conversion, y-axis flipping, local UV interpolation,
+and pixel-size radius data are covered together rather than only by the ideal
+CPU SDF helper. Line commands use a dedicated capsule SDF with 1px analytic-AA
+padding and round caps, because a
 1px 45-degree stroke rendered as a bare quad can miss MSAA sample positions and
 appear broken or intermittent. The coverage quad expands by the stroke radius
 plus AA padding both perpendicular to the stroke and along the stroke axis, so

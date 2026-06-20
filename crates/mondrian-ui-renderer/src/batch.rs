@@ -741,6 +741,48 @@ fn sample_line_alpha_from_vertices(
 }
 
 #[cfg(test)]
+fn rounded_rect_signed_distance_px(local: [f32; 2], rect_size: [f32; 2], radius: f32) -> f32 {
+    let radius = radius.clamp(0.0, rect_size[0].min(rect_size[1]) * 0.5);
+    let half = [rect_size[0] * 0.5, rect_size[1] * 0.5];
+    let q = [
+        (local[0] - half[0]).abs() - half[0] + radius,
+        (local[1] - half[1]).abs() - half[1] + radius,
+    ];
+    let outside = [q[0].max(0.0), q[1].max(0.0)];
+    (outside[0] * outside[0] + outside[1] * outside[1]).sqrt() + q[0].max(q[1]).min(0.0) - radius
+}
+
+#[cfg(test)]
+fn sample_shape_signed_distance_from_vertices(
+    vertices: &[RectVertex],
+    screen_size: (u32, u32),
+    point: Point,
+) -> Option<f32> {
+    let ndc = ndc_from_pixel(point, screen_size);
+    vertices.chunks_exact(3).find_map(|tri| {
+        let a = (tri[0].position[0], tri[0].position[1]);
+        let b = (tri[1].position[0], tri[1].position[1]);
+        let c = (tri[2].position[0], tri[2].position[1]);
+        let weights = barycentric_weights(ndc, a, b, c)?;
+        let local = [
+            (tri[0].tex_coord[0] * weights[0]
+                + tri[1].tex_coord[0] * weights[1]
+                + tri[2].tex_coord[0] * weights[2])
+                * tri[0].rect_size[0],
+            (tri[0].tex_coord[1] * weights[0]
+                + tri[1].tex_coord[1] * weights[1]
+                + tri[2].tex_coord[1] * weights[2])
+                * tri[0].rect_size[1],
+        ];
+        Some(rounded_rect_signed_distance_px(
+            local,
+            tri[0].rect_size,
+            tri[0].corner_radius_px,
+        ))
+    })
+}
+
+#[cfg(test)]
 fn assert_line_coverage_connects_caps(
     vertices: &[RectVertex],
     screen_size: (u32, u32),
@@ -2033,6 +2075,95 @@ mod tests {
                 "p_local.y={} out of bounds",
                 p_local[1]
             );
+        }
+    }
+
+    #[test]
+    fn circle_command_batch_sdf_keeps_angle_boundaries_round() {
+        let screen_size = (128, 128);
+        let cases = [
+            Rect::new(24.0, 24.0, 64.0, 64.0),
+            Rect::new(24.25, 24.75, 64.0, 64.0),
+            Rect::new(48.5, 48.25, 9.0, 9.0),
+        ];
+        let angles = [
+            0.0_f32, 15.0, 30.0, 45.0, 60.0, 75.0, 90.0, 120.0, 135.0, 150.0, 180.0, 225.0, 270.0,
+            315.0,
+        ];
+
+        for rect in cases {
+            let radius = rect.width * 0.5;
+            let center = rect.center();
+            let cmds = [DrawCommand::Rect {
+                bounds: rect,
+                color: Color::WHITE,
+                corner_radius: radius,
+            }];
+            let batches = build_batches(&cmds, screen_size);
+
+            assert_eq!(batches.len(), 1);
+            let vertices = &batches[0].vertices;
+            assert_eq!(vertices.len(), 6);
+            for vertex in vertices {
+                assert_eq!(vertex.render_mode, RenderMode::Shape as u32);
+                assert_eq!(vertex.rect_size, [rect.width, rect.height]);
+                assert!((vertex.corner_radius_px - radius).abs() < 0.001);
+            }
+
+            let center_distance =
+                sample_shape_signed_distance_from_vertices(vertices, screen_size, center)
+                    .expect("circle center should be inside generated batch geometry");
+            assert!(
+                (center_distance + radius).abs() < 0.001,
+                "circle center for {rect:?} produced signed distance {center_distance}"
+            );
+
+            for angle in angles {
+                let radians = angle.to_radians();
+                let boundary = Point::new(
+                    center.x + radius * radians.cos(),
+                    center.y + radius * radians.sin(),
+                );
+                let d = sample_shape_signed_distance_from_vertices(vertices, screen_size, boundary)
+                    .unwrap_or_else(|| {
+                        panic!("circle boundary at {angle} degrees missed batch triangles")
+                    });
+                assert!(
+                    d.abs() < 0.01,
+                    "circle boundary for {rect:?} at {angle} degrees produced signed distance {d}"
+                );
+
+                let inward = Point::new(
+                    center.x + (radius - 1.0).max(0.0) * radians.cos(),
+                    center.y + (radius - 1.0).max(0.0) * radians.sin(),
+                );
+                let outward = Point::new(
+                    center.x + (radius + 1.0) * radians.cos(),
+                    center.y + (radius + 1.0) * radians.sin(),
+                );
+                let inside =
+                    sample_shape_signed_distance_from_vertices(vertices, screen_size, inward)
+                        .unwrap_or_else(|| {
+                            panic!("inner circle sample at {angle} degrees missed batch triangles")
+                        });
+                assert!(
+                    inside <= -0.75,
+                    "inner circle sample for {rect:?} at {angle} degrees should stay filled, d={inside}"
+                );
+                if rect.contains(outward) {
+                    let outside =
+                        sample_shape_signed_distance_from_vertices(vertices, screen_size, outward)
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "outer circle sample at {angle} degrees missed batch triangles"
+                                )
+                            });
+                    assert!(
+                        outside >= 0.75,
+                        "outer circle sample for {rect:?} at {angle} degrees should stay outside, d={outside}"
+                    );
+                }
+            }
         }
     }
 
