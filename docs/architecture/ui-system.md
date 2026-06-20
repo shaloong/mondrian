@@ -654,7 +654,10 @@ above/below flipping, and their hit-testing is derived from the same rects used
 for overlay painting.
 Menus whose rows exceed the root overlay viewport must clip their row content
 and scroll in the same PC wheel direction as dropdowns, rather than overflowing
-into unrelated dock panels.
+into unrelated dock panels. Overlay viewport inputs must be finite and have
+positive area before computing popup placement or emitting menu draw commands;
+invalid or empty viewport clips should skip popup paint instead of relying on
+renderer-side degenerate command rejection.
 Dropdown trigger labels are clipped to the trigger text lane, reserving the
 arrow area when enabled, so constrained form rows do not let long labels paint
 over affordances or neighboring controls.

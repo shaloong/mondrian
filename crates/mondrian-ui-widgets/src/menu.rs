@@ -42,7 +42,7 @@ pub(crate) fn anchored_menu_rect(
     let width = width.max(1.0);
     let height = height.max(1.0);
     let below = Rect::new(anchor.x, anchor.y + anchor.height + gap, width, height);
-    let Some(viewport) = viewport else {
+    let Some(viewport) = viewport.filter(|rect| rect_has_paintable_area(*rect)) else {
         return below;
     };
 
@@ -62,6 +62,15 @@ pub(crate) fn anchored_menu_rect(
     };
     y = y.clamp(top, (bottom - height).max(top));
     Rect::new(x, y, width, height)
+}
+
+fn rect_has_paintable_area(rect: Rect) -> bool {
+    rect.x.is_finite()
+        && rect.y.is_finite()
+        && rect.width.is_finite()
+        && rect.height.is_finite()
+        && rect.width > 0.0
+        && rect.height > 0.0
 }
 
 pub(crate) fn paint_menu_trigger(ctx: &mut PaintContext, rect: Rect, label: &str, open: bool) {
@@ -650,6 +659,10 @@ impl Dropdown {
             return;
         }
 
+        if !rect_has_paintable_area(ctx.clip_rect) {
+            self.overlay_viewport.set(None);
+            return;
+        }
         self.overlay_viewport.set(Some(ctx.clip_rect));
         let menu_bg = self.menu_rect();
 
@@ -1637,6 +1650,49 @@ mod tests {
         );
 
         assert_eq!(actions.borrow().as_slice(), &[Action::Pause]);
+    }
+
+    #[test]
+    fn anchored_menu_rect_ignores_invalid_viewports() {
+        let anchor = Rect::new(20.0, 30.0, 120.0, 28.0);
+        let expected = Rect::new(20.0, 58.0, 160.0, 80.0);
+
+        for viewport in [
+            Rect::new(f32::NAN, 0.0, 240.0, 180.0),
+            Rect::new(0.0, f32::INFINITY, 240.0, 180.0),
+            Rect::new(0.0, 0.0, 0.0, 180.0),
+            Rect::new(0.0, 0.0, 240.0, -1.0),
+        ] {
+            assert_eq!(
+                anchored_menu_rect(anchor, 160.0, 80.0, 0.0, Some(viewport)),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn dropdown_overlay_skips_paint_when_clip_is_invalid_or_empty() {
+        for clip_rect in [
+            Rect::new(0.0, 0.0, 0.0, 120.0),
+            Rect::new(0.0, 0.0, f32::INFINITY, 120.0),
+        ] {
+            let mut d = Dropdown::new(
+                "File",
+                vec![MenuItem::new("Open", Action::OpenProject("".into()))],
+            );
+            d.layout(Rect::new(0.0, 0.0, 120.0, 28.0));
+            d.open = true;
+            let theme = mondrian_ui_theme::ThemePreset::Dark.build();
+            let mut encoder = RecordingEncoder::default();
+
+            let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+            d.paint_overlay(&mut ctx);
+
+            assert!(encoder.rects.is_empty());
+            assert!(encoder.clips.is_empty());
+            assert!(encoder.texts.is_empty());
+            assert_eq!(d.overlay_viewport.get(), None);
+        }
     }
 
     #[test]
