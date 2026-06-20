@@ -636,8 +636,10 @@ impl Widget for ScrollView {
                 };
                 if changed {
                     ctx.request_repaint();
+                    EventResult::Handled
+                } else {
+                    EventResult::Ignored
                 }
-                EventResult::Handled
             }
             _ => {
                 if let Some(ref mut child) = self.child {
@@ -1353,7 +1355,7 @@ mod tests {
         let dispatch = |_| {};
         let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch);
 
-        sv.event(
+        let result = sv.event(
             &UiEvent::MouseWheel {
                 delta: 50.0,
                 position: Point::new(10.0, 10.0),
@@ -1362,6 +1364,7 @@ mod tests {
             &mut ctx,
         );
 
+        assert_eq!(result, EventResult::Ignored);
         assert_eq!(sv.scroll_offset().x, 0.0);
         assert_eq!(sv.scroll_offset().y, 0.0);
     }
@@ -1457,7 +1460,7 @@ mod tests {
             requests: &mut requests,
         };
 
-        sv.event(
+        let result = sv.event(
             &UiEvent::MouseWheel {
                 delta: -10.0,
                 position: Point::new(10.0, 10.0),
@@ -1466,6 +1469,7 @@ mod tests {
             &mut ctx,
         );
 
+        assert_eq!(result, EventResult::Ignored);
         assert!(!ctx.requests.repaint);
     }
 

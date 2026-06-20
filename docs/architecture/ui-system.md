@@ -832,6 +832,9 @@ Components that truly need overflow in the other direction must opt into
 Shift+wheel and a draggable bottom scrollbar. Dual-axis scrollbars reserve
 viewport gutters and the bottom-right corner from one another, while painting
 the scrollbar chrome in a separate clipped scope from child content.
+Wheel events are consumed only when a child handles them or the scroll view
+actually changes its offset; at scroll boundaries or on a disabled axis they
+return ignored so an enclosing scroll surface can continue the gesture.
 Thumb drags request pointer capture, map thumb-track movement back to content
 scroll offset, and release capture on mouse up. Focus loss also cancels an
 active thumb drag and releases capture, while an idle scroll view ignores focus
