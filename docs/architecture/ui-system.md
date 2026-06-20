@@ -1505,7 +1505,10 @@ preview settings through an undoable sequence snapshot without stopping
 playback, so quality switching remains a viewer operation rather than a
 sequence-settings-dialog draft mutation. The preview quality label comes from
 the active sequence preview scale (`Full` at 1.0, percentage labels below full
-resolution), not from whether a preview frame has already arrived. Viewer
+resolution), not from whether a preview frame has already arrived. Zoom and
+preview-quality chips dispatch only when the host provides their callback;
+otherwise they keep local press/repaint feedback but must not send
+`Action::NoOp` into the app dispatch path. Viewer
 transport chrome collapses its visible control set at narrow widths before
 allowing buttons to overflow panel bounds.
 `ViewerSurface` is focusable when enabled. Pointer clicks inside the viewer give

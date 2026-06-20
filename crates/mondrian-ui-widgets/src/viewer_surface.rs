@@ -408,14 +408,15 @@ impl ViewerSurface {
     }
 
     fn dispatch_preview_quality(&self, ctx: &mut EventContext) {
-        let action =
-            self.on_preview_quality.as_ref().map(|mapper| mapper()).unwrap_or(Action::NoOp);
-        (ctx.dispatch)(action);
+        if let Some(mapper) = &self.on_preview_quality {
+            (ctx.dispatch)(mapper());
+        }
     }
 
     fn dispatch_zoom(&self, ctx: &mut EventContext) {
-        let action = self.on_zoom.as_ref().map(|mapper| mapper()).unwrap_or(Action::NoOp);
-        (ctx.dispatch)(action);
+        if let Some(mapper) = &self.on_zoom {
+            (ctx.dispatch)(mapper());
+        }
     }
 
     fn focus_from_pointer(&mut self, ctx: &mut EventContext) {
@@ -1335,6 +1336,50 @@ mod tests {
         );
 
         assert_eq!(actions.borrow().as_slice(), &[Action::SaveProject]);
+    }
+
+    #[test]
+    fn optional_viewer_chips_without_actions_do_not_dispatch_noop() {
+        let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080)
+            .with_zoom_label("Fit")
+            .with_preview_quality_label("50%");
+        viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        for position in [
+            viewer.zoom_rect().center(),
+            viewer.preview_quality_rect().center(),
+        ] {
+            assert_eq!(
+                viewer.event(
+                    &UiEvent::MouseDown {
+                        position,
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::none(),
+                    },
+                    &mut ctx,
+                ),
+                EventResult::Handled
+            );
+            assert_eq!(
+                viewer.event(
+                    &UiEvent::MouseUp {
+                        position,
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::none(),
+                    },
+                    &mut ctx,
+                ),
+                EventResult::Handled
+            );
+        }
+
+        assert!(actions.borrow().is_empty());
     }
 
     #[test]
