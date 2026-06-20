@@ -10,6 +10,11 @@ pub fn hit_test_deepest(tree: &dyn WidgetTree, position: Point) -> Option<Widget
     hit_test_path(tree, position).last().copied()
 }
 
+/// Return the deepest top-layer overlay hit, ignoring normal-content hits.
+pub fn overlay_hit_test_deepest(tree: &dyn WidgetTree, position: Point) -> Option<WidgetId> {
+    overlay_hit_test_recursive(tree, tree.root_id(), position).last().copied()
+}
+
 /// 返回从根到最深命中 Widget 的完整路径
 pub fn hit_test_path(tree: &dyn WidgetTree, position: Point) -> Vec<WidgetId> {
     let overlay_path = overlay_hit_test_recursive(tree, tree.root_id(), position);

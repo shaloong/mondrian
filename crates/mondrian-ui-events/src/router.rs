@@ -19,7 +19,7 @@ use mondrian_ui_core::widget::{
 use mondrian_ui_core::{TreeWalker, Widget, WidgetTree};
 
 use crate::focus_manager::FocusManagerImpl;
-use crate::hit_test::hit_test_deepest;
+use crate::hit_test::{hit_test_deepest, overlay_hit_test_deepest};
 use crate::shortcut_manager::ShortcutManagerImpl;
 
 /// 事件路由器
@@ -227,11 +227,7 @@ impl EventRouter {
         }
         match &event {
             UiEvent::MouseMove { position, .. } => {
-                let target = if let Some(captured) = self.captured {
-                    Some(captured)
-                } else {
-                    hit_test_deepest(tree, *position)
-                };
+                let target = self.pointer_target(tree, *position);
 
                 if target != self.hovered {
                     if let Some(old_id) = self.hovered {
@@ -328,13 +324,11 @@ impl EventRouter {
                         | UiEvent::ImeCommit(_)
                 );
 
-                let target = if let Some(captured) = self.captured {
-                    Some(captured)
-                } else if is_keyboard {
+                let target = if is_keyboard {
                     // Keyboard events go to the focused widget, not hit-tested
                     self.focus_mgr.focused_widget()
                 } else {
-                    hit_test_deepest(tree, position)
+                    self.pointer_target(tree, position)
                 };
 
                 if matches!(&event, UiEvent::MouseDown { .. }) {
@@ -570,6 +564,22 @@ impl EventRouter {
                 return false;
             };
             child = parent;
+        }
+    }
+
+    fn pointer_target(&self, tree: &dyn WidgetTree, position: Point) -> Option<WidgetId> {
+        let overlay_target = overlay_hit_test_deepest(tree, position);
+        let Some(captured) = self.captured else {
+            return overlay_target.or_else(|| hit_test_deepest(tree, position));
+        };
+
+        match overlay_target {
+            Some(overlay)
+                if overlay != captured && !self.is_ancestor_or_self(tree, overlay, captured) =>
+            {
+                Some(overlay)
+            }
+            _ => Some(captured),
         }
     }
 
@@ -968,6 +978,75 @@ mod tests {
 
         fn can_focus(&self) -> bool {
             self.focusable.get()
+        }
+    }
+
+    struct OverlayRecordingWidget {
+        id: WidgetId,
+        label: &'static str,
+        bounds: Rect,
+        overlay_hit: bool,
+        capture_on_down: bool,
+        log: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl OverlayRecordingWidget {
+        fn new(
+            label: &'static str,
+            bounds: Rect,
+            overlay_hit: bool,
+            capture_on_down: bool,
+            log: Rc<RefCell<Vec<String>>>,
+        ) -> Self {
+            Self {
+                id: WidgetId::new(),
+                label,
+                bounds,
+                overlay_hit,
+                capture_on_down,
+                log,
+            }
+        }
+    }
+
+    impl Widget for OverlayRecordingWidget {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+
+        fn measure(&self, _constraint: LayoutConstraint) -> Size {
+            Size::new(self.bounds.width, self.bounds.height)
+        }
+
+        fn layout(&mut self, bounds: Rect) {
+            self.bounds = bounds;
+        }
+
+        fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+            match event {
+                UiEvent::MouseDown { .. } => {
+                    if self.capture_on_down {
+                        ctx.request_pointer_capture(self.id);
+                    }
+                    self.log.borrow_mut().push(format!("{}:down", self.label));
+                    EventResult::Handled
+                }
+                UiEvent::MouseMove { .. } => {
+                    self.log.borrow_mut().push(format!("{}:move", self.label));
+                    EventResult::Handled
+                }
+                _ => EventResult::Ignored,
+            }
+        }
+
+        fn paint(&self, _ctx: &mut PaintContext) {}
+
+        fn hit_test(&self, point: Point) -> bool {
+            self.bounds.contains(point)
+        }
+
+        fn overlay_hit_test(&self, _point: Point) -> bool {
+            self.overlay_hit
         }
     }
 
@@ -1521,6 +1600,114 @@ mod tests {
             &|_| {},
         );
         assert_eq!(router.captured(), None);
+    }
+
+    #[test]
+    fn router_routes_pointer_to_top_overlay_outside_capture() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let root = OverlayRecordingWidget::new(
+            "root",
+            Rect::new(0.0, 0.0, 500.0, 500.0),
+            false,
+            false,
+            Rc::clone(&log),
+        );
+        let root_id = root.id();
+        let captured = OverlayRecordingWidget::new(
+            "captured",
+            Rect::new(0.0, 0.0, 100.0, 100.0),
+            true,
+            false,
+            Rc::clone(&log),
+        );
+        let captured_id = captured.id();
+        let modal = OverlayRecordingWidget::new(
+            "modal",
+            Rect::new(0.0, 0.0, 500.0, 500.0),
+            true,
+            false,
+            Rc::clone(&log),
+        );
+        let modal_id = modal.id();
+        let mut tree = TestTree {
+            root: root_id,
+            nodes: HashMap::from([
+                (root_id, Box::new(root) as Box<dyn Widget>),
+                (captured_id, Box::new(captured) as Box<dyn Widget>),
+                (modal_id, Box::new(modal) as Box<dyn Widget>),
+            ]),
+            parents: HashMap::from([(captured_id, root_id), (modal_id, root_id)]),
+            children: HashMap::from([(root_id, vec![captured_id, modal_id])]),
+        };
+        let mut router = EventRouter::new(root_id);
+        router.set_capture(Some(captured_id));
+
+        let result = router.route(
+            UiEvent::MouseDown {
+                position: Point::new(50.0, 50.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(log.borrow().as_slice(), ["modal:down"]);
+        assert_eq!(router.captured(), Some(captured_id));
+    }
+
+    #[test]
+    fn router_preserves_capture_inside_ancestor_overlay() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let root = OverlayRecordingWidget::new(
+            "root",
+            Rect::new(0.0, 0.0, 500.0, 500.0),
+            false,
+            false,
+            Rc::clone(&log),
+        );
+        let root_id = root.id();
+        let modal = OverlayRecordingWidget::new(
+            "modal",
+            Rect::new(0.0, 0.0, 500.0, 500.0),
+            true,
+            false,
+            Rc::clone(&log),
+        );
+        let modal_id = modal.id();
+        let captured = OverlayRecordingWidget::new(
+            "captured",
+            Rect::new(40.0, 40.0, 80.0, 80.0),
+            false,
+            false,
+            Rc::clone(&log),
+        );
+        let captured_id = captured.id();
+        let mut tree = TestTree {
+            root: root_id,
+            nodes: HashMap::from([
+                (root_id, Box::new(root) as Box<dyn Widget>),
+                (modal_id, Box::new(modal) as Box<dyn Widget>),
+                (captured_id, Box::new(captured) as Box<dyn Widget>),
+            ]),
+            parents: HashMap::from([(modal_id, root_id), (captured_id, modal_id)]),
+            children: HashMap::from([(root_id, vec![modal_id]), (modal_id, vec![captured_id])]),
+        };
+        let mut router = EventRouter::new(root_id);
+        router.set_capture(Some(captured_id));
+
+        let result = router.route(
+            UiEvent::MouseMove {
+                position: Point::new(300.0, 300.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(log.borrow().as_slice(), ["captured:move"]);
     }
 
     #[test]

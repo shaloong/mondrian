@@ -690,8 +690,14 @@ router resolves overlay hits before normal content hits and searches child
 overlays before a parent's broad close layer, so a nested or visually topmost
 popup receives pointer and wheel events before an ancestor outside-click
 catcher or a sibling panel.
-Dragging popup internals should use pointer capture so move/up events remain
-routed to the owning widget.
+Pointer capture remains authoritative for drags and open popup internals, but
+only inside the current top-layer overlay scope: if a newer sibling overlay such
+as a modal is visually above the captured widget, pointer routing targets that
+top overlay instead of the stale capture. Captured descendants inside the active
+overlay keep receiving move/up events so sliders, scrubbers, and drag handles do
+not lose capture just because their modal or popup exposes a broad overlay
+boundary. Dragging popup internals should use pointer capture so move/up events
+remain routed to the owning widget.
 
 Application render loops must call `TreeWalker::paint_clipped()` with the
 current window or surface bounds. Overlay placement uses `PaintContext.clip_rect`
