@@ -254,17 +254,21 @@ impl Widget for ContextMenu {
                 self.visible = false;
                 EventResult::Handled
             }
-            UiEvent::KeyDown { key: KeyCode::Down, .. } => {
+            UiEvent::KeyDown { key: KeyCode::Down, modifiers }
+                if *modifiers == Modifiers::none() =>
+            {
                 self.hovered = self.next_activatable_index(1);
                 self.ensure_hover_visible();
                 EventResult::Handled
             }
-            UiEvent::KeyDown { key: KeyCode::Up, .. } => {
+            UiEvent::KeyDown { key: KeyCode::Up, modifiers } if *modifiers == Modifiers::none() => {
                 self.hovered = self.next_activatable_index(-1);
                 self.ensure_hover_visible();
                 EventResult::Handled
             }
-            UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, .. } => {
+            UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, modifiers }
+                if *modifiers == Modifiers::none() =>
+            {
                 self.activate_hovered(ctx);
                 EventResult::Handled
             }
@@ -604,6 +608,42 @@ mod tests {
 
         assert!(!menu.visible);
         assert_eq!(cell.into_inner(), vec![Action::Cut]);
+    }
+
+    #[test]
+    fn context_menu_keyboard_navigation_ignores_modified_keys() {
+        let mut menu = ContextMenu::new(
+            Point::new(100.0, 100.0),
+            vec![
+                MenuItem::new("Copy", Action::Copy),
+                MenuItem::new("Cut", Action::Cut),
+            ],
+        );
+        menu.layout(Rect::ZERO);
+        menu.hovered = Some(1);
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let cell = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch_fn);
+
+        for (key, modifiers) in [
+            (KeyCode::Down, Modifiers::ctrl()),
+            (KeyCode::Up, Modifiers::shift()),
+            (KeyCode::Enter, Modifiers::ctrl()),
+            (KeyCode::Space, Modifiers::shift()),
+        ] {
+            assert_eq!(
+                menu.event(&UiEvent::KeyDown { key, modifiers }, &mut ctx),
+                EventResult::Ignored
+            );
+            assert!(menu.visible);
+            assert_eq!(menu.hovered, Some(1));
+        }
+        assert!(cell.borrow().is_empty());
     }
 
     #[test]

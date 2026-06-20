@@ -597,11 +597,12 @@ their item list and scroll with the same positive-delta-means-content-down
 offset convention as `ScrollView`. Menu separators are explicit non-action
 items and paint geometric divider rects; disabled items only mute their text and
 must not draw strikethroughs or divider-like chrome.
-Open menus support keyboard navigation: Up/Down cycles through enabled action
-rows while skipping separators and disabled rows, Enter/Space activates the
-highlighted row, and Escape closes the popup. Internal selectors such as the
-ColorPicker mode menu follow the same keys but commit local widget state instead
-of dispatching editor actions.
+Open menus support keyboard navigation: unmodified Up/Down cycles through
+enabled action rows while skipping separators and disabled rows, unmodified
+Enter/Space activates the highlighted row, and Escape closes the popup. Modified
+navigation and activation chords stay ignored so application shortcuts remain
+centralized. Internal selectors such as the ColorPicker mode menu follow the
+same keys but commit local widget state instead of dispatching editor actions.
 Menu bars coordinate sibling dropdowns: when one menu is open, clicking or
 hovering another menu trigger closes the old popup and opens the new one.
 Trigger-click opens suppress the matching release; parent-coordinated hover

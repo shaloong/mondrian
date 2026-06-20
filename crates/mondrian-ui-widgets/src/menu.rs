@@ -777,17 +777,23 @@ impl Widget for Dropdown {
                     self.close(ctx);
                     return EventResult::Handled;
                 }
-                UiEvent::KeyDown { key: KeyCode::Down, .. } => {
+                UiEvent::KeyDown { key: KeyCode::Down, modifiers }
+                    if *modifiers == Modifiers::none() =>
+                {
                     self.hovered_index = self.next_activatable_index(1);
                     self.ensure_hover_visible();
                     return EventResult::Handled;
                 }
-                UiEvent::KeyDown { key: KeyCode::Up, .. } => {
+                UiEvent::KeyDown { key: KeyCode::Up, modifiers }
+                    if *modifiers == Modifiers::none() =>
+                {
                     self.hovered_index = self.next_activatable_index(-1);
                     self.ensure_hover_visible();
                     return EventResult::Handled;
                 }
-                UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, .. } => {
+                UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, modifiers }
+                    if *modifiers == Modifiers::none() =>
+                {
                     self.activate_hovered(ctx);
                     return EventResult::Handled;
                 }
@@ -807,8 +813,8 @@ impl Widget for Dropdown {
                 }
                 UiEvent::KeyDown {
                     key: KeyCode::Enter | KeyCode::Space | KeyCode::Down,
-                    ..
-                } if self.focused => {
+                    modifiers,
+                } if self.focused && *modifiers == Modifiers::none() => {
                     self.focus_visible = false;
                     self.open(ctx);
                     return EventResult::Handled;
@@ -1347,6 +1353,72 @@ mod tests {
         );
 
         assert_eq!(d.hovered_index, Some(1));
+    }
+
+    #[test]
+    fn dropdown_keyboard_navigation_ignores_modified_keys_when_open() {
+        let mut d = Dropdown::new(
+            "File",
+            vec![
+                MenuItem::new("Open", Action::OpenProject("".into())),
+                MenuItem::new("Save", Action::SaveProject),
+            ],
+        );
+        d.layout(Rect::new(0.0, 0.0, 120.0, 28.0));
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let cell = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch_fn);
+
+        d.open(&mut ctx);
+        d.hovered_index = Some(1);
+        for (key, modifiers) in [
+            (KeyCode::Down, Modifiers::ctrl()),
+            (KeyCode::Up, Modifiers::shift()),
+            (KeyCode::Enter, Modifiers::ctrl()),
+            (KeyCode::Space, Modifiers::shift()),
+        ] {
+            assert_eq!(
+                d.event(&UiEvent::KeyDown { key, modifiers }, &mut ctx),
+                EventResult::Ignored
+            );
+            assert!(d.open);
+            assert_eq!(d.hovered_index, Some(1));
+        }
+        assert!(cell.borrow().is_empty());
+    }
+
+    #[test]
+    fn dropdown_trigger_ignores_modified_keyboard_open_chords() {
+        let mut d = Dropdown::new(
+            "File",
+            vec![MenuItem::new("Open", Action::OpenProject("".into()))],
+        );
+        d.layout(Rect::new(0.0, 0.0, 120.0, 28.0));
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
+
+        assert_eq!(
+            d.event(&UiEvent::FocusGained, &mut ctx),
+            EventResult::Handled
+        );
+        for (key, modifiers) in [
+            (KeyCode::Down, Modifiers::ctrl()),
+            (KeyCode::Enter, Modifiers::shift()),
+            (KeyCode::Space, Modifiers::ctrl()),
+        ] {
+            assert_eq!(
+                d.event(&UiEvent::KeyDown { key, modifiers }, &mut ctx),
+                EventResult::Ignored
+            );
+            assert!(!d.open);
+        }
     }
 
     #[test]
