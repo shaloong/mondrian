@@ -832,6 +832,82 @@ mod tests {
     }
 
     #[test]
+    fn analytic_line_sdf_keeps_centerline_continuous_for_primary_angles() {
+        let radius = 0.5;
+        let angles = [0.0_f32, 15.0, 30.0, 45.0, 60.0, 75.0, 90.0, 135.0];
+
+        for angle in angles {
+            let radians = angle.to_radians();
+            let dx = radians.cos() * 56.0;
+            let dy = radians.sin() * 56.0;
+            let len = dx.hypot(dy);
+            let rect_size = [len + LINE_AA_PADDING_PX * 2.0, 3.0];
+
+            for step in 0..=56 {
+                let local_x = LINE_AA_PADDING_PX + step as f32;
+                let d = line_signed_distance_px([local_x, rect_size[1] * 0.5], rect_size, radius);
+                assert!(
+                    d <= -0.49,
+                    "angle {angle} centerline step {step} has weak coverage d={d}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn build_batches_hairline_angles_keep_front_faces_and_local_line_space() {
+        let angles = [0.0_f32, 15.0, 30.0, 45.0, 60.0, 75.0, 90.0, 135.0, 180.0];
+
+        for angle in angles {
+            let radians = angle.to_radians();
+            let start = Point::new(80.0, 80.0);
+            let end = Point::new(
+                start.x + radians.cos() * 48.0,
+                start.y + radians.sin() * 48.0,
+            );
+            let cmds = [DrawCommand::Line { start, end, width: 1.0, color: Color::WHITE }];
+
+            let batches = build_batches(&cmds, (200, 200));
+
+            assert_eq!(batches.len(), 1, "angle {angle} should produce one batch");
+            let vertices = &batches[0].vertices;
+            assert_eq!(
+                vertices.len(),
+                6,
+                "angle {angle} should expand to two triangles"
+            );
+            for tri in vertices.chunks_exact(3) {
+                let a = (tri[0].position[0], tri[0].position[1]);
+                let b = (tri[1].position[0], tri[1].position[1]);
+                let c = (tri[2].position[0], tri[2].position[1]);
+                assert!(
+                    signed_triangle_area(a, b, c) > 0.0,
+                    "angle {angle} generated a back-facing line triangle"
+                );
+            }
+            for vertex in vertices {
+                assert_eq!(vertex.render_mode, RenderMode::Line as u32);
+                assert!(
+                    vertex.position.iter().all(|value| value.is_finite()),
+                    "angle {angle} generated non-finite position"
+                );
+                assert!(
+                    vertex.tex_coord[0] >= 0.0
+                        && vertex.tex_coord[0] <= vertex.rect_size[0]
+                        && vertex.tex_coord[1] >= 0.0
+                        && vertex.tex_coord[1] <= vertex.rect_size[1],
+                    "angle {angle} generated local coordinates outside line bounds"
+                );
+                assert!(
+                    (vertex.rect_size[1] - 3.0).abs() < 0.001,
+                    "angle {angle} should keep 1px stroke plus 1px AA padding per side"
+                );
+                assert!((vertex.corner_radius_px - 0.5).abs() < 0.001);
+            }
+        }
+    }
+
+    #[test]
     fn analytic_line_sdf_preserves_round_caps_for_zero_length_lines() {
         let radius = 2.0;
         let rect_size = [

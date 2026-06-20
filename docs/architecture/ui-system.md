@@ -1748,7 +1748,13 @@ for every orientation, then shaded as capsule SDFs in local line coordinates.
 The quad is only the conservative draw bounds; the visible stroke edge, AA, and
 round caps come from the fragment shader. This matters for splitter handles and
 tool icons because the UI pipeline keeps back-face culling enabled and thin
-diagonal strokes must not depend on sample coverage alone. Filled triangle-list
+diagonal strokes must not depend on sample coverage alone.
+Line regressions should be tested as angle families, not only as horizontal and
+vertical strokes: 1px lines at common diagonal angles must keep front-facing
+winding, local pixel-space SDF coordinates, and a continuous centerline. Axis
+aligned semantic separators may snap to pixel centers locally, but arbitrary
+angle lines should keep their authored subpixel endpoints so diagonal strokes
+do not shimmer or change slope during resize and scroll. Filled triangle-list
 commands are also normalized to front-facing winding after the pixel-to-NDC y
 flip. The batch builder rejects non-finite triangle positions, non-finite vertex
 colors, and zero-area or near-zero-area triangle primitives before they reach the
