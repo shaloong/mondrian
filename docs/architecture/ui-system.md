@@ -801,7 +801,9 @@ Shift+wheel and a draggable bottom scrollbar. Dual-axis scrollbars reserve
 viewport gutters and the bottom-right corner from one another, while painting
 the scrollbar chrome in a separate clipped scope from child content.
 Thumb drags request pointer capture, map thumb-track movement back to content
-scroll offset, and release capture on mouse up. Clicking the scrollbar track
+scroll offset, and release capture on mouse up. Focus loss also cancels an
+active thumb drag and releases capture, while an idle scroll view ignores focus
+loss so it cannot clear unrelated capture state. Clicking the scrollbar track
 outside the thumb pages the viewport by one visible span. Compound widgets that
 embed a private `ScrollView` must translate its pointer-capture requests to the
 outer widget id, because the inner scroll view is not present as an independent

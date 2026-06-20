@@ -582,6 +582,10 @@ impl Widget for ScrollView {
                 self.stop_thumb_drag(ctx);
                 EventResult::Handled
             }
+            UiEvent::FocusLost if self.dragging_thumb.is_some() => {
+                self.stop_thumb_drag(ctx);
+                EventResult::Handled
+            }
             UiEvent::MouseMove { position, .. } => {
                 if self.set_thumb_hovered(*position) {
                     ctx.request_repaint();
@@ -1825,6 +1829,63 @@ mod tests {
             &mut ctx,
         );
         assert_eq!(sv.scroll_offset().y, offset_after_release);
+    }
+
+    #[test]
+    fn scroll_view_focus_lost_during_thumb_drag_releases_capture() {
+        let child = Spacer::new(200.0, 800.0);
+        let mut sv = ScrollView::new(Some(Box::new(child)));
+        sv.layout(Rect::new(0.0, 0.0, 300.0, 300.0));
+
+        let thumb = sv.vertical_scrollbar_thumb_rect().expect("overflow should show thumb");
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let dispatch = |_| {};
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch);
+
+        sv.event(
+            &UiEvent::MouseDown {
+                position: thumb.center(),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        ctx.requests.pointer_capture = None;
+
+        assert_eq!(
+            sv.event(&UiEvent::FocusLost, &mut ctx),
+            EventResult::Handled
+        );
+
+        assert!(!sv.is_scrollbar_dragging());
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Release(sv.id))
+        );
+        assert!(ctx.requests.repaint);
+    }
+
+    #[test]
+    fn scroll_view_idle_focus_lost_does_not_release_pointer_capture() {
+        let child = Spacer::new(200.0, 800.0);
+        let mut sv = ScrollView::new(Some(Box::new(child)));
+        sv.layout(Rect::new(0.0, 0.0, 300.0, 300.0));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let dispatch = |_| {};
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch);
+
+        assert_eq!(
+            sv.event(&UiEvent::FocusLost, &mut ctx),
+            EventResult::Ignored
+        );
+
+        assert_eq!(ctx.requests.pointer_capture, None);
+        assert!(!ctx.requests.repaint);
     }
 
     #[test]
