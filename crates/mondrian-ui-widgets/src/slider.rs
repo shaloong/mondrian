@@ -257,6 +257,9 @@ impl Widget for Slider {
                 EventResult::Handled
             }
             UiEvent::KeyDown { key, modifiers } if self.focused => {
+                if modifiers.ctrl || modifiers.meta {
+                    return EventResult::Ignored;
+                }
                 let step = self.keyboard_step(*modifiers);
                 match key {
                     KeyCode::Left | KeyCode::Down => self.nudge(-step, ctx),
@@ -746,6 +749,51 @@ mod tests {
         );
 
         assert_close(s.value(), 30.0);
+    }
+
+    #[test]
+    fn slider_keyboard_alt_uses_fine_step_without_configured_step() {
+        let mut s = Slider::new(50.0, 0.0, 100.0);
+        let mut ctx = event_ctx();
+
+        s.event(&UiEvent::FocusGained, &mut ctx);
+        assert_eq!(
+            s.event(
+                &UiEvent::KeyDown {
+                    key: KeyCode::Right,
+                    modifiers: Modifiers { alt: true, ..Default::default() },
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_close(s.value(), 50.1);
+    }
+
+    #[test]
+    fn slider_keyboard_ignores_ctrl_and_meta_chords() {
+        let mut s = Slider::new(50.0, 0.0, 100.0);
+        let mut ctx = event_ctx();
+
+        s.event(&UiEvent::FocusGained, &mut ctx);
+        for (key, modifiers) in [
+            (KeyCode::Right, Modifiers::ctrl()),
+            (
+                KeyCode::Home,
+                Modifiers { meta: true, ..Default::default() },
+            ),
+            (
+                KeyCode::PageUp,
+                Modifiers { ctrl: true, shift: true, ..Default::default() },
+            ),
+        ] {
+            assert_eq!(
+                s.event(&UiEvent::KeyDown { key, modifiers }, &mut ctx),
+                EventResult::Ignored
+            );
+            assert_close(s.value(), 50.0);
+        }
     }
 
     #[test]
