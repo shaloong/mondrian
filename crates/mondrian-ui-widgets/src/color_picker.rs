@@ -15,7 +15,8 @@ use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
 use crate::form_layout::{FormLayout, FormRowOptions, FormRowRects};
 use crate::menu::{
-    anchored_menu_rect, paint_menu_popup_chrome, paint_menu_row, paint_menu_trigger, MenuRowPaint,
+    anchored_menu_rect, paint_menu_popup_chrome, paint_menu_row, paint_menu_trigger,
+    rect_has_paintable_area, MenuRowPaint,
 };
 use crate::paint::{
     color_with_alpha, mix_color, paint_checkerboard, paint_focus_ring, paint_shadow, soft_border,
@@ -1403,6 +1404,10 @@ impl Widget for ColorPicker {
             return;
         }
 
+        if !rect_has_paintable_area(ctx.clip_rect) {
+            self.overlay_viewport.set(None);
+            return;
+        }
         self.overlay_viewport.set(Some(ctx.clip_rect));
         let menu = self.mode_menu_rect();
         paint_menu_popup_chrome(ctx, menu);
@@ -3252,6 +3257,27 @@ mod tests {
         assert!(encoder.texts.iter().any(|text| text == "HEX"));
         assert!(encoder.texts.iter().any(|text| text == "HSV"));
         assert!(encoder.rects.len() >= MODES.len() + 2);
+    }
+
+    #[test]
+    fn mode_dropdown_overlay_skips_paint_when_clip_is_invalid_or_empty() {
+        for clip_rect in [
+            Rect::new(0.0, 0.0, 0.0, 302.0),
+            Rect::new(0.0, 0.0, f32::INFINITY, 302.0),
+        ] {
+            let mut picker = ColorPicker::new(Color::from_rgba8(51, 102, 153, 255));
+            picker.layout(Rect::new(0.0, 0.0, 280.0, 302.0));
+            picker.mode_menu_open = true;
+            let theme = ThemePreset::Dark.build();
+            let mut encoder = RecordingEncoder::default();
+            let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+
+            picker.paint_overlay(&mut ctx);
+
+            assert!(encoder.rects.is_empty());
+            assert!(encoder.texts.is_empty());
+            assert_eq!(picker.overlay_viewport.get(), None);
+        }
     }
 
     #[test]

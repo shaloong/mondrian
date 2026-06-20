@@ -9,7 +9,7 @@ use std::cell::Cell;
 
 use crate::menu::{
     anchored_menu_rect, menu_item_text_width, paint_menu_popup_chrome, paint_menu_row,
-    paint_menu_scrollbar, paint_menu_separator, MenuItem, MenuRowPaint,
+    paint_menu_scrollbar, paint_menu_separator, rect_has_paintable_area, MenuItem, MenuRowPaint,
 };
 
 /// 右键弹出菜单
@@ -85,7 +85,9 @@ impl ContextMenu {
 
     fn visible_content_height(&self) -> f32 {
         let content_height = self.content_height();
-        let Some(viewport) = self.overlay_viewport.get() else {
+        let Some(viewport) =
+            self.overlay_viewport.get().filter(|rect| rect_has_paintable_area(*rect))
+        else {
             return content_height;
         };
         let available = (viewport.height - 8.0).max(self.item_height);
@@ -287,6 +289,10 @@ impl Widget for ContextMenu {
             return;
         }
 
+        if !rect_has_paintable_area(ctx.clip_rect) {
+            self.overlay_viewport.set(None);
+            return;
+        }
         self.overlay_viewport.set(Some(ctx.clip_rect));
         self.clamp_scroll_offset();
         let bg = self.bounds_rect();
@@ -804,6 +810,29 @@ mod tests {
         assert_eq!(result, EventResult::Handled);
         assert_eq!(actions.borrow().as_slice(), &[Action::Paste]);
         assert!(!menu.visible);
+    }
+
+    #[test]
+    fn context_menu_overlay_skips_paint_when_clip_is_invalid_or_empty() {
+        for clip_rect in [
+            Rect::new(0.0, 0.0, 0.0, 120.0),
+            Rect::new(0.0, 0.0, f32::INFINITY, 120.0),
+        ] {
+            let menu = ContextMenu::new(
+                Point::new(20.0, 20.0),
+                vec![MenuItem::new("Open", Action::OpenProject("".into()))],
+            );
+            let theme = mondrian_ui_theme::ThemePreset::Dark.build();
+            let mut encoder = RecordingEncoder::default();
+
+            let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+            menu.paint_overlay(&mut ctx);
+
+            assert_eq!(encoder.rect_count, 0);
+            assert!(encoder.rects.is_empty());
+            assert!(encoder.texts.is_empty());
+            assert_eq!(menu.overlay_viewport.get(), None);
+        }
     }
 
     #[test]

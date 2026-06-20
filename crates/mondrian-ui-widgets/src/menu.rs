@@ -64,7 +64,7 @@ pub(crate) fn anchored_menu_rect(
     Rect::new(x, y, width, height)
 }
 
-fn rect_has_paintable_area(rect: Rect) -> bool {
+pub(crate) fn rect_has_paintable_area(rect: Rect) -> bool {
     rect.x.is_finite()
         && rect.y.is_finite()
         && rect.width.is_finite()
