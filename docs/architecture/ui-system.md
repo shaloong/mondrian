@@ -479,9 +479,12 @@ globally so text input cannot accidentally toggle playback while typing.
 Text-capable widgets expose `Widget::accepts_text_input()` while their editable
 field is active. When that is true, the router does not resolve unmodified or
 Shift-modified printable `KeyDown`s as shortcuts; the matching `TextInput` or
-IME commit event remains the authoritative text mutation path. Ctrl, Alt, and
-Meta chords still reach shortcut resolution so explicit editing shortcuts such
-as copy, paste, select-all, and user-defined command chords keep working.
+IME commit event remains the authoritative text mutation path. Ctrl and Meta
+chords still reach shortcut resolution so explicit editing shortcuts such as
+copy, paste, select-all, and user-defined command chords keep working. Alt-only
+`KeyDown`s also reach widgets/router first, but the shell may still route a
+following printable text payload so AltGr-style keyboard layouts can commit
+characters when the platform reports real text.
 Composite widgets that keep private `TextInput`s outside the public widget tree
 must translate private focus back to the composite's stable widget id while
 preserving the inner text field's local focus and IME requests. Router focus
@@ -1323,10 +1326,12 @@ Winit keyboard and IME conversion lives in the self-hosted shell runtime so
 `ui_demo` and product windows share the same `KeyDown` / `TextInput` /
 `ImePreedit` / `ImeCommit` semantics. Entry binaries should route Escape
 through the widget tree first and only treat it as a window close when ignored.
-The runtime emits printable `TextInput` only when Ctrl, Alt, and Meta are all
-clear; Shift remains allowed for uppercase and symbol input. Shortcut chords
-therefore reach widgets and the central router as `KeyDown` without also
-inserting text into focused fields. Space must be recognized both as
+The runtime emits printable `TextInput` only when Ctrl and Meta are clear; Shift
+remains allowed for uppercase and symbol input, and Alt-only text remains
+allowed when winit reports printable text so AltGr-style keyboard layouts do not
+lose characters. Ctrl, Ctrl+Alt, and Meta shortcut chords therefore reach
+widgets and the central router as `KeyDown` without also inserting text into
+focused fields. Space must be recognized both as
 `NamedKey::Space` and as `Key::Character(" ")` so playback/timeline shortcuts
 remain platform-stable while focused text fields can still receive a printable
 space through `TextInput`.

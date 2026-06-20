@@ -511,7 +511,7 @@ fn printable_key_text(text: Option<&str>) -> Option<String> {
 }
 
 fn should_route_printable_text(modifiers: Modifiers) -> bool {
-    !modifiers.ctrl && !modifiers.alt && !modifiers.meta
+    !modifiers.ctrl && !modifiers.meta
 }
 
 /// Paint the shell-owned eyedropper magnifier.
@@ -654,13 +654,18 @@ mod tests {
     fn printable_text_routing_ignores_shortcut_modifiers() {
         assert!(should_route_printable_text(Modifiers::none()));
         assert!(should_route_printable_text(Modifiers::shift()));
-        assert!(!should_route_printable_text(Modifiers::ctrl()));
-        assert!(!should_route_printable_text(Modifiers {
+        assert!(should_route_printable_text(Modifiers {
             alt: true,
             ..Modifiers::none()
         }));
+        assert!(!should_route_printable_text(Modifiers::ctrl()));
         assert!(!should_route_printable_text(Modifiers {
             meta: true,
+            ..Modifiers::none()
+        }));
+        assert!(!should_route_printable_text(Modifiers {
+            ctrl: true,
+            alt: true,
             ..Modifiers::none()
         }));
         assert!(!should_route_printable_text(Modifiers {
