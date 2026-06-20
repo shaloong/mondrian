@@ -7,7 +7,7 @@ use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
-use crate::paint::color_with_alpha;
+use crate::paint::{color_with_alpha, mix_color};
 use crate::{FormLayout, FormRowOptions, Label};
 use mondrian_editor_state::Action;
 
@@ -343,7 +343,10 @@ impl Widget for PropertyPanel {
     fn paint(&self, ctx: &mut PaintContext) {
         let colors = &ctx.theme.colors;
         let spacing = &ctx.theme.spacing;
-        ctx.encoder.draw_rect(self.bounds, colors.card, 0.0);
+        let panel_fill = mix_color(colors.background, colors.card, 0.32);
+        let section_fill = mix_color(colors.card, colors.background, 0.18);
+        let selected_section_fill = mix_color(section_fill, colors.ring, 0.08);
+        ctx.encoder.draw_rect(self.bounds, panel_fill, 0.0);
         self.title.paint(ctx);
         if let Some(subtitle) = &self.subtitle {
             subtitle.paint(ctx);
@@ -354,16 +357,25 @@ impl Widget for PropertyPanel {
                 if section.selected {
                     ctx.encoder.draw_rect(
                         section.bounds,
-                        color_with_alpha(colors.ring, 0.45),
+                        color_with_alpha(colors.ring, 0.34),
                         spacing.radius_md,
                     );
                     ctx.encoder.draw_rect(
                         section.bounds.inset(1.0, 1.0),
-                        colors.popover,
+                        selected_section_fill,
                         (spacing.radius_md - 1.0).max(0.0),
                     );
                 } else {
-                    ctx.encoder.draw_rect(section.bounds, colors.popover, spacing.radius_md);
+                    ctx.encoder.draw_rect(
+                        section.bounds,
+                        color_with_alpha(colors.border, 0.58),
+                        spacing.radius_md,
+                    );
+                    ctx.encoder.draw_rect(
+                        section.bounds.inset(1.0, 1.0),
+                        section_fill,
+                        (spacing.radius_md - 1.0).max(0.0),
+                    );
                 }
             }
             if !section.title().is_empty() {

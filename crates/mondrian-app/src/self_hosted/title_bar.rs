@@ -199,7 +199,8 @@ impl Widget for TitleBar {
 
     fn paint(&self, ctx: &mut PaintContext) {
         let colors = &ctx.theme.colors;
-        ctx.encoder.draw_rect(self.bounds, colors.card, 0.0);
+        ctx.encoder
+            .draw_rect(self.bounds, colors.background.lerp(colors.card, 0.42), 0.0);
         let border_y = self.bounds.y + self.bounds.height - 1.0;
         ctx.encoder.draw_line(
             Point::new(self.bounds.x, border_y),
@@ -274,7 +275,7 @@ fn paint_window_control(title_bar: &TitleBar, control: WindowControl, ctx: &mut 
     } else if hovered {
         colors.secondary
     } else {
-        colors.card
+        colors.background.lerp(colors.card, 0.42)
     };
     if !hovered && !pressed {
         fill.a = 0.0;

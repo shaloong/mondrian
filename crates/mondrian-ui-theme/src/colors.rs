@@ -121,64 +121,64 @@ pub struct ColorTokens {
 }
 
 impl ColorTokens {
-    /// Dark 主题 — 深色背景 + 高对比度文字
+    /// Dark 主题 — editor-grade dark surfaces with clear content hierarchy.
     pub fn dark() -> Self {
         Self {
-            background: Color::from_hex(0x0B0B0E),
-            foreground: Color::from_hex(0xEBEBF0),
-            card: Color::from_hex(0x16161A),
-            card_foreground: Color::from_hex(0xEBEBF0),
-            popover: Color::from_hex(0x1C1C22),
-            popover_foreground: Color::from_hex(0xEBEBF0),
+            background: Color::from_hex(0x0B0D12),
+            foreground: Color::from_hex(0xF4F4F5),
+            card: Color::from_hex(0x151820),
+            card_foreground: Color::from_hex(0xF4F4F5),
+            popover: Color::from_hex(0x1D212B),
+            popover_foreground: Color::from_hex(0xF4F4F5),
             modal_scrim: Color { r: 0.0, g: 0.0, b: 0.0, a: 0.48 },
 
-            primary: Color::from_hex(0x3B82F6),
+            primary: Color::from_hex(0x5DA7FF),
             primary_foreground: Color::WHITE,
-            secondary: Color::from_hex(0x27272D),
-            secondary_foreground: Color::from_hex(0xD4D4DB),
+            secondary: Color::from_hex(0x242936),
+            secondary_foreground: Color::from_hex(0xE5E7EB),
 
-            muted: Color::from_hex(0x1C1C22),
-            muted_foreground: Color::from_hex(0x717182),
-            accent: Color::from_hex(0x27272D),
-            accent_foreground: Color::from_hex(0xD4D4DB),
+            muted: Color::from_hex(0x191D26),
+            muted_foreground: Color::from_hex(0xA0A7B5),
+            accent: Color::from_hex(0x243246),
+            accent_foreground: Color::from_hex(0xF4F4F5),
             color_handle_shadow: Color { r: 0.0, g: 0.0, b: 0.0, a: 0.45 },
             color_handle_strong_shadow: Color { r: 0.0, g: 0.0, b: 0.0, a: 0.8 },
             color_handle_outer: Color::WHITE,
             color_handle_inner: Color::BLACK,
-            checkerboard_light: Color::from_hex(0xBFC0C7),
-            checkerboard_dark: Color::from_hex(0x7A7A85),
-            eyedropper_overlay: Color::from_hex(0x1F1F24),
+            checkerboard_light: Color::from_hex(0xC5C8D1),
+            checkerboard_dark: Color::from_hex(0x747B8A),
+            eyedropper_overlay: Color::from_hex(0x151820),
 
             destructive: Color::from_hex(0x7F1D1D),
             destructive_foreground: Color::from_hex(0xFCA5A5),
 
-            border: Color::from_hex(0x27272D),
-            input: Color::from_hex(0x27272D),
-            ring: Color::from_hex(0x3B82F6),
+            border: Color::from_hex(0x2A303C),
+            input: Color::from_hex(0x303746),
+            ring: Color::from_hex(0x73B4FF),
 
             success: Color::from_hex(0x22C55E),
             warning: Color::from_hex(0xF59E0B),
             error: Color::from_hex(0xEF4444),
 
-            timeline_clip_video: Color::from_hex(0x1E3A5F),
-            timeline_clip_audio: Color::from_hex(0x1D587B),
-            timeline_playhead: Color::from_hex(0x3B82F6),
-            media_video: Color::from_hex(0x4B7BE5),
-            media_audio: Color::from_hex(0x1D587B),
-            media_adjustment: Color::from_hex(0x6D5DD3),
-            media_solid: Color::from_hex(0xD946EF),
-            effect_filter: Color::from_hex(0x3B82F6),
+            timeline_clip_video: Color::from_hex(0x235B91),
+            timeline_clip_audio: Color::from_hex(0x20747D),
+            timeline_playhead: Color::from_hex(0x73B4FF),
+            media_video: Color::from_hex(0x4E8DF0),
+            media_audio: Color::from_hex(0x2AA6A0),
+            media_adjustment: Color::from_hex(0x8B78E6),
+            media_solid: Color::from_hex(0xD75FE8),
+            effect_filter: Color::from_hex(0x5DA7FF),
             effect_lut: Color::from_hex(0x22C55E),
             effect_key: Color::from_hex(0xF59E0B),
             effect_plugin: Color::from_hex(0xD946EF),
             effect_default: Color::from_hex(0x8B5CF6),
-            node_source: Color::from_hex(0x4B7BE5),
+            node_source: Color::from_hex(0x4E8DF0),
             node_output: Color::from_hex(0x22C55E),
 
-            canvas: Color::BLACK,
+            canvas: Color::from_hex(0x05070B),
             canvas_overlay: Color { r: 1.0, g: 1.0, b: 1.0, a: 0.08 },
 
-            scrollbar_thumb: Color::from_hex(0x3F3F48),
+            scrollbar_thumb: Color::from_hex(0x586173),
         }
     }
 

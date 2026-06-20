@@ -9,7 +9,7 @@ use crate::shape::{
     generate_gradient_rect_vertices, generate_rect_vertices, RectVertex, RenderMode,
 };
 
-const LINE_AA_PADDING_PX: f32 = 1.0;
+const LINE_AA_PADDING_PX: f32 = 1.25;
 const MIN_LINE_WIDTH_PX: f32 = 1.0;
 const MIN_LINE_DIRECTION_LEN: f32 = 0.001;
 const MIN_TRIANGLE_AREA_NDC: f32 = 1.0e-12;
@@ -895,6 +895,38 @@ fn assert_line_coverage_connects_caps(
 }
 
 #[cfg(test)]
+fn strongest_line_alpha_around(
+    vertices: &[RectVertex],
+    screen_size: (u32, u32),
+    center: Point,
+    normal: (f32, f32),
+) -> f32 {
+    let mut strongest_alpha = 0.0_f32;
+
+    for normal_offset in [-0.5_f32, -0.25, 0.0, 0.25, 0.5] {
+        let sample = Point::new(
+            center.x + normal.0 * normal_offset,
+            center.y + normal.1 * normal_offset,
+        );
+        let base_x = sample.x.floor() as i32;
+        let base_y = sample.y.floor() as i32;
+
+        for y in (base_y - 1)..=(base_y + 1) {
+            for x in (base_x - 1)..=(base_x + 1) {
+                let pixel_center = Point::new(x as f32 + 0.5, y as f32 + 0.5);
+                strongest_alpha = strongest_alpha.max(sample_line_alpha_from_vertices(
+                    vertices,
+                    screen_size,
+                    pixel_center,
+                ));
+            }
+        }
+    }
+
+    strongest_alpha
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use mondrian_core::Color;
@@ -1191,6 +1223,53 @@ mod tests {
     }
 
     #[test]
+    fn batch_line_vertices_keep_45_degree_hairline_alpha_profile_stable() {
+        let screen_size = (128, 128);
+        let cases = [
+            (Point::new(12.0, 12.0), Point::new(84.0, 84.0)),
+            (Point::new(12.25, 12.75), Point::new(84.25, 84.75)),
+            (Point::new(12.5, 12.0), Point::new(84.5, 84.0)),
+            (Point::new(12.0, 84.0), Point::new(84.0, 12.0)),
+            (Point::new(12.75, 84.25), Point::new(84.75, 12.25)),
+        ];
+
+        for (start, end) in cases {
+            let cmds = [DrawCommand::Line { start, end, width: 1.0, color: Color::WHITE }];
+            let batches = build_batches(&cmds, screen_size);
+            assert_eq!(batches.len(), 1);
+
+            let dx = end.x - start.x;
+            let dy = end.y - start.y;
+            let len = dx.hypot(dy);
+            let unit = (dx / len, dy / len);
+            let normal = (-unit.1, unit.0);
+            let vertices = &batches[0].vertices;
+            let mut previous_alpha = None;
+
+            for step in 0..=len.round() as i32 {
+                let center = Point::new(
+                    start.x + unit.0 * step as f32,
+                    start.y + unit.1 * step as f32,
+                );
+                let alpha = strongest_line_alpha_around(vertices, screen_size, center, normal);
+                assert!(
+                    alpha >= 0.55,
+                    "45 degree hairline has a weak alpha sample for {start:?}->{end:?} at step {step}: {alpha}"
+                );
+
+                if let Some(previous) = previous_alpha {
+                    let delta = f32::abs(previous - alpha);
+                    assert!(
+                        delta <= 0.55,
+                        "45 degree hairline alpha jumps too abruptly for {start:?}->{end:?} at step {step}: previous={previous}, current={alpha}"
+                    );
+                }
+                previous_alpha = Some(alpha);
+            }
+        }
+    }
+
+    #[test]
     fn batch_line_vertices_keep_45_degree_hairline_coverage_connected() {
         let screen_size = (96, 96);
         let cases = [
@@ -1284,8 +1363,8 @@ mod tests {
                     "angle {angle} generated local coordinates outside line bounds"
                 );
                 assert!(
-                    (vertex.rect_size[1] - 3.0).abs() < 0.001,
-                    "angle {angle} should keep 1px stroke plus 1px AA padding per side"
+                    (vertex.rect_size[1] - (1.0 + LINE_AA_PADDING_PX * 2.0)).abs() < 0.001,
+                    "angle {angle} should keep 1px stroke plus conservative AA padding per side"
                 );
                 assert!((vertex.corner_radius_px - 0.5).abs() < 0.001);
             }
@@ -1765,8 +1844,11 @@ mod tests {
             .map(|v| v.position[0])
             .fold(f32::NEG_INFINITY, f32::max);
 
-        assert!((min_x - (-0.86)).abs() < 0.001);
-        assert!((max_x - 0.86).abs() < 0.001);
+        let half_geometry_width = 2.0 + LINE_AA_PADDING_PX;
+        let expected_min_x = (10.0 - half_geometry_width) * 0.02 - 1.0;
+        let expected_max_x = (90.0 + half_geometry_width) * 0.02 - 1.0;
+        assert!((min_x - expected_min_x).abs() < 0.001);
+        assert!((max_x - expected_max_x).abs() < 0.001);
     }
 
     #[test]
@@ -1786,13 +1868,16 @@ mod tests {
         let min_y = vertices.iter().map(|v| v.position[1]).fold(f32::INFINITY, f32::min);
         let max_y = vertices.iter().map(|v| v.position[1]).fold(f32::NEG_INFINITY, f32::max);
 
-        assert!((min_x - (-0.06)).abs() < 0.001);
-        assert!((max_x - 0.06).abs() < 0.001);
-        assert!((min_y - (-0.06)).abs() < 0.001);
-        assert!((max_y - 0.06).abs() < 0.001);
+        let half_geometry_width = 2.0 + LINE_AA_PADDING_PX;
+        let expected_min = (50.0 - half_geometry_width) * 0.02 - 1.0;
+        let expected_max = (50.0 + half_geometry_width) * 0.02 - 1.0;
+        assert!((min_x - expected_min).abs() < 0.001);
+        assert!((max_x - expected_max).abs() < 0.001);
+        assert!((min_y - (-expected_max)).abs() < 0.001);
+        assert!((max_y - (-expected_min)).abs() < 0.001);
         for vertex in vertices {
-            assert!((vertex.rect_size[0] - 6.0).abs() < 0.001);
-            assert!((vertex.rect_size[1] - 6.0).abs() < 0.001);
+            assert!((vertex.rect_size[0] - (4.0 + LINE_AA_PADDING_PX * 2.0)).abs() < 0.001);
+            assert!((vertex.rect_size[1] - (4.0 + LINE_AA_PADDING_PX * 2.0)).abs() < 0.001);
             assert!((vertex.corner_radius_px - 2.0).abs() < 0.001);
         }
     }

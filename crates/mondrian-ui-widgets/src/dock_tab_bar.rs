@@ -6,6 +6,7 @@ use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
+use crate::paint::{color_with_alpha, mix_color};
 use crate::text_metrics::centered_text_x;
 
 /// 单个 Tab 的信息
@@ -112,7 +113,13 @@ impl Widget for DockTabBar {
             self.bounds.width,
             self.bar_height,
         );
-        ctx.encoder.draw_rect(bg, tokens.card, 0.0);
+        let bar_fill = mix_color(tokens.background, tokens.card, 0.48);
+        ctx.encoder.draw_rect(bg, bar_fill, 0.0);
+        ctx.encoder.draw_rect(
+            Rect::new(bg.x, bg.y + bg.height - 1.0, bg.width, 1.0),
+            color_with_alpha(tokens.border, 0.82),
+            0.0,
+        );
 
         let rects = self.tab_rects();
         for (i, tab) in self.tabs.iter().enumerate() {
@@ -124,11 +131,11 @@ impl Widget for DockTabBar {
             let is_hovered = self.hovered_tab == Some(i);
 
             let fill = if is_active {
-                tokens.popover
+                mix_color(tokens.card, tokens.popover, 0.42)
             } else if is_hovered {
-                tokens.accent
+                color_with_alpha(tokens.accent, 0.72)
             } else {
-                tokens.card
+                color_with_alpha(tokens.card, 0.24)
             };
 
             let inset = r.inset(2.0, 2.0);
@@ -140,18 +147,24 @@ impl Widget for DockTabBar {
                 let ty = inset.y + (inset.height - font_size * 1.3).max(0.0) * 0.5;
                 let pos = mondrian_ui_core::types::snap_point(Point::new(tx, ty));
                 ctx.push_clip(inset);
-                ctx.encoder.draw_text(&tab.label, font_size, pos, tokens.foreground);
+                let text_color = if is_active || is_hovered {
+                    tokens.foreground
+                } else {
+                    tokens.muted_foreground
+                };
+                ctx.encoder.draw_text(&tab.label, font_size, pos, text_color);
                 ctx.pop_clip();
             }
 
             if is_active {
+                let indicator_width = (inset.width * 0.34).clamp(24.0, 52.0);
                 let indicator = Rect::new(
-                    inset.x + 4.0,
+                    inset.x + (inset.width - indicator_width) * 0.5,
                     inset.y + inset.height - 2.0,
-                    inset.width - 8.0,
+                    indicator_width,
                     2.0,
                 );
-                ctx.encoder.draw_rect(indicator, tokens.primary, 0.0);
+                ctx.encoder.draw_rect(indicator, tokens.ring, 1.0);
             }
         }
     }

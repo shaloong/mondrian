@@ -12,6 +12,7 @@ use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
+use crate::paint::mix_color;
 use crate::{ContextMenu, MenuItem};
 
 const SCROLLBAR_THICKNESS: f32 = 8.0;
@@ -1946,7 +1947,8 @@ impl TimelineView {
 
     fn paint_ruler(&self, ctx: &mut PaintContext) {
         let colors = &ctx.theme.colors;
-        ctx.encoder.draw_rect(self.ruler_rect, colors.card, 0.0);
+        let ruler_fill = mix_color(colors.background, colors.card, 0.58);
+        ctx.encoder.draw_rect(self.ruler_rect, ruler_fill, 0.0);
         self.paint_in_out_ruler_region(ctx);
         let step = self.tick_step_frames();
         let start_frame = (self.scroll_x / self.pixels_per_frame).floor().max(0.0) as i64;
@@ -1991,7 +1993,8 @@ impl TimelineView {
     fn paint_timeline_corner(&self, ctx: &mut PaintContext) {
         let colors = &ctx.theme.colors;
         let corner = self.timeline_corner_rect();
-        ctx.encoder.draw_rect(corner, colors.card, 0.0);
+        ctx.encoder
+            .draw_rect(corner, mix_color(colors.background, colors.card, 0.58), 0.0);
         ctx.encoder.draw_line(
             Point::new(corner.x, corner.y + corner.height - 1.0),
             Point::new(corner.x + corner.width, corner.y + corner.height - 1.0),
@@ -2189,7 +2192,7 @@ impl TimelineView {
                 if track_selected {
                     colors.accent
                 } else {
-                    colors.card
+                    mix_color(colors.background, colors.card, 0.46)
                 },
                 0.0,
             );
@@ -2220,9 +2223,9 @@ impl TimelineView {
 
             let row = Rect::new(self.body_rect.x, y, self.body_rect.width, self.track_height);
             let row_fill = if track_index % 2 == 0 {
-                colors.background
+                mix_color(colors.background, colors.card, 0.12)
             } else {
-                colors.card
+                mix_color(colors.background, colors.card, 0.24)
             };
             ctx.encoder.draw_rect(row, row_fill, 0.0);
             self.paint_in_out_row_region(ctx, row);

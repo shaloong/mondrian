@@ -706,7 +706,11 @@ impl Widget for MenuBar {
             self.bounds.width,
             MENU_BAR_HEIGHT,
         );
-        ctx.encoder.draw_rect(bar_bg, ctx.theme.colors.card, 0.0);
+        ctx.encoder.draw_rect(
+            bar_bg,
+            ctx.theme.colors.background.lerp(ctx.theme.colors.card, 0.42),
+            0.0,
+        );
         for menu in &self.menus {
             menu.paint(ctx);
         }

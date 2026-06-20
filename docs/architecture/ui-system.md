@@ -1284,6 +1284,15 @@ and future browsers can share neutral, accent, success, warning, and error
 treatments without hard-coded colors or fixed-width text assumptions. Demo
 fixture colors that represent clip media content may remain fixture data,
 because they are not theme chrome.
+The dark theme maintains a deliberate surface ladder: root workspace and viewer
+canvases are the darkest surfaces, dock chrome and timeline rulers sit one step
+above them, panel bodies use a restrained card mix, and inspector sections,
+popups, and menus use elevated tokens only when they need clear containment.
+Widgets may compose semantic tokens with shared paint helpers such as
+`mix_color`, but should not flatten large editor areas into the same mid-gray
+`card`/`popover` fill. This keeps the self-hosted UI closer to professional NLE
+workspaces and prevents visual hierarchy from depending on per-panel ad-hoc
+color constants.
 Panel models must attach explicit stable actions to rows instead of deriving
 commands from titles, indices, or fixture-only prefixes. Synthetic demo rows
 use explicit `ui.demo_panel` actions so they exercise the same select/activate
@@ -1797,13 +1806,16 @@ numeric stability do not depend on only the cardinal points. Batch-level circle
 tests should also reconstruct signed distance from the final generated
 triangles, so pixel-to-NDC conversion, y-axis flipping, local UV interpolation,
 and pixel-size radius data are covered together rather than only by the ideal
-CPU SDF helper. Line commands use a dedicated capsule SDF with 1px analytic-AA
-padding and round caps, because a
+CPU SDF helper. Line commands use a dedicated capsule SDF with conservative
+analytic-AA geometry padding and round caps, because a
 1px 45-degree stroke rendered as a bare quad can miss MSAA sample positions and
-appear broken or intermittent. The coverage quad expands by the stroke radius
-plus AA padding both perpendicular to the stroke and along the stroke axis, so
-wide, short, and zero-length lines do not have their round caps clipped by the
-conservative geometry before the fragment SDF runs.
+appear broken or intermittent. The visible line width still comes from the
+fragment SDF radius; the CPU-generated coverage quad only defines conservative
+draw bounds. It expands by the stroke radius plus AA padding both perpendicular
+to the stroke and along the stroke axis, with padding wider than the shader's
+visible AA edge so backend derivative and MSAA sample differences cannot clip
+the fringe before the fragment SDF runs. Wide, short, and zero-length lines
+therefore keep their round caps inside the conservative geometry.
 The batch builder must also reject lines whose finite inputs overflow while
 deriving length, local SDF bounds, coverage-quad points, or final NDC vertices;
 primitive safety is enforced before any vertex reaches the GPU.
@@ -1907,11 +1919,12 @@ be clipped before shading. This matters for splitter handles and tool icons
 because thin diagonal strokes must not depend on sample coverage alone.
 Line regressions should be tested as angle families, not only as horizontal and
 vertical strokes: 1px lines at common diagonal angles must keep front-facing
-winding, local pixel-space SDF coordinates, a continuous centerline, and stable
-pixel-center coverage at subpixel offsets. Hairline tests should also assert an
-8-connected visible coverage path from the start cap to the end cap for 45
-degree strokes, because local per-step visibility can miss dotted-line
-regressions that are obvious to users. Renderer tests should reconstruct line
+winding, local pixel-space SDF coordinates, a continuous centerline, stable
+pixel-center coverage at subpixel offsets, and a bounded alpha profile along
+the stroke. Hairline tests should also assert an 8-connected visible coverage
+path from the start cap to the end cap for 45 degree strokes, because local
+per-step visibility can miss dotted-line regressions that are obvious to users.
+Renderer tests should reconstruct line
 coverage from the final batch triangles, not only from ideal SDF-local
 coordinates, so pixel-to-NDC conversion, y-axis flipping, triangle winding,
 local coordinate interpolation, and cap coverage stay covered as one contract.

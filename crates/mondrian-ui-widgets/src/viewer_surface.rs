@@ -592,7 +592,11 @@ impl Widget for ViewerSurface {
         let viewport = self.canvas_viewport_rect();
         let canvas = self.canvas_rect();
 
-        ctx.encoder.draw_rect(self.bounds, colors.background, 0.0);
+        ctx.encoder.draw_rect(
+            self.bounds,
+            mix_color(colors.background, colors.card, 0.16),
+            0.0,
+        );
         if self.focus_visible {
             paint_focus_ring(ctx, self.bounds.inset(2.0, 2.0), spacing.radius_lg);
         }
@@ -631,19 +635,19 @@ impl Widget for ViewerSurface {
 
         ctx.encoder.draw_rect(
             viewport,
-            mix_color(colors.card, colors.background, 0.45),
+            mix_color(colors.canvas, colors.background, 0.38),
             0.0,
         );
         ctx.push_clip(viewport);
         ctx.encoder.draw_rect(
             canvas.inset(-1.0, -1.0),
-            soft_border(colors.border),
+            color_with_alpha(colors.border, 0.74),
             spacing.radius_md,
         );
         let canvas_fill = if self.enabled {
-            mix_color(colors.card, colors.foreground, 0.035)
+            mix_color(colors.canvas, colors.card, 0.18)
         } else {
-            mix_color(colors.card, colors.muted, 0.34)
+            mix_color(colors.background, colors.muted, 0.24)
         };
         ctx.encoder.draw_rect(canvas, canvas_fill, spacing.radius_md);
         if self.enabled {
