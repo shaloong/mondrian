@@ -18,6 +18,7 @@ use crate::self_hosted::runtime::{
 use crate::self_hosted::shortcuts::{register_shortcuts, SelfHostedShortcutOverride};
 use crate::self_hosted::startup::{STARTUP_WINDOW_HEIGHT, STARTUP_WINDOW_WIDTH};
 use mondrian_platform::SystemPlatformService;
+use mondrian_ui_core::focus::FocusManager;
 use mondrian_ui_core::shortcut::{ShortcutManager, ShortcutScope};
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::TreeWalker;
@@ -365,10 +366,14 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                         } else {
                             None
                         };
+                        let focused_text = focused_widget_accepts_text_input(
+                            host.active_root(),
+                            session.router.focus_manager().focused_widget(),
+                        );
                         session.window.set_cursor_icon(winit_cursor_icon_for_ui_state(
                             session.ui_runtime.is_eyedropper_active(),
                             dir,
-                            false,
+                            focused_text,
                         ));
                         session.window.request_redraw();
                     }
@@ -687,6 +692,30 @@ fn window_attributes_for_role(role: SelfHostedWindowRole) -> winit::window::Wind
     attrs
 }
 
+fn focused_widget_accepts_text_input(
+    root: &dyn mondrian_ui_core::Widget,
+    focused: Option<WidgetId>,
+) -> bool {
+    focused.is_some_and(|id| widget_tree_accepts_text_input(root, id))
+}
+
+fn widget_tree_accepts_text_input(
+    widget: &dyn mondrian_ui_core::Widget,
+    focused: WidgetId,
+) -> bool {
+    if widget.id() == focused {
+        return widget.accepts_text_input();
+    }
+    for index in 0..widget.child_count() {
+        if let Some(child) = widget.child(index) {
+            if widget_tree_accepts_text_input(child, focused) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 fn window_bounds_for_role(role: SelfHostedWindowRole) -> Rect {
     let chrome = window_chrome_for_role(role);
@@ -728,6 +757,65 @@ fn toggle_window_fullscreen(window: &winit::window::Window) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mondrian_ui_core::widget::{EventContext, PaintContext};
+    use mondrian_ui_core::Widget;
+
+    struct CursorFocusWidget {
+        id: WidgetId,
+        accepts_text: bool,
+        children: Vec<Box<dyn Widget>>,
+    }
+
+    impl CursorFocusWidget {
+        fn new(accepts_text: bool) -> Self {
+            Self {
+                id: WidgetId::new(),
+                accepts_text,
+                children: Vec::new(),
+            }
+        }
+
+        fn with_children(children: Vec<Box<dyn Widget>>) -> Self {
+            Self { id: WidgetId::new(), accepts_text: false, children }
+        }
+    }
+
+    impl Widget for CursorFocusWidget {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+
+        fn measure(&self, _constraint: LayoutConstraint) -> Size {
+            Size::ZERO
+        }
+
+        fn layout(&mut self, _bounds: Rect) {}
+
+        fn event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+            EventResult::Ignored
+        }
+
+        fn paint(&self, _ctx: &mut PaintContext) {}
+
+        fn child_count(&self) -> usize {
+            self.children.len()
+        }
+
+        fn child(&self, index: usize) -> Option<&dyn Widget> {
+            self.children.get(index).map(|child| child.as_ref())
+        }
+
+        fn child_mut(&mut self, index: usize) -> Option<&mut dyn Widget> {
+            match self.children.get_mut(index) {
+                Some(child) => Some(child.as_mut()),
+                None => None,
+            }
+        }
+
+        fn accepts_text_input(&self) -> bool {
+            self.accepts_text
+        }
+    }
 
     #[test]
     fn default_log_filter_keeps_noisy_gpu_crates_at_warning() {
@@ -747,6 +835,26 @@ mod tests {
     fn focus_loss_is_deferred_while_desktop_eyedropper_is_active() {
         assert!(!should_route_focus_lost_to_ui(true));
         assert!(should_route_focus_lost_to_ui(false));
+    }
+
+    #[test]
+    fn focused_widget_accepts_text_input_finds_nested_text_owner() {
+        let text_child = CursorFocusWidget::new(true);
+        let text_id = text_child.id;
+        let button_child = CursorFocusWidget::new(false);
+        let button_id = button_child.id;
+        let root = CursorFocusWidget::with_children(vec![
+            Box::new(button_child),
+            Box::new(CursorFocusWidget::with_children(vec![Box::new(text_child)])),
+        ]);
+
+        assert!(focused_widget_accepts_text_input(&root, Some(text_id)));
+        assert!(!focused_widget_accepts_text_input(&root, Some(button_id)));
+        assert!(!focused_widget_accepts_text_input(&root, None));
+        assert!(!focused_widget_accepts_text_input(
+            &root,
+            Some(WidgetId::new())
+        ));
     }
 
     #[test]

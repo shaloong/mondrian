@@ -418,7 +418,10 @@ predictably.
 
 Text content is clipped to the padded content rect, not the outer widget
 bounds. App shells should show an I-beam cursor for text inputs only after the
-input owns focus; hover alone should not switch the pointer shape.
+input owns focus; hover alone should not switch the pointer shape. The
+self-hosted product window derives this from the focused widget's
+`accepts_text_input()` state when choosing the native cursor, while eyedropper
+and splitter cursors keep higher priority.
 Text inputs use the same `mondrian-ui-text` measurement path as glyph rendering
 for cursor movement, selection geometry, hit testing, and horizontal scroll;
 approximate width estimates are not used for editable text internals.
