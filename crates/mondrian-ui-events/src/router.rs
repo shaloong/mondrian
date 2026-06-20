@@ -285,6 +285,10 @@ impl EventRouter {
                     } else {
                         TreeWalker::focus_next(tree, traversal_origin)
                     };
+                    if next.is_none() {
+                        self.focused = self.focus_mgr.focused_widget();
+                        return EventResult::Ignored;
+                    }
                     if next == current {
                         self.focused = self.focus_mgr.focused_widget();
                         return EventResult::Handled;
@@ -2089,6 +2093,34 @@ mod tests {
         assert_eq!(router.focused(), Some(root));
         assert!(log.borrow().is_empty());
         assert!(router.take_ime_request().is_none());
+    }
+
+    #[test]
+    fn router_tab_without_focusable_target_is_ignored() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let focusable = Rc::new(Cell::new(false));
+        let widget = RecordingWidget::with_focusable_flag(
+            Rect::new(0.0, 0.0, 100.0, 30.0),
+            Rc::clone(&log),
+            Rc::clone(&focusable),
+        );
+        let root = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(root);
+
+        let result = router.route(
+            UiEvent::KeyDown {
+                key: KeyCode::Tab,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(router.focused(), None);
+        assert_eq!(router.focus_manager().focused_widget(), None);
+        assert!(log.borrow().is_empty());
     }
 
     #[test]

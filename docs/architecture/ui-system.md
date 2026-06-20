@@ -397,7 +397,10 @@ commit update. Escape clears the local preedit preview without committing text
 and requests repaint.
 Focus traversal treats a cycle back to the same widget as a no-op: the router
 handles Tab but does not emit `FocusLost`/`FocusGained`, avoiding selection and
-IME flicker when only one focusable control is present.
+IME flicker when only one focusable control is present. If the current tree has
+no focusable target at all, Tab remains `Ignored` rather than being promoted to
+a handled shortcut, so empty startup/modal states do not swallow platform or
+user-level key paths.
 
 Single-line text input maintains a horizontal viewport owned by the widget. The
 cursor is scrolled into view after layout, editing, navigation, or selection
