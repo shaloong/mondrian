@@ -203,6 +203,10 @@ pub const APP_SHELL_SEQUENCE_SETTINGS_TAB_CHANGED: &str = "sequence_settings_tab
 pub const APP_SHELL_PREFERENCES_TAB_CHANGED: &str = "preferences_tab_changed";
 /// App-shell request to switch the active self-hosted theme preset.
 pub const APP_SHELL_PREFERENCES_THEME_CHANGED: &str = "preferences_theme_changed";
+/// App-shell request to disable one self-hosted shortcut descriptor.
+pub const APP_SHELL_PREFERENCES_SHORTCUT_DISABLED: &str = "preferences_shortcut_disabled";
+/// App-shell request to restore one self-hosted shortcut descriptor to default.
+pub const APP_SHELL_PREFERENCES_SHORTCUT_RESET: &str = "preferences_shortcut_reset";
 /// App-shell request to close the current shell-local modal.
 pub const APP_SHELL_CLOSE_MODAL: &str = "close_modal";
 /// App-shell request to quit the native application window.
@@ -228,6 +232,13 @@ pub enum PreferencesTabPayload {
 pub struct PreferencesThemePayload {
     /// Theme preset to apply and persist.
     pub preset: ThemePreset,
+}
+
+/// Stable shortcut descriptor selected in the self-hosted preferences UI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreferencesShortcutPayload {
+    /// Stable shortcut descriptor id.
+    pub id: String,
 }
 
 /// Project path selected from the self-hosted recent-project startup list.
@@ -1225,6 +1236,22 @@ pub fn app_shell_preferences_theme_changed_action(preset: ThemePreset) -> Action
     custom_app_shell_action_with_payload(
         APP_SHELL_PREFERENCES_THEME_CHANGED,
         PreferencesThemePayload { preset },
+    )
+}
+
+/// Build an app-shell request for disabling one shortcut descriptor.
+pub fn app_shell_preferences_shortcut_disabled_action(id: impl Into<String>) -> Action {
+    custom_app_shell_action_with_payload(
+        APP_SHELL_PREFERENCES_SHORTCUT_DISABLED,
+        PreferencesShortcutPayload { id: id.into() },
+    )
+}
+
+/// Build an app-shell request for restoring one shortcut descriptor to default.
+pub fn app_shell_preferences_shortcut_reset_action(id: impl Into<String>) -> Action {
+    custom_app_shell_action_with_payload(
+        APP_SHELL_PREFERENCES_SHORTCUT_RESET,
+        PreferencesShortcutPayload { id: id.into() },
     )
 }
 

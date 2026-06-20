@@ -18,6 +18,7 @@ use crate::self_hosted::runtime::{
 use crate::self_hosted::shortcuts::{register_shortcuts, SelfHostedShortcutOverride};
 use crate::self_hosted::startup::{STARTUP_WINDOW_HEIGHT, STARTUP_WINDOW_WIDTH};
 use mondrian_platform::SystemPlatformService;
+use mondrian_ui_core::shortcut::{ShortcutManager, ShortcutScope};
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::TreeWalker;
 use mondrian_ui_events::EventRouter;
@@ -582,6 +583,8 @@ fn drain_actions_and_sync_window_session(
 ) {
     let commands =
         host.drain_pending_actions(pending_actions, session.current_bounds.get(), platform);
+    session.router.shortcut_manager_mut().clear_scope(ShortcutScope::Global);
+    register_shortcuts(&mut session.router, &host.preferences().shortcut_overrides);
     apply_shell_commands(commands, &session.window, elwt);
     sync_window_session_role(host, elwt, instance, adapter, device, session);
 }

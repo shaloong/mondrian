@@ -15,13 +15,14 @@ use mondrian_ui_core::{TreeWalker, Widget};
 use mondrian_ui_theme::set_theme_preset;
 
 use crate::app::ui_actions::{
-    AssetsOpenFolderPayload, PreferencesThemePayload, APP_SHELL_CANCEL_NEW_PROJECT_DIALOG,
-    APP_SHELL_CLOSE_MODAL, APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_NAMESPACE,
-    APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_NEW_PROJECT_DRAFT_CHANGED,
-    APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_OPEN_RECENT_PROJECT,
-    APP_SHELL_PREFERENCES_THEME_CHANGED, APP_SHELL_QUIT, APP_SHELL_RECOVER_PROJECT,
-    APP_SHELL_WINDOW_DRAG, APP_SHELL_WINDOW_MINIMIZE, APP_SHELL_WINDOW_TOGGLE_MAXIMIZE,
-    ASSETS_NAMESPACE, ASSETS_OPEN_FOLDER,
+    AssetsOpenFolderPayload, PreferencesShortcutPayload, PreferencesThemePayload,
+    APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
+    APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
+    APP_SHELL_NEW_PROJECT_DRAFT_CHANGED, APP_SHELL_OPEN_PROJECT_DIALOG,
+    APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PREFERENCES_SHORTCUT_DISABLED,
+    APP_SHELL_PREFERENCES_SHORTCUT_RESET, APP_SHELL_PREFERENCES_THEME_CHANGED, APP_SHELL_QUIT,
+    APP_SHELL_RECOVER_PROJECT, APP_SHELL_WINDOW_DRAG, APP_SHELL_WINDOW_MINIMIZE,
+    APP_SHELL_WINDOW_TOGGLE_MAXIMIZE, ASSETS_NAMESPACE, ASSETS_OPEN_FOLDER,
 };
 use crate::app::{discover_crash_recovery_candidates, AppState, CrashRecoveryCandidate};
 use crate::self_hosted::action_queue::PendingUiActions;
@@ -33,6 +34,7 @@ use crate::self_hosted::preferences_store::{
 };
 use crate::self_hosted::preview::SelfHostedPreviewService;
 use crate::self_hosted::shell::{try_resolve_app_shell_action, SelfHostedAppRoot};
+use crate::self_hosted::shortcuts::{is_known_shortcut_id, SelfHostedShortcutOverride};
 use crate::self_hosted::startup::{
     SelfHostedStartupScreen, StartupRecentProject, StartupRecoveryProject,
 };
@@ -432,13 +434,33 @@ impl SelfHostedUiHost {
     }
 
     fn take_preferences_update(&mut self, action: &Action, bounds: Rect) -> bool {
-        let Some(result) = parse_preferences_theme_update(action) else {
+        let Some(result) = parse_preferences_update(action) else {
             return false;
         };
         match result {
-            Ok(payload) => {
-                self.preferences.theme_preset = payload.preset;
-                set_theme_preset(payload.preset);
+            Ok(update) => {
+                match update {
+                    PreferencesUpdate::Theme(payload) => {
+                        self.preferences.theme_preset = payload.preset;
+                        set_theme_preset(payload.preset);
+                    }
+                    PreferencesUpdate::ShortcutDisabled(payload) => {
+                        if !is_known_shortcut_id(&payload.id) {
+                            self.app_state
+                                .borrow_mut()
+                                .set_status_hint("Shortcut preference is no longer valid", true);
+                            self.mark_dirty();
+                            return true;
+                        }
+                        self.preferences.shortcut_overrides.retain(|entry| entry.id != payload.id);
+                        self.preferences
+                            .shortcut_overrides
+                            .push(SelfHostedShortcutOverride { id: payload.id, binding: None });
+                    }
+                    PreferencesUpdate::ShortcutReset(payload) => {
+                        self.preferences.shortcut_overrides.retain(|entry| entry.id != payload.id);
+                    }
+                }
                 if let Err(err) =
                     persist_self_hosted_preferences_to(&self.preferences_path, &self.preferences)
                 {
@@ -656,14 +678,31 @@ fn take_shell_window_command(commands: &mut SelfHostedShellCommands, action: &Ac
     }
 }
 
-fn parse_preferences_theme_update(
+enum PreferencesUpdate {
+    Theme(PreferencesThemePayload),
+    ShortcutDisabled(PreferencesShortcutPayload),
+    ShortcutReset(PreferencesShortcutPayload),
+}
+
+fn parse_preferences_update(
     action: &Action,
-) -> Option<Result<PreferencesThemePayload, serde_json::Error>> {
+) -> Option<Result<PreferencesUpdate, serde_json::Error>> {
     match action {
         Action::Custom { namespace, name, payload }
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_PREFERENCES_THEME_CHANGED =>
         {
-            Some(serde_json::from_value(payload.clone()))
+            Some(serde_json::from_value(payload.clone()).map(PreferencesUpdate::Theme))
+        }
+        Action::Custom { namespace, name, payload }
+            if namespace == APP_SHELL_NAMESPACE
+                && name == APP_SHELL_PREFERENCES_SHORTCUT_DISABLED =>
+        {
+            Some(serde_json::from_value(payload.clone()).map(PreferencesUpdate::ShortcutDisabled))
+        }
+        Action::Custom { namespace, name, payload }
+            if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_PREFERENCES_SHORTCUT_RESET =>
+        {
+            Some(serde_json::from_value(payload.clone()).map(PreferencesUpdate::ShortcutReset))
         }
         _ => None,
     }
@@ -1011,6 +1050,45 @@ mod tests {
         assert_eq!(
             load_self_hosted_preferences_from(&path).theme_preset,
             ThemePreset::Light
+        );
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn host_applies_and_persists_shortcut_preference_updates() {
+        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let path = temp_preferences_path("shortcut-preferences");
+        let mut preferences = SelfHostedPreferences::default();
+        preferences
+            .shortcut_overrides
+            .push(SelfHostedShortcutOverride { id: "panel.inspector".to_owned(), binding: None });
+        let mut host =
+            SelfHostedUiHost::new_with_preferences_path(AppState::new(), preferences, path.clone());
+        let pending = PendingUiActions::default();
+
+        pending.push(
+            crate::app::ui_actions::app_shell_preferences_shortcut_disabled_action(
+                "file.save_project",
+            ),
+        );
+        pending.push(
+            crate::app::ui_actions::app_shell_preferences_shortcut_reset_action("panel.inspector"),
+        );
+        let commands = host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+
+        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert_eq!(
+            host.preferences().shortcut_overrides,
+            vec![SelfHostedShortcutOverride { id: "file.save_project".to_owned(), binding: None }]
+        );
+        assert_eq!(
+            load_self_hosted_preferences_from(&path).shortcut_overrides,
+            host.preferences().shortcut_overrides
         );
 
         std::fs::remove_file(path).ok();

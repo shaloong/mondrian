@@ -13,11 +13,12 @@ use mondrian_ui_theme::ThemePreset;
 use mondrian_ui_widgets::{Button, DialogSurface, Label};
 
 use crate::app::ui_actions::{
-    app_shell_close_modal_action, app_shell_preferences_tab_changed_action,
+    app_shell_close_modal_action, app_shell_preferences_shortcut_disabled_action,
+    app_shell_preferences_shortcut_reset_action, app_shell_preferences_tab_changed_action,
     app_shell_preferences_theme_changed_action, PreferencesTabPayload,
 };
 use crate::app::AppState;
-use crate::self_hosted::shortcuts::{active_shortcuts, SelfHostedShortcutOverride};
+use crate::self_hosted::shortcuts::{default_shortcuts, SelfHostedShortcutOverride};
 use crate::self_hosted::window::{DEFAULT_SELF_HOSTED_LOG_FILTER, SELF_HOSTED_BACKGROUND_WORKERS};
 
 const CARD_MIN_WIDTH: f32 = 480.0;
@@ -38,6 +39,10 @@ const BUTTON_BOTTOM_INSET: f32 = 20.0;
 const THEME_BUTTON_WIDTH: f32 = 76.0;
 const THEME_BUTTON_HEIGHT: f32 = 26.0;
 const THEME_BUTTON_GAP: f32 = 6.0;
+const SHORTCUT_BUTTON_WIDTH: f32 = 68.0;
+const SHORTCUT_BUTTON_GAP: f32 = 6.0;
+const SHORTCUT_BUTTON_HEIGHT: f32 = 24.0;
+const SHORTCUT_HEADER_ROW_COUNT: usize = 2;
 
 /// Read-only settings/status snapshot shown by the self-hosted preferences UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,7 +60,18 @@ pub struct SelfHostedPreferencesModel {
     pub runtime_diagnostics: String,
     pub log_filter: String,
     pub background_workers: String,
-    pub shortcut_rows: Vec<String>,
+    pub shortcut_rows: Vec<ShortcutPreferenceRow>,
+}
+
+/// One shortcut row shown in the self-hosted preferences UI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShortcutPreferenceRow {
+    pub id: String,
+    pub label: String,
+    pub action: String,
+    pub default_label: String,
+    pub overridden: bool,
+    pub disabled: bool,
 }
 
 impl SelfHostedPreferencesModel {
@@ -112,10 +128,7 @@ impl SelfHostedPreferencesModel {
             runtime_diagnostics: "Tracing enabled".to_owned(),
             log_filter: format!("RUST_LOG / {DEFAULT_SELF_HOSTED_LOG_FILTER}"),
             background_workers: SELF_HOSTED_BACKGROUND_WORKERS.to_string(),
-            shortcut_rows: active_shortcuts(shortcut_overrides)
-                .into_iter()
-                .map(|shortcut| format!("{:<18} {:?}", shortcut.label, shortcut.action))
-                .collect(),
+            shortcut_rows: shortcut_preference_rows(shortcut_overrides),
         }
     }
 }
@@ -136,10 +149,7 @@ impl Default for SelfHostedPreferencesModel {
             runtime_diagnostics: "Tracing enabled".to_owned(),
             log_filter: format!("RUST_LOG / {DEFAULT_SELF_HOSTED_LOG_FILTER}"),
             background_workers: SELF_HOSTED_BACKGROUND_WORKERS.to_string(),
-            shortcut_rows: active_shortcuts(&[])
-                .into_iter()
-                .map(|shortcut| format!("{:<18} {:?}", shortcut.label, shortcut.action))
-                .collect(),
+            shortcut_rows: shortcut_preference_rows(&[]),
         }
     }
 }
@@ -199,7 +209,13 @@ pub struct PreferencesDialog {
     nav_buttons: Vec<Button>,
     theme_buttons: Vec<Button>,
     content_labels: Vec<Label>,
+    shortcut_buttons: Vec<ShortcutPreferenceButtons>,
     close_button: Button,
+}
+
+struct ShortcutPreferenceButtons {
+    disable: Button,
+    reset: Button,
 }
 
 impl PreferencesDialog {
@@ -257,6 +273,7 @@ impl PreferencesDialog {
             nav_buttons,
             theme_buttons,
             content_labels: Vec::new(),
+            shortcut_buttons: Vec::new(),
             close_button: Button::new("Done").on_click(app_shell_close_modal_action()),
         };
         dialog.rebuild_content();
@@ -315,6 +332,24 @@ impl PreferencesDialog {
                 }
             })
             .collect();
+        self.shortcut_buttons = if self.active_tab == PreferencesDialogTab::Shortcuts {
+            self.model
+                .shortcut_rows
+                .iter()
+                .map(|row| ShortcutPreferenceButtons {
+                    disable: Button::new("Disable")
+                        .on_click(app_shell_preferences_shortcut_disabled_action(
+                            row.id.clone(),
+                        ))
+                        .enabled(!row.disabled),
+                    reset: Button::new("Default")
+                        .on_click(app_shell_preferences_shortcut_reset_action(row.id.clone()))
+                        .enabled(row.overridden),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
     }
 }
 
@@ -373,7 +408,11 @@ impl Widget for PreferencesDialog {
                 button.layout(Rect::ZERO);
             }
         }
-        let content_width = content.x + content.width - content_x;
+        let mut content_width = content.x + content.width - content_x;
+        if self.active_tab == PreferencesDialogTab::Shortcuts {
+            content_width =
+                (content_width - SHORTCUT_BUTTON_WIDTH * 2.0 - SHORTCUT_BUTTON_GAP * 2.0).max(0.0);
+        }
         for (index, label) in self.content_labels.iter_mut().enumerate() {
             label.layout(Rect::new(
                 content_x,
@@ -381,6 +420,27 @@ impl Widget for PreferencesDialog {
                 content_width,
                 ROW_HEIGHT,
             ));
+        }
+        if self.active_tab == PreferencesDialogTab::Shortcuts {
+            let buttons_left =
+                content.x + content.width - SHORTCUT_BUTTON_WIDTH * 2.0 - SHORTCUT_BUTTON_GAP - 2.0;
+            for (index, buttons) in self.shortcut_buttons.iter_mut().enumerate() {
+                let y = body_top
+                    + (index + SHORTCUT_HEADER_ROW_COUNT) as f32 * ROW_HEIGHT
+                    + (ROW_HEIGHT - SHORTCUT_BUTTON_HEIGHT) * 0.5;
+                buttons.disable.layout(Rect::new(
+                    buttons_left,
+                    y,
+                    SHORTCUT_BUTTON_WIDTH,
+                    SHORTCUT_BUTTON_HEIGHT,
+                ));
+                buttons.reset.layout(Rect::new(
+                    buttons_left + SHORTCUT_BUTTON_WIDTH + SHORTCUT_BUTTON_GAP,
+                    y,
+                    SHORTCUT_BUTTON_WIDTH,
+                    SHORTCUT_BUTTON_HEIGHT,
+                ));
+            }
         }
 
         self.close_button.layout(Rect::new(
@@ -416,6 +476,16 @@ impl Widget for PreferencesDialog {
         if self.active_tab == PreferencesDialogTab::General {
             for button in &mut self.theme_buttons {
                 if button.event(event, ctx) == EventResult::Handled {
+                    return EventResult::Handled;
+                }
+            }
+        }
+        if self.active_tab == PreferencesDialogTab::Shortcuts {
+            for buttons in &mut self.shortcut_buttons {
+                if buttons.disable.event(event, ctx) == EventResult::Handled {
+                    return EventResult::Handled;
+                }
+                if buttons.reset.event(event, ctx) == EventResult::Handled {
                     return EventResult::Handled;
                 }
             }
@@ -481,6 +551,12 @@ impl Widget for PreferencesDialog {
         for label in &self.content_labels {
             label.paint(ctx);
         }
+        if self.active_tab == PreferencesDialogTab::Shortcuts {
+            for buttons in &self.shortcut_buttons {
+                buttons.disable.paint(ctx);
+                buttons.reset.paint(ctx);
+            }
+        }
         self.close_button.paint(ctx);
     }
 
@@ -489,7 +565,10 @@ impl Widget for PreferencesDialog {
     }
 
     fn child_count(&self) -> usize {
-        3 + self.nav_buttons.len() + self.theme_buttons.len() + self.content_labels.len()
+        3 + self.nav_buttons.len()
+            + self.theme_buttons.len()
+            + self.content_labels.len()
+            + self.shortcut_buttons.len() * 2
     }
 
     fn child(&self, index: usize) -> Option<&dyn Widget> {
@@ -517,7 +596,20 @@ impl Widget for PreferencesDialog {
                 .get(index - content_start)
                 .map(|label| label as &dyn Widget);
         }
-        (index == content_end).then_some(&self.close_button as &dyn Widget)
+        let shortcut_start = content_end;
+        let shortcut_end = shortcut_start + self.shortcut_buttons.len() * 2;
+        if (shortcut_start..shortcut_end).contains(&index) {
+            let button_index = index - shortcut_start;
+            let row = button_index / 2;
+            return self.shortcut_buttons.get(row).map(|buttons| {
+                if button_index.is_multiple_of(2) {
+                    &buttons.disable as &dyn Widget
+                } else {
+                    &buttons.reset as &dyn Widget
+                }
+            });
+        }
+        (index == shortcut_end).then_some(&self.close_button as &dyn Widget)
     }
 
     fn child_mut(&mut self, index: usize) -> Option<&mut dyn Widget> {
@@ -551,7 +643,20 @@ impl Widget for PreferencesDialog {
                 .get_mut(index - content_start)
                 .map(|label| label as &mut dyn Widget);
         }
-        (index == content_end).then_some(&mut self.close_button as &mut dyn Widget)
+        let shortcut_start = content_end;
+        let shortcut_end = shortcut_start + self.shortcut_buttons.len() * 2;
+        if (shortcut_start..shortcut_end).contains(&index) {
+            let button_index = index - shortcut_start;
+            let row = button_index / 2;
+            return self.shortcut_buttons.get_mut(row).map(|buttons| {
+                if button_index.is_multiple_of(2) {
+                    &mut buttons.disable as &mut dyn Widget
+                } else {
+                    &mut buttons.reset as &mut dyn Widget
+                }
+            });
+        }
+        (index == shortcut_end).then_some(&mut self.close_button as &mut dyn Widget)
     }
 }
 
@@ -566,6 +671,35 @@ fn heading(text: impl Into<String>) -> ContentRow {
 
 fn detail(text: impl Into<String>) -> ContentRow {
     ContentRow { text: text.into(), heading: false }
+}
+
+fn shortcut_preference_rows(
+    overrides: &[SelfHostedShortcutOverride],
+) -> Vec<ShortcutPreferenceRow> {
+    default_shortcuts()
+        .into_iter()
+        .map(|default| {
+            let override_entry = overrides.iter().find(|entry| entry.id == default.id);
+            let disabled = override_entry.is_some_and(|entry| entry.binding.is_none());
+            let label = override_entry
+                .and_then(|entry| entry.binding.map(|binding| binding.label()))
+                .unwrap_or_else(|| {
+                    if disabled {
+                        "Disabled".to_owned()
+                    } else {
+                        default.label.clone()
+                    }
+                });
+            ShortcutPreferenceRow {
+                id: default.id.to_owned(),
+                label,
+                action: format!("{:?}", default.action),
+                default_label: default.label,
+                overridden: override_entry.is_some(),
+                disabled,
+            }
+        })
+        .collect()
 }
 
 fn paint_theme_button_outline(ctx: &mut PaintContext, bounds: Rect) {
@@ -620,7 +754,14 @@ fn content_rows_for_tab(
                 heading("Self-hosted shortcuts"),
                 detail("Active command bindings"),
             ];
-            rows.extend(model.shortcut_rows.iter().cloned().map(detail));
+            rows.extend(model.shortcut_rows.iter().map(|row| {
+                let suffix = if row.disabled || row.overridden {
+                    format!("default {}", row.default_label)
+                } else {
+                    "default".to_owned()
+                };
+                detail(format!("{}  ·  {}  ·  {}", row.label, row.action, suffix))
+            }));
             rows
         }
         PreferencesDialogTab::Developer => vec![
@@ -657,10 +798,36 @@ mod tests {
     use mondrian_ui_core::widget::EventRequests;
 
     use crate::app::ui_actions::{
-        APP_SHELL_CLOSE_MODAL, APP_SHELL_NAMESPACE, APP_SHELL_PREFERENCES_TAB_CHANGED,
-        APP_SHELL_PREFERENCES_THEME_CHANGED,
+        PreferencesShortcutPayload, APP_SHELL_CLOSE_MODAL, APP_SHELL_NAMESPACE,
+        APP_SHELL_PREFERENCES_SHORTCUT_DISABLED, APP_SHELL_PREFERENCES_SHORTCUT_RESET,
+        APP_SHELL_PREFERENCES_TAB_CHANGED, APP_SHELL_PREFERENCES_THEME_CHANGED,
     };
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+
+    fn click(dialog: &mut PreferencesDialog, ctx: &mut EventContext<'_>, position: Point) {
+        assert_eq!(
+            dialog.event(
+                &UiEvent::MouseDown {
+                    position,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            dialog.event(
+                &UiEvent::MouseUp {
+                    position,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                ctx,
+            ),
+            EventResult::Handled
+        );
+    }
 
     #[test]
     fn preferences_dialog_defaults_to_general() {
@@ -699,8 +866,102 @@ mod tests {
             &overrides,
         );
 
-        assert!(model.shortcut_rows.iter().all(|row| !row.contains("FocusPanel(Inspector)")));
-        assert!(model.shortcut_rows.iter().any(|row| row.contains("Ctrl+S")));
+        let inspector = model
+            .shortcut_rows
+            .iter()
+            .find(|row| row.id == "panel.inspector")
+            .expect("inspector shortcut row");
+        assert_eq!(inspector.label, "Disabled");
+        assert!(inspector.disabled);
+        assert!(inspector.overridden);
+        assert!(model
+            .shortcut_rows
+            .iter()
+            .any(|row| row.id == "file.save_project" && row.label == "Ctrl+S"));
+    }
+
+    #[test]
+    fn preferences_shortcut_buttons_dispatch_disable_and_default_actions() {
+        let overrides = vec![SelfHostedShortcutOverride {
+            id: "file.save_project".to_owned(),
+            binding: Some(crate::self_hosted::shortcuts::SelfHostedShortcutBinding {
+                key: crate::self_hosted::shortcuts::SelfHostedShortcutKey::S,
+                ctrl: true,
+                alt: true,
+                shift: false,
+                meta: false,
+            }),
+        }];
+        let model = SelfHostedPreferencesModel::from_app_state_with_shortcut_overrides(
+            &AppState::new(),
+            WorkspacePreset::Editing,
+            ThemePreset::Dark,
+            &overrides,
+        );
+        let mut dialog =
+            PreferencesDialog::with_model_and_tab(model, PreferencesDialogTab::Shortcuts);
+        dialog.layout(Rect::new(0.0, 0.0, 1000.0, 700.0));
+        let actions = RefCell::new(Vec::new());
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let save_index = dialog
+            .model
+            .shortcut_rows
+            .iter()
+            .position(|row| row.id == "file.save_project")
+            .expect("save row");
+        let content = dialog.surface.content_rect(dialog.card);
+        let buttons_left =
+            content.x + content.width - SHORTCUT_BUTTON_WIDTH * 2.0 - SHORTCUT_BUTTON_GAP - 2.0;
+        let shortcut_button_center = |row: usize, column: usize| {
+            let x = buttons_left
+                + column as f32 * (SHORTCUT_BUTTON_WIDTH + SHORTCUT_BUTTON_GAP)
+                + SHORTCUT_BUTTON_WIDTH * 0.5;
+            let y = content.y
+                + 82.0
+                + (row + SHORTCUT_HEADER_ROW_COUNT) as f32 * ROW_HEIGHT
+                + ROW_HEIGHT * 0.5;
+            Point::new(x, y)
+        };
+        let save_disable = shortcut_button_center(save_index, 0);
+        let save_reset = shortcut_button_center(save_index, 1);
+
+        click(&mut dialog, &mut ctx, save_disable);
+        click(&mut dialog, &mut ctx, save_reset);
+
+        let recorded = actions.borrow();
+        assert_eq!(recorded.len(), 2);
+        match &recorded[0] {
+            Action::Custom { namespace, name, payload } => {
+                assert_eq!(namespace, APP_SHELL_NAMESPACE);
+                assert_eq!(name, APP_SHELL_PREFERENCES_SHORTCUT_DISABLED);
+                let payload: PreferencesShortcutPayload =
+                    serde_json::from_value(payload.clone()).unwrap();
+                assert_eq!(payload.id, "file.save_project");
+            }
+            other => panic!("expected shortcut disabled action, got {other:?}"),
+        }
+        match &recorded[1] {
+            Action::Custom { namespace, name, payload } => {
+                assert_eq!(namespace, APP_SHELL_NAMESPACE);
+                assert_eq!(name, APP_SHELL_PREFERENCES_SHORTCUT_RESET);
+                let payload: PreferencesShortcutPayload =
+                    serde_json::from_value(payload.clone()).unwrap();
+                assert_eq!(payload.id, "file.save_project");
+            }
+            other => panic!("expected shortcut reset action, got {other:?}"),
+        }
     }
 
     #[test]

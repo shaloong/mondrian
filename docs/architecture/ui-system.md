@@ -505,7 +505,11 @@ Self-hosted default shortcuts are descriptors with stable ids. The shell loads
 an override can replace the binding or set it to `None` to disable a default
 shortcut. Menus and the Preferences shortcut list read the same active
 descriptor table, so disabling a conflicting `Ctrl+Alt` panel/workspace chord
-also removes the visible shortcut hint.
+also removes the visible shortcut hint. The Preferences Shortcuts tab dispatches
+shell-local Disable and Default actions keyed by descriptor id; `SelfHostedUiHost`
+persists those updates and the native window session immediately rebuilds the
+router's global shortcut scope from the new active table. These preference
+updates are not editor actions and must not create undo history.
 Focused-panel context is inferred by walking from the focused widget to the
 nearest ancestor widget that exposes `Widget::panel_kind()`. `PanelSlot` is the
 normal boundary that returns a panel kind. Leaf controls request only widget
