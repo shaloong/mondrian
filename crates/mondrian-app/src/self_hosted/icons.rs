@@ -35,6 +35,8 @@ pub enum AppIcon {
     CursorFilled,
     /// Cut/scissors icon.
     Cut,
+    /// Eyedropper color sampler icon.
+    Eyedropper,
     /// Jump to sequence end icon.
     EndFrameFilled,
     /// Effect browser icon.
@@ -111,7 +113,7 @@ pub enum AppIcon {
 
 impl AppIcon {
     /// Every bundled product icon that should remain parseable by the custom UI.
-    pub const ALL: [Self; 49] = [
+    pub const ALL: [Self; 50] = [
         Self::Add,
         Self::Anchor,
         Self::CaretDown,
@@ -125,6 +127,7 @@ impl AppIcon {
         Self::Cursor,
         Self::CursorFilled,
         Self::Cut,
+        Self::Eyedropper,
         Self::EndFrameFilled,
         Self::Effect,
         Self::Export,
@@ -179,6 +182,7 @@ impl AppIcon {
             Self::Cursor => "app.cursor",
             Self::CursorFilled => "app.cursor-filled",
             Self::Cut => "app.cut",
+            Self::Eyedropper => "app.eyedropper",
             Self::EndFrameFilled => "app.end-frame-filled",
             Self::Effect => "app.effect",
             Self::Export => "app.export",
@@ -234,6 +238,7 @@ impl AppIcon {
             Self::Cursor => include_str!("../../assets/icons/cursor.svg"),
             Self::CursorFilled => include_str!("../../assets/icons/cursor_fill.svg"),
             Self::Cut => include_str!("../../assets/icons/cut.svg"),
+            Self::Eyedropper => include_str!("../../assets/icons/eyedropper.svg"),
             Self::EndFrameFilled => include_str!("../../assets/icons/end_frame_fill.svg"),
             Self::Effect => include_str!("../../assets/icons/effect.svg"),
             Self::Export => include_str!("../../assets/icons/export.svg"),

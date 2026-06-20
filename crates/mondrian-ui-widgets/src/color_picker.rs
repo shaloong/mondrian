@@ -21,6 +21,7 @@ use crate::paint::{
     color_with_alpha, mix_color, paint_checkerboard, paint_focus_ring, paint_shadow, soft_border,
 };
 use crate::text_input::TextInput;
+use crate::vector_icon::VectorIcon;
 
 const MODES: [ColorPickerMode; 5] = [
     ColorPickerMode::Hex,
@@ -160,6 +161,7 @@ pub struct ColorPicker {
     eyedropper_active: bool,
     area_mode: ColorPickerAreaMode,
     show_swatch: bool,
+    eyedropper_icon: Option<VectorIcon>,
     focused: bool,
     focus_visible: bool,
     enabled: bool,
@@ -203,6 +205,7 @@ impl ColorPicker {
             eyedropper_active: false,
             area_mode: ColorPickerAreaMode::Square,
             show_swatch: true,
+            eyedropper_icon: None,
             focused: false,
             focus_visible: false,
             enabled: true,
@@ -300,6 +303,17 @@ impl ColorPicker {
     /// Show or hide the current-color swatch in the picker chrome.
     pub fn set_show_swatch(&mut self, show_swatch: bool) {
         self.show_swatch = show_swatch;
+    }
+
+    /// Paint this vector icon inside the eyedropper button.
+    pub fn with_eyedropper_icon(mut self, icon: VectorIcon) -> Self {
+        self.set_eyedropper_icon(icon);
+        self
+    }
+
+    /// Replace the eyedropper button icon.
+    pub fn set_eyedropper_icon(&mut self, icon: VectorIcon) {
+        self.eyedropper_icon = Some(icon);
     }
 
     /// Mark the picker as waiting for an externally sampled color.
@@ -808,6 +822,9 @@ impl ColorPicker {
         modifiers: Modifiers,
         ctx: &mut EventContext,
     ) -> bool {
+        if modifiers.ctrl || modifiers.alt || modifiers.meta {
+            return false;
+        }
         let old_color = self.color;
         let old_hue = self.hue;
         let step = if modifiers.shift { 0.05 } else { 0.01 };
@@ -915,6 +932,10 @@ impl ColorPicker {
 
         ctx.encoder.draw_rect(rect, soft_border(tokens.border), spacing.radius_md);
         ctx.encoder.draw_rect(rect.inset(1.0, 1.0), fill, spacing.radius_md - 1.0);
+        if let Some(vector_icon) = &self.eyedropper_icon {
+            vector_icon.paint(ctx, rect.inset(7.0, 7.0), icon);
+            return;
+        }
         ctx.encoder.draw_line(
             Point::new(rect.x + 10.0, rect.y + 18.0),
             Point::new(rect.x + 18.0, rect.y + 10.0),
@@ -1276,16 +1297,20 @@ impl Widget for ColorPicker {
                 self.close_mode_menu();
                 return EventResult::Handled;
             }
-            UiEvent::KeyDown { key: KeyCode::Down, .. } if self.mode_menu_open => {
+            UiEvent::KeyDown { key: KeyCode::Down, modifiers }
+                if self.mode_menu_open && *modifiers == Modifiers::none() =>
+            {
                 self.mode_hovered = Some(self.next_mode_selection(1));
                 return EventResult::Handled;
             }
-            UiEvent::KeyDown { key: KeyCode::Up, .. } if self.mode_menu_open => {
+            UiEvent::KeyDown { key: KeyCode::Up, modifiers }
+                if self.mode_menu_open && *modifiers == Modifiers::none() =>
+            {
                 self.mode_hovered = Some(self.next_mode_selection(-1));
                 return EventResult::Handled;
             }
-            UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, .. }
-                if self.mode_menu_open =>
+            UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, modifiers }
+                if self.mode_menu_open && *modifiers == Modifiers::none() =>
             {
                 let selected = self.mode_hovered.unwrap_or(self.mode);
                 self.set_mode(selected);
@@ -1787,6 +1812,9 @@ mod tests {
         rects: Vec<Rect>,
         rect_colors: Vec<Color>,
         gradient_rects: Vec<Rect>,
+        line_segments: usize,
+        triangle_vertices: usize,
+        raster_images: usize,
         colored_triangle_vertices: usize,
         colored_triangle_mask: Option<(Rect, f32)>,
         colored_triangle_max_radius: f32,
@@ -1807,7 +1835,13 @@ mod tests {
             self.gradient_rects.push(bounds);
         }
 
-        fn draw_line(&mut self, _start: Point, _end: Point, _width: f32, _color: Color) {}
+        fn draw_line(&mut self, _start: Point, _end: Point, _width: f32, _color: Color) {
+            self.line_segments += 1;
+        }
+
+        fn draw_triangles(&mut self, vertices: &[Point], _color: Color) {
+            self.triangle_vertices += vertices.len();
+        }
 
         fn draw_colored_triangles(&mut self, vertices: &[(Point, Color)]) {
             self.colored_triangle_vertices += vertices.len();
@@ -1836,6 +1870,18 @@ mod tests {
 
         fn draw_text(&mut self, text: &str, _font_size: f32, _position: Point, _color: Color) {
             self.texts.push(text.into());
+        }
+
+        fn draw_raster_image(
+            &mut self,
+            _key: &str,
+            _bounds: Rect,
+            _width: u32,
+            _height: u32,
+            _rgba: std::sync::Arc<[u8]>,
+            _tint: Color,
+        ) {
+            self.raster_images += 1;
         }
 
         fn push_translate(&mut self, _offset: glam::Vec2) {}
@@ -2187,6 +2233,42 @@ mod tests {
     }
 
     #[test]
+    fn mode_dropdown_keyboard_navigation_ignores_modified_keys() {
+        let mut picker = ColorPicker::new(Color::BLACK);
+        picker.layout(Rect::new(0.0, 0.0, PICKER_WIDTH, PICKER_HEIGHT));
+        let trigger = picker.mode_trigger_rect().center();
+        let mut ctx = event_ctx();
+
+        picker.event(
+            &UiEvent::MouseDown {
+                position: trigger,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        picker.mode_hovered = Some(ColorPickerMode::Rgb);
+
+        for (key, modifiers) in [
+            (KeyCode::Down, Modifiers::ctrl()),
+            (KeyCode::Up, Modifiers { alt: true, ..Default::default() }),
+            (
+                KeyCode::Enter,
+                Modifiers { meta: true, ..Default::default() },
+            ),
+            (KeyCode::Space, Modifiers::shift()),
+        ] {
+            assert_eq!(
+                picker.event(&UiEvent::KeyDown { key, modifiers }, &mut ctx),
+                EventResult::Ignored
+            );
+            assert!(picker.mode_menu_open);
+            assert_eq!(picker.mode(), ColorPickerMode::Hex);
+            assert_eq!(picker.mode_hovered, Some(ColorPickerMode::Rgb));
+        }
+    }
+
+    #[test]
     fn field_click_routes_to_target_field_without_being_swallowed_by_previous_field() {
         let mut picker = ColorPicker::new(Color::BLACK);
         picker.set_mode(ColorPickerMode::Rgb);
@@ -2492,6 +2574,38 @@ mod tests {
         );
 
         assert!(shifted.color().to_hsv().s - normal.color().to_hsv().s > 0.03);
+    }
+
+    #[test]
+    fn keyboard_nudge_ignores_ctrl_alt_and_meta_chords() {
+        let mut picker = ColorPicker::new(Color::from_hsv(HsvColor {
+            h: 120.0,
+            s: 0.5,
+            v: 0.5,
+            a: 1.0,
+        }));
+        picker.hue = 120.0;
+        picker.keyboard_target = ColorDragTarget::ColorArea;
+        let mut ctx = event_ctx();
+
+        for (key, modifiers) in [
+            (KeyCode::Right, Modifiers::ctrl()),
+            (KeyCode::Left, Modifiers { alt: true, ..Default::default() }),
+            (KeyCode::Up, Modifiers { meta: true, ..Default::default() }),
+            (
+                KeyCode::Down,
+                Modifiers { ctrl: true, shift: true, ..Default::default() },
+            ),
+        ] {
+            assert_eq!(
+                picker.event(&UiEvent::KeyDown { key, modifiers }, &mut ctx),
+                EventResult::Ignored
+            );
+            let hsv = picker.color().to_hsv();
+            assert!((hsv.s - 0.5).abs() < f32::EPSILON);
+            assert!((hsv.v - 0.5).abs() < f32::EPSILON);
+            assert!((picker.hue - 120.0).abs() < f32::EPSILON);
+        }
     }
 
     #[test]
@@ -2846,6 +2960,29 @@ mod tests {
         let shadow = &theme.spacing.shadow_md;
         assert_eq!(encoder.rects[0], shadow_rect(bounds, shadow));
         assert_eq!(encoder.rect_colors[0], shadow_color(shadow));
+    }
+
+    #[test]
+    fn paint_eyedropper_uses_injected_vector_icon() {
+        let icon = VectorIcon::from_svg_str(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M7 20l2-5 8-8 2 2-8 8-4 3z"/></svg>"#,
+        )
+        .expect("test vector icon should parse");
+        let mut picker =
+            ColorPicker::new(Color::from_rgba8(51, 102, 153, 255)).with_eyedropper_icon(icon);
+        picker.layout(Rect::new(0.0, 0.0, 280.0, 302.0));
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 280.0, 302.0),
+        };
+
+        picker.paint(&mut ctx);
+
+        assert_eq!(encoder.line_segments, 0);
+        assert!(encoder.raster_images > 0 || encoder.triangle_vertices > 0);
     }
 
     #[test]

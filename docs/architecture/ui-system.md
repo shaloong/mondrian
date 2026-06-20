@@ -1435,7 +1435,9 @@ ColorPicker and inspector controls should use the shared HEX/RGBA/HSL/HSV/CMYK
 models so text inputs, swatches, and future effect parameters round-trip through
 the same math. The custom `ColorPicker` owns HSV area, hue bar, alpha bar,
 mode selection, keyboard nudging, eyedropper state, and text-field
-synchronization.
+synchronization. Color-axis nudging handles unmodified arrows and Shift
+large-step arrows only; Ctrl/Alt/Meta arrow chords and modified mode-menu
+navigation stay ignored so shortcut routing remains centralized.
 
 The renderer exposes gradient rectangle and per-vertex colored triangle draw
 commands backed by the existing batch pipeline. Colored triangle fans may carry
@@ -1460,15 +1462,18 @@ swatch to avoid duplicated color chips, while embedded inspector pickers can
 still use `ColorPicker` directly. Color model fields use mode-specific compact
 columns: HEX gets one full-width field, RGB/HSL/HSV fit four channels on one
 row, and CMYKA fits five compact numeric fields on one row. The picker exposes
-a visible geometric eyedropper button that enters sampling mode. The widget
-stays platform-neutral: it emits `EventRequests::eyedropper`, handles
-`UiEvent::EyedropperSample` / `UiEvent::EyedropperCancel`, and never calls
-screen-capture or OS pointer APIs directly. Winit shells complete sampling via
-`mondrian_app::self_hosted::runtime::WinitUiRuntime`, which delegates platform work to
-`mondrian-platform::DesktopEyedropper` and routes the sampled color back as
-`UiEvent::EyedropperSample`. Shell-owned eyedropper overlay chrome uses theme
-tokens for its magnifier shell and contrast dot; the sampled preview color is
-the only dynamic fill. While desktop eyedropper sampling is active, a winit
+a visible eyedropper button that enters sampling mode. The widget accepts an
+optional `VectorIcon` for that button but stays asset-agnostic; the self-hosted
+app shell supplies the bundled `AppIcon::Eyedropper` SVG from its product icon
+registry. The widget stays platform-neutral: it emits
+`EventRequests::eyedropper`, handles `UiEvent::EyedropperSample` /
+`UiEvent::EyedropperCancel`, and never calls screen-capture or OS pointer APIs
+directly. Winit shells complete sampling via
+`mondrian_app::self_hosted::runtime::WinitUiRuntime`, which delegates platform
+work to `mondrian-platform::DesktopEyedropper` and routes the sampled color
+back as `UiEvent::EyedropperSample`. Shell-owned eyedropper overlay chrome uses
+theme tokens for its magnifier shell and contrast dot; the sampled preview color
+is the only dynamic fill. While desktop eyedropper sampling is active, a winit
 focus-loss event is not routed as ordinary UI `FocusLost`: external sampling
 commonly moves focus to another app, and clearing widget capture at that point
 would prevent the later global `EyedropperSample` from reaching the picker that

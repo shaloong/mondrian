@@ -84,6 +84,24 @@ fn with_demo_menu_icon(item: MenuItem, icon: AppIcon) -> MenuItem {
     item.with_icon(icon.vector_icon().expect("bundled ui_demo menu icon asset should parse"))
 }
 
+fn color_picker_trigger(color: Color) -> ColorPickerTrigger {
+    let mut trigger = ColorPickerTrigger::new(color);
+    trigger.picker_mut().set_eyedropper_icon(
+        AppIcon::Eyedropper
+            .vector_icon()
+            .expect("bundled ui_demo eyedropper icon asset should parse"),
+    );
+    trigger
+}
+
+fn color_picker(color: Color) -> ColorPicker {
+    ColorPicker::new(color).with_eyedropper_icon(
+        AppIcon::Eyedropper
+            .vector_icon()
+            .expect("bundled ui_demo eyedropper icon asset should parse"),
+    )
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Gallery Widget
 // ═══════════════════════════════════════════════════════════════════════════
@@ -167,7 +185,7 @@ impl GalleryWidget {
 
         let initial_color = Color::from_hex(0x336699);
 
-        let mut color_trigger = ColorPickerTrigger::new(Color::from_hex(0xD946EF));
+        let mut color_trigger = color_picker_trigger(Color::from_hex(0xD946EF));
         color_trigger.picker_mut().set_area_mode(ColorPickerAreaMode::Wheel);
         color_trigger.picker_mut().set_show_swatch(false);
         let curve_editor = CurveEditor::new();
@@ -185,7 +203,7 @@ impl GalleryWidget {
             dropdown: Dropdown::new("选择选项", dropdown_items).with_max_visible_items(5),
             list: List::new(list_items),
             scroll_area: ScrollView::new(Some(Box::new(scroll_content))),
-            color_picker: ColorPicker::new(initial_color),
+            color_picker: color_picker(initial_color),
             color_trigger,
             curve_editor,
             tooltip_trigger: Rect::ZERO,
@@ -1203,7 +1221,7 @@ fn demo_property_browser_panel() -> PanelList {
 }
 
 fn inspector_demo_panel() -> Box<dyn Widget> {
-    let mut tint = ColorPickerTrigger::new(Color::from_rgba8(190, 156, 255, 220));
+    let mut tint = color_picker_trigger(Color::from_rgba8(190, 156, 255, 220));
     tint.picker_mut().set_area_mode(ColorPickerAreaMode::Wheel);
 
     let panel = PropertyPanel::new("Inspector")

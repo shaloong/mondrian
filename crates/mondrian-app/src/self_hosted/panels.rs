@@ -1841,6 +1841,16 @@ fn with_app_icon(item: PanelListItem, icon: AppIcon) -> PanelListItem {
     item.with_icon(icon.vector_icon().expect("bundled panel list icon asset should parse"))
 }
 
+fn color_picker_trigger(color: Color) -> ColorPickerTrigger {
+    let mut trigger = ColorPickerTrigger::new(color);
+    trigger.picker_mut().set_eyedropper_icon(
+        AppIcon::Eyedropper
+            .vector_icon()
+            .expect("bundled Eyedropper icon asset should parse"),
+    );
+    trigger
+}
+
 fn asset_kind_badge(kind: &AssetKind) -> &'static str {
     match kind {
         AssetKind::Video => "VID",
@@ -2771,7 +2781,7 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
     } else {
         "No clip selected"
     });
-    let mut tint = ColorPickerTrigger::new(model.tint).enabled(can_edit);
+    let mut tint = color_picker_trigger(model.tint).enabled(can_edit);
     tint.picker_mut().set_area_mode(model.tint_area_mode);
     let curve = CurveEditor::with_points(model.curve_points.clone())
         .enabled(can_edit)
@@ -3330,7 +3340,7 @@ fn effect_property_value_widget(
         PropertyValue::Color(value) => {
             let selected_clip = selection;
             let path = path.clone();
-            let trigger = ColorPickerTrigger::new(*value).enabled(can_edit);
+            let trigger = color_picker_trigger(*value).enabled(can_edit);
             Box::new(trigger.on_change(move |color| {
                 inspector_effect_property_action(
                     selected_clip,
