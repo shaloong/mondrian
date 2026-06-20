@@ -1239,6 +1239,10 @@ Winit keyboard and IME conversion lives in the self-hosted shell runtime so
 `ui_demo` and product windows share the same `KeyDown` / `TextInput` /
 `ImePreedit` / `ImeCommit` semantics. Entry binaries should route Escape
 through the widget tree first and only treat it as a window close when ignored.
+The runtime emits printable `TextInput` only when Ctrl, Alt, and Meta are all
+clear; Shift remains allowed for uppercase and symbol input. Shortcut chords
+therefore reach widgets and the central router as `KeyDown` without also
+inserting text into focused fields.
 Entrypoints must also consume `WindowEvent::ModifiersChanged` through
 `winit_modifiers_to_ui_modifiers`; key-edge tracking is only a fallback for the
 current keyboard event and must not be the sole source of modifier state.

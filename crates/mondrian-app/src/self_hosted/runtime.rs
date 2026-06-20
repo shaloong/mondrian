@@ -104,7 +104,7 @@ impl WinitUiRuntime {
             );
         }
 
-        if pressed && !modifiers.ctrl {
+        if pressed && should_route_printable_text(*modifiers) {
             if let Some(text) = printable_key_text(event.text.as_deref()) {
                 let text_result = self.route_window_event(
                     window,
@@ -506,6 +506,10 @@ fn printable_key_text(text: Option<&str>) -> Option<String> {
     (!text.is_empty() && !text.chars().any(char::is_control)).then(|| text.to_string())
 }
 
+fn should_route_printable_text(modifiers: Modifiers) -> bool {
+    !modifiers.ctrl && !modifiers.alt && !modifiers.meta
+}
+
 /// Paint the shell-owned eyedropper magnifier.
 pub fn paint_eyedropper_overlay(
     encoder: &mut dyn DrawCommandEncoder,
@@ -631,6 +635,26 @@ mod tests {
         assert!(printable_key_text(Some("\u{8}")).is_none());
         assert!(printable_key_text(Some("")).is_none());
         assert!(printable_key_text(None).is_none());
+    }
+
+    #[test]
+    fn printable_text_routing_ignores_shortcut_modifiers() {
+        assert!(should_route_printable_text(Modifiers::none()));
+        assert!(should_route_printable_text(Modifiers::shift()));
+        assert!(!should_route_printable_text(Modifiers::ctrl()));
+        assert!(!should_route_printable_text(Modifiers {
+            alt: true,
+            ..Modifiers::none()
+        }));
+        assert!(!should_route_printable_text(Modifiers {
+            meta: true,
+            ..Modifiers::none()
+        }));
+        assert!(!should_route_printable_text(Modifiers {
+            ctrl: true,
+            shift: true,
+            ..Modifiers::none()
+        }));
     }
 
     #[test]
