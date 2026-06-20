@@ -1852,9 +1852,13 @@ semantic separators may snap to pixel centers locally, but arbitrary angle
 lines should keep their authored subpixel endpoints so diagonal strokes do not
 shimmer or change slope during resize and scroll. Filled triangle-list
 commands are also normalized to front-facing winding after the pixel-to-NDC y
-flip. Per-vertex colored triangles must swap color and mask-local coordinates
-with their corresponding point when winding is normalized; otherwise masked
-color fans can stay visible while their hue or SDF mask coordinates drift. The
+flip while preserving the authored subpixel vertices. Per-vertex colored
+triangles must swap color and mask-local coordinates with their corresponding
+point when winding is normalized; otherwise masked color fans can stay visible
+while their hue or SDF mask coordinates drift. Masked colored-triangle tests
+should reconstruct the rounded-mask signed distance from final batch vertices,
+matching the circle batch tests so color-wheel and gradient swatches verify
+pixel-to-NDC conversion, local UV interpolation, and mask radius together. The
 batch builder rejects non-finite triangle positions, non-finite vertex colors,
 and zero-area or near-zero-area triangle primitives before they reach the GPU
 vertex buffer; `DrawEncoder` still preserves valid subpixel vertices and only

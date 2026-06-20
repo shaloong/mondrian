@@ -1333,6 +1333,63 @@ mod tests {
     }
 
     #[test]
+    fn build_batches_masked_colored_triangles_reconstruct_mask_sdf_from_vertices() {
+        let mask = crate::command::ShapeMask {
+            bounds: Rect::new(20.0, 20.0, 60.0, 60.0),
+            corner_radius: 30.0,
+        };
+        let cmds = [DrawCommand::ColoredTriangles {
+            vertices: vec![
+                (Point::new(20.0, 20.0), Color::from_rgba8(255, 0, 0, 255)),
+                (Point::new(80.0, 20.0), Color::from_rgba8(0, 255, 0, 255)),
+                (Point::new(20.0, 80.0), Color::from_rgba8(0, 0, 255, 255)),
+                (Point::new(80.0, 20.0), Color::from_rgba8(0, 255, 0, 255)),
+                (
+                    Point::new(80.0, 80.0),
+                    Color::from_rgba8(255, 255, 255, 255),
+                ),
+                (Point::new(20.0, 80.0), Color::from_rgba8(0, 0, 255, 255)),
+            ],
+            mask: Some(mask),
+        }];
+        let batches = build_batches(&cmds, (100, 100));
+
+        assert_eq!(batches.len(), 1);
+        let vertices = &batches[0].vertices;
+        assert_eq!(vertices.len(), 6);
+        for tri in vertices.chunks_exact(3) {
+            let a = (tri[0].position[0], tri[0].position[1]);
+            let b = (tri[1].position[0], tri[1].position[1]);
+            let c = (tri[2].position[0], tri[2].position[1]);
+            assert!(signed_triangle_area(a, b, c) > 0.0);
+        }
+
+        let center = mask.bounds.center();
+        let center_d = sample_shape_signed_distance_from_vertices(vertices, (100, 100), center)
+            .expect("masked colored triangle center should be covered by final triangles");
+        assert!(
+            (center_d + mask.corner_radius).abs() < 0.001,
+            "masked triangle center signed distance should match circle radius, got {center_d}"
+        );
+
+        for angle in [0.0_f32, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0] {
+            let radians = angle.to_radians();
+            let boundary = Point::new(
+                center.x + mask.corner_radius * radians.cos(),
+                center.y + mask.corner_radius * radians.sin(),
+            );
+            let d = sample_shape_signed_distance_from_vertices(vertices, (100, 100), boundary)
+                .unwrap_or_else(|| {
+                    panic!("masked colored triangle boundary at {angle} degrees missed triangles")
+                });
+            assert!(
+                d.abs() < 0.01,
+                "masked colored triangle boundary at {angle} degrees produced signed distance {d}"
+            );
+        }
+    }
+
+    #[test]
     fn build_batches_multiple_rects_same_batch() {
         let cmds = [
             DrawCommand::Rect {
@@ -1748,6 +1805,60 @@ mod tests {
             let b = (tri[1].position[0], tri[1].position[1]);
             let c = (tri[2].position[0], tri[2].position[1]);
             assert!(signed_triangle_area(a, b, c) > 0.0);
+        }
+    }
+
+    #[test]
+    fn build_batches_triangles_preserve_subpixel_vertices_after_winding_normalization() {
+        let cmds = [DrawCommand::Triangles {
+            vertices: vec![
+                Point::new(10.25, 12.5),
+                Point::new(22.75, 74.25),
+                Point::new(90.5, 20.125),
+            ],
+            color: Color::from_rgba8(51, 102, 153, 204),
+        }];
+
+        let batches = build_batches(&cmds, (100, 100));
+
+        assert_eq!(batches.len(), 1);
+        let vertices = &batches[0].vertices;
+        assert_eq!(vertices.len(), 3);
+        let tri = &vertices[..3];
+        let a = (tri[0].position[0], tri[0].position[1]);
+        let b = (tri[1].position[0], tri[1].position[1]);
+        let c = (tri[2].position[0], tri[2].position[1]);
+        assert!(signed_triangle_area(a, b, c) > 0.0);
+        for vertex in tri {
+            assert_eq!(vertex.render_mode, RenderMode::Shape as u32);
+            assert_eq!(vertex.rect_size, [1.0, 1.0]);
+            assert_eq!(vertex.corner_radius_px, 0.0);
+            assert_eq!(vertex.tex_coord, [0.0, 0.0]);
+            assert_eq!(vertex.color, [0.2, 0.4, 0.6, 0.8]);
+        }
+
+        let actual = tri
+            .iter()
+            .map(|vertex| {
+                Point::new(
+                    (vertex.position[0] + 1.0) * 50.0,
+                    (1.0 - vertex.position[1]) * 50.0,
+                )
+            })
+            .collect::<Vec<_>>();
+        let expected = [
+            Point::new(10.25, 12.5),
+            Point::new(22.75, 74.25),
+            Point::new(90.5, 20.125),
+        ];
+        for expected_point in expected {
+            assert!(
+                actual.iter().any(|point| {
+                    (point.x - expected_point.x).abs() < 0.001
+                        && (point.y - expected_point.y).abs() < 0.001
+                }),
+                "subpixel triangle vertex {expected_point:?} was not preserved in {actual:?}"
+            );
         }
     }
 
