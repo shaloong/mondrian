@@ -741,6 +741,94 @@ fn sample_line_alpha_from_vertices(
 }
 
 #[cfg(test)]
+fn assert_line_coverage_connects_caps(
+    vertices: &[RectVertex],
+    screen_size: (u32, u32),
+    start: Point,
+    end: Point,
+) {
+    let dx = end.x - start.x;
+    let dy = end.y - start.y;
+    let len = dx.hypot(dy);
+    let (ux, uy) = if len > MIN_LINE_DIRECTION_LEN {
+        (dx / len, dy / len)
+    } else {
+        (1.0, 0.0)
+    };
+    let min_x = start.x.min(end.x).floor().max(0.0) as i32 - 3;
+    let max_x = start.x.max(end.x).ceil().min(screen_size.0 as f32 - 1.0) as i32 + 3;
+    let min_y = start.y.min(end.y).floor().max(0.0) as i32 - 3;
+    let max_y = start.y.max(end.y).ceil().min(screen_size.1 as f32 - 1.0) as i32 + 3;
+    let width = (max_x - min_x + 1).max(0) as usize;
+    let height = (max_y - min_y + 1).max(0) as usize;
+    let mut visible = vec![false; width * height];
+    let mut start_seed = None;
+    let mut end_pixels = vec![false; width * height];
+
+    for gy in 0..height {
+        for gx in 0..width {
+            let x = min_x + gx as i32;
+            let y = min_y + gy as i32;
+            let pixel_center = Point::new(x as f32 + 0.5, y as f32 + 0.5);
+            let alpha = sample_line_alpha_from_vertices(vertices, screen_size, pixel_center);
+            if alpha < 0.1 {
+                continue;
+            }
+
+            let idx = gy * width + gx;
+            visible[idx] = true;
+            let rel_x = pixel_center.x - start.x;
+            let rel_y = pixel_center.y - start.y;
+            let projected = rel_x * ux + rel_y * uy;
+            if projected <= 1.5 {
+                start_seed.get_or_insert(idx);
+            }
+            if projected >= len - 1.5 {
+                end_pixels[idx] = true;
+            }
+        }
+    }
+
+    let seed = start_seed.expect("line coverage should include the start cap");
+    assert!(
+        end_pixels.iter().any(|is_end| *is_end),
+        "line coverage should include the end cap"
+    );
+
+    let mut visited = vec![false; width * height];
+    let mut queue = std::collections::VecDeque::from([seed]);
+    visited[seed] = true;
+
+    while let Some(idx) = queue.pop_front() {
+        if end_pixels[idx] {
+            return;
+        }
+
+        let gx = idx % width;
+        let gy = idx / width;
+        for oy in -1_i32..=1 {
+            for ox in -1_i32..=1 {
+                if ox == 0 && oy == 0 {
+                    continue;
+                }
+                let nx = gx as i32 + ox;
+                let ny = gy as i32 + oy;
+                if nx < 0 || ny < 0 || nx >= width as i32 || ny >= height as i32 {
+                    continue;
+                }
+                let next = ny as usize * width + nx as usize;
+                if visible[next] && !visited[next] {
+                    visited[next] = true;
+                    queue.push_back(next);
+                }
+            }
+        }
+    }
+
+    panic!("line coverage should form an 8-connected visible path from start cap to end cap");
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use mondrian_core::Color;
@@ -1031,6 +1119,27 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn batch_line_vertices_keep_45_degree_hairline_coverage_connected() {
+        let screen_size = (96, 96);
+        let cases = [
+            (Point::new(12.0, 12.0), Point::new(60.0, 60.0)),
+            (Point::new(12.25, 12.0), Point::new(60.25, 60.0)),
+            (Point::new(12.0, 12.25), Point::new(60.0, 60.25)),
+            (Point::new(12.5, 12.5), Point::new(60.5, 60.5)),
+            (Point::new(12.25, 12.75), Point::new(60.25, 60.75)),
+            (Point::new(12.0, 60.0), Point::new(60.0, 12.0)),
+            (Point::new(12.5, 60.25), Point::new(60.5, 12.25)),
+        ];
+
+        for (start, end) in cases {
+            let cmds = [DrawCommand::Line { start, end, width: 1.0, color: Color::WHITE }];
+            let batches = build_batches(&cmds, screen_size);
+            assert_eq!(batches.len(), 1);
+            assert_line_coverage_connects_caps(&batches[0].vertices, screen_size, start, end);
         }
     }
 

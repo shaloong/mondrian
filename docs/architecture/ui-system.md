@@ -1830,13 +1830,17 @@ and thin diagonal strokes must not depend on sample coverage alone.
 Line regressions should be tested as angle families, not only as horizontal and
 vertical strokes: 1px lines at common diagonal angles must keep front-facing
 winding, local pixel-space SDF coordinates, a continuous centerline, and stable
-pixel-center coverage at subpixel offsets. Renderer tests should reconstruct
-line coverage from the final batch triangles, not only from ideal SDF-local
-coordinates, so pixel-to-NDC conversion, y-axis flipping, triangle winding, and
-local coordinate interpolation stay covered as one contract. The CPU coverage
-model and WGSL fragment shader AA clamp/edge-scale constants must be tested as
-the same contract; changing shader smoothstep parameters without updating the
-coverage model can leave tests green while reintroducing weak diagonal strokes.
+pixel-center coverage at subpixel offsets. Hairline tests should also assert an
+8-connected visible coverage path from the start cap to the end cap for 45
+degree strokes, because local per-step visibility can miss dotted-line
+regressions that are obvious to users. Renderer tests should reconstruct line
+coverage from the final batch triangles, not only from ideal SDF-local
+coordinates, so pixel-to-NDC conversion, y-axis flipping, triangle winding,
+local coordinate interpolation, and cap coverage stay covered as one contract.
+The CPU coverage model and WGSL fragment shader AA clamp/edge-scale constants
+must be tested as the same contract; changing shader smoothstep parameters
+without updating the coverage model can leave tests green while reintroducing
+weak diagonal strokes.
 Axis aligned
 semantic separators may snap to pixel centers locally, but arbitrary angle
 lines should keep their authored subpixel endpoints so diagonal strokes do not
