@@ -83,6 +83,10 @@ pub struct ColorTokens {
     pub error: Color,
 
     // ── 时间线专色 (Timeline) ─────────────────────────────────────────────
+    /// 时间线轨道偶数行底色
+    pub timeline_track_even: Color,
+    /// 时间线轨道奇数行底色
+    pub timeline_track_odd: Color,
     pub timeline_clip_video: Color,
     pub timeline_clip_audio: Color,
     pub timeline_playhead: Color,
@@ -124,23 +128,23 @@ impl ColorTokens {
     /// Dark 主题 — editor-grade dark surfaces with clear content hierarchy.
     pub fn dark() -> Self {
         Self {
-            background: Color::from_hex(0x0B0D12),
-            foreground: Color::from_hex(0xF4F4F5),
-            card: Color::from_hex(0x151820),
-            card_foreground: Color::from_hex(0xF4F4F5),
-            popover: Color::from_hex(0x1D212B),
-            popover_foreground: Color::from_hex(0xF4F4F5),
+            background: Color::from_hex(0x0F1012),
+            foreground: Color::from_hex(0xE6E8EC),
+            card: Color::from_hex(0x181A1F),
+            card_foreground: Color::from_hex(0xE6E8EC),
+            popover: Color::from_hex(0x22252C),
+            popover_foreground: Color::from_hex(0xE6E8EC),
             modal_scrim: Color { r: 0.0, g: 0.0, b: 0.0, a: 0.48 },
 
-            primary: Color::from_hex(0x5DA7FF),
+            primary: Color::from_hex(0x0A84FF),
             primary_foreground: Color::WHITE,
-            secondary: Color::from_hex(0x242936),
-            secondary_foreground: Color::from_hex(0xE5E7EB),
+            secondary: Color::from_hex(0x22252C),
+            secondary_foreground: Color::from_hex(0xE6E8EC),
 
-            muted: Color::from_hex(0x191D26),
-            muted_foreground: Color::from_hex(0xA0A7B5),
-            accent: Color::from_hex(0x243246),
-            accent_foreground: Color::from_hex(0xF4F4F5),
+            muted: Color::from_hex(0x1D2026),
+            muted_foreground: Color::from_hex(0xA8ADB7),
+            accent: Color::from_hex(0x2A2E36),
+            accent_foreground: Color::from_hex(0xE6E8EC),
             color_handle_shadow: Color { r: 0.0, g: 0.0, b: 0.0, a: 0.45 },
             color_handle_strong_shadow: Color { r: 0.0, g: 0.0, b: 0.0, a: 0.8 },
             color_handle_outer: Color::WHITE,
@@ -149,22 +153,24 @@ impl ColorTokens {
             checkerboard_dark: Color::from_hex(0x747B8A),
             eyedropper_overlay: Color::from_hex(0x151820),
 
-            destructive: Color::from_hex(0x7F1D1D),
-            destructive_foreground: Color::from_hex(0xFCA5A5),
+            destructive: Color::from_hex(0x3A1718),
+            destructive_foreground: Color::from_hex(0xFF453A),
 
-            border: Color::from_hex(0x2A303C),
-            input: Color::from_hex(0x303746),
-            ring: Color::from_hex(0x73B4FF),
+            border: Color::from_hex(0x2A2D34),
+            input: Color::from_hex(0x343842),
+            ring: Color::from_hex(0x0A84FF),
 
-            success: Color::from_hex(0x22C55E),
-            warning: Color::from_hex(0xF59E0B),
-            error: Color::from_hex(0xEF4444),
+            success: Color::from_hex(0x30D158),
+            warning: Color::from_hex(0xFFD60A),
+            error: Color::from_hex(0xFF453A),
 
-            timeline_clip_video: Color::from_hex(0x235B91),
-            timeline_clip_audio: Color::from_hex(0x20747D),
-            timeline_playhead: Color::from_hex(0x73B4FF),
-            media_video: Color::from_hex(0x4E8DF0),
-            media_audio: Color::from_hex(0x2AA6A0),
+            timeline_track_even: Color::from_hex(0x14161A),
+            timeline_track_odd: Color::from_hex(0x181A1E),
+            timeline_clip_video: Color::from_hex(0x0A4D8F),
+            timeline_clip_audio: Color::from_hex(0x126B82),
+            timeline_playhead: Color::from_hex(0x0A84FF),
+            media_video: Color::from_hex(0x0A84FF),
+            media_audio: Color::from_hex(0x3DD5F3),
             media_adjustment: Color::from_hex(0x8B78E6),
             media_solid: Color::from_hex(0xD75FE8),
             effect_filter: Color::from_hex(0x5DA7FF),
@@ -175,10 +181,10 @@ impl ColorTokens {
             node_source: Color::from_hex(0x4E8DF0),
             node_output: Color::from_hex(0x22C55E),
 
-            canvas: Color::from_hex(0x05070B),
+            canvas: Color::from_hex(0x0A0B0D),
             canvas_overlay: Color { r: 1.0, g: 1.0, b: 1.0, a: 0.08 },
 
-            scrollbar_thumb: Color::from_hex(0x586173),
+            scrollbar_thumb: Color::from_hex(0xFFFFFF),
         }
     }
 
@@ -221,6 +227,8 @@ impl ColorTokens {
             warning: Color::from_hex(0xD97706),
             error: Color::from_hex(0xDC2626),
 
+            timeline_track_even: Color::from_hex(0xF8FAFC),
+            timeline_track_odd: Color::from_hex(0xF1F5F9),
             timeline_clip_video: Color::from_hex(0xDBEAFE),
             timeline_clip_audio: Color::from_hex(0xE0F2FE),
             timeline_playhead: Color::from_hex(0x2563EB),

@@ -627,7 +627,10 @@ remain outside the widget layer. Timeline pointer capture ownership is tracked
 explicitly and is separate from keyboard focus: `FocusLost` or disabled-event
 cleanup releases capture only if an active timeline drag previously captured
 the pointer, so an idle focused timeline cannot clear another overlay or
-control's capture.
+control's capture. Programmatic timeline disabling must cancel every pending
+timeline-local drag preview, including playhead, in/out marker, track, clip,
+trim, and scrollbar drags, so a later re-enable cannot commit stale pointer
+state from a previous panel model.
 
 ## Overlays
 
@@ -685,7 +688,10 @@ overlay pass after the root's normal paint pass, so dropdown menus and similar
 popups are not hidden by siblings that happen to paint later in the normal
 content tree. Tooltip popups are overlay-only: a composite widget that owns a
 tooltip must forward it from `paint_overlay()` instead of drawing it inside the
-panel's normal `paint()` method.
+panel's normal `paint()` method. Composite shell widgets must also forward
+overlay hit testing through their owned popups; for example `TitleBar` forwards
+to `MenuBar`, and `MenuBar` forwards to each open `Dropdown`, so menu clicks are
+not mistaken for outside-panel input after the first popup frame.
 
 Dropdowns request pointer capture while open so outside clicks, Escape, wheel
 events, and release events continue to route to the popup even when the pointer
@@ -1099,9 +1105,12 @@ drag threshold asks the router to begin an internal drag; the router, not the
 source widget, owns `DragEnter` / `DragOver` / `DragLeave` / `Drop` delivery so
 pointer capture from the source cannot block target panels. Focus loss cancels
 an active row drag candidate or internal scrollbar drag and releases the list's
-capture; idle lists must not release capture they do not own. List wheel events
-follow the same bubbling contract as `ScrollView`: scrolling consumes the event,
-while boundary or non-overflow wheel input remains ignored for parent panels.
+capture; idle lists must not release capture they do not own. Replacing list
+items through `set_items()` follows the same rule without an event context: row
+drag candidates and scrollbar drags are cleared immediately, and the next routed
+event releases any capture the stale interaction owned. List wheel events follow
+the same bubbling contract as `ScrollView`: scrolling consumes the event, while
+boundary or non-overflow wheel input remains ignored for parent panels.
 Searchable list panels should use `PanelList::with_filter`, which exposes its
 filter `TextInput` as a real widget tree child so focus, IME, and keyboard
 routing stay framework-owned. Filtering
@@ -1128,9 +1137,14 @@ instead of the row-list surface. `AssetGrid` keeps the same framework-owned
 interaction contract as `PanelList`: filter input is a real `TextInput`, local
 selection is preserved through `AssetGridState`, cards can activate typed
 actions, card drag payloads start through the router, and file drops map to
-app-layer import actions. Focus loss cancels an active card drag candidate and
-releases the grid's pointer capture, while an idle grid must not release capture
-it does not own. It also owns domain-light right-click context menus:
+app-layer import actions. State restoration uses stable card ids first; index
+fallbacks are allowed only for enabled cards that remain visible in the current
+filtered view, so model refreshes cannot select hidden assets. Inline rename is
+transient card-local state: filtering or model refresh that makes the target
+card hidden, disabled, or non-renamable closes the editor without dispatching a
+rename action. Focus loss cancels an active card drag candidate and releases the
+grid's pointer capture, while an idle grid must not release capture it does not
+own. It also owns domain-light right-click context menus:
 the grid surface and individual cards receive plain `MenuItem`s, while the
 widget handles popup placement, overlay painting, dismissal, keyboard
 activation, and dispatch. Menus that contain only separators or disabled rows
@@ -1158,7 +1172,11 @@ so global shortcuts remain centralized. Escape clears this local browser
 selection when one exists; with no local selection it stays ignored so the shell-level
 `Action::DeselectAll` fallback can still clear editor selections. `selected_index`
 remains the primary keyboard/focus item while `selected_indices` stores the
-multi-selection set. When a selected card starts a drag, `AssetGrid` can
+multi-selection set. Right-clicking an unselected card may update this local
+selection before opening the card menu, but it must not dispatch the card's
+normal select action during the popup-opening event; host-level action refresh
+would otherwise rebuild the panel tree and drop the just-opened context menu.
+When a selected card starts a drag, `AssetGrid` can
 aggregate selected asset and folder card payloads into
 `DragPayload::AssetSelection`; the Assets panel maps that payload to
 `ui.assets.move_selection` so moving a multi-selection into a bin publishes one
@@ -1293,6 +1311,14 @@ Widgets may compose semantic tokens with shared paint helpers such as
 `card`/`popover` fill. This keeps the self-hosted UI closer to professional NLE
 workspaces and prevents visual hierarchy from depending on per-panel ad-hoc
 color constants.
+The default dark preset is calibrated around an editor workbench:
+`background` is the app/window floor, `card` is the normal dock panel body,
+`secondary` and `accent` are compact control surfaces, and `primary`/`ring`
+carry the blue focus, playback, selection, and playhead language. `accent` is
+not a license for broad blue fills; large selected timeline/header regions
+should use low-alpha `primary` composition so the workspace remains dark and
+readable. Scrollbars use a white semantic thumb with per-widget alpha, producing
+modern overlay-scrollbar contrast without system-default gray rails.
 Reusable browser surfaces such as `PanelList` and `AssetGrid` follow the same
 rule: their panel body is a dark workspace mix, rows/cards draw a subtle border
 with an inset fill, and selected/hovered states tint that fill instead of
@@ -1308,6 +1334,12 @@ The default editing dock follows a conventional NLE shape: Assets/Effects,
 Viewer, and Inspector occupy the upper workspace, while Timeline owns the full
 bottom span. Project commands remain in the shell/menu layer, and export uses
 its own workspace/panel instead of sharing a status/log tab group.
+The editing preset keeps the left browser narrow, gives the center viewer the
+largest share of the upper workspace, and leaves the inspector at a compact
+right-column width. Single-tab dock headers should paint as panel titles with a
+small active underline, not as full-width raised tabs; grouped browser tabs may
+keep larger hit areas but should use hover fills and underline selection rather
+than heavy active rectangles.
 Self-hosted `FocusPanel` and current View-menu `TogglePanel` actions activate
 the matching dock panel or grouped tab through shell-local dock traversal and do
 not continue into `AppState`. The traversal first understands grouped tabs in
@@ -1345,6 +1377,14 @@ data into `TimelineTrack` / `TimelineClip` view models, then translate
 selection and seek callbacks into semantic `Action`s or undoable commands at
 the app layer. This keeps the renderer-facing timeline primitive testable while
 preserving a clean path for progressively replacing the old egui timeline.
+The visual baseline is compact NLE density: 42px default tracks, 28px ruler,
+104px app-supplied track header column, subtle alternating lane fills, weak row
+separators, a one-pixel playhead, 8px overlay scrollbars, and clip blocks with
+kind-specific borders plus trim-handle affordances on hover/selection. Ruler
+ticks should use low-alpha foreground rather than full panel borders, so time
+markings read without turning the timeline into a table. Alternating timeline
+lane fills are semantic timeline tokens so compact editor density remains
+theme-owned rather than embedded in the drawing code.
 When no timeline model is available, app panels should disable the surface so
 empty shells do not steal focus, seek, or hold pointer capture.
 
@@ -1364,9 +1404,12 @@ unmodified keys and Shift large-step variants. Focused number inputs follow the
 same rule for Up/Down/Page nudging before delegating other keys to their inner
 `TextInput`. Ctrl, Alt, and Meta chords stay ignored by value widgets so
 workspace shortcuts, input methods, and user-level tool hotkeys remain
-centralized outside the component. Slider focus loss clears keyboard focus and
-an active drag if present, but it must not release pointer capture when the
-slider was only keyboard focused.
+centralized outside the component. Programmatically disabling a focused number
+input ends the edit session before any further key handling: the wrapper focus
+flag is cleared and pending invalid display text is normalized back to the most
+recent valid value. Slider focus loss clears keyboard focus and an active drag if
+present, but it must not release pointer capture when the slider was only
+keyboard focused.
 Self-hosted Inspector actions should use typed payloads for clip mutations.
 Scalar clip fields that need both coarse and precise editing, such as opacity,
 transform values, and trim frames, compose `Slider` plus `NumberInput` in the
@@ -1509,6 +1552,13 @@ instances for semantic color, padding, and wrapping rather than direct
 per-dialog `draw_text` calls.
 Inspector/property-panel titles, section headers, and row labels follow the
 same rule through `PropertyPanel`'s internal `Label` instances.
+Inspector sections should read as a professional parameter stack, not nested
+cards. `PropertyPanel` paints the panel body from the normal panel token, uses
+thin section dividers, and reserves stronger chrome only for the selected
+section's left accent marker. Standard property rows are 30px tall, with labels
+vertically centered in compact rows and pinned near the top of tall rows by
+`FormLayout`; oversized curve editors or color pickers can opt into explicit
+taller row heights while staying clipped to their row/control rects.
 `PropertyPanel` clips each row and its form-control rect during normal paint so
 oversized controls cannot leak across inspector rows or outside a `ScrollView`.
 Dropdowns, color-picker popups, context menus, and tooltips that must escape a
@@ -1562,6 +1612,12 @@ source aspect-ratio fitting, raster-image presentation, tokenized status-badge
 tones, empty-canvas messaging, metadata labels, and safe-area guide drawing
 only; frame decoding, preview scheduling, and GPU texture lifecycle remain
 app/runtime responsibilities.
+Viewer painting uses the dark canvas token as an actual preview well: the panel
+body stays at `card`, the viewport behind the fitted canvas stays darker, the
+canvas itself stays near black, and safe-area guides are low-alpha foreground
+lines. Transport buttons and zoom/quality chips use compact toolbar surfaces;
+the play/pause button may be slightly more prominent, but viewer controls should
+not look like generic form inputs or large rectangular tabs.
 The product host supplies viewer frames through `ViewerPreviewSource`.
 `SelfHostedPreviewService` is the app-layer boundary that interprets timeline
 render plans, owns compositor scratch state and preview cache keys, and injects
@@ -1578,8 +1634,11 @@ sequence is missing or any recursive media input is still unavailable, the
 viewer returns no frame instead of presenting a partial preview as correct
 output.
 Viewer transport controls are part of this chrome but stay domain-light: the
-widget draws geometry buttons for mark in/out, jump start/end, step back/forward,
-and play/pause. By default these controls emit shared editor actions
+widget draws fallback geometry for mark in/out and accepts injected vector icons
+for jump start/end, step back/forward, and play/pause. The self-hosted app must
+source those transport icons from `self_hosted::icons::AppIcon` / bundled SVG
+assets rather than recreating product icons in widget drawing code. By default
+these controls emit shared editor actions
 (`MarkInAtPlayhead`, `MarkOutAtPlayhead`, `GoToStart`, `StepBack`,
 `TogglePlay`, `StepForward`, `GoToEnd`), and embedders may override the mapping
 with a control callback when a host needs a custom command boundary. The
@@ -1587,7 +1646,9 @@ self-hosted app panel must bind that callback explicitly so the app adapter, not
 the generic widget, owns the command boundary for transport controls. Playback
 state changes, mark semantics, frame stepping semantics, preview scheduling, and
 audio/video sync remain in the app/runtime layers. Zoom and preview-quality
-labels are explicit model fields. Viewer zoom is shell-local display state owned
+labels are explicit model fields. The Viewer bottom-left metadata lane is kept
+to the current timecode; resolution, frame-rate, absolute frame, and duration
+remain model data but should not crowd the default transport strip. Viewer zoom is shell-local display state owned
 by `SelfHostedAppRoot`; `ui.viewer.cycle_zoom` is consumed before AppState
 dispatch, survives model refreshes, and is not undoable because it does not
 change the project. The shell injects both zoom label and fixed zoom scale into
@@ -1613,7 +1674,9 @@ fall through to the shell shortcut router. Space remains intentionally absent
 from global shortcuts so text editing cannot toggle playback. Focus loss and
 disabled cleanup clear hover, pressed, and focus-ring chrome and request repaint
 when any of those visual states changed, so transport buttons and chips cannot
-remain visually pressed after focus or availability changes.
+remain visually pressed after focus or availability changes. Programmatic
+viewer disabling must clear the same interaction state immediately so a later
+re-enable cannot dispatch a stale mouse release from a previous preview model.
 Empty app state maps to a disabled viewer model so the product shell can show
 clear no-signal chrome without pretending a preview texture exists.
 `ui_demo` should use the same `ViewerSurface` for the Viewer panel and keep
@@ -1694,7 +1757,11 @@ traversal, and keep painting the current color in muted chrome for inspector
 empty states. Disabled-event cleanup releases pointer capture for the
 pre-sampling eyedropper button press state as well as active desktop sampling,
 color-area drags, and embedded text-field capture, because keyboard focus and
-capture ownership are separate router concerns.
+capture ownership are separate router concerns. Programmatic disabling must
+clear those interaction fields immediately and remember any required platform
+cleanup for the next routed event, so re-enabling the picker cannot revive a
+stale color drag, text-field capture, or desktop eyedropper sample from a
+previous inspector model.
 Circular color areas are painted as colored triangles clipped by a rounded-rect
 SDF mask. Their triangle fan must overdraw past the mask radius so the shader's
 analytic circle, not polygon chords from the fan, defines the visible edge.
@@ -1743,10 +1810,13 @@ grid/curve/handle painting. Nudging selected points handles unmodified arrows
 and Shift large-step arrows only; Ctrl/Alt/Meta arrow chords stay ignored so
 shortcut routing remains centralized. Focus loss or disabling the control may
 cancel an active point drag, but it must release pointer capture only when such
-a drag exists; keyboard focus alone does not imply capture ownership. Timeline
-keyframes, effect graph curves, and color curves should map their domain data
-into this primitive and commit semantic mutations at the panel/app layer
-instead of teaching the widget about clips, effects, or undo history.
+a drag exists; keyboard focus alone does not imply capture ownership.
+Programmatic disabling clears the active drag immediately and remembers that
+the next routed event must release capture, so re-enabling the widget cannot
+apply stale pointer movement from a previous panel model. Timeline keyframes,
+effect graph curves, and color curves should map their domain data into this
+primitive and commit semantic mutations at the panel/app layer instead of
+teaching the widget about clips, effects, or undo history.
 
 ## Rendering Notes
 
@@ -1883,7 +1953,9 @@ unbounded redraw loop.
 results through `SelfHostedRenderDiagnosticReporter`, which logs only changed
 failure counts and resets after a healthy frame. Render diagnostics should go to
 the tracing/log path by default; the status bar is reserved for actionable
-project or editor-state messages.
+project or editor-state messages. Status bar text is top-positioned from the
+bar height and metadata font size, not a fixed baseline, so the bottom chrome
+cannot clip half of the glyphs on compact window sizes.
 
 Tests that mutate the process-global theme must take the self-hosted
 `theme_test_guard()` before calling `set_theme_preset()`. Most widget tests

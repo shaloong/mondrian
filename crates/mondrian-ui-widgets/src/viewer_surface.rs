@@ -17,7 +17,7 @@ use crate::paint::{
     vertical_stroke_rect,
 };
 use crate::text_metrics::measure_single_line;
-use crate::RasterImage;
+use crate::{RasterImage, VectorIcon};
 
 const DEFAULT_WIDTH: f32 = 480.0;
 const DEFAULT_HEIGHT: f32 = 270.0;
@@ -102,6 +102,9 @@ pub struct ViewerSurface {
     on_control: Option<Box<ViewerControlAction>>,
     on_zoom: Option<Box<ViewerZoomAction>>,
     on_preview_quality: Option<Box<ViewerPreviewQualityAction>>,
+    control_icons: Vec<(ViewerControl, VectorIcon)>,
+    play_pause_icon: Option<VectorIcon>,
+    playing_pause_icon: Option<VectorIcon>,
 }
 
 impl ViewerSurface {
@@ -137,6 +140,9 @@ impl ViewerSurface {
             on_control: None,
             on_zoom: None,
             on_preview_quality: None,
+            control_icons: Vec::new(),
+            play_pause_icon: None,
+            playing_pause_icon: None,
         }
     }
 
@@ -208,6 +214,9 @@ impl ViewerSurface {
     /// Set whether the surface represents an available preview target.
     pub fn enabled(mut self, enabled: bool) -> Self {
         self.enabled = enabled;
+        if !enabled {
+            self.clear_interaction_state();
+        }
         self
     }
 
@@ -243,6 +252,25 @@ impl ViewerSurface {
     /// Set a custom action for clicking the zoom chip.
     pub fn on_zoom(mut self, action: impl Fn() -> Action + 'static) -> Self {
         self.on_zoom = Some(Box::new(action));
+        self
+    }
+
+    /// Set a vector icon used to paint one transport control.
+    pub fn with_control_icon(mut self, control: ViewerControl, icon: VectorIcon) -> Self {
+        if let Some((_, existing)) =
+            self.control_icons.iter_mut().find(|(candidate, _)| *candidate == control)
+        {
+            *existing = icon;
+        } else {
+            self.control_icons.push((control, icon));
+        }
+        self
+    }
+
+    /// Set the vector icons used by the playback toggle in paused/playing states.
+    pub fn with_play_pause_icons(mut self, play: VectorIcon, pause: VectorIcon) -> Self {
+        self.play_pause_icon = Some(play);
+        self.playing_pause_icon = Some(pause);
         self
     }
 
@@ -283,18 +311,7 @@ impl ViewerSurface {
     }
 
     fn metadata_text(&self) -> String {
-        let mut parts = Vec::new();
-        if !self.timecode_label.is_empty() {
-            parts.push(self.timecode_label.as_str());
-        }
-        if !self.resolution_label.is_empty() {
-            parts.push(self.resolution_label.as_str());
-        }
-        parts.push(self.frame_label.as_str());
-        if !self.duration_label.is_empty() {
-            parts.push(self.duration_label.as_str());
-        }
-        parts.join("  |  ")
+        self.timecode_label.clone()
     }
 
     fn control_strip_rect(&self) -> Rect {
@@ -417,6 +434,12 @@ impl ViewerSurface {
         if let Some(mapper) = &self.on_zoom {
             (ctx.dispatch)(mapper());
         }
+    }
+
+    fn control_icon(&self, control: ViewerControl) -> Option<&VectorIcon> {
+        self.control_icons
+            .iter()
+            .find_map(|(candidate, icon)| (*candidate == control).then_some(icon))
     }
 
     fn focus_from_pointer(&mut self, ctx: &mut EventContext) {
@@ -592,11 +615,7 @@ impl Widget for ViewerSurface {
         let viewport = self.canvas_viewport_rect();
         let canvas = self.canvas_rect();
 
-        ctx.encoder.draw_rect(
-            self.bounds,
-            mix_color(colors.background, colors.card, 0.16),
-            0.0,
-        );
+        ctx.encoder.draw_rect(self.bounds, colors.card, 0.0);
         if self.focus_visible {
             paint_focus_ring(ctx, self.bounds.inset(2.0, 2.0), spacing.radius_lg);
         }
@@ -635,17 +654,17 @@ impl Widget for ViewerSurface {
 
         ctx.encoder.draw_rect(
             viewport,
-            mix_color(colors.canvas, colors.background, 0.38),
+            mix_color(colors.canvas, colors.background, 0.18),
             0.0,
         );
         ctx.push_clip(viewport);
         ctx.encoder.draw_rect(
             canvas.inset(-1.0, -1.0),
-            color_with_alpha(colors.border, 0.74),
+            color_with_alpha(colors.input, 0.74),
             spacing.radius_md,
         );
         let canvas_fill = if self.enabled {
-            mix_color(colors.canvas, colors.card, 0.18)
+            colors.canvas
         } else {
             mix_color(colors.background, colors.muted, 0.24)
         };
@@ -672,12 +691,14 @@ impl Widget for ViewerSurface {
                     (canvas.width - 24.0).max(1.0),
                     22.0,
                 );
+                let mut muted = colors.muted_foreground;
+                muted.a *= 0.72;
                 ctx.encoder.draw_text_box(
                     message,
                     typography.body.font_size,
                     Point::new(message_rect.x, message_rect.y),
                     message_rect.width,
-                    colors.muted_foreground,
+                    muted,
                 );
             }
         }
@@ -739,10 +760,14 @@ impl ViewerSurface {
         let hovered = self.hovered_control == Some(control);
         let bg = if !self.enabled || pressed {
             colors.muted
+        } else if control == ViewerControl::PlayPause && hovered {
+            mix_color(colors.accent, colors.primary, 0.12)
+        } else if control == ViewerControl::PlayPause {
+            colors.accent
         } else if hovered {
             colors.accent
         } else {
-            colors.card
+            colors.secondary
         };
         let icon = if self.enabled {
             colors.foreground
@@ -751,6 +776,24 @@ impl ViewerSurface {
         };
 
         ctx.encoder.draw_rect(rect, bg, radius);
+        let vector_icon = if control == ViewerControl::PlayPause && self.playing {
+            self.playing_pause_icon.as_ref()
+        } else if control == ViewerControl::PlayPause {
+            self.play_pause_icon.as_ref().or_else(|| self.control_icon(control))
+        } else {
+            self.control_icon(control)
+        };
+        if let Some(vector_icon) = vector_icon {
+            let icon_size = 14.0_f32.min(rect.width - 6.0).min(rect.height - 6.0).max(1.0);
+            let icon_rect = Rect::new(
+                rect.x + (rect.width - icon_size) * 0.5,
+                rect.y + (rect.height - icon_size) * 0.5,
+                icon_size,
+                icon_size,
+            );
+            vector_icon.paint(ctx, icon_rect, icon);
+            return;
+        }
         match control {
             ViewerControl::MarkIn => {
                 paint_mark_in_icon(ctx, rect, icon);
@@ -816,7 +859,7 @@ impl ViewerSurface {
         } else if hovered {
             colors.accent
         } else {
-            colors.card
+            colors.secondary
         };
         ctx.encoder.draw_rect(
             rect,
@@ -834,7 +877,11 @@ impl ViewerSurface {
             ctx.theme.typography.small.font_size,
             Point::new(rect.x + 8.0, rect.y + 4.0),
             (rect.width - 16.0).max(1.0),
-            colors.muted_foreground,
+            if hovered {
+                colors.foreground
+            } else {
+                colors.muted_foreground
+            },
         );
         ctx.pop_clip();
     }
@@ -980,7 +1027,7 @@ fn paint_safe_guides(ctx: &mut PaintContext, canvas: Rect, enabled: bool) {
         return;
     }
     let colors = &ctx.theme.colors;
-    let guide = color_with_alpha(colors.border, if enabled { 0.46 } else { 0.28 });
+    let guide = color_with_alpha(colors.foreground, if enabled { 0.18 } else { 0.10 });
     let action = canvas.inset(canvas.width * 0.05, canvas.height * 0.05);
     let title = canvas.inset(canvas.width * 0.10, canvas.height * 0.10);
     draw_rect_outline(ctx, action, guide);
@@ -1126,8 +1173,9 @@ mod tests {
         assert!(encoder.texts.iter().any(|text| text == "Scene 01"));
         assert!(encoder.texts.iter().any(|text| text == "Playing"));
         assert!(encoder.texts.iter().any(|text| text.contains("00:00:01:18")));
-        assert!(encoder.texts.iter().any(|text| text.contains("1920x1080")));
-        assert!(encoder.texts.iter().any(|text| text.contains("F42")));
+        assert!(!encoder.texts.iter().any(|text| text.contains("1920x1080")));
+        assert!(!encoder.texts.iter().any(|text| text.contains("F42")));
+        assert!(!encoder.texts.iter().any(|text| text.contains("240 frames")));
         assert!(encoder.texts.iter().any(|text| text.contains("Fit")));
         assert!(encoder.texts.iter().any(|text| text.contains("Full")));
         assert!(
@@ -1633,6 +1681,51 @@ mod tests {
         assert_eq!(viewer.pressed_control, None);
         assert_eq!(viewer.hovered_control, None);
         assert!(!viewer.focused);
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn disabling_viewer_builder_cancels_pending_control_press() {
+        let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080);
+        viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
+        let position = viewer.control_rect(ViewerControl::PlayPause).center();
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        assert_eq!(
+            viewer.event(
+                &UiEvent::MouseDown {
+                    position,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(viewer.pressed_control, Some(ViewerControl::PlayPause));
+
+        viewer = viewer.enabled(false);
+        assert_eq!(viewer.pressed_control, None);
+        assert_eq!(viewer.hovered_control, None);
+        assert!(!viewer.focused);
+
+        viewer = viewer.enabled(true);
+        assert_eq!(
+            viewer.event(
+                &UiEvent::MouseUp {
+                    position,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
         assert!(actions.borrow().is_empty());
     }
 

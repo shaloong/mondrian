@@ -61,6 +61,10 @@ impl NumberInput {
     /// Set whether the input accepts user interaction.
     pub fn enabled(mut self, enabled: bool) -> Self {
         self.input = self.input.enabled(enabled);
+        if !enabled {
+            self.focused = false;
+            self.commit_display_text();
+        }
         self
     }
 
@@ -468,6 +472,44 @@ mod tests {
 
         assert_eq!(input.text(), "12");
         assert_eq!(input.value(), Some(12.0));
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn disabling_number_input_clears_focus_and_pending_invalid_edit() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+        let mut input = NumberInput::new(12.0, 0.0, 100.0).on_change(number_action);
+        layout(&mut input);
+
+        click(&mut input, &mut ctx);
+        input.event(
+            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &mut ctx,
+        );
+        input.event(&UiEvent::TextInput("abc".into()), &mut ctx);
+        assert_eq!(input.text(), "abc");
+        assert!(input.focused);
+        assert!(actions.borrow().is_empty());
+
+        input = input.enabled(false);
+        assert_eq!(input.text(), "12");
+        assert!(!input.focused);
+
+        input = input.enabled(true);
+        assert_eq!(
+            input.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+
+        assert_eq!(input.text(), "12");
         assert!(actions.borrow().is_empty());
     }
 

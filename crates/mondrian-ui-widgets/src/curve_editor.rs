@@ -51,6 +51,7 @@ pub struct CurveEditor {
     grid_rows: usize,
     focused: bool,
     focus_visible: bool,
+    pending_capture_release: bool,
     enabled: bool,
     on_change: Option<Box<CurveChangeAction>>,
 }
@@ -78,6 +79,7 @@ impl CurveEditor {
             grid_rows: 3,
             focused: false,
             focus_visible: false,
+            pending_capture_release: false,
             enabled: true,
             on_change: None,
         };
@@ -111,8 +113,12 @@ impl CurveEditor {
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
         if !enabled {
+            if self.dragging.is_some() {
+                self.pending_capture_release = true;
+            }
             self.focused = false;
             self.focus_visible = false;
+            self.dragging = None;
         }
     }
 
@@ -346,10 +352,11 @@ impl Widget for CurveEditor {
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if self.pending_capture_release || (!self.enabled && self.dragging.is_some()) {
+            ctx.release_pointer_capture(self.id);
+            self.pending_capture_release = false;
+        }
         if !self.enabled {
-            if self.dragging.is_some() {
-                ctx.release_pointer_capture(self.id);
-            }
             self.focused = false;
             self.focus_visible = false;
             self.dragging = None;
@@ -944,6 +951,7 @@ mod tests {
             EventResult::Handled
         );
         editor.set_enabled(false);
+        assert!(editor.dragging.is_none());
 
         assert_eq!(
             editor.event(
@@ -962,6 +970,62 @@ mod tests {
             ))
         );
         assert_eq!(editor.points()[1], CurvePoint::new(0.5, 0.5));
+    }
+
+    #[test]
+    fn disabling_and_reenabling_cancels_pending_curve_drag() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut f = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut shortcut, &mut tooltip, &dispatch);
+        let mut editor = CurveEditor::with_points(vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.5, 0.5),
+            CurvePoint::new(1.0, 1.0),
+        ])
+        .on_change(curve_action);
+        editor.layout(Rect::new(0.0, 0.0, 200.0, 100.0));
+        let start = editor.to_screen(editor.points()[1]);
+
+        assert_eq!(
+            editor.event(
+                &UiEvent::MouseDown {
+                    position: start,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(editor.dragging, Some(1));
+        ctx.requests.pointer_capture = None;
+
+        editor.set_enabled(false);
+        assert!(editor.dragging.is_none());
+        editor.set_enabled(true);
+
+        assert_eq!(
+            editor.event(
+                &UiEvent::MouseMove {
+                    position: Point::new(start.x + 30.0, start.y - 20.0),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(mondrian_ui_core::widget::PointerCaptureRequest::Release(
+                editor.id()
+            ))
+        );
+        assert_eq!(editor.points()[1], CurvePoint::new(0.5, 0.5));
+        assert!(actions.borrow().is_empty());
     }
 
     #[test]

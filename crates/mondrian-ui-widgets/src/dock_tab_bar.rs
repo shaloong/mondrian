@@ -33,7 +33,7 @@ impl DockTabBar {
             tabs,
             bounds: Rect::ZERO,
             hovered_tab: None,
-            bar_height: 26.0,
+            bar_height: 32.0,
             tab_min_width: 80.0,
         }
     }
@@ -53,6 +53,18 @@ impl DockTabBar {
     }
 
     fn tab_rects(&self) -> Vec<Rect> {
+        if self.tabs.len() == 1 {
+            let tab = &self.tabs[0];
+            let label_width = tab.label.chars().count() as f32 * 7.0;
+            let tab_w = (label_width + 28.0).clamp(72.0, self.bounds.width.max(0.0));
+            return vec![Rect::new(
+                self.bounds.x + 6.0,
+                self.bounds.y,
+                tab_w,
+                self.bar_height,
+            )];
+        }
+
         let n = self.tabs.len().max(1);
         let tab_w = (self.bounds.width / n as f32).max(self.tab_min_width);
         self.tabs
@@ -113,11 +125,11 @@ impl Widget for DockTabBar {
             self.bounds.width,
             self.bar_height,
         );
-        let bar_fill = mix_color(tokens.background, tokens.card, 0.48);
+        let bar_fill = mix_color(tokens.background, tokens.card, 0.62);
         ctx.encoder.draw_rect(bg, bar_fill, 0.0);
         ctx.encoder.draw_rect(
             Rect::new(bg.x, bg.y + bg.height - 1.0, bg.width, 1.0),
-            color_with_alpha(tokens.border, 0.82),
+            color_with_alpha(tokens.border, 0.68),
             0.0,
         );
 
@@ -130,16 +142,14 @@ impl Widget for DockTabBar {
             let is_active = tab.active;
             let is_hovered = self.hovered_tab == Some(i);
 
-            let fill = if is_active {
-                mix_color(tokens.card, tokens.popover, 0.42)
-            } else if is_hovered {
-                color_with_alpha(tokens.accent, 0.72)
-            } else {
-                color_with_alpha(tokens.card, 0.24)
-            };
-
-            let inset = r.inset(2.0, 2.0);
-            ctx.encoder.draw_rect(inset, fill, spacing.radius_sm);
+            let inset = r.inset(3.0, 3.0);
+            if is_hovered {
+                ctx.encoder.draw_rect(
+                    inset,
+                    color_with_alpha(tokens.accent, if is_active { 0.76 } else { 0.46 }),
+                    spacing.radius_sm,
+                );
+            }
 
             if !tab.label.is_empty() {
                 let font_size = ctx.theme.typography.tab_label.font_size;
@@ -157,14 +167,14 @@ impl Widget for DockTabBar {
             }
 
             if is_active {
-                let indicator_width = (inset.width * 0.34).clamp(24.0, 52.0);
+                let indicator_width = (inset.width * 0.42).clamp(26.0, 54.0);
                 let indicator = Rect::new(
                     inset.x + (inset.width - indicator_width) * 0.5,
-                    inset.y + inset.height - 2.0,
+                    bg.y + bg.height - 2.0,
                     indicator_width,
                     2.0,
                 );
-                ctx.encoder.draw_rect(indicator, tokens.ring, 1.0);
+                ctx.encoder.draw_rect(indicator, tokens.primary, 1.0);
             }
         }
     }
@@ -374,7 +384,7 @@ mod tests {
             },
             TabInfo { label: "Second".into(), active: false },
         ]);
-        bar.layout(Rect::new(0.0, 0.0, 160.0, 26.0));
+        bar.layout(Rect::new(0.0, 0.0, 160.0, 32.0));
         let theme = ThemePreset::Dark.build();
         let mut encoder = PaintRecorder::default();
         let mut ctx = PaintContext {
@@ -392,8 +402,8 @@ mod tests {
         assert_eq!(
             encoder.clips,
             vec![
-                Rect::new(2.0, 2.0, 76.0, 22.0),
-                Rect::new(82.0, 2.0, 76.0, 22.0)
+                Rect::new(3.0, 3.0, 74.0, 26.0),
+                Rect::new(83.0, 3.0, 74.0, 26.0)
             ]
         );
         assert_eq!(encoder.clip_pops, 2);

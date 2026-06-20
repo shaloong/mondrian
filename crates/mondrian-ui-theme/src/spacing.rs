@@ -101,10 +101,10 @@ impl Default for SpacingTokens {
             xxl: 80.0,
 
             radius_none: 0.0,
-            radius_sm: 4.0,
+            radius_sm: 6.0,
             radius_md: 8.0,
-            radius_lg: 12.0,
-            radius_xl: 18.0,
+            radius_lg: 10.0,
+            radius_xl: 14.0,
             radius_full: 999.0,
 
             shadow_none: ShadowToken {
@@ -123,10 +123,10 @@ impl Default for SpacingTokens {
             },
             shadow_md: ShadowToken {
                 offset_x: 0.0,
-                offset_y: 4.0,
-                blur: 12.0,
+                offset_y: 8.0,
+                blur: 24.0,
                 spread: 0.0,
-                color: [0.0, 0.0, 0.0, 0.16],
+                color: [0.0, 0.0, 0.0, 0.35],
             },
             shadow_lg: ShadowToken {
                 offset_x: 0.0,
@@ -146,17 +146,17 @@ impl Default for SpacingTokens {
             panel_gap: 10.0,
             panel_inner_margin: (12.0, 12.0),
 
-            interact_height: 26.0,
+            interact_height: 28.0,
             icon_size: 14.0,
 
             border_standard: 1.0,
             border_emphasis: 2.0,
 
-            timeline_track_height: 40.0,
+            timeline_track_height: 42.0,
             timeline_ruler_height: 28.0,
             timeline_clip_radius: 4.0,
-            timeline_track_label_width: 92.0,
-            timeline_scrollbar_size: 14.0,
+            timeline_track_label_width: 96.0,
+            timeline_scrollbar_size: 8.0,
             timeline_default_pixels_per_frame: 4.0,
 
             inspector_panel_width: 344.0,
@@ -164,13 +164,13 @@ impl Default for SpacingTokens {
             property_row_height: 28.0,
 
             list_row_height: 36.0,
-            list_row_radius: 12.0,
+            list_row_radius: 6.0,
 
             export_grid_spacing: (12.0, 4.0),
 
             tooltip_offset: 8.0,
-            tooltip_delay_ms: 500,
-            tooltip_max_width: 320.0,
+            tooltip_delay_ms: 450,
+            tooltip_max_width: 280.0,
 
             animation_duration_ms: 200,
             animation_ease: AnimationEasing::EaseInOut,

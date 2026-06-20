@@ -7,7 +7,7 @@ use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
-use crate::paint::{color_with_alpha, mix_color};
+use crate::paint::color_with_alpha;
 use crate::{FormLayout, FormRowOptions, Label};
 use mondrian_editor_state::Action;
 
@@ -30,10 +30,10 @@ impl Default for PropertyPanelOptions {
     fn default() -> Self {
         Self {
             margin: 12.0,
-            label_width: 92.0,
-            row_height: 34.0,
-            control_gap: 8.0,
-            section_gap: 10.0,
+            label_width: 84.0,
+            row_height: 30.0,
+            control_gap: 10.0,
+            section_gap: 6.0,
         }
     }
 }
@@ -211,9 +211,9 @@ impl PropertyPanel {
 
     fn header_height(&self) -> f32 {
         if self.subtitle.is_some() {
-            42.0
+            38.0
         } else {
-            26.0
+            24.0
         }
     }
 
@@ -275,15 +275,15 @@ impl Widget for PropertyPanel {
 
         for section in &mut self.sections {
             if !section.title().is_empty() {
-                section.header_position = Point::new(content.x, y + 16.0);
-                section.header_bounds = Rect::new(content.x, y, content.width, 24.0);
+                section.header_position = Point::new(content.x, y + 12.0);
+                section.header_bounds = Rect::new(content.x, y, content.width, 20.0);
                 section.title.layout(Rect::new(
                     content.x,
                     section.header_position.y,
                     content.width,
                     16.0,
                 ));
-                y += 24.0;
+                y += 20.0;
             } else {
                 section.header_bounds = Rect::ZERO;
             }
@@ -314,9 +314,9 @@ impl Widget for PropertyPanel {
             );
             y += self.options.section_gap;
         }
-        self.title.layout(Rect::new(content.x, content.y + 16.0, content.width, 18.0));
+        self.title.layout(Rect::new(content.x, content.y + 12.0, content.width, 18.0));
         if let Some(subtitle) = &mut self.subtitle {
-            subtitle.layout(Rect::new(content.x, content.y + 34.0, content.width, 16.0));
+            subtitle.layout(Rect::new(content.x, content.y + 28.0, content.width, 16.0));
         }
     }
 
@@ -343,9 +343,7 @@ impl Widget for PropertyPanel {
     fn paint(&self, ctx: &mut PaintContext) {
         let colors = &ctx.theme.colors;
         let spacing = &ctx.theme.spacing;
-        let panel_fill = mix_color(colors.background, colors.card, 0.32);
-        let section_fill = mix_color(colors.card, colors.background, 0.18);
-        let selected_section_fill = mix_color(section_fill, colors.ring, 0.08);
+        let panel_fill = colors.card;
         ctx.encoder.draw_rect(self.bounds, panel_fill, 0.0);
         self.title.paint(ctx);
         if let Some(subtitle) = &self.subtitle {
@@ -353,28 +351,25 @@ impl Widget for PropertyPanel {
         }
 
         for section in &self.sections {
+            if section.header_bounds.height > 0.0 {
+                let y = section.header_bounds.y;
+                ctx.encoder.draw_rect(
+                    Rect::new(section.header_bounds.x, y, section.header_bounds.width, 1.0),
+                    color_with_alpha(colors.border, 0.72),
+                    0.0,
+                );
+            }
             if section.bounds.height > 0.0 {
                 if section.selected {
                     ctx.encoder.draw_rect(
-                        section.bounds,
-                        color_with_alpha(colors.ring, 0.34),
-                        spacing.radius_md,
-                    );
-                    ctx.encoder.draw_rect(
-                        section.bounds.inset(1.0, 1.0),
-                        selected_section_fill,
-                        (spacing.radius_md - 1.0).max(0.0),
-                    );
-                } else {
-                    ctx.encoder.draw_rect(
-                        section.bounds,
-                        color_with_alpha(colors.border, 0.58),
-                        spacing.radius_md,
-                    );
-                    ctx.encoder.draw_rect(
-                        section.bounds.inset(1.0, 1.0),
-                        section_fill,
-                        (spacing.radius_md - 1.0).max(0.0),
+                        Rect::new(
+                            section.bounds.x,
+                            section.bounds.y,
+                            3.0,
+                            section.bounds.height,
+                        ),
+                        color_with_alpha(colors.primary, 0.72),
+                        spacing.radius_sm,
                     );
                 }
             }
@@ -626,7 +621,7 @@ mod tests {
 
         let row = &panel.sections[0].rows[0];
         assert_eq!(row.bounds.height, 118.0);
-        assert_eq!(row.label_position.y, row.bounds.y + 20.0);
+        assert_eq!(row.label_position.y, row.bounds.y + 4.0);
         assert!(measured.height >= 118.0 + panel.options.margin * 2.0);
     }
 
@@ -644,9 +639,9 @@ mod tests {
 
         assert_eq!(
             seen.borrow().as_slice(),
-            &[LayoutConstraint { min: Size::ZERO, max: Size::new(176.0, 34.0) }]
+            &[LayoutConstraint { min: Size::ZERO, max: Size::new(182.0, 30.0) }]
         );
-        assert_eq!(panel.sections[0].rows[0].control_bounds.width, 176.0);
+        assert_eq!(panel.sections[0].rows[0].control_bounds.width, 182.0);
     }
 
     #[test]

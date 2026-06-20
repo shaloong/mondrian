@@ -1301,19 +1301,19 @@ pub fn build_dock_tree_for_preset(
 fn editing_workspace(models: SelfHostedPanelModels) -> DockSplitter {
     let viewer_and_inspector = DockSplitter::new(
         SplitDirection::Horizontal,
-        0.68,
+        0.70,
         slot(PanelKind::Viewer, models.clone()),
         slot(PanelKind::Inspector, models.clone()),
     );
     let upper = DockSplitter::new(
         SplitDirection::Horizontal,
-        0.26,
+        0.22,
         slot(PanelKind::Assets, models.clone()),
         Box::new(viewer_and_inspector),
     );
     DockSplitter::new(
         SplitDirection::Vertical,
-        0.62,
+        0.66,
         Box::new(upper),
         slot(PanelKind::Timeline, models),
     )
@@ -1482,6 +1482,7 @@ fn viewer_panel(model: &ViewerPanelModel) -> ViewerSurface {
                 scale: next_preview_scale,
             })
         });
+    let surface = with_viewer_transport_icons(surface);
     let surface = if let Some(message) = model.empty_message.clone() {
         surface.with_empty_message(message)
     } else {
@@ -1491,6 +1492,26 @@ fn viewer_panel(model: &ViewerPanelModel) -> ViewerSurface {
         Some(frame_image) => surface.with_frame_image(frame_image),
         None => surface,
     }
+}
+
+fn with_viewer_transport_icons(mut surface: ViewerSurface) -> ViewerSurface {
+    if let (Ok(play), Ok(pause)) = (
+        AppIcon::PlayFilled.vector_icon(),
+        AppIcon::PauseFilled.vector_icon(),
+    ) {
+        surface = surface.with_play_pause_icons(play, pause);
+    }
+    for (control, icon) in [
+        (ViewerControl::JumpStart, AppIcon::HomeFrameFilled),
+        (ViewerControl::StepBack, AppIcon::LeftFrameFilled),
+        (ViewerControl::StepForward, AppIcon::RightFrameFilled),
+        (ViewerControl::JumpEnd, AppIcon::EndFrameFilled),
+    ] {
+        if let Ok(vector_icon) = icon.vector_icon() {
+            surface = surface.with_control_icon(control, vector_icon);
+        }
+    }
+    surface
 }
 
 fn viewer_control_action(control: ViewerControl) -> Action {
@@ -2330,7 +2351,7 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
     let action_model = model.clone();
     TimelineView::new(model.tracks.clone())
         .enabled(!model.tracks.is_empty())
-        .with_header_width(128.0)
+        .with_header_width(104.0)
         .with_playhead(model.playhead_frame)
         .with_in_out_points(model.in_point_frame, model.out_point_frame)
         .on_clip_select({
@@ -5252,7 +5273,7 @@ mod tests {
         panel.event(
             &UiEvent::Drop {
                 payload: DragPayload::Asset(asset_id),
-                position: Point::new(168.0, 55.0),
+                position: Point::new(144.0, 55.0),
             },
             &mut ctx,
         );
@@ -5333,7 +5354,7 @@ mod tests {
             let mut tree = WidgetTreeView::new(&mut root);
             router.route(
                 UiEvent::MouseMove {
-                    position: Point::new(468.0, 55.0),
+                    position: Point::new(444.0, 55.0),
                     modifiers: Modifiers::default(),
                 },
                 &mut tree,
@@ -5344,7 +5365,7 @@ mod tests {
             let mut tree = WidgetTreeView::new(&mut root);
             router.route(
                 UiEvent::MouseUp {
-                    position: Point::new(468.0, 55.0),
+                    position: Point::new(444.0, 55.0),
                     button: MouseButton::Left,
                     modifiers: Modifiers::default(),
                 },
@@ -5581,7 +5602,7 @@ mod tests {
         assert_eq!(
             panel.event(
                 &UiEvent::MouseDown {
-                    position: Point::new(168.0, 12.0),
+                    position: Point::new(144.0, 12.0),
                     button: MouseButton::Left,
                     modifiers: Modifiers::none(),
                 },
@@ -5592,7 +5613,7 @@ mod tests {
         assert_eq!(
             panel.event(
                 &UiEvent::MouseMove {
-                    position: Point::new(208.0, 12.0),
+                    position: Point::new(184.0, 12.0),
                     modifiers: Modifiers::none(),
                 },
                 &mut ctx,
@@ -5602,7 +5623,7 @@ mod tests {
         assert_eq!(
             panel.event(
                 &UiEvent::MouseUp {
-                    position: Point::new(208.0, 12.0),
+                    position: Point::new(184.0, 12.0),
                     button: MouseButton::Left,
                     modifiers: Modifiers::none(),
                 },
@@ -7203,7 +7224,7 @@ mod tests {
 
         let result = panel.event(
             &UiEvent::MouseDown {
-                position: Point::new(24.0, 470.0),
+                position: Point::new(24.0, 408.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },

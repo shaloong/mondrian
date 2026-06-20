@@ -189,6 +189,7 @@ pub struct PanelList {
     drag_start_scroll_y: f32,
     drop_hovered: bool,
     drag_candidate: Option<PanelListDragCandidate>,
+    pending_capture_release: bool,
     last_click: Option<PanelListClick>,
     focused: bool,
     focus_visible: bool,
@@ -235,6 +236,7 @@ impl PanelList {
             drag_start_scroll_y: 0.0,
             drop_hovered: false,
             drag_candidate: None,
+            pending_capture_release: false,
             last_click: None,
             focused: false,
             focus_visible: false,
@@ -346,14 +348,18 @@ impl PanelList {
 
     /// Replace all items and clamp selection/scroll state.
     pub fn set_items(&mut self, items: Vec<PanelListItem>) {
+        let had_pointer_capture = self.drag_candidate.is_some() || self.scrollbar_dragging;
         self.items = items;
         self.rebuild_visible_indices();
         self.selected = self.selected.filter(|idx| {
             self.is_enabled_index(*idx) && self.item_matches_filter(&self.items[*idx])
         });
         self.hovered = None;
+        self.scrollbar_hovered = false;
+        self.scrollbar_dragging = false;
         self.drop_hovered = false;
         self.drag_candidate = None;
+        self.pending_capture_release |= had_pointer_capture;
         self.last_click = None;
         self.clamp_scroll();
     }
@@ -921,6 +927,10 @@ impl Widget for PanelList {
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if self.pending_capture_release {
+            ctx.release_pointer_capture(self.id);
+            self.pending_capture_release = false;
+        }
         match event {
             UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
                 if self.filter_input.as_ref().is_some_and(|input| input.hit_test(*position)) {
@@ -1737,6 +1747,66 @@ mod tests {
     }
 
     #[test]
+    fn set_items_cancels_row_drag_candidate_and_releases_capture_on_next_event() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut list = PanelList::new("Assets", vec![drag_item(AssetId::new())]);
+        list.layout(Rect::new(0.0, 0.0, 240.0, 180.0));
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        {
+            let mut ctx = dispatching_ctx(
+                &mut focus,
+                &mut shortcut,
+                &mut tooltip,
+                &mut requests,
+                &dispatch,
+            );
+            assert_eq!(
+                list.event(
+                    &UiEvent::MouseDown {
+                        position: Point::new(30.0, 74.0),
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::none(),
+                    },
+                    &mut ctx,
+                ),
+                EventResult::Handled
+            );
+        }
+        assert!(list.drag_candidate.is_some());
+        requests.pointer_capture = None;
+
+        list.set_items(vec![PanelListItem::new("Folder")]);
+        assert!(list.drag_candidate.is_none());
+
+        {
+            let mut ctx = dispatching_ctx(
+                &mut focus,
+                &mut shortcut,
+                &mut tooltip,
+                &mut requests,
+                &dispatch,
+            );
+            let _ = list.event(
+                &UiEvent::MouseMove {
+                    position: Point::new(54.0, 74.0),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+        }
+
+        assert_eq!(
+            requests.pointer_capture,
+            Some(PointerCaptureRequest::Release(list.id()))
+        );
+        assert!(requests.drag.is_none());
+    }
+
+    #[test]
     fn idle_focus_lost_does_not_release_pointer_capture() {
         let actions = RefCell::new(Vec::new());
         let dispatch = |action| actions.borrow_mut().push(action);
@@ -2147,6 +2217,69 @@ mod tests {
             Some(PointerCaptureRequest::Release(list.id()))
         );
         assert!(requests.repaint);
+    }
+
+    #[test]
+    fn set_items_cancels_scrollbar_drag_and_releases_capture_on_next_event() {
+        let items = (0..16).map(|index| PanelListItem::new(format!("Item {index}"))).collect();
+        let mut list = PanelList::new("Long", items);
+        list.layout(Rect::new(0.0, 0.0, 240.0, 150.0));
+        let thumb = list.scrollbar_thumb_rect().expect("overflowing list should have thumb");
+        let start = Point::new(thumb.x + 2.0, thumb.y + 2.0);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let dispatch = |_| {};
+        {
+            let mut ctx = dispatching_ctx(
+                &mut focus,
+                &mut shortcut,
+                &mut tooltip,
+                &mut requests,
+                &dispatch,
+            );
+            assert_eq!(
+                list.event(
+                    &UiEvent::MouseDown {
+                        position: start,
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::none(),
+                    },
+                    &mut ctx,
+                ),
+                EventResult::Handled
+            );
+        }
+        assert!(list.scrollbar_dragging);
+        requests.pointer_capture = None;
+
+        list.set_items((0..12).map(|index| PanelListItem::new(format!("Next {index}"))).collect());
+        assert!(!list.scrollbar_dragging);
+        let scroll_before = list.scroll_offset_y();
+
+        {
+            let mut ctx = dispatching_ctx(
+                &mut focus,
+                &mut shortcut,
+                &mut tooltip,
+                &mut requests,
+                &dispatch,
+            );
+            let _ = list.event(
+                &UiEvent::MouseMove {
+                    position: Point::new(start.x, start.y + 36.0),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+        }
+
+        assert_eq!(list.scroll_offset_y(), scroll_before);
+        assert_eq!(
+            requests.pointer_capture,
+            Some(PointerCaptureRequest::Release(list.id()))
+        );
     }
 
     #[test]

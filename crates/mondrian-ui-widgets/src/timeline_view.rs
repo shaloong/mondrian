@@ -12,14 +12,14 @@ use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
-use crate::paint::mix_color;
+use crate::paint::{color_with_alpha, mix_color};
 use crate::{ContextMenu, MenuItem};
 
 const SCROLLBAR_THICKNESS: f32 = 8.0;
 const SCROLLBAR_MIN_THUMB: f32 = 28.0;
-const TIMELINE_TOOL_BUTTON_SIZE: f32 = 18.0;
+const TIMELINE_TOOL_BUTTON_SIZE: f32 = 20.0;
 const TIMELINE_TOOL_BUTTON_GAP: f32 = 4.0;
-const TIMELINE_ZOOM_BUTTON_SIZE: f32 = 18.0;
+const TIMELINE_ZOOM_BUTTON_SIZE: f32 = 20.0;
 const TIMELINE_ZOOM_BUTTON_GAP: f32 = 4.0;
 
 /// Action factory for clip selection.
@@ -475,9 +475,9 @@ impl TimelineView {
             focused: false,
             focus_visible: false,
             enabled: true,
-            track_height: 50.0,
+            track_height: 42.0,
             header_width: 96.0,
-            ruler_height: 30.0,
+            ruler_height: 28.0,
             playhead_dragging: false,
             in_out_drag: None,
             asset_drop_hover: None,
@@ -558,6 +558,8 @@ impl TimelineView {
             self.hovered_zoom = None;
             self.active_tool = TimelineTool::Select;
             self.selected_track = None;
+            self.playhead_dragging = false;
+            self.in_out_drag = None;
             self.asset_drop_hover = None;
             self.track_drag = None;
             self.clip_drag = None;
@@ -929,9 +931,9 @@ impl TimelineView {
     }
 
     fn track_control_rect(&self, header: Rect, control: TimelineTrackControl) -> Rect {
-        let size = 18.0;
-        let gap = 5.0;
-        let right_padding = 8.0;
+        let size = 16.0;
+        let gap = 4.0;
+        let right_padding = 6.0;
         let group_width = size * 3.0 + gap * 2.0;
         let start_x = header.x + header.width - right_padding - group_width;
         let index = match control {
@@ -1127,9 +1129,9 @@ impl TimelineView {
 
     fn clip_rect_at(&self, track_index: usize, start_frame: i64, clip: &TimelineClip) -> Rect {
         let x = self.frame_to_x(start_frame);
-        let y = self.track_y(track_index) + 6.0;
+        let y = self.track_y(track_index) + 4.0;
         let width = (clip.duration_frames.max(1) as f32 * self.pixels_per_frame).max(8.0);
-        Rect::new(x, y, width, self.track_height - 12.0)
+        Rect::new(x, y, width, self.track_height - 8.0)
     }
 
     fn clip_rect_for_preview(
@@ -1139,9 +1141,9 @@ impl TimelineView {
         duration_frames: i64,
     ) -> Rect {
         let x = self.frame_to_x(start_frame);
-        let y = self.track_y(track_index) + 6.0;
+        let y = self.track_y(track_index) + 4.0;
         let width = (duration_frames.max(1) as f32 * self.pixels_per_frame).max(8.0);
-        Rect::new(x, y, width, self.track_height - 12.0)
+        Rect::new(x, y, width, self.track_height - 8.0)
     }
 
     fn hit_clip(&self, point: Point) -> Option<TimelineClipRef> {
@@ -1947,7 +1949,7 @@ impl TimelineView {
 
     fn paint_ruler(&self, ctx: &mut PaintContext) {
         let colors = &ctx.theme.colors;
-        let ruler_fill = mix_color(colors.background, colors.card, 0.58);
+        let ruler_fill = mix_color(colors.background, colors.card, 0.54);
         ctx.encoder.draw_rect(self.ruler_rect, ruler_fill, 0.0);
         self.paint_in_out_ruler_region(ctx);
         let step = self.tick_step_frames();
@@ -1958,12 +1960,17 @@ impl TimelineView {
         while frame <= end_frame {
             let x = self.frame_to_x(frame);
             let major = frame % (step * 4) == 0;
-            let height = if major { 16.0 } else { 8.0 };
+            let height = if major { 9.0 } else { 4.0 };
+            let tick_color = if major {
+                color_with_alpha(colors.foreground, 0.28)
+            } else {
+                color_with_alpha(colors.foreground, 0.12)
+            };
             ctx.encoder.draw_line(
                 Point::new(x, self.ruler_rect.y + self.ruler_rect.height - height),
                 Point::new(x, self.ruler_rect.y + self.ruler_rect.height - 1.0),
                 1.0,
-                colors.border,
+                tick_color,
             );
             if major {
                 ctx.encoder.draw_text(
@@ -1985,7 +1992,7 @@ impl TimelineView {
                 self.ruler_rect.y + self.ruler_rect.height - 1.0,
             ),
             1.0,
-            colors.border,
+            color_with_alpha(colors.border, 0.72),
         );
         self.paint_zoom_buttons(ctx);
     }
@@ -1994,18 +2001,18 @@ impl TimelineView {
         let colors = &ctx.theme.colors;
         let corner = self.timeline_corner_rect();
         ctx.encoder
-            .draw_rect(corner, mix_color(colors.background, colors.card, 0.58), 0.0);
+            .draw_rect(corner, mix_color(colors.background, colors.card, 0.54), 0.0);
         ctx.encoder.draw_line(
             Point::new(corner.x, corner.y + corner.height - 1.0),
             Point::new(corner.x + corner.width, corner.y + corner.height - 1.0),
             1.0,
-            colors.border,
+            color_with_alpha(colors.border, 0.72),
         );
         ctx.encoder.draw_line(
             Point::new(corner.x + corner.width - 1.0, corner.y),
             Point::new(corner.x + corner.width - 1.0, corner.y + corner.height),
             1.0,
-            colors.border,
+            color_with_alpha(colors.border, 0.72),
         );
         self.paint_tool_button(ctx, TimelineTool::Select);
         self.paint_tool_button(ctx, TimelineTool::Blade);
@@ -2027,9 +2034,9 @@ impl TimelineView {
         let mut bg = if hovered {
             colors.secondary
         } else {
-            colors.card
+            colors.accent
         };
-        bg.a = if hovered { 0.9 } else { 0.48 };
+        bg.a = if hovered { 0.9 } else { 0.34 };
         ctx.encoder.draw_rect(rect, bg, ctx.theme.spacing.radius_sm);
 
         let icon = if hovered {
@@ -2058,17 +2065,23 @@ impl TimelineView {
         let active = self.active_tool == tool;
         let hovered = self.hovered_tool == Some(tool);
         let mut bg = if active {
-            colors.accent
+            mix_color(colors.accent, colors.primary, 0.18)
         } else if hovered {
             colors.secondary
         } else {
-            colors.card
+            colors.accent
         };
-        bg.a = if active || hovered { 0.92 } else { 0.32 };
+        bg.a = if active {
+            0.92
+        } else if hovered {
+            0.82
+        } else {
+            0.26
+        };
         ctx.encoder.draw_rect(rect, bg, ctx.theme.spacing.radius_sm);
 
         let icon = if active {
-            colors.accent_foreground
+            colors.primary
         } else {
             colors.muted_foreground
         };
@@ -2109,9 +2122,9 @@ impl TimelineView {
         let mut bg = if hovered {
             colors.secondary
         } else {
-            colors.card
+            colors.accent
         };
-        bg.a = if hovered { 0.9 } else { 0.32 };
+        bg.a = if hovered { 0.84 } else { 0.26 };
         ctx.encoder.draw_rect(rect, bg, ctx.theme.spacing.radius_sm);
 
         let icon = if hovered {
@@ -2190,9 +2203,9 @@ impl TimelineView {
             ctx.encoder.draw_rect(
                 header,
                 if track_selected {
-                    colors.accent
+                    color_with_alpha(colors.primary, 0.18)
                 } else {
-                    mix_color(colors.background, colors.card, 0.46)
+                    mix_color(colors.background, colors.card, 0.42)
                 },
                 0.0,
             );
@@ -2204,11 +2217,11 @@ impl TimelineView {
                 snap_point(Point::new(header.x + 10.0, header.y + 16.0)),
                 (control_group_x - header.x - 18.0).max(0.0),
                 if track_selected {
-                    colors.accent_foreground
+                    colors.foreground
                 } else if track.locked {
                     colors.muted_foreground
                 } else {
-                    colors.foreground
+                    colors.muted_foreground
                 },
             );
             self.paint_track_control(
@@ -2223,9 +2236,9 @@ impl TimelineView {
 
             let row = Rect::new(self.body_rect.x, y, self.body_rect.width, self.track_height);
             let row_fill = if track_index % 2 == 0 {
-                mix_color(colors.background, colors.card, 0.12)
+                colors.timeline_track_even
             } else {
-                mix_color(colors.background, colors.card, 0.24)
+                colors.timeline_track_odd
             };
             ctx.encoder.draw_rect(row, row_fill, 0.0);
             self.paint_in_out_row_region(ctx, row);
@@ -2243,7 +2256,7 @@ impl TimelineView {
                 Point::new(self.bounds.x, y + self.track_height),
                 Point::new(self.bounds.x + self.bounds.width, y + self.track_height),
                 1.0,
-                colors.border,
+                color_with_alpha(colors.foreground, 0.045),
             );
 
             for (clip_index, clip) in track.clips.iter().enumerate() {
@@ -2434,9 +2447,15 @@ impl TimelineView {
         let mut bg = if hovered {
             colors.secondary
         } else {
-            colors.card
+            colors.accent
         };
-        bg.a = if hovered || active { 0.85 } else { 0.18 };
+        bg.a = if hovered {
+            0.84
+        } else if active {
+            0.46
+        } else {
+            0.16
+        };
         ctx.encoder.draw_rect(rect, bg, ctx.theme.spacing.radius_sm);
 
         let mut icon = if active {
@@ -2619,15 +2638,48 @@ impl TimelineView {
         }
         if selected {
             let mut ring = colors.ring;
-            ring.a = if dragging { 0.72 } else { 0.55 };
+            ring.a = if dragging { 0.72 } else { 0.58 };
             ctx.encoder.draw_rect(rect.inset(-1.5, -1.5), ring, spacing.radius_sm + 1.5);
+        } else {
+            let border = match track_kind {
+                TimelineTrackKind::Video => colors.primary,
+                TimelineTrackKind::Audio => colors.media_audio,
+            };
+            ctx.encoder.draw_rect(
+                rect.inset(-1.0, -1.0),
+                color_with_alpha(border, if hovered { 0.58 } else { 0.34 }),
+                spacing.radius_sm + 1.0,
+            );
         }
         ctx.encoder.draw_rect(rect, fill, spacing.radius_sm);
+        if selected || hovered {
+            let handle = color_with_alpha(colors.foreground, if hovered { 0.35 } else { 0.22 });
+            ctx.encoder.draw_rect(
+                Rect::new(
+                    rect.x + 2.0,
+                    rect.y + 4.0,
+                    2.0,
+                    (rect.height - 8.0).max(4.0),
+                ),
+                handle,
+                1.0,
+            );
+            ctx.encoder.draw_rect(
+                Rect::new(
+                    rect.x + rect.width - 4.0,
+                    rect.y + 4.0,
+                    2.0,
+                    (rect.height - 8.0).max(4.0),
+                ),
+                handle,
+                1.0,
+            );
+        }
         ctx.push_clip(rect.inset(6.0, 2.0));
         ctx.encoder.draw_text_box(
             &clip.label,
-            ctx.theme.typography.body.font_size,
-            snap_point(Point::new(rect.x + 8.0, rect.y + 10.0)),
+            ctx.theme.typography.small.font_size,
+            snap_point(Point::new(rect.x + 8.0, rect.y + 9.0)),
             (rect.width - 16.0).max(0.0),
             colors.foreground,
         );
@@ -2643,7 +2695,7 @@ impl TimelineView {
         ctx.encoder.draw_line(
             Point::new(x, self.ruler_rect.y),
             Point::new(x, self.body_rect.y + self.body_rect.height),
-            2.0,
+            1.0,
             colors.timeline_playhead,
         );
         let marker = [
@@ -2669,16 +2721,16 @@ impl TimelineView {
                 thumb = Rect::new(thumb.x, thumb.y - 1.0, thumb.width, thumb.height + 2.0);
             }
             let mut track_color = colors.scrollbar_thumb;
-            track_color.a *= if active { 0.22 } else { 0.12 };
+            track_color.a *= if active { 0.06 } else { 0.035 };
             ctx.encoder.draw_rect(track, track_color, radius);
 
             let mut thumb_color = colors.scrollbar_thumb;
             thumb_color.a *= if dragging {
-                1.0
+                0.45
             } else if active {
-                0.82
+                0.34
             } else {
-                0.62
+                0.22
             };
             ctx.encoder.draw_rect(thumb, thumb_color, radius);
         }
@@ -2695,16 +2747,16 @@ impl TimelineView {
                 thumb = Rect::new(thumb.x - 1.0, thumb.y, thumb.width + 2.0, thumb.height);
             }
             let mut track_color = colors.scrollbar_thumb;
-            track_color.a *= if active { 0.22 } else { 0.12 };
+            track_color.a *= if active { 0.06 } else { 0.035 };
             ctx.encoder.draw_rect(track, track_color, radius);
 
             let mut thumb_color = colors.scrollbar_thumb;
             thumb_color.a *= if dragging {
-                1.0
+                0.45
             } else if active {
-                0.82
+                0.34
             } else {
-                0.62
+                0.22
             };
             ctx.encoder.draw_rect(thumb, thumb_color, radius);
         }
@@ -3110,7 +3162,7 @@ impl Widget for TimelineView {
 
     fn paint(&self, ctx: &mut PaintContext) {
         let colors = &ctx.theme.colors;
-        ctx.encoder.draw_rect(self.bounds, colors.background, 0.0);
+        ctx.encoder.draw_rect(self.bounds, colors.card, 0.0);
         if self.focus_visible {
             let mut ring = colors.ring;
             ring.a = 0.38;
@@ -5842,6 +5894,117 @@ mod tests {
                 payload: Default::default(),
             }]
         );
+    }
+
+    #[test]
+    fn disabling_timeline_cancels_pending_in_out_drag() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut view =
+            timeline().with_in_out_points(10, Some(30)).on_in_out_point(|point, frame| {
+                Action::Custom {
+                    namespace: "timeline.range".into(),
+                    name: format!("{point:?}:{frame}"),
+                    payload: Default::default(),
+                }
+            });
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            view.event(
+                &UiEvent::MouseDown {
+                    position: Point::new(136.0, 12.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert!(view.in_out_drag.is_some());
+
+        view.set_enabled(false);
+        assert!(view.in_out_drag.is_none());
+
+        view.set_enabled(true);
+        assert_eq!(
+            view.event(
+                &UiEvent::MouseUp {
+                    position: Point::new(176.0, 12.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn disabling_timeline_cancels_pending_playhead_drag() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut view = timeline().on_seek(|frame| Action::Custom {
+            namespace: "timeline.seek".into(),
+            name: frame.to_string(),
+            payload: Default::default(),
+        });
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            view.event(
+                &UiEvent::MouseDown {
+                    position: Point::new(136.0, 12.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert!(view.playhead_dragging);
+        actions.borrow_mut().clear();
+
+        view.set_enabled(false);
+        assert!(!view.playhead_dragging);
+
+        view.set_enabled(true);
+        assert_eq!(
+            view.event(
+                &UiEvent::MouseMove {
+                    position: Point::new(176.0, 12.0),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+        assert!(actions.borrow().is_empty());
     }
 
     #[test]

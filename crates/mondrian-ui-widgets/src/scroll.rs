@@ -682,16 +682,16 @@ impl Widget for ScrollView {
             }
             let track = self.vertical_scrollbar_track_rect();
             let mut track_color = ctx.theme.colors.scrollbar_thumb;
-            track_color.a *= if active { 0.22 } else { 0.12 };
+            track_color.a *= if active { 0.06 } else { 0.03 };
             ctx.encoder.draw_rect(track, track_color, ctx.theme.spacing.radius_full);
 
             let mut thumb_color = ctx.theme.colors.scrollbar_thumb;
             thumb_color.a *= if dragging {
-                1.0
+                0.42
             } else if hovered {
-                0.82
+                0.30
             } else {
-                0.62
+                0.18
             };
             ctx.encoder.draw_rect(sb_rect, thumb_color, ctx.theme.spacing.radius_full);
         }
@@ -710,16 +710,16 @@ impl Widget for ScrollView {
             }
             let track = self.horizontal_scrollbar_track_rect();
             let mut track_color = ctx.theme.colors.scrollbar_thumb;
-            track_color.a *= if active { 0.22 } else { 0.12 };
+            track_color.a *= if active { 0.06 } else { 0.03 };
             ctx.encoder.draw_rect(track, track_color, ctx.theme.spacing.radius_full);
 
             let mut thumb_color = ctx.theme.colors.scrollbar_thumb;
             thumb_color.a *= if dragging {
-                1.0
+                0.42
             } else if hovered {
-                0.82
+                0.30
             } else {
-                0.62
+                0.18
             };
             ctx.encoder.draw_rect(sb_rect, thumb_color, ctx.theme.spacing.radius_full);
         }

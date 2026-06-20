@@ -46,7 +46,7 @@ impl DockPanel {
             content_factory: Box::new(content_factory),
             bounds: Rect::ZERO,
             last_active: initial_active,
-            tab_height: 26.0,
+            tab_height: 32.0,
         }
     }
 

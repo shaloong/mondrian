@@ -436,7 +436,10 @@ impl AssetGrid {
                     .filter(|index| self.visible_indices.contains(index)),
             );
         }
-        if let Some(primary) = primary.filter(|index| self.is_enabled_index(*index)) {
+        if let Some(primary) = primary
+            .filter(|index| self.is_enabled_index(*index))
+            .filter(|index| self.visible_indices.contains(index))
+        {
             selected_indices.insert(primary);
             self.selected = Some(primary);
         } else {
@@ -596,6 +599,13 @@ impl AssetGrid {
         self.selection_anchor = self
             .selection_anchor
             .filter(|index| self.is_enabled_index(*index) && self.visible_indices.contains(index));
+        if self
+            .rename_editor
+            .as_ref()
+            .is_some_and(|editor| !self.can_rename_index(editor.index))
+        {
+            self.rename_editor = None;
+        }
         self.hovered = None;
         self.drag_candidate = None;
         self.last_click = None;
@@ -1422,7 +1432,6 @@ impl Widget for AssetGrid {
                         if items.iter().any(MenuItem::is_activatable) {
                             if !self.selected_indices.contains(&index) {
                                 self.set_selected(Some(index));
-                                self.dispatch_select(index, ctx);
                             }
                             if self.open_context_menu(*position, items, Some(index), ctx) {
                                 return EventResult::Handled;
@@ -2122,6 +2131,60 @@ mod tests {
     }
 
     #[test]
+    fn inline_rename_filter_change_cancels_hidden_editor_without_dispatch() {
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![
+                item("clip-a", "Camera A").renamable(true),
+                item("music", "Music Bed"),
+            ],
+        )
+        .on_rename(|_, _, name| Action::OpenProject(PathBuf::from(name)));
+        grid.layout(Rect::new(0.0, 0.0, 360.0, 220.0));
+        grid.event(&UiEvent::FocusGained, &mut ctx);
+        grid.event(
+            &UiEvent::MouseDown {
+                position: grid.card_rect_for_index(0).expect("card").center(),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::F2, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            grid.event(&UiEvent::TextInput("Hidden rename".into()), &mut ctx),
+            EventResult::Handled
+        );
+        assert_eq!(grid.child_count(), 1);
+
+        grid.set_filter_query("music");
+
+        assert_eq!(grid.filter_query(), "music");
+        assert_eq!(grid.child_count(), 0);
+        assert!(grid.rename_editor.is_none());
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
     fn inline_rename_commit_returns_focus_to_grid_and_disables_ime() {
         let actions = RefCell::new(Vec::<Action>::new());
         let dispatch = |action| actions.borrow_mut().push(action);
@@ -2501,6 +2564,29 @@ mod tests {
 
         assert_eq!(rebuilt.filter_query(), "camera");
         assert_eq!(rebuilt.selected_index(), Some(0));
+    }
+
+    #[test]
+    fn restore_state_rejects_hidden_fallback_selection_index() {
+        let state = AssetGridState {
+            filter_query: "camera".to_owned(),
+            selected_item_id: Some("missing".to_owned()),
+            selected_index: Some(1),
+            selected_item_ids: Vec::new(),
+            selected_indices: vec![1],
+        };
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![item("clip-a", "Camera A"), item("music", "Music Bed")],
+        )
+        .with_filter("Search assets");
+        grid.layout(Rect::new(0.0, 0.0, 360.0, 220.0));
+
+        grid.restore_state(&state);
+
+        assert_eq!(grid.filter_query(), "camera");
+        assert_eq!(grid.selected_index(), None);
+        assert!(grid.selected_indices().is_empty());
     }
 
     #[test]
@@ -3238,6 +3324,60 @@ mod tests {
             EventResult::Handled
         );
 
+        assert_eq!(actions.borrow().as_slice(), &[card_action]);
+    }
+
+    #[test]
+    fn right_click_card_context_menu_does_not_dispatch_select_before_popup_action() {
+        let select_action = Action::SaveProject;
+        let card_action = Action::ImportMedia(vec![PathBuf::from("E:/media/delete.mov")]);
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![
+                item("asset-a", "Asset A")
+                    .with_select_action(select_action)
+                    .with_context_menu(vec![MenuItem::new("Delete asset", card_action.clone())]),
+                item("asset-b", "Asset B"),
+            ],
+        );
+        grid.layout(Rect::new(0.0, 0.0, 420.0, 260.0));
+        let card = grid.card_rect_for_index(0).expect("card");
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            grid.event(
+                &UiEvent::MouseDown {
+                    position: card.center(),
+                    button: MouseButton::Right,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(grid.selected_index(), Some(0));
+        assert!(actions.borrow().is_empty());
+
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
         assert_eq!(actions.borrow().as_slice(), &[card_action]);
     }
 

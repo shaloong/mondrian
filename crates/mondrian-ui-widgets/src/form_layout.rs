@@ -28,8 +28,8 @@ impl Default for FormRowOptions {
             label_width: 92.0,
             control_gap: 8.0,
             label_height: 16.0,
-            compact_label_y_offset: 4.0,
-            tall_label_y_offset: 20.0,
+            compact_label_y_offset: 0.0,
+            tall_label_y_offset: 4.0,
             tall_row_multiplier: 1.5,
         }
     }
@@ -100,7 +100,9 @@ impl FormLayout {
         let label_y = if row_height > default_row_height * self.options.tall_row_multiplier {
             row_y + self.options.tall_label_y_offset
         } else {
-            row_y + row_height * 0.5 + self.options.compact_label_y_offset
+            row_y
+                + (row_height - self.options.label_height.max(1.0)).max(0.0) * 0.5
+                + self.options.compact_label_y_offset
         };
         FormRowRects {
             row,
@@ -137,7 +139,7 @@ mod tests {
         let rects = layout.row_rects(Rect::new(10.0, 20.0, 300.0, 200.0), 40.0, 34.0, 34.0, 24.0);
 
         assert_eq!(rects.row, Rect::new(10.0, 40.0, 300.0, 34.0));
-        assert_eq!(rects.label, Rect::new(10.0, 61.0, 92.0, 16.0));
+        assert_eq!(rects.label, Rect::new(10.0, 49.0, 92.0, 16.0));
         assert_eq!(rects.control, Rect::new(110.0, 45.0, 200.0, 24.0));
     }
 
@@ -159,7 +161,7 @@ mod tests {
 
         let rects = layout.row_rects(Rect::new(0.0, 0.0, 240.0, 140.0), 12.0, 118.0, 34.0, 200.0);
 
-        assert_eq!(rects.label.y, 32.0);
+        assert_eq!(rects.label.y, 16.0);
         assert_eq!(rects.control, Rect::new(100.0, 12.0, 140.0, 118.0));
     }
 

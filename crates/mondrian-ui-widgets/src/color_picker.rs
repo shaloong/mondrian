@@ -165,6 +165,8 @@ pub struct ColorPicker {
     eyedropper_icon: Option<VectorIcon>,
     focused: bool,
     focus_visible: bool,
+    pending_capture_release: bool,
+    pending_eyedropper_cleanup: bool,
     enabled: bool,
     on_change: Option<Box<ColorChangeAction>>,
 }
@@ -209,6 +211,8 @@ impl ColorPicker {
             eyedropper_icon: None,
             focused: false,
             focus_visible: false,
+            pending_capture_release: false,
+            pending_eyedropper_cleanup: false,
             enabled: true,
             on_change: None,
         };
@@ -252,6 +256,11 @@ impl ColorPicker {
 
     /// Set whether the picker accepts pointer, keyboard, IME, eyedropper, and focus input.
     pub fn set_enabled(&mut self, enabled: bool) {
+        let had_capture_interaction = self.drag_target.is_some()
+            || self.eyedropper_pressed
+            || self.eyedropper_active
+            || self.field_pointer_captured.is_some();
+        let had_eyedropper = self.eyedropper_active;
         self.enabled = enabled;
         for field in &mut self.fields {
             field.set_enabled(enabled);
@@ -263,6 +272,9 @@ impl ColorPicker {
             self.mode_pressed = None;
             self.mode_hovered = None;
             self.eyedropper_hovered = false;
+            self.cancel_interaction();
+            self.pending_capture_release |= had_capture_interaction;
+            self.pending_eyedropper_cleanup |= had_eyedropper;
         }
     }
 
@@ -1148,6 +1160,15 @@ impl Widget for ColorPicker {
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if self.pending_capture_release {
+            ctx.release_pointer_capture(self.id);
+            self.pending_capture_release = false;
+        }
+        if self.pending_eyedropper_cleanup {
+            ctx.set_cursor(CursorRequest::Default);
+            ctx.set_eyedropper(false, None);
+            self.pending_eyedropper_cleanup = false;
+        }
         if !self.enabled {
             if self.eyedropper_active
                 || self.eyedropper_pressed
@@ -2022,6 +2043,41 @@ mod tests {
     }
 
     #[test]
+    fn disabling_and_reenabling_cancels_active_eyedropper() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut f = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut shortcut, &mut tooltip, &dispatch);
+        let mut picker = ColorPicker::new(Color::BLACK).on_change(color_action);
+        picker.layout(Rect::new(0.0, 0.0, PICKER_WIDTH, PICKER_HEIGHT));
+
+        picker.begin_eyedropper();
+        assert!(picker.is_eyedropper_active());
+
+        picker.set_enabled(false);
+        assert!(!picker.is_eyedropper_active());
+        picker.set_enabled(true);
+
+        assert_eq!(
+            picker.event(&UiEvent::EyedropperSample { color: Color::WHITE }, &mut ctx,),
+            EventResult::Ignored
+        );
+
+        assert_eq!(picker.color(), Color::BLACK);
+        assert!(actions.borrow().is_empty());
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Release(picker.id()))
+        );
+        assert_eq!(
+            ctx.requests.eyedropper,
+            Some(mondrian_ui_core::widget::EyedropperRequest { active: false, hotspot: None })
+        );
+    }
+
+    #[test]
     fn disabling_pressed_eyedropper_button_releases_capture_on_next_event() {
         let mut picker = ColorPicker::new(Color::BLACK);
         picker.layout(Rect::new(0.0, 0.0, PICKER_WIDTH, PICKER_HEIGHT));
@@ -2059,6 +2115,58 @@ mod tests {
         );
         assert!(!picker.eyedropper_pressed);
         assert!(!picker.is_eyedropper_active());
+    }
+
+    #[test]
+    fn disabling_and_reenabling_cancels_pending_color_drag() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut f = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut shortcut, &mut tooltip, &dispatch);
+        let original = Color::from_rgba8(51, 102, 153, 255);
+        let mut picker = ColorPicker::new(original).on_change(color_action);
+        picker.layout(Rect::new(0.0, 0.0, PICKER_WIDTH, PICKER_HEIGHT));
+        let alpha = picker.alpha_bar_rect();
+
+        assert_eq!(
+            picker.event(
+                &UiEvent::MouseDown {
+                    position: Point::new(alpha.x + alpha.width, alpha.center().y),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(picker.drag_target, Some(ColorDragTarget::Alpha));
+        assert_eq!(picker.color(), original);
+        assert!(actions.borrow().is_empty());
+        ctx.requests.pointer_capture = None;
+
+        picker.set_enabled(false);
+        assert_eq!(picker.drag_target, None);
+        picker.set_enabled(true);
+
+        assert_eq!(
+            picker.event(
+                &UiEvent::MouseMove {
+                    position: Point::new(alpha.x, alpha.center().y),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+
+        assert_eq!(picker.color(), original);
+        assert!(actions.borrow().is_empty());
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Release(picker.id()))
+        );
     }
 
     #[test]

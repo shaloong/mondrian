@@ -143,12 +143,16 @@ impl Widget for StatusBar {
         let padding = 10.0;
         let text_gap = 16.0;
         ctx.push_clip(self.bounds);
-        ctx.encoder.draw_rect(self.bounds, colors.card, 0.0);
+        ctx.encoder.draw_rect(self.bounds, colors.background, 0.0);
         ctx.encoder.draw_line(
             Point::new(self.bounds.x, self.bounds.y),
             Point::new(self.bounds.x + self.bounds.width, self.bounds.y),
             1.0,
-            colors.border,
+            {
+                let mut border = colors.border;
+                border.a *= 0.72;
+                border
+            },
         );
 
         let message_color = if self.model.is_error {
@@ -158,7 +162,7 @@ impl Widget for StatusBar {
         } else {
             colors.muted_foreground
         };
-        let text_y = self.bounds.y + 16.0;
+        let text_y = self.bounds.y + ((self.bounds.height - font_size) * 0.5).max(0.0);
 
         let content_width = (self.bounds.width - padding * 2.0).max(0.0);
         let context_text = if self.model.context.is_empty() {

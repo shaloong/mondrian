@@ -716,6 +716,16 @@ impl Widget for MenuBar {
         }
     }
 
+    fn paint_overlay(&self, ctx: &mut PaintContext) {
+        for menu in &self.menus {
+            menu.paint_overlay(ctx);
+        }
+    }
+
+    fn overlay_hit_test(&self, point: Point) -> bool {
+        self.menus.iter().any(|menu| menu.overlay_hit_test(point))
+    }
+
     fn hit_test(&self, point: Point) -> bool {
         self.bounds.contains(point)
     }
@@ -1491,6 +1501,33 @@ mod tests {
             }
             other => panic!("expected about action after menu switch, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn menu_bar_reports_open_dropdown_overlay() {
+        let mut menu = MenuBar::default();
+        menu.layout(Rect::new(0.0, 0.0, 720.0, MENU_BAR_HEIGHT));
+        let dispatched = Rc::new(RefCell::new(Vec::new()));
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let dispatch = {
+            let dispatched = Rc::clone(&dispatched);
+            move |action| dispatched.borrow_mut().push(action)
+        };
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let file_trigger = trigger_point(&menu, 0);
+        click_menu(&mut menu, &mut ctx, file_trigger);
+
+        assert!(menu.overlay_hit_test(Point::new(8.0, MENU_BAR_HEIGHT + 8.0)));
     }
 
     #[test]
