@@ -1039,13 +1039,19 @@ impl Widget for PanelList {
                 return EventResult::Handled;
             }
             UiEvent::FocusLost => {
+                let had_pointer_capture = self.drag_candidate.is_some() || self.scrollbar_dragging;
                 self.focused = false;
                 self.focus_visible = false;
                 self.drag_candidate = None;
+                self.scrollbar_dragging = false;
                 self.drop_hovered = false;
                 self.last_click = None;
                 if let Some(input) = &mut self.filter_input {
                     let _ = input.event(event, ctx);
+                }
+                if had_pointer_capture {
+                    ctx.release_pointer_capture(self.id);
+                    ctx.request_repaint();
                 }
                 return EventResult::Handled;
             }
@@ -1661,6 +1667,88 @@ mod tests {
     }
 
     #[test]
+    fn focus_lost_releases_drag_candidate_capture() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut list = PanelList::new("Assets", vec![drag_item(AssetId::new())]);
+        list.layout(Rect::new(0.0, 0.0, 240.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        {
+            let mut ctx = dispatching_ctx(
+                &mut focus,
+                &mut shortcut,
+                &mut tooltip,
+                &mut requests,
+                &dispatch,
+            );
+            list.event(
+                &UiEvent::MouseDown {
+                    position: Point::new(30.0, 74.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+        }
+        assert!(list.drag_candidate.is_some());
+        requests.pointer_capture = None;
+        requests.repaint = false;
+
+        {
+            let mut ctx = dispatching_ctx(
+                &mut focus,
+                &mut shortcut,
+                &mut tooltip,
+                &mut requests,
+                &dispatch,
+            );
+            assert_eq!(
+                list.event(&UiEvent::FocusLost, &mut ctx),
+                EventResult::Handled
+            );
+        }
+
+        assert!(list.drag_candidate.is_none());
+        assert_eq!(
+            requests.pointer_capture,
+            Some(PointerCaptureRequest::Release(list.id()))
+        );
+        assert!(requests.repaint);
+    }
+
+    #[test]
+    fn idle_focus_lost_does_not_release_pointer_capture() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut list = PanelList::new("Effects", sample_items());
+        list.layout(Rect::new(0.0, 0.0, 240.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            list.event(&UiEvent::FocusLost, &mut ctx),
+            EventResult::Handled
+        );
+
+        assert_eq!(ctx.requests.pointer_capture, None);
+        assert!(!ctx.requests.repaint);
+    }
+
+    #[test]
     fn disabled_item_consumes_click_without_selection_or_dispatch() {
         let actions = RefCell::new(Vec::new());
         let dispatch = |action| actions.borrow_mut().push(action);
@@ -1921,6 +2009,62 @@ mod tests {
             ctx.requests.pointer_capture,
             Some(PointerCaptureRequest::Release(list.id()))
         );
+    }
+
+    #[test]
+    fn focus_lost_releases_scrollbar_drag_capture() {
+        let items = (0..16).map(|index| PanelListItem::new(format!("Item {index}"))).collect();
+        let mut list = PanelList::new("Long", items);
+        list.layout(Rect::new(0.0, 0.0, 240.0, 150.0));
+        let thumb = list.scrollbar_thumb_rect().expect("overflowing list should have thumb");
+        let start = Point::new(thumb.x + 2.0, thumb.y + 2.0);
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let dispatch = |_| {};
+        {
+            let mut ctx = dispatching_ctx(
+                &mut focus,
+                &mut shortcut,
+                &mut tooltip,
+                &mut requests,
+                &dispatch,
+            );
+            list.event(
+                &UiEvent::MouseDown {
+                    position: start,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+        }
+        assert!(list.scrollbar_dragging);
+        requests.pointer_capture = None;
+        requests.repaint = false;
+
+        {
+            let mut ctx = dispatching_ctx(
+                &mut focus,
+                &mut shortcut,
+                &mut tooltip,
+                &mut requests,
+                &dispatch,
+            );
+            assert_eq!(
+                list.event(&UiEvent::FocusLost, &mut ctx),
+                EventResult::Handled
+            );
+        }
+
+        assert!(!list.scrollbar_dragging);
+        assert_eq!(
+            requests.pointer_capture,
+            Some(PointerCaptureRequest::Release(list.id()))
+        );
+        assert!(requests.repaint);
     }
 
     #[test]

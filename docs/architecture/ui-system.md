@@ -1027,7 +1027,9 @@ list-local row selection when one exists, and otherwise stays ignored so global
 `DeselectAll` can still clear editor selections. Pointer movement beyond the
 drag threshold asks the router to begin an internal drag; the router, not the
 source widget, owns `DragEnter` / `DragOver` / `DragLeave` / `Drop` delivery so
-pointer capture from the source cannot block target panels. Searchable list
+pointer capture from the source cannot block target panels. Focus loss cancels
+an active row drag candidate or internal scrollbar drag and releases the list's
+capture; idle lists must not release capture they do not own. Searchable list
 panels should use `PanelList::with_filter`, which exposes its filter `TextInput`
 as a real widget tree child so focus, IME, and keyboard routing stay
 framework-owned. Filtering
