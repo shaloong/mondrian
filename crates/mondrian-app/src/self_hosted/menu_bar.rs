@@ -5,6 +5,7 @@
 //! shell. Root layout, modal state, and native dialog resolution stay in
 //! `self_hosted::shell`.
 
+use mondrian_core::types::TrackId;
 use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
@@ -460,14 +461,11 @@ fn has_timeline_selection(state: &AppState) -> bool {
 }
 
 fn has_deletable_timeline_selection(state: &AppState) -> bool {
-    if !state.selection.selected_track_ids.is_empty() {
-        return true;
-    }
-    let Some(sequence) = state.sequence.as_ref() else {
-        return false;
-    };
-    !state.selection.selected_clips.is_empty()
-        && state.selection.selected_clips.iter().all(|selection| {
+    if !state.selection.selected_clips.is_empty() {
+        let Some(sequence) = state.sequence.as_ref() else {
+            return false;
+        };
+        return state.selection.selected_clips.iter().all(|selection| {
             let tracks = if selection.is_video_track {
                 &sequence.video_tracks
             } else {
@@ -477,7 +475,40 @@ fn has_deletable_timeline_selection(state: &AppState) -> bool {
                 .iter()
                 .find(|track| track.id == selection.track_id)
                 .is_some_and(|track| !track.is_locked)
-        })
+        });
+    }
+
+    selected_tracks_are_deletable(state)
+}
+
+fn selected_tracks_are_deletable(state: &AppState) -> bool {
+    if state.selection.selected_track_ids.is_empty() {
+        return false;
+    }
+    let Some(sequence) = state.sequence.as_ref() else {
+        return false;
+    };
+
+    let mut targets = Vec::<TrackId>::new();
+    let mut video_targets = 0usize;
+    let mut audio_targets = 0usize;
+    for track_id in &state.selection.selected_track_ids {
+        if targets.contains(track_id) {
+            continue;
+        }
+        targets.push(*track_id);
+
+        if sequence.video_tracks.iter().any(|track| track.id == *track_id) {
+            video_targets += 1;
+        } else if sequence.audio_tracks.iter().any(|track| track.id == *track_id) {
+            audio_targets += 1;
+        } else {
+            return false;
+        }
+    }
+
+    sequence.video_tracks.len().saturating_sub(video_targets) >= 1
+        && sequence.audio_tracks.len().saturating_sub(audio_targets) >= 1
 }
 
 fn has_any_app_selection(state: &AppState) -> bool {
@@ -1307,6 +1338,62 @@ mod tests {
         assert!(!menu_item(&menu_items, "Edit", "Duplicate").enabled);
         assert!(!menu_item(&menu_items, "Edit", "Delete Selection").enabled);
         assert!(!menu_item(&menu_items, "Edit", "Ripple Delete").enabled);
+    }
+
+    #[test]
+    fn app_state_menu_items_disable_delete_for_stale_selected_track() {
+        let mut state = state_with_selected_clip();
+        state.selection.selected_clips.clear();
+        state.selection.selected_track_ids = vec![TrackId::new()];
+
+        let menu_items = default_menu_items_for_app_state(&state);
+
+        assert!(!app_state_action_enabled(&Action::DeleteSelection, &state));
+        assert!(!app_state_action_enabled(
+            &Action::RippleDeleteSelection,
+            &state
+        ));
+        assert!(!menu_item(&menu_items, "Edit", "Delete Selection").enabled);
+        assert!(!menu_item(&menu_items, "Edit", "Ripple Delete").enabled);
+    }
+
+    #[test]
+    fn app_state_menu_items_disable_delete_for_last_track_targets() {
+        let mut state = AppState::new();
+        let sequence = Sequence::new("single-track");
+        let video_track_ids =
+            sequence.video_tracks.iter().map(|track| track.id).collect::<Vec<_>>();
+        state.sequence = Some(sequence);
+        state.selection.selected_track_ids = video_track_ids;
+
+        let menu_items = default_menu_items_for_app_state(&state);
+
+        assert!(!app_state_action_enabled(&Action::DeleteSelection, &state));
+        assert!(!app_state_action_enabled(
+            &Action::RippleDeleteSelection,
+            &state
+        ));
+        assert!(!menu_item(&menu_items, "Edit", "Delete Selection").enabled);
+        assert!(!menu_item(&menu_items, "Edit", "Ripple Delete").enabled);
+    }
+
+    #[test]
+    fn app_state_menu_items_enable_delete_for_removable_selected_track() {
+        let mut state = AppState::new();
+        let mut sequence = Sequence::new("multi-track");
+        let removable_track_id = sequence.add_video_track();
+        state.sequence = Some(sequence);
+        state.selection.selected_track_ids = vec![removable_track_id];
+
+        let menu_items = default_menu_items_for_app_state(&state);
+
+        assert!(app_state_action_enabled(&Action::DeleteSelection, &state));
+        assert!(app_state_action_enabled(
+            &Action::RippleDeleteSelection,
+            &state
+        ));
+        assert!(menu_item(&menu_items, "Edit", "Delete Selection").enabled);
+        assert!(menu_item(&menu_items, "Edit", "Ripple Delete").enabled);
     }
 
     #[test]

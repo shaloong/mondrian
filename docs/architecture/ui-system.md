@@ -518,6 +518,11 @@ Shortcut-dispatched actions still pass through the self-hosted host's
 keeps keyboard shortcuts and disabled menu rows semantically aligned: an
 unavailable Import, Save, Undo, or Redo command is ignored before native dialogs
 or app mutations can start.
+Timeline edit gates must mirror the action handler's authoritative target
+validation instead of checking only whether a selection vector is non-empty. For
+example, Delete and Ripple Delete are available for selected clips only when all
+target tracks are unlocked, and for selected tracks only when every selected id
+still exists and at least one video and one audio track remain after removal.
 Shortcut resolution receives a `ShortcutContext` from the router focus state and
 must search scopes in a fixed order: focused widget, focused panel, workspace,
 then global. Same-scope duplicate registrations replace the older binding so
