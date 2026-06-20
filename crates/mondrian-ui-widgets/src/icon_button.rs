@@ -85,6 +85,13 @@ impl IconButton {
             (ctx.dispatch)(action.clone());
         }
     }
+
+    fn clear_visual_state(&mut self) -> bool {
+        let changed = self.state != ButtonState::Normal || self.focus_visible;
+        self.state = ButtonState::Normal;
+        self.focus_visible = false;
+        changed
+    }
 }
 
 impl Widget for IconButton {
@@ -102,8 +109,9 @@ impl Widget for IconButton {
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
         if !self.enabled {
-            self.state = ButtonState::Normal;
-            self.focus_visible = false;
+            if self.clear_visual_state() {
+                ctx.request_repaint();
+            }
             return EventResult::Ignored;
         }
 
@@ -113,6 +121,7 @@ impl Widget for IconButton {
             {
                 self.state = ButtonState::Pressed;
                 self.focus_visible = false;
+                ctx.request_repaint();
                 EventResult::Handled
             }
             UiEvent::MouseUp { position, button: MouseButton::Left, .. } => {
@@ -121,6 +130,7 @@ impl Widget for IconButton {
                         self.activate(ctx);
                     }
                     self.state = ButtonState::Normal;
+                    ctx.request_repaint();
                     return EventResult::Handled;
                 }
                 EventResult::Ignored
@@ -144,6 +154,7 @@ impl Widget for IconButton {
                     ctx.tooltip.hide();
                 }
                 if was_hovered != (self.state == ButtonState::Hovered) {
+                    ctx.request_repaint();
                     EventResult::Handled
                 } else {
                     EventResult::Ignored
@@ -158,13 +169,16 @@ impl Widget for IconButton {
                         Point::new(self.bounds.x, self.bounds.y + self.bounds.height),
                     );
                 }
+                ctx.request_repaint();
                 EventResult::Handled
             }
             UiEvent::FocusLost => {
-                self.focus_visible = false;
-                self.state = ButtonState::Normal;
+                let changed = self.clear_visual_state();
                 if self.tooltip.is_some() {
                     ctx.tooltip.hide();
+                }
+                if changed {
+                    ctx.request_repaint();
                 }
                 EventResult::Handled
             }
@@ -172,12 +186,14 @@ impl Widget for IconButton {
                 if *modifiers == Modifiers::none() =>
             {
                 self.state = ButtonState::Pressed;
+                ctx.request_repaint();
                 EventResult::Handled
             }
             UiEvent::KeyUp { key: KeyCode::Enter | KeyCode::Space, .. } => {
                 if self.state == ButtonState::Pressed {
                     self.activate(ctx);
                     self.state = ButtonState::Hovered;
+                    ctx.request_repaint();
                     return EventResult::Handled;
                 }
                 EventResult::Ignored
@@ -329,6 +345,8 @@ mod tests {
             ),
             EventResult::Handled
         );
+        assert!(ctx.requests.repaint);
+        ctx.requests.repaint = false;
         assert_eq!(
             button.event(
                 &UiEvent::MouseUp {
@@ -341,6 +359,7 @@ mod tests {
             EventResult::Handled
         );
 
+        assert!(ctx.requests.repaint);
         assert_eq!(actions.borrow().as_slice(), &[Action::Play]);
     }
 
@@ -397,6 +416,7 @@ mod tests {
         );
 
         assert_eq!(button.state(), ButtonState::Hovered);
+        assert!(ctx.requests.repaint);
         assert_eq!(actions.borrow().as_slice(), &[Action::Play]);
     }
 
@@ -428,6 +448,67 @@ mod tests {
         );
         assert!(actions.borrow().is_empty());
         assert!(!button.can_focus());
+    }
+
+    #[test]
+    fn disabled_icon_button_clears_stale_visual_state_and_repaints() {
+        let mut button = IconButton::new(test_icon()).on_click(Action::Play);
+        button.layout(Rect::new(0.0, 0.0, 28.0, 28.0));
+        button.state = ButtonState::Pressed;
+        button.focus_visible = true;
+        button.enabled = false;
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        assert_eq!(
+            button.event(
+                &UiEvent::MouseMove {
+                    position: Point::new(12.0, 12.0),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+
+        assert_eq!(button.state(), ButtonState::Normal);
+        assert!(!button.focus_visible);
+        assert!(actions.borrow().is_empty());
+        assert!(ctx.requests.repaint);
+    }
+
+    #[test]
+    fn icon_button_focus_state_changes_request_repaint() {
+        let mut button = IconButton::new(test_icon()).with_tooltip("Remove effect");
+        button.layout(Rect::new(10.0, 20.0, 28.0, 28.0));
+        let dispatch = |_| {};
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = TooltipRecorder::default();
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        assert_eq!(
+            button.event(&UiEvent::FocusGained, &mut ctx),
+            EventResult::Handled
+        );
+        assert_eq!(button.state(), ButtonState::Hovered);
+        assert!(button.focus_visible);
+        assert!(ctx.tooltip.current().is_some());
+        assert!(ctx.requests.repaint);
+
+        ctx.requests.repaint = false;
+        assert_eq!(
+            button.event(&UiEvent::FocusLost, &mut ctx),
+            EventResult::Handled
+        );
+        assert_eq!(button.state(), ButtonState::Normal);
+        assert!(!button.focus_visible);
+        assert!(ctx.tooltip.current().is_none());
+        assert!(ctx.requests.repaint);
     }
 
     #[test]
@@ -468,7 +549,9 @@ mod tests {
         let current = ctx.tooltip.current().expect("tooltip requested");
         assert_eq!(current.text, "Remove effect");
         assert_eq!(current.position, Point::new(10.0, 48.0));
+        assert!(ctx.requests.repaint);
 
+        ctx.requests.repaint = false;
         assert_eq!(
             button.event(
                 &UiEvent::MouseMove {
@@ -480,6 +563,7 @@ mod tests {
             EventResult::Handled
         );
         assert!(ctx.tooltip.current().is_none());
+        assert!(ctx.requests.repaint);
     }
 
     #[test]

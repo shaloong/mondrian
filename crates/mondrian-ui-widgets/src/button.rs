@@ -90,6 +90,13 @@ impl Button {
             (ctx.dispatch)(action.clone());
         }
     }
+
+    fn clear_visual_state(&mut self) -> bool {
+        let changed = self.state != ButtonState::Normal || self.focus_visible;
+        self.state = ButtonState::Normal;
+        self.focus_visible = false;
+        changed
+    }
 }
 
 impl Widget for Button {
@@ -118,8 +125,9 @@ impl Widget for Button {
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
         if !self.enabled {
-            self.state = ButtonState::Normal;
-            self.focus_visible = false;
+            if self.clear_visual_state() {
+                ctx.request_repaint();
+            }
             return EventResult::Ignored;
         }
         match event {
@@ -128,6 +136,7 @@ impl Widget for Button {
             {
                 self.state = ButtonState::Pressed;
                 self.focus_visible = false;
+                ctx.request_repaint();
                 EventResult::Handled
             }
             UiEvent::MouseUp { position, button: MouseButton::Left, .. } => {
@@ -136,6 +145,7 @@ impl Widget for Button {
                         self.activate(ctx);
                     }
                     self.state = ButtonState::Normal;
+                    ctx.request_repaint();
                     return EventResult::Handled;
                 }
                 EventResult::Ignored
@@ -145,19 +155,23 @@ impl Widget for Button {
                 let now_inside = self.bounds.contains(*position);
                 if now_inside && !was_hovered {
                     self.state = ButtonState::Hovered;
+                    ctx.request_repaint();
                 } else if !now_inside && was_hovered {
                     self.state = ButtonState::Normal;
+                    ctx.request_repaint();
                 }
                 EventResult::Ignored
             }
             UiEvent::FocusGained => {
                 self.state = ButtonState::Hovered;
                 self.focus_visible = true;
+                ctx.request_repaint();
                 EventResult::Handled
             }
             UiEvent::FocusLost => {
-                self.state = ButtonState::Normal;
-                self.focus_visible = false;
+                if self.clear_visual_state() {
+                    ctx.request_repaint();
+                }
                 EventResult::Handled
             }
             UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, modifiers }
@@ -165,11 +179,13 @@ impl Widget for Button {
             {
                 self.state = ButtonState::Pressed;
                 self.activate(ctx);
+                ctx.request_repaint();
                 EventResult::Handled
             }
             UiEvent::KeyUp { key: KeyCode::Enter | KeyCode::Space, .. } => {
                 if self.state == ButtonState::Pressed {
                     self.state = ButtonState::Hovered;
+                    ctx.request_repaint();
                     return EventResult::Handled;
                 }
                 EventResult::Ignored
@@ -441,6 +457,7 @@ mod tests {
             &mut ctx,
         );
         assert_eq!(b.state(), ButtonState::Pressed);
+        assert!(ctx.requests.repaint);
     }
 
     #[test]
@@ -489,6 +506,7 @@ mod tests {
             },
             &mut ctx,
         );
+        ctx.requests.repaint = false;
         b.event(
             &UiEvent::MouseUp {
                 position: Point::new(50.0, 15.0),
@@ -499,6 +517,7 @@ mod tests {
         );
 
         assert_eq!(b.state(), ButtonState::Normal);
+        assert!(ctx.requests.repaint);
         let actions = cell.into_inner();
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0], Action::Play);
@@ -530,6 +549,32 @@ mod tests {
         assert_eq!(b.state(), ButtonState::Normal);
         assert!(!b.can_focus());
         assert!(cell.into_inner().is_empty());
+    }
+
+    #[test]
+    fn disabled_button_clears_stale_visual_state_and_repaints() {
+        let mut b = Button::new("OK");
+        b.layout(Rect::new(0.0, 0.0, 100.0, 30.0));
+        b.state = ButtonState::Pressed;
+        b.focus_visible = true;
+        b.enabled = false;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
+
+        let result = b.event(
+            &UiEvent::MouseMove {
+                position: Point::new(50.0, 15.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(b.state(), ButtonState::Normal);
+        assert!(!b.focus_visible);
+        assert!(ctx.requests.repaint);
     }
 
     #[test]
@@ -579,6 +624,8 @@ mod tests {
 
         b.event(&UiEvent::FocusGained, &mut ctx);
         assert_eq!(b.state(), ButtonState::Hovered);
+        assert!(b.focus_visible);
+        assert!(ctx.requests.repaint);
     }
 
     #[test]
@@ -596,6 +643,7 @@ mod tests {
 
         b.event(&UiEvent::FocusLost, &mut ctx);
         assert_eq!(b.state(), ButtonState::Normal);
+        assert!(ctx.requests.repaint);
     }
 
     #[test]
@@ -651,6 +699,8 @@ mod tests {
         assert_eq!(result, EventResult::Handled);
         assert_eq!(b.state(), ButtonState::Pressed);
         assert_eq!(cell.borrow().as_slice(), &[Action::Play]);
+        assert!(ctx.requests.repaint);
+        ctx.requests.repaint = false;
 
         let result = b.event(
             &UiEvent::KeyUp { key: KeyCode::Enter, modifiers: Modifiers::none() },
@@ -659,6 +709,7 @@ mod tests {
 
         assert_eq!(result, EventResult::Handled);
         assert_eq!(b.state(), ButtonState::Hovered);
+        assert!(ctx.requests.repaint);
     }
 
     #[test]
@@ -756,6 +807,7 @@ mod tests {
         );
         assert_eq!(r, EventResult::Ignored); // hover change does not stop propagation
         assert_eq!(b.state(), ButtonState::Hovered);
+        assert!(ctx.requests.repaint);
     }
 
     #[test]
@@ -777,6 +829,7 @@ mod tests {
         );
         assert_eq!(r, EventResult::Ignored);
         assert_eq!(b.state(), ButtonState::Normal);
+        assert!(ctx.requests.repaint);
     }
 
     #[test]
@@ -799,5 +852,6 @@ mod tests {
         // During press, MouseMove does NOT change state (guard: self.state != Pressed)
         assert_eq!(r, EventResult::Ignored);
         assert_eq!(b.state(), ButtonState::Pressed);
+        assert!(!ctx.requests.repaint);
     }
 }

@@ -678,6 +678,10 @@ enters the pressed visual state; modified chords stay ignored so application
 shortcuts remain centralized. The matching KeyUp clears an existing pressed
 state even if the modifier state changed before release. Keyboard events are
 routed by focus, so these handlers do not perform hit testing.
+Common controls must request repaint whenever hover, pressed, focus-visible, or
+disabled-state cleanup changes their visual state. Pointer hover updates may
+remain propagation-neutral, but the shell cannot rely on unrelated frame
+invalidations to show pressed feedback, focus rings, or stale-state cleanup.
 
 Color pickers reuse the shared color model conversions from `mondrian-core`
 (`Color`, `RgbaColor`, `HslColor`, `HsvColor`, and `CmykColor`). The widget
