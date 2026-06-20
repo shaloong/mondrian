@@ -14,6 +14,13 @@ const MIN_LINE_WIDTH_PX: f32 = 1.0;
 const MIN_LINE_DIRECTION_LEN: f32 = 0.001;
 const MIN_TRIANGLE_AREA_NDC: f32 = 1.0e-12;
 
+#[cfg(test)]
+pub(crate) const LINE_SHADER_AA_MIN_PX: f32 = 0.75;
+#[cfg(test)]
+pub(crate) const LINE_SHADER_AA_MAX_PX: f32 = 1.5;
+#[cfg(test)]
+pub(crate) const LINE_SHADER_AA_EDGE_SCALE: f32 = 0.5;
+
 /// 一个绘制批次 —— 一组顶点 + 可选的裁剪矩形
 #[derive(Debug, Clone)]
 pub struct DrawBatch {
@@ -640,8 +647,12 @@ fn line_axis_padding_px(radius: f32) -> f32 {
 
 #[cfg(test)]
 fn line_alpha_from_signed_distance(d: f32) -> f32 {
-    let aa = 0.75_f32;
-    smoothstep(aa * 0.5, -aa * 0.5, d)
+    let aa = LINE_SHADER_AA_MIN_PX;
+    smoothstep(
+        aa * LINE_SHADER_AA_EDGE_SCALE,
+        -aa * LINE_SHADER_AA_EDGE_SCALE,
+        d,
+    )
 }
 
 #[cfg(test)]

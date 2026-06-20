@@ -115,11 +115,34 @@ impl UiPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::batch::{LINE_SHADER_AA_EDGE_SCALE, LINE_SHADER_AA_MAX_PX, LINE_SHADER_AA_MIN_PX};
 
     #[test]
     fn ui_shaders_parse_and_validate() {
         validate_wgsl(UI_VERTEX_SHADER);
         validate_wgsl(UI_FRAGMENT_SHADER);
+    }
+
+    #[test]
+    fn line_shader_aa_contract_matches_cpu_coverage_tests() {
+        let fragment = UI_FRAGMENT_SHADER.split_whitespace().collect::<Vec<_>>().join(" ");
+        let clamp_expr = format!(
+            "clamp(fwidth(d), {}, {})",
+            LINE_SHADER_AA_MIN_PX, LINE_SHADER_AA_MAX_PX
+        );
+        let smoothstep_expr = format!(
+            "smoothstep(aa * {}, -aa * {}, d)",
+            LINE_SHADER_AA_EDGE_SCALE, LINE_SHADER_AA_EDGE_SCALE
+        );
+
+        assert!(
+            fragment.contains(&clamp_expr),
+            "fragment shader must keep line AA clamp {clamp_expr:?} in sync with CPU coverage tests"
+        );
+        assert!(
+            fragment.contains(&smoothstep_expr),
+            "fragment shader must keep line alpha edge scale {smoothstep_expr:?} in sync with CPU coverage tests"
+        );
     }
 
     fn validate_wgsl(source: &str) {

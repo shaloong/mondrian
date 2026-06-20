@@ -1816,7 +1816,11 @@ winding, local pixel-space SDF coordinates, a continuous centerline, and stable
 pixel-center coverage at subpixel offsets. Renderer tests should reconstruct
 line coverage from the final batch triangles, not only from ideal SDF-local
 coordinates, so pixel-to-NDC conversion, y-axis flipping, triangle winding, and
-local coordinate interpolation stay covered as one contract. Axis aligned
+local coordinate interpolation stay covered as one contract. The CPU coverage
+model and WGSL fragment shader AA clamp/edge-scale constants must be tested as
+the same contract; changing shader smoothstep parameters without updating the
+coverage model can leave tests green while reintroducing weak diagonal strokes.
+Axis aligned
 semantic separators may snap to pixel centers locally, but arbitrary angle
 lines should keep their authored subpixel endpoints so diagonal strokes do not
 shimmer or change slope during resize and scroll. Filled triangle-list
