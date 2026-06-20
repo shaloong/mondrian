@@ -507,9 +507,14 @@ impl Widget for TextInput {
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
         if !self.enabled {
-            if self.focused || self.mouse_down || !self.ime_preedit.is_empty() {
+            if self.focused
+                || self.mouse_down
+                || self.has_selection()
+                || !self.ime_preedit.is_empty()
+            {
                 ctx.release_pointer_capture(self.id);
                 ctx.set_ime_enabled(false, None);
+                ctx.request_repaint();
             }
             self.focused = false;
             self.mouse_down = false;
@@ -536,7 +541,12 @@ impl Widget for TextInput {
                     self.mouse_down = true;
                     self.ime_preedit.clear();
                     ctx.request_pointer_capture(self.id);
+                    ctx.request_repaint();
                 } else {
+                    let changed = self.focused
+                        || self.mouse_down
+                        || self.has_selection()
+                        || !self.ime_preedit.is_empty();
                     self.focused = false;
                     self.clear_selection();
                     self.mouse_down = false;
@@ -544,6 +554,9 @@ impl Widget for TextInput {
                     ctx.release_pointer_capture(self.id);
                     ctx.set_ime_enabled(false, None);
                     self.refresh_ime_area(ctx);
+                    if changed {
+                        ctx.request_repaint();
+                    }
                     return EventResult::Ignored;
                 }
                 self.focused = clicked;
@@ -559,6 +572,7 @@ impl Widget for TextInput {
                     let text_x = self.text_x_from_pointer(*position);
                     self.set_cursor_from_text_x(text_x, DEFAULT_FONT_SIZE);
                     self.refresh_ime_area(ctx);
+                    ctx.request_repaint();
                     EventResult::Handled
                 } else {
                     EventResult::Ignored
@@ -570,6 +584,7 @@ impl Widget for TextInput {
                 }
                 self.mouse_down = false;
                 ctx.release_pointer_capture(self.id);
+                ctx.request_repaint();
                 EventResult::Handled
             }
             // ── Focus ──────────────────────────────────────────────────
@@ -579,15 +594,23 @@ impl Widget for TextInput {
                 self.last_blink.set(Instant::now());
                 self.update_scroll(DEFAULT_FONT_SIZE);
                 self.refresh_ime_area(ctx);
+                ctx.request_repaint();
                 EventResult::Handled
             }
             UiEvent::FocusLost => {
+                let changed = self.focused
+                    || self.mouse_down
+                    || self.has_selection()
+                    || !self.ime_preedit.is_empty();
                 self.focused = false;
                 self.mouse_down = false;
                 self.clear_selection();
                 self.ime_preedit.clear();
                 ctx.release_pointer_capture(self.id);
                 ctx.set_ime_enabled(false, None);
+                if changed {
+                    ctx.request_repaint();
+                }
                 EventResult::Handled
             }
             // ── Keyboard ───────────────────────────────────────────────
@@ -757,6 +780,7 @@ impl Widget for TextInput {
                     if self.text != before_text {
                         self.dispatch_change(ctx);
                     }
+                    ctx.request_repaint();
                 }
                 result
             }
@@ -770,6 +794,7 @@ impl Widget for TextInput {
                 if self.text != before_text {
                     self.dispatch_change(ctx);
                 }
+                ctx.request_repaint();
                 EventResult::Handled
             }
             UiEvent::ImeCommit(ch) if self.focused => {
@@ -781,6 +806,7 @@ impl Widget for TextInput {
                 if self.text != before_text {
                     self.dispatch_change(ctx);
                 }
+                ctx.request_repaint();
                 EventResult::Handled
             }
             UiEvent::ImePreedit(preedit) if self.focused => {
@@ -1216,6 +1242,7 @@ mod tests {
         let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
         md(&mut ti, 100.0, 14.0, &mut ctx);
         assert!(ti.focused);
+        assert!(ctx.requests.repaint);
     }
 
     #[test]
@@ -1237,6 +1264,7 @@ mod tests {
         );
         assert!(!ti.focused);
         assert_eq!(result, EventResult::Ignored);
+        assert!(ctx.requests.repaint);
     }
 
     #[test]
@@ -1253,6 +1281,7 @@ mod tests {
         ti.event(&UiEvent::FocusLost, &mut ctx);
         assert!(!ti.focused);
         assert!(!ti.has_selection());
+        assert!(ctx.requests.repaint);
     }
 
     // ── Typing / IME ─────────────────────────────────────────────────────
@@ -1269,6 +1298,7 @@ mod tests {
         tp(&mut ti, "b", &mut ctx);
         assert_eq!(ti.text(), "ab");
         assert_eq!(ti.cursor, 2);
+        assert!(ctx.requests.repaint);
     }
 
     #[test]
@@ -1505,6 +1535,7 @@ mod tests {
             .expect("IME should receive a caret rect");
         let expected = ti.cursor_area(DEFAULT_FONT_SIZE);
         assert!((area.x - expected.x).abs() <= 0.1);
+        assert!(ctx.requests.repaint);
     }
 
     #[test]
@@ -1940,10 +1971,14 @@ mod tests {
         let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
         md(&mut ti, 8.0, 14.0, &mut ctx);
         assert!(!ti.has_selection());
+        ctx.requests.repaint = false;
         mm(&mut ti, 80.0, 14.0, &mut ctx);
         assert!(ti.has_selection());
+        assert!(ctx.requests.repaint);
+        ctx.requests.repaint = false;
         mu(&mut ti, &mut ctx);
         assert!(ti.has_selection());
+        assert!(ctx.requests.repaint);
     }
 
     #[test]

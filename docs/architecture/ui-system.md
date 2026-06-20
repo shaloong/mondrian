@@ -428,6 +428,9 @@ move before showing the I-beam.
 Text inputs use the same `mondrian-ui-text` measurement path as glyph rendering
 for cursor movement, selection geometry, hit testing, and horizontal scroll;
 approximate width estimates are not used for editable text internals.
+TextInput event handlers must request repaint whenever focus chrome, caret
+position, selection highlight, committed text, mouse-drag state, or IME preedit
+preview changes; these visuals must not depend on an unrelated shell redraw.
 IME is a platform side effect: text widgets emit `EventRequests::ime`, the
 event router exposes the latest request, and the app shell applies it to the
 native window (`set_ime_allowed` plus cursor area for winit). Pointer clicks
