@@ -1193,11 +1193,12 @@ dispatch changes and request repaint.
 Adapters that cannot target editor state should return `Action::NoOp` rather
 than inventing legacy custom action names; `AppState` dispatch treats NoOp as a
 first-class empty action without logging it as an unimplemented command.
-Focused sliders handle arrow/Page/Home/End value changes locally unless Ctrl or
-Meta is held; focused number inputs follow the same rule for Up/Down/Page
-nudging before delegating other keys to their inner `TextInput`. Shift keeps the
-large-step gesture and Alt keeps the fine-step gesture for unconstrained numeric
-controls.
+Focused sliders handle arrow/Page/Home/End value changes locally only for
+unmodified keys and Shift large-step variants. Focused number inputs follow the
+same rule for Up/Down/Page nudging before delegating other keys to their inner
+`TextInput`. Ctrl, Alt, and Meta chords stay ignored by value widgets so
+workspace shortcuts, input methods, and user-level tool hotkeys remain
+centralized outside the component.
 Self-hosted Inspector actions should use typed payloads for clip mutations.
 Scalar clip fields that need both coarse and precise editing, such as opacity,
 transform values, and trim frames, compose `Slider` plus `NumberInput` in the

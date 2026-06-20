@@ -172,9 +172,7 @@ impl Slider {
 
     fn keyboard_step(&self, modifiers: Modifiers) -> f32 {
         let base = self.step.unwrap_or_else(|| self.range().abs() / 100.0);
-        if modifiers.alt && self.step.is_none() {
-            self.range().abs() / 1000.0
-        } else if modifiers.shift {
+        if modifiers.shift {
             base * 10.0
         } else {
             base
@@ -257,7 +255,7 @@ impl Widget for Slider {
                 EventResult::Handled
             }
             UiEvent::KeyDown { key, modifiers } if self.focused => {
-                if modifiers.ctrl || modifiers.meta {
+                if modifiers.ctrl || modifiers.alt || modifiers.meta {
                     return EventResult::Ignored;
                 }
                 let step = self.keyboard_step(*modifiers);
@@ -752,27 +750,7 @@ mod tests {
     }
 
     #[test]
-    fn slider_keyboard_alt_uses_fine_step_without_configured_step() {
-        let mut s = Slider::new(50.0, 0.0, 100.0);
-        let mut ctx = event_ctx();
-
-        s.event(&UiEvent::FocusGained, &mut ctx);
-        assert_eq!(
-            s.event(
-                &UiEvent::KeyDown {
-                    key: KeyCode::Right,
-                    modifiers: Modifiers { alt: true, ..Default::default() },
-                },
-                &mut ctx,
-            ),
-            EventResult::Handled
-        );
-
-        assert_close(s.value(), 50.1);
-    }
-
-    #[test]
-    fn slider_keyboard_ignores_ctrl_and_meta_chords() {
+    fn slider_keyboard_ignores_ctrl_alt_and_meta_chords() {
         let mut s = Slider::new(50.0, 0.0, 100.0);
         let mut ctx = event_ctx();
 
@@ -780,8 +758,16 @@ mod tests {
         for (key, modifiers) in [
             (KeyCode::Right, Modifiers::ctrl()),
             (
+                KeyCode::Right,
+                Modifiers { alt: true, ..Default::default() },
+            ),
+            (
                 KeyCode::Home,
                 Modifiers { meta: true, ..Default::default() },
+            ),
+            (
+                KeyCode::End,
+                Modifiers { alt: true, shift: true, ..Default::default() },
             ),
             (
                 KeyCode::PageUp,
