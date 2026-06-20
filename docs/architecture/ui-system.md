@@ -1676,7 +1676,10 @@ sample boundary points across angle families and tiny sizes so roundness and
 numeric stability do not depend on only the cardinal points. Line commands use
 a dedicated capsule SDF with 1px analytic-AA padding and round caps, because a
 1px 45-degree stroke rendered as a bare quad can miss MSAA sample positions and
-appear broken or intermittent.
+appear broken or intermittent. The coverage quad expands by the stroke radius
+plus AA padding both perpendicular to the stroke and along the stroke axis, so
+wide, short, and zero-length lines do not have their round caps clipped by the
+conservative geometry before the fragment SDF runs.
 Together with 4x MSAA resolve and linear atlas sampling, this keeps circles,
 SVG raster icons, diagonals, and text glyph images smooth during resize and
 scroll. The renderer batch builder is the final primitive-safety boundary: it
@@ -1765,13 +1768,16 @@ warm-up redraw instead of adding entrypoint-specific repaint hacks.
 Line commands are expanded to coverage quads with front-facing triangle winding
 for every orientation, then shaded as capsule SDFs in local line coordinates.
 The quad is only the conservative draw bounds; the visible stroke edge, AA, and
-round caps come from the fragment shader. This matters for splitter handles and
-tool icons because the UI pipeline keeps back-face culling enabled and thin
-diagonal strokes must not depend on sample coverage alone.
+round caps come from the fragment shader. Its bounds must still include the
+round-cap radius on the line axis, not only AA padding, otherwise valid wide or
+zero-length strokes can be clipped before shading. This matters for splitter
+handles and tool icons because the UI pipeline keeps back-face culling enabled
+and thin diagonal strokes must not depend on sample coverage alone.
 Line regressions should be tested as angle families, not only as horizontal and
 vertical strokes: 1px lines at common diagonal angles must keep front-facing
-winding, local pixel-space SDF coordinates, and a continuous centerline. Axis
-aligned semantic separators may snap to pixel centers locally, but arbitrary
+winding, local pixel-space SDF coordinates, a continuous centerline, and stable
+pixel-center coverage at subpixel offsets. Axis aligned semantic separators may
+snap to pixel centers locally, but arbitrary
 angle lines should keep their authored subpixel endpoints so diagonal strokes
 do not shimmer or change slope during resize and scroll. Filled triangle-list
 commands are also normalized to front-facing winding after the pixel-to-NDC y

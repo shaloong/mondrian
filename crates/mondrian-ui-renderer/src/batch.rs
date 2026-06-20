@@ -372,13 +372,14 @@ fn line_vertices(
     let stroke_width = width.max(MIN_LINE_WIDTH_PX);
     let radius = stroke_width * 0.5;
     let half_geometry_width = radius + LINE_AA_PADDING_PX;
-    let geometry_len = len + LINE_AA_PADDING_PX * 2.0;
+    let axis_padding = half_geometry_width;
+    let geometry_len = len + axis_padding * 2.0;
     let geometry_width = half_geometry_width * 2.0;
 
-    let start_x = start.x - ux * LINE_AA_PADDING_PX;
-    let start_y = start.y - uy * LINE_AA_PADDING_PX;
-    let end_x = end.x + ux * LINE_AA_PADDING_PX;
-    let end_y = end.y + uy * LINE_AA_PADDING_PX;
+    let start_x = start.x - ux * axis_padding;
+    let start_y = start.y - uy * axis_padding;
+    let end_x = end.x + ux * axis_padding;
+    let end_y = end.y + uy * axis_padding;
     let pixel_points = [
         (
             Point::new(
@@ -620,9 +621,9 @@ fn point_to_ndc(point: Point, sx: f32, sy: f32, tx: f32, ty: f32) -> Point {
 #[cfg(test)]
 fn line_signed_distance_px(local: [f32; 2], rect_size: [f32; 2], radius: f32) -> f32 {
     let center_y = rect_size[1] * 0.5;
-    let padding = (center_y - radius).max(0.0);
-    let a = [padding, center_y];
-    let b = [(rect_size[0] - padding).max(padding), center_y];
+    let axis_padding = center_y;
+    let a = [axis_padding, center_y];
+    let b = [(rect_size[0] - axis_padding).max(axis_padding), center_y];
     let pa = [local[0] - a[0], local[1] - a[1]];
     let ba = [b[0] - a[0], b[1] - a[1]];
     let denom = (ba[0] * ba[0] + ba[1] * ba[1]).max(0.000001);
@@ -630,6 +631,48 @@ fn line_signed_distance_px(local: [f32; 2], rect_size: [f32; 2], radius: f32) ->
     let dx = pa[0] - ba[0] * h;
     let dy = pa[1] - ba[1] * h;
     (dx * dx + dy * dy).sqrt() - radius
+}
+
+#[cfg(test)]
+fn line_axis_padding_px(radius: f32) -> f32 {
+    radius + LINE_AA_PADDING_PX
+}
+
+#[cfg(test)]
+fn line_alpha_from_signed_distance(d: f32) -> f32 {
+    let aa = 0.75_f32;
+    smoothstep(aa * 0.5, -aa * 0.5, d)
+}
+
+#[cfg(test)]
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+#[cfg(test)]
+fn line_local_point(point: Point, start: Point, end: Point, radius: f32) -> ([f32; 2], [f32; 2]) {
+    let dx = end.x - start.x;
+    let dy = end.y - start.y;
+    let len = dx.hypot(dy);
+    let (ux, uy) = if len > MIN_LINE_DIRECTION_LEN {
+        (dx / len, dy / len)
+    } else {
+        (1.0, 0.0)
+    };
+    let nx = -uy;
+    let ny = ux;
+    let axis_padding = line_axis_padding_px(radius);
+    let origin = Point::new(
+        start.x - ux * axis_padding - nx * axis_padding,
+        start.y - uy * axis_padding - ny * axis_padding,
+    );
+    let rel_x = point.x - origin.x;
+    let rel_y = point.y - origin.y;
+    (
+        [rel_x * ux + rel_y * uy, rel_x * nx + rel_y * ny],
+        [len + axis_padding * 2.0, axis_padding * 2.0],
+    )
 }
 
 #[cfg(test)]
@@ -823,11 +866,47 @@ mod tests {
     #[test]
     fn analytic_line_sdf_keeps_45_degree_centerline_continuous() {
         let radius = 0.5;
-        let rect_size = [48.0_f32.hypot(48.0) + LINE_AA_PADDING_PX * 2.0, 3.0];
+        let axis_padding = line_axis_padding_px(radius);
+        let rect_size = [48.0_f32.hypot(48.0) + axis_padding * 2.0, 3.0];
         for step in 0..=48 {
-            let local_x = LINE_AA_PADDING_PX + step as f32 * 2.0_f32.sqrt();
+            let local_x = axis_padding + step as f32 * 2.0_f32.sqrt();
             let d = line_signed_distance_px([local_x, rect_size[1] * 0.5], rect_size, radius);
             assert!(d <= -0.49, "centerline step {step} has weak coverage d={d}");
+        }
+    }
+
+    #[test]
+    fn analytic_line_sdf_keeps_45_degree_pixel_centers_visible() {
+        let radius = 0.5;
+        let start = Point::new(8.0, 8.0);
+        let end = Point::new(56.0, 56.0);
+        let direction = 1.0 / 2.0_f32.sqrt();
+        let normal = (-direction, direction);
+
+        for normal_offset in [-0.5_f32, -0.25, 0.0, 0.25, 0.5] {
+            for step in 0..=48 {
+                let center = Point::new(
+                    start.x + step as f32 + normal.0 * normal_offset,
+                    start.y + step as f32 + normal.1 * normal_offset,
+                );
+                let base_x = center.x.floor() as i32;
+                let base_y = center.y.floor() as i32;
+                let mut strongest_alpha = 0.0_f32;
+
+                for y in (base_y - 1)..=(base_y + 1) {
+                    for x in (base_x - 1)..=(base_x + 1) {
+                        let pixel_center = Point::new(x as f32 + 0.5, y as f32 + 0.5);
+                        let (local, rect_size) = line_local_point(pixel_center, start, end, radius);
+                        let d = line_signed_distance_px(local, rect_size, radius);
+                        strongest_alpha = strongest_alpha.max(line_alpha_from_signed_distance(d));
+                    }
+                }
+
+                assert!(
+                    strongest_alpha >= 0.5,
+                    "45 degree line has weak pixel coverage at offset {normal_offset}, step {step}: alpha {strongest_alpha}"
+                );
+            }
         }
     }
 
@@ -841,10 +920,11 @@ mod tests {
             let dx = radians.cos() * 56.0;
             let dy = radians.sin() * 56.0;
             let len = dx.hypot(dy);
-            let rect_size = [len + LINE_AA_PADDING_PX * 2.0, 3.0];
+            let axis_padding = line_axis_padding_px(radius);
+            let rect_size = [len + axis_padding * 2.0, 3.0];
 
             for step in 0..=56 {
-                let local_x = LINE_AA_PADDING_PX + step as f32;
+                let local_x = axis_padding + step as f32;
                 let d = line_signed_distance_px([local_x, rect_size[1] * 0.5], rect_size, radius);
                 assert!(
                     d <= -0.49,
@@ -910,13 +990,11 @@ mod tests {
     #[test]
     fn analytic_line_sdf_preserves_round_caps_for_zero_length_lines() {
         let radius = 2.0;
-        let rect_size = [
-            LINE_AA_PADDING_PX * 2.0,
-            radius * 2.0 + LINE_AA_PADDING_PX * 2.0,
-        ];
-        let center = [LINE_AA_PADDING_PX, rect_size[1] * 0.5];
+        let axis_padding = line_axis_padding_px(radius);
+        let rect_size = [axis_padding * 2.0, radius * 2.0 + LINE_AA_PADDING_PX * 2.0];
+        let center = [axis_padding, rect_size[1] * 0.5];
         assert!((line_signed_distance_px(center, rect_size, radius) + radius).abs() < 0.001);
-        let cap_edge = [LINE_AA_PADDING_PX + radius, rect_size[1] * 0.5];
+        let cap_edge = [axis_padding + radius, rect_size[1] * 0.5];
         assert!(line_signed_distance_px(cap_edge, rect_size, radius).abs() < 0.001);
     }
 
@@ -1325,8 +1403,36 @@ mod tests {
             .map(|v| v.position[0])
             .fold(f32::NEG_INFINITY, f32::max);
 
-        assert!((min_x - (-0.82)).abs() < 0.001);
-        assert!((max_x - 0.82).abs() < 0.001);
+        assert!((min_x - (-0.86)).abs() < 0.001);
+        assert!((max_x - 0.86).abs() < 0.001);
+    }
+
+    #[test]
+    fn build_batches_zero_length_wide_line_bounds_include_round_cap() {
+        let cmds = [DrawCommand::Line {
+            start: Point::new(50.0, 50.0),
+            end: Point::new(50.0, 50.0),
+            width: 4.0,
+            color: Color::WHITE,
+        }];
+        let batches = build_batches(&cmds, (100, 100));
+
+        assert_eq!(batches.len(), 1);
+        let vertices = &batches[0].vertices;
+        let min_x = vertices.iter().map(|v| v.position[0]).fold(f32::INFINITY, f32::min);
+        let max_x = vertices.iter().map(|v| v.position[0]).fold(f32::NEG_INFINITY, f32::max);
+        let min_y = vertices.iter().map(|v| v.position[1]).fold(f32::INFINITY, f32::min);
+        let max_y = vertices.iter().map(|v| v.position[1]).fold(f32::NEG_INFINITY, f32::max);
+
+        assert!((min_x - (-0.06)).abs() < 0.001);
+        assert!((max_x - 0.06).abs() < 0.001);
+        assert!((min_y - (-0.06)).abs() < 0.001);
+        assert!((max_y - 0.06).abs() < 0.001);
+        for vertex in vertices {
+            assert!((vertex.rect_size[0] - 6.0).abs() < 0.001);
+            assert!((vertex.rect_size[1] - 6.0).abs() < 0.001);
+            assert!((vertex.corner_radius_px - 2.0).abs() < 0.001);
+        }
     }
 
     #[test]

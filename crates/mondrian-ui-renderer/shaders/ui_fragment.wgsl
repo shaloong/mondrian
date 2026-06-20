@@ -41,9 +41,9 @@ fn main(in: VertexOutput) -> @location(0) vec4<f32> {
     if in.render_mode == RENDER_MODE_LINE {
         let radius = max(in.corner_radius_px, 0.0);
         let center_y = in.rect_size.y * 0.5;
-        let padding = max(center_y - radius, 0.0);
-        let a = vec2<f32>(padding, center_y);
-        let b = vec2<f32>(max(in.rect_size.x - padding, padding), center_y);
+        let axis_padding = center_y;
+        let a = vec2<f32>(axis_padding, center_y);
+        let b = vec2<f32>(max(in.rect_size.x - axis_padding, axis_padding), center_y);
         let d = sd_segment_px(in.tex_coord, a, b) - radius;
         let aa = clamp(fwidth(d), 0.75, 1.5);
         let alpha = smoothstep(aa * 0.5, -aa * 0.5, d);
