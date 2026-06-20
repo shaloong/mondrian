@@ -1007,6 +1007,12 @@ The timeline context menu is implemented inside `TimelineView` with the shared
 `TimelineEditCommand`s and track-add proposals as keyboard and toolbar input.
 Right-clicking a clip selects that clip first, then menu actions dispatch
 through the existing app adapter; the widget never mutates the sequence itself.
+Context-menu row availability should reflect only widget-local target state:
+selection-only commands are disabled when the view has no selected clip, Split
+is disabled when the playhead does not intersect any clip, and Clear In/Out is
+disabled when the view has no active range. Clipboard presence, locked-track
+policy, and stale-id validation remain at the host/AppState gate and command
+layer.
 Modified variants should get explicit semantic commands instead of reusing
 plain delete.
 Timeline structure mutations that can invalidate ids, such as removing tracks,

@@ -1652,12 +1652,52 @@ impl TimelineView {
     }
 
     fn edit_menu_item(&self, label: &str, command: TimelineEditCommand) -> MenuItem {
-        let item = Self::menu_item(label, self.edit_command_action(command));
+        let mut item = Self::menu_item(label, self.edit_command_action(command));
+        if !self.edit_command_has_local_target(command) {
+            item = item.disabled();
+        }
         if let Some(shortcut) = self.edit_command_shortcut(command) {
             item.with_shortcut(shortcut)
         } else {
             item
         }
+    }
+
+    fn edit_command_has_local_target(&self, command: TimelineEditCommand) -> bool {
+        match command {
+            TimelineEditCommand::PasteAtPlayhead
+            | TimelineEditCommand::MarkInAtPlayhead
+            | TimelineEditCommand::MarkOutAtPlayhead
+            | TimelineEditCommand::TogglePlayback => true,
+            TimelineEditCommand::ClearInOutPoints => {
+                self.in_point_frame > 0 || self.out_point_frame.is_some()
+            }
+            TimelineEditCommand::SplitAtPlayhead => self.clip_intersects_playhead(),
+            TimelineEditCommand::DeleteSelection | TimelineEditCommand::RippleDeleteSelection => {
+                self.selected_clip.is_some() || self.selected_track.is_some()
+            }
+            TimelineEditCommand::CutSelection
+            | TimelineEditCommand::CopySelection
+            | TimelineEditCommand::DuplicateSelection
+            | TimelineEditCommand::TrimSelectionInToPlayhead
+            | TimelineEditCommand::TrimSelectionOutToPlayhead
+            | TimelineEditCommand::EnableSelection
+            | TimelineEditCommand::DisableSelection => self.selected_clip.is_some(),
+            TimelineEditCommand::OpenNestedSequence(clip_ref) => {
+                self.selected_clip == Some(clip_ref)
+                    && self.clip(clip_ref).is_some_and(|clip| clip.nested)
+            }
+        }
+    }
+
+    fn clip_intersects_playhead(&self) -> bool {
+        let frame = self.playhead_frame;
+        self.tracks.iter().any(|track| {
+            track
+                .clips
+                .iter()
+                .any(|clip| frame > clip.start_frame && frame < clip.end_frame())
+        })
     }
 
     fn clip_context_menu_items(&self) -> Vec<MenuItem> {
@@ -5196,10 +5236,114 @@ mod tests {
     }
 
     #[test]
+    fn empty_timeline_context_menu_disables_selection_only_commands() {
+        let view = timeline().on_edit_command(|command| match command {
+            TimelineEditCommand::CutSelection => Action::Cut,
+            TimelineEditCommand::CopySelection => Action::Copy,
+            TimelineEditCommand::PasteAtPlayhead => Action::Paste,
+            TimelineEditCommand::DuplicateSelection => Action::Duplicate,
+            TimelineEditCommand::DeleteSelection => Action::DeleteSelection,
+            TimelineEditCommand::RippleDeleteSelection => Action::RippleDeleteSelection,
+            TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
+            TimelineEditCommand::TrimSelectionInToPlayhead => Action::Cut,
+            TimelineEditCommand::TrimSelectionOutToPlayhead => Action::Copy,
+            TimelineEditCommand::EnableSelection => Action::Play,
+            TimelineEditCommand::DisableSelection => Action::Pause,
+            TimelineEditCommand::OpenNestedSequence(_) => Action::NoOp,
+            TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
+            TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
+            TimelineEditCommand::ClearInOutPoints => Action::CloseProject,
+            TimelineEditCommand::TogglePlayback => Action::TogglePlay,
+        });
+
+        let items = view.timeline_context_menu_items();
+
+        for label in [
+            "Cut Selection",
+            "Copy Selection",
+            "Duplicate Selection",
+            "Trim Selection In to Playhead",
+            "Trim Selection Out to Playhead",
+            "Enable Selection",
+            "Disable Selection",
+            "Clear In/Out",
+        ] {
+            let item = items.iter().find(|item| item.label == label).expect(label);
+            assert!(!item.enabled, "{label} should require a local target");
+        }
+        assert!(
+            items
+                .iter()
+                .find(|item| item.label == "Paste at Playhead")
+                .expect("paste")
+                .enabled
+        );
+        assert!(
+            items
+                .iter()
+                .find(|item| item.label == "Split at Playhead")
+                .expect("split")
+                .enabled
+        );
+        assert!(items.iter().find(|item| item.label == "Mark In").expect("mark in").enabled);
+        assert!(items.iter().find(|item| item.label == "Mark Out").expect("mark out").enabled);
+    }
+
+    #[test]
+    fn timeline_context_menu_disables_split_when_playhead_misses_clips() {
+        let view = timeline().with_playhead(200).on_edit_command(|command| match command {
+            TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
+            _ => Action::NoOp,
+        });
+
+        let items = view.timeline_context_menu_items();
+
+        let split = items.iter().find(|item| item.label == "Split at Playhead").expect("split");
+        assert!(!split.enabled);
+    }
+
+    #[test]
+    fn clip_context_menu_keeps_clip_edit_commands_enabled_for_selected_clip() {
+        let mut view = timeline().on_edit_command(|command| match command {
+            TimelineEditCommand::CutSelection => Action::Cut,
+            TimelineEditCommand::CopySelection => Action::Copy,
+            TimelineEditCommand::DuplicateSelection => Action::Duplicate,
+            TimelineEditCommand::DeleteSelection => Action::DeleteSelection,
+            TimelineEditCommand::RippleDeleteSelection => Action::RippleDeleteSelection,
+            TimelineEditCommand::TrimSelectionInToPlayhead => Action::Cut,
+            TimelineEditCommand::TrimSelectionOutToPlayhead => Action::Copy,
+            TimelineEditCommand::EnableSelection => Action::Play,
+            TimelineEditCommand::DisableSelection => Action::Pause,
+            _ => Action::NoOp,
+        });
+        view.selected_clip = Some(TimelineClipRef { track_index: 0, clip_index: 0 });
+
+        let items = view.clip_context_menu_items();
+
+        for label in [
+            "Cut Clip",
+            "Copy Clip",
+            "Duplicate Clip",
+            "Delete Clip",
+            "Ripple Delete Clip",
+            "Trim In to Playhead",
+            "Trim Out to Playhead",
+            "Enable Clip",
+            "Disable Clip",
+        ] {
+            let item = items.iter().find(|item| item.label == label).expect(label);
+            assert!(
+                item.enabled,
+                "{label} should be available for a selected clip"
+            );
+        }
+    }
+
+    #[test]
     fn context_menu_can_dispatch_clear_in_out_command() {
         let commands = Rc::new(RefCell::new(Vec::new()));
         let command_log = Rc::clone(&commands);
-        let view = timeline().on_edit_command(move |command| {
+        let view = timeline().with_in_out_points(0, Some(30)).on_edit_command(move |command| {
             command_log.borrow_mut().push(command);
             match command {
                 TimelineEditCommand::ClearInOutPoints => Action::SaveProject,
