@@ -1142,7 +1142,16 @@ impl AssetGrid {
         let colors = &ctx.theme.colors;
         let center = self.viewport.center();
         let box_rect = Rect::new(center.x - 86.0, center.y - 30.0, 172.0, 60.0);
-        ctx.encoder.draw_rect(box_rect, colors.muted, ctx.theme.spacing.radius_md);
+        ctx.encoder.draw_rect(
+            box_rect,
+            color_with_alpha(colors.border, 0.52),
+            ctx.theme.spacing.radius_md,
+        );
+        ctx.encoder.draw_rect(
+            box_rect.inset(1.0, 1.0),
+            mix_color(colors.background, colors.card, 0.44),
+            (ctx.theme.spacing.radius_md - 1.0).max(0.0),
+        );
         ctx.push_clip(box_rect.inset(10.0, 6.0));
         ctx.encoder.draw_text(
             if self.items.is_empty() {
@@ -1175,16 +1184,28 @@ impl AssetGrid {
         let selected = self.selected_indices.contains(&index);
         let hovered = self.hovered == Some(index) && !item.disabled;
         let base_fill = if selected {
-            colors.accent
+            mix_color(colors.card, colors.accent, 0.34)
         } else if hovered {
-            colors.muted
+            mix_color(colors.card, colors.muted, 0.58)
         } else {
-            colors.card
+            mix_color(colors.background, colors.card, 0.64)
         };
         if primary_selected && (self.focus_visible || self.focused) {
             paint_focus_ring(ctx, rect, CARD_RADIUS);
         }
-        ctx.encoder.draw_rect(rect, base_fill, CARD_RADIUS);
+        let card_border = if selected {
+            color_with_alpha(colors.ring, 0.34)
+        } else if hovered {
+            color_with_alpha(colors.border, 0.82)
+        } else {
+            soft_border(colors.border)
+        };
+        ctx.encoder.draw_rect(rect, card_border, CARD_RADIUS);
+        ctx.encoder.draw_rect(
+            rect.inset(1.0, 1.0),
+            base_fill,
+            (CARD_RADIUS - 1.0).max(0.0),
+        );
 
         let preview = Rect::new(
             rect.x + 6.0,
@@ -1204,7 +1225,7 @@ impl AssetGrid {
         );
         ctx.encoder.draw_rect(
             preview,
-            mix_color(colors.card, colors.background, 0.42),
+            mix_color(colors.canvas, colors.card, 0.30),
             spacing.radius_sm,
         );
 
@@ -1231,8 +1252,8 @@ impl AssetGrid {
             );
             ctx.pop_clip();
         } else {
-            let preview_top = mix_color(accent, colors.card, 0.22);
-            let preview_bottom = mix_color(accent, colors.background, 0.58);
+            let preview_top = mix_color(colors.canvas, accent, 0.24);
+            let preview_bottom = mix_color(colors.background, accent, 0.16);
             ctx.encoder.draw_gradient_rect(
                 preview,
                 [preview_top, preview_top, preview_bottom, preview_bottom],
@@ -1245,7 +1266,7 @@ impl AssetGrid {
                     preview.width,
                     2.0,
                 ),
-                color_with_alpha(accent, 0.72),
+                color_with_alpha(accent, 0.62),
                 0.0,
             );
         }
@@ -1632,7 +1653,11 @@ impl Widget for AssetGrid {
 
     fn paint(&self, ctx: &mut PaintContext) {
         let colors = &ctx.theme.colors;
-        ctx.encoder.draw_rect(self.bounds, colors.card, 0.0);
+        ctx.encoder.draw_rect(
+            self.bounds,
+            mix_color(colors.background, colors.card, 0.24),
+            0.0,
+        );
 
         ctx.encoder.draw_text(
             &self.title,
@@ -1658,6 +1683,13 @@ impl Widget for AssetGrid {
         if let Some(input) = &self.filter_input {
             input.paint(ctx);
         }
+        let divider_y = self.viewport.y - 1.0;
+        ctx.encoder.draw_line(
+            Point::new(self.bounds.x, divider_y),
+            Point::new(self.bounds.x + self.bounds.width, divider_y),
+            1.0,
+            color_with_alpha(colors.border, 0.72),
+        );
 
         ctx.push_clip(self.viewport);
         if self.visible_indices.is_empty() {
@@ -2310,6 +2342,43 @@ mod tests {
 
         assert!(encoder.raster_images.is_empty());
         assert!(encoder.rects.len() >= 3);
+    }
+
+    #[test]
+    fn paint_uses_layered_panel_card_and_preview_surfaces() {
+        let mut grid = AssetGrid::new("Assets", vec![item("clip-a", "Clip A")]);
+        grid.layout(Rect::new(0.0, 0.0, 260.0, 180.0));
+
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 260.0, 180.0),
+        };
+        grid.paint(&mut ctx);
+
+        assert!(
+            encoder
+                .rect_colors
+                .iter()
+                .any(|color| *color == mix_color(theme.colors.background, theme.colors.card, 0.24)),
+            "asset grid background should sit below card surfaces"
+        );
+        assert!(
+            encoder
+                .rect_colors
+                .iter()
+                .any(|color| *color == mix_color(theme.colors.background, theme.colors.card, 0.64)),
+            "asset cards should use a layered surface instead of raw card fill"
+        );
+        assert!(
+            encoder
+                .rect_colors
+                .iter()
+                .any(|color| *color == mix_color(theme.colors.canvas, theme.colors.card, 0.30)),
+            "asset previews should read as a dark media well"
+        );
     }
 
     #[test]

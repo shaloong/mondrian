@@ -11,7 +11,7 @@ use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use std::time::{Duration, Instant};
 
-use crate::paint::color_with_alpha;
+use crate::paint::{color_with_alpha, mix_color};
 use crate::text_metrics::measure_single_line;
 use crate::vector_icon::VectorIcon;
 use crate::TextInput;
@@ -768,18 +768,29 @@ impl PanelList {
         let hovered = self.hovered == Some(index) && !item.disabled;
 
         let fill = if selected {
-            colors.accent
+            mix_color(colors.card, colors.accent, 0.34)
         } else if hovered {
-            colors.muted
+            mix_color(colors.card, colors.muted, 0.58)
         } else {
-            colors.card
+            mix_color(colors.background, colors.card, 0.54)
         };
         if selected {
-            let mut ring = colors.ring;
-            ring.a = 0.42;
-            ctx.encoder.draw_rect(row.inset(-1.0, -1.0), ring, spacing.radius_sm + 1.0);
+            ctx.encoder.draw_rect(
+                row.inset(-1.0, -1.0),
+                color_with_alpha(colors.ring, 0.34),
+                spacing.radius_sm + 1.0,
+            );
         }
-        ctx.encoder.draw_rect(row, fill, spacing.radius_sm);
+        ctx.encoder.draw_rect(
+            row,
+            color_with_alpha(colors.border, 0.56),
+            spacing.radius_sm,
+        );
+        ctx.encoder.draw_rect(
+            row.inset(1.0, 1.0),
+            fill,
+            (spacing.radius_sm - 1.0).max(0.0),
+        );
 
         let accent = item.accent.unwrap_or(colors.secondary);
         let swatch = Rect::new(row.x + 8.0, row.y + 13.0, 6.0, row.height - 26.0);
@@ -1115,7 +1126,11 @@ impl Widget for PanelList {
     fn paint(&self, ctx: &mut PaintContext) {
         let colors = &ctx.theme.colors;
         let spacing = &ctx.theme.spacing;
-        ctx.encoder.draw_rect(self.bounds, colors.card, 0.0);
+        ctx.encoder.draw_rect(
+            self.bounds,
+            mix_color(colors.background, colors.card, 0.24),
+            0.0,
+        );
 
         let title_pos = snap_point(Point::new(self.bounds.x + 12.0, self.bounds.y + 12.0));
         ctx.encoder.draw_text(
@@ -2429,6 +2444,36 @@ mod tests {
         assert!(encoder.clips >= 2);
         assert!(encoder.texts.iter().any(|text| text == "Assets"));
         assert!(encoder.texts.iter().any(|text| text == "Imported footage"));
+    }
+
+    #[test]
+    fn paint_uses_layered_panel_and_row_surfaces() {
+        let mut list = PanelList::new("Assets", vec![PanelListItem::new("Media")]);
+        list.layout(Rect::new(0.0, 0.0, 260.0, 140.0));
+
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 260.0, 140.0),
+        };
+        list.paint(&mut ctx);
+
+        assert!(
+            encoder
+                .rect_colors
+                .iter()
+                .any(|color| *color == mix_color(theme.colors.background, theme.colors.card, 0.24)),
+            "panel background should sit below card rows in the dark surface ladder"
+        );
+        assert!(
+            encoder
+                .rect_colors
+                .iter()
+                .any(|color| *color == mix_color(theme.colors.background, theme.colors.card, 0.54)),
+            "unselected rows should not flatten to the raw card token"
+        );
     }
 
     #[test]

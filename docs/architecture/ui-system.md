@@ -1293,6 +1293,12 @@ Widgets may compose semantic tokens with shared paint helpers such as
 `card`/`popover` fill. This keeps the self-hosted UI closer to professional NLE
 workspaces and prevents visual hierarchy from depending on per-panel ad-hoc
 color constants.
+Reusable browser surfaces such as `PanelList` and `AssetGrid` follow the same
+rule: their panel body is a dark workspace mix, rows/cards draw a subtle border
+with an inset fill, and selected/hovered states tint that fill instead of
+painting the entire item with raw `accent` or `muted`. Asset-grid preview wells
+should read as dark media slots even before thumbnails arrive, so placeholder
+gradients and badges do not dominate the panel.
 Panel models must attach explicit stable actions to rows instead of deriving
 commands from titles, indices, or fixture-only prefixes. Synthetic demo rows
 use explicit `ui.demo_panel` actions so they exercise the same select/activate
