@@ -207,6 +207,8 @@ pub const APP_SHELL_PREFERENCES_THEME_CHANGED: &str = "preferences_theme_changed
 pub const APP_SHELL_PREFERENCES_SHORTCUT_DISABLED: &str = "preferences_shortcut_disabled";
 /// App-shell request to restore one self-hosted shortcut descriptor to default.
 pub const APP_SHELL_PREFERENCES_SHORTCUT_RESET: &str = "preferences_shortcut_reset";
+/// App-shell request to bind one self-hosted shortcut descriptor to a new key chord.
+pub const APP_SHELL_PREFERENCES_SHORTCUT_REBOUND: &str = "preferences_shortcut_rebound";
 /// App-shell request to close the current shell-local modal.
 pub const APP_SHELL_CLOSE_MODAL: &str = "close_modal";
 /// App-shell request to quit the native application window.
@@ -239,6 +241,19 @@ pub struct PreferencesThemePayload {
 pub struct PreferencesShortcutPayload {
     /// Stable shortcut descriptor id.
     pub id: String,
+}
+
+/// New key chord captured by the self-hosted shortcut preferences UI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreferencesShortcutReboundPayload {
+    /// Stable shortcut descriptor id.
+    pub id: String,
+    /// Stable key name matching `SelfHostedShortcutKey` serialization.
+    pub key: String,
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+    pub meta: bool,
 }
 
 /// Project path selected from the self-hosted recent-project startup list.
@@ -1253,6 +1268,13 @@ pub fn app_shell_preferences_shortcut_reset_action(id: impl Into<String>) -> Act
         APP_SHELL_PREFERENCES_SHORTCUT_RESET,
         PreferencesShortcutPayload { id: id.into() },
     )
+}
+
+/// Build an app-shell request for rebinding one shortcut descriptor.
+pub fn app_shell_preferences_shortcut_rebound_action(
+    payload: PreferencesShortcutReboundPayload,
+) -> Action {
+    custom_app_shell_action_with_payload(APP_SHELL_PREFERENCES_SHORTCUT_REBOUND, payload)
 }
 
 /// Build an app-shell request for closing the current shell-local modal.

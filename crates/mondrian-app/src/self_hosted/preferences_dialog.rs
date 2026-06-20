@@ -14,11 +14,14 @@ use mondrian_ui_widgets::{Button, DialogSurface, Label};
 
 use crate::app::ui_actions::{
     app_shell_close_modal_action, app_shell_preferences_shortcut_disabled_action,
-    app_shell_preferences_shortcut_reset_action, app_shell_preferences_tab_changed_action,
-    app_shell_preferences_theme_changed_action, PreferencesTabPayload,
+    app_shell_preferences_shortcut_rebound_action, app_shell_preferences_shortcut_reset_action,
+    app_shell_preferences_tab_changed_action, app_shell_preferences_theme_changed_action,
+    PreferencesShortcutReboundPayload, PreferencesTabPayload,
 };
 use crate::app::AppState;
-use crate::self_hosted::shortcuts::{default_shortcuts, SelfHostedShortcutOverride};
+use crate::self_hosted::shortcuts::{
+    default_shortcuts, SelfHostedShortcutKey, SelfHostedShortcutOverride,
+};
 use crate::self_hosted::window::{DEFAULT_SELF_HOSTED_LOG_FILTER, SELF_HOSTED_BACKGROUND_WORKERS};
 
 const CARD_MIN_WIDTH: f32 = 480.0;
@@ -206,6 +209,7 @@ pub struct PreferencesDialog {
     card: Rect,
     shortcut_viewport: Rect,
     shortcut_scroll_offset: f32,
+    capturing_shortcut: Option<String>,
     title_label: Label,
     description_label: Label,
     nav_buttons: Vec<Button>,
@@ -216,6 +220,9 @@ pub struct PreferencesDialog {
 }
 
 struct ShortcutPreferenceButtons {
+    id: String,
+    rebind: Button,
+    rebind_bounds: Rect,
     disable: Button,
     reset: Button,
 }
@@ -263,6 +270,7 @@ impl PreferencesDialog {
             card: Rect::ZERO,
             shortcut_viewport: Rect::ZERO,
             shortcut_scroll_offset: 0.0,
+            capturing_shortcut: None,
             title_label: Label::new("Preferences")
                 .popover_foreground()
                 .with_font_size(TITLE_FONT_SIZE)
@@ -300,6 +308,13 @@ impl PreferencesDialog {
             return;
         }
         self.model = model;
+        if self
+            .capturing_shortcut
+            .as_deref()
+            .is_some_and(|id| !self.model.shortcut_rows.iter().any(|row| row.id == id))
+        {
+            self.capturing_shortcut = None;
+        }
         self.clamp_shortcut_scroll();
         self.rebuild_content();
         if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
@@ -313,6 +328,9 @@ impl PreferencesDialog {
             return;
         }
         self.active_tab = tab;
+        if self.active_tab != PreferencesDialogTab::Shortcuts {
+            self.capturing_shortcut = None;
+        }
         self.clamp_shortcut_scroll();
         self.rebuild_content();
         if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
@@ -343,6 +361,13 @@ impl PreferencesDialog {
                 .shortcut_rows
                 .iter()
                 .map(|row| ShortcutPreferenceButtons {
+                    id: row.id.clone(),
+                    rebind: Button::new(if self.capturing_shortcut.as_deref() == Some(&row.id) {
+                        "Press key"
+                    } else {
+                        "Rebind"
+                    }),
+                    rebind_bounds: Rect::ZERO,
                     disable: Button::new("Disable")
                         .on_click(app_shell_preferences_shortcut_disabled_action(
                             row.id.clone(),
@@ -381,6 +406,55 @@ impl PreferencesDialog {
         } else {
             EventResult::Ignored
         }
+    }
+
+    fn begin_shortcut_capture(&mut self, id: String, ctx: &mut EventContext) {
+        self.capturing_shortcut = Some(id);
+        self.rebuild_content();
+        if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
+            self.layout(self.bounds);
+        }
+        ctx.request_repaint();
+    }
+
+    fn cancel_shortcut_capture(&mut self, ctx: &mut EventContext) {
+        if self.capturing_shortcut.take().is_some() {
+            self.rebuild_content();
+            if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
+                self.layout(self.bounds);
+            }
+            ctx.request_repaint();
+        }
+    }
+
+    fn capture_shortcut_key(
+        &mut self,
+        key: KeyCode,
+        modifiers: Modifiers,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        let Some(id) = self.capturing_shortcut.clone() else {
+            return EventResult::Ignored;
+        };
+        if key == KeyCode::Escape {
+            self.cancel_shortcut_capture(ctx);
+            return EventResult::Handled;
+        }
+        let Some(key) = SelfHostedShortcutKey::from_key_code(key) else {
+            return EventResult::Handled;
+        };
+        (ctx.dispatch)(app_shell_preferences_shortcut_rebound_action(
+            PreferencesShortcutReboundPayload {
+                id,
+                key: key.preference_name().to_owned(),
+                ctrl: modifiers.ctrl,
+                alt: modifiers.alt,
+                shift: modifiers.shift,
+                meta: modifiers.meta,
+            },
+        ));
+        self.cancel_shortcut_capture(ctx);
+        EventResult::Handled
     }
 }
 
@@ -455,7 +529,7 @@ impl Widget for PreferencesDialog {
         let mut content_width = content.x + content.width - content_x;
         if self.active_tab == PreferencesDialogTab::Shortcuts {
             content_width =
-                (content_width - SHORTCUT_BUTTON_WIDTH * 2.0 - SHORTCUT_BUTTON_GAP * 2.0).max(0.0);
+                (content_width - SHORTCUT_BUTTON_WIDTH * 3.0 - SHORTCUT_BUTTON_GAP * 3.0).max(0.0);
         }
         for (index, label) in self.content_labels.iter_mut().enumerate() {
             let y = if self.active_tab == PreferencesDialogTab::Shortcuts
@@ -469,20 +543,29 @@ impl Widget for PreferencesDialog {
             label.layout(Rect::new(content_x, y, content_width, ROW_HEIGHT));
         }
         if self.active_tab == PreferencesDialogTab::Shortcuts {
-            let buttons_left =
-                content.x + content.width - SHORTCUT_BUTTON_WIDTH * 2.0 - SHORTCUT_BUTTON_GAP - 2.0;
+            let buttons_left = content.x + content.width
+                - SHORTCUT_BUTTON_WIDTH * 3.0
+                - SHORTCUT_BUTTON_GAP * 2.0
+                - 2.0;
             for (index, buttons) in self.shortcut_buttons.iter_mut().enumerate() {
                 let y = self.shortcut_viewport.y + index as f32 * ROW_HEIGHT
                     - self.shortcut_scroll_offset
                     + (ROW_HEIGHT - SHORTCUT_BUTTON_HEIGHT) * 0.5;
-                buttons.disable.layout(Rect::new(
+                buttons.rebind_bounds = Rect::new(
                     buttons_left,
+                    y,
+                    SHORTCUT_BUTTON_WIDTH,
+                    SHORTCUT_BUTTON_HEIGHT,
+                );
+                buttons.rebind.layout(buttons.rebind_bounds);
+                buttons.disable.layout(Rect::new(
+                    buttons_left + SHORTCUT_BUTTON_WIDTH + SHORTCUT_BUTTON_GAP,
                     y,
                     SHORTCUT_BUTTON_WIDTH,
                     SHORTCUT_BUTTON_HEIGHT,
                 ));
                 buttons.reset.layout(Rect::new(
-                    buttons_left + SHORTCUT_BUTTON_WIDTH + SHORTCUT_BUTTON_GAP,
+                    buttons_left + (SHORTCUT_BUTTON_WIDTH + SHORTCUT_BUTTON_GAP) * 2.0,
                     y,
                     SHORTCUT_BUTTON_WIDTH,
                     SHORTCUT_BUTTON_HEIGHT,
@@ -499,6 +582,11 @@ impl Widget for PreferencesDialog {
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if let UiEvent::KeyDown { key, modifiers } = event {
+            if self.capturing_shortcut.is_some() {
+                return self.capture_shortcut_key(*key, *modifiers, ctx);
+            }
+        }
         match event {
             UiEvent::KeyDown { key: KeyCode::Escape | KeyCode::Enter, .. } => {
                 (ctx.dispatch)(app_shell_close_modal_action());
@@ -540,13 +628,30 @@ impl Widget for PreferencesDialog {
             let inside_viewport =
                 pointer_position.is_none_or(|position| self.shortcut_viewport.contains(position));
             if inside_viewport {
+                let mut capture_id = None;
                 for buttons in &mut self.shortcut_buttons {
+                    if buttons.rebind.event(event, ctx) == EventResult::Handled {
+                        if let UiEvent::MouseUp { position, button: MouseButton::Left, .. } = event
+                        {
+                            if buttons.rebind_bounds.contains(*position) {
+                                capture_id = Some(buttons.id.clone());
+                            }
+                        }
+                        if capture_id.is_none() {
+                            return EventResult::Handled;
+                        }
+                        break;
+                    }
                     if buttons.disable.event(event, ctx) == EventResult::Handled {
                         return EventResult::Handled;
                     }
                     if buttons.reset.event(event, ctx) == EventResult::Handled {
                         return EventResult::Handled;
                     }
+                }
+                if let Some(id) = capture_id {
+                    self.begin_shortcut_capture(id, ctx);
+                    return EventResult::Handled;
                 }
             }
         }
@@ -617,6 +722,7 @@ impl Widget for PreferencesDialog {
                 label.paint(ctx);
             }
             for buttons in &self.shortcut_buttons {
+                buttons.rebind.paint(ctx);
                 buttons.disable.paint(ctx);
                 buttons.reset.paint(ctx);
             }
@@ -643,7 +749,7 @@ impl Widget for PreferencesDialog {
         3 + self.nav_buttons.len()
             + self.theme_buttons.len()
             + self.content_labels.len()
-            + self.shortcut_buttons.len() * 2
+            + self.shortcut_buttons.len() * 3
     }
 
     fn child(&self, index: usize) -> Option<&dyn Widget> {
@@ -672,16 +778,14 @@ impl Widget for PreferencesDialog {
                 .map(|label| label as &dyn Widget);
         }
         let shortcut_start = content_end;
-        let shortcut_end = shortcut_start + self.shortcut_buttons.len() * 2;
+        let shortcut_end = shortcut_start + self.shortcut_buttons.len() * 3;
         if (shortcut_start..shortcut_end).contains(&index) {
             let button_index = index - shortcut_start;
-            let row = button_index / 2;
-            return self.shortcut_buttons.get(row).map(|buttons| {
-                if button_index.is_multiple_of(2) {
-                    &buttons.disable as &dyn Widget
-                } else {
-                    &buttons.reset as &dyn Widget
-                }
+            let row = button_index / 3;
+            return self.shortcut_buttons.get(row).map(|buttons| match button_index % 3 {
+                0 => &buttons.rebind as &dyn Widget,
+                1 => &buttons.disable as &dyn Widget,
+                _ => &buttons.reset as &dyn Widget,
             });
         }
         (index == shortcut_end).then_some(&self.close_button as &dyn Widget)
@@ -719,16 +823,14 @@ impl Widget for PreferencesDialog {
                 .map(|label| label as &mut dyn Widget);
         }
         let shortcut_start = content_end;
-        let shortcut_end = shortcut_start + self.shortcut_buttons.len() * 2;
+        let shortcut_end = shortcut_start + self.shortcut_buttons.len() * 3;
         if (shortcut_start..shortcut_end).contains(&index) {
             let button_index = index - shortcut_start;
-            let row = button_index / 2;
-            return self.shortcut_buttons.get_mut(row).map(|buttons| {
-                if button_index.is_multiple_of(2) {
-                    &mut buttons.disable as &mut dyn Widget
-                } else {
-                    &mut buttons.reset as &mut dyn Widget
-                }
+            let row = button_index / 3;
+            return self.shortcut_buttons.get_mut(row).map(|buttons| match button_index % 3 {
+                0 => &mut buttons.rebind as &mut dyn Widget,
+                1 => &mut buttons.disable as &mut dyn Widget,
+                _ => &mut buttons.reset as &mut dyn Widget,
             });
         }
         (index == shortcut_end).then_some(&mut self.close_button as &mut dyn Widget)
@@ -911,8 +1013,9 @@ mod tests {
     use mondrian_ui_core::widget::EventRequests;
 
     use crate::app::ui_actions::{
-        PreferencesShortcutPayload, APP_SHELL_CLOSE_MODAL, APP_SHELL_NAMESPACE,
-        APP_SHELL_PREFERENCES_SHORTCUT_DISABLED, APP_SHELL_PREFERENCES_SHORTCUT_RESET,
+        PreferencesShortcutPayload, PreferencesShortcutReboundPayload, APP_SHELL_CLOSE_MODAL,
+        APP_SHELL_NAMESPACE, APP_SHELL_PREFERENCES_SHORTCUT_DISABLED,
+        APP_SHELL_PREFERENCES_SHORTCUT_REBOUND, APP_SHELL_PREFERENCES_SHORTCUT_RESET,
         APP_SHELL_PREFERENCES_TAB_CHANGED, APP_SHELL_PREFERENCES_THEME_CHANGED,
     };
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
@@ -1035,8 +1138,10 @@ mod tests {
             .position(|row| row.id == "file.save_project")
             .expect("save row");
         let content = dialog.surface.content_rect(dialog.card);
-        let buttons_left =
-            content.x + content.width - SHORTCUT_BUTTON_WIDTH * 2.0 - SHORTCUT_BUTTON_GAP - 2.0;
+        let buttons_left = content.x + content.width
+            - SHORTCUT_BUTTON_WIDTH * 3.0
+            - SHORTCUT_BUTTON_GAP * 2.0
+            - 2.0;
         let shortcut_button_center = |row: usize, column: usize| {
             let x = buttons_left
                 + column as f32 * (SHORTCUT_BUTTON_WIDTH + SHORTCUT_BUTTON_GAP)
@@ -1047,8 +1152,8 @@ mod tests {
                 + ROW_HEIGHT * 0.5;
             Point::new(x, y)
         };
-        let save_disable = shortcut_button_center(save_index, 0);
-        let save_reset = shortcut_button_center(save_index, 1);
+        let save_disable = shortcut_button_center(save_index, 1);
+        let save_reset = shortcut_button_center(save_index, 2);
 
         click(&mut dialog, &mut ctx, save_disable);
         click(&mut dialog, &mut ctx, save_reset);
@@ -1074,6 +1179,77 @@ mod tests {
                 assert_eq!(payload.id, "file.save_project");
             }
             other => panic!("expected shortcut reset action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn preferences_shortcut_rebind_captures_next_keydown() {
+        let mut dialog = PreferencesDialog::with_model_and_tab(
+            SelfHostedPreferencesModel::default(),
+            PreferencesDialogTab::Shortcuts,
+        );
+        dialog.layout(Rect::new(0.0, 0.0, 1000.0, 700.0));
+        let actions = RefCell::new(Vec::new());
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let save_index = dialog
+            .model
+            .shortcut_rows
+            .iter()
+            .position(|row| row.id == "file.save_project")
+            .expect("save row");
+        let content = dialog.surface.content_rect(dialog.card);
+        let buttons_left = content.x + content.width
+            - SHORTCUT_BUTTON_WIDTH * 3.0
+            - SHORTCUT_BUTTON_GAP * 2.0
+            - 2.0;
+        let rebind = Point::new(
+            buttons_left + SHORTCUT_BUTTON_WIDTH * 0.5,
+            content.y
+                + 82.0
+                + (save_index + SHORTCUT_HEADER_ROW_COUNT) as f32 * ROW_HEIGHT
+                + ROW_HEIGHT * 0.5,
+        );
+
+        click(&mut dialog, &mut ctx, rebind);
+        assert_eq!(
+            dialog.event(
+                &UiEvent::KeyDown {
+                    key: KeyCode::I,
+                    modifiers: Modifiers { ctrl: true, alt: true, shift: false, meta: false },
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        let recorded = actions.borrow();
+        assert_eq!(recorded.len(), 1);
+        match &recorded[0] {
+            Action::Custom { namespace, name, payload } => {
+                assert_eq!(namespace, APP_SHELL_NAMESPACE);
+                assert_eq!(name, APP_SHELL_PREFERENCES_SHORTCUT_REBOUND);
+                let payload: PreferencesShortcutReboundPayload =
+                    serde_json::from_value(payload.clone()).unwrap();
+                assert_eq!(payload.id, "file.save_project");
+                assert_eq!(payload.key, "I");
+                assert!(payload.ctrl);
+                assert!(payload.alt);
+                assert!(!payload.shift);
+                assert!(!payload.meta);
+            }
+            other => panic!("expected shortcut rebound action, got {other:?}"),
         }
     }
 
@@ -1119,10 +1295,15 @@ mod tests {
             .position(|row| row.id == "panel.export")
             .expect("export panel shortcut row");
         let content = dialog.surface.content_rect(dialog.card);
-        let buttons_left =
-            content.x + content.width - SHORTCUT_BUTTON_WIDTH * 2.0 - SHORTCUT_BUTTON_GAP - 2.0;
+        let buttons_left = content.x + content.width
+            - SHORTCUT_BUTTON_WIDTH * 3.0
+            - SHORTCUT_BUTTON_GAP * 2.0
+            - 2.0;
         let export_disable = Point::new(
-            buttons_left + SHORTCUT_BUTTON_WIDTH * 0.5,
+            buttons_left
+                + SHORTCUT_BUTTON_WIDTH
+                + SHORTCUT_BUTTON_GAP
+                + SHORTCUT_BUTTON_WIDTH * 0.5,
             dialog.shortcut_viewport.y + export_index as f32 * ROW_HEIGHT
                 - dialog.shortcut_scroll_offset
                 + ROW_HEIGHT * 0.5,

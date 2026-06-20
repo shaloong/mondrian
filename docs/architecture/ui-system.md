@@ -506,10 +506,15 @@ an override can replace the binding or set it to `None` to disable a default
 shortcut. Menus and the Preferences shortcut list read the same active
 descriptor table, so disabling a conflicting `Ctrl+Alt` panel/workspace chord
 also removes the visible shortcut hint. The Preferences Shortcuts tab dispatches
-shell-local Disable and Default actions keyed by descriptor id; `SelfHostedUiHost`
-persists those updates and the native window session immediately rebuilds the
-router's global shortcut scope from the new active table. These preference
-updates are not editor actions and must not create undo history.
+shell-local Disable, Default, and Rebind actions keyed by descriptor id. Rebind
+captures the next supported `KeyDown` inside the Preferences modal, consumes
+Escape as cancel, and serializes only the shortcut key plus modifier booleans in
+the shell action payload. `SelfHostedUiHost` persists those updates, makes the
+new binding win by disabling any default descriptor that used the same chord,
+and the native window session immediately rebuilds the router's global shortcut
+scope from the new active table. These preference updates are shell-local
+navigation/preferences state, not editor actions, and must not create undo
+history.
 Because the descriptor table is longer than the compact Preferences modal, the
 Shortcuts tab keeps its heading fixed and scrolls the shortcut rows inside a
 clipped viewport with a token-painted scrollbar; row buttons must use the same

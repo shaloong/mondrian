@@ -15,14 +15,15 @@ use mondrian_ui_core::{TreeWalker, Widget};
 use mondrian_ui_theme::set_theme_preset;
 
 use crate::app::ui_actions::{
-    AssetsOpenFolderPayload, PreferencesShortcutPayload, PreferencesThemePayload,
-    APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
+    AssetsOpenFolderPayload, PreferencesShortcutPayload, PreferencesShortcutReboundPayload,
+    PreferencesThemePayload, APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
     APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
     APP_SHELL_NEW_PROJECT_DRAFT_CHANGED, APP_SHELL_OPEN_PROJECT_DIALOG,
     APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PREFERENCES_SHORTCUT_DISABLED,
-    APP_SHELL_PREFERENCES_SHORTCUT_RESET, APP_SHELL_PREFERENCES_THEME_CHANGED, APP_SHELL_QUIT,
-    APP_SHELL_RECOVER_PROJECT, APP_SHELL_WINDOW_DRAG, APP_SHELL_WINDOW_MINIMIZE,
-    APP_SHELL_WINDOW_TOGGLE_MAXIMIZE, ASSETS_NAMESPACE, ASSETS_OPEN_FOLDER,
+    APP_SHELL_PREFERENCES_SHORTCUT_REBOUND, APP_SHELL_PREFERENCES_SHORTCUT_RESET,
+    APP_SHELL_PREFERENCES_THEME_CHANGED, APP_SHELL_QUIT, APP_SHELL_RECOVER_PROJECT,
+    APP_SHELL_WINDOW_DRAG, APP_SHELL_WINDOW_MINIMIZE, APP_SHELL_WINDOW_TOGGLE_MAXIMIZE,
+    ASSETS_NAMESPACE, ASSETS_OPEN_FOLDER,
 };
 use crate::app::{discover_crash_recovery_candidates, AppState, CrashRecoveryCandidate};
 use crate::self_hosted::action_queue::PendingUiActions;
@@ -34,7 +35,10 @@ use crate::self_hosted::preferences_store::{
 };
 use crate::self_hosted::preview::SelfHostedPreviewService;
 use crate::self_hosted::shell::{try_resolve_app_shell_action, SelfHostedAppRoot};
-use crate::self_hosted::shortcuts::{is_known_shortcut_id, SelfHostedShortcutOverride};
+use crate::self_hosted::shortcuts::{
+    default_shortcuts, is_known_shortcut_id, SelfHostedShortcutBinding, SelfHostedShortcutKey,
+    SelfHostedShortcutOverride,
+};
 use crate::self_hosted::startup::{
     SelfHostedStartupScreen, StartupRecentProject, StartupRecoveryProject,
 };
@@ -460,6 +464,34 @@ impl SelfHostedUiHost {
                     PreferencesUpdate::ShortcutReset(payload) => {
                         self.preferences.shortcut_overrides.retain(|entry| entry.id != payload.id);
                     }
+                    PreferencesUpdate::ShortcutRebound(payload) => {
+                        if !is_known_shortcut_id(&payload.id) {
+                            self.app_state
+                                .borrow_mut()
+                                .set_status_hint("Shortcut preference is no longer valid", true);
+                            self.mark_dirty();
+                            return true;
+                        }
+                        let Some(key) = SelfHostedShortcutKey::from_preference_name(&payload.key)
+                        else {
+                            self.app_state
+                                .borrow_mut()
+                                .set_status_hint("Shortcut key is no longer valid", true);
+                            self.mark_dirty();
+                            return true;
+                        };
+                        apply_shortcut_rebind(
+                            &mut self.preferences.shortcut_overrides,
+                            payload.id,
+                            SelfHostedShortcutBinding {
+                                key,
+                                ctrl: payload.ctrl,
+                                alt: payload.alt,
+                                shift: payload.shift,
+                                meta: payload.meta,
+                            },
+                        );
+                    }
                 }
                 if let Err(err) =
                     persist_self_hosted_preferences_to(&self.preferences_path, &self.preferences)
@@ -678,10 +710,44 @@ fn take_shell_window_command(commands: &mut SelfHostedShellCommands, action: &Ac
     }
 }
 
+fn apply_shortcut_rebind(
+    overrides: &mut Vec<SelfHostedShortcutOverride>,
+    id: String,
+    binding: SelfHostedShortcutBinding,
+) {
+    let core_binding = binding.to_core();
+    overrides.retain(|entry| {
+        entry.id != id
+            && entry.binding.map(|existing| existing.to_core() != core_binding).unwrap_or(true)
+    });
+
+    let defaults = default_shortcuts();
+    for shortcut in &defaults {
+        if shortcut.id == id || shortcut.binding != core_binding {
+            continue;
+        }
+        if !overrides.iter().any(|entry| entry.id == shortcut.id) {
+            overrides
+                .push(SelfHostedShortcutOverride { id: shortcut.id.to_owned(), binding: None });
+        }
+    }
+
+    if defaults
+        .iter()
+        .find(|shortcut| shortcut.id == id)
+        .is_some_and(|shortcut| shortcut.binding == core_binding)
+    {
+        return;
+    }
+
+    overrides.push(SelfHostedShortcutOverride { id, binding: Some(binding) });
+}
+
 enum PreferencesUpdate {
     Theme(PreferencesThemePayload),
     ShortcutDisabled(PreferencesShortcutPayload),
     ShortcutReset(PreferencesShortcutPayload),
+    ShortcutRebound(PreferencesShortcutReboundPayload),
 }
 
 fn parse_preferences_update(
@@ -703,6 +769,12 @@ fn parse_preferences_update(
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_PREFERENCES_SHORTCUT_RESET =>
         {
             Some(serde_json::from_value(payload.clone()).map(PreferencesUpdate::ShortcutReset))
+        }
+        Action::Custom { namespace, name, payload }
+            if namespace == APP_SHELL_NAMESPACE
+                && name == APP_SHELL_PREFERENCES_SHORTCUT_REBOUND =>
+        {
+            Some(serde_json::from_value(payload.clone()).map(PreferencesUpdate::ShortcutRebound))
         }
         _ => None,
     }
@@ -1075,6 +1147,18 @@ mod tests {
         pending.push(
             crate::app::ui_actions::app_shell_preferences_shortcut_reset_action("panel.inspector"),
         );
+        pending.push(
+            crate::app::ui_actions::app_shell_preferences_shortcut_rebound_action(
+                crate::app::ui_actions::PreferencesShortcutReboundPayload {
+                    id: "file.save_project".to_owned(),
+                    key: "I".to_owned(),
+                    ctrl: true,
+                    alt: true,
+                    shift: false,
+                    meta: false,
+                },
+            ),
+        );
         let commands = host.drain_pending_actions(
             &pending,
             Rect::new(0.0, 0.0, 1280.0, 720.0),
@@ -1084,7 +1168,19 @@ mod tests {
         assert_eq!(commands, SelfHostedShellCommands::default());
         assert_eq!(
             host.preferences().shortcut_overrides,
-            vec![SelfHostedShortcutOverride { id: "file.save_project".to_owned(), binding: None }]
+            vec![
+                SelfHostedShortcutOverride { id: "panel.inspector".to_owned(), binding: None },
+                SelfHostedShortcutOverride {
+                    id: "file.save_project".to_owned(),
+                    binding: Some(SelfHostedShortcutBinding {
+                        key: SelfHostedShortcutKey::I,
+                        ctrl: true,
+                        alt: true,
+                        shift: false,
+                        meta: false,
+                    }),
+                },
+            ]
         );
         assert_eq!(
             load_self_hosted_preferences_from(&path).shortcut_overrides,

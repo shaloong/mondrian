@@ -56,7 +56,7 @@ impl SelfHostedShortcutBinding {
     /// Build a stored binding from the router binding type.
     pub fn from_core(binding: &ShortcutBinding) -> Option<Self> {
         Some(Self {
-            key: SelfHostedShortcutKey::from_core(binding.key)?,
+            key: SelfHostedShortcutKey::from_key_code(binding.key)?,
             ctrl: binding.modifiers.ctrl,
             alt: binding.modifiers.alt,
             shift: binding.modifiers.shift,
@@ -166,7 +166,8 @@ pub enum SelfHostedShortcutKey {
 }
 
 impl SelfHostedShortcutKey {
-    fn from_core(key: KeyCode) -> Option<Self> {
+    /// Convert a runtime UI key code into a serializable shortcut key.
+    pub fn from_key_code(key: KeyCode) -> Option<Self> {
         Some(match key {
             KeyCode::A => Self::A,
             KeyCode::B => Self::B,
@@ -240,6 +241,80 @@ impl SelfHostedShortcutKey {
             | KeyCode::LeftMeta
             | KeyCode::RightMeta => return None,
         })
+    }
+
+    /// Parse a stable serialized key name from preferences/action payloads.
+    pub fn from_preference_name(name: &str) -> Option<Self> {
+        serde_json::from_value(serde_json::Value::String(name.to_owned())).ok()
+    }
+
+    /// Stable serialized key name used in preferences/action payloads.
+    pub fn preference_name(self) -> &'static str {
+        match self {
+            Self::A => "A",
+            Self::B => "B",
+            Self::C => "C",
+            Self::D => "D",
+            Self::E => "E",
+            Self::F => "F",
+            Self::G => "G",
+            Self::H => "H",
+            Self::I => "I",
+            Self::J => "J",
+            Self::K => "K",
+            Self::L => "L",
+            Self::M => "M",
+            Self::N => "N",
+            Self::O => "O",
+            Self::P => "P",
+            Self::Q => "Q",
+            Self::R => "R",
+            Self::S => "S",
+            Self::T => "T",
+            Self::U => "U",
+            Self::V => "V",
+            Self::W => "W",
+            Self::X => "X",
+            Self::Y => "Y",
+            Self::Z => "Z",
+            Self::Digit0 => "Digit0",
+            Self::Digit1 => "Digit1",
+            Self::Digit2 => "Digit2",
+            Self::Digit3 => "Digit3",
+            Self::Digit4 => "Digit4",
+            Self::Digit5 => "Digit5",
+            Self::Digit6 => "Digit6",
+            Self::Digit7 => "Digit7",
+            Self::Digit8 => "Digit8",
+            Self::Digit9 => "Digit9",
+            Self::F1 => "F1",
+            Self::F2 => "F2",
+            Self::F3 => "F3",
+            Self::F4 => "F4",
+            Self::F5 => "F5",
+            Self::F6 => "F6",
+            Self::F7 => "F7",
+            Self::F8 => "F8",
+            Self::F9 => "F9",
+            Self::F10 => "F10",
+            Self::F11 => "F11",
+            Self::F12 => "F12",
+            Self::Escape => "Escape",
+            Self::Tab => "Tab",
+            Self::Enter => "Enter",
+            Self::Space => "Space",
+            Self::Backspace => "Backspace",
+            Self::Delete => "Delete",
+            Self::Insert => "Insert",
+            Self::Home => "Home",
+            Self::End => "End",
+            Self::PageUp => "PageUp",
+            Self::PageDown => "PageDown",
+            Self::Left => "Left",
+            Self::Right => "Right",
+            Self::Up => "Up",
+            Self::Down => "Down",
+        }
     }
 
     fn to_core(self) -> KeyCode {
