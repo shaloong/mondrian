@@ -819,6 +819,9 @@ editor actions such as `Action::DeleteSelection` and
 focused timeline clipboard shortcuts use the clipboard edit commands
 (`CutSelection`, `CopySelection`, `PasteAtPlayhead`, and
 `DuplicateSelection`) before reaching app-level clipboard actions.
+Timeline-local playhead stepping handles unmodified Left/Right/Home/End, with
+Shift multiplying Left/Right by the coarse step; Ctrl/Alt/Meta seek chords stay
+ignored so command routing and workspace shortcuts can own them explicitly.
 Nested-sequence navigation stays in this boundary as well. `TimelineClip` only
 marks that a clip is nested, never stores a `SequenceId`; when the clip context
 menu is opened the widget emits `TimelineEditCommand::OpenNestedSequence` with

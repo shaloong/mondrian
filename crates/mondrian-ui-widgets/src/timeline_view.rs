@@ -1788,6 +1788,9 @@ impl TimelineView {
         modifiers: Modifiers,
         ctx: &mut EventContext,
     ) -> bool {
+        if modifiers.ctrl || modifiers.meta || modifiers.alt {
+            return false;
+        }
         let step = if modifiers.shift { 10 } else { 1 };
         let target = match key {
             KeyCode::Left => self.playhead_frame.saturating_sub(step),
@@ -5552,6 +5555,51 @@ mod tests {
             &mut ctx,
         );
         assert_eq!(view.playhead_frame(), view.max_content_frame());
+    }
+
+    #[test]
+    fn focused_keyboard_seek_ignores_unowned_modified_keys() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut view = timeline().with_playhead(12).on_seek(|frame| Action::Custom {
+            namespace: "timeline.seek".into(),
+            name: frame.to_string(),
+            payload: Default::default(),
+        });
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        view.event(&UiEvent::FocusGained, &mut ctx);
+        for (key, modifiers) in [
+            (KeyCode::Left, Modifiers::ctrl()),
+            (
+                KeyCode::Right,
+                Modifiers { alt: true, ..Default::default() },
+            ),
+            (
+                KeyCode::Home,
+                Modifiers { meta: true, ..Default::default() },
+            ),
+            (KeyCode::End, Modifiers::ctrl()),
+        ] {
+            assert_eq!(
+                view.event(&UiEvent::KeyDown { key, modifiers }, &mut ctx),
+                EventResult::Ignored
+            );
+            assert_eq!(view.playhead_frame(), 12);
+        }
+        assert!(actions.borrow().is_empty());
     }
 
     #[test]
