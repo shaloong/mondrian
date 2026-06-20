@@ -81,6 +81,15 @@ fn scissor_rect_for_clip(
     let Some(clip) = clip_rect else {
         return Some((0, 0, screen_w, screen_h));
     };
+    if !clip.x.is_finite()
+        || !clip.y.is_finite()
+        || !clip.width.is_finite()
+        || !clip.height.is_finite()
+        || clip.width <= 0.0
+        || clip.height <= 0.0
+    {
+        return None;
+    }
 
     let max_x = screen_w as f32;
     let max_y = screen_h as f32;
@@ -526,6 +535,20 @@ mod tests {
             scissor_rect_for_clip(Some(Rect::new(120.0, 10.0, 20.0, 20.0)), (100, 50)),
             None
         );
+    }
+
+    #[test]
+    fn scissor_rejects_invalid_clip_bounds() {
+        for clip in [
+            Rect::new(f32::NAN, 10.0, 20.0, 20.0),
+            Rect::new(10.0, f32::INFINITY, 20.0, 20.0),
+            Rect::new(10.0, 10.0, f32::NAN, 20.0),
+            Rect::new(10.0, 10.0, 20.0, f32::INFINITY),
+            Rect::new(10.0, 10.0, 0.0, 20.0),
+            Rect::new(10.0, 10.0, 20.0, -1.0),
+        ] {
+            assert_eq!(scissor_rect_for_clip(Some(clip), (100, 50)), None);
+        }
     }
 
     #[test]

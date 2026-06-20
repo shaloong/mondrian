@@ -1759,8 +1759,11 @@ vertices. Clip bounds are the exception to normal draw rejection: they are
 expanded conservatively with floor/ceil when the command is recorded, then
 intersected hierarchically by the renderer and applied as GPU scissors; invalid
 clip scopes become empty clips so enclosed content cannot leak outside the
-broken scope. Invalid translate pushes become zero-offset stack entries so later
-pop commands still preserve transform-stack balance. Widgets may still opt into
+broken scope. The final GPU scissor conversion rejects non-finite or non-positive
+clip rectangles again, so context submission remains safe even if a future batch
+path bypasses the normal clip sanitizer. Invalid translate pushes become
+zero-offset stack entries so later pop commands still preserve transform-stack
+balance. Widgets may still opt into
 stable pixel placement at semantic edges with `snap_point()` or local layout
 policy, but whole-sale snapping of draw commands is avoided because it degrades
 curved/vector geometry and can misalign glyph bitmap bearings.
