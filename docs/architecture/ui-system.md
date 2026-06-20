@@ -1524,10 +1524,12 @@ actions before enabling rewiring or parameter mutation in the widget.
 Curve editing starts as a domain-independent widget primitive in
 `mondrian-ui-widgets`. `CurveEditor` owns normalized `0.0..=1.0` point layout,
 hit testing, pointer capture, monotonic-x dragging, keyboard nudging, and themed
-grid/curve/handle painting. Timeline keyframes, effect graph curves, and color
-curves should map their domain data into this primitive and commit semantic
-mutations at the panel/app layer instead of teaching the widget about clips,
-effects, or undo history.
+grid/curve/handle painting. Nudging selected points handles unmodified arrows
+and Shift large-step arrows only; Ctrl/Alt/Meta arrow chords stay ignored so
+shortcut routing remains centralized. Timeline keyframes, effect graph curves,
+and color curves should map their domain data into this primitive and commit
+semantic mutations at the panel/app layer instead of teaching the widget about
+clips, effects, or undo history.
 
 ## Rendering Notes
 

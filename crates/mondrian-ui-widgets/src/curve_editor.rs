@@ -254,6 +254,9 @@ impl CurveEditor {
         modifiers: Modifiers,
         ctx: &mut EventContext,
     ) -> bool {
+        if modifiers.ctrl || modifiers.alt || modifiers.meta {
+            return false;
+        }
         let Some(index) = self.selected else {
             return false;
         };
@@ -806,6 +809,42 @@ mod tests {
             &[curve_action(editor.points())]
         );
         assert!(ctx.requests.repaint);
+    }
+
+    #[test]
+    fn keyboard_nudge_ignores_ctrl_alt_and_meta_chords() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut f = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut shortcut, &mut tooltip, &dispatch);
+        let mut editor = CurveEditor::with_points(vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.5, 0.5),
+            CurvePoint::new(1.0, 1.0),
+        ])
+        .on_change(curve_action);
+        editor.select(Some(1));
+
+        for (key, modifiers) in [
+            (KeyCode::Right, Modifiers::ctrl()),
+            (KeyCode::Left, Modifiers { alt: true, ..Default::default() }),
+            (KeyCode::Up, Modifiers { meta: true, ..Default::default() }),
+            (
+                KeyCode::Down,
+                Modifiers { ctrl: true, shift: true, ..Default::default() },
+            ),
+        ] {
+            assert_eq!(
+                editor.event(&UiEvent::KeyDown { key, modifiers }, &mut ctx),
+                EventResult::Ignored
+            );
+            assert_eq!(editor.points()[1], CurvePoint::new(0.5, 0.5));
+        }
+
+        assert!(actions.borrow().is_empty());
+        assert!(!ctx.requests.repaint);
     }
 
     #[test]
