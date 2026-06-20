@@ -591,7 +591,11 @@ overlay horizontal and vertical scrollbars when content overflows; scrollbar
 thumb drags and track paging must win hit testing over clip selection and
 seeking. Timeline surfaces are focusable: while focused they may handle
 timeline-local navigation such as playhead nudging, but global editor commands
-remain outside the widget layer.
+remain outside the widget layer. Timeline pointer capture ownership is tracked
+explicitly and is separate from keyboard focus: `FocusLost` or disabled-event
+cleanup releases capture only if an active timeline drag previously captured
+the pointer, so an idle focused timeline cannot clear another overlay or
+control's capture.
 
 ## Overlays
 

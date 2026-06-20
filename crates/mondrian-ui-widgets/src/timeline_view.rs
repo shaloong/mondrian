@@ -373,6 +373,7 @@ pub struct TimelineView {
     clip_drag: Option<TimelineClipDrag>,
     trim_drag: Option<TimelineTrimDrag>,
     scrollbar_drag: Option<TimelineScrollbarDrag>,
+    pointer_capture_active: bool,
     context_menu: Option<ContextMenu>,
     horizontal_scrollbar_hovered: bool,
     vertical_scrollbar_hovered: bool,
@@ -483,6 +484,7 @@ impl TimelineView {
             clip_drag: None,
             trim_drag: None,
             scrollbar_drag: None,
+            pointer_capture_active: false,
             context_menu: None,
             horizontal_scrollbar_hovered: false,
             vertical_scrollbar_hovered: false,
@@ -563,6 +565,18 @@ impl TimelineView {
             self.context_menu = None;
             self.horizontal_scrollbar_hovered = false;
             self.vertical_scrollbar_hovered = false;
+        }
+    }
+
+    fn request_timeline_pointer_capture(&mut self, ctx: &mut EventContext) {
+        self.pointer_capture_active = true;
+        ctx.request_pointer_capture(self.id);
+    }
+
+    fn release_timeline_pointer_capture(&mut self, ctx: &mut EventContext) {
+        if self.pointer_capture_active {
+            self.pointer_capture_active = false;
+            ctx.release_pointer_capture(self.id);
         }
     }
 
@@ -2691,16 +2705,7 @@ impl Widget for TimelineView {
             if self.chrome_tooltip().is_some() {
                 ctx.tooltip.hide();
             }
-            if self.playhead_dragging
-                || self.in_out_drag.is_some()
-                || self.track_drag.is_some()
-                || self.clip_drag.is_some()
-                || self.trim_drag.is_some()
-                || self.scrollbar_drag.is_some()
-                || self.focused
-            {
-                ctx.release_pointer_capture(self.id);
-            }
+            self.release_timeline_pointer_capture(ctx);
             self.focused = false;
             self.focus_visible = false;
             self.playhead_dragging = false;
@@ -2788,7 +2793,7 @@ impl Widget for TimelineView {
                             start_scroll: self.scroll_x,
                         });
                         self.horizontal_scrollbar_hovered = true;
-                        ctx.request_pointer_capture(self.id);
+                        self.request_timeline_pointer_capture(ctx);
                         ctx.request_repaint();
                         return EventResult::Handled;
                     }
@@ -2801,7 +2806,7 @@ impl Widget for TimelineView {
                             start_scroll: self.scroll_y,
                         });
                         self.vertical_scrollbar_hovered = true;
-                        ctx.request_pointer_capture(self.id);
+                        self.request_timeline_pointer_capture(ctx);
                         ctx.request_repaint();
                         return EventResult::Handled;
                     }
@@ -2852,12 +2857,12 @@ impl Widget for TimelineView {
                 if self.ruler_rect.contains(*position) {
                     if let Some(point) = self.in_out_marker_at(*position) {
                         self.start_in_out_drag(point);
-                        ctx.request_pointer_capture(self.id);
+                        self.request_timeline_pointer_capture(ctx);
                         ctx.request_repaint();
                         return EventResult::Handled;
                     }
                     self.playhead_dragging = true;
-                    ctx.request_pointer_capture(self.id);
+                    self.request_timeline_pointer_capture(ctx);
                     self.seek_from_input(self.x_to_frame(position.x), ctx);
                     return EventResult::Handled;
                 }
@@ -2867,7 +2872,7 @@ impl Widget for TimelineView {
                 if let Some(track_ref) = self.track_header_at(*position) {
                     let result = self.select_track_from_input(track_ref, ctx);
                     self.start_track_drag(track_ref);
-                    ctx.request_pointer_capture(self.id);
+                    self.request_timeline_pointer_capture(ctx);
                     return result;
                 }
                 if let Some(clip_ref) = self.hit_clip(*position) {
@@ -2881,7 +2886,7 @@ impl Widget for TimelineView {
                         self.start_clip_drag(clip_ref, *position);
                     }
                     if self.clip_drag.is_some() || self.trim_drag.is_some() {
-                        ctx.request_pointer_capture(self.id);
+                        self.request_timeline_pointer_capture(ctx);
                     }
                     return result;
                 }
@@ -2967,33 +2972,33 @@ impl Widget for TimelineView {
             }
             UiEvent::MouseUp { button: MouseButton::Left, .. } if self.playhead_dragging => {
                 self.playhead_dragging = false;
-                ctx.release_pointer_capture(self.id);
+                self.release_timeline_pointer_capture(ctx);
                 ctx.request_repaint();
                 return EventResult::Handled;
             }
             UiEvent::MouseUp { button: MouseButton::Left, .. } if self.in_out_drag.is_some() => {
                 self.finish_in_out_drag(ctx);
-                ctx.release_pointer_capture(self.id);
+                self.release_timeline_pointer_capture(ctx);
                 return EventResult::Handled;
             }
             UiEvent::MouseUp { button: MouseButton::Left, .. } if self.track_drag.is_some() => {
                 self.finish_track_drag(ctx);
-                ctx.release_pointer_capture(self.id);
+                self.release_timeline_pointer_capture(ctx);
                 return EventResult::Handled;
             }
             UiEvent::MouseUp { button: MouseButton::Left, .. } if self.clip_drag.is_some() => {
                 self.finish_clip_drag(ctx);
-                ctx.release_pointer_capture(self.id);
+                self.release_timeline_pointer_capture(ctx);
                 return EventResult::Handled;
             }
             UiEvent::MouseUp { button: MouseButton::Left, .. } if self.trim_drag.is_some() => {
                 self.finish_trim_drag(ctx);
-                ctx.release_pointer_capture(self.id);
+                self.release_timeline_pointer_capture(ctx);
                 return EventResult::Handled;
             }
             UiEvent::MouseUp { button: MouseButton::Left, .. } if self.scrollbar_drag.is_some() => {
                 self.scrollbar_drag = None;
-                ctx.release_pointer_capture(self.id);
+                self.release_timeline_pointer_capture(ctx);
                 ctx.request_repaint();
                 return EventResult::Handled;
             }
@@ -3019,7 +3024,7 @@ impl Widget for TimelineView {
                 self.hovered_tool = None;
                 self.hovered_track_add = None;
                 self.hovered_zoom = None;
-                ctx.release_pointer_capture(self.id);
+                self.release_timeline_pointer_capture(ctx);
                 return EventResult::Handled;
             }
             UiEvent::KeyDown { key, modifiers } if self.focused => {
@@ -3699,6 +3704,87 @@ mod tests {
     }
 
     #[test]
+    fn focus_lost_without_active_drag_preserves_pointer_capture_owner() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut view = timeline();
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            view.event(&UiEvent::FocusGained, &mut ctx),
+            EventResult::Handled
+        );
+        assert!(ctx.requests.pointer_capture.is_none());
+
+        assert_eq!(
+            view.event(&UiEvent::FocusLost, &mut ctx),
+            EventResult::Handled
+        );
+        assert!(ctx.requests.pointer_capture.is_none());
+        assert!(!view.focused);
+        assert!(!view.pointer_capture_active);
+    }
+
+    #[test]
+    fn focus_lost_during_ruler_drag_releases_pointer_capture() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut view = timeline();
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        view.event(
+            &UiEvent::MouseDown {
+                position: Point::new(192.0, 12.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert!(view.playhead_dragging);
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Capture(view.id()))
+        );
+
+        ctx.requests.pointer_capture = None;
+        assert_eq!(
+            view.event(&UiEvent::FocusLost, &mut ctx),
+            EventResult::Handled
+        );
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Release(view.id()))
+        );
+        assert!(!view.playhead_dragging);
+        assert!(!view.pointer_capture_active);
+    }
+
+    #[test]
     fn disabled_timeline_ignores_seek_and_focus() {
         let actions = RefCell::new(Vec::new());
         let dispatch = |action| actions.borrow_mut().push(action);
@@ -3779,6 +3865,61 @@ mod tests {
             ctx.requests.pointer_capture,
             Some(PointerCaptureRequest::Release(view.id()))
         );
+    }
+
+    #[test]
+    fn disabling_while_dragging_clip_releases_preserved_capture_on_next_event() {
+        let mut view = timeline();
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let dispatch = |_| {};
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            view.event(
+                &UiEvent::MouseDown {
+                    position: Point::new(108.0, 42.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert!(view.clip_drag.is_some());
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Capture(view.id()))
+        );
+
+        view.set_enabled(false);
+        assert!(view.clip_drag.is_none());
+        assert!(view.pointer_capture_active);
+        assert_eq!(
+            view.event(
+                &UiEvent::MouseMove {
+                    position: Point::new(148.0, 42.0),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Release(view.id()))
+        );
+        assert!(!view.pointer_capture_active);
     }
 
     #[test]
