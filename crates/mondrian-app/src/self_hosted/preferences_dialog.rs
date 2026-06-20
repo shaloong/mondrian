@@ -204,6 +204,8 @@ pub struct PreferencesDialog {
     surface: DialogSurface,
     bounds: Rect,
     card: Rect,
+    shortcut_viewport: Rect,
+    shortcut_scroll_offset: f32,
     title_label: Label,
     description_label: Label,
     nav_buttons: Vec<Button>,
@@ -259,6 +261,8 @@ impl PreferencesDialog {
             .with_content_padding(CONTENT_PADDING),
             bounds: Rect::ZERO,
             card: Rect::ZERO,
+            shortcut_viewport: Rect::ZERO,
+            shortcut_scroll_offset: 0.0,
             title_label: Label::new("Preferences")
                 .popover_foreground()
                 .with_font_size(TITLE_FONT_SIZE)
@@ -296,6 +300,7 @@ impl PreferencesDialog {
             return;
         }
         self.model = model;
+        self.clamp_shortcut_scroll();
         self.rebuild_content();
         if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
             self.layout(self.bounds);
@@ -308,6 +313,7 @@ impl PreferencesDialog {
             return;
         }
         self.active_tab = tab;
+        self.clamp_shortcut_scroll();
         self.rebuild_content();
         if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
             self.layout(self.bounds);
@@ -351,6 +357,31 @@ impl PreferencesDialog {
             Vec::new()
         };
     }
+
+    fn shortcut_content_height(&self) -> f32 {
+        self.model.shortcut_rows.len() as f32 * ROW_HEIGHT
+    }
+
+    fn max_shortcut_scroll(&self) -> f32 {
+        (self.shortcut_content_height() - self.shortcut_viewport.height).max(0.0)
+    }
+
+    fn clamp_shortcut_scroll(&mut self) {
+        self.shortcut_scroll_offset =
+            self.shortcut_scroll_offset.clamp(0.0, self.max_shortcut_scroll());
+    }
+
+    fn set_shortcut_scroll(&mut self, offset: f32, ctx: &mut EventContext) -> EventResult {
+        let old = self.shortcut_scroll_offset;
+        self.shortcut_scroll_offset = offset.clamp(0.0, self.max_shortcut_scroll());
+        if (self.shortcut_scroll_offset - old).abs() > 0.01 {
+            self.layout(self.bounds);
+            ctx.request_repaint();
+            EventResult::Handled
+        } else {
+            EventResult::Ignored
+        }
+    }
 }
 
 impl Default for PreferencesDialog {
@@ -388,6 +419,19 @@ impl Widget for PreferencesDialog {
         let body_top = content.y + 82.0;
         let nav_x = content.x;
         let content_x = nav_x + NAV_WIDTH + CONTENT_GAP;
+        let list_bottom =
+            self.card.y + self.card.height - BUTTON_BOTTOM_INSET - BUTTON_HEIGHT - 18.0;
+        self.shortcut_viewport = if self.active_tab == PreferencesDialogTab::Shortcuts {
+            Rect::new(
+                content_x,
+                body_top + SHORTCUT_HEADER_ROW_COUNT as f32 * ROW_HEIGHT,
+                (content.x + content.width - content_x).max(0.0),
+                (list_bottom - (body_top + SHORTCUT_HEADER_ROW_COUNT as f32 * ROW_HEIGHT)).max(0.0),
+            )
+        } else {
+            Rect::ZERO
+        };
+        self.clamp_shortcut_scroll();
         for (index, button) in self.nav_buttons.iter_mut().enumerate() {
             button.layout(Rect::new(
                 nav_x,
@@ -414,19 +458,22 @@ impl Widget for PreferencesDialog {
                 (content_width - SHORTCUT_BUTTON_WIDTH * 2.0 - SHORTCUT_BUTTON_GAP * 2.0).max(0.0);
         }
         for (index, label) in self.content_labels.iter_mut().enumerate() {
-            label.layout(Rect::new(
-                content_x,
-                body_top + index as f32 * ROW_HEIGHT,
-                content_width,
-                ROW_HEIGHT,
-            ));
+            let y = if self.active_tab == PreferencesDialogTab::Shortcuts
+                && index >= SHORTCUT_HEADER_ROW_COUNT
+            {
+                self.shortcut_viewport.y + (index - SHORTCUT_HEADER_ROW_COUNT) as f32 * ROW_HEIGHT
+                    - self.shortcut_scroll_offset
+            } else {
+                body_top + index as f32 * ROW_HEIGHT
+            };
+            label.layout(Rect::new(content_x, y, content_width, ROW_HEIGHT));
         }
         if self.active_tab == PreferencesDialogTab::Shortcuts {
             let buttons_left =
                 content.x + content.width - SHORTCUT_BUTTON_WIDTH * 2.0 - SHORTCUT_BUTTON_GAP - 2.0;
             for (index, buttons) in self.shortcut_buttons.iter_mut().enumerate() {
-                let y = body_top
-                    + (index + SHORTCUT_HEADER_ROW_COUNT) as f32 * ROW_HEIGHT
+                let y = self.shortcut_viewport.y + index as f32 * ROW_HEIGHT
+                    - self.shortcut_scroll_offset
                     + (ROW_HEIGHT - SHORTCUT_BUTTON_HEIGHT) * 0.5;
                 buttons.disable.layout(Rect::new(
                     buttons_left,
@@ -465,6 +512,14 @@ impl Widget for PreferencesDialog {
             _ => {}
         }
 
+        if let UiEvent::MouseWheel { delta, position, .. } = event {
+            if self.active_tab == PreferencesDialogTab::Shortcuts
+                && self.shortcut_viewport.contains(*position)
+            {
+                return self.set_shortcut_scroll(self.shortcut_scroll_offset + *delta, ctx);
+            }
+        }
+
         if self.close_button.event(event, ctx) == EventResult::Handled {
             return EventResult::Handled;
         }
@@ -481,12 +536,17 @@ impl Widget for PreferencesDialog {
             }
         }
         if self.active_tab == PreferencesDialogTab::Shortcuts {
-            for buttons in &mut self.shortcut_buttons {
-                if buttons.disable.event(event, ctx) == EventResult::Handled {
-                    return EventResult::Handled;
-                }
-                if buttons.reset.event(event, ctx) == EventResult::Handled {
-                    return EventResult::Handled;
+            let pointer_position = pointer_position(event);
+            let inside_viewport =
+                pointer_position.is_none_or(|position| self.shortcut_viewport.contains(position));
+            if inside_viewport {
+                for buttons in &mut self.shortcut_buttons {
+                    if buttons.disable.event(event, ctx) == EventResult::Handled {
+                        return EventResult::Handled;
+                    }
+                    if buttons.reset.event(event, ctx) == EventResult::Handled {
+                        return EventResult::Handled;
+                    }
                 }
             }
         }
@@ -548,13 +608,28 @@ impl Widget for PreferencesDialog {
                 }
             }
         }
-        for label in &self.content_labels {
-            label.paint(ctx);
-        }
         if self.active_tab == PreferencesDialogTab::Shortcuts {
+            for label in self.content_labels.iter().take(SHORTCUT_HEADER_ROW_COUNT) {
+                label.paint(ctx);
+            }
+            ctx.push_clip(self.shortcut_viewport);
+            for label in self.content_labels.iter().skip(SHORTCUT_HEADER_ROW_COUNT) {
+                label.paint(ctx);
+            }
             for buttons in &self.shortcut_buttons {
                 buttons.disable.paint(ctx);
                 buttons.reset.paint(ctx);
+            }
+            ctx.pop_clip();
+            paint_shortcut_scrollbar(
+                ctx,
+                self.shortcut_viewport,
+                self.shortcut_scroll_offset,
+                self.max_shortcut_scroll(),
+            );
+        } else {
+            for label in &self.content_labels {
+                label.paint(ctx);
             }
         }
         self.close_button.paint(ctx);
@@ -673,6 +748,16 @@ fn detail(text: impl Into<String>) -> ContentRow {
     ContentRow { text: text.into(), heading: false }
 }
 
+fn pointer_position(event: &UiEvent) -> Option<Point> {
+    match event {
+        UiEvent::MouseDown { position, .. }
+        | UiEvent::MouseUp { position, .. }
+        | UiEvent::MouseMove { position, .. }
+        | UiEvent::MouseWheel { position, .. } => Some(*position),
+        _ => None,
+    }
+}
+
 fn shortcut_preference_rows(
     overrides: &[SelfHostedShortcutOverride],
 ) -> Vec<ShortcutPreferenceRow> {
@@ -723,6 +808,34 @@ fn paint_theme_button_outline(ctx: &mut PaintContext, bounds: Rect) {
     );
     ctx.encoder
         .draw_line(Point::new(left, bottom), Point::new(left, top), 1.5, color);
+}
+
+fn paint_shortcut_scrollbar(
+    ctx: &mut PaintContext,
+    viewport: Rect,
+    scroll_offset: f32,
+    max_scroll: f32,
+) {
+    if max_scroll <= 0.0 || viewport.height <= 0.0 {
+        return;
+    }
+    let track = Rect::new(
+        viewport.x + viewport.width - 3.0,
+        viewport.y,
+        3.0,
+        viewport.height,
+    );
+    let content_height = viewport.height + max_scroll;
+    let thumb_height =
+        (viewport.height / content_height * viewport.height).clamp(24.0, viewport.height);
+    let thumb_range = (viewport.height - thumb_height).max(0.0);
+    let thumb_y = viewport.y + (scroll_offset / max_scroll) * thumb_range;
+    ctx.encoder.draw_rect(track, ctx.theme.colors.muted, 1.5);
+    ctx.encoder.draw_rect(
+        Rect::new(track.x, thumb_y, track.width, thumb_height),
+        ctx.theme.colors.muted_foreground,
+        1.5,
+    );
 }
 
 fn content_rows_for_tab(
@@ -961,6 +1074,74 @@ mod tests {
                 assert_eq!(payload.id, "file.save_project");
             }
             other => panic!("expected shortcut reset action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn preferences_shortcuts_scroll_to_late_rows_before_dispatch() {
+        let mut dialog = PreferencesDialog::with_model_and_tab(
+            SelfHostedPreferencesModel::default(),
+            PreferencesDialogTab::Shortcuts,
+        );
+        dialog.layout(Rect::new(0.0, 0.0, 1000.0, 700.0));
+        let actions = RefCell::new(Vec::new());
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert!(dialog.max_shortcut_scroll() > 0.0);
+        assert_eq!(
+            dialog.event(
+                &UiEvent::MouseWheel {
+                    delta: 10_000.0,
+                    position: dialog.shortcut_viewport.center(),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert!((dialog.shortcut_scroll_offset - dialog.max_shortcut_scroll()).abs() < 0.01);
+
+        let export_index = dialog
+            .model
+            .shortcut_rows
+            .iter()
+            .position(|row| row.id == "panel.export")
+            .expect("export panel shortcut row");
+        let content = dialog.surface.content_rect(dialog.card);
+        let buttons_left =
+            content.x + content.width - SHORTCUT_BUTTON_WIDTH * 2.0 - SHORTCUT_BUTTON_GAP - 2.0;
+        let export_disable = Point::new(
+            buttons_left + SHORTCUT_BUTTON_WIDTH * 0.5,
+            dialog.shortcut_viewport.y + export_index as f32 * ROW_HEIGHT
+                - dialog.shortcut_scroll_offset
+                + ROW_HEIGHT * 0.5,
+        );
+        assert!(dialog.shortcut_viewport.contains(export_disable));
+
+        click(&mut dialog, &mut ctx, export_disable);
+
+        let recorded = actions.borrow();
+        assert_eq!(recorded.len(), 1);
+        match &recorded[0] {
+            Action::Custom { namespace, name, payload } => {
+                assert_eq!(namespace, APP_SHELL_NAMESPACE);
+                assert_eq!(name, APP_SHELL_PREFERENCES_SHORTCUT_DISABLED);
+                let payload: PreferencesShortcutPayload =
+                    serde_json::from_value(payload.clone()).unwrap();
+                assert_eq!(payload.id, "panel.export");
+            }
+            other => panic!("expected shortcut disabled action, got {other:?}"),
         }
     }
 

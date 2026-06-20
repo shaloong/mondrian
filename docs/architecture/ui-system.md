@@ -510,6 +510,10 @@ shell-local Disable and Default actions keyed by descriptor id; `SelfHostedUiHos
 persists those updates and the native window session immediately rebuilds the
 router's global shortcut scope from the new active table. These preference
 updates are not editor actions and must not create undo history.
+Because the descriptor table is longer than the compact Preferences modal, the
+Shortcuts tab keeps its heading fixed and scrolls the shortcut rows inside a
+clipped viewport with a token-painted scrollbar; row buttons must use the same
+scroll offset and must not receive pointer events outside that viewport.
 Focused-panel context is inferred by walking from the focused widget to the
 nearest ancestor widget that exposes `Widget::panel_kind()`. `PanelSlot` is the
 normal boundary that returns a panel kind. Leaf controls request only widget
