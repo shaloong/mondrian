@@ -1565,7 +1565,10 @@ row, and CMYKA fits five compact numeric fields on one row. The picker exposes
 a visible eyedropper button that enters sampling mode. The widget accepts an
 optional `VectorIcon` for that button but stays asset-agnostic; the self-hosted
 app shell supplies the bundled `AppIcon::Eyedropper` SVG from its product icon
-registry. The widget stays platform-neutral: it emits
+registry. The bundled source is the canonical `assets/icons/eyedropper.svg`
+asset, with no style suffix variants such as `eyedropper-bold.svg`, so the
+picker, demo, and inspector share the same designer-authored symbol. The widget
+stays platform-neutral: it emits
 `EventRequests::eyedropper`, handles `UiEvent::EyedropperSample` /
 `UiEvent::EyedropperCancel`, and never calls screen-capture or OS pointer APIs
 directly. Winit shells complete sampling via

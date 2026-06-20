@@ -321,6 +321,27 @@ mod tests {
     }
 
     #[test]
+    fn eyedropper_uses_canonical_bundled_svg_filename() {
+        let icons_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets").join("icons");
+        let mut eyedropper_files = std::fs::read_dir(&icons_dir)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", icons_dir.display()))
+            .map(|entry| {
+                entry
+                    .unwrap_or_else(|err| panic!("failed to read icon entry: {err}"))
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .filter(|name| name.starts_with("eyedropper"))
+            .collect::<Vec<_>>();
+        eyedropper_files.sort();
+
+        assert_eq!(eyedropper_files, ["eyedropper.svg"]);
+        assert!(AppIcon::Eyedropper.vector_icon().is_ok());
+    }
+
+    #[test]
     fn self_hosted_icons_build_text_buttons() {
         let button = AppIcon::Trash.text_button("Remove").expect("trash text button");
 
