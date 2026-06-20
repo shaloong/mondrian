@@ -740,11 +740,12 @@ behind adjacent dock panels.
 Pointer capture remains authoritative for drags and open popup internals, but
 only inside the current top-layer overlay scope: if a newer sibling overlay such
 as a modal is visually above the captured widget, pointer routing targets that
-top overlay instead of the stale capture. Captured descendants inside the active
-overlay keep receiving move/up events so sliders, scrubbers, and drag handles do
-not lose capture just because their modal or popup exposes a broad overlay
-boundary. Dragging popup internals should use pointer capture so move/up events
-remain routed to the owning widget.
+top overlay and clears the covered sibling capture instead of leaving a stale
+capture that can resurface after the overlay closes. Captured descendants inside
+the active overlay keep receiving move/up events so sliders, scrubbers, and drag
+handles do not lose capture just because their modal or popup exposes a broad
+overlay boundary. Dragging popup internals should use pointer capture so move/up
+events remain routed to the owning widget.
 Active drag-and-drop uses the same overlay-first target resolution as pointer
 events: open context menus, dropdowns, popovers, and modal surfaces must receive
 `DragEnter`, `DragOver`, and `Drop` before normal panel content beneath them.

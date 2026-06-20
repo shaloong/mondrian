@@ -574,7 +574,7 @@ impl EventRouter {
         }
     }
 
-    fn pointer_target(&self, tree: &dyn WidgetTree, position: Point) -> Option<WidgetId> {
+    fn pointer_target(&mut self, tree: &dyn WidgetTree, position: Point) -> Option<WidgetId> {
         let overlay_target = overlay_hit_test_deepest(tree, position);
         let Some(captured) = self.captured else {
             return overlay_target.or_else(|| hit_test_deepest(tree, position));
@@ -584,6 +584,7 @@ impl EventRouter {
             Some(overlay)
                 if overlay != captured && !self.is_ancestor_or_self(tree, overlay, captured) =>
             {
+                self.captured = None;
                 Some(overlay)
             }
             _ => Some(captured),
@@ -1663,7 +1664,7 @@ mod tests {
     }
 
     #[test]
-    fn router_routes_pointer_to_top_overlay_outside_capture() {
+    fn router_routes_pointer_to_top_overlay_and_clears_stale_sibling_capture() {
         let log = Rc::new(RefCell::new(Vec::new()));
         let root = OverlayRecordingWidget::new(
             "root",
@@ -1714,7 +1715,7 @@ mod tests {
 
         assert_eq!(result, EventResult::Handled);
         assert_eq!(log.borrow().as_slice(), ["modal:down"]);
-        assert_eq!(router.captured(), Some(captured_id));
+        assert_eq!(router.captured(), None);
     }
 
     #[test]
