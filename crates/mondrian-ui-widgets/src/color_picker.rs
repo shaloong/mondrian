@@ -420,6 +420,9 @@ impl ColorPicker {
         let before = self.fields[index].text().to_string();
         let result = self.fields[index].event(event, ctx);
         self.translate_field_capture_request(index, ctx.requests);
+        if result == EventResult::Handled && !matches!(event, UiEvent::FocusLost) {
+            ctx.focus.request_focus(self.id);
+        }
         if result == EventResult::Handled
             && self.fields[index].text() != before
             && self.apply_visible_fields()
@@ -1807,9 +1810,11 @@ mod tests {
     use super::*;
     use crate::paint::{shadow_color, shadow_rect};
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use mondrian_ui_core::focus::FocusManager;
     use mondrian_ui_core::widget::DrawCommandEncoder;
     use mondrian_ui_theme::ThemePreset;
     use std::cell::RefCell;
+    use std::rc::Rc;
 
     #[derive(Default)]
     struct RecordingEncoder {
@@ -1898,6 +1903,38 @@ mod tests {
         let s: &'static mut DummyShortcut = Box::leak(Box::new(DummyShortcut));
         let t: &'static mut DummyTooltip = Box::leak(Box::new(DummyTooltip));
         make_event_ctx(f, s, t, &|_| {})
+    }
+
+    struct RecordingFocus {
+        focused: Rc<RefCell<Option<WidgetId>>>,
+    }
+
+    impl FocusManager for RecordingFocus {
+        fn focused_widget(&self) -> Option<WidgetId> {
+            *self.focused.borrow()
+        }
+
+        fn focused_panel(&self) -> Option<mondrian_editor_state::state::PanelKind> {
+            None
+        }
+
+        fn request_focus(&mut self, widget: WidgetId) {
+            *self.focused.borrow_mut() = Some(widget);
+        }
+
+        fn release_focus(&mut self, widget: WidgetId) {
+            if *self.focused.borrow() == Some(widget) {
+                *self.focused.borrow_mut() = None;
+            }
+        }
+
+        fn focus_next(&mut self) {}
+
+        fn focus_prev(&mut self) {}
+
+        fn clear_focus(&mut self) {
+            *self.focused.borrow_mut() = None;
+        }
     }
 
     fn color_action(color: Color) -> Action {
@@ -2295,6 +2332,39 @@ mod tests {
         picker.event(&UiEvent::TextInput("200".into()), &mut ctx);
 
         assert_eq!(picker.color().to_rgba8(), [0, 200, 0, 255]);
+    }
+
+    #[test]
+    fn field_click_keeps_router_focus_on_color_picker() {
+        let mut picker = ColorPicker::new(Color::BLACK);
+        picker.layout(Rect::new(0.0, 0.0, PICKER_WIDTH, PICKER_HEIGHT));
+        let picker_id = picker.id();
+        let field = picker.field_rect(0).center();
+        let focused = Rc::new(RefCell::new(None));
+        let mut focus = RecordingFocus { focused: Rc::clone(&focused) };
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let dispatch = |_action: Action| {};
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        assert_eq!(
+            picker.event(&UiEvent::FocusGained, &mut ctx),
+            EventResult::Handled
+        );
+        assert_eq!(
+            picker.event(
+                &UiEvent::MouseDown {
+                    position: field,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(*focused.borrow(), Some(picker_id));
+        assert!(picker.accepts_text_input());
     }
 
     #[test]

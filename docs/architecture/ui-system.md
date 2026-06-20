@@ -471,6 +471,12 @@ Shift-modified printable `KeyDown`s as shortcuts; the matching `TextInput` or
 IME commit event remains the authoritative text mutation path. Ctrl, Alt, and
 Meta chords still reach shortcut resolution so explicit editing shortcuts such
 as copy, paste, select-all, and user-defined command chords keep working.
+Composite widgets that keep private `TextInput`s outside the public widget tree
+must translate private focus back to the composite's stable widget id while
+preserving the inner text field's local focus and IME requests. Router focus
+must never point at an id that `WidgetTree::get()` cannot resolve on the next
+event, otherwise text input, shortcut shielding, and focused-panel context will
+be pruned as stale state.
 Every product `PanelKind` exposed by the View menu must also have a default
 focus shortcut descriptor so menu rows, shortcut labels, and router bindings
 stay in one access model.
