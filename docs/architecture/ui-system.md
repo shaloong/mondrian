@@ -1466,6 +1466,11 @@ mode selection, keyboard nudging, eyedropper state, and text-field
 synchronization. Color-axis nudging handles unmodified arrows and Shift
 large-step arrows only; Ctrl/Alt/Meta arrow chords and modified mode-menu
 navigation stay ignored so shortcut routing remains centralized.
+`ColorPickerTrigger` wraps a private popup picker and must translate the popup's
+pointer capture, focused text-field ownership, and `accepts_text_input()` state
+back to the trigger id. Inspector popups therefore keep a router-visible focus
+owner while the embedded picker preserves its own active field, IME, and color
+editing state.
 
 The renderer exposes gradient rectangle and per-vertex colored triangle draw
 commands backed by the existing batch pipeline. Colored triangle fans may carry

@@ -1593,7 +1593,12 @@ impl ColorPickerTrigger {
         self.bounds.inset(4.0, 4.0)
     }
 
-    fn translate_picker_capture_request(&mut self, ctx: &mut EventContext) {
+    fn translate_picker_event_requests(
+        &mut self,
+        event: &UiEvent,
+        result: EventResult,
+        ctx: &mut EventContext,
+    ) {
         match ctx.requests.pointer_capture {
             Some(PointerCaptureRequest::Capture(id)) if id == self.picker.id() => {
                 self.picker_pointer_captured = true;
@@ -1604,6 +1609,9 @@ impl ColorPickerTrigger {
                 ctx.release_pointer_capture(self.id);
             }
             _ => {}
+        }
+        if result == EventResult::Handled && !matches!(event, UiEvent::FocusLost) {
+            ctx.focus.request_focus(self.id);
         }
     }
 
@@ -1626,8 +1634,9 @@ impl ColorPickerTrigger {
     fn close_popup(&mut self, ctx: &mut EventContext, release_focus: bool) {
         self.open = false;
         self.pressed = false;
-        let _ = self.picker.event(&UiEvent::FocusLost, ctx);
-        self.translate_picker_capture_request(ctx);
+        let focus_lost = UiEvent::FocusLost;
+        let result = self.picker.event(&focus_lost, ctx);
+        self.translate_picker_event_requests(&focus_lost, result, ctx);
         self.picker.cancel_interaction();
         if self.picker_pointer_captured {
             self.picker_pointer_captured = false;
@@ -1697,9 +1706,9 @@ impl Widget for ColorPickerTrigger {
             };
 
             if should_route {
-                let handled_by_picker = self.picker.event(event, ctx) == EventResult::Handled;
-                self.translate_picker_capture_request(ctx);
-                if handled_by_picker {
+                let result = self.picker.event(event, ctx);
+                self.translate_picker_event_requests(event, result, ctx);
+                if result == EventResult::Handled {
                     return EventResult::Handled;
                 }
             }
@@ -1802,6 +1811,10 @@ impl Widget for ColorPickerTrigger {
 
     fn can_focus(&self) -> bool {
         self.enabled
+    }
+
+    fn accepts_text_input(&self) -> bool {
+        self.enabled && self.open && self.picker.accepts_text_input()
     }
 }
 
@@ -2934,6 +2947,55 @@ mod tests {
             ctx.requests.pointer_capture,
             Some(PointerCaptureRequest::Capture(trigger.id()))
         );
+    }
+
+    #[test]
+    fn trigger_translates_inner_text_focus_to_trigger_id() {
+        let mut trigger = ColorPickerTrigger::new(Color::BLACK);
+        trigger.picker_mut().set_mode(ColorPickerMode::Rgb);
+        trigger.layout(Rect::new(20.0, 30.0, 32.0, 32.0));
+        let trigger_id = trigger.id();
+        let trigger_center = trigger.bounds.center();
+        let focused = Rc::new(RefCell::new(None));
+        let mut focus = RecordingFocus { focused: Rc::clone(&focused) };
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let dispatch = |_action: Action| {};
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        trigger.event(
+            &UiEvent::MouseDown {
+                position: trigger_center,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        trigger.event(
+            &UiEvent::MouseUp {
+                position: trigger_center,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert!(trigger.is_open());
+
+        let red = trigger.picker.field_rect(0).center();
+        assert_eq!(
+            trigger.event(
+                &UiEvent::MouseDown {
+                    position: red,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(*focused.borrow(), Some(trigger_id));
+        assert!(trigger.accepts_text_input());
     }
 
     #[test]
