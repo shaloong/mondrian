@@ -932,12 +932,16 @@ impl AssetGrid {
         items: Vec<MenuItem>,
         target: Option<usize>,
         ctx: &mut EventContext,
-    ) {
+    ) -> bool {
+        if items.iter().all(|item| !item.is_activatable()) {
+            return false;
+        }
         let mut menu = ContextMenu::new(position, items);
         menu.layout(self.bounds);
         self.context_menu = Some(menu);
         self.context_menu_target = target;
         ctx.request_repaint();
+        true
     }
 
     fn card_context_menu_items(&self, index: usize) -> Vec<MenuItem> {
@@ -1389,24 +1393,23 @@ impl Widget for AssetGrid {
                         if self.selected_indices.contains(&index) && self.selected_indices.len() > 1
                         {
                             let items = self.selection_context_menu_items();
-                            if !items.is_empty() {
-                                self.open_context_menu(*position, items, None, ctx);
+                            if self.open_context_menu(*position, items, None, ctx) {
                                 return EventResult::Handled;
                             }
                         }
                         let items = self.card_context_menu_items(index);
-                        if !items.is_empty() {
+                        if items.iter().any(MenuItem::is_activatable) {
                             if !self.selected_indices.contains(&index) {
                                 self.set_selected(Some(index));
                                 self.dispatch_select(index, ctx);
                             }
-                            self.open_context_menu(*position, items, Some(index), ctx);
-                            return EventResult::Handled;
+                            if self.open_context_menu(*position, items, Some(index), ctx) {
+                                return EventResult::Handled;
+                            }
                         }
                     }
                 }
-                if !self.context_menu_items.is_empty() {
-                    self.open_context_menu(*position, self.context_menu_items.clone(), None, ctx);
+                if self.open_context_menu(*position, self.context_menu_items.clone(), None, ctx) {
                     return EventResult::Handled;
                 }
             }
@@ -3028,6 +3031,96 @@ mod tests {
     }
 
     #[test]
+    fn right_click_disabled_grid_context_menu_is_ignored() {
+        let mut grid =
+            AssetGrid::new("Assets", vec![item("asset", "Asset")]).with_context_menu(vec![
+                MenuItem::separator(),
+                MenuItem::new("Unavailable", Action::ImportMedia(Vec::new())).disabled(),
+            ]);
+        grid.layout(Rect::new(0.0, 0.0, 320.0, 220.0));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let result = grid.event(
+            &UiEvent::MouseDown {
+                position: Point::new(32.0, 72.0),
+                button: MouseButton::Right,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Ignored);
+        assert!(!grid.overlay_hit_test(Point::new(900.0, 900.0)));
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn right_click_disabled_card_context_menu_preserves_selection_and_falls_back_to_grid() {
+        let grid_action = Action::DeselectAll;
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![
+                item("asset-a", "Asset A").with_context_menu(vec![
+                    MenuItem::separator(),
+                    MenuItem::new("Unavailable", Action::DeleteSelection).disabled(),
+                ]),
+                item("asset-b", "Asset B"),
+            ],
+        )
+        .with_context_menu(vec![MenuItem::new("New folder", grid_action.clone())]);
+        grid.layout(Rect::new(0.0, 0.0, 420.0, 260.0));
+        grid.set_selected(Some(1));
+        let card = grid.card_rect_for_index(0).expect("card");
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            grid.event(
+                &UiEvent::MouseDown {
+                    position: card.center(),
+                    button: MouseButton::Right,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(grid.selected_index(), Some(1));
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(actions.borrow().as_slice(), &[grid_action]);
+    }
+
+    #[test]
     fn right_click_card_context_menu_overrides_grid_menu_and_selects_card() {
         let card_action = Action::ImportMedia(vec![PathBuf::from("E:/media/card.mov")]);
         let grid_action = Action::DeselectAll;
@@ -3077,6 +3170,79 @@ mod tests {
         );
 
         assert_eq!(actions.borrow().as_slice(), &[card_action]);
+    }
+
+    #[test]
+    fn right_click_disabled_selection_context_menu_uses_card_menu() {
+        let single_action = Action::DeselectAll;
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![
+                item("asset-a", "Asset A")
+                    .with_context_menu(vec![MenuItem::new("Delete asset", single_action.clone())]),
+                item("asset-b", "Asset B")
+                    .with_context_menu(vec![MenuItem::new("Delete asset", single_action.clone())]),
+            ],
+        )
+        .with_selection_context_menu(|_, _| {
+            vec![
+                MenuItem::separator(),
+                MenuItem::new("Unavailable", Action::DeleteSelection).disabled(),
+            ]
+        });
+        grid.layout(Rect::new(0.0, 0.0, 420.0, 260.0));
+        let first = grid.card_rect_for_index(0).expect("first").center();
+        let second = grid.card_rect_for_index(1).expect("second").center();
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let _ = grid.event(
+            &UiEvent::MouseDown {
+                position: first,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        let _ = grid.event(
+            &UiEvent::MouseDown {
+                position: second,
+                button: MouseButton::Left,
+                modifiers: Modifiers::ctrl(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(
+            grid.event(
+                &UiEvent::MouseDown {
+                    position: second,
+                    button: MouseButton::Right,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(actions.borrow().as_slice(), &[single_action]);
     }
 
     #[test]

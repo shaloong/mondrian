@@ -1119,7 +1119,11 @@ releases the grid's pointer capture, while an idle grid must not release capture
 it does not own. It also owns domain-light right-click context menus:
 the grid surface and individual cards receive plain `MenuItem`s, while the
 widget handles popup placement, overlay painting, dismissal, keyboard
-activation, and dispatch. `AssetGrid` also exposes item-level drop callbacks:
+activation, and dispatch. Menus that contain only separators or disabled rows
+must not open; multi-selection menus fall back to the card menu when they have
+no activatable rows, and card menus with no activatable rows fall back to the
+grid menu without changing the current selection. `AssetGrid` also exposes
+item-level drop callbacks:
 the widget reports the target card view model, while panel adapters decide
 whether a given payload means move, import, or no-op. For drop callbacks,
 `None` means "not handled; allow fallback", while `Action::NoOp` means "handled
