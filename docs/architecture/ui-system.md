@@ -442,8 +442,13 @@ property rows; the input still receives its final bounds from layout and must
 not own row-level sizing policy.
 
 Text copy/cut shortcuts are consumed by `TextInput` only when a selection exists.
-If there is no selection, `Ctrl+C` and `Ctrl+X` are ignored so panel-level
-commands, such as copying clips or keyframes, can handle them.
+Clipboard and select-all editing shortcuts are exact `Ctrl` chords; Alt, Meta,
+or Shift-modified variants are ignored so panel/workspace shortcut routing can
+own them. Word navigation is owned by `Ctrl+Left/Right`, with
+`Ctrl+Shift+Left/Right` extending selection by word. `Ctrl+Home/End` moves to
+the text boundaries, and `Ctrl+Shift+Home/End` extends selection to those
+boundaries. If there is no selection, `Ctrl+C` and `Ctrl+X` are ignored so
+panel-level commands, such as copying clips or keyframes, can handle them.
 When a `TextInput` receives an outside mouse down directly, it clears local
 focus and IME state but returns `Ignored`; the clicked sibling must still receive
 the event. Intentional focus loss that should stop propagation is delivered by

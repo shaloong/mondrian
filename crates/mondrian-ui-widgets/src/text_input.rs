@@ -590,17 +590,21 @@ impl Widget for TextInput {
             // ── Keyboard ───────────────────────────────────────────────
             UiEvent::KeyDown { key, modifiers } if self.focused => {
                 let shift = modifiers.shift;
-                let ctrl = modifiers.ctrl;
+                let exact_ctrl =
+                    modifiers.ctrl && !modifiers.shift && !modifiers.alt && !modifiers.meta;
+                let word_navigation = modifiers.ctrl && !modifiers.alt && !modifiers.meta;
+                let local_navigation = !modifiers.ctrl && !modifiers.alt && !modifiers.meta;
+                let plain_delete = *modifiers == Modifiers::none();
                 let before_text = self.text.clone();
 
                 let result = match key {
                     // ── Ctrl shortcuts ─────────────────────────────────
-                    KeyCode::A if ctrl => {
+                    KeyCode::A if exact_ctrl => {
                         self.move_cursor_to(self.len_graphemes());
                         self.selection_start = Some(0);
                         EventResult::Handled
                     }
-                    KeyCode::C if ctrl => {
+                    KeyCode::C if exact_ctrl => {
                         if let Some((start, end)) = self.selection_byte_range() {
                             ctx.platform.clipboard_copy(&self.text[start..end]);
                             EventResult::Handled
@@ -608,7 +612,7 @@ impl Widget for TextInput {
                             EventResult::Ignored
                         }
                     }
-                    KeyCode::V if ctrl => {
+                    KeyCode::V if exact_ctrl => {
                         if let Some(clip) = ctx.platform.clipboard_paste() {
                             let normalized = normalize_single_line_input(&clip);
                             if !normalized.is_empty() {
@@ -618,7 +622,7 @@ impl Widget for TextInput {
                         }
                         EventResult::Handled
                     }
-                    KeyCode::X if ctrl => {
+                    KeyCode::X if exact_ctrl => {
                         if let Some((start, end)) = self.selection_byte_range() {
                             ctx.platform.clipboard_copy(&self.text[start..end]);
                             self.delete_selection();
@@ -628,7 +632,7 @@ impl Widget for TextInput {
                         }
                     }
                     // ── Word navigation ────────────────────────────────
-                    KeyCode::Left if ctrl => {
+                    KeyCode::Left if word_navigation => {
                         if !shift {
                             self.clear_selection();
                         } else if self.selection_start.is_none() {
@@ -637,7 +641,7 @@ impl Widget for TextInput {
                         self.move_cursor_to(self.prev_word_boundary(self.cursor));
                         EventResult::Handled
                     }
-                    KeyCode::Right if ctrl => {
+                    KeyCode::Right if word_navigation => {
                         if !shift {
                             self.clear_selection();
                         } else if self.selection_start.is_none() {
@@ -646,15 +650,33 @@ impl Widget for TextInput {
                         self.move_cursor_to(self.next_word_boundary(self.cursor));
                         EventResult::Handled
                     }
+                    KeyCode::Home if word_navigation => {
+                        if !shift {
+                            self.clear_selection();
+                        } else if self.selection_start.is_none() {
+                            self.selection_start = Some(self.cursor);
+                        }
+                        self.move_cursor_to(0);
+                        EventResult::Handled
+                    }
+                    KeyCode::End if word_navigation => {
+                        if !shift {
+                            self.clear_selection();
+                        } else if self.selection_start.is_none() {
+                            self.selection_start = Some(self.cursor);
+                        }
+                        self.move_cursor_to(self.len_graphemes());
+                        EventResult::Handled
+                    }
                     // ── Deletion ────────────────────────────────────────
-                    KeyCode::Backspace => {
+                    KeyCode::Backspace if plain_delete => {
                         if !self.delete_selection() {
                             self.delete_grapheme_before();
                         }
                         self.update_scroll(DEFAULT_FONT_SIZE);
                         EventResult::Handled
                     }
-                    KeyCode::Delete => {
+                    KeyCode::Delete if plain_delete => {
                         if !self.delete_selection() {
                             self.delete_grapheme_at();
                         }
@@ -662,7 +684,7 @@ impl Widget for TextInput {
                         EventResult::Handled
                     }
                     // ── Navigation ──────────────────────────────────────
-                    KeyCode::Left => {
+                    KeyCode::Left if local_navigation => {
                         if shift {
                             if self.selection_start.is_none() {
                                 self.selection_start = Some(self.cursor);
@@ -675,7 +697,7 @@ impl Widget for TextInput {
                         }
                         EventResult::Handled
                     }
-                    KeyCode::Right => {
+                    KeyCode::Right if local_navigation => {
                         if shift {
                             if self.selection_start.is_none() {
                                 self.selection_start = Some(self.cursor);
@@ -689,7 +711,7 @@ impl Widget for TextInput {
                         }
                         EventResult::Handled
                     }
-                    KeyCode::Home => {
+                    KeyCode::Home if local_navigation => {
                         if shift {
                             if self.selection_start.is_none() {
                                 self.selection_start = Some(self.cursor);
@@ -700,7 +722,7 @@ impl Widget for TextInput {
                         self.move_cursor_to(0);
                         EventResult::Handled
                     }
-                    KeyCode::End => {
+                    KeyCode::End if local_navigation => {
                         if shift {
                             if self.selection_start.is_none() {
                                 self.selection_start = Some(self.cursor);
@@ -948,6 +970,9 @@ mod tests {
     }
     fn kd_ctrl(ti: &mut TextInput, key: KeyCode, ctx: &mut EventContext) {
         ti.event(&UiEvent::KeyDown { key, modifiers: Modifiers::ctrl() }, ctx);
+    }
+    fn kd_mod(ti: &mut TextInput, key: KeyCode, modifiers: Modifiers, ctx: &mut EventContext) {
+        ti.event(&UiEvent::KeyDown { key, modifiers }, ctx);
     }
     fn tp(ti: &mut TextInput, ch: &str, ctx: &mut EventContext) {
         ti.event(&UiEvent::TextInput(ch.to_string()), ctx);
@@ -1580,6 +1605,28 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_shift_word_navigation_extends_selection() {
+        let mut ti = TextInput::new("ph").with_text("hello world");
+        ti.focused = true;
+        ti.cursor = 11;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
+
+        kd_mod(
+            &mut ti,
+            KeyCode::Left,
+            Modifiers { ctrl: true, shift: true, ..Default::default() },
+            &mut ctx,
+        );
+
+        assert_eq!(ti.cursor, 6);
+        assert_eq!(ti.selection_start, Some(11));
+        assert_eq!(ti.selection_byte_range(), Some((6, 11)));
+    }
+
+    #[test]
     fn ctrl_word_navigation_uses_unicode_whitespace_boundaries() {
         let mut ti = TextInput::new("ph").with_text("alpha\tbeta\n\u{00A0}gamma");
         ti.focused = true;
@@ -1702,6 +1749,78 @@ mod tests {
             &mut ctx,
         );
         assert_eq!(result, EventResult::Ignored);
+    }
+
+    #[test]
+    fn modified_text_editing_chords_are_ignored_for_shortcut_routing() {
+        let platform = ClipboardPlatform { text: "paste".to_owned() };
+        let mut ti = TextInput::new("ph").with_text("hello world").on_change(change_action);
+        ti.focused = true;
+        ti.selection_start = Some(0);
+        ti.cursor = 5;
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = EventContext {
+            focus: &mut focus,
+            shortcut: &mut shortcuts,
+            tooltip: &mut tooltip,
+            dispatch: &dispatch,
+            platform: &platform,
+            requests: &mut requests,
+        };
+
+        for (key, modifiers) in [
+            (
+                KeyCode::A,
+                Modifiers { ctrl: true, alt: true, ..Default::default() },
+            ),
+            (
+                KeyCode::C,
+                Modifiers { ctrl: true, meta: true, ..Default::default() },
+            ),
+            (
+                KeyCode::V,
+                Modifiers { ctrl: true, shift: true, ..Default::default() },
+            ),
+            (
+                KeyCode::X,
+                Modifiers { ctrl: true, alt: true, ..Default::default() },
+            ),
+            (KeyCode::Left, Modifiers { alt: true, ..Default::default() }),
+            (
+                KeyCode::Right,
+                Modifiers { meta: true, ..Default::default() },
+            ),
+            (
+                KeyCode::Home,
+                Modifiers { alt: true, shift: true, ..Default::default() },
+            ),
+            (
+                KeyCode::End,
+                Modifiers { meta: true, shift: true, ..Default::default() },
+            ),
+            (
+                KeyCode::Backspace,
+                Modifiers { alt: true, ..Default::default() },
+            ),
+            (
+                KeyCode::Delete,
+                Modifiers { meta: true, ..Default::default() },
+            ),
+        ] {
+            assert_eq!(
+                ti.event(&UiEvent::KeyDown { key, modifiers }, &mut ctx),
+                EventResult::Ignored
+            );
+            assert_eq!(ti.text(), "hello world");
+            assert_eq!(ti.cursor, 5);
+            assert_eq!(ti.selection_byte_range(), Some((0, 5)));
+        }
+        assert!(actions.borrow().is_empty());
     }
 
     // ── Mouse drag ───────────────────────────────────────────────────────
