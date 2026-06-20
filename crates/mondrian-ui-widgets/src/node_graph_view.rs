@@ -298,12 +298,16 @@ impl Widget for NodeGraphView {
 
         match event {
             UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
-                self.focus_visible = false;
-                let Some(node_id) = self.node_id_at(*position) else {
+                if !self.bounds.contains(*position) || self.nodes.is_empty() {
                     return EventResult::Ignored;
-                };
+                }
+                self.focus_visible = false;
                 self.focus_from_pointer(ctx);
-                self.select_node_from_input(node_id, ctx)
+                if let Some(node_id) = self.node_id_at(*position) {
+                    self.select_node_from_input(node_id, ctx)
+                } else {
+                    EventResult::Handled
+                }
             }
             UiEvent::KeyDown { key: KeyCode::Right | KeyCode::Down, modifiers }
                 if self.focused && *modifiers == Modifiers::none() =>
@@ -657,6 +661,55 @@ mod tests {
         assert_eq!(
             actions[1],
             Action::OpenProject(std::path::PathBuf::from("grade"))
+        );
+    }
+
+    #[test]
+    fn node_graph_background_click_focuses_without_selecting_or_dispatching() {
+        let selected = Rc::new(RefCell::new(Vec::new()));
+        let mut graph = NodeGraphView::new(
+            vec![
+                NodeGraphNode::new("source", "Source"),
+                NodeGraphNode::new("grade", "Grade"),
+            ],
+            vec![],
+        )
+        .on_select(|id| Action::OpenProject(std::path::PathBuf::from(id)));
+        graph.layout(Rect::new(0.0, 0.0, 520.0, 240.0));
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let dispatch = {
+            let selected = Rc::clone(&selected);
+            move |action| selected.borrow_mut().push(action)
+        };
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        assert_eq!(
+            graph.event(
+                &UiEvent::MouseDown {
+                    position: Point::new(500.0, 210.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(graph.selected_node_id(), None);
+        assert!(selected.borrow().is_empty());
+
+        assert_eq!(
+            graph.event(
+                &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(graph.selected_node_id(), Some("source"));
+        assert_eq!(
+            selected.borrow().as_slice(),
+            &[Action::OpenProject(std::path::PathBuf::from("source"))]
         );
     }
 

@@ -1688,11 +1688,13 @@ port/edge painting, focus/keyboard selection, disabled presentation, selection
 chrome, and hit testing for generic `NodeGraphNode` / `NodeGraphEdge` values.
 Pointer node selection requests widget focus so arrow-key navigation and
 Home/End edge-node jumps plus Enter/Space activation can continue from the
-clicked node without requiring a separate focus shortcut. Node graph keyboard
-navigation is limited to unmodified keys; Ctrl/Shift/Alt/Meta chords are ignored
-by the widget so panel and workspace shortcut routing can handle them
-centrally. It does not own effect semantics, undo history, or graph mutation
-rules.
+clicked node without requiring a separate focus shortcut. Clicking empty graph
+space inside a non-empty graph also requests focus but must not select a node or
+dispatch an action; the next unmodified navigation key starts from the graph's
+first or last node. Node graph keyboard navigation is limited to unmodified
+keys; Ctrl/Shift/Alt/Meta chords are ignored by the widget so panel and
+workspace shortcut routing can handle them centrally. It does not own effect
+semantics, undo history, or graph mutation rules.
 
 The self-hosted `PanelKind::NodeGraph` panel maps the currently selected clip to
 a read-only render chain: Source -> each clip effect -> Output. The app adapter
