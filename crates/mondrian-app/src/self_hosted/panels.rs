@@ -2929,6 +2929,7 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
             let can_move_down = can_edit && index + 1 < model.effects.len();
             let mut section = PropertySection::new(effect.label.clone())
                 .selected(model.selected_effect_id == Some(effect_id))
+                .on_select(inspector_effect_select_action(selected_clip, effect_id))
                 .with_row(PropertyRow::new(
                     "Controls",
                     Box::new(
@@ -3121,6 +3122,19 @@ fn inspector_effect_enabled_action(
             clip: inspector_clip_payload(selection),
             effect_id,
             enabled,
+        });
+    }
+    Action::NoOp
+}
+
+fn inspector_effect_select_action(
+    selection: Option<SelectedClipRef>,
+    effect_id: EffectId,
+) -> Action {
+    if let Some(selection) = selection {
+        return inspector_select_effect_action(InspectorSelectEffectPayload {
+            clip: inspector_clip_payload(selection),
+            effect_id,
         });
     }
     Action::NoOp
@@ -7130,6 +7144,83 @@ mod tests {
         assert_eq!(down, EventResult::Ignored);
         assert_eq!(up, EventResult::Ignored);
         assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn inspector_effect_section_header_selects_effect_for_graph_sync() {
+        let selection = SelectedClipRef {
+            track_id: TrackId::new(),
+            is_video_track: true,
+            clip_id: ClipId::new(),
+        };
+        let effect_id = EffectId::new();
+        let model = InspectorPanelModel {
+            selected_clip: Some(selection),
+            selected_effect_id: None,
+            is_editable: true,
+            edit_disabled_reason: None,
+            enabled: true,
+            opacity: 100.0,
+            tint: Color::from_rgba8(64, 128, 192, 255),
+            position_x: 0.0,
+            position_y: 0.0,
+            scale_percent: 100.0,
+            rotation_degrees: 0.0,
+            in_frame: 0.0,
+            out_frame: 30.0,
+            max_frame: 60.0,
+            tint_area_mode: ColorPickerAreaMode::Wheel,
+            curve_points: vec![CurvePoint::new(0.0, 1.0), CurvePoint::new(1.0, 1.0)],
+            effects: vec![InspectorEffectModel {
+                effect_id,
+                label: "Gaussian Blur".to_owned(),
+                enabled: true,
+                properties: Vec::new(),
+            }],
+        };
+        let mut panel = inspector_panel(&model);
+        panel.layout(Rect::new(0.0, 0.0, 340.0, 720.0));
+
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let result = panel.event(
+            &UiEvent::MouseDown {
+                position: Point::new(24.0, 470.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert!(requests.repaint);
+        let recorded = actions.borrow();
+        assert_eq!(recorded.len(), 1);
+        let Action::Custom { namespace, name, payload } = &recorded[0] else {
+            panic!(
+                "expected inspector select effect action, got {:?}",
+                recorded[0]
+            );
+        };
+        assert_eq!(namespace, INSPECTOR_NAMESPACE);
+        assert_eq!(name, INSPECTOR_SELECT_EFFECT);
+        let payload: InspectorSelectEffectPayload =
+            serde_json::from_value(payload.clone()).expect("inspector select effect payload");
+        assert_eq!(payload.clip.clip_id, selection.clip_id);
+        assert_eq!(payload.clip.track_id, selection.track_id);
+        assert_eq!(payload.effect_id, effect_id);
     }
 
     #[test]

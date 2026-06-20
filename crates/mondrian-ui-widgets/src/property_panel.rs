@@ -9,6 +9,7 @@ use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
 use crate::paint::color_with_alpha;
 use crate::{FormLayout, FormRowOptions, Label};
+use mondrian_editor_state::Action;
 
 /// Layout options for [`PropertyPanel`].
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -96,7 +97,9 @@ pub struct PropertySection {
     title: Label,
     rows: Vec<PropertyRow>,
     selected: bool,
+    select_action: Option<Action>,
     bounds: Rect,
+    header_bounds: Rect,
     header_position: Point,
 }
 
@@ -107,7 +110,9 @@ impl PropertySection {
             title: Label::new(title.into()).muted().with_font_size(11.0).with_padding(0.0, 0.0),
             rows: Vec::new(),
             selected: false,
+            select_action: None,
             bounds: Rect::ZERO,
+            header_bounds: Rect::ZERO,
             header_position: Point::ZERO,
         }
     }
@@ -121,6 +126,15 @@ impl PropertySection {
     /// Set whether this section represents the active nested selection.
     pub fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
+        self
+    }
+
+    /// Dispatch an action when the section background/header is clicked.
+    ///
+    /// Child row controls receive events first; this action is only a fallback
+    /// for clicks that do not belong to an inner control.
+    pub fn on_select(mut self, action: Action) -> Self {
+        self.select_action = Some(action);
         self
     }
 
@@ -262,6 +276,7 @@ impl Widget for PropertyPanel {
         for section in &mut self.sections {
             if !section.title().is_empty() {
                 section.header_position = Point::new(content.x, y + 16.0);
+                section.header_bounds = Rect::new(content.x, y, content.width, 24.0);
                 section.title.layout(Rect::new(
                     content.x,
                     section.header_position.y,
@@ -269,6 +284,8 @@ impl Widget for PropertyPanel {
                     16.0,
                 ));
                 y += 24.0;
+            } else {
+                section.header_bounds = Rect::ZERO;
             }
 
             let section_top = y;
@@ -308,6 +325,15 @@ impl Widget for PropertyPanel {
             for row in section.rows.iter_mut().rev() {
                 if row.control.event(event, ctx) == EventResult::Handled {
                     return EventResult::Handled;
+                }
+            }
+            if let UiEvent::MouseDown { position, button: MouseButton::Left, .. } = event {
+                if section.bounds.contains(*position) || section.header_bounds.contains(*position) {
+                    if let Some(action) = section.select_action.clone() {
+                        (ctx.dispatch)(action);
+                        ctx.request_repaint();
+                        return EventResult::Handled;
+                    }
                 }
             }
         }
@@ -636,6 +662,72 @@ mod tests {
 
         assert_eq!(result, EventResult::Handled);
         assert!(handled.get());
+    }
+
+    #[test]
+    fn property_section_select_action_dispatches_from_header_click() {
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch);
+        let mut panel = PropertyPanel::new("Inspector").with_section(
+            PropertySection::new("Effect")
+                .on_select(Action::NoOp)
+                .with_row(PropertyRow::new(
+                    "Enabled",
+                    Box::new(ConstraintRecordingWidget::new(Rc::clone(&seen))),
+                )),
+        );
+        panel.layout(Rect::new(0.0, 0.0, 300.0, 180.0));
+
+        let result = panel.event(
+            &UiEvent::MouseDown {
+                position: Point::new(20.0, 46.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(actions.borrow().len(), 1);
+        assert!(ctx.requests.repaint);
+    }
+
+    #[test]
+    fn property_section_select_action_does_not_steal_child_control_clicks() {
+        let handled = Rc::new(Cell::new(false));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch);
+        let mut panel = PropertyPanel::new("Inspector").with_section(
+            PropertySection::new("Effect")
+                .on_select(Action::NoOp)
+                .with_row(PropertyRow::new(
+                    "Enabled",
+                    Box::new(ProbeWidget::new(Rc::clone(&handled))),
+                )),
+        );
+        panel.layout(Rect::new(0.0, 0.0, 300.0, 180.0));
+
+        let result = panel.event(
+            &UiEvent::MouseDown {
+                position: Point::new(140.0, 79.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert!(handled.get());
+        assert!(actions.borrow().is_empty());
     }
 
     #[test]

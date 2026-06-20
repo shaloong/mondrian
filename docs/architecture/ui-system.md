@@ -1084,7 +1084,12 @@ registry and, when a video clip is selected, activates rows through undoable
 `AppState::add_effect_to_clip` commands. The app action selects the newly
 created effect instance after the mutation so Inspector and Node Graph
 immediately target the same effect; the selection update is navigation state and
-does not create a second undo entry. Project lifecycle state
+does not create a second undo entry. Inspector effect sections use the same
+selection protocol: clicking a section header or background dispatches
+`ui.inspector.select_effect`, while child controls keep owning their own
+toggle/reorder/remove/property-edit events. This keeps Inspector and Node Graph
+navigation synchronized without treating effect selection as an undoable
+timeline mutation. Project lifecycle state
 belongs to the shell and File menu surfaces instead of a dock panel, so editing
 workspaces do not expose a separate project-status panel beside creative panels.
 The lighter `List` widget remains available for demos and simple generic
