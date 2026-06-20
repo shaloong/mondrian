@@ -1762,7 +1762,13 @@ stay deterministic; repeated widget-tree construction must clone cached geometry
 rather than reparsing XML.
 Product-level bundled icons should enter the custom UI through
 `self_hosted::icons::AppIcon` so panel migration code does not duplicate
-`include_str!()` paths or depend on legacy egui icon enums.
+`include_str!()` paths or depend on legacy egui icon enums. Development tests
+must still parse every bundled `AppIcon`, but production panel and menu
+construction should not `panic!` if one SVG fails to parse: menu/list rows keep
+their text without an icon, text buttons fall back to their label, and dense
+icon-only controls may degrade to compact labeled buttons. This keeps a broken
+decorative asset from taking down the editor while preserving CI coverage for
+the underlying asset regression.
 Controls with different geometry, such as slider thumb halos or inset timeline
 focus borders, may keep local painting while preserving the same theme token
 vocabulary.

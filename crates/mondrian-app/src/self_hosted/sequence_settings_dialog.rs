@@ -1090,8 +1090,7 @@ impl SequenceSettingsDialog {
             preview_cache_checkbox,
             cancel_button: Button::new("Cancel").on_click(app_shell_close_modal_action()),
             apply_button: AppIcon::Save
-                .text_button("Apply")
-                .expect("bundled Save icon asset should parse")
+                .text_button_or_label("Apply")
                 .on_click(app_shell_confirm_sequence_settings_action()),
         }
     }

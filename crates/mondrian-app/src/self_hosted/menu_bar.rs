@@ -549,8 +549,11 @@ fn can_split_at_playhead(state: &AppState) -> bool {
 }
 
 fn menu_item_with_icon(item: MenuItem, icon: AppIcon) -> MenuItem {
-    menu_item_with_shortcut(item)
-        .with_icon(icon.vector_icon().expect("bundled menu icon asset should parse"))
+    let item = menu_item_with_shortcut(item);
+    match icon.vector_icon() {
+        Ok(icon) => item.with_icon(icon),
+        Err(_) => item,
+    }
 }
 
 fn menu_item_with_shortcut(item: MenuItem) -> MenuItem {

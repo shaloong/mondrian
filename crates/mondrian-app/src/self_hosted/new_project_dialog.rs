@@ -374,8 +374,7 @@ impl NewProjectDialog {
             cancel_button: Button::new("Cancel")
                 .on_click(app_shell_cancel_new_project_dialog_action()),
             create_button: AppIcon::PlusFilled
-                .text_button("Create...")
-                .expect("bundled PlusFilled icon asset should parse")
+                .text_button_or_label("Create...")
                 .on_click(app_shell_confirm_new_project_dialog_action()),
         }
     }

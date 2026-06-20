@@ -31,7 +31,7 @@ use mondrian_ui_widgets::dock_splitter::DockSplitter;
 use mondrian_ui_widgets::dock_tab_bar::TabInfo;
 use mondrian_ui_widgets::NumberInput;
 use mondrian_ui_widgets::{
-    AssetGrid, AssetGridBadgeTone, AssetGridItem, Checkbox, ColorPickerAreaMode,
+    AssetGrid, AssetGridBadgeTone, AssetGridItem, Button, Checkbox, ColorPickerAreaMode,
     ColorPickerTrigger, CurveEditor, CurvePoint, DockPanel, Dropdown, FlexChild, FlexContainer,
     Label, MenuItem, NodeGraphEdge, NodeGraphNode, NodeGraphView, PanelList, PanelListBadgeTone,
     PanelListItem, PropertyPanel, PropertyRow, PropertySection, RasterImage, ScrollView, Slider,
@@ -1834,20 +1834,37 @@ fn asset_empty_item(
 }
 
 fn with_asset_icon(item: AssetGridItem, icon: AppIcon) -> AssetGridItem {
-    item.with_icon(icon.vector_icon().expect("bundled asset grid icon asset should parse"))
+    match icon.vector_icon() {
+        Ok(icon) => item.with_icon(icon),
+        Err(_) => item,
+    }
 }
 
 fn with_app_icon(item: PanelListItem, icon: AppIcon) -> PanelListItem {
-    item.with_icon(icon.vector_icon().expect("bundled panel list icon asset should parse"))
+    match icon.vector_icon() {
+        Ok(icon) => item.with_icon(icon),
+        Err(_) => item,
+    }
+}
+
+fn effect_icon_button(
+    icon: AppIcon,
+    fallback_label: &'static str,
+    tooltip: &'static str,
+    enabled: bool,
+    action: Action,
+) -> Box<dyn Widget> {
+    match icon.icon_button() {
+        Ok(button) => Box::new(button.with_tooltip(tooltip).enabled(enabled).on_click(action)),
+        Err(_) => Box::new(Button::new(fallback_label).enabled(enabled).on_click(action)),
+    }
 }
 
 fn color_picker_trigger(color: Color) -> ColorPickerTrigger {
     let mut trigger = ColorPickerTrigger::new(color);
-    trigger.picker_mut().set_eyedropper_icon(
-        AppIcon::Eyedropper
-            .vector_icon()
-            .expect("bundled Eyedropper icon asset should parse"),
-    );
+    if let Ok(icon) = AppIcon::Eyedropper.vector_icon() {
+        trigger.picker_mut().set_eyedropper_icon(icon);
+    }
     trigger
 }
 
@@ -2156,7 +2173,10 @@ fn asset_grid_context_menu_items(current_folder_id: Option<&str>) -> Vec<MenuIte
 }
 
 fn asset_menu_item(item: MenuItem, icon: AppIcon) -> MenuItem {
-    item.with_icon(icon.vector_icon().expect("bundled asset menu icon asset should parse"))
+    match icon.vector_icon() {
+        Ok(icon) => item.with_icon(icon),
+        Err(_) => item,
+    }
 }
 
 #[cfg(test)]
@@ -2559,15 +2579,12 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
 
     let selected_preset = model.selected_preset();
     let output_extension = selected_preset.map(export_preset_extension).unwrap_or("mp4").to_owned();
-    let output_browse = AppIcon::Folder
-        .text_button("Browse...")
-        .expect("bundled Folder icon asset should parse")
-        .on_click(app_shell_export_output_dialog_action(
-            ExportOutputDialogPayload {
-                default_file_name: export_default_file_name(selected_preset),
-                extension: output_extension,
-            },
-        ));
+    let output_browse = AppIcon::Folder.text_button_or_label("Browse...").on_click(
+        app_shell_export_output_dialog_action(ExportOutputDialogPayload {
+            default_file_name: export_default_file_name(selected_preset),
+            extension: output_extension,
+        }),
+    );
     let output_input = TextInput::new("Output path")
         .with_text(model.output_path.clone())
         .on_change(|text| {
@@ -2580,13 +2597,11 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
     .with_gap(8.0);
     let enqueue_action = model.enqueue_payload().map(export_enqueue_action).unwrap_or(Action::NoOp);
     let enqueue_button = AppIcon::Export
-        .text_button("Add to queue")
-        .expect("bundled Export icon asset should parse")
+        .text_button_or_label("Add to queue")
         .enabled(model.can_enqueue())
         .on_click(enqueue_action);
     let clear_completed_button = AppIcon::Trash
-        .text_button("Clear completed")
-        .expect("bundled Trash icon asset should parse")
+        .text_button_or_label("Clear completed")
         .enabled(model.can_clear_completed_jobs)
         .on_click(export_clear_completed_action());
 
@@ -2675,12 +2690,9 @@ fn export_job_row(job: &ExportJobModel) -> PropertyRow {
     .with_gap(4.0);
 
     let content: Box<dyn Widget> = if job.can_cancel {
-        let cancel = AppIcon::Trash
-            .text_button("Cancel")
-            .expect("bundled Trash icon asset should parse")
-            .on_click(export_cancel_job_action(ExportJobTargetPayload {
-                job_id: job.id,
-            }));
+        let cancel = AppIcon::Trash.text_button_or_label("Cancel").on_click(
+            export_cancel_job_action(ExportJobTargetPayload { job_id: job.id }),
+        );
         Box::new(
             FlexContainer::row(vec![
                 FlexChild::flex(Box::new(summary), 1.0),
@@ -2948,40 +2960,34 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                                 ),
                                 1.0,
                             ),
-                            FlexChild::fixed(Box::new(
-                                AppIcon::CaretUp
-                                    .icon_button()
-                                    .expect("bundled CaretUp icon asset should parse")
-                                    .with_tooltip("Move effect up")
-                                    .enabled(can_move_up)
-                                    .on_click(inspector_reorder_effect_action(
-                                        selected_clip,
-                                        index,
-                                        index.saturating_sub(1),
-                                    )),
+                            FlexChild::fixed(effect_icon_button(
+                                AppIcon::CaretUp,
+                                "Up",
+                                "Move effect up",
+                                can_move_up,
+                                inspector_reorder_effect_action(
+                                    selected_clip,
+                                    index,
+                                    index.saturating_sub(1),
+                                ),
                             )),
-                            FlexChild::fixed(Box::new(
-                                AppIcon::CaretDown
-                                    .icon_button()
-                                    .expect("bundled CaretDown icon asset should parse")
-                                    .with_tooltip("Move effect down")
-                                    .enabled(can_move_down)
-                                    .on_click(inspector_reorder_effect_action(
-                                        selected_clip,
-                                        index,
-                                        (index + 1).min(model.effects.len().saturating_sub(1)),
-                                    )),
+                            FlexChild::fixed(effect_icon_button(
+                                AppIcon::CaretDown,
+                                "Down",
+                                "Move effect down",
+                                can_move_down,
+                                inspector_reorder_effect_action(
+                                    selected_clip,
+                                    index,
+                                    (index + 1).min(model.effects.len().saturating_sub(1)),
+                                ),
                             )),
-                            FlexChild::fixed(Box::new(
-                                AppIcon::Trash
-                                    .icon_button()
-                                    .expect("bundled Trash icon asset should parse")
-                                    .with_tooltip("Remove effect")
-                                    .enabled(can_edit)
-                                    .on_click(inspector_remove_effect_row_action(
-                                        selected_clip,
-                                        effect_id,
-                                    )),
+                            FlexChild::fixed(effect_icon_button(
+                                AppIcon::Trash,
+                                "Remove",
+                                "Remove effect",
+                                can_edit,
+                                inspector_remove_effect_row_action(selected_clip, effect_id),
                             )),
                         ])
                         .with_gap(8.0),

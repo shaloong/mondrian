@@ -292,6 +292,15 @@ impl AppIcon {
     pub fn text_button(self, label: impl Into<String>) -> Result<Button, VectorIconError> {
         Ok(Button::new(label).with_leading_icon(self.vector_icon()?))
     }
+
+    /// Build a text button and omit the icon if the bundled SVG cannot parse.
+    pub fn text_button_or_label(self, label: impl Into<String>) -> Button {
+        let label = label.into();
+        match self.text_button(label.clone()) {
+            Ok(button) => button,
+            Err(_) => Button::new(label),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -344,6 +353,13 @@ mod tests {
     #[test]
     fn self_hosted_icons_build_text_buttons() {
         let button = AppIcon::Trash.text_button("Remove").expect("trash text button");
+
+        assert!(button.measure(mondrian_ui_core::types::LayoutConstraint::LOOSE).width > 0.0);
+    }
+
+    #[test]
+    fn self_hosted_icons_build_lossy_text_buttons() {
+        let button = AppIcon::Trash.text_button_or_label("Remove");
 
         assert!(button.measure(mondrian_ui_core::types::LayoutConstraint::LOOSE).width > 0.0);
     }
