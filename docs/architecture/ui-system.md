@@ -1051,7 +1051,9 @@ instead of the row-list surface. `AssetGrid` keeps the same framework-owned
 interaction contract as `PanelList`: filter input is a real `TextInput`, local
 selection is preserved through `AssetGridState`, cards can activate typed
 actions, card drag payloads start through the router, and file drops map to
-app-layer import actions. It also owns domain-light right-click context menus:
+app-layer import actions. Focus loss cancels an active card drag candidate and
+releases the grid's pointer capture, while an idle grid must not release capture
+it does not own. It also owns domain-light right-click context menus:
 the grid surface and individual cards receive plain `MenuItem`s, while the
 widget handles popup placement, overlay painting, dismissal, keyboard
 activation, and dispatch. `AssetGrid` also exposes item-level drop callbacks:

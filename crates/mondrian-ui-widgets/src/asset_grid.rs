@@ -1482,6 +1482,7 @@ impl Widget for AssetGrid {
                 return EventResult::Handled;
             }
             UiEvent::FocusLost => {
+                let had_pointer_capture = self.drag_candidate.is_some();
                 self.focused = false;
                 self.focus_visible = false;
                 self.drag_candidate = None;
@@ -1491,6 +1492,10 @@ impl Widget for AssetGrid {
                 self.context_menu_target = None;
                 if let Some(input) = &mut self.filter_input {
                     let _ = input.event(event, ctx);
+                }
+                if had_pointer_capture {
+                    ctx.release_pointer_capture(self.id);
+                    ctx.request_repaint();
                 }
                 return EventResult::Handled;
             }
@@ -1825,7 +1830,9 @@ mod tests {
     use mondrian_core::types::AssetId;
     use mondrian_platform::NoopPlatformService;
     use mondrian_ui_core::focus::FocusManager;
-    use mondrian_ui_core::widget::{DrawCommandEncoder, EventContext, EventRequests};
+    use mondrian_ui_core::widget::{
+        DrawCommandEncoder, EventContext, EventRequests, PointerCaptureRequest,
+    };
     use mondrian_ui_theme::ThemePreset;
     use std::cell::RefCell;
     use std::path::PathBuf;
@@ -3282,6 +3289,95 @@ mod tests {
                 DragPayload::Asset(asset_id)
             ))
         );
+    }
+
+    #[test]
+    fn focus_lost_releases_drag_candidate_capture() {
+        let asset_id = AssetId::new();
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![item("asset", "Asset").with_drag_payload(DragPayload::Asset(asset_id))],
+        );
+        grid.layout(Rect::new(0.0, 0.0, 320.0, 220.0));
+        let card = grid.card_rect_for_index(0).expect("card");
+        let start = card.center();
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        {
+            let mut ctx = event_ctx(
+                &mut focus,
+                &mut shortcut,
+                &mut tooltip,
+                &mut requests,
+                &dispatch,
+            );
+            assert_eq!(
+                grid.event(
+                    &UiEvent::MouseDown {
+                        position: start,
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::none(),
+                    },
+                    &mut ctx,
+                ),
+                EventResult::Handled
+            );
+        }
+        assert!(grid.drag_candidate.is_some());
+        requests.pointer_capture = None;
+        requests.repaint = false;
+
+        {
+            let mut ctx = event_ctx(
+                &mut focus,
+                &mut shortcut,
+                &mut tooltip,
+                &mut requests,
+                &dispatch,
+            );
+            assert_eq!(
+                grid.event(&UiEvent::FocusLost, &mut ctx),
+                EventResult::Handled
+            );
+        }
+
+        assert!(grid.drag_candidate.is_none());
+        assert_eq!(
+            requests.pointer_capture,
+            Some(PointerCaptureRequest::Release(grid.id()))
+        );
+        assert!(requests.repaint);
+    }
+
+    #[test]
+    fn idle_focus_lost_does_not_release_pointer_capture() {
+        let mut grid = AssetGrid::new("Assets", vec![item("asset", "Asset")]);
+        grid.layout(Rect::new(0.0, 0.0, 320.0, 220.0));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            grid.event(&UiEvent::FocusLost, &mut ctx),
+            EventResult::Handled
+        );
+
+        assert_eq!(ctx.requests.pointer_capture, None);
+        assert!(!ctx.requests.repaint);
     }
 
     #[test]
