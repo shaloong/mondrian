@@ -262,7 +262,6 @@ impl ColorPicker {
             self.mode_pressed = None;
             self.mode_hovered = None;
             self.eyedropper_hovered = false;
-            self.eyedropper_pressed = false;
         }
     }
 
@@ -1150,6 +1149,7 @@ impl Widget for ColorPicker {
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
         if !self.enabled {
             if self.eyedropper_active
+                || self.eyedropper_pressed
                 || self.drag_target.is_some()
                 || self.field_pointer_captured.is_some()
             {
@@ -2014,6 +2014,46 @@ mod tests {
             ctx.requests.eyedropper,
             Some(mondrian_ui_core::widget::EyedropperRequest { active: false, hotspot: None })
         );
+    }
+
+    #[test]
+    fn disabling_pressed_eyedropper_button_releases_capture_on_next_event() {
+        let mut picker = ColorPicker::new(Color::BLACK);
+        picker.layout(Rect::new(0.0, 0.0, PICKER_WIDTH, PICKER_HEIGHT));
+        let eyedropper = picker.eyedropper_rect().center();
+        let mut ctx = event_ctx();
+
+        assert_eq!(
+            picker.event(
+                &UiEvent::MouseDown {
+                    position: eyedropper,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Capture(picker.id()))
+        );
+
+        picker.set_enabled(false);
+        assert_eq!(
+            picker.event(
+                &UiEvent::MouseMove { position: eyedropper, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Release(picker.id()))
+        );
+        assert!(!picker.eyedropper_pressed);
+        assert!(!picker.is_eyedropper_active());
     }
 
     #[test]

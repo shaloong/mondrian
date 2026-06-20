@@ -1591,7 +1591,10 @@ local widget state rather than an editor `Action`.
 Disabled color pickers propagate disabled state into their text inputs, close
 the mode menu, cancel pointer/eyedropper interactions, opt out of focus
 traversal, and keep painting the current color in muted chrome for inspector
-empty states.
+empty states. Disabled-event cleanup releases pointer capture for the
+pre-sampling eyedropper button press state as well as active desktop sampling,
+color-area drags, and embedded text-field capture, because keyboard focus and
+capture ownership are separate router concerns.
 Circular color areas are painted as colored triangles clipped by a rounded-rect
 SDF mask. Their triangle fan must overdraw past the mask radius so the shader's
 analytic circle, not polygon chords from the fan, defines the visible edge.
