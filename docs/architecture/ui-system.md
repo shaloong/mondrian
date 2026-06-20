@@ -722,6 +722,10 @@ therefore drag the same way as controls outside the scroll view. Wheel events
 are handled only inside the viewport and offsets are clamped after wheel input
 and layout. Offset-changing wheel, track, thumb drag, and scrollbar hover
 transitions request repaint through `EventRequests`.
+Programmatic and restored `ScrollViewState` offsets are sanitized at the widget
+boundary: negative, NaN, and infinite values clamp to a finite scroll range
+before child layout. Persisted or corrupted local state must never move child
+content to non-finite screen coordinates.
 Normal child hit testing is clipped by the scroll viewport through the
 `Widget::child_hit_test_clip()` contract, so offscreen scrolled content cannot
 steal clicks from sibling controls or panels. Overlay hit testing deliberately

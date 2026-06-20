@@ -7,6 +7,14 @@ use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
+fn finite_nonnegative(value: f32) -> f32 {
+    if value.is_finite() {
+        value.max(0.0)
+    } else {
+        0.0
+    }
+}
+
 /// Axes that a [`ScrollView`] may scroll.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScrollAxes {
@@ -108,8 +116,8 @@ impl ScrollView {
     /// Restore a previously captured scroll state.
     pub fn restore_state(&mut self, state: &ScrollViewState) {
         self.scroll_offset = Vec2::new(
-            state.scroll_offset.x.max(0.0),
-            state.scroll_offset.y.max(0.0),
+            finite_nonnegative(state.scroll_offset.x),
+            finite_nonnegative(state.scroll_offset.y),
         );
         if self.bounds.width > 0.0
             && self.bounds.height > 0.0
@@ -156,7 +164,9 @@ impl ScrollView {
 
     fn max_scroll_y(&self) -> f32 {
         if self.axes.vertical() {
-            (self.content_size.height - self.viewport_size.height).max(0.0)
+            (finite_nonnegative(self.content_size.height)
+                - finite_nonnegative(self.viewport_size.height))
+            .max(0.0)
         } else {
             0.0
         }
@@ -164,7 +174,9 @@ impl ScrollView {
 
     fn max_scroll_x(&self) -> f32 {
         if self.axes.horizontal() {
-            (self.content_size.width - self.viewport_size.width).max(0.0)
+            (finite_nonnegative(self.content_size.width)
+                - finite_nonnegative(self.viewport_size.width))
+            .max(0.0)
         } else {
             0.0
         }
@@ -179,8 +191,8 @@ impl ScrollView {
     }
 
     fn clamp_scroll_offset(&mut self) {
-        self.scroll_offset.x = self.scroll_offset.x.clamp(0.0, self.max_scroll_x());
-        self.scroll_offset.y = self.scroll_offset.y.clamp(0.0, self.max_scroll_y());
+        self.scroll_offset.x = finite_nonnegative(self.scroll_offset.x).min(self.max_scroll_x());
+        self.scroll_offset.y = finite_nonnegative(self.scroll_offset.y).min(self.max_scroll_y());
     }
 
     fn normalized_content_size(&self, measured: Size, viewport: Size) -> Size {
@@ -984,6 +996,52 @@ mod tests {
         rebuilt.restore_state(&original.state());
 
         assert_eq!(rebuilt.scroll_offset(), Vec2::new(120.0, 180.0));
+    }
+
+    #[test]
+    fn scroll_view_rejects_nonfinite_programmatic_offsets() {
+        let layout = Rc::new(RefCell::new(None));
+        let child = RecordingChild {
+            id: WidgetId::new(),
+            preferred: Size::new(600.0, 900.0),
+            last_mouse_down: Rc::new(RefCell::new(None)),
+            last_layout: Rc::clone(&layout),
+        };
+        let mut sv = ScrollView::new(Some(Box::new(child))).with_axes(ScrollAxes::Both);
+        sv.layout(Rect::new(0.0, 0.0, 240.0, 180.0));
+
+        sv.set_scroll_offset(Vec2::new(f32::NAN, f32::INFINITY));
+
+        assert_eq!(sv.scroll_offset(), Vec2::ZERO);
+        let child_bounds = layout.borrow().expect("child should be relaid out");
+        assert!(child_bounds.x.is_finite());
+        assert!(child_bounds.y.is_finite());
+        assert_eq!(child_bounds.x, 0.0);
+        assert_eq!(child_bounds.y, 0.0);
+    }
+
+    #[test]
+    fn scroll_view_restore_state_rejects_nonfinite_offsets() {
+        let layout = Rc::new(RefCell::new(None));
+        let child = RecordingChild {
+            id: WidgetId::new(),
+            preferred: Size::new(600.0, 900.0),
+            last_mouse_down: Rc::new(RefCell::new(None)),
+            last_layout: Rc::clone(&layout),
+        };
+        let mut sv = ScrollView::new(Some(Box::new(child))).with_axes(ScrollAxes::Both);
+        sv.layout(Rect::new(0.0, 0.0, 240.0, 180.0));
+
+        sv.restore_state(&ScrollViewState {
+            scroll_offset: Vec2::new(f32::NEG_INFINITY, f32::NAN),
+        });
+
+        assert_eq!(sv.scroll_offset(), Vec2::ZERO);
+        let child_bounds = layout.borrow().expect("child should be relaid out");
+        assert!(child_bounds.x.is_finite());
+        assert!(child_bounds.y.is_finite());
+        assert_eq!(child_bounds.x, 0.0);
+        assert_eq!(child_bounds.y, 0.0);
     }
 
     #[test]
