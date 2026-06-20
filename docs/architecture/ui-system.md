@@ -286,7 +286,10 @@ the active clipboard. Menu rows and shortcut dispatch gates must query
 `AppState` clipboard capability helpers (`can_copy_to_app_clipboard`,
 `can_cut_to_app_clipboard`, `can_paste_from_app_clipboard`) instead of
 reconstructing clip, keyframe, locked-track, or active-clipboard rules in shell
-or widget code.
+or widget code. Paste availability must validate the actual active clipboard
+target: animation-keyframe paste requires an unlocked selected clip target, and
+clip paste requires every clipboard destination track to still exist and remain
+unlocked, matching the mutation path that will run after dispatch.
 Inspector timing controls reuse timeline trim actions for clip In/Out changes
 instead of introducing a parallel editing path. `TrimClipStart` and
 `TrimClipEnd` accept source in/out times from inspector-style controls, convert

@@ -701,8 +701,9 @@ mod tests {
     use crate::app::ui_actions::{APP_SHELL_ABOUT, APP_SHELL_QUIT};
     use crate::app::SelectedClipRef;
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use mondrian_core::automation::{timecode_to_ticks, Keyframe, PropertyMutation, PropertyValue};
     use mondrian_core::types::{AssetId, TimeCode};
-    use mondrian_timeline::clip::Clip;
+    use mondrian_timeline::clip::{Clip, Transform2D};
     use mondrian_timeline::sequence::Sequence;
     use mondrian_ui_core::EventRequests;
     use std::cell::RefCell;
@@ -1315,7 +1316,48 @@ mod tests {
 
         let menu_items = default_menu_items_for_app_state(&state);
 
+        assert!(state.can_paste_from_app_clipboard());
         assert!(menu_item(&menu_items, "Edit", "Paste").enabled);
+
+        state.sequence.as_mut().expect("sequence").video_tracks[0].is_locked = true;
+        let menu_items = default_menu_items_for_app_state(&state);
+
+        assert!(!state.can_paste_from_app_clipboard());
+        assert!(!menu_item(&menu_items, "Edit", "Paste").enabled);
+    }
+
+    #[test]
+    fn app_state_menu_items_disable_animation_paste_for_locked_target_track() {
+        let mut state = state_with_selected_clip();
+        let selection = state.primary_selected_clip().expect("selected clip");
+        let tb = state.sequence.as_ref().expect("sequence").time_base();
+        let key_time = timecode_to_ticks(TimeCode::new(12, tb));
+        state
+            .mutate_clip_property(
+                selection,
+                PropertyMutation::SetKeyframe {
+                    path: Transform2D::OPACITY_PATH.to_owned(),
+                    keyframe: Keyframe::linear(key_time, PropertyValue::Float(0.5)),
+                },
+                "seed opacity keyframe",
+            )
+            .expect("seed keyframe");
+        state.set_animation_keyframe_selection(vec![crate::app::AnimationKeyframeSelection {
+            clip_id: selection.clip_id,
+            path: Transform2D::OPACITY_PATH.to_owned(),
+            time: key_time,
+        }]);
+        assert!(state.copy_selected_animation_keyframes(selection).expect("copy keyframe"));
+
+        let menu_items = default_menu_items_for_app_state(&state);
+        assert!(state.can_paste_from_app_clipboard());
+        assert!(menu_item(&menu_items, "Edit", "Paste").enabled);
+
+        state.sequence.as_mut().expect("sequence").video_tracks[0].is_locked = true;
+        let menu_items = default_menu_items_for_app_state(&state);
+
+        assert!(!state.can_paste_from_app_clipboard());
+        assert!(!menu_item(&menu_items, "Edit", "Paste").enabled);
     }
 
     #[test]

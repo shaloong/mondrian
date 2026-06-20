@@ -20,9 +20,19 @@ impl AppState {
 
     /// Whether `Paste` can apply the currently active app clipboard to the active target.
     pub fn can_paste_from_app_clipboard(&self) -> bool {
-        let can_paste_animation =
-            self.has_animation_clipboard() && self.primary_selected_clip().is_some();
-        let can_paste_clips = self.has_clip_clipboard() && self.sequence.is_some();
+        let can_paste_animation = self.has_animation_clipboard()
+            && self.primary_selected_clip().is_some_and(|selection| {
+                self.sequence
+                    .as_ref()
+                    .and_then(|seq| find_clip_track_lock(seq, selection.clip_id))
+                    .is_some_and(|(_, _, is_locked)| !is_locked)
+            });
+        let can_paste_clips = self.sequence.as_ref().is_some_and(|seq| {
+            self.clip_clipboard.as_ref().is_some_and(|clipboard| {
+                !clipboard.entries.is_empty()
+                    && validate_clip_clipboard_targets(seq, &clipboard.entries).is_ok()
+            })
+        });
         match self.active_clipboard_kind {
             Some(AppClipboardKind::AnimationKeyframes) => can_paste_animation || can_paste_clips,
             Some(AppClipboardKind::Clips) => can_paste_clips,
