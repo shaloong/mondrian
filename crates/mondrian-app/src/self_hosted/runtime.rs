@@ -393,6 +393,7 @@ pub fn winit_key_to_keycode(key: &Key) -> Option<KeyCode> {
             NamedKey::F12 => Some(KeyCode::F12),
             _ => None,
         },
+        Key::Character(ch) if ch.as_str() == " " => Some(KeyCode::Space),
         Key::Character(ch) => match ch.as_str().to_ascii_lowercase().as_str() {
             "a" => Some(KeyCode::A),
             "b" => Some(KeyCode::B),
@@ -630,6 +631,15 @@ mod tests {
             winit_key_to_keycode(&Key::Character("5".into())),
             Some(KeyCode::Digit5)
         );
+    }
+
+    #[test]
+    fn maps_character_space_as_space_key() {
+        assert_eq!(
+            winit_key_to_keycode(&Key::Character(" ".into())),
+            Some(KeyCode::Space)
+        );
+        assert_eq!(printable_key_text(Some(" ")).as_deref(), Some(" "));
     }
 
     #[test]
