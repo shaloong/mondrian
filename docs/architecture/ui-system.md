@@ -573,7 +573,9 @@ Parent-owned chrome that must win over child hit targets, such as
 Splitter handles paint above children, use a narrower 6px interaction zone by
 default, draw full-span geometric rectangles instead of text or glyphs, grow
 while hovered or dragged, and span the full splitter bounds without endpoint
-gaps.
+gaps. A splitter drag may be cancelled by `FocusLost` through the same
+before-child path; only an active splitter drag handles that event and releases
+capture, while an idle splitter ignores it.
 
 Slider value mapping uses the same thumb-centered track for painting and
 pointer updates. The thumb rect must remain inside widget bounds; if a parent

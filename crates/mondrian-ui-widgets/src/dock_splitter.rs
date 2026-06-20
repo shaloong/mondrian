@@ -186,6 +186,12 @@ impl DockSplitter {
                     return EventResult::Handled;
                 }
             }
+            UiEvent::FocusLost if self.dragging => {
+                self.dragging = false;
+                self.handle_hovered = false;
+                ctx.release_pointer_capture(self.id);
+                return EventResult::Handled;
+            }
             _ => {}
         }
         EventResult::Ignored
@@ -374,7 +380,7 @@ impl Widget for DockSplitter {
 mod tests {
     use super::*;
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
-    use mondrian_ui_core::widget::DrawCommandEncoder;
+    use mondrian_ui_core::widget::{DrawCommandEncoder, PointerCaptureRequest};
 
     struct EmptyWidget {
         id: WidgetId,
@@ -494,6 +500,57 @@ mod tests {
         assert_eq!(result, EventResult::Handled);
         assert!(splitter.dragging);
         assert!(ctx.requests.pointer_capture.is_some());
+    }
+
+    #[test]
+    fn focus_lost_during_drag_releases_pointer_capture() {
+        let mut splitter = splitter(SplitDirection::Horizontal);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = event_ctx(&mut focus, &mut shortcut, &mut tooltip);
+
+        assert_eq!(
+            splitter.before_child_event(
+                &UiEvent::MouseDown {
+                    position: splitter.grab_rect.center(),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        ctx.requests.pointer_capture = None;
+
+        assert_eq!(
+            splitter.before_child_event(&UiEvent::FocusLost, &mut ctx),
+            EventResult::Handled
+        );
+
+        assert!(!splitter.dragging);
+        assert!(!splitter.handle_hovered);
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Release(splitter.id()))
+        );
+    }
+
+    #[test]
+    fn idle_focus_lost_does_not_release_pointer_capture() {
+        let mut splitter = splitter(SplitDirection::Horizontal);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = event_ctx(&mut focus, &mut shortcut, &mut tooltip);
+
+        assert_eq!(
+            splitter.before_child_event(&UiEvent::FocusLost, &mut ctx),
+            EventResult::Ignored
+        );
+
+        assert_eq!(ctx.requests.pointer_capture, None);
+        assert!(!splitter.dragging);
     }
 
     #[test]
