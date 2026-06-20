@@ -17,7 +17,7 @@ use crate::app::ui_actions::{
     app_shell_preferences_theme_changed_action, PreferencesTabPayload,
 };
 use crate::app::AppState;
-use crate::self_hosted::shortcuts::default_shortcuts;
+use crate::self_hosted::shortcuts::{active_shortcuts, SelfHostedShortcutOverride};
 use crate::self_hosted::window::{DEFAULT_SELF_HOSTED_LOG_FILTER, SELF_HOSTED_BACKGROUND_WORKERS};
 
 const CARD_MIN_WIDTH: f32 = 480.0;
@@ -55,6 +55,7 @@ pub struct SelfHostedPreferencesModel {
     pub runtime_diagnostics: String,
     pub log_filter: String,
     pub background_workers: String,
+    pub shortcut_rows: Vec<String>,
 }
 
 impl SelfHostedPreferencesModel {
@@ -64,6 +65,16 @@ impl SelfHostedPreferencesModel {
         state: &AppState,
         workspace: WorkspacePreset,
         theme_preset: ThemePreset,
+    ) -> Self {
+        Self::from_app_state_with_shortcut_overrides(state, workspace, theme_preset, &[])
+    }
+
+    /// Build the preferences model using the active self-hosted shortcut table.
+    pub fn from_app_state_with_shortcut_overrides(
+        state: &AppState,
+        workspace: WorkspacePreset,
+        theme_preset: ThemePreset,
+        shortcut_overrides: &[SelfHostedShortcutOverride],
     ) -> Self {
         let project_status = state
             .current_project_path
@@ -101,6 +112,10 @@ impl SelfHostedPreferencesModel {
             runtime_diagnostics: "Tracing enabled".to_owned(),
             log_filter: format!("RUST_LOG / {DEFAULT_SELF_HOSTED_LOG_FILTER}"),
             background_workers: SELF_HOSTED_BACKGROUND_WORKERS.to_string(),
+            shortcut_rows: active_shortcuts(shortcut_overrides)
+                .into_iter()
+                .map(|shortcut| format!("{:<18} {:?}", shortcut.label, shortcut.action))
+                .collect(),
         }
     }
 }
@@ -121,6 +136,10 @@ impl Default for SelfHostedPreferencesModel {
             runtime_diagnostics: "Tracing enabled".to_owned(),
             log_filter: format!("RUST_LOG / {DEFAULT_SELF_HOSTED_LOG_FILTER}"),
             background_workers: SELF_HOSTED_BACKGROUND_WORKERS.to_string(),
+            shortcut_rows: active_shortcuts(&[])
+                .into_iter()
+                .map(|shortcut| format!("{:<18} {:?}", shortcut.label, shortcut.action))
+                .collect(),
         }
     }
 }
@@ -599,13 +618,9 @@ fn content_rows_for_tab(
         PreferencesDialogTab::Shortcuts => {
             let mut rows = vec![
                 heading("Self-hosted shortcuts"),
-                detail("Default command bindings"),
+                detail("Active command bindings"),
             ];
-            rows.extend(
-                default_shortcuts().into_iter().map(|shortcut| {
-                    detail(format!("{:<18} {:?}", shortcut.label, shortcut.action))
-                }),
-            );
+            rows.extend(model.shortcut_rows.iter().cloned().map(detail));
             rows
         }
         PreferencesDialogTab::Developer => vec![
@@ -668,7 +683,24 @@ mod tests {
         );
 
         assert_eq!(dialog.active_tab(), PreferencesDialogTab::Shortcuts);
-        assert!(dialog.content_labels.len() > default_shortcuts().len());
+        assert!(
+            dialog.content_labels.len() > crate::self_hosted::shortcuts::default_shortcuts().len()
+        );
+    }
+
+    #[test]
+    fn preferences_shortcut_rows_use_active_overrides() {
+        let overrides =
+            vec![SelfHostedShortcutOverride { id: "panel.inspector".to_owned(), binding: None }];
+        let model = SelfHostedPreferencesModel::from_app_state_with_shortcut_overrides(
+            &AppState::new(),
+            WorkspacePreset::Editing,
+            ThemePreset::Dark,
+            &overrides,
+        );
+
+        assert!(model.shortcut_rows.iter().all(|row| !row.contains("FocusPanel(Inspector)")));
+        assert!(model.shortcut_rows.iter().any(|row| row.contains("Ctrl+S")));
     }
 
     #[test]

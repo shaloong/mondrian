@@ -496,6 +496,16 @@ Shortcut resolution receives a `ShortcutContext` from the router focus state and
 must search scopes in a fixed order: focused widget, focused panel, workspace,
 then global. Same-scope duplicate registrations replace the older binding so
 the active command is deterministic.
+If no widget handles a `KeyDown` and no registered shortcut matches it,
+`EventRouter` returns `EventResult::Ignored`; unmatched keys must not be
+converted into `Action::NoOp`, because that would consume user-level tool,
+input-method, and platform shortcut paths without a Mondrian command.
+Self-hosted default shortcuts are descriptors with stable ids. The shell loads
+`SelfHostedPreferences.shortcut_overrides` before registering router bindings:
+an override can replace the binding or set it to `None` to disable a default
+shortcut. Menus and the Preferences shortcut list read the same active
+descriptor table, so disabling a conflicting `Ctrl+Alt` panel/workspace chord
+also removes the visible shortcut hint.
 Focused-panel context is inferred by walking from the focused widget to the
 nearest ancestor widget that exposes `Widget::panel_kind()`. `PanelSlot` is the
 normal boundary that returns a panel kind. Leaf controls request only widget

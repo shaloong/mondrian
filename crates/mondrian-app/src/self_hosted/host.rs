@@ -905,6 +905,7 @@ mod tests {
                 theme_preset: ThemePreset::Dark,
                 workspace_preset: WorkspacePreset::Compositing,
                 recent_projects: Vec::new(),
+                shortcut_overrides: Vec::new(),
             },
             temp_preferences_path("initial-workspace"),
         );
@@ -1026,6 +1027,7 @@ mod tests {
                 theme_preset: ThemePreset::Dark,
                 workspace_preset: WorkspacePreset::Editing,
                 recent_projects: Vec::new(),
+                shortcut_overrides: Vec::new(),
             },
             path.clone(),
         );
@@ -1059,6 +1061,7 @@ mod tests {
                 theme_preset: ThemePreset::Dark,
                 workspace_preset: WorkspacePreset::Editing,
                 recent_projects: Vec::new(),
+                shortcut_overrides: Vec::new(),
             },
             path.clone(),
         );

@@ -2486,7 +2486,7 @@ fn timeline_edit_command_shortcut_label(command: TimelineEditCommand) -> Option<
         TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
         TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
     };
-    shortcut_label_for_action(&action).map(str::to_owned)
+    shortcut_label_for_action(&action)
 }
 
 fn node_graph_panel(model: &NodeGraphPanelModel) -> NodeGraphView {

@@ -15,7 +15,7 @@ use crate::self_hosted::runtime::{
     winit_cursor_icon_for_ui_state, winit_modifiers_to_ui_modifiers,
     winit_mouse_button_to_ui_button, winit_scroll_delta_to_ui_delta, WinitUiRuntime,
 };
-use crate::self_hosted::shortcuts::register_default_shortcuts;
+use crate::self_hosted::shortcuts::{register_shortcuts, SelfHostedShortcutOverride};
 use crate::self_hosted::startup::{STARTUP_WINDOW_HEIGHT, STARTUP_WINDOW_WIDTH};
 use mondrian_platform::SystemPlatformService;
 use mondrian_ui_core::types::*;
@@ -544,7 +544,10 @@ impl SelfHostedWindowSession {
             config: config.clone(),
             frame_renderer: SelfHostedFrameRenderer::new(device, config.format),
             render_diagnostic_reporter: SelfHostedRenderDiagnosticReporter::default(),
-            router: build_event_router(host.active_root().id()),
+            router: build_event_router(
+                host.active_root().id(),
+                &host.preferences().shortcut_overrides,
+            ),
             ui_runtime: WinitUiRuntime::new(),
             last_cursor: Point::new(0.0, 0.0),
             current_bounds: std::cell::Cell::new(bounds),
@@ -554,13 +557,16 @@ impl SelfHostedWindowSession {
     }
 }
 
-fn build_event_router(root_id: mondrian_ui_core::types::WidgetId) -> EventRouter {
+fn build_event_router(
+    root_id: mondrian_ui_core::types::WidgetId,
+    shortcut_overrides: &[SelfHostedShortcutOverride],
+) -> EventRouter {
     let mut router = EventRouter::with_platform_and_tooltip(
         root_id,
         Box::new(SystemPlatformService),
         Box::new(TooltipManagerImpl::new(450)),
     );
-    register_default_shortcuts(&mut router);
+    register_shortcuts(&mut router, shortcut_overrides);
     router
 }
 

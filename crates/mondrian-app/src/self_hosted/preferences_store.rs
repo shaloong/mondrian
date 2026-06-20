@@ -12,6 +12,7 @@ use mondrian_ui_theme::ThemePreset;
 use serde::{Deserialize, Serialize};
 
 use crate::app::app_data_dir;
+use crate::self_hosted::shortcuts::{is_known_shortcut_id, SelfHostedShortcutOverride};
 
 const SELF_HOSTED_PREFERENCES_FILE: &str = "self_hosted_preferences.json";
 /// Maximum number of recent projects kept by the self-hosted startup surface.
@@ -28,6 +29,9 @@ pub struct SelfHostedPreferences {
     pub workspace_preset: WorkspacePreset,
     /// Most recently opened project files for the startup surface.
     pub recent_projects: Vec<PathBuf>,
+    /// User overrides for self-hosted shell shortcut descriptors.
+    #[serde(default)]
+    pub shortcut_overrides: Vec<SelfHostedShortcutOverride>,
 }
 
 impl Default for SelfHostedPreferences {
@@ -37,6 +41,7 @@ impl Default for SelfHostedPreferences {
             theme_preset: ThemePreset::Dark,
             workspace_preset: WorkspacePreset::Editing,
             recent_projects: Vec::new(),
+            shortcut_overrides: Vec::new(),
         }
     }
 }
@@ -61,6 +66,19 @@ impl SelfHostedPreferences {
             }
         }
         self.recent_projects = sanitized;
+
+        let mut shortcut_overrides = Vec::new();
+        for entry in self.shortcut_overrides {
+            if !is_known_shortcut_id(&entry.id)
+                || shortcut_overrides
+                    .iter()
+                    .any(|existing: &SelfHostedShortcutOverride| existing.id == entry.id)
+            {
+                continue;
+            }
+            shortcut_overrides.push(entry);
+        }
+        self.shortcut_overrides = shortcut_overrides;
         self
     }
 }
@@ -145,6 +163,10 @@ mod tests {
             theme_preset: ThemePreset::Light,
             workspace_preset: WorkspacePreset::Compositing,
             recent_projects: vec![project_path.clone()],
+            shortcut_overrides: vec![SelfHostedShortcutOverride {
+                id: "panel.inspector".to_owned(),
+                binding: None,
+            }],
         };
 
         fs::write(&project_path, b"project").expect("write recent project fixture");
@@ -199,6 +221,7 @@ mod tests {
                 theme_preset: ThemePreset::Dark,
                 workspace_preset: WorkspacePreset::Editing,
                 recent_projects: vec![missing, existing.clone(), existing.clone()],
+                shortcut_overrides: Vec::new(),
             })
             .expect("serialize preferences"),
         )
@@ -209,5 +232,34 @@ mod tests {
         fs::remove_file(&existing).ok();
 
         assert_eq!(preferences.recent_projects, vec![existing]);
+    }
+
+    #[test]
+    fn loading_preferences_sanitizes_shortcut_overrides() {
+        let path = temp_preferences_path("shortcut-filter");
+        fs::write(
+            &path,
+            serde_json::to_vec(&SelfHostedPreferences {
+                version: 1,
+                theme_preset: ThemePreset::Dark,
+                workspace_preset: WorkspacePreset::Editing,
+                recent_projects: Vec::new(),
+                shortcut_overrides: vec![
+                    SelfHostedShortcutOverride { id: "panel.inspector".to_owned(), binding: None },
+                    SelfHostedShortcutOverride { id: "unknown.shortcut".to_owned(), binding: None },
+                    SelfHostedShortcutOverride { id: "panel.inspector".to_owned(), binding: None },
+                ],
+            })
+            .expect("serialize preferences"),
+        )
+        .expect("write preferences");
+
+        let preferences = load_self_hosted_preferences_from(&path);
+        fs::remove_file(path).ok();
+
+        assert_eq!(
+            preferences.shortcut_overrides,
+            vec![SelfHostedShortcutOverride { id: "panel.inspector".to_owned(), binding: None }]
+        );
     }
 }

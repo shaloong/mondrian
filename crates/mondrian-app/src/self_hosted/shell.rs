@@ -591,13 +591,17 @@ impl SelfHostedAppRoot {
         let mut root = Self::new_with_preferences(
             TitleBar::new(
                 window_title_for_app_state(state),
-                MenuBar::for_app_state(state),
+                MenuBar::for_app_state_with_shortcut_overrides(
+                    state,
+                    &preferences.shortcut_overrides,
+                ),
             ),
             models,
-            SelfHostedPreferencesModel::from_app_state(
+            SelfHostedPreferencesModel::from_app_state_with_shortcut_overrides(
                 state,
                 preferences.workspace_preset,
                 preferences.theme_preset,
+                &preferences.shortcut_overrides,
             ),
             preferences.workspace_preset,
             status_bar_model(state),
@@ -730,6 +734,7 @@ impl SelfHostedAppRoot {
             theme_preset: self.preferences_model.theme_preset,
             workspace_preset: self.workspace_preset,
             recent_projects: Vec::new(),
+            shortcut_overrides: Vec::new(),
         };
         self.refresh_from_app_state_with_preferences(state, &preferences);
     }
@@ -771,7 +776,7 @@ impl SelfHostedAppRoot {
     ) {
         self.title_bar = TitleBar::new(
             window_title_for_app_state(state),
-            MenuBar::for_app_state(state),
+            MenuBar::for_app_state_with_shortcut_overrides(state, &preferences.shortcut_overrides),
         );
         self.status_bar.set_model(status_bar_model(state));
         self.active_sequence = state.sequence.clone();
@@ -784,10 +789,11 @@ impl SelfHostedAppRoot {
             );
         apply_viewer_zoom_mode(&mut models, self.viewer_zoom_mode);
         self.set_models(models);
-        let preferences_model = SelfHostedPreferencesModel::from_app_state(
+        let preferences_model = SelfHostedPreferencesModel::from_app_state_with_shortcut_overrides(
             state,
             self.workspace_preset,
             preferences.theme_preset,
+            &preferences.shortcut_overrides,
         );
         self.preferences_model = preferences_model.clone();
         if let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_preferences_mut) {

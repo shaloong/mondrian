@@ -26,7 +26,9 @@ use crate::app::ui_actions::{
 };
 use crate::app::AppState;
 use crate::self_hosted::icons::AppIcon;
-use crate::self_hosted::shortcuts::shortcut_label_for_action;
+use crate::self_hosted::shortcuts::{
+    shortcut_label_for_action, shortcut_label_for_action_with_overrides, SelfHostedShortcutOverride,
+};
 
 /// Height reserved for the self-hosted top menu bar.
 pub const MENU_BAR_HEIGHT: f32 = 28.0;
@@ -243,12 +245,27 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
     ]
 }
 
+/// Default Mondrian menu structure with user shortcut overrides applied.
+pub fn default_menu_items_with_shortcut_overrides(
+    overrides: &[SelfHostedShortcutOverride],
+) -> Vec<(&'static str, Vec<MenuItem>)> {
+    apply_shortcut_overrides_to_menu_items(default_menu_items(), overrides)
+}
+
 /// Default Mondrian menu structure with application-state availability applied.
 ///
 /// The semantic menu table stays stable; this adapter only disables rows that
 /// cannot produce a useful editor action for the supplied state snapshot.
 pub fn default_menu_items_for_app_state(state: &AppState) -> Vec<(&'static str, Vec<MenuItem>)> {
-    default_menu_items()
+    default_menu_items_for_app_state_with_shortcut_overrides(state, &[])
+}
+
+/// Default menu structure with state availability and shortcut overrides.
+pub fn default_menu_items_for_app_state_with_shortcut_overrides(
+    state: &AppState,
+    overrides: &[SelfHostedShortcutOverride],
+) -> Vec<(&'static str, Vec<MenuItem>)> {
+    let items = default_menu_items()
         .into_iter()
         .map(|(label, items)| {
             if label == "Sequence" {
@@ -262,7 +279,8 @@ pub fn default_menu_items_for_app_state(state: &AppState) -> Vec<(&'static str, 
                     .collect(),
             )
         })
-        .collect()
+        .collect::<Vec<_>>();
+    apply_shortcut_overrides_to_menu_items(items, overrides)
 }
 
 fn sequence_menu_items_for_app_state(state: &AppState) -> Vec<MenuItem> {
@@ -511,6 +529,27 @@ fn menu_item_with_shortcut(item: MenuItem) -> MenuItem {
     item.with_shortcut(shortcut)
 }
 
+fn apply_shortcut_overrides_to_menu_items(
+    items: Vec<(&'static str, Vec<MenuItem>)>,
+    overrides: &[SelfHostedShortcutOverride],
+) -> Vec<(&'static str, Vec<MenuItem>)> {
+    items
+        .into_iter()
+        .map(|(label, rows)| {
+            (
+                label,
+                rows.into_iter()
+                    .map(|mut item| {
+                        item.shortcut =
+                            shortcut_label_for_action_with_overrides(&item.action, overrides);
+                        item
+                    })
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
 /// Horizontal menu bar wrapping dropdown widgets.
 pub struct MenuBar {
     id: WidgetId,
@@ -534,6 +573,16 @@ impl MenuBar {
     /// Build a menu bar whose rows reflect the current application state.
     pub fn for_app_state(state: &AppState) -> Self {
         Self::new(default_menu_items_for_app_state(state))
+    }
+
+    /// Build a menu bar from app state and user shortcut overrides.
+    pub fn for_app_state_with_shortcut_overrides(
+        state: &AppState,
+        overrides: &[SelfHostedShortcutOverride],
+    ) -> Self {
+        Self::new(default_menu_items_for_app_state_with_shortcut_overrides(
+            state, overrides,
+        ))
     }
 
     /// Current laid-out menu bar bounds.
@@ -574,10 +623,14 @@ impl Widget for MenuBar {
 
     fn layout(&mut self, bounds: Rect) {
         self.bounds = bounds;
+        if self.menus.is_empty() {
+            return;
+        }
+        let trigger_width = (bounds.width / self.menus.len() as f32).max(0.0);
         let mut x = bounds.x;
         for menu in &mut self.menus {
-            menu.layout(Rect::new(x, bounds.y, 100.0, MENU_BAR_HEIGHT));
-            x += 100.0;
+            menu.layout(Rect::new(x, bounds.y, trigger_width, MENU_BAR_HEIGHT));
+            x += trigger_width;
         }
     }
 
@@ -906,6 +959,42 @@ mod tests {
                 "Workspace/{workspace_label} should show {shortcut}"
             );
         }
+    }
+
+    #[test]
+    fn menu_shortcut_hints_follow_user_overrides() {
+        let overrides = vec![
+            SelfHostedShortcutOverride {
+                id: "file.save_project".to_owned(),
+                binding: Some(crate::self_hosted::shortcuts::SelfHostedShortcutBinding {
+                    key: crate::self_hosted::shortcuts::SelfHostedShortcutKey::S,
+                    ctrl: true,
+                    alt: true,
+                    shift: false,
+                    meta: false,
+                }),
+            },
+            SelfHostedShortcutOverride { id: "panel.inspector".to_owned(), binding: None },
+        ];
+        let menu_items = default_menu_items_with_shortcut_overrides(&overrides);
+
+        assert_eq!(
+            menu_item(&menu_items, "File", "Save").shortcut.as_deref(),
+            Some("Ctrl+Alt+S")
+        );
+        assert_eq!(
+            menu_item(&menu_items, "View", "Inspector").shortcut.as_deref(),
+            None
+        );
+    }
+
+    #[test]
+    fn menu_bar_triggers_stay_inside_layout_bounds() {
+        let mut menu = MenuBar::default();
+        menu.layout(Rect::new(100.0, 0.0, 500.0, MENU_BAR_HEIGHT));
+
+        assert!(menu.trigger_index_at(Point::new(599.5, 14.0)).is_some());
+        assert_eq!(menu.trigger_index_at(Point::new(600.5, 14.0)), None);
     }
 
     #[test]
