@@ -369,6 +369,9 @@ fn line_vertices(
     let dx = end.x - start.x;
     let dy = end.y - start.y;
     let len = (dx * dx + dy * dy).sqrt();
+    if !len.is_finite() {
+        return None;
+    }
     let (ux, uy) = if len > MIN_LINE_DIRECTION_LEN {
         (dx / len, dy / len)
     } else {
@@ -382,6 +385,13 @@ fn line_vertices(
     let axis_padding = half_geometry_width;
     let geometry_len = len + axis_padding * 2.0;
     let geometry_width = half_geometry_width * 2.0;
+    if !radius.is_finite()
+        || !half_geometry_width.is_finite()
+        || !geometry_len.is_finite()
+        || !geometry_width.is_finite()
+    {
+        return None;
+    }
 
     let start_x = start.x - ux * axis_padding;
     let start_y = start.y - uy * axis_padding;
@@ -417,10 +427,24 @@ fn line_vertices(
             [geometry_len, geometry_width],
         ),
     ];
+    if !pixel_points.iter().all(|(point, tex_coord)| {
+        point_is_finite(*point) && tex_coord.iter().all(|v| v.is_finite())
+    }) {
+        return None;
+    }
     let points =
         pixel_points.map(|(point, tex_coord)| ((sx * point.x + tx, sy * point.y + ty), tex_coord));
+    if !points.iter().all(|((x, y), tex_coord)| {
+        x.is_finite() && y.is_finite() && tex_coord.iter().all(|v| v.is_finite())
+    }) {
+        return None;
+    }
     let [p0, p1, p2, p3] = points;
-    let order = if signed_triangle_area(p0.0, p2.0, p1.0) >= 0.0 {
+    let area = signed_triangle_area(p0.0, p2.0, p1.0);
+    if !area.is_finite() {
+        return None;
+    }
+    let order = if area >= 0.0 {
         [p0, p2, p1, p1, p2, p3]
     } else {
         [p0, p1, p2, p2, p1, p3]
@@ -1774,6 +1798,30 @@ mod tests {
             end: Point::new(90.0, 50.0),
             width: 2.0,
             color: Color { r: 1.0, g: f32::NAN, b: 1.0, a: 1.0 },
+        }];
+
+        assert!(build_batches(&cmds, (100, 100)).is_empty());
+    }
+
+    #[test]
+    fn build_batches_lines_skip_overflowing_length() {
+        let cmds = [DrawCommand::Line {
+            start: Point::new(-f32::MAX, 50.0),
+            end: Point::new(f32::MAX, 50.0),
+            width: 1.0,
+            color: Color::WHITE,
+        }];
+
+        assert!(build_batches(&cmds, (100, 100)).is_empty());
+    }
+
+    #[test]
+    fn build_batches_lines_skip_overflowing_geometry() {
+        let cmds = [DrawCommand::Line {
+            start: Point::new(10.0, 10.0),
+            end: Point::new(11.0, 10.0),
+            width: f32::MAX,
+            color: Color::WHITE,
         }];
 
         assert!(build_batches(&cmds, (100, 100)).is_empty());

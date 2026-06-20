@@ -1747,6 +1747,9 @@ appear broken or intermittent. The coverage quad expands by the stroke radius
 plus AA padding both perpendicular to the stroke and along the stroke axis, so
 wide, short, and zero-length lines do not have their round caps clipped by the
 conservative geometry before the fragment SDF runs.
+The batch builder must also reject lines whose finite inputs overflow while
+deriving length, local SDF bounds, coverage-quad points, or final NDC vertices;
+primitive safety is enforced before any vertex reaches the GPU.
 Together with 4x MSAA resolve and linear atlas sampling, this keeps circles,
 SVG raster icons, diagonals, and text glyph images smooth during resize and
 scroll. The renderer batch builder is the final primitive-safety boundary: it
