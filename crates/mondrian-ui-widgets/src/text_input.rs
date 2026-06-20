@@ -565,6 +565,9 @@ impl Widget for TextInput {
                 }
             }
             UiEvent::MouseUp { button: MouseButton::Left, .. } => {
+                if !self.mouse_down {
+                    return EventResult::Ignored;
+                }
                 self.mouse_down = false;
                 ctx.release_pointer_capture(self.id);
                 EventResult::Handled
@@ -1902,6 +1905,29 @@ mod tests {
     }
 
     // ── Mouse drag ───────────────────────────────────────────────────────
+
+    #[test]
+    fn idle_mouse_up_is_ignored_for_sibling_event_routing() {
+        let mut ti = TextInput::new("ph").with_text("hello");
+        layout(&mut ti);
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
+
+        let result = ti.event(
+            &UiEvent::MouseUp {
+                position: Point::new(40.0, 14.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Ignored);
+        assert!(ctx.requests.pointer_capture.is_none());
+        assert!(!ti.mouse_down);
+    }
 
     #[test]
     fn drag_selects() {

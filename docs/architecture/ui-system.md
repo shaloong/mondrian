@@ -457,7 +457,10 @@ panel-level commands, such as copying clips or keyframes, can handle them.
 When a `TextInput` receives an outside mouse down directly, it clears local
 focus and IME state but returns `Ignored`; the clicked sibling must still receive
 the event. Intentional focus loss that should stop propagation is delivered by
-the router through `FocusLost`.
+the router through `FocusLost`. Mouse release follows the same ownership rule:
+an idle text input must ignore `MouseUp` and must not release pointer capture it
+does not own. Only a text-selection drag that began in that input handles the
+release and emits a capture release request.
 
 ## Shortcut Routing
 
