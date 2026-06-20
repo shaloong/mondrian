@@ -112,6 +112,9 @@ impl Widget for TooltipWidget {
         if !self.state.visible || self.state.text.is_empty() {
             return;
         }
+        if !rect_has_paintable_area(ctx.clip_rect) {
+            return;
+        }
 
         let tokens = &ctx.theme.colors;
         let spacing = &ctx.theme.spacing;
@@ -124,7 +127,7 @@ impl Widget for TooltipWidget {
         ctx.encoder.draw_rect(border_rect, tokens.border, spacing.radius_sm + 1.0);
         ctx.encoder.draw_rect(bg, tokens.popover, spacing.radius_sm);
 
-        ctx.encoder.push_clip(bg);
+        ctx.push_clip(bg);
         ctx.encoder.draw_text_box(
             &self.state.text,
             font_size,
@@ -153,6 +156,15 @@ fn clamp_rect_to_clip(rect: Rect, clip: Rect) -> Rect {
     let right = (rect.x + rect.width).min(clip.x + clip.width);
     let bottom = (rect.y + rect.height).min(clip.y + clip.height);
     Rect::new(left, top, (right - left).max(0.0), (bottom - top).max(0.0))
+}
+
+fn rect_has_paintable_area(rect: Rect) -> bool {
+    rect.x.is_finite()
+        && rect.y.is_finite()
+        && rect.width.is_finite()
+        && rect.height.is_finite()
+        && rect.width > 0.0
+        && rect.height > 0.0
 }
 
 impl Default for TooltipWidget {
@@ -287,6 +299,56 @@ mod tests {
         assert!(border.y >= clip_rect.y);
         assert!(border.x + border.width <= clip_rect.x + clip_rect.width + 0.1);
         assert!(border.y + border.height <= clip_rect.y + clip_rect.height + 0.1);
+    }
+
+    #[test]
+    fn paint_skips_tooltip_when_clip_has_no_area() {
+        let mut widget = TooltipWidget::new();
+        widget.update_state(TooltipState {
+            text: "hidden by empty viewport".into(),
+            position: Point::new(10.0, 10.0),
+            visible: true,
+        });
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+
+        {
+            let mut ctx = PaintContext {
+                encoder: &mut encoder,
+                theme: &theme,
+                clip_rect: Rect::new(0.0, 0.0, 0.0, 120.0),
+            };
+            widget.paint_overlay(&mut ctx);
+        }
+
+        assert!(encoder.rects.is_empty());
+        assert!(encoder.clips.is_empty());
+        assert!(encoder.text_boxes.is_empty());
+    }
+
+    #[test]
+    fn paint_skips_tooltip_when_clip_is_not_finite() {
+        let mut widget = TooltipWidget::new();
+        widget.update_state(TooltipState {
+            text: "hidden by invalid viewport".into(),
+            position: Point::new(10.0, 10.0),
+            visible: true,
+        });
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+
+        {
+            let mut ctx = PaintContext {
+                encoder: &mut encoder,
+                theme: &theme,
+                clip_rect: Rect::new(0.0, 0.0, f32::INFINITY, 120.0),
+            };
+            widget.paint_overlay(&mut ctx);
+        }
+
+        assert!(encoder.rects.is_empty());
+        assert!(encoder.clips.is_empty());
+        assert!(encoder.text_boxes.is_empty());
     }
 
     #[test]

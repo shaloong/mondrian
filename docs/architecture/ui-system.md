@@ -738,6 +738,9 @@ before painting its background. The text layer uses cosmic-text wrapping with
 word breaks and glyph fallback for overlong tokens, so tooltip widgets do not
 own line-breaking logic. Tooltip fill and border geometry must both be clamped
 to the root clip rect so edge-adjacent popovers do not bleed outside the window.
+If the root overlay clip is empty or non-finite, the tooltip widget should skip
+painting entirely rather than emitting degenerate rect, clip, or text commands
+and relying on the renderer to discard them.
 
 ## Overlay Contract
 
