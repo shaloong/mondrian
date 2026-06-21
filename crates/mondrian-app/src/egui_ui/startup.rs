@@ -661,12 +661,15 @@ fn app_icon_texture(ctx: &egui::Context) -> egui::TextureHandle {
         return texture;
     }
 
-    let bytes = include_bytes!("../../assets/app-ico.png");
-    let decoded = image::load_from_memory(bytes)
-        .expect("app-ico.png should be a valid embedded image")
-        .into_rgba8();
-    let size = [decoded.width() as usize, decoded.height() as usize];
-    let color_image = egui::ColorImage::from_rgba_unmultiplied(size, decoded.as_raw());
+    const ICON_SIZE: usize = 64;
+    let rgba = crate::product_assets::rasterize_svg_rgba(
+        include_str!("../../assets/favicon.svg"),
+        ICON_SIZE as u32,
+        ICON_SIZE as u32,
+    )
+    .expect("favicon.svg should be a valid embedded image");
+    let color_image =
+        egui::ColorImage::from_rgba_unmultiplied([ICON_SIZE, ICON_SIZE], rgba.as_slice());
     let texture = ctx.load_texture(
         "bootstrap_app_icon_texture",
         color_image,

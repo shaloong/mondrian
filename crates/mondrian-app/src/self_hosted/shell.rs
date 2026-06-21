@@ -764,6 +764,12 @@ impl SelfHostedAppRoot {
         &mut self.dock
     }
 
+    /// Menu bar bounds exposed for root-level event tests.
+    #[cfg(test)]
+    pub(crate) fn menu_bar_bounds_for_test(&self) -> Rect {
+        self.title_bar.menu_bar().bounds()
+    }
+
     /// Replace panel contents from a fresh model snapshot while preserving the
     /// root widget id and menu state.
     pub fn set_models(&mut self, models: SelfHostedPanelModels) {

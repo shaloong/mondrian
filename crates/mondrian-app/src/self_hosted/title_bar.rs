@@ -3,10 +3,13 @@
 //! Native window effects stay behind app-shell actions. This widget only owns
 //! layout, hit testing, and drawing for the custom title/menu row.
 
+use std::sync::OnceLock;
+
 use mondrian_editor_state::state::WorkspacePreset;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
+use mondrian_ui_widgets::RasterImage;
 
 use crate::app::ui_actions::app_shell_window_drag_action;
 use crate::self_hosted::menu_bar::{MenuBar, MENU_BAR_HEIGHT};
@@ -18,7 +21,9 @@ use crate::self_hosted::workspace_layout::SelfHostedWorkspaceLayout;
 /// Height reserved for the self-hosted menu/title chrome.
 pub const TITLE_BAR_HEIGHT: f32 = 34.0;
 
-const BRAND_WIDTH: f32 = 96.0;
+const BRAND_ICON_SIZE: f32 = 16.0;
+const BRAND_MENU_GAP: f32 = 18.0;
+const BRAND_WIDTH: f32 = BRAND_ICON_SIZE + BRAND_MENU_GAP;
 const MENU_WIDTH: f32 = 500.0;
 
 /// Custom top chrome for product windows.
@@ -201,12 +206,16 @@ impl Widget for TitleBar {
             colors.border,
         );
 
-        ctx.encoder.draw_text(
-            "Mondrian",
-            13.0,
-            Point::new(self.brand_x(), self.bounds.y + 10.0),
-            colors.card_foreground,
-        );
+        if let Some(image) = title_bar_favicon_image() {
+            ctx.encoder.draw_raster_image(
+                &image.key,
+                self.brand_icon_rect(),
+                image.width,
+                image.height,
+                image.rgba.clone(),
+                mondrian_core::Color::WHITE,
+            );
+        }
         self.menu_bar.paint(ctx);
 
         let previous_clip = ctx.clip_rect;
@@ -258,6 +267,29 @@ impl TitleBar {
             WindowControlEdge::Trailing => self.bounds.x + 12.0,
         }
     }
+
+    fn brand_icon_rect(&self) -> Rect {
+        Rect::new(
+            self.brand_x(),
+            self.bounds.y + (TITLE_BAR_HEIGHT - BRAND_ICON_SIZE) * 0.5,
+            BRAND_ICON_SIZE,
+            BRAND_ICON_SIZE,
+        )
+    }
+}
+
+fn title_bar_favicon_image() -> Option<&'static RasterImage> {
+    static IMAGE: OnceLock<Option<RasterImage>> = OnceLock::new();
+    IMAGE
+        .get_or_init(|| {
+            crate::product_assets::rasterize_svg_asset(
+                "titlebar.favicon",
+                include_str!("../../assets/favicon.svg"),
+                64,
+                64,
+            )
+        })
+        .as_ref()
 }
 
 #[cfg(test)]
@@ -274,6 +306,7 @@ mod tests {
         rects: Vec<Rect>,
         lines: usize,
         texts: Vec<String>,
+        raster_images: Vec<(String, Rect, u32, u32)>,
     }
 
     impl DrawCommandEncoder for Recorder {
@@ -301,6 +334,18 @@ mod tests {
             self.texts.push(text.to_owned());
         }
 
+        fn draw_raster_image(
+            &mut self,
+            key: &str,
+            bounds: Rect,
+            width: u32,
+            height: u32,
+            _rgba: std::sync::Arc<[u8]>,
+            _tint: mondrian_core::Color,
+        ) {
+            self.raster_images.push((key.to_owned(), bounds, width, height));
+        }
+
         fn push_translate(&mut self, _offset: glam::Vec2) {}
 
         fn pop_transform(&mut self) {}
@@ -325,7 +370,8 @@ mod tests {
 
         assert_eq!(bar.bounds(), Rect::new(0.0, 0.0, 1000.0, TITLE_BAR_HEIGHT));
         assert_eq!(bar.menu_bar().bounds().y, 5.0);
-        assert!(bar.menu_bar().bounds().x > 90.0);
+        let icon_bounds = bar.brand_icon_rect();
+        assert!(bar.menu_bar().bounds().x > icon_bounds.x + icon_bounds.width);
         assert_eq!(
             bar.control_bounds(WindowControl::Close).width,
             PlatformWindowControlStyle::current().total_width() / 3.0
@@ -440,11 +486,43 @@ mod tests {
 
         bar.paint(&mut ctx);
 
-        assert!(recorder.texts.iter().any(|text| text == "Mondrian"));
+        assert!(!recorder.texts.iter().any(|text| text == "Mondrian"));
         assert!(recorder.texts.iter().any(|text| text == "Demo Project"));
         assert!(
             recorder.lines >= 7,
             "window controls should be painted as platform geometry"
         );
+    }
+
+    #[test]
+    fn title_bar_paints_favicon_before_menu_bar() {
+        let bar = title_bar();
+        let mut recorder = Recorder::default();
+        let theme = ThemePreset::Dark.build();
+        let mut ctx = PaintContext {
+            encoder: &mut recorder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 1000.0, 200.0),
+        };
+
+        bar.paint(&mut ctx);
+
+        let (_, icon_bounds, width, height) = recorder
+            .raster_images
+            .iter()
+            .find(|(key, _, _, _)| key == "titlebar.favicon")
+            .expect("title bar should paint the product favicon");
+        assert_eq!((*width, *height), (64, 64));
+        assert_eq!(*icon_bounds, bar.brand_icon_rect());
+        assert!(icon_bounds.x < bar.menu_bar().bounds().x);
+    }
+
+    #[test]
+    fn title_bar_favicon_asset_rasterizes() {
+        let image = title_bar_favicon_image().expect("favicon.svg should rasterize");
+
+        assert_eq!(image.key, "titlebar.favicon");
+        assert_eq!((image.width, image.height), (64, 64));
+        assert_eq!(image.rgba.len(), 64 * 64 * 4);
     }
 }

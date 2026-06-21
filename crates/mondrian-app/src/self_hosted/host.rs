@@ -1220,7 +1220,9 @@ mod tests {
         let mut host = SelfHostedUiHost::new(workspace_app_state());
         TreeWalker::layout(host.root_mut(), bounds);
 
-        click_root(host.root_mut(), Point::new(116.0, 17.0));
+        let menu_bounds = host.root().menu_bar_bounds_for_test();
+        let menu_point = Point::new(menu_bounds.x + 16.0, menu_bounds.center().y);
+        click_root(host.root_mut(), menu_point);
         assert!(
             widget_tree_has_transient_interaction(host.active_root()),
             "test setup should leave the File menu overlay open"
