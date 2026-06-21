@@ -13,6 +13,10 @@ pub enum AppIcon {
     Add,
     /// Anchor point icon.
     Anchor,
+    /// Left bracket in/out range icon.
+    BracketsLeft,
+    /// Right bracket in/out range icon.
+    BracketsRight,
     /// Down caret icon.
     CaretDown,
     /// Left caret icon.
@@ -113,9 +117,11 @@ pub enum AppIcon {
 
 impl AppIcon {
     /// Every bundled product icon that should remain parseable by the custom UI.
-    pub const ALL: [Self; 50] = [
+    pub const ALL: [Self; 52] = [
         Self::Add,
         Self::Anchor,
+        Self::BracketsLeft,
+        Self::BracketsRight,
         Self::CaretDown,
         Self::CaretLeft,
         Self::CaretRight,
@@ -171,6 +177,8 @@ impl AppIcon {
         match self {
             Self::Add => "app.add",
             Self::Anchor => "app.anchor",
+            Self::BracketsLeft => "app.brackets-left",
+            Self::BracketsRight => "app.brackets-right",
             Self::CaretDown => "app.caret-down",
             Self::CaretLeft => "app.caret-left",
             Self::CaretRight => "app.caret-right",
@@ -227,6 +235,8 @@ impl AppIcon {
         match self {
             Self::Add => include_str!("../../assets/icons/add.svg"),
             Self::Anchor => include_str!("../../assets/icons/anchor.svg"),
+            Self::BracketsLeft => include_str!("../../assets/icons/brackets_left.svg"),
+            Self::BracketsRight => include_str!("../../assets/icons/brackets_right.svg"),
             Self::CaretDown => include_str!("../../assets/icons/caret_down.svg"),
             Self::CaretLeft => include_str!("../../assets/icons/caret_left.svg"),
             Self::CaretRight => include_str!("../../assets/icons/caret_right.svg"),

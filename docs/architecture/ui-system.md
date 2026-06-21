@@ -109,7 +109,11 @@ for that root, updates the UI bounds, and relayouts before the first workspace
 frame. The workspace keeps one product chrome row owned by `TitleBar`; it must
 not combine native OS decorations with the self-hosted title/menu bar. Closing
 the project follows the same boundary in reverse rather than mutating
-creation-time window attributes in place.
+creation-time window attributes in place. Workspace windows request platform
+rounded corners where the operating system exposes a native top-level window
+corner preference; this keeps the whole editor shell visually rounded without
+reintroducing system title bars or clipping reusable widget content in the
+renderer.
 Recent-project recovery, crash recovery, and future onboarding belong in the
 startup model and should be surfaced through app-layer actions rather than
 reintroducing a separate project browser or console panel.

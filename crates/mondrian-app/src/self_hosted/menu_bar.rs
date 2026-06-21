@@ -96,11 +96,11 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
                 MenuItem::separator(),
                 menu_item_with_icon(
                     MenuItem::new("Mark In", Action::MarkInAtPlayhead),
-                    AppIcon::Stopwatch,
+                    AppIcon::BracketsLeft,
                 ),
                 menu_item_with_icon(
                     MenuItem::new("Mark Out", Action::MarkOutAtPlayhead),
-                    AppIcon::Stopwatch,
+                    AppIcon::BracketsRight,
                 ),
                 menu_item_with_icon(
                     MenuItem::new("Clear In/Out", timeline_clear_in_out_points_action()),

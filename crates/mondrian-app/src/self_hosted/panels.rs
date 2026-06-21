@@ -1676,11 +1676,11 @@ fn with_timeline_toolbar_icons(mut timeline: TimelineView) -> TimelineView {
         (TimelineToolbarIconSlot::Snapping, AppIcon::Magnet),
         (
             TimelineToolbarIconSlot::MarkInAtPlayhead,
-            AppIcon::CaretRight,
+            AppIcon::BracketsLeft,
         ),
         (
             TimelineToolbarIconSlot::MarkOutAtPlayhead,
-            AppIcon::CaretLeft,
+            AppIcon::BracketsRight,
         ),
     ] {
         if let Ok(vector_icon) = icon.vector_icon() {

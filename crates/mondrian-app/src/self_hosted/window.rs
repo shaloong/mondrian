@@ -53,9 +53,16 @@ struct WindowChrome {
     height: f32,
     transparent: bool,
     decorations: bool,
+    rounded_corners: bool,
     resizable: bool,
     min_size: Option<(f32, f32)>,
     max_size: Option<(f32, f32)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowCornerPreference {
+    Default,
+    Round,
 }
 
 struct SelfHostedWindowSession {
@@ -526,6 +533,8 @@ impl SelfHostedWindowSession {
         device: &wgpu::Device,
         host: &mut SelfHostedUiHost,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        apply_window_corner_preference(&window, window_corner_preference_for_role(role));
+
         let size = window.inner_size();
         let config = surface
             .get_default_config(adapter, size.width, size.height)
@@ -644,6 +653,7 @@ fn window_chrome_for_role(role: SelfHostedWindowRole) -> WindowChrome {
             height: STARTUP_WINDOW_HEIGHT,
             transparent: true,
             decorations: false,
+            rounded_corners: false,
             resizable: false,
             min_size: Some((STARTUP_WINDOW_WIDTH, STARTUP_WINDOW_HEIGHT)),
             max_size: Some((STARTUP_WINDOW_WIDTH, STARTUP_WINDOW_HEIGHT)),
@@ -654,6 +664,7 @@ fn window_chrome_for_role(role: SelfHostedWindowRole) -> WindowChrome {
             height: WORKSPACE_WINDOW_HEIGHT,
             transparent: false,
             decorations: false,
+            rounded_corners: true,
             resizable: true,
             min_size: Some((WORKSPACE_MIN_WIDTH, WORKSPACE_MIN_HEIGHT)),
             max_size: None,
@@ -681,6 +692,21 @@ fn window_attributes_for_role(role: SelfHostedWindowRole) -> winit::window::Wind
         attrs = attrs.with_max_inner_size(logical_size(w, h));
     }
     attrs
+}
+
+fn window_corner_preference_for_role(role: SelfHostedWindowRole) -> WindowCornerPreference {
+    if window_chrome_for_role(role).rounded_corners {
+        WindowCornerPreference::Round
+    } else {
+        WindowCornerPreference::Default
+    }
+}
+
+fn apply_window_corner_preference(
+    window: &winit::window::Window,
+    preference: WindowCornerPreference,
+) {
+    platform_window_chrome::apply_window_corner_preference(window, preference);
 }
 
 fn update_window_cursor_icon(host: &SelfHostedUiHost, session: &SelfHostedWindowSession) {
@@ -772,6 +798,65 @@ fn toggle_window_fullscreen(window: &winit::window::Window) {
         window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(
             window.current_monitor(),
         )));
+    }
+}
+
+#[cfg(target_os = "windows")]
+mod platform_window_chrome {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute;
+
+    use super::WindowCornerPreference;
+
+    const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
+    const DWMWCP_DEFAULT: u32 = 0;
+    const DWMWCP_ROUND: u32 = 2;
+
+    pub(super) fn apply_window_corner_preference(
+        window: &winit::window::Window,
+        preference: WindowCornerPreference,
+    ) {
+        let Ok(window_handle) = window.window_handle() else {
+            return;
+        };
+        let RawWindowHandle::Win32(handle) = window_handle.as_raw() else {
+            return;
+        };
+
+        let preference = match preference {
+            WindowCornerPreference::Default => DWMWCP_DEFAULT,
+            WindowCornerPreference::Round => DWMWCP_ROUND,
+        };
+        let hwnd = handle.hwnd.get() as windows_sys::Win32::Foundation::HWND;
+
+        // SAFETY: winit owns a live top-level HWND on this thread and the
+        // attribute payload is a pointer to a properly sized DWORD value for
+        // the duration of the call.
+        let result = unsafe {
+            DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_WINDOW_CORNER_PREFERENCE,
+                std::ptr::addr_of!(preference).cast(),
+                std::mem::size_of_val(&preference) as u32,
+            )
+        };
+        if result < 0 {
+            tracing::debug!(
+                hresult = result,
+                "failed to apply Windows DWM window corner preference"
+            );
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+mod platform_window_chrome {
+    use super::WindowCornerPreference;
+
+    pub(super) fn apply_window_corner_preference(
+        _window: &winit::window::Window,
+        _preference: WindowCornerPreference,
+    ) {
     }
 }
 
@@ -887,6 +972,7 @@ mod tests {
         assert_eq!(chrome.height, STARTUP_WINDOW_HEIGHT);
         assert!(chrome.transparent);
         assert!(!chrome.decorations);
+        assert!(!chrome.rounded_corners);
         assert!(!chrome.resizable);
         assert_eq!(
             chrome.min_size,
@@ -907,6 +993,7 @@ mod tests {
         assert_eq!(chrome.height, WORKSPACE_WINDOW_HEIGHT);
         assert!(!chrome.transparent);
         assert!(!chrome.decorations);
+        assert!(chrome.rounded_corners);
         assert!(chrome.resizable);
         assert_eq!(
             chrome.min_size,
@@ -940,6 +1027,18 @@ mod tests {
         assert_eq!(
             window_role_for_mode(SelfHostedUiMode::Workspace),
             SelfHostedWindowRole::Workspace
+        );
+    }
+
+    #[test]
+    fn workspace_window_requests_platform_rounded_corners() {
+        assert_eq!(
+            window_corner_preference_for_role(SelfHostedWindowRole::Startup),
+            WindowCornerPreference::Default
+        );
+        assert_eq!(
+            window_corner_preference_for_role(SelfHostedWindowRole::Workspace),
+            WindowCornerPreference::Round
         );
     }
 }

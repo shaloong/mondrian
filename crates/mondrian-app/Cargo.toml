@@ -83,6 +83,10 @@ winit = "0.30"
 pollster = "0.4"
 zip = "0.6"
 
+[target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"
+windows-sys = { workspace = true }
+
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"
 image = { workspace = true, features = ["ico"] }
