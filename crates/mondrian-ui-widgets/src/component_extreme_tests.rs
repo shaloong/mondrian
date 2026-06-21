@@ -486,8 +486,12 @@ fn panel_surfaces_extreme_scroll_keyboard_and_paint_remain_stable() {
     viewer.layout(Rect::new(0.0, 0.0, 20.0, 36.0));
     let viewer_paint = paint_widget(&viewer, Rect::new(0.0, 0.0, 32.0, 48.0));
     assert!(
-        viewer_paint.texts.iter().any(|text| text.text.contains("Viewer")),
-        "viewer should still issue bounded text commands when chrome collapses"
+        !viewer_paint.texts.iter().any(|text| text.text.contains("Viewer")),
+        "viewer should not reintroduce title chrome when the canvas collapses"
+    );
+    assert!(
+        viewer_paint.texts.iter().any(|text| text.text.contains("00:00:00:00")),
+        "viewer should still issue bounded timecode text when chrome collapses"
     );
 }
 

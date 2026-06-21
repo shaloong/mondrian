@@ -649,11 +649,11 @@ fn window_chrome_for_role(role: SelfHostedWindowRole) -> WindowChrome {
             max_size: Some((STARTUP_WINDOW_WIDTH, STARTUP_WINDOW_HEIGHT)),
         },
         SelfHostedWindowRole::Workspace => WindowChrome {
-            title: "Mondrian - 自研 UI",
+            title: "Mondrian",
             width: WORKSPACE_WINDOW_WIDTH,
             height: WORKSPACE_WINDOW_HEIGHT,
             transparent: false,
-            decorations: true,
+            decorations: false,
             resizable: true,
             min_size: Some((WORKSPACE_MIN_WIDTH, WORKSPACE_MIN_HEIGHT)),
             max_size: None,
@@ -902,11 +902,11 @@ mod tests {
     fn workspace_window_chrome_is_resizable_product_workspace() {
         let chrome = window_chrome_for_role(SelfHostedWindowRole::Workspace);
 
-        assert_eq!(chrome.title, "Mondrian - 自研 UI");
+        assert_eq!(chrome.title, "Mondrian");
         assert_eq!(chrome.width, WORKSPACE_WINDOW_WIDTH);
         assert_eq!(chrome.height, WORKSPACE_WINDOW_HEIGHT);
         assert!(!chrome.transparent);
-        assert!(chrome.decorations);
+        assert!(!chrome.decorations);
         assert!(chrome.resizable);
         assert_eq!(
             chrome.min_size,

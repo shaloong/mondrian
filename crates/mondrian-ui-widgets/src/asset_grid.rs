@@ -26,9 +26,9 @@ const DOUBLE_CLICK_MAX_DISTANCE: f32 = 5.0;
 const DRAG_START_DISTANCE: f32 = 6.0;
 const FILTER_INPUT_HEIGHT: f32 = 28.0;
 const HEADER_GAP: f32 = 10.0;
-const HEADER_PADDING_X: f32 = 12.0;
-const CONTENT_PADDING: f32 = 10.0;
-const CARD_GAP: f32 = 10.0;
+const HEADER_PADDING_X: f32 = 8.0;
+const CONTENT_PADDING: f32 = 8.0;
+const CARD_GAP: f32 = 8.0;
 const CARD_TARGET_WIDTH: f32 = 158.0;
 const CARD_MIN_WIDTH: f32 = 118.0;
 const CARD_MAX_WIDTH: f32 = 190.0;
@@ -1173,40 +1173,18 @@ impl AssetGrid {
 
     fn paint_empty_state(&self, ctx: &mut PaintContext) {
         let colors = &ctx.theme.colors;
-        let center = self.viewport.center();
-        let box_rect = Rect::new(center.x - 86.0, center.y - 30.0, 172.0, 60.0);
-        ctx.encoder.draw_rect(
-            box_rect,
-            color_with_alpha(colors.border, 0.52),
-            ctx.theme.spacing.radius_md,
-        );
-        ctx.encoder.draw_rect(
-            box_rect.inset(1.0, 1.0),
-            mix_color(colors.background, colors.card, 0.44),
-            (ctx.theme.spacing.radius_md - 1.0).max(0.0),
-        );
-        ctx.push_clip(box_rect.inset(10.0, 6.0));
-        ctx.encoder.draw_text(
-            if self.items.is_empty() {
-                "No assets"
-            } else {
-                "No matching assets"
-            },
-            ctx.theme.typography.body.font_size,
-            snap_point(Point::new(box_rect.x + 14.0, box_rect.y + 11.0)),
-            colors.foreground,
-        );
-        ctx.encoder.draw_text(
-            if self.items.is_empty() {
-                "Import media to begin"
-            } else {
-                "Adjust the search query"
-            },
+        let message = if self.items.is_empty() {
+            "Drop media here or import files"
+        } else {
+            "No matching assets"
+        };
+        ctx.encoder.draw_text_box(
+            message,
             ctx.theme.typography.small.font_size,
-            snap_point(Point::new(box_rect.x + 14.0, box_rect.y + 34.0)),
+            snap_point(Point::new(self.viewport.x + 8.0, self.viewport.y + 8.0)),
+            (self.viewport.width - 16.0).max(0.0),
             colors.muted_foreground,
         );
-        ctx.pop_clip();
     }
 
     fn paint_card(&self, ctx: &mut PaintContext, index: usize, rect: Rect) {
@@ -1340,18 +1318,6 @@ impl AssetGrid {
                 snap_point(Point::new(text_clip.x, text_clip.y)),
                 text_clip.width,
                 text_color,
-            );
-        }
-        if !item.subtitle.is_empty() {
-            ctx.encoder.draw_text_box(
-                &item.subtitle,
-                ctx.theme.typography.small.font_size,
-                snap_point(Point::new(
-                    text_clip.x,
-                    text_clip.y + if editing_title { 24.0 } else { 17.0 },
-                )),
-                text_clip.width,
-                colors.muted_foreground,
             );
         }
         ctx.pop_clip();
@@ -2547,6 +2513,27 @@ mod tests {
             assert!(preview.contains(Point::new(clip.x, clip.y)));
             assert!(preview.contains(Point::new(clip.x + clip.width, clip.y + clip.height)));
         }
+    }
+
+    #[test]
+    fn paint_card_uses_badges_for_type_metadata_not_subtitle_text() {
+        let grid = AssetGrid::new(
+            "Assets",
+            vec![item("clip-a", "Clip A").with_subtitle("Video clip").with_badge("VID")],
+        );
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 320.0, 240.0),
+        };
+
+        grid.paint_card(&mut ctx, 0, Rect::new(20.0, 30.0, 158.0, 118.0));
+
+        assert!(encoder.texts.iter().any(|text| text == "Clip A"));
+        assert!(encoder.texts.iter().any(|text| text == "VID"));
+        assert!(!encoder.texts.iter().any(|text| text == "Video clip"));
     }
 
     #[test]

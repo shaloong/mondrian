@@ -104,18 +104,23 @@ workspace. Startup owns a fixed transparent undecorated winit window. Once
 create/open resolves to a concrete editor action and `AppState` owns an open
 project, the host switches the active root to the workspace and the winit
 adapter replaces the native session: it hides/drops the startup window, creates
-a decorated resizable workspace window, builds a fresh surface/router/runtime
+a resizable undecorated workspace window, builds a fresh surface/router/runtime
 for that root, updates the UI bounds, and relayouts before the first workspace
-frame. Closing the project follows the same boundary in reverse rather than
-mutating creation-time window attributes in place.
+frame. The workspace keeps one product chrome row owned by `TitleBar`; it must
+not combine native OS decorations with the self-hosted title/menu bar. Closing
+the project follows the same boundary in reverse rather than mutating
+creation-time window attributes in place.
 Recent-project recovery, crash recovery, and future onboarding belong in the
 startup model and should be surfaced through app-layer actions rather than
 reintroducing a separate project browser or console panel.
 The startup surface may use app-owned embedded raster resources, such as the
-bootstrap banner and app icon, decoded once inside `self_hosted::startup` and
-sent through the renderer raster-image path. Those resources are product shell
-assets, not reusable widget-crate dependencies; generic widgets should continue
-receiving already-decoded image view models when they need raster content.
+bootstrap banner, decoded once inside `self_hosted::startup` and sent through
+the renderer raster-image path. The left launch half is intentionally pure
+raster: do not layer app icons, product names, marketing copy, badges, or
+translucent overlays over it. If that side needs text, it belongs in the bitmap
+asset. Those resources are product shell assets, not reusable widget-crate
+dependencies; generic widgets should continue receiving already-decoded image
+view models when they need raster content.
 The workspace panel set follows NLE product surfaces only: Viewer, Timeline,
 Assets, Inspector, Effects, Node Graph, and Export. Project media browsing lives
 inside Assets as the project library; self-hosted menus and dock factories must
@@ -1185,7 +1190,10 @@ actions, card drag payloads start through the router, and file drops map to
 app-layer import actions. Browser widgets embedded inside a `DockPanel` should
 use embedded panel chrome so the dock header remains the only panel title; the
 embedded browser body keeps the search field and rows/cards but omits duplicate
-title text, explanatory subtitles, and the search-to-content divider. State
+title text, explanatory subtitles, and the search-to-content divider. Empty
+asset libraries are true empty grids with lightweight text, not disabled fake
+asset cards; placeholder cards are reserved for unavailable/error states that
+are not valid media library contents. State
 restoration uses stable card ids first; index fallbacks are allowed only for
 enabled cards that remain visible in the current filtered view, so model
 refreshes cannot select hidden assets. Inline rename is transient card-local
@@ -1376,7 +1384,9 @@ rule: their panel body is a dark workspace mix, rows/cards draw a subtle border
 with an inset fill, and selected/hovered states tint that fill instead of
 painting the entire item with raw `accent` or `muted`. Asset-grid preview wells
 should read as dark media slots even before thumbnails arrive, so placeholder
-gradients and badges do not dominate the panel.
+gradients and badges do not dominate the panel. Embedded browser margins should
+align to the same compact inset so Assets and Effects do not appear to belong to
+different layout systems inside a shared dock group.
 Panel models must attach explicit stable actions to rows instead of deriving
 commands from titles, indices, or fixture-only prefixes. Synthetic demo rows
 use explicit `ui.demo_panel` actions so they exercise the same select/activate
@@ -1703,10 +1713,10 @@ instead of a colored placeholder. App code maps `AppState` / `Sequence` into a
 small `ViewerPanelModel` containing title, playback status, current frame,
 duration, source resolution, and an optional `ViewerFrameImage` alias over the
 shared `RasterImage` payload. The widget owns preview chrome,
-source aspect-ratio fitting, raster-image presentation, tokenized status-badge
-tones, empty-canvas messaging, metadata labels, and safe-area guide drawing
-only; frame decoding, preview scheduling, and GPU texture lifecycle remain
-app/runtime responsibilities.
+source aspect-ratio fitting, raster-image presentation, tokenized abnormal
+status-badge tones, empty-canvas messaging, metadata labels, and safe-area guide
+drawing only; frame decoding, preview scheduling, and GPU texture lifecycle
+remain app/runtime responsibilities.
 Viewer painting treats the fitted sequence frame as the only real image canvas.
 The panel body stays at `card`; areas outside the sequence frame show that
 panel body, not a fake black frame. The sequence frame itself is a straight-edged
@@ -1717,6 +1727,11 @@ to the viewport, so content outside the sequence frame is never visible.
 Transport buttons and zoom/quality chips use compact toolbar surfaces; the
 play/pause button may be slightly more prominent, but viewer controls should not
 look like generic form inputs or large rectangular tabs.
+Normal viewer titles and healthy statuses, such as sequence names, `Ready`, or
+`Playing`, remain model data and are not painted in the panel body by default;
+the dock tab and transport/timecode chrome already provide enough context.
+Warning/error statuses may surface as a compact badge so exceptional preview
+problems remain visible without making every frame look like a status card.
 The product host supplies viewer frames through `ViewerPreviewSource`.
 `SelfHostedPreviewService` is the app-layer boundary that interprets timeline
 render plans, owns compositor scratch state and preview cache keys, and injects
@@ -1778,7 +1793,7 @@ remain visually pressed after focus or availability changes. Programmatic
 viewer disabling must clear the same interaction state immediately so a later
 re-enable cannot dispatch a stale mouse release from a previous preview model.
 Empty app state maps to a disabled viewer model so the product shell can show
-clear no-signal chrome without pretending a preview texture exists.
+a clipped empty canvas message without pretending a preview texture exists.
 `ui_demo` should use the same `ViewerSurface` for the Viewer panel and keep
 separate text diagnostics in the Text tab, so visual QA exercises production
 viewer chrome instead of a demo-only widget.

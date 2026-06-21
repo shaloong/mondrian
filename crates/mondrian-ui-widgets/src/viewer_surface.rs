@@ -75,7 +75,6 @@ pub type ViewerZoomAction = dyn Fn() -> Action;
 pub struct ViewerSurface {
     id: WidgetId,
     bounds: Rect,
-    title: String,
     status: String,
     status_tone: ViewerStatusTone,
     resolution_label: String,
@@ -110,10 +109,10 @@ pub struct ViewerSurface {
 impl ViewerSurface {
     /// Create a viewer surface with a title and source dimensions.
     pub fn new(title: impl Into<String>, source_width: u32, source_height: u32) -> Self {
+        let _ = title.into();
         Self {
             id: WidgetId::new(),
             bounds: Rect::ZERO,
-            title: title.into(),
             status: "No signal".into(),
             status_tone: ViewerStatusTone::Neutral,
             resolution_label: String::new(),
@@ -284,7 +283,7 @@ impl ViewerSurface {
     }
 
     fn canvas_viewport_rect(&self) -> Rect {
-        let chrome_top = 42.0;
+        let chrome_top = 14.0;
         let chrome_bottom = 44.0;
         let padding = 16.0;
         Rect::new(
@@ -312,6 +311,13 @@ impl ViewerSurface {
 
     fn metadata_text(&self) -> String {
         self.timecode_label.clone()
+    }
+
+    fn should_paint_status_badge(&self) -> bool {
+        matches!(
+            self.status_tone,
+            ViewerStatusTone::Warning | ViewerStatusTone::Error
+        ) && !self.status.is_empty()
     }
 
     fn control_strip_rect(&self) -> Rect {
@@ -620,38 +626,29 @@ impl Widget for ViewerSurface {
         if self.focus_visible {
             paint_focus_ring(ctx, self.bounds.inset(2.0, 2.0), spacing.radius_lg);
         }
-        ctx.encoder.draw_text_box(
-            &self.title,
-            typography.body.font_size,
-            Point::new(self.bounds.x + 14.0, self.bounds.y + 12.0),
-            (self.bounds.width - 120.0).max(32.0),
-            if self.enabled {
-                colors.foreground
-            } else {
-                colors.muted_foreground
-            },
-        );
-
-        let status_width = (measure_single_line(&self.status, typography.small.font_size).0 + 24.0)
-            .clamp(64.0, (self.bounds.width - 32.0).max(64.0));
-        let badge = Rect::new(
-            self.bounds.x + self.bounds.width - status_width - 16.0,
-            self.bounds.y + 9.0,
-            status_width,
-            24.0,
-        );
-        let (badge_fill, badge_text) = status_badge_colors(self, ctx);
-        ctx.encoder.draw_rect(badge, soft_border(colors.border), spacing.radius_sm);
-        ctx.encoder
-            .draw_rect(badge.inset(1.0, 1.0), badge_fill, spacing.radius_sm - 1.0);
-        ctx.push_clip(badge.inset(4.0, 0.0));
-        ctx.encoder.draw_text(
-            &self.status,
-            typography.small.font_size,
-            Point::new(badge.x + 8.0, badge.y + 5.0),
-            badge_text,
-        );
-        ctx.pop_clip();
+        if self.should_paint_status_badge() {
+            let status_width = (measure_single_line(&self.status, typography.small.font_size).0
+                + 24.0)
+                .clamp(64.0, (self.bounds.width - 32.0).max(64.0));
+            let badge = Rect::new(
+                self.bounds.x + self.bounds.width - status_width - 16.0,
+                self.bounds.y + 9.0,
+                status_width,
+                24.0,
+            );
+            let (badge_fill, badge_text) = status_badge_colors(self, ctx);
+            ctx.encoder.draw_rect(badge, soft_border(colors.border), spacing.radius_sm);
+            ctx.encoder
+                .draw_rect(badge.inset(1.0, 1.0), badge_fill, spacing.radius_sm - 1.0);
+            ctx.push_clip(badge.inset(4.0, 0.0));
+            ctx.encoder.draw_text(
+                &self.status,
+                typography.small.font_size,
+                Point::new(badge.x + 8.0, badge.y + 5.0),
+                badge_text,
+            );
+            ctx.pop_clip();
+        }
 
         ctx.push_clip(viewport);
         ctx.encoder.draw_rect(
@@ -1159,7 +1156,7 @@ mod tests {
 
         assert!((canvas.width / canvas.height - 16.0 / 9.0).abs() < 0.001);
         assert!(canvas.x >= 16.0);
-        assert!(canvas.y >= 42.0);
+        assert!(canvas.y >= 14.0);
     }
 
     #[test]
@@ -1177,7 +1174,7 @@ mod tests {
     }
 
     #[test]
-    fn paint_draws_chrome_metadata_and_safe_guides() {
+    fn paint_prioritizes_canvas_and_omits_normal_status_chrome() {
         let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080)
             .with_status("Playing")
             .with_resolution_label("1920x1080")
@@ -1198,23 +1195,39 @@ mod tests {
 
         viewer.paint(&mut ctx);
 
-        assert!(encoder.texts.iter().any(|text| text == "Scene 01"));
-        assert!(encoder.texts.iter().any(|text| text == "Playing"));
+        assert!(!encoder.texts.iter().any(|text| text == "Scene 01"));
+        assert!(!encoder.texts.iter().any(|text| text == "Playing"));
         assert!(encoder.texts.iter().any(|text| text.contains("00:00:01:18")));
         assert!(!encoder.texts.iter().any(|text| text.contains("1920x1080")));
         assert!(!encoder.texts.iter().any(|text| text.contains("F42")));
         assert!(!encoder.texts.iter().any(|text| text.contains("240 frames")));
         assert!(encoder.texts.iter().any(|text| text.contains("Fit")));
         assert!(encoder.texts.iter().any(|text| text.contains("Full")));
-        assert!(
-            encoder
-                .rect_colors
-                .iter()
-                .any(|color| *color == mix_color(theme.colors.popover, theme.colors.primary, 0.18)),
-            "playing status should use the theme primary token"
-        );
+        assert!(!encoder
+            .rect_colors
+            .iter()
+            .any(|color| *color == mix_color(theme.colors.popover, theme.colors.primary, 0.18)));
         assert_eq!(encoder.lines, 0);
         assert!(encoder.rects.len() >= 12);
+    }
+
+    #[test]
+    fn warning_status_badge_can_surface_preview_problems() {
+        let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080)
+            .with_status("Offline")
+            .with_status_tone(ViewerStatusTone::Warning);
+        viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 500.0, 320.0),
+        };
+
+        viewer.paint(&mut ctx);
+
+        assert!(encoder.texts.iter().any(|text| text == "Offline"));
     }
 
     #[test]
@@ -1235,7 +1248,7 @@ mod tests {
         viewer.paint(&mut ctx);
 
         assert!(encoder.raster_images.is_empty());
-        assert!(encoder.texts.iter().any(|text| text == "No sequence"));
+        assert!(!encoder.texts.iter().any(|text| text == "No sequence"));
         assert!(encoder.texts.iter().any(|text| text == "No sequence loaded"));
         assert_eq!(encoder.clip_pops, encoder.clips.len());
     }

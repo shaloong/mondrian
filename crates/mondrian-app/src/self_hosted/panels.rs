@@ -34,11 +34,12 @@ use mondrian_ui_widgets::{
     AssetGrid, AssetGridBadgeTone, AssetGridItem, Button, Checkbox, ColorPickerAreaMode,
     ColorPickerTrigger, CurveEditor, CurvePoint, DockPanel, Dropdown, FlexChild, FlexContainer,
     Label, MenuItem, NodeGraphEdge, NodeGraphNode, NodeGraphView, PanelList, PanelListBadgeTone,
-    PanelListItem, PropertyPanel, PropertyRow, PropertySection, RasterImage, ScrollView, Slider,
-    TextInput, TimelineAssetDrop, TimelineClip, TimelineClipMove, TimelineClipRef,
-    TimelineClipTrim, TimelineEditCommand, TimelineInOutPoint, TimelineToolbarIconSlot,
-    TimelineTrack, TimelineTrackControl, TimelineTrackMove, TimelineTrackRef, TimelineTrimEdge,
-    TimelineView, ViewerControl, ViewerFrameImage, ViewerStatusTone, ViewerSurface,
+    PanelListItem, PropertyPanel, PropertyPanelOptions, PropertyRow, PropertySection, RasterImage,
+    ScrollView, Slider, TextInput, TimelineAssetDrop, TimelineClip, TimelineClipMove,
+    TimelineClipRef, TimelineClipTrim, TimelineEditCommand, TimelineInOutPoint,
+    TimelineToolbarIconSlot, TimelineTrack, TimelineTrackControl, TimelineTrackMove,
+    TimelineTrackRef, TimelineTrimEdge, TimelineView, ViewerControl, ViewerFrameImage,
+    ViewerStatusTone, ViewerSurface,
 };
 
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
@@ -370,50 +371,19 @@ impl AssetGridModel {
             .map(|folder| format!("Project library / {}", folder.name))
             .unwrap_or_else(|| "Project library".to_owned());
         let current_folder_id = current_folder.map(|folder| folder.id.clone());
-        let mut items = asset_grid_items_from_library_records(
+        let items = asset_grid_items_from_library_records(
             &folders,
             assets,
             current_folder,
             thumbnails,
             proxy_mode_assets,
         );
-        if current_folder.is_some() && items.len() == 1 {
-            items.push(asset_empty_item(
-                "asset-folder-empty",
-                "Empty folder",
-                "Import media or create generated assets",
-                colors.muted_foreground,
-                AppIcon::FolderOpenFilled,
-            ));
-        }
         if items.is_empty() {
-            let (title, message, icon) = if current_folder.is_some() {
-                (
-                    "Empty folder",
-                    "Import media or create generated assets",
-                    AppIcon::FolderOpenFilled,
-                )
-            } else {
-                (
-                    "No assets",
-                    "Import media or create generated assets",
-                    AppIcon::Folder,
-                )
-            };
-            return AssetGridModel::new(
-                "Assets",
-                vec![asset_empty_item(
-                    "asset-library-empty",
-                    title,
-                    message,
-                    colors.muted_foreground,
-                    icon,
-                )],
-            )
-            .with_subtitle(subtitle)
-            .with_filter_placeholder("Search assets")
-            .accepts_file_drop(true)
-            .with_current_folder_id(current_folder_id);
+            return AssetGridModel::new("Assets", Vec::new())
+                .with_subtitle(subtitle)
+                .with_filter_placeholder("Search assets")
+                .accepts_file_drop(true)
+                .with_current_folder_id(current_folder_id);
         }
 
         AssetGridModel::new("Assets", items)
@@ -3055,15 +3025,21 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
         "No clip selected"
     });
     if let Some(message) = model.empty_message.as_deref().filter(|message| !message.is_empty()) {
-        return PropertyPanel::new("Inspector")
-            .with_subtitle(subtitle)
-            .with_embedded_panel_chrome()
-            .with_section(
-                PropertySection::new("Status").with_row(
-                    PropertyRow::new("Selection", Box::new(Label::new(message).muted().wrapped()))
-                        .with_height(48.0),
-                ),
-            );
+        return PropertyPanel::with_options(
+            "Inspector",
+            PropertyPanelOptions {
+                label_width: 0.0,
+                control_gap: 0.0,
+                row_height: 28.0,
+                section_gap: 0.0,
+                ..PropertyPanelOptions::default()
+            },
+        )
+        .with_embedded_panel_chrome()
+        .with_section(PropertySection::new("").with_row(PropertyRow::new(
+            "",
+            Box::new(Label::new(message).muted().wrapped()),
+        )));
     }
     let mut tint = color_picker_trigger(model.tint).enabled(can_edit);
     tint.picker_mut().set_area_mode(model.tint_area_mode);
@@ -6789,7 +6765,7 @@ mod tests {
     }
 
     #[test]
-    fn asset_panel_empty_library_uses_icon_empty_state() {
+    fn asset_panel_empty_library_uses_true_empty_grid_state() {
         let root = unique_temp_dir("asset-panel-empty-library");
         let library = AssetLibrary::open(root.clone()).expect("open asset library");
         let mut state = AppState::new();
@@ -6797,10 +6773,8 @@ mod tests {
 
         let models = SelfHostedPanelModels::from_app_state(&state);
 
-        assert_eq!(models.assets.items.len(), 1);
-        assert_eq!(models.assets.items[0].title, "No assets");
-        assert!(models.assets.items[0].icon.is_some());
-        assert!(models.assets.items[0].disabled);
+        assert!(models.assets.items.is_empty());
+        assert!(models.assets.accepts_file_drop);
 
         let _ = std::fs::remove_dir_all(root);
     }

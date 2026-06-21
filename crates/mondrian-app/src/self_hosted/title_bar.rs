@@ -303,8 +303,8 @@ fn paint_window_control(title_bar: &TitleBar, control: WindowControl, ctx: &mut 
     match control {
         WindowControl::Minimize => {
             ctx.encoder.draw_line(
-                Point::new(cx - 5.0, cy + 4.0),
-                Point::new(cx + 5.0, cy + 4.0),
+                Point::new(cx - 5.0, cy + 1.0),
+                Point::new(cx + 5.0, cy + 1.0),
                 1.25,
                 icon_color,
             );

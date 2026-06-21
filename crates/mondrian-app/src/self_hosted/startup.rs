@@ -36,8 +36,8 @@ pub const STARTUP_WINDOW_HEIGHT: f32 = 500.0;
 
 const OUTER_MARGIN: f32 = 18.0;
 const LEFT_WIDTH: f32 = 300.0;
-const CONTENT_PAD_X: f32 = 22.0;
-const CONTENT_PAD_Y: f32 = 24.0;
+const CONTENT_PAD_X: f32 = 28.0;
+const CONTENT_PAD_Y: f32 = 46.0;
 const CLOSE_SIZE: f32 = 28.0;
 const CLOSE_MARGIN: f32 = 10.0;
 const ACTION_BUTTON_HEIGHT: f32 = 34.0;
@@ -338,7 +338,7 @@ impl Widget for SelfHostedStartupScreen {
 
         let content_x = self.right_rect.x + CONTENT_PAD_X;
         let content_width = (self.right_rect.width - CONTENT_PAD_X * 2.0).max(0.0);
-        let action_y = self.right_rect.y + CONTENT_PAD_Y + 86.0;
+        let action_y = self.right_rect.y + CONTENT_PAD_Y + 56.0;
         let button_width = ((content_width - ACTION_BUTTON_GAP) * 0.5).max(92.0);
         self.new_project_rect = Rect::new(content_x, action_y, button_width, ACTION_BUTTON_HEIGHT);
         self.open_project_rect = Rect::new(
@@ -437,70 +437,26 @@ impl Widget for SelfHostedStartupScreen {
         let typography = &ctx.theme.typography;
         let radius = spacing.radius_lg;
 
-        ctx.encoder.draw_rect(self.panel_rect, colors.border, radius);
-        paint_startup_banner(ctx, self.left_rect, radius);
-        ctx.encoder.draw_rect(self.right_rect, colors.popover, radius);
-
-        let brand_x = self.left_rect.x + 30.0;
-        let brand_y = self.left_rect.y + 54.0;
-        let mark = Rect::new(brand_x, brand_y, 28.0, 28.0);
-        if let Some(icon) = startup_app_icon_image() {
-            ctx.encoder.draw_raster_image(
-                &icon.key,
-                mark,
-                icon.width,
-                icon.height,
-                icon.rgba.clone(),
-                Color::WHITE,
-            );
-        } else {
-            ctx.encoder.draw_rect(mark, colors.primary_foreground, 8.0);
-            ctx.encoder.draw_rect(mark.inset(5.0, 5.0), colors.primary, 5.0);
-        }
-        ctx.encoder.draw_text(
-            "Mondrian",
-            typography.heading_h2.font_size,
-            Point::new(mark.x + mark.width + 10.0, mark.y + 21.0),
-            colors.primary_foreground,
-        );
-        ctx.encoder.draw_text_box(
-            "重构节奏，\n帧帧精彩",
-            typography.heading_h1.font_size,
-            Point::new(brand_x, self.left_rect.y + self.left_rect.height * 0.43),
-            self.left_rect.width - 60.0,
-            colors.primary_foreground,
-        );
-
-        let accent = Rect::new(
-            self.left_rect.x + 30.0,
-            self.left_rect.y + self.left_rect.height - 92.0,
-            self.left_rect.width - 60.0,
-            44.0,
-        );
-        ctx.encoder
-            .draw_rect(accent, colors.background.lerp(colors.primary, 0.28), 10.0);
-        ctx.encoder.draw_text(
-            "自研 UI",
-            typography.button.font_size,
-            Point::new(accent.x + 14.0, accent.y + 15.0),
-            colors.primary_foreground,
+        ctx.encoder.draw_rect(self.panel_rect, colors.popover, radius);
+        ctx.push_clip(self.panel_rect);
+        paint_startup_banner(ctx, self.left_rect);
+        ctx.pop_clip();
+        let divider_x = self.left_rect.x + self.left_rect.width;
+        ctx.encoder.draw_line(
+            Point::new(divider_x, self.panel_rect.y),
+            Point::new(divider_x, self.panel_rect.y + self.panel_rect.height),
+            1.0,
+            startup_alpha(colors.border, 0.44),
         );
 
         let content_x = self.right_rect.x + CONTENT_PAD_X;
-        let content_y = self.right_rect.y + CONTENT_PAD_Y + 16.0;
+        let content_y = self.right_rect.y + CONTENT_PAD_Y;
         let content_width = self.right_rect.width - CONTENT_PAD_X * 2.0;
         ctx.encoder.draw_text(
             "开始工作",
             typography.heading_h2.font_size,
             Point::new(content_x, content_y),
             colors.popover_foreground,
-        );
-        ctx.encoder.draw_text_box(
-            "创建剪辑项目，或打开现有 Mondrian 工程。",
-            typography.body.font_size,
-            Point::new(content_x, content_y + 30.0),
-            content_width,
-            colors.muted_foreground,
         );
 
         self.paint_button(
@@ -518,7 +474,7 @@ impl Widget for SelfHostedStartupScreen {
             StartupHit::OpenProject,
         );
 
-        let mut section_y = self.new_project_rect.y + ACTION_BUTTON_HEIGHT + 34.0;
+        let mut section_y = self.new_project_rect.y + ACTION_BUTTON_HEIGHT + 36.0;
         if !self.recovery_projects.is_empty() {
             ctx.encoder.draw_text(
                 "可恢复项目",
@@ -688,7 +644,7 @@ impl SelfHostedStartupScreen {
     }
 }
 
-fn paint_startup_banner(ctx: &mut PaintContext, rect: Rect, radius: f32) {
+fn paint_startup_banner(ctx: &mut PaintContext, rect: Rect) {
     let colors = &ctx.theme.colors;
     if let Some(image) = startup_banner_image() {
         ctx.push_clip(rect);
@@ -702,8 +658,6 @@ fn paint_startup_banner(ctx: &mut PaintContext, rect: Rect, radius: f32) {
             Color::WHITE,
         );
         ctx.pop_clip();
-        ctx.encoder
-            .draw_rect(rect, startup_overlay_color(colors.background, 0.52), radius);
     } else {
         ctx.encoder.draw_gradient_rect(
             rect,
@@ -713,7 +667,7 @@ fn paint_startup_banner(ctx: &mut PaintContext, rect: Rect, radius: f32) {
                 colors.background.lerp(colors.primary, 0.22),
                 colors.card.lerp(colors.primary, 0.18),
             ],
-            radius,
+            0.0,
         );
     }
 }
@@ -741,24 +695,12 @@ fn startup_banner_image() -> Option<&'static RasterImage> {
         .as_ref()
 }
 
-fn startup_app_icon_image() -> Option<&'static RasterImage> {
-    static IMAGE: OnceLock<Option<RasterImage>> = OnceLock::new();
-    IMAGE
-        .get_or_init(|| {
-            decode_startup_png(
-                "startup.app-icon",
-                include_bytes!("../../assets/app-ico.png"),
-            )
-        })
-        .as_ref()
-}
-
 fn decode_startup_png(key: &str, bytes: &[u8]) -> Option<RasterImage> {
     let image = image::load_from_memory(bytes).ok()?.into_rgba8();
     RasterImage::new(key, image.width(), image.height(), image.into_raw())
 }
 
-fn startup_overlay_color(mut color: Color, alpha: f32) -> Color {
+fn startup_alpha(mut color: Color, alpha: f32) -> Color {
     color.a *= alpha.clamp(0.0, 1.0);
     color
 }
@@ -934,7 +876,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_screen_paints_embedded_banner_and_app_icon() {
+    fn startup_screen_uses_embedded_banner_without_text_overlay() {
         let mut screen = SelfHostedStartupScreen::new();
         screen.layout(Rect::new(
             0.0,
@@ -957,11 +899,12 @@ mod tests {
             "startup banner should use the embedded raster asset"
         );
         assert!(
-            encoder.raster_images.iter().any(|(key, _, _, _)| key == "startup.app-icon"),
-            "startup icon should use the embedded raster asset"
+            !encoder.raster_images.iter().any(|(key, _, _, _)| key == "startup.app-icon"),
+            "startup left half should not layer a separate app icon over the banner"
         );
         assert_eq!(encoder.clip_pops, encoder.clips.len());
-        assert!(encoder.texts.iter().any(|text| text == "Mondrian"));
+        assert!(!encoder.texts.iter().any(|text| text == "Mondrian"));
+        assert!(!encoder.texts.iter().any(|text| text == "自研 UI"));
     }
 
     #[test]
