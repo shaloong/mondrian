@@ -4230,7 +4230,7 @@ mod tests {
     fn viewer_panel_play_pause_control_dispatches_toggle_play() {
         let mut viewer = viewer_panel(&SelfHostedPanelModels::demo().viewer);
         viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
-        let play_pause_center = Point::new(281.0, 299.0);
+        let play_pause_center = Point::new(250.0, 299.0);
         let actions = RefCell::new(Vec::new());
         let dispatch = |action| actions.borrow_mut().push(action);
         let mut focus = DummyFocus;

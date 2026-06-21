@@ -22,8 +22,8 @@ use crate::{RasterImage, VectorIcon};
 const DEFAULT_WIDTH: f32 = 480.0;
 const DEFAULT_HEIGHT: f32 = 270.0;
 const TRANSPORT_BUTTON_SIZE: f32 = 26.0;
-const TRANSPORT_MARK_BUTTON_WIDTH: f32 = 24.0;
 const TRANSPORT_BUTTON_GAP: f32 = 7.0;
+const CHECKER_TILE_SIZE: f32 = 10.0;
 
 /// RGBA preview image presented by [`ViewerSurface`].
 pub type ViewerFrameImage = RasterImage;
@@ -340,8 +340,9 @@ impl ViewerSurface {
 
     fn control_width(&self, control: ViewerControl) -> f32 {
         match control {
-            ViewerControl::MarkIn | ViewerControl::MarkOut => TRANSPORT_MARK_BUTTON_WIDTH,
-            ViewerControl::JumpStart
+            ViewerControl::MarkIn
+            | ViewerControl::MarkOut
+            | ViewerControl::JumpStart
             | ViewerControl::StepBack
             | ViewerControl::PlayPause
             | ViewerControl::StepForward
@@ -652,24 +653,15 @@ impl Widget for ViewerSurface {
         );
         ctx.pop_clip();
 
-        ctx.encoder.draw_rect(
-            viewport,
-            mix_color(colors.canvas, colors.background, 0.18),
-            0.0,
-        );
         ctx.push_clip(viewport);
         ctx.encoder.draw_rect(
             canvas.inset(-1.0, -1.0),
-            color_with_alpha(colors.input, 0.74),
-            spacing.radius_md,
+            color_with_alpha(colors.border, 0.82),
+            0.0,
         );
-        let canvas_fill = if self.enabled {
-            colors.canvas
-        } else {
-            mix_color(colors.background, colors.muted, 0.24)
-        };
-        ctx.encoder.draw_rect(canvas, canvas_fill, spacing.radius_md);
+        ctx.push_clip(canvas);
         if self.enabled {
+            paint_checkerboard(ctx, canvas);
             if let Some(frame) = &self.frame_image {
                 ctx.encoder.draw_raster_image(
                     &frame.key,
@@ -680,6 +672,12 @@ impl Widget for ViewerSurface {
                     Color::WHITE,
                 );
             }
+        } else {
+            ctx.encoder.draw_rect(
+                canvas,
+                mix_color(colors.background, colors.muted, 0.24),
+                0.0,
+            );
         }
         if self.frame_image.is_none() {
             if let Some(message) =
@@ -703,6 +701,7 @@ impl Widget for ViewerSurface {
             }
         }
         paint_safe_guides(ctx, canvas, self.enabled);
+        ctx.pop_clip();
         ctx.pop_clip();
 
         self.paint_transport_controls(ctx);
@@ -885,9 +884,7 @@ impl ViewerSurface {
     }
 }
 
-const FULL_VIEWER_CONTROLS: [ViewerControl; 7] = [
-    ViewerControl::MarkIn,
-    ViewerControl::MarkOut,
+const FULL_VIEWER_CONTROLS: [ViewerControl; 5] = [
     ViewerControl::JumpStart,
     ViewerControl::StepBack,
     ViewerControl::PlayPause,
@@ -943,6 +940,37 @@ fn paint_right_triangle(ctx: &mut PaintContext, rect: Rect, left: f32, color: Co
         ],
         color,
     );
+}
+
+fn paint_checkerboard(ctx: &mut PaintContext, canvas: Rect) {
+    if canvas.width <= 0.0 || canvas.height <= 0.0 {
+        return;
+    }
+    let colors = &ctx.theme.colors;
+    let dark = mix_color(colors.background, colors.canvas, 0.38);
+    let light = mix_color(colors.canvas, colors.card, 0.28);
+    ctx.encoder.draw_rect(canvas, dark, 0.0);
+
+    let columns = (canvas.width / CHECKER_TILE_SIZE).ceil().max(1.0) as usize;
+    let rows = (canvas.height / CHECKER_TILE_SIZE).ceil().max(1.0) as usize;
+    for row in 0..rows {
+        for column in 0..columns {
+            if (row + column) % 2 == 0 {
+                let x = canvas.x + column as f32 * CHECKER_TILE_SIZE;
+                let y = canvas.y + row as f32 * CHECKER_TILE_SIZE;
+                ctx.encoder.draw_rect(
+                    Rect::new(
+                        x,
+                        y,
+                        (canvas.x + canvas.width - x).clamp(0.0, CHECKER_TILE_SIZE),
+                        (canvas.y + canvas.height - y).clamp(0.0, CHECKER_TILE_SIZE),
+                    ),
+                    light,
+                    0.0,
+                );
+            }
+        }
+    }
 }
 
 fn paint_mark_in_icon(ctx: &mut PaintContext, rect: Rect, color: Color) {
@@ -1067,6 +1095,7 @@ mod tests {
     struct RecordingEncoder {
         rects: Vec<Rect>,
         rect_colors: Vec<Color>,
+        rect_radii: Vec<f32>,
         lines: usize,
         triangles: usize,
         texts: Vec<String>,
@@ -1082,9 +1111,10 @@ mod tests {
         fn pop_clip(&mut self) {
             self.clip_pops += 1;
         }
-        fn draw_rect(&mut self, bounds: Rect, color: Color, _corner_radius: f32) {
+        fn draw_rect(&mut self, bounds: Rect, color: Color, corner_radius: f32) {
             self.rects.push(bounds);
             self.rect_colors.push(color);
+            self.rect_radii.push(corner_radius);
         }
         fn draw_line(&mut self, _start: Point, _end: Point, _width: f32, _color: Color) {
             self.lines += 1;
@@ -1229,8 +1259,6 @@ mod tests {
         let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
 
         for control in [
-            ViewerControl::MarkIn,
-            ViewerControl::MarkOut,
             ViewerControl::JumpStart,
             ViewerControl::StepBack,
             ViewerControl::PlayPause,
@@ -1265,8 +1293,6 @@ mod tests {
         assert_eq!(
             actions.borrow().as_slice(),
             &[
-                Action::MarkInAtPlayhead,
-                Action::MarkOutAtPlayhead,
                 Action::GoToStart,
                 Action::StepBack,
                 Action::TogglePlay,
@@ -1280,11 +1306,11 @@ mod tests {
     fn custom_control_mapper_overrides_default_actions() {
         let mut viewer =
             ViewerSurface::new("Scene 01", 1920, 1080).on_control(|control| match control {
-                ViewerControl::MarkIn => Action::SaveProject,
+                ViewerControl::PlayPause => Action::SaveProject,
                 _ => Action::NoOp,
             });
         viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
-        let position = viewer.control_rect(ViewerControl::MarkIn).center();
+        let position = viewer.control_rect(ViewerControl::PlayPause).center();
         let actions = RefCell::new(Vec::<Action>::new());
         let dispatch = |action| actions.borrow_mut().push(action);
         let mut focus = DummyFocus;
@@ -1761,8 +1787,8 @@ mod tests {
         viewer.paint(&mut ctx);
 
         assert_eq!(
-            encoder.triangles, 18,
-            "jump, step, and mark buttons should paint geometric triangles"
+            encoder.triangles, 12,
+            "jump and step buttons should paint geometric triangles"
         );
         assert!(
             encoder.rects.len() >= 18,
@@ -1771,23 +1797,19 @@ mod tests {
     }
 
     #[test]
-    fn mark_transport_controls_paint_geometry_without_text_letters() {
+    fn viewer_transport_omits_mark_in_out_buttons() {
         let mut viewer = ViewerSurface::new("Viewer", 1920, 1080);
         viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
-        let theme = ThemePreset::Dark.build();
-        let mut encoder = RecordingEncoder::default();
-        let mut ctx = PaintContext {
-            encoder: &mut encoder,
-            theme: &theme,
-            clip_rect: Rect::new(0.0, 0.0, 500.0, 320.0),
-        };
 
-        viewer.paint(&mut ctx);
-
-        assert!(!encoder.texts.iter().any(|text| text == "I" || text == "O"));
+        assert!(!viewer.visible_controls().contains(&ViewerControl::MarkIn));
+        assert!(!viewer.visible_controls().contains(&ViewerControl::MarkOut));
         assert_eq!(
-            encoder.triangles, 21,
-            "mark in/out controls should contribute geometric marker triangles"
+            viewer.control_at(viewer.control_rect(ViewerControl::MarkIn).center()),
+            None
+        );
+        assert_eq!(
+            viewer.control_at(viewer.control_rect(ViewerControl::MarkOut).center()),
+            None
         );
     }
 
@@ -1819,9 +1841,29 @@ mod tests {
             encoder.raster_images,
             vec![("preview:42".to_owned(), canvas, 2, 2)]
         );
+        assert!(encoder
+            .rect_colors
+            .iter()
+            .any(|color| *color == mix_color(theme.colors.background, theme.colors.canvas, 0.38)));
+        assert!(encoder
+            .rect_colors
+            .iter()
+            .any(|color| *color == mix_color(theme.colors.canvas, theme.colors.card, 0.28)));
         assert!(
             encoder.clips.contains(&viewport),
             "preview image must be clipped to the viewer viewport"
+        );
+        assert!(
+            encoder.clips.contains(&canvas),
+            "preview image must also be clipped to the sequence canvas"
+        );
+        assert!(
+            encoder
+                .rects
+                .iter()
+                .zip(encoder.rect_radii.iter())
+                .any(|(rect, radius)| *rect == canvas && *radius == 0.0),
+            "sequence canvas should be painted as a straight-edged rectangle"
         );
         assert_eq!(encoder.clip_pops, encoder.clips.len());
     }

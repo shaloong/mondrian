@@ -1691,12 +1691,16 @@ source aspect-ratio fitting, raster-image presentation, tokenized status-badge
 tones, empty-canvas messaging, metadata labels, and safe-area guide drawing
 only; frame decoding, preview scheduling, and GPU texture lifecycle remain
 app/runtime responsibilities.
-Viewer painting uses the dark canvas token as an actual preview well: the panel
-body stays at `card`, the viewport behind the fitted canvas stays darker, the
-canvas itself stays near black, and safe-area guides are low-alpha foreground
-lines. Transport buttons and zoom/quality chips use compact toolbar surfaces;
-the play/pause button may be slightly more prominent, but viewer controls should
-not look like generic form inputs or large rectangular tabs.
+Viewer painting treats the fitted sequence frame as the only real image canvas.
+The panel body stays at `card`; areas outside the sequence frame show that
+panel body, not a fake black frame. The sequence frame itself is a straight-edged
+rectangle with a Photoshop-style checkerboard base so transparent or empty
+regions can be distinguished from genuinely black media. Preview frames, empty
+messages, and safe-area guides are clipped to that sequence rectangle and then
+to the viewport, so content outside the sequence frame is never visible.
+Transport buttons and zoom/quality chips use compact toolbar surfaces; the
+play/pause button may be slightly more prominent, but viewer controls should not
+look like generic form inputs or large rectangular tabs.
 The product host supplies viewer frames through `ViewerPreviewSource`.
 `SelfHostedPreviewService` is the app-layer boundary that interprets timeline
 render plans, owns compositor scratch state and preview cache keys, and injects
@@ -1713,18 +1717,19 @@ sequence is missing or any recursive media input is still unavailable, the
 viewer returns no frame instead of presenting a partial preview as correct
 output.
 Viewer transport controls are part of this chrome but stay domain-light: the
-widget draws fallback geometry for mark in/out and accepts injected vector icons
-for jump start/end, step back/forward, and play/pause. The self-hosted app must
-source those transport icons from `self_hosted::icons::AppIcon` / bundled SVG
-assets rather than recreating product icons in widget drawing code. By default
-these controls emit shared editor actions
-(`MarkInAtPlayhead`, `MarkOutAtPlayhead`, `GoToStart`, `StepBack`,
-`TogglePlay`, `StepForward`, `GoToEnd`), and embedders may override the mapping
-with a control callback when a host needs a custom command boundary. The
-self-hosted app panel must bind that callback explicitly so the app adapter, not
-the generic widget, owns the command boundary for transport controls. Playback
-state changes, mark semantics, frame stepping semantics, preview scheduling, and
-audio/video sync remain in the app/runtime layers. Zoom and preview-quality
+visible transport strip contains jump start/end, step back/forward, and
+play/pause only. Mark In/Out remains a focused keyboard workflow, not a viewer
+button, so the preview panel does not duplicate timeline editing controls. The
+self-hosted app must source those visible transport icons from
+`self_hosted::icons::AppIcon` / bundled SVG assets rather than recreating
+product icons in widget drawing code. By default these controls emit shared
+editor actions (`GoToStart`, `StepBack`, `TogglePlay`, `StepForward`,
+`GoToEnd`), and embedders may override the mapping with a control callback when
+a host needs a custom command boundary. The self-hosted app panel must bind that
+callback explicitly so the app adapter, not the generic widget, owns the command
+boundary for transport controls. Playback state changes, mark semantics, frame
+stepping semantics, preview scheduling, and audio/video sync remain in the
+app/runtime layers. Zoom and preview-quality
 labels are explicit model fields. The Viewer bottom-left metadata lane is kept
 to the current timecode; resolution, frame-rate, absolute frame, and duration
 remain model data but should not crowd the default transport strip. Viewer zoom is shell-local display state owned
@@ -1748,7 +1753,7 @@ allowing buttons to overflow panel bounds.
 `ViewerSurface` is focusable when enabled. Pointer clicks inside the viewer give
 it focus, while `FocusGained` shows tokenized focus chrome for keyboard
 navigation. Focused viewers handle unmodified Space, Left/Right, Home/End, and
-I/O through the same transport callback used by clickable chrome; modified keys
+I/O through the same control callback used by clickable chrome; modified keys
 fall through to the shell shortcut router. Space remains intentionally absent
 from global shortcuts so text editing cannot toggle playback. Focus loss and
 disabled cleanup clear hover, pressed, and focus-ring chrome and request repaint
