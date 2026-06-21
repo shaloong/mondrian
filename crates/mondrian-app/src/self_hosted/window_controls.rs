@@ -253,9 +253,9 @@ impl WindowControls {
         let icon_color = if control == WindowControl::Close && hovered {
             colors.primary_foreground
         } else {
-            colors.card_foreground
+            colors.muted_foreground
         };
-        paint_geometric_icon(ctx, rect.center(), control, 1.25, icon_color);
+        paint_geometric_icon(ctx, rect.center(), control, 1.0, icon_color);
     }
 
     fn paint_linux_control(
@@ -326,14 +326,14 @@ fn paint_geometric_icon(
     match control {
         WindowControl::Minimize => {
             ctx.encoder.draw_line(
-                Point::new(center.x - 5.0, center.y + 1.0),
-                Point::new(center.x + 5.0, center.y + 1.0),
+                Point::new(center.x - 4.5, center.y + 0.5),
+                Point::new(center.x + 4.5, center.y + 0.5),
                 line_width,
                 color,
             );
         }
         WindowControl::ToggleMaximize => {
-            let r = Rect::new(center.x - 5.0, center.y - 5.0, 10.0, 10.0);
+            let r = Rect::new(center.x - 4.5, center.y - 4.5, 9.0, 9.0);
             ctx.encoder
                 .draw_line(r.min(), Point::new(r.x + r.width, r.y), line_width, color);
             ctx.encoder
@@ -353,14 +353,14 @@ fn paint_geometric_icon(
         }
         WindowControl::Close => {
             ctx.encoder.draw_line(
-                Point::new(center.x - 5.0, center.y - 5.0),
-                Point::new(center.x + 5.0, center.y + 5.0),
+                Point::new(center.x - 4.5, center.y - 4.5),
+                Point::new(center.x + 4.5, center.y + 4.5),
                 line_width,
                 color,
             );
             ctx.encoder.draw_line(
-                Point::new(center.x + 5.0, center.y - 5.0),
-                Point::new(center.x - 5.0, center.y + 5.0),
+                Point::new(center.x + 4.5, center.y - 4.5),
+                Point::new(center.x - 4.5, center.y + 4.5),
                 line_width,
                 color,
             );

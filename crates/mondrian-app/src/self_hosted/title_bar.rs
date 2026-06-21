@@ -324,7 +324,7 @@ mod tests {
         let bar = title_bar();
 
         assert_eq!(bar.bounds(), Rect::new(0.0, 0.0, 1000.0, TITLE_BAR_HEIGHT));
-        assert_eq!(bar.menu_bar().bounds().y, 3.0);
+        assert_eq!(bar.menu_bar().bounds().y, 5.0);
         assert!(bar.menu_bar().bounds().x > 90.0);
         assert_eq!(
             bar.control_bounds(WindowControl::Close).width,

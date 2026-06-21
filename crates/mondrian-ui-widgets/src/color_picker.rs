@@ -16,7 +16,7 @@ use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use crate::form_layout::{FormLayout, FormRowOptions, FormRowRects};
 use crate::menu::{
     anchored_menu_rect, paint_menu_popup_chrome, paint_menu_row, paint_menu_trigger,
-    rect_has_paintable_area, MenuRowPaint,
+    rect_has_paintable_area, DropdownTriggerStyle, MenuRowPaint,
 };
 use crate::paint::{
     color_with_alpha, mix_color, paint_checkerboard, paint_focus_ring, paint_shadow, soft_border,
@@ -1407,6 +1407,7 @@ impl Widget for ColorPicker {
             self.mode_trigger_rect(),
             self.mode.label(),
             self.mode_menu_open,
+            DropdownTriggerStyle::Filled,
         );
 
         for (index, field) in self.active_fields().iter().enumerate() {

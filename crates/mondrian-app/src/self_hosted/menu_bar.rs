@@ -10,7 +10,7 @@ use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
-use mondrian_ui_widgets::menu::{Dropdown, MenuItem};
+use mondrian_ui_widgets::menu::{Dropdown, DropdownTriggerStyle, MenuItem};
 
 use crate::app::ui_actions::{
     app_shell_about_action, app_shell_import_media_dialog_action,
@@ -29,7 +29,9 @@ use crate::self_hosted::shortcuts::{
 use crate::self_hosted::workspace_layout::SelfHostedWorkspaceLayout;
 
 /// Height reserved for the self-hosted top menu bar.
-pub const MENU_BAR_HEIGHT: f32 = 28.0;
+pub const MENU_BAR_HEIGHT: f32 = 24.0;
+
+const MENU_BAR_TRIGGER_GAP: f32 = 2.0;
 
 /// Default Mondrian menu structure for self-hosted shells.
 pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
@@ -463,7 +465,12 @@ impl Default for MenuBar {
 impl MenuBar {
     /// Build a menu bar from explicit menu definitions.
     pub fn new(items: Vec<(&'static str, Vec<MenuItem>)>) -> Self {
-        let menus = items.into_iter().map(|(label, items)| Dropdown::new(label, items)).collect();
+        let menus = items
+            .into_iter()
+            .map(|(label, items)| {
+                Dropdown::new(label, items).with_trigger_style(DropdownTriggerStyle::MenuBar)
+            })
+            .collect();
         Self { id: WidgetId::new(), menus, bounds: Rect::ZERO }
     }
 
@@ -562,11 +569,17 @@ impl Widget for MenuBar {
         if self.menus.is_empty() {
             return;
         }
-        let trigger_width = (bounds.width / self.menus.len() as f32).max(0.0);
         let mut x = bounds.x;
         for menu in &mut self.menus {
-            menu.layout(Rect::new(x, bounds.y, trigger_width, MENU_BAR_HEIGHT));
-            x += trigger_width;
+            if x >= bounds.x + bounds.width {
+                menu.layout(Rect::new(x, bounds.y, 0.0, MENU_BAR_HEIGHT));
+                continue;
+            }
+            let preferred = menu.measure(LayoutConstraint::LOOSE).width;
+            let remaining = (bounds.x + bounds.width - x).max(0.0);
+            let width = preferred.min(remaining);
+            menu.layout(Rect::new(x, bounds.y, width, MENU_BAR_HEIGHT));
+            x += width + MENU_BAR_TRIGGER_GAP;
         }
     }
 
@@ -1009,8 +1022,22 @@ mod tests {
         let mut menu = MenuBar::default();
         menu.layout(Rect::new(100.0, 0.0, 500.0, MENU_BAR_HEIGHT));
 
-        assert!(menu.trigger_index_at(Point::new(599.5, 14.0)).is_some());
+        assert!(menu.trigger_index_at(Point::new(100.5, 12.0)).is_some());
         assert_eq!(menu.trigger_index_at(Point::new(600.5, 14.0)), None);
+    }
+
+    #[test]
+    fn menu_bar_triggers_use_compact_content_widths() {
+        let mut menu = MenuBar::default();
+        menu.layout(Rect::new(0.0, 0.0, 720.0, MENU_BAR_HEIGHT));
+
+        let help_trigger = trigger_point(&menu, menu.child_count() - 1);
+
+        assert!(
+            help_trigger.x < 360.0,
+            "menu triggers should not be evenly stretched across the title bar"
+        );
+        assert_eq!(menu.trigger_index_at(Point::new(560.0, 12.0)), None);
     }
 
     #[test]

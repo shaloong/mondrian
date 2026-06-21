@@ -161,6 +161,9 @@ event surface. Window controls emit app-shell custom actions only;
 quit side effects after widget and `AppState` borrows end. These commands must
 not be added to the editor-state core action enum unless they mutate portable
 editor data.
+Top menu triggers use the lightweight `DropdownTriggerStyle::MenuBar` treatment
+and content-width layout: closed triggers should read like native menu text, not
+filled toolbar buttons, and should not reserve a persistent arrow affordance.
 
 Shell-local modals, such as New Project, Preferences, and About, live in their
 own `self_hosted::*_dialog` modules and are hosted by `self_hosted::modal`.

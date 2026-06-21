@@ -23,6 +23,7 @@ pub(crate) struct MenuRowPaint {
 const MENU_MEASURE_FONT_SIZE: f32 = 13.0;
 const MENU_MIN_WIDTH: f32 = 120.0;
 const MENU_TRIGGER_HEIGHT: f32 = 28.0;
+const MENU_BAR_TRIGGER_HEIGHT: f32 = 22.0;
 const MENU_TRIGGER_PADDING_X: f32 = 8.0;
 const MENU_ARROW_SPACE: f32 = 24.0;
 const MENU_ROW_PADDING_X: f32 = 16.0;
@@ -73,13 +74,38 @@ pub(crate) fn rect_has_paintable_area(rect: Rect) -> bool {
         && rect.height > 0.0
 }
 
-pub(crate) fn paint_menu_trigger(ctx: &mut PaintContext, rect: Rect, label: &str, open: bool) {
+/// Visual treatment for a dropdown trigger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DropdownTriggerStyle {
+    /// Filled rounded rectangle suitable for form and toolbar dropdowns.
+    Filled,
+    /// Lightweight transparent trigger suitable for native-style menu bars.
+    MenuBar,
+}
+
+pub(crate) fn paint_menu_trigger(
+    ctx: &mut PaintContext,
+    rect: Rect,
+    label: &str,
+    open: bool,
+    style: DropdownTriggerStyle,
+) {
     let tokens = &ctx.theme.colors;
     let spacing = &ctx.theme.spacing;
-    let fill = if open { tokens.primary } else { tokens.card };
-    ctx.encoder.draw_rect(rect, fill, spacing.radius_sm);
-    paint_menu_trigger_label(ctx, rect, label, tokens.foreground, true);
-    paint_menu_arrow(ctx, rect);
+    match style {
+        DropdownTriggerStyle::Filled => {
+            let fill = if open { tokens.primary } else { tokens.card };
+            ctx.encoder.draw_rect(rect, fill, spacing.radius_sm);
+            paint_menu_trigger_label(ctx, rect, label, tokens.foreground, true, style);
+            paint_menu_arrow(ctx, rect);
+        }
+        DropdownTriggerStyle::MenuBar => {
+            if open {
+                ctx.encoder.draw_rect(rect, tokens.accent, spacing.radius_sm);
+            }
+            paint_menu_trigger_label(ctx, rect, label, tokens.muted_foreground, false, style);
+        }
+    }
 }
 
 pub(crate) fn paint_menu_trigger_label(
@@ -88,29 +114,48 @@ pub(crate) fn paint_menu_trigger_label(
     label: &str,
     color: Color,
     reserve_arrow: bool,
+    style: DropdownTriggerStyle,
 ) {
     if label.is_empty() {
         return;
     }
     let reserved_right = if reserve_arrow { MENU_ARROW_SPACE } else { 0.0 };
-    let text_width = rect.width - MENU_TRIGGER_PADDING_X * 2.0 - reserved_right;
+    let padding_x = trigger_padding_x(style);
+    let text_width = rect.width - padding_x * 2.0 - reserved_right;
     if text_width <= 0.0 {
         return;
     }
-    let clip = Rect::new(
-        rect.x + MENU_TRIGGER_PADDING_X,
-        rect.y,
-        text_width,
-        rect.height,
-    );
+    let clip = Rect::new(rect.x + padding_x, rect.y, text_width, rect.height);
     ctx.push_clip(clip);
+    let font_size = trigger_font_size(ctx, style);
     ctx.encoder.draw_text(
         label,
-        ctx.theme.typography.body.font_size,
-        Point::new(rect.x + MENU_TRIGGER_PADDING_X, rect.y + 5.0),
+        font_size,
+        Point::new(rect.x + padding_x, trigger_text_y(rect, font_size, style)),
         color,
     );
     ctx.pop_clip();
+}
+
+fn trigger_padding_x(style: DropdownTriggerStyle) -> f32 {
+    match style {
+        DropdownTriggerStyle::Filled => MENU_TRIGGER_PADDING_X,
+        DropdownTriggerStyle::MenuBar => 7.0,
+    }
+}
+
+fn trigger_font_size(ctx: &PaintContext, style: DropdownTriggerStyle) -> f32 {
+    match style {
+        DropdownTriggerStyle::Filled => ctx.theme.typography.body.font_size,
+        DropdownTriggerStyle::MenuBar => 12.5,
+    }
+}
+
+fn trigger_text_y(rect: Rect, font_size: f32, style: DropdownTriggerStyle) -> f32 {
+    match style {
+        DropdownTriggerStyle::Filled => rect.y + 5.0,
+        DropdownTriggerStyle::MenuBar => rect.y + ((rect.height - font_size) * 0.5).max(0.0) - 0.5,
+    }
 }
 
 pub(crate) fn paint_menu_popup_chrome(ctx: &mut PaintContext, rect: Rect) {
@@ -405,6 +450,7 @@ pub struct Dropdown {
     focused: bool,
     focus_visible: bool,
     overlay_viewport: Cell<Option<Rect>>,
+    trigger_style: DropdownTriggerStyle,
 }
 
 impl Dropdown {
@@ -425,6 +471,7 @@ impl Dropdown {
             focused: false,
             focus_visible: false,
             overlay_viewport: Cell::new(None),
+            trigger_style: DropdownTriggerStyle::Filled,
         }
     }
 
@@ -450,6 +497,12 @@ impl Dropdown {
     /// Whether the dropdown is enabled.
     pub fn is_enabled(&self) -> bool {
         self.enabled
+    }
+
+    /// Select the visual style for the closed trigger.
+    pub fn with_trigger_style(mut self, style: DropdownTriggerStyle) -> Self {
+        self.trigger_style = style;
+        self
     }
 
     /// Whether the popup menu is currently open.
@@ -503,17 +556,32 @@ impl Dropdown {
     }
 
     fn trigger_rect(&self) -> Rect {
+        let height = self.trigger_height().min(self.bounds.height.max(0.0));
         Rect::new(
             self.bounds.x,
-            self.bounds.y,
+            self.bounds.y + ((self.bounds.height - height) * 0.5).max(0.0),
             self.bounds.width,
-            MENU_TRIGGER_HEIGHT,
+            height,
         )
+    }
+
+    fn trigger_height(&self) -> f32 {
+        match self.trigger_style {
+            DropdownTriggerStyle::Filled => MENU_TRIGGER_HEIGHT,
+            DropdownTriggerStyle::MenuBar => MENU_BAR_TRIGGER_HEIGHT,
+        }
     }
 
     fn preferred_trigger_width(&self) -> f32 {
         let (label_width, _) = measure_single_line(&self.label, MENU_MEASURE_FONT_SIZE);
-        MENU_MIN_WIDTH.max(label_width + MENU_TRIGGER_PADDING_X * 2.0 + MENU_ARROW_SPACE)
+        match self.trigger_style {
+            DropdownTriggerStyle::Filled => {
+                MENU_MIN_WIDTH.max(label_width + MENU_TRIGGER_PADDING_X * 2.0 + MENU_ARROW_SPACE)
+            }
+            DropdownTriggerStyle::MenuBar => {
+                (label_width + trigger_padding_x(self.trigger_style) * 2.0).max(28.0)
+            }
+        }
     }
 
     fn preferred_menu_width(&self) -> f32 {
@@ -742,7 +810,7 @@ impl Widget for Dropdown {
     fn measure(&self, constraint: LayoutConstraint) -> Size {
         constraint.constrain(Size::new(
             self.preferred_trigger_width(),
-            MENU_TRIGGER_HEIGHT,
+            self.trigger_height(),
         ))
     }
 
@@ -878,12 +946,25 @@ impl Widget for Dropdown {
 
     fn paint(&self, ctx: &mut PaintContext) {
         if self.enabled {
-            paint_menu_trigger(ctx, self.trigger_rect(), &self.label, self.open);
+            paint_menu_trigger(
+                ctx,
+                self.trigger_rect(),
+                &self.label,
+                self.open,
+                self.trigger_style,
+            );
         } else {
             let rect = self.trigger_rect();
             let tokens = &ctx.theme.colors;
             ctx.encoder.draw_rect(rect, tokens.muted, ctx.theme.spacing.radius_sm);
-            paint_menu_trigger_label(ctx, rect, &self.label, tokens.muted_foreground, false);
+            paint_menu_trigger_label(
+                ctx,
+                rect,
+                &self.label,
+                tokens.muted_foreground,
+                false,
+                self.trigger_style,
+            );
         }
         if self.focus_visible && !self.open {
             paint_focus_ring(ctx, self.trigger_rect(), ctx.theme.spacing.radius_sm);
@@ -1534,6 +1615,21 @@ mod tests {
 
         assert_eq!(open, closed);
         assert_eq!(open, Size::new(120.0, 28.0));
+    }
+
+    #[test]
+    fn menu_bar_trigger_measures_as_compact_text_without_arrow_space() {
+        let menu_bar_dropdown = Dropdown::new("File", vec![MenuItem::new("Open", Action::Copy)])
+            .with_trigger_style(DropdownTriggerStyle::MenuBar);
+        let filled_dropdown = Dropdown::new("File", vec![MenuItem::new("Open", Action::Copy)]);
+
+        let menu_bar_size = menu_bar_dropdown.measure(LayoutConstraint::LOOSE);
+        let filled_size = filled_dropdown.measure(LayoutConstraint::LOOSE);
+
+        assert_eq!(menu_bar_size.height, MENU_BAR_TRIGGER_HEIGHT);
+        assert!(menu_bar_size.width < 48.0);
+        assert_eq!(filled_size.height, MENU_TRIGGER_HEIGHT);
+        assert!(filled_size.width >= MENU_MIN_WIDTH);
     }
 
     #[test]
