@@ -31,6 +31,8 @@ pub const TIMELINE_MOVE_CLIP: &str = "move_clip";
 pub const TIMELINE_TRIM_CLIPS: &str = "trim_clips";
 /// Action name for trimming the current clip selection to the playhead.
 pub const TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD: &str = "trim_selected_clips_to_playhead";
+/// Action name for rolling the selected timeline cut to the playhead.
+pub const TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD: &str = "roll_selected_cut_to_playhead";
 /// Action name for setting one timeline in/out point to an explicit frame.
 pub const TIMELINE_SET_IN_OUT_POINT: &str = "set_in_out_point";
 /// Action name for clearing active-sequence in/out points.
@@ -882,6 +884,11 @@ pub fn timeline_trim_selected_clips_to_playhead_action(
     payload: TimelineTrimSelectedClipsToPlayheadPayload,
 ) -> Action {
     custom_timeline_action(TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD, payload)
+}
+
+/// Build an action that rolls the selected cut to the playhead.
+pub fn timeline_roll_selected_cut_to_playhead_action() -> Action {
+    custom_timeline_action(TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, ())
 }
 
 /// Build an action that sets one active-sequence in/out point.

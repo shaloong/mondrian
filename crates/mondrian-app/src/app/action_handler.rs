@@ -44,10 +44,10 @@ use crate::app::ui_actions::{
     SEQUENCE_NEW, SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT, SEQUENCE_SWITCH_ACTIVE,
     SEQUENCE_UPDATE_SETTINGS, TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS,
     TIMELINE_DROP_ASSET, TIMELINE_MOVE_CLIP, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
-    TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_SEEK, TIMELINE_SELECT_CLIP, TIMELINE_SET_IN_OUT_POINT,
-    TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL, TIMELINE_TRIM_CLIPS,
-    TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD, VIEWER_NAMESPACE,
-    VIEWER_SET_PREVIEW_RESOLUTION_SCALE,
+    TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, TIMELINE_SEEK,
+    TIMELINE_SELECT_CLIP, TIMELINE_SET_IN_OUT_POINT, TIMELINE_SET_SELECTED_CLIPS_ENABLED,
+    TIMELINE_SET_TRACK_CONTROL, TIMELINE_TRIM_CLIPS, TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD,
+    VIEWER_NAMESPACE, VIEWER_SET_PREVIEW_RESOLUTION_SCALE,
 };
 use crate::app::{AppClipboardKind, AppState, ClipOverlapMode, SelectedClipRef};
 use glam::Vec2;
@@ -1081,6 +1081,7 @@ impl AppState {
                 };
                 self.trim_selected_clips_to_playhead_from_ui(edge)
             }
+            TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD => self.roll_selected_cut_to_playhead_from_ui(),
             TIMELINE_SET_IN_OUT_POINT => {
                 let payload = parse_ui_payload::<TimelineSetInOutPointPayload>(
                     "timeline_ui_action",
@@ -1758,6 +1759,20 @@ impl AppState {
         self.trim_clips_bulk_to_frame(&clip_ids, edge, target_frame).map(|_| ())
     }
 
+    fn roll_selected_cut_to_playhead_from_ui(&mut self) -> Result<()> {
+        let clip_ids = self.selected_clip_ids_for_timeline_action();
+        let [clip_id] = clip_ids.as_slice() else {
+            return Ok(());
+        };
+        match self.roll_cut_to_frame(*clip_id, self.current_frame())? {
+            true => Ok(()),
+            false => {
+                self.set_status_hint("未找到可滚动切点，或播放头不在可滚动范围", true);
+                Ok(())
+            }
+        }
+    }
+
     fn set_in_out_point_from_ui(&mut self, payload: TimelineSetInOutPointPayload) -> Result<()> {
         let Some(sequence) = self.sequence.as_mut() else {
             return Err(missing_sequence_error("timeline_set_in_out_point"));
@@ -2308,7 +2323,8 @@ mod tests {
         sequence_new_action, sequence_return_to_parent_action, sequence_set_active_default_action,
         sequence_switch_active_action, sequence_update_settings_action, timeline_add_track_action,
         timeline_clear_in_out_points_action, timeline_drop_asset_action, timeline_move_clip_action,
-        timeline_move_track_action, timeline_open_nested_sequence_action, timeline_seek_action,
+        timeline_move_track_action, timeline_open_nested_sequence_action,
+        timeline_roll_selected_cut_to_playhead_action, timeline_seek_action,
         timeline_select_clip_action, timeline_set_in_out_point_action,
         timeline_set_selected_clips_enabled_action, timeline_set_track_control_action,
         timeline_trim_clips_action, timeline_trim_selected_clips_to_playhead_action,
@@ -3215,6 +3231,40 @@ mod tests {
         assert_eq!(first.duration.frame, 12);
         assert_eq!(second.position.frame, 18);
         assert_eq!(second.duration.frame, 24);
+    }
+
+    #[test]
+    fn dispatch_timeline_ui_rolls_single_selected_cut_to_playhead() {
+        let (mut state, track_id, clip_a_id) = state_with_two_video_tracks();
+        let tb = state.sequence.as_ref().expect("sequence").time_base();
+        let clip_b = Clip::new(AssetId::new(), TimeCode::new(30, tb), TimeCode::new(20, tb));
+        let clip_b_id = clip_b.id;
+        state.sequence.as_mut().expect("sequence").video_tracks[0]
+            .add_clip(clip_b)
+            .expect("add adjacent clip");
+        state.selection.selected_clips =
+            vec![SelectedClipRef { track_id, is_video_track: true, clip_id: clip_a_id }];
+        state.seek(35);
+
+        state
+            .dispatch_action(timeline_roll_selected_cut_to_playhead_action())
+            .expect("roll selected cut");
+
+        let sequence = state.sequence.as_ref().expect("sequence");
+        let first = sequence.video_tracks[0]
+            .clips
+            .iter()
+            .find(|clip| clip.id == clip_a_id)
+            .expect("first clip");
+        let second = sequence.video_tracks[0]
+            .clips
+            .iter()
+            .find(|clip| clip.id == clip_b_id)
+            .expect("second clip");
+        assert_eq!(first.duration.frame, 25);
+        assert_eq!(second.position.frame, 35);
+        assert_eq!(second.duration.frame, 15);
+        assert_eq!(second.source_in.frame, 5);
     }
 
     #[test]

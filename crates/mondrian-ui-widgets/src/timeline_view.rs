@@ -163,6 +163,8 @@ pub enum TimelineEditCommand {
     TrimSelectionInToPlayhead,
     /// Trim selected clip ends to the playhead frame.
     TrimSelectionOutToPlayhead,
+    /// Roll the selected edit point to the playhead frame.
+    RollSelectedCutToPlayhead,
     /// Enable the current timeline clip selection.
     EnableSelection,
     /// Disable the current timeline clip selection.
@@ -1756,9 +1758,10 @@ impl TimelineView {
             | TimelineEditCommand::CopySelection
             | TimelineEditCommand::DuplicateSelection
             | TimelineEditCommand::TrimSelectionInToPlayhead
-            | TimelineEditCommand::TrimSelectionOutToPlayhead
             | TimelineEditCommand::EnableSelection
             | TimelineEditCommand::DisableSelection => self.selected_clip.is_some(),
+            TimelineEditCommand::TrimSelectionOutToPlayhead
+            | TimelineEditCommand::RollSelectedCutToPlayhead => self.selected_clip.is_some(),
             TimelineEditCommand::OpenNestedSequence(clip_ref) => {
                 self.selected_clip == Some(clip_ref)
                     && self.clip(clip_ref).is_some_and(|clip| clip.nested)
@@ -1797,6 +1800,10 @@ impl TimelineView {
             self.edit_menu_item(
                 "Trim Out to Playhead",
                 TimelineEditCommand::TrimSelectionOutToPlayhead,
+            ),
+            self.edit_menu_item(
+                "Roll Cut to Playhead",
+                TimelineEditCommand::RollSelectedCutToPlayhead,
             ),
             MenuItem::separator(),
             self.edit_menu_item("Enable Clip", TimelineEditCommand::EnableSelection),
@@ -1849,6 +1856,10 @@ impl TimelineView {
             self.edit_menu_item(
                 "Trim Selection Out to Playhead",
                 TimelineEditCommand::TrimSelectionOutToPlayhead,
+            ),
+            self.edit_menu_item(
+                "Roll Selected Cut to Playhead",
+                TimelineEditCommand::RollSelectedCutToPlayhead,
             ),
             MenuItem::separator(),
             self.edit_menu_item("Enable Selection", TimelineEditCommand::EnableSelection),
@@ -5455,6 +5466,7 @@ mod tests {
                 TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
                 TimelineEditCommand::TrimSelectionInToPlayhead => Action::Cut,
                 TimelineEditCommand::TrimSelectionOutToPlayhead => Action::Copy,
+                TimelineEditCommand::RollSelectedCutToPlayhead => Action::SaveProject,
                 TimelineEditCommand::EnableSelection => Action::Play,
                 TimelineEditCommand::DisableSelection => Action::Pause,
                 TimelineEditCommand::OpenNestedSequence(_) => Action::NoOp,
@@ -5576,6 +5588,7 @@ mod tests {
             TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
             TimelineEditCommand::TrimSelectionInToPlayhead => Action::Cut,
             TimelineEditCommand::TrimSelectionOutToPlayhead => Action::Copy,
+            TimelineEditCommand::RollSelectedCutToPlayhead => Action::SaveProject,
             TimelineEditCommand::EnableSelection => Action::Play,
             TimelineEditCommand::DisableSelection => Action::Pause,
             TimelineEditCommand::OpenNestedSequence(_) => Action::NoOp,
@@ -5666,6 +5679,7 @@ mod tests {
             TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
             TimelineEditCommand::TrimSelectionInToPlayhead => Action::Cut,
             TimelineEditCommand::TrimSelectionOutToPlayhead => Action::Copy,
+            TimelineEditCommand::RollSelectedCutToPlayhead => Action::SaveProject,
             TimelineEditCommand::EnableSelection => Action::Play,
             TimelineEditCommand::DisableSelection => Action::Pause,
             TimelineEditCommand::OpenNestedSequence(_) => Action::NoOp,
@@ -5683,6 +5697,7 @@ mod tests {
             "Duplicate Selection",
             "Trim Selection In to Playhead",
             "Trim Selection Out to Playhead",
+            "Roll Selected Cut to Playhead",
             "Enable Selection",
             "Disable Selection",
             "Clear In/Out",
@@ -5731,6 +5746,7 @@ mod tests {
             TimelineEditCommand::RippleDeleteSelection => Action::RippleDeleteSelection,
             TimelineEditCommand::TrimSelectionInToPlayhead => Action::Cut,
             TimelineEditCommand::TrimSelectionOutToPlayhead => Action::Copy,
+            TimelineEditCommand::RollSelectedCutToPlayhead => Action::SaveProject,
             TimelineEditCommand::EnableSelection => Action::Play,
             TimelineEditCommand::DisableSelection => Action::Pause,
             _ => Action::NoOp,
@@ -5747,6 +5763,7 @@ mod tests {
             "Ripple Delete Clip",
             "Trim In to Playhead",
             "Trim Out to Playhead",
+            "Roll Cut to Playhead",
             "Enable Clip",
             "Disable Clip",
         ] {
@@ -5833,6 +5850,7 @@ mod tests {
                 TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
                 TimelineEditCommand::TrimSelectionInToPlayhead => Action::Cut,
                 TimelineEditCommand::TrimSelectionOutToPlayhead => Action::Copy,
+                TimelineEditCommand::RollSelectedCutToPlayhead => Action::SaveProject,
                 TimelineEditCommand::EnableSelection => Action::Play,
                 TimelineEditCommand::DisableSelection => Action::Pause,
                 TimelineEditCommand::OpenNestedSequence(_) => Action::NoOp,

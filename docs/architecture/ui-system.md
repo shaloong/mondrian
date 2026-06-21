@@ -1028,6 +1028,13 @@ resolves the current selection and playhead at dispatch time. This matters for
 right-click workflows because the widget first dispatches clip selection before
 the menu command is activated; menu items must not freeze stale clip ids when
 the menu opens.
+Roll edit follows the same selected-state boundary through
+`TimelineEditCommand::RollSelectedCutToPlayhead` and
+`ui.timeline.roll_selected_cut_to_playhead`: the context menu exposes the NLE
+operation, the adapter requires exactly one editable selected clip, and
+`AppState` resolves the nearest adjacent cut through the shared timeline
+editing command. The widget must not compute neighboring clip pairs, source
+limits, or ripple semantics locally.
 Enable/disable selection follows the same boundary through
 `TimelineEditCommand::EnableSelection` /
 `TimelineEditCommand::DisableSelection` and

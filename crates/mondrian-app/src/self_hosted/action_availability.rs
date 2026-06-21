@@ -10,7 +10,7 @@ use crate::app::ui_actions::{
     APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
     APP_SHELL_SEQUENCE_SETTINGS, SEQUENCE_DELETE, SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE,
     SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT, SEQUENCE_SWITCH_ACTIVE,
-    TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_NAMESPACE,
+    TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_NAMESPACE, TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD,
 };
 use crate::app::AppState;
 
@@ -60,6 +60,12 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
             if namespace == TIMELINE_NAMESPACE && name == TIMELINE_CLEAR_IN_OUT_POINTS =>
         {
             sequence_has_in_out_points(state)
+        }
+        Action::Custom { namespace, name, .. }
+            if namespace == TIMELINE_NAMESPACE
+                && name == TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD =>
+        {
+            has_single_editable_selected_clip(state)
         }
         Action::Custom { namespace, name, .. }
             if namespace == SEQUENCE_NAMESPACE && name == SEQUENCE_RETURN_TO_PARENT =>
@@ -114,6 +120,25 @@ fn has_deletable_timeline_selection(state: &AppState) -> bool {
     }
 
     selected_tracks_are_deletable(state)
+}
+
+fn has_single_editable_selected_clip(state: &AppState) -> bool {
+    if state.selection.selected_clips.len() != 1 {
+        return false;
+    }
+    let Some(sequence) = state.sequence.as_ref() else {
+        return false;
+    };
+    state.selection.selected_clips.iter().all(|selection| {
+        let tracks = if selection.is_video_track {
+            &sequence.video_tracks
+        } else {
+            &sequence.audio_tracks
+        };
+        tracks.iter().find(|track| track.id == selection.track_id).is_some_and(|track| {
+            !track.is_locked && track.clips.iter().any(|clip| clip.id == selection.clip_id)
+        })
+    })
 }
 
 fn selected_tracks_are_deletable(state: &AppState) -> bool {
@@ -186,7 +211,9 @@ fn can_split_at_playhead(state: &AppState) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::ui_actions::timeline_clear_in_out_points_action;
+    use crate::app::ui_actions::{
+        timeline_clear_in_out_points_action, timeline_roll_selected_cut_to_playhead_action,
+    };
     use crate::app::SelectedClipRef;
     use mondrian_core::types::{AssetId, TimeCode};
     use mondrian_timeline::clip::Clip;
@@ -210,6 +237,7 @@ mod tests {
     fn app_state_action_gate_disables_timeline_editing_without_targets() {
         let state = AppState::new();
         let clear_in_out_action = timeline_clear_in_out_points_action();
+        let roll_cut_action = timeline_roll_selected_cut_to_playhead_action();
 
         for action in [
             Action::DeleteSelection,
@@ -227,7 +255,7 @@ mod tests {
             Action::DeselectAll,
         ]
         .iter()
-        .chain(std::iter::once(&clear_in_out_action))
+        .chain([&clear_in_out_action, &roll_cut_action])
         {
             assert!(!app_state_action_enabled(action, &state), "{action:?}");
         }
@@ -255,6 +283,10 @@ mod tests {
         ] {
             assert!(app_state_action_enabled(&action, &state), "{action:?}");
         }
+        assert!(app_state_action_enabled(
+            &timeline_roll_selected_cut_to_playhead_action(),
+            &state
+        ));
     }
 
     #[test]

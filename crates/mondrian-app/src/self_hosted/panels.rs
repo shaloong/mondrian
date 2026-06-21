@@ -58,7 +58,8 @@ use crate::app::ui_actions::{
     inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
     inspector_set_effect_property_action, timeline_add_track_action,
     timeline_clear_in_out_points_action, timeline_drop_asset_action, timeline_move_clip_action,
-    timeline_move_track_action, timeline_open_nested_sequence_action, timeline_seek_action,
+    timeline_move_track_action, timeline_open_nested_sequence_action,
+    timeline_roll_selected_cut_to_playhead_action, timeline_seek_action,
     timeline_select_clip_action, timeline_set_in_out_point_action,
     timeline_set_selected_clips_enabled_action, timeline_set_track_control_action,
     timeline_trim_clips_action, timeline_trim_selected_clips_to_playhead_action,
@@ -672,6 +673,7 @@ struct TimelineEditAvailability {
     ripple_delete: bool,
     split: bool,
     trim_to_playhead: bool,
+    roll_cut_to_playhead: bool,
     set_selected_enabled: bool,
     mark_in: bool,
     mark_out: bool,
@@ -690,6 +692,7 @@ impl TimelineEditAvailability {
             ripple_delete: app_state_action_enabled(&Action::RippleDeleteSelection, state),
             split: app_state_action_enabled(&Action::SplitClipAtPlayhead, state),
             trim_to_playhead: selected_clip_tracks_are_editable(state),
+            roll_cut_to_playhead: single_selected_clip_track_is_editable(state),
             set_selected_enabled: selected_clip_tracks_are_editable(state),
             mark_in: app_state_action_enabled(&Action::MarkInAtPlayhead, state),
             mark_out: app_state_action_enabled(&Action::MarkOutAtPlayhead, state),
@@ -709,6 +712,7 @@ impl TimelineEditAvailability {
             TimelineEditCommand::SplitAtPlayhead => self.split,
             TimelineEditCommand::TrimSelectionInToPlayhead
             | TimelineEditCommand::TrimSelectionOutToPlayhead => self.trim_to_playhead,
+            TimelineEditCommand::RollSelectedCutToPlayhead => self.roll_cut_to_playhead,
             TimelineEditCommand::EnableSelection | TimelineEditCommand::DisableSelection => {
                 self.set_selected_enabled
             }
@@ -2226,6 +2230,10 @@ fn selected_clip_tracks_are_editable(state: &AppState) -> bool {
     })
 }
 
+fn single_selected_clip_track_is_editable(state: &AppState) -> bool {
+    state.selected_clips().len() == 1 && selected_clip_tracks_are_editable(state)
+}
+
 fn panel_list(model: &PanelListModel) -> PanelList {
     let mut list = PanelList::new(model.title.clone(), model.items.clone())
         .with_subtitle(model.subtitle.clone())
@@ -2697,6 +2705,9 @@ fn timeline_edit_command_action(
                 TimelineTrimSelectedClipsToPlayheadPayload { edge: TimelineTrimPayloadEdge::Out },
             )
         }
+        TimelineEditCommand::RollSelectedCutToPlayhead => {
+            timeline_roll_selected_cut_to_playhead_action()
+        }
         TimelineEditCommand::EnableSelection => {
             timeline_set_selected_clips_enabled_action(TimelineSetSelectedClipsEnabledPayload {
                 enabled: true,
@@ -2739,6 +2750,9 @@ fn timeline_edit_command_shortcut_label(command: TimelineEditCommand) -> Option<
             timeline_trim_selected_clips_to_playhead_action(
                 TimelineTrimSelectedClipsToPlayheadPayload { edge: TimelineTrimPayloadEdge::Out },
             )
+        }
+        TimelineEditCommand::RollSelectedCutToPlayhead => {
+            timeline_roll_selected_cut_to_playhead_action()
         }
         TimelineEditCommand::EnableSelection => {
             timeline_set_selected_clips_enabled_action(TimelineSetSelectedClipsEnabledPayload {
@@ -6111,6 +6125,18 @@ mod tests {
             serde_json::from_value(payload).expect("trim payload");
         assert_eq!(payload.edge, TimelineTrimPayloadEdge::In);
 
+        let roll_action =
+            timeline_edit_command_action(&model, TimelineEditCommand::RollSelectedCutToPlayhead);
+        let Action::Custom { namespace, name, payload } = roll_action else {
+            panic!("expected roll cut action");
+        };
+        assert_eq!(namespace, TIMELINE_NAMESPACE);
+        assert_eq!(
+            name,
+            crate::app::ui_actions::TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD
+        );
+        assert!(payload.is_null());
+
         let disable_action =
             timeline_edit_command_action(&model, TimelineEditCommand::DisableSelection);
         let Action::Custom { namespace, name, payload } = disable_action else {
@@ -7332,6 +7358,7 @@ mod tests {
             TimelineEditCommand::SplitAtPlayhead,
             TimelineEditCommand::TrimSelectionInToPlayhead,
             TimelineEditCommand::TrimSelectionOutToPlayhead,
+            TimelineEditCommand::RollSelectedCutToPlayhead,
             TimelineEditCommand::EnableSelection,
             TimelineEditCommand::DisableSelection,
         ] {
