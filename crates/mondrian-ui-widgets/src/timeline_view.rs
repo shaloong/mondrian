@@ -194,10 +194,6 @@ pub enum TimelineTool {
 pub enum TimelineToolbarIconSlot {
     SelectTool,
     BladeTool,
-    AddVideoTrack,
-    AddAudioTrack,
-    SplitAtPlayhead,
-    DeleteSelection,
     MarkInAtPlayhead,
     MarkOutAtPlayhead,
 }
@@ -211,7 +207,6 @@ enum TimelineZoomButton {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TimelineToolbarButton {
     Tool(TimelineTool),
-    AddTrack(TimelineTrackKind),
     Edit(TimelineEditCommand),
     Zoom(TimelineZoomButton),
 }
@@ -1080,14 +1075,10 @@ impl TimelineView {
         }
     }
 
-    fn toolbar_left_buttons() -> [TimelineToolbarButton; 8] {
+    fn toolbar_left_buttons() -> [TimelineToolbarButton; 4] {
         [
             TimelineToolbarButton::Tool(TimelineTool::Select),
             TimelineToolbarButton::Tool(TimelineTool::Blade),
-            TimelineToolbarButton::AddTrack(TimelineTrackKind::Video),
-            TimelineToolbarButton::AddTrack(TimelineTrackKind::Audio),
-            TimelineToolbarButton::Edit(TimelineEditCommand::SplitAtPlayhead),
-            TimelineToolbarButton::Edit(TimelineEditCommand::DeleteSelection),
             TimelineToolbarButton::Edit(TimelineEditCommand::MarkInAtPlayhead),
             TimelineToolbarButton::Edit(TimelineEditCommand::MarkOutAtPlayhead),
         ]
@@ -1111,7 +1102,7 @@ impl TimelineView {
         let limit = self.toolbar_left_limit();
         let mut x = self.toolbar_rect.x + 8.0;
         for (index, candidate) in Self::toolbar_left_buttons().into_iter().enumerate() {
-            if index == 2 || index == 4 {
+            if index == 2 {
                 x += TIMELINE_TOOLBAR_GROUP_GAP;
             }
             let rect = Rect::new(x, y, size, size);
@@ -1152,18 +1143,6 @@ impl TimelineView {
             TimelineToolbarButton::Tool(TimelineTool::Blade) => {
                 Some(TimelineToolbarIconSlot::BladeTool)
             }
-            TimelineToolbarButton::AddTrack(TimelineTrackKind::Video) => {
-                Some(TimelineToolbarIconSlot::AddVideoTrack)
-            }
-            TimelineToolbarButton::AddTrack(TimelineTrackKind::Audio) => {
-                Some(TimelineToolbarIconSlot::AddAudioTrack)
-            }
-            TimelineToolbarButton::Edit(TimelineEditCommand::SplitAtPlayhead) => {
-                Some(TimelineToolbarIconSlot::SplitAtPlayhead)
-            }
-            TimelineToolbarButton::Edit(TimelineEditCommand::DeleteSelection) => {
-                Some(TimelineToolbarIconSlot::DeleteSelection)
-            }
             TimelineToolbarButton::Edit(TimelineEditCommand::MarkInAtPlayhead) => {
                 Some(TimelineToolbarIconSlot::MarkInAtPlayhead)
             }
@@ -1179,12 +1158,6 @@ impl TimelineView {
         let label = match button {
             TimelineToolbarButton::Tool(TimelineTool::Select) => "Select Tool (V)",
             TimelineToolbarButton::Tool(TimelineTool::Blade) => "Blade Tool (B)",
-            TimelineToolbarButton::AddTrack(TimelineTrackKind::Video) => "Add Video Track",
-            TimelineToolbarButton::AddTrack(TimelineTrackKind::Audio) => "Add Audio Track",
-            TimelineToolbarButton::Edit(TimelineEditCommand::SplitAtPlayhead) => {
-                "Split at Playhead"
-            }
-            TimelineToolbarButton::Edit(TimelineEditCommand::DeleteSelection) => "Delete Selection",
             TimelineToolbarButton::Edit(TimelineEditCommand::MarkInAtPlayhead) => "Mark In",
             TimelineToolbarButton::Edit(TimelineEditCommand::MarkOutAtPlayhead) => "Mark Out",
             TimelineToolbarButton::Zoom(TimelineZoomButton::Out) => "Zoom Out",
@@ -1936,7 +1909,6 @@ impl TimelineView {
         }
         match button {
             TimelineToolbarButton::Tool(_) | TimelineToolbarButton::Zoom(_) => true,
-            TimelineToolbarButton::AddTrack(_) => self.on_track_add.is_some(),
             TimelineToolbarButton::Edit(command) => self.edit_command_enabled(command),
         }
     }
@@ -1951,13 +1923,6 @@ impl TimelineView {
         }
         match button {
             TimelineToolbarButton::Tool(tool) => self.set_active_tool(tool, ctx),
-            TimelineToolbarButton::AddTrack(kind) => {
-                if let Some(factory) = &self.on_track_add {
-                    (ctx.dispatch)(factory(kind));
-                    ctx.request_repaint();
-                }
-                EventResult::Handled
-            }
             TimelineToolbarButton::Edit(command) => {
                 let _ = self.dispatch_edit_command(command, ctx);
                 EventResult::Handled
@@ -2231,7 +2196,7 @@ impl TimelineView {
         match button {
             TimelineToolbarButton::Tool(tool) => self.paint_tool_button(ctx, tool),
             TimelineToolbarButton::Zoom(button) => self.paint_zoom_button(ctx, button),
-            TimelineToolbarButton::AddTrack(_) | TimelineToolbarButton::Edit(_) => {
+            TimelineToolbarButton::Edit(_) => {
                 let Some(rect) = self.toolbar_button_rect(button) else {
                     return;
                 };
@@ -2294,69 +2259,6 @@ impl TimelineView {
         color: Color,
     ) {
         match button {
-            TimelineToolbarButton::AddTrack(TimelineTrackKind::Video) => {
-                let frame = Rect::new(rect.x + 4.0, rect.y + 7.0, 7.0, 5.0);
-                ctx.encoder.draw_rect(frame, color, 1.2);
-                ctx.encoder.draw_triangles(
-                    &[
-                        Point::new(frame.x + frame.width, frame.y + 1.0),
-                        Point::new(frame.x + frame.width + 3.4, frame.y - 0.4),
-                        Point::new(frame.x + frame.width + 3.4, frame.y + frame.height + 0.4),
-                    ],
-                    color,
-                );
-                self.paint_toolbar_plus(ctx, rect, color);
-            }
-            TimelineToolbarButton::AddTrack(TimelineTrackKind::Audio) => {
-                let cy = rect.center().y + 1.0;
-                for (start, end) in [
-                    (
-                        Point::new(rect.x + 4.0, cy + 2.0),
-                        Point::new(rect.x + 6.4, cy - 2.5),
-                    ),
-                    (
-                        Point::new(rect.x + 6.4, cy - 2.5),
-                        Point::new(rect.x + 9.2, cy + 2.5),
-                    ),
-                    (
-                        Point::new(rect.x + 9.2, cy + 2.5),
-                        Point::new(rect.x + 12.0, cy - 1.5),
-                    ),
-                ] {
-                    ctx.encoder.draw_line(start, end, 1.3, color);
-                }
-                self.paint_toolbar_plus(ctx, rect, color);
-            }
-            TimelineToolbarButton::Edit(TimelineEditCommand::SplitAtPlayhead) => {
-                ctx.encoder.draw_line(
-                    Point::new(rect.x + 5.0, rect.y + 14.0),
-                    Point::new(rect.x + 14.0, rect.y + 5.0),
-                    1.8,
-                    color,
-                );
-                ctx.encoder.draw_line(
-                    Point::new(rect.x + 5.8, rect.y + 5.6),
-                    Point::new(rect.x + 13.8, rect.y + 13.8),
-                    1.1,
-                    color,
-                );
-            }
-            TimelineToolbarButton::Edit(TimelineEditCommand::DeleteSelection) => {
-                ctx.encoder
-                    .draw_rect(Rect::new(rect.x + 6.0, rect.y + 7.2, 8.0, 8.0), color, 1.4);
-                ctx.encoder.draw_line(
-                    Point::new(rect.x + 5.2, rect.y + 6.0),
-                    Point::new(rect.x + 14.8, rect.y + 6.0),
-                    1.3,
-                    color,
-                );
-                ctx.encoder.draw_line(
-                    Point::new(rect.x + 8.0, rect.y + 4.2),
-                    Point::new(rect.x + 12.0, rect.y + 4.2),
-                    1.3,
-                    color,
-                );
-            }
             TimelineToolbarButton::Edit(TimelineEditCommand::MarkInAtPlayhead) => {
                 self.paint_toolbar_marker(ctx, rect, true, color);
             }
@@ -2365,22 +2267,6 @@ impl TimelineView {
             }
             _ => {}
         }
-    }
-
-    fn paint_toolbar_plus(&self, ctx: &mut PaintContext, rect: Rect, color: Color) {
-        let center = Point::new(rect.x + rect.width - 5.0, rect.y + 5.0);
-        ctx.encoder.draw_line(
-            Point::new(center.x - 3.0, center.y),
-            Point::new(center.x + 3.0, center.y),
-            1.4,
-            color,
-        );
-        ctx.encoder.draw_line(
-            Point::new(center.x, center.y - 3.0),
-            Point::new(center.x, center.y + 3.0),
-            1.4,
-            color,
-        );
     }
 
     fn paint_toolbar_marker(
@@ -5144,65 +5030,47 @@ mod tests {
     }
 
     #[test]
-    fn timeline_toolbar_add_track_buttons_dispatch_kind_without_seeking() {
-        let actions = RefCell::new(Vec::new());
-        let dispatch = |action| actions.borrow_mut().push(action);
-        let mut view = timeline().on_track_add(|kind| match kind {
+    fn structural_timeline_commands_stay_in_context_menu_not_toolbar() {
+        let view = timeline().on_track_add(|kind| match kind {
             TimelineTrackKind::Video => Action::Play,
             TimelineTrackKind::Audio => Action::Pause,
         });
-        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
-        let initial_playhead = view.playhead_frame();
-        let add_video = view
-            .toolbar_button_rect(TimelineToolbarButton::AddTrack(TimelineTrackKind::Video))
-            .expect("wide toolbar should show add-video control")
-            .center();
-        let add_audio = view
-            .toolbar_button_rect(TimelineToolbarButton::AddTrack(TimelineTrackKind::Audio))
-            .expect("wide toolbar should show add-audio control")
-            .center();
-
-        let mut focus = DummyFocus;
-        let mut shortcut = DummyShortcut;
-        let mut tooltip = DummyTooltip;
-        let mut requests = EventRequests::default();
-        let mut ctx = dispatching_ctx(
-            &mut focus,
-            &mut shortcut,
-            &mut tooltip,
-            &mut requests,
-            &dispatch,
-        );
 
         assert_eq!(
-            view.event(
-                &UiEvent::MouseDown {
-                    position: add_video,
-                    button: MouseButton::Left,
-                    modifiers: Modifiers::none(),
-                },
-                &mut ctx,
-            ),
-            EventResult::Handled
+            TimelineView::toolbar_left_buttons(),
+            [
+                TimelineToolbarButton::Tool(TimelineTool::Select),
+                TimelineToolbarButton::Tool(TimelineTool::Blade),
+                TimelineToolbarButton::Edit(TimelineEditCommand::MarkInAtPlayhead),
+                TimelineToolbarButton::Edit(TimelineEditCommand::MarkOutAtPlayhead),
+            ]
         );
-        assert_eq!(
-            view.event(
-                &UiEvent::MouseDown {
-                    position: add_audio,
-                    button: MouseButton::Left,
-                    modifiers: Modifiers::none(),
-                },
-                &mut ctx,
-            ),
-            EventResult::Handled
+        let timeline_menu_items = view.timeline_context_menu_items();
+        let timeline_labels: Vec<&str> = timeline_menu_items
+            .iter()
+            .filter(|item| !item.is_separator())
+            .map(|item| item.label.as_str())
+            .collect();
+        for label in ["Add Video Track", "Add Audio Track", "Split at Playhead"] {
+            assert!(
+                timeline_labels.contains(&label),
+                "{label} should remain available from the timeline context menu"
+            );
+        }
+        let clip_menu_items = view.clip_context_menu_items();
+        let clip_labels: Vec<&str> = clip_menu_items
+            .iter()
+            .filter(|item| !item.is_separator())
+            .map(|item| item.label.as_str())
+            .collect();
+        assert!(
+            clip_labels.contains(&"Delete Clip"),
+            "delete should remain available from the clip context menu"
         );
-
-        assert_eq!(view.playhead_frame(), initial_playhead);
-        assert_eq!(actions.borrow().as_slice(), &[Action::Play, Action::Pause]);
     }
 
     #[test]
-    fn timeline_toolbar_edit_buttons_dispatch_commands_and_consume_disabled_clicks() {
+    fn timeline_toolbar_mark_buttons_dispatch_commands() {
         let commands = Rc::new(RefCell::new(Vec::new()));
         let recorded = Rc::clone(&commands);
         let actions = RefCell::new(Vec::new());
@@ -5218,23 +5086,27 @@ mod tests {
         });
         view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
         let initial_playhead = view.playhead_frame();
-        let split = view
+        assert!(view
             .toolbar_button_rect(TimelineToolbarButton::Edit(
                 TimelineEditCommand::SplitAtPlayhead,
             ))
-            .expect("wide toolbar should show split control")
-            .center();
-        let delete = view
+            .is_none());
+        assert!(view
             .toolbar_button_rect(TimelineToolbarButton::Edit(
                 TimelineEditCommand::DeleteSelection,
             ))
-            .expect("wide toolbar should show delete control")
-            .center();
+            .is_none());
         let mark_in = view
             .toolbar_button_rect(TimelineToolbarButton::Edit(
                 TimelineEditCommand::MarkInAtPlayhead,
             ))
             .expect("wide toolbar should show mark-in control")
+            .center();
+        let mark_out = view
+            .toolbar_button_rect(TimelineToolbarButton::Edit(
+                TimelineEditCommand::MarkOutAtPlayhead,
+            ))
+            .expect("wide toolbar should show mark-out control")
             .center();
 
         let mut focus = DummyFocus;
@@ -5249,7 +5121,7 @@ mod tests {
             &dispatch,
         );
 
-        for position in [split, delete, mark_in] {
+        for position in [mark_in, mark_out] {
             assert_eq!(
                 view.event(
                     &UiEvent::MouseDown {
@@ -5267,13 +5139,13 @@ mod tests {
         assert_eq!(
             commands.borrow().as_slice(),
             &[
-                TimelineEditCommand::SplitAtPlayhead,
                 TimelineEditCommand::MarkInAtPlayhead,
+                TimelineEditCommand::MarkOutAtPlayhead,
             ]
         );
         assert_eq!(
             actions.borrow().as_slice(),
-            &[Action::SplitClipAtPlayhead, Action::MarkInAtPlayhead]
+            &[Action::MarkInAtPlayhead, Action::MarkOutAtPlayhead]
         );
     }
 
@@ -5295,12 +5167,16 @@ mod tests {
             });
         view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
 
-        let split = view
+        assert!(view
             .toolbar_button_rect(TimelineToolbarButton::Edit(
                 TimelineEditCommand::SplitAtPlayhead,
             ))
-            .expect("wide toolbar should show split control")
-            .center();
+            .is_none());
+        assert!(view
+            .toolbar_button_rect(TimelineToolbarButton::Edit(
+                TimelineEditCommand::DeleteSelection,
+            ))
+            .is_none());
         let mut focus = DummyFocus;
         let mut shortcut = DummyShortcut;
         let mut tooltip = DummyTooltip;
@@ -5313,17 +5189,6 @@ mod tests {
             &dispatch,
         );
 
-        assert_eq!(
-            view.event(
-                &UiEvent::MouseDown {
-                    position: split,
-                    button: MouseButton::Left,
-                    modifiers: Modifiers::none(),
-                },
-                &mut ctx,
-            ),
-            EventResult::Handled
-        );
         assert_eq!(
             view.event(
                 &UiEvent::KeyDown { key: KeyCode::Delete, modifiers: Modifiers::none() },
@@ -5356,21 +5221,17 @@ mod tests {
     #[test]
     fn timeline_chrome_buttons_update_and_hide_tooltips() {
         let mut view = timeline().on_edit_command_shortcut(|command| match command {
-            TimelineEditCommand::DeleteSelection => Some("Delete".to_owned()),
+            TimelineEditCommand::MarkInAtPlayhead => Some("I".to_owned()),
             _ => None,
         });
         view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
 
         let select = view.tool_button_rect(TimelineTool::Select).center();
-        let add_audio = view
-            .toolbar_button_rect(TimelineToolbarButton::AddTrack(TimelineTrackKind::Audio))
-            .expect("wide toolbar should show add-audio control")
-            .center();
-        let delete = view
+        let mark_in = view
             .toolbar_button_rect(TimelineToolbarButton::Edit(
-                TimelineEditCommand::DeleteSelection,
+                TimelineEditCommand::MarkInAtPlayhead,
             ))
-            .expect("wide toolbar should show delete control")
+            .expect("wide toolbar should show mark-in control")
             .center();
         let zoom_out = view
             .zoom_button_rect(TimelineZoomButton::Out)
@@ -5404,26 +5265,14 @@ mod tests {
 
         assert_eq!(
             view.event(
-                &UiEvent::MouseMove { position: add_audio, modifiers: Modifiers::none() },
+                &UiEvent::MouseMove { position: mark_in, modifiers: Modifiers::none() },
                 &mut ctx,
             ),
             EventResult::Handled
         );
         assert_eq!(
             ctx.tooltip.current().map(|state| state.text.as_str()),
-            Some("Add Audio Track")
-        );
-
-        assert_eq!(
-            view.event(
-                &UiEvent::MouseMove { position: delete, modifiers: Modifiers::none() },
-                &mut ctx,
-            ),
-            EventResult::Handled
-        );
-        assert_eq!(
-            ctx.tooltip.current().map(|state| state.text.as_str()),
-            Some("Delete Selection (Delete)")
+            Some("Mark In (I)")
         );
 
         assert_eq!(

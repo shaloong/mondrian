@@ -936,10 +936,9 @@ The app adapter rejects cross-kind moves, resolves the source `TrackId`, convert
 the target view index into a video/audio-local target index, and dispatches
 `ui.timeline.move_track` so `AppState::move_track` remains the only mutation
 path for track order.
-Timeline toolbar buttons and context menu entries for adding video/audio tracks
-emit only a `TimelineTrackKind`; the app adapter translates that into
-`ui.timeline.add_track`, and `AppState` routes it through the existing undoable
-track creation commands.
+Timeline context menu entries for adding video/audio tracks emit only a
+`TimelineTrackKind`; the app adapter translates that into `ui.timeline.add_track`,
+and `AppState` routes it through the existing undoable track creation commands.
 Timeline pointer tools are widget-local session state. `TimelineTool::Select`
 keeps normal selection, move, trim, and seek behavior. `TimelineTool::Blade`
 matches the egui-era workflow without adding a separate app command by seeking
@@ -948,19 +947,20 @@ Shortcut keys `V` and `B` switch these widget-local tools; undoable timeline
 mutation still starts only at the app command boundary. `TimelineViewState`
 captures the active tool, zoom, and scroll offsets so `SelfHostedAppRoot`
 preserves timeline working context across panel model rebuilds without storing
-that UI session data in `AppState`. Timeline pointer, add-track, edit-command,
-and zoom controls live in a dedicated toolbar above the ruler. Add-track and
-edit-command buttons are visible daily editing affordances, not alternate
-mutation paths: add-track buttons use the same `TimelineTrackKind` adapter as
-the timeline context menu, while edit buttons use the same `TimelineEditCommand`
-availability checks and action factory as menus and focused keyboard input.
+that UI session data in `AppState`. The toolbar above the ruler is reserved for
+mode and navigation-scale controls: Select, Blade, Mark In, Mark Out, and zoom.
+Structural or destructive operations such as Add Video Track, Add Audio Track,
+Split at Playhead, Delete, and Ripple Delete belong in the timeline context menu
+and focused keyboard shortcuts rather than compact icon buttons. Context menu
+rows use the same `TimelineTrackKind` or `TimelineEditCommand` adapters,
+availability checks, and action factories as focused keyboard input.
 Timeline command availability has two layers: the widget checks only local
 view facts such as selection and playhead intersection, while the self-hosted
 adapter injects app-state availability derived from the same locked-track,
-clipboard, in/out, and sequence gates used by the top menus. Toolbar buttons,
-timeline context menu rows, and focused timeline shortcuts must all consult
-that host availability before dispatching.
-Disabled toolbar commands consume their click without dispatching so they
+clipboard, in/out, and sequence gates used by the top menus. Timeline context
+menu rows and focused timeline shortcuts must consult that host availability
+before dispatching.
+Disabled toolbar controls consume their click without dispatching so they
 cannot accidentally seek or select timeline content underneath. Zoom controls
 mutate the same widget-local `pixels_per_frame` value as Ctrl+wheel zoom and do
 not emit editor actions because display zoom is not project data.
@@ -968,16 +968,15 @@ Timeline wheel input follows the same consumption rule as scroll containers:
 vertical scroll, Shift+horizontal scroll, or Ctrl/Meta zoom handles the event
 only when the corresponding offset or zoom value changes, so boundary wheel
 input can bubble to an enclosing surface.
-Timeline chrome buttons, including pointer tools, add-track controls, edit
-commands, and zoom controls, publish hover hints through the shared tooltip
-manager rather than painting local text labels inside the compact toolbar.
-Edit-command toolbar hints append the same host-provided shortcut labels used by
-timeline context menus, so Split, Delete, and Mark In/Out remain discoverable
-without hardcoding platform shortcut text in the widget crate.
-Toolbar vector assets are injected through `TimelineToolbarIconSlot` only;
-pointer tools do not carry a second tool-specific icon path. This keeps the
-toolbar's hit testing, availability, tooltip, and icon contracts aligned around
-the same button model.
+Timeline chrome buttons, including pointer tools, mark controls, and zoom
+controls, publish hover hints through the shared tooltip manager rather than
+painting local text labels inside the compact toolbar. Mark-command toolbar
+hints append the same host-provided shortcut labels used by timeline context
+menus without hardcoding platform shortcut text in the widget crate. Toolbar
+vector assets are injected through `TimelineToolbarIconSlot` only; pointer tools
+do not carry a second tool-specific icon path. This keeps the toolbar's hit
+testing, availability, tooltip, and icon contracts aligned around the same
+button model.
 Asset drops follow the same boundary. `TimelineView` accepts
 `DragPayload::Asset` only as a domain-light drop proposal with a view track ref
 and frame. The self-hosted adapter resolves that view ref to a stable

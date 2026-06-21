@@ -1699,10 +1699,6 @@ fn with_timeline_toolbar_icons(mut timeline: TimelineView) -> TimelineView {
     for (slot, icon) in [
         (TimelineToolbarIconSlot::SelectTool, AppIcon::CursorFilled),
         (TimelineToolbarIconSlot::BladeTool, AppIcon::Cut),
-        (TimelineToolbarIconSlot::AddVideoTrack, AppIcon::Film),
-        (TimelineToolbarIconSlot::AddAudioTrack, AppIcon::Music),
-        (TimelineToolbarIconSlot::SplitAtPlayhead, AppIcon::Cut),
-        (TimelineToolbarIconSlot::DeleteSelection, AppIcon::Trash),
         (
             TimelineToolbarIconSlot::MarkInAtPlayhead,
             AppIcon::CaretRight,
@@ -5534,48 +5530,6 @@ mod tests {
             EventResult::Handled
         );
 
-        let recorded = actions.borrow();
-        assert_eq!(recorded.len(), 1);
-        let Action::Custom { namespace, name, payload } = &recorded[0] else {
-            panic!("expected custom add-track action");
-        };
-        assert_eq!(namespace, TIMELINE_NAMESPACE);
-        assert_eq!(name, TIMELINE_ADD_TRACK);
-        let payload: TimelineAddTrackPayload =
-            serde_json::from_value(payload.clone()).expect("add track payload");
-        assert_eq!(payload.kind, TimelineAddTrackKind::Video);
-    }
-
-    #[test]
-    fn timeline_panel_toolbar_add_track_emits_typed_timeline_actions() {
-        let model = demo_timeline_model();
-        let actions = RefCell::new(Vec::<Action>::new());
-        let dispatch = |action| actions.borrow_mut().push(action);
-        let mut panel = timeline_panel(&model);
-        panel.layout(mondrian_ui_core::types::Rect::new(0.0, 0.0, 520.0, 180.0));
-
-        let mut focus = DummyFocus;
-        let mut shortcut = DummyShortcut;
-        let mut tooltip = DummyTooltip;
-        let mut requests = EventRequests::default();
-        let mut ctx = event_ctx(
-            &mut focus,
-            &mut shortcut,
-            &mut tooltip,
-            &mut requests,
-            &dispatch,
-        );
-
-        let result = panel.event(
-            &UiEvent::MouseDown {
-                position: Point::new(76.0, 15.0),
-                button: MouseButton::Left,
-                modifiers: Modifiers::none(),
-            },
-            &mut ctx,
-        );
-
-        assert_eq!(result, EventResult::Handled);
         let recorded = actions.borrow();
         assert_eq!(recorded.len(), 1);
         let Action::Custom { namespace, name, payload } = &recorded[0] else {
