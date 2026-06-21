@@ -105,7 +105,7 @@ impl TitleBar {
 
     fn is_drag_region(&self, position: Point) -> bool {
         self.bounds.contains(position)
-            && !self.menu_bounds.contains(position)
+            && !self.menu_bar.trigger_hit_test(position)
             && self.control_at(position).is_none()
     }
 }
@@ -471,6 +471,17 @@ mod tests {
             actions.borrow().as_slice(),
             &[app_shell_window_drag_action()]
         );
+    }
+
+    #[test]
+    fn title_bar_unused_menu_allocation_remains_draggable() {
+        let bar = title_bar();
+        let menu_bounds = bar.menu_bar().bounds();
+
+        assert!(bar.is_drag_region(Point::new(
+            menu_bounds.x + menu_bounds.width - 8.0,
+            menu_bounds.center().y,
+        )));
     }
 
     #[test]

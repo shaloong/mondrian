@@ -5,6 +5,7 @@
 const RENDER_MODE_SHAPE: u32 = 0u;
 const RENDER_MODE_GLYPH: u32 = 1u;
 const RENDER_MODE_LINE: u32 = 2u;
+const RENDER_MODE_IMAGE: u32 = 3u;
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -36,6 +37,11 @@ fn main(in: VertexOutput) -> @location(0) vec4<f32> {
     if in.render_mode == RENDER_MODE_GLYPH {
         let sampled = textureSample(glyph_texture, glyph_sampler, in.tex_coord);
         return vec4<f32>(in.color.rgb, in.color.a * sampled.a);
+    }
+
+    if in.render_mode == RENDER_MODE_IMAGE {
+        let sampled = textureSample(glyph_texture, glyph_sampler, in.tex_coord);
+        return sampled * in.color;
     }
 
     if in.render_mode == RENDER_MODE_LINE {

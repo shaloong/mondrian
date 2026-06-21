@@ -521,6 +521,12 @@ impl MenuBar {
         self.bounds
     }
 
+    /// Whether a point lands on an actual menu trigger, excluding unused menu
+    /// bar allocation so the surrounding titlebar can remain draggable.
+    pub(crate) fn trigger_hit_test(&self, point: Point) -> bool {
+        self.trigger_index_at(point).is_some()
+    }
+
     /// Return checked state for the first row matching an action.
     #[cfg(test)]
     pub(crate) fn checked_for_action(&self, action: &Action) -> Option<bool> {
@@ -1449,6 +1455,15 @@ mod tests {
         click_menu(&mut menu, &mut ctx, file_trigger);
 
         assert!(menu.overlay_hit_test(Point::new(8.0, MENU_BAR_HEIGHT + 8.0)));
+    }
+
+    #[test]
+    fn menu_bar_trigger_hit_test_excludes_unused_allocation() {
+        let mut menu = MenuBar::default();
+        menu.layout(Rect::new(100.0, 0.0, 500.0, MENU_BAR_HEIGHT));
+
+        assert!(menu.trigger_hit_test(Point::new(116.0, 10.0)));
+        assert!(!menu.trigger_hit_test(Point::new(594.0, 10.0)));
     }
 
     #[test]

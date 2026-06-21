@@ -236,8 +236,10 @@ impl WindowControls {
         let colors = &ctx.theme.colors;
         let hovered = hovered_control == Some(control);
         let pressed = pressed_control == Some(control);
-        let mut fill = if control == WindowControl::Close && hovered {
-            colors.error
+        let mut fill = if control == WindowControl::Close && pressed {
+            colors.window_close_pressed
+        } else if control == WindowControl::Close && hovered {
+            colors.window_close_hover
         } else if pressed {
             colors.accent
         } else if hovered {
@@ -250,8 +252,8 @@ impl WindowControls {
         }
         ctx.encoder.draw_rect(rect, fill, 0.0);
 
-        let icon_color = if control == WindowControl::Close && hovered {
-            colors.primary_foreground
+        let icon_color = if control == WindowControl::Close && (hovered || pressed) {
+            colors.window_close_foreground
         } else {
             colors.muted_foreground
         };
@@ -377,14 +379,16 @@ mod tests {
     #[derive(Default)]
     struct Recorder {
         rects: Vec<Rect>,
+        rect_colors: Vec<Color>,
         lines: usize,
     }
 
     impl DrawCommandEncoder for Recorder {
         fn push_clip(&mut self, _bounds: Rect) {}
         fn pop_clip(&mut self) {}
-        fn draw_rect(&mut self, bounds: Rect, _color: Color, _corner_radius: f32) {
+        fn draw_rect(&mut self, bounds: Rect, color: Color, _corner_radius: f32) {
             self.rects.push(bounds);
+            self.rect_colors.push(color);
         }
         fn draw_line(&mut self, _start: Point, _end: Point, _width: f32, _color: Color) {
             self.lines += 1;
@@ -492,5 +496,21 @@ mod tests {
                 "{style:?} should paint visible glyph geometry"
             );
         }
+    }
+
+    #[test]
+    fn windows_close_hover_uses_native_red_token() {
+        let controls = controls(PlatformWindowControlStyle::Windows);
+        let mut recorder = Recorder::default();
+        let theme = ThemePreset::Dark.build();
+        let mut ctx = PaintContext {
+            encoder: &mut recorder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 1000.0, 100.0),
+        };
+
+        controls.paint(&mut ctx, Some(WindowControl::Close), None);
+
+        assert!(recorder.rect_colors.contains(&theme.colors.window_close_hover));
     }
 }

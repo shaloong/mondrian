@@ -9,7 +9,7 @@ use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use std::cell::Cell;
 
-use crate::paint::{horizontal_stroke_rect, mix_color, paint_focus_ring, paint_shadow};
+use crate::paint::{horizontal_stroke_rect, mix_color, paint_focus_ring, paint_popover_shadow};
 use crate::text_metrics::measure_single_line;
 use crate::vector_icon::VectorIcon;
 
@@ -161,9 +161,14 @@ fn trigger_text_y(rect: Rect, font_size: f32, style: DropdownTriggerStyle) -> f3
 pub(crate) fn paint_menu_popup_chrome(ctx: &mut PaintContext, rect: Rect) {
     let tokens = &ctx.theme.colors;
     let spacing = &ctx.theme.spacing;
-    paint_shadow(ctx, rect, spacing.radius_sm);
-    ctx.encoder.draw_rect(rect, tokens.border, 0.0);
-    ctx.encoder.draw_rect(rect.inset(1.0, 1.0), tokens.popover, spacing.radius_sm);
+    let radius = spacing.radius_md;
+    paint_popover_shadow(ctx, rect, radius);
+    ctx.encoder.draw_rect(rect, tokens.border, radius);
+    ctx.encoder.draw_rect(
+        rect.inset(1.0, 1.0),
+        tokens.popover,
+        (radius - 1.0).max(0.0),
+    );
 }
 
 pub(crate) fn paint_menu_row(
@@ -991,7 +996,7 @@ impl Widget for Dropdown {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::paint::{shadow_color, shadow_rect};
+    use crate::paint::soft_shadow_rect;
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_editor_state::state::PanelKind;
     use mondrian_platform::NoopPlatformService;
@@ -1842,7 +1847,7 @@ mod tests {
     }
 
     #[test]
-    fn menu_popup_shadow_uses_theme_shadow_token() {
+    fn menu_popup_shadow_uses_layered_theme_shadow_tokens() {
         let theme = mondrian_ui_theme::ThemePreset::Dark.build();
         let clip_rect = Rect::new(0.0, 0.0, 200.0, 120.0);
         let mut encoder = RecordingEncoder::default();
@@ -1851,9 +1856,16 @@ mod tests {
         let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
         paint_menu_popup_chrome(&mut ctx, popup);
 
-        let shadow = &theme.spacing.shadow_md;
-        assert_eq!(encoder.rects[0], shadow_rect(popup, shadow));
-        assert_eq!(encoder.rect_colors[0], shadow_color(shadow));
+        assert_eq!(
+            encoder.rects[0],
+            soft_shadow_rect(popup, &theme.spacing.shadow_xl, 0.38)
+        );
+        assert_eq!(
+            encoder.rect_colors[0].a,
+            theme.spacing.shadow_xl.color[3] * 0.34
+        );
+        assert_eq!(encoder.rects[3], popup);
+        assert_eq!(encoder.rect_colors[3], theme.colors.border);
     }
 
     #[test]

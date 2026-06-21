@@ -15,6 +15,25 @@ pub(crate) fn paint_shadow(ctx: &mut PaintContext, bounds: Rect, radius: f32) {
     ctx.encoder.draw_rect(shadow_rect(bounds, shadow), shadow_color(shadow), radius);
 }
 
+pub(crate) fn paint_popover_shadow(ctx: &mut PaintContext, bounds: Rect, radius: f32) {
+    let spacing = &ctx.theme.spacing;
+    let layers = [
+        (&spacing.shadow_xl, 0.34, 0.38, radius + 4.0),
+        (&spacing.shadow_md, 0.52, 0.20, radius + 2.0),
+        (&spacing.shadow_sm, 0.82, 0.04, radius),
+    ];
+
+    for (shadow, alpha_scale, blur_scale, layer_radius) in layers {
+        let mut color = shadow_color(shadow);
+        color.a *= alpha_scale;
+        ctx.encoder.draw_rect(
+            soft_shadow_rect(bounds, shadow, blur_scale),
+            color,
+            layer_radius,
+        );
+    }
+}
+
 pub(crate) fn paint_focus_ring(ctx: &mut PaintContext, bounds: Rect, radius: f32) {
     ctx.encoder.draw_rect(
         focus_ring_rect(bounds),
@@ -121,6 +140,17 @@ pub(crate) fn shadow_color(shadow: &ShadowToken) -> Color {
         b: shadow.color[2],
         a: shadow.color[3],
     }
+}
+
+pub(crate) fn soft_shadow_rect(bounds: Rect, shadow: &ShadowToken, blur_scale: f32) -> Rect {
+    let blur_spread = shadow.blur.max(0.0) * blur_scale.max(0.0);
+    let spread = shadow.spread.max(0.0) + blur_spread;
+    Rect::new(
+        bounds.x + shadow.offset_x - spread,
+        bounds.y + shadow.offset_y - spread,
+        bounds.width + spread * 2.0,
+        bounds.height + spread * 2.0,
+    )
 }
 
 pub(crate) fn focus_ring_rect(bounds: Rect) -> Rect {
@@ -244,6 +274,22 @@ mod tests {
         assert_eq!(
             shadow_color(&shadow),
             Color { r: 0.1, g: 0.2, b: 0.3, a: 0.4 }
+        );
+    }
+
+    #[test]
+    fn soft_shadow_rect_uses_blur_as_visual_spread() {
+        let shadow = ShadowToken {
+            offset_x: 1.0,
+            offset_y: 2.0,
+            blur: 20.0,
+            spread: 3.0,
+            color: [0.0, 0.0, 0.0, 0.2],
+        };
+
+        assert_eq!(
+            soft_shadow_rect(Rect::new(10.0, 20.0, 100.0, 40.0), &shadow, 0.25),
+            Rect::new(3.0, 14.0, 116.0, 56.0)
         );
     }
 

@@ -68,6 +68,12 @@ pub struct ColorTokens {
     pub destructive: Color,
     /// 危险色上的文字
     pub destructive_foreground: Color,
+    /// Native-window close hover surface.
+    pub window_close_hover: Color,
+    /// Native-window close pressed surface.
+    pub window_close_pressed: Color,
+    /// Native-window close icon color on hover/press.
+    pub window_close_foreground: Color,
 
     // ── 边框 & 输入 (Borders & Inputs) ────────────────────────────────────
     /// 默认边框
@@ -155,6 +161,9 @@ impl ColorTokens {
 
             destructive: Color::from_hex(0x3A1718),
             destructive_foreground: Color::from_hex(0xFF453A),
+            window_close_hover: Color::from_hex(0xE81123),
+            window_close_pressed: Color::from_hex(0xC50F1F),
+            window_close_foreground: Color::WHITE,
 
             border: Color::from_hex(0x2A2D34),
             input: Color::from_hex(0x343842),
@@ -218,6 +227,9 @@ impl ColorTokens {
 
             destructive: Color::from_hex(0xFEE2E2),
             destructive_foreground: Color::from_hex(0x991B1B),
+            window_close_hover: Color::from_hex(0xE81123),
+            window_close_pressed: Color::from_hex(0xC50F1F),
+            window_close_foreground: Color::WHITE,
 
             border: Color::from_hex(0xE4E4E7),
             input: Color::from_hex(0xE4E4E7),

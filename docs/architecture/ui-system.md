@@ -162,7 +162,9 @@ to keep the self-hosted title/menu row while borrowing only the operating
 system's minimize, maximize, and close buttons. `self_hosted::window_controls`
 owns the client-side control order, edge, hit targets, hover treatment, and
 glyphs for Windows, macOS, and Linux styles; `TitleBar` only consumes its layout
-and event surface. Window controls emit app-shell custom actions only;
+and event surface. Windows close hover/press colors are semantic theme tokens so
+the self-drawn chrome can follow native red affordances without hardcoding
+palette values in the app shell. Window controls emit app-shell custom actions only;
 `SelfHostedUiHost` converts them into `SelfHostedShellCommands` and
 `self_hosted::window` applies native minimize, maximize, drag, fullscreen, or
 quit side effects after widget and `AppState` borrows end. These commands must
@@ -171,6 +173,9 @@ editor data.
 Top menu triggers use the lightweight `DropdownTriggerStyle::MenuBar` treatment
 and content-width layout: closed triggers should read like native menu text, not
 filled toolbar buttons, and should not reserve a persistent arrow affordance.
+Unused menu-bar allocation remains draggable titlebar space; `TitleBar` should
+exclude only actual menu trigger hit rects and window-control rects from native
+drag initiation.
 
 Shell-local modals, such as New Project, Preferences, and About, live in their
 own `self_hosted::*_dialog` modules and are hosted by `self_hosted::modal`.
@@ -692,8 +697,11 @@ labels, and platform font metrics use the same layout facts as final glyph
 rendering instead of approximate character-width math.
 Popup elevation goes through the widget crate's shared paint helper and theme
 shadow tokens rather than per-widget hardcoded black alpha values, so dark/light
-themes can tune perceived depth centrally. Common color composition helpers
-such as alpha scaling, color mixing, and softened borders also live behind that
+themes can tune perceived depth centrally. Dropdown popups use layered token
+shadows and token radius instead of one hard rectangular shadow; this keeps
+menus visually closer to modern shadcn/Codex-style floating surfaces while
+preserving deterministic draw commands. Common color composition helpers such
+as alpha scaling, color mixing, and softened borders also live behind that
 shared paint helper so widgets do not drift in their interpretation of tokens.
 Dropdowns, context menus, and embedded selectors such as the color-picker mode
 menu use the shared anchored-menu geometry for viewport edge clamping and
@@ -2053,7 +2061,11 @@ curved/vector geometry and can misalign glyph bitmap bearings.
 The GPU UI pass renders through a cached 4x MSAA target and resolves into the
 surface view. Raster icon images use a separate renderer-owned image atlas with
 linear sampling so SVG icons receive browser-like coverage from resvg/tiny-skia
-without sharing mutable atlas state with text glyphs. Small SVG rasters are
+without sharing mutable atlas state with text glyphs. Raster atlas draws use the
+full-color image render mode: sampled RGBA is multiplied by tint, while glyph
+atlas draws keep the alpha-mask tint path. Do not route arbitrary raster images
+through `RenderMode::Glyph`, because that collapses multicolor assets such as
+the product favicon into a single tinted alpha mask. Small SVG rasters are
 prefiltered before atlas upload rather than relying on GPU minification as a
 box filter; layout bounds remain the authoritative hit-test and composition
 geometry. Image UVs remain unsnapped because they are texture coordinates rather

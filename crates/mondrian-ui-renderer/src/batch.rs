@@ -245,12 +245,12 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                 let bw = bounds.width.max(1.0);
                 let bh = bounds.height.max(1.0);
                 let vertices = vec![
-                    RectVertex::new(x0, y0, u0, v1, r, g, b, a, bw, bh, 0.0, RenderMode::Glyph),
-                    RectVertex::new(x1, y0, u1, v1, r, g, b, a, bw, bh, 0.0, RenderMode::Glyph),
-                    RectVertex::new(x0, y1, u0, v0, r, g, b, a, bw, bh, 0.0, RenderMode::Glyph),
-                    RectVertex::new(x0, y1, u0, v0, r, g, b, a, bw, bh, 0.0, RenderMode::Glyph),
-                    RectVertex::new(x1, y0, u1, v1, r, g, b, a, bw, bh, 0.0, RenderMode::Glyph),
-                    RectVertex::new(x1, y1, u1, v0, r, g, b, a, bw, bh, 0.0, RenderMode::Glyph),
+                    RectVertex::new(x0, y0, u0, v1, r, g, b, a, bw, bh, 0.0, RenderMode::Image),
+                    RectVertex::new(x1, y0, u1, v1, r, g, b, a, bw, bh, 0.0, RenderMode::Image),
+                    RectVertex::new(x0, y1, u0, v0, r, g, b, a, bw, bh, 0.0, RenderMode::Image),
+                    RectVertex::new(x0, y1, u0, v0, r, g, b, a, bw, bh, 0.0, RenderMode::Image),
+                    RectVertex::new(x1, y0, u1, v1, r, g, b, a, bw, bh, 0.0, RenderMode::Image),
+                    RectVertex::new(x1, y1, u1, v0, r, g, b, a, bw, bh, 0.0, RenderMode::Image),
                 ];
                 current_batch.vertices.extend(vertices);
             }
@@ -2129,6 +2129,13 @@ mod tests {
         assert_eq!(batches.len(), 2);
         assert_eq!(batches[0].texture_key, None);
         assert_eq!(batches[1].texture_key.as_deref(), Some("image"));
+        assert!(
+            batches[1]
+                .vertices
+                .iter()
+                .all(|vertex| vertex.render_mode == RenderMode::Image as u32),
+            "raster atlas images must preserve full RGBA color instead of glyph alpha tinting"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -2253,7 +2260,7 @@ mod tests {
         assert!((verts[5].tex_coord[0] - (uv.x + uv.width)).abs() < 0.001);
         assert!((verts[5].tex_coord[1] - v0).abs() < 0.001);
 
-        // All vertices should have render_mode = Glyph
+        // Glyph-atlas image commands still use alpha-mask tinting.
         for v in verts {
             assert_eq!(
                 v.render_mode,
