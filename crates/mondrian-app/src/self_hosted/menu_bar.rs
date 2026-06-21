@@ -16,9 +16,7 @@ use crate::app::ui_actions::{
     app_shell_about_action, app_shell_import_media_dialog_action,
     app_shell_new_project_dialog_action, app_shell_open_project_dialog_action,
     app_shell_preferences_action, app_shell_quit_action, app_shell_save_project_as_dialog_action,
-    app_shell_sequence_settings_action, sequence_delete_action, sequence_duplicate_action,
-    sequence_new_action, sequence_return_to_parent_action, sequence_set_active_default_action,
-    sequence_switch_active_action, timeline_clear_in_out_points_action, SequenceTargetPayload,
+    timeline_clear_in_out_points_action,
 };
 use crate::app::AppState;
 use crate::self_hosted::action_availability::app_state_action_enabled;
@@ -117,6 +115,13 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
         ),
         (
             "View",
+            vec![menu_item_with_icon(
+                MenuItem::new("Toggle Fullscreen", Action::ToggleFullscreen),
+                AppIcon::FullScreen,
+            )],
+        ),
+        (
+            "Window",
             vec![
                 menu_item_with_icon(
                     MenuItem::new("Viewer", Action::TogglePanel(PanelKind::Viewer)),
@@ -149,88 +154,38 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
                 ),
                 MenuItem::separator(),
                 menu_item_with_icon(
-                    MenuItem::new("Toggle Fullscreen", Action::ToggleFullscreen),
-                    AppIcon::FullScreen,
-                ),
-            ],
-        ),
-        (
-            "Playback",
-            vec![
-                menu_item_with_icon(
-                    MenuItem::new("Go to Start", Action::GoToStart),
-                    AppIcon::HomeFrameFilled,
-                ),
-                menu_item_with_icon(
-                    MenuItem::new("Step Back", Action::StepBack),
-                    AppIcon::LeftFrameFilled,
-                ),
-                menu_item_with_icon(
-                    MenuItem::new("Play/Pause", Action::TogglePlay),
-                    AppIcon::PlayFilled,
-                ),
-                menu_item_with_icon(
-                    MenuItem::new("Step Forward", Action::StepForward),
-                    AppIcon::RightFrameFilled,
-                ),
-                menu_item_with_icon(
-                    MenuItem::new("Go to End", Action::GoToEnd),
-                    AppIcon::EndFrameFilled,
-                ),
-            ],
-        ),
-        (
-            "Sequence",
-            vec![
-                menu_item_with_icon(
-                    MenuItem::new("New Sequence", sequence_new_action()),
-                    AppIcon::PlusFilled,
-                ),
-                menu_item_with_icon(
-                    MenuItem::new("Sequence Settings...", app_shell_sequence_settings_action()),
-                    AppIcon::Save,
-                ),
-                MenuItem::separator(),
-                menu_item_with_icon(
                     MenuItem::new(
-                        "Return to Parent Sequence",
-                        sequence_return_to_parent_action(),
+                        "Editing Workspace",
+                        Action::SwitchWorkspace(WorkspacePreset::Editing),
                     ),
-                    AppIcon::CaretLeft,
-                ),
-                menu_item_with_icon(
-                    MenuItem::new(
-                        "Set Active as Default",
-                        sequence_set_active_default_action(),
-                    ),
-                    AppIcon::HomeFrameFilled,
-                ),
-            ],
-        ),
-        (
-            "Workspace",
-            vec![
-                menu_item_with_icon(
-                    MenuItem::new("Editing", Action::SwitchWorkspace(WorkspacePreset::Editing)),
                     AppIcon::Cursor,
                 ),
                 menu_item_with_icon(
-                    MenuItem::new("Color", Action::SwitchWorkspace(WorkspacePreset::Color)),
+                    MenuItem::new(
+                        "Color Workspace",
+                        Action::SwitchWorkspace(WorkspacePreset::Color),
+                    ),
                     AppIcon::Circle,
                 ),
                 menu_item_with_icon(
-                    MenuItem::new("Audio", Action::SwitchWorkspace(WorkspacePreset::Audio)),
+                    MenuItem::new(
+                        "Audio Workspace",
+                        Action::SwitchWorkspace(WorkspacePreset::Audio),
+                    ),
                     AppIcon::Music,
                 ),
                 menu_item_with_icon(
                     MenuItem::new(
-                        "Compositing",
+                        "Compositing Workspace",
                         Action::SwitchWorkspace(WorkspacePreset::Compositing),
                     ),
                     AppIcon::Grid,
                 ),
                 menu_item_with_icon(
-                    MenuItem::new("Export", Action::SwitchWorkspace(WorkspacePreset::Export)),
+                    MenuItem::new(
+                        "Export Workspace",
+                        Action::SwitchWorkspace(WorkspacePreset::Export),
+                    ),
                     AppIcon::Export,
                 ),
             ],
@@ -268,9 +223,6 @@ pub fn default_menu_items_for_app_state_with_shortcut_overrides(
     let items = default_menu_items()
         .into_iter()
         .map(|(label, items)| {
-            if label == "Sequence" {
-                return (label, sequence_menu_items_for_app_state(state));
-            }
             (
                 label,
                 items
@@ -316,93 +268,6 @@ fn apply_shell_menu_item_checked_state(
         _ => return item,
     };
     item.checked(checked)
-}
-
-fn sequence_menu_items_for_app_state(state: &AppState) -> Vec<MenuItem> {
-    let active_sequence_id = state.active_sequence_id;
-    let mut items = vec![
-        menu_item_with_icon(
-            MenuItem::new("New Sequence", sequence_new_action()),
-            AppIcon::PlusFilled,
-        ),
-        menu_item_with_icon(
-            MenuItem::new("Sequence Settings...", app_shell_sequence_settings_action()),
-            AppIcon::Save,
-        ),
-        MenuItem::separator(),
-        menu_item_with_icon(
-            MenuItem::new(
-                "Return to Parent Sequence",
-                sequence_return_to_parent_action(),
-            ),
-            AppIcon::CaretLeft,
-        ),
-        menu_item_with_icon(
-            MenuItem::new(
-                "Set Active as Default",
-                sequence_set_active_default_action(),
-            ),
-            AppIcon::HomeFrameFilled,
-        ),
-    ];
-
-    if let Some(sequence_id) = active_sequence_id {
-        items.push(menu_item_with_icon(
-            MenuItem::new(
-                "Duplicate Active Sequence",
-                sequence_duplicate_action(SequenceTargetPayload { sequence_id }),
-            ),
-            AppIcon::Copy,
-        ));
-        items.push(menu_item_with_icon(
-            MenuItem::new(
-                "Delete Active Sequence",
-                sequence_delete_action(SequenceTargetPayload { sequence_id }),
-            ),
-            AppIcon::Trash,
-        ));
-    } else {
-        items.push(menu_item_with_icon(
-            MenuItem::new("Duplicate Active Sequence", Action::NoOp).disabled(),
-            AppIcon::Copy,
-        ));
-        items.push(menu_item_with_icon(
-            MenuItem::new("Delete Active Sequence", Action::NoOp).disabled(),
-            AppIcon::Trash,
-        ));
-    }
-
-    let sequences = state.export_sequences_snapshot();
-    if !sequences.is_empty() {
-        items.push(MenuItem::separator());
-        for sequence in sequences {
-            let is_active = Some(sequence.id) == active_sequence_id;
-            let is_default = Some(sequence.id) == state.default_sequence_id;
-            let mut label = sequence.name.clone();
-            if is_default {
-                label.push_str(" (Default)");
-            }
-            let icon = if is_active {
-                AppIcon::CaretRight
-            } else {
-                AppIcon::Clock
-            };
-            items.push(menu_item_with_icon(
-                MenuItem::new(
-                    label,
-                    sequence_switch_active_action(SequenceTargetPayload {
-                        sequence_id: sequence.id,
-                    }),
-                ),
-                icon,
-            ));
-        }
-    }
-
-    items
-        .into_iter()
-        .map(|item| apply_app_state_menu_availability(item, state))
-        .collect()
 }
 
 fn apply_app_state_menu_availability(item: MenuItem, state: &AppState) -> MenuItem {
@@ -668,8 +533,7 @@ impl Widget for MenuBar {
 mod tests {
     use super::*;
     use crate::app::ui_actions::{
-        APP_SHELL_ABOUT, APP_SHELL_NAMESPACE, APP_SHELL_QUIT, SEQUENCE_DELETE, SEQUENCE_DUPLICATE,
-        SEQUENCE_NAMESPACE, SEQUENCE_SWITCH_ACTIVE, TIMELINE_CLEAR_IN_OUT_POINTS,
+        APP_SHELL_ABOUT, APP_SHELL_NAMESPACE, APP_SHELL_QUIT, TIMELINE_CLEAR_IN_OUT_POINTS,
         TIMELINE_NAMESPACE,
     };
     use crate::app::SelectedClipRef;
@@ -766,24 +630,20 @@ mod tests {
     fn default_menu_bar_exposes_primary_menu_groups() {
         let menu = MenuBar::default();
 
-        assert_eq!(menu.child_count(), 7);
+        assert_eq!(menu.child_count(), 5);
     }
 
     #[test]
     fn default_menu_items_expose_all_panels_and_builtin_workspaces() {
         let menu_items = default_menu_items();
-        let view_items = menu_items
+        let window_items = menu_items
             .iter()
-            .find_map(|(label, items)| (*label == "View").then_some(items))
-            .expect("view menu");
-        let workspace_items = menu_items
-            .iter()
-            .find_map(|(label, items)| (*label == "Workspace").then_some(items))
-            .expect("workspace menu");
+            .find_map(|(label, items)| (*label == "Window").then_some(items))
+            .expect("window menu");
 
         for panel in PanelKind::ALL {
             assert!(
-                view_items.iter().any(|item| item.action == Action::TogglePanel(panel)),
+                window_items.iter().any(|item| item.action == Action::TogglePanel(panel)),
                 "missing panel menu item for {panel:?}"
             );
         }
@@ -795,10 +655,8 @@ mod tests {
             WorkspacePreset::Export,
         ] {
             assert!(
-                workspace_items
-                    .iter()
-                    .any(|item| item.action == Action::SwitchWorkspace(preset)),
-                "missing workspace menu item for {preset:?}"
+                window_items.iter().any(|item| item.action == Action::SwitchWorkspace(preset)),
+                "missing window/workspace menu item for {preset:?}"
             );
         }
     }
@@ -826,12 +684,12 @@ mod tests {
             Some(&layout),
         );
 
-        assert!(menu_item(&menu_items, "View", "Assets").checked);
-        assert!(menu_item(&menu_items, "View", "Effects").checked);
-        assert!(menu_item(&menu_items, "View", "Viewer").checked);
-        assert!(!menu_item(&menu_items, "View", "Timeline").checked);
-        assert!(menu_item(&menu_items, "Workspace", "Editing").checked);
-        assert!(!menu_item(&menu_items, "Workspace", "Color").checked);
+        assert!(menu_item(&menu_items, "Window", "Assets").checked);
+        assert!(menu_item(&menu_items, "Window", "Effects").checked);
+        assert!(menu_item(&menu_items, "Window", "Viewer").checked);
+        assert!(!menu_item(&menu_items, "Window", "Timeline").checked);
+        assert!(menu_item(&menu_items, "Window", "Editing Workspace").checked);
+        assert!(!menu_item(&menu_items, "Window", "Color Workspace").checked);
     }
 
     #[test]
@@ -857,22 +715,22 @@ mod tests {
             Some(&layout),
         );
 
-        assert!(menu_item(&menu_items, "View", "Assets").checked);
-        assert!(!menu_item(&menu_items, "View", "Effects").checked);
-        assert!(menu_item(&menu_items, "View", "Viewer").checked);
-        assert!(!menu_item(&menu_items, "Workspace", "Editing").checked);
-        assert!(!menu_item(&menu_items, "Workspace", "Export").checked);
+        assert!(menu_item(&menu_items, "Window", "Assets").checked);
+        assert!(!menu_item(&menu_items, "Window", "Effects").checked);
+        assert!(menu_item(&menu_items, "Window", "Viewer").checked);
+        assert!(!menu_item(&menu_items, "Window", "Editing Workspace").checked);
+        assert!(!menu_item(&menu_items, "Window", "Export Workspace").checked);
     }
 
     #[test]
-    fn self_hosted_view_menu_excludes_project_browser_and_console_panels() {
+    fn self_hosted_window_menu_excludes_project_browser_and_console_panels() {
         let menu_items = default_menu_items();
-        let view_items = menu_items
+        let window_items = menu_items
             .iter()
-            .find_map(|(label, items)| (*label == "View").then_some(items))
-            .expect("view menu");
+            .find_map(|(label, items)| (*label == "Window").then_some(items))
+            .expect("window menu");
 
-        let labels = view_items
+        let labels = window_items
             .iter()
             .filter(|item| !item.is_separator())
             .map(|item| item.label.as_str())
@@ -910,17 +768,10 @@ mod tests {
             ("Edit", "Mark Out"),
             ("Edit", "Clear In/Out"),
             ("Edit", "Preferences..."),
-            ("View", "Timeline"),
-            ("View", "Effects"),
-            ("Playback", "Go to Start"),
-            ("Playback", "Step Back"),
-            ("Playback", "Play/Pause"),
-            ("Playback", "Step Forward"),
-            ("Playback", "Go to End"),
-            ("Sequence", "New Sequence"),
-            ("Sequence", "Return to Parent Sequence"),
-            ("Sequence", "Set Active as Default"),
-            ("Workspace", "Audio"),
+            ("View", "Toggle Fullscreen"),
+            ("Window", "Timeline"),
+            ("Window", "Effects"),
+            ("Window", "Audio Workspace"),
             ("Help", "About Mondrian"),
         ] {
             assert!(
@@ -952,10 +803,6 @@ mod tests {
             ("Edit", "Split Clip at Playhead", "Ctrl+K"),
             ("Edit", "Mark In", "I"),
             ("Edit", "Mark Out", "O"),
-            ("Playback", "Go to Start", "Home"),
-            ("Playback", "Step Back", "Left"),
-            ("Playback", "Step Forward", "Right"),
-            ("Playback", "Go to End", "End"),
             ("View", "Toggle Fullscreen", "F11"),
         ] {
             assert_eq!(
@@ -975,23 +822,23 @@ mod tests {
             ("Export", "Ctrl+Alt+X"),
         ] {
             assert_eq!(
-                menu_item(&menu_items, "View", panel_label).shortcut.as_deref(),
+                menu_item(&menu_items, "Window", panel_label).shortcut.as_deref(),
                 Some(shortcut),
-                "View/{panel_label} should show {shortcut}"
+                "Window/{panel_label} should show {shortcut}"
             );
         }
 
         for (workspace_label, shortcut) in [
-            ("Editing", "Ctrl+Alt+1"),
-            ("Color", "Ctrl+Alt+2"),
-            ("Audio", "Ctrl+Alt+3"),
-            ("Compositing", "Ctrl+Alt+4"),
-            ("Export", "Ctrl+Alt+5"),
+            ("Editing Workspace", "Ctrl+Alt+1"),
+            ("Color Workspace", "Ctrl+Alt+2"),
+            ("Audio Workspace", "Ctrl+Alt+3"),
+            ("Compositing Workspace", "Ctrl+Alt+4"),
+            ("Export Workspace", "Ctrl+Alt+5"),
         ] {
             assert_eq!(
-                menu_item(&menu_items, "Workspace", workspace_label).shortcut.as_deref(),
+                menu_item(&menu_items, "Window", workspace_label).shortcut.as_deref(),
                 Some(shortcut),
-                "Workspace/{workspace_label} should show {shortcut}"
+                "Window/{workspace_label} should show {shortcut}"
             );
         }
     }
@@ -1018,7 +865,7 @@ mod tests {
             Some("Ctrl+Alt+S")
         );
         assert_eq!(
-            menu_item(&menu_items, "View", "Inspector").shortcut.as_deref(),
+            menu_item(&menu_items, "Window", "Inspector").shortcut.as_deref(),
             None
         );
     }
@@ -1072,16 +919,6 @@ mod tests {
         assert!(!menu_item(&menu_items, "Edit", "Mark In").enabled);
         assert!(!menu_item(&menu_items, "Edit", "Mark Out").enabled);
         assert!(!menu_item(&menu_items, "Edit", "Clear In/Out").enabled);
-        assert!(!menu_item(&menu_items, "Playback", "Go to Start").enabled);
-        assert!(!menu_item(&menu_items, "Playback", "Step Back").enabled);
-        assert!(!menu_item(&menu_items, "Playback", "Play/Pause").enabled);
-        assert!(!menu_item(&menu_items, "Playback", "Step Forward").enabled);
-        assert!(!menu_item(&menu_items, "Playback", "Go to End").enabled);
-        assert!(menu_item(&menu_items, "Sequence", "New Sequence").enabled);
-        assert!(!menu_item(&menu_items, "Sequence", "Return to Parent Sequence").enabled);
-        assert!(!menu_item(&menu_items, "Sequence", "Set Active as Default").enabled);
-        assert!(!menu_item(&menu_items, "Sequence", "Duplicate Active Sequence").enabled);
-        assert!(!menu_item(&menu_items, "Sequence", "Delete Active Sequence").enabled);
     }
 
     #[test]
@@ -1095,87 +932,6 @@ mod tests {
         assert!(!menu_item(&menu_items, "File", "Save").enabled);
         assert!(menu_item(&menu_items, "File", "Save As...").enabled);
         assert!(menu_item(&menu_items, "File", "Close Project").enabled);
-        assert!(!menu_item(&menu_items, "Sequence", "Return to Parent Sequence").enabled);
-        assert!(!menu_item(&menu_items, "Sequence", "Set Active as Default").enabled);
-        assert!(!menu_item(&menu_items, "Sequence", "Duplicate Active Sequence").enabled);
-        assert!(!menu_item(&menu_items, "Sequence", "Delete Active Sequence").enabled);
-    }
-
-    #[test]
-    fn app_state_menu_items_reflect_sequence_navigation_state() {
-        let mut state = AppState::new();
-        let parent = Sequence::new("Parent");
-        let parent_id = parent.id;
-        let child = Sequence::new("Child");
-        let child_id = child.id;
-        state.sequence = Some(child);
-        state.active_sequence_id = Some(child_id);
-        state.default_sequence_id = Some(parent_id);
-        state.sequences.push(parent);
-        state.sequence_navigation_stack.push(parent_id);
-
-        let menu_items = default_menu_items_for_app_state(&state);
-        assert!(menu_item(&menu_items, "Sequence", "Return to Parent Sequence").enabled);
-        assert!(menu_item(&menu_items, "Sequence", "Set Active as Default").enabled);
-        assert!(menu_item(&menu_items, "Sequence", "Duplicate Active Sequence").enabled);
-        assert!(menu_item(&menu_items, "Sequence", "Delete Active Sequence").enabled);
-        assert!(menu_item(&menu_items, "Sequence", "Child").enabled);
-        assert!(menu_item(&menu_items, "Sequence", "Parent (Default)").enabled);
-
-        state.default_sequence_id = Some(child_id);
-        let menu_items = default_menu_items_for_app_state(&state);
-        assert!(menu_item(&menu_items, "Sequence", "Return to Parent Sequence").enabled);
-        assert!(!menu_item(&menu_items, "Sequence", "Set Active as Default").enabled);
-    }
-
-    #[test]
-    fn app_state_menu_sequence_rows_emit_typed_sequence_actions() {
-        let mut state = AppState::new();
-        let first = Sequence::new("First");
-        let first_id = first.id;
-        let second = Sequence::new("Second");
-        let second_id = second.id;
-        state.sequence = Some(first.clone());
-        state.active_sequence_id = Some(first_id);
-        state.default_sequence_id = Some(first_id);
-        state.sequences.push(first);
-        state.sequences.push(second);
-
-        let menu_items = default_menu_items_for_app_state(&state);
-        let duplicate = menu_item(&menu_items, "Sequence", "Duplicate Active Sequence");
-        let delete = menu_item(&menu_items, "Sequence", "Delete Active Sequence");
-        let switch = menu_item(&menu_items, "Sequence", "Second");
-
-        match &duplicate.action {
-            Action::Custom { namespace, name, payload } => {
-                assert_eq!(namespace, SEQUENCE_NAMESPACE);
-                assert_eq!(name, SEQUENCE_DUPLICATE);
-                let payload: SequenceTargetPayload =
-                    serde_json::from_value(payload.clone()).expect("duplicate payload");
-                assert_eq!(payload.sequence_id, first_id);
-            }
-            other => panic!("expected sequence duplicate action, got {other:?}"),
-        }
-        match &delete.action {
-            Action::Custom { namespace, name, payload } => {
-                assert_eq!(namespace, SEQUENCE_NAMESPACE);
-                assert_eq!(name, SEQUENCE_DELETE);
-                let payload: SequenceTargetPayload =
-                    serde_json::from_value(payload.clone()).expect("delete payload");
-                assert_eq!(payload.sequence_id, first_id);
-            }
-            other => panic!("expected sequence delete action, got {other:?}"),
-        }
-        match &switch.action {
-            Action::Custom { namespace, name, payload } => {
-                assert_eq!(namespace, SEQUENCE_NAMESPACE);
-                assert_eq!(name, SEQUENCE_SWITCH_ACTIVE);
-                let payload: SequenceTargetPayload =
-                    serde_json::from_value(payload.clone()).expect("switch payload");
-                assert_eq!(payload.sequence_id, second_id);
-            }
-            other => panic!("expected sequence switch action, got {other:?}"),
-        }
     }
 
     #[test]
@@ -1238,11 +994,6 @@ mod tests {
         assert!(menu_item(&menu_items, "Edit", "Mark In").enabled);
         assert!(menu_item(&menu_items, "Edit", "Mark Out").enabled);
         assert!(!menu_item(&menu_items, "Edit", "Clear In/Out").enabled);
-        assert!(menu_item(&menu_items, "Playback", "Go to Start").enabled);
-        assert!(menu_item(&menu_items, "Playback", "Step Back").enabled);
-        assert!(menu_item(&menu_items, "Playback", "Play/Pause").enabled);
-        assert!(menu_item(&menu_items, "Playback", "Step Forward").enabled);
-        assert!(menu_item(&menu_items, "Playback", "Go to End").enabled);
     }
 
     #[test]
@@ -1577,7 +1328,7 @@ mod tests {
     }
 
     #[test]
-    fn default_menu_items_expose_window_fullscreen_command() {
+    fn default_menu_items_expose_view_fullscreen_command() {
         let menu_items = default_menu_items();
         let view_items = menu_items
             .iter()

@@ -173,6 +173,15 @@ editor data.
 Top menu triggers use the lightweight `DropdownTriggerStyle::MenuBar` treatment
 and content-width layout: closed triggers should read like native menu text, not
 filled toolbar buttons, and should not reserve a persistent arrow affordance.
+The product menu bar has exactly five stable top-level groups: File, Edit,
+View, Window, and Help. Do not add top-level buckets for workflow-specific
+domains such as Playback, Sequence, Workspace, Assets, Effects, or Timeline.
+Route commands to the narrowest useful surface instead: timeline or asset
+context menus, focused keyboard shortcuts, panel toolbars, inspector controls,
+sequence selectors, or existing rows inside the five groups. `View` owns view
+presentation controls such as fullscreen. `Window` owns dock panel visibility
+and workspace presets. Adding another top-level menu requires an
+architecture update because the product chrome is intentionally kept compact.
 Unused menu-bar allocation remains draggable titlebar space; `TitleBar` should
 exclude only actual menu trigger hit rects and window-control rects from native
 drag initiation.
@@ -1044,15 +1053,15 @@ the local `TimelineClipRef`, and the app adapter resolves that ref to
 `ui.timeline.open_nested_sequence`. `AppState` then calls the same
 `open_nested_sequence` path used by the egui timeline, preserving sequence
 navigation stack behavior.
-Top-level sequence navigation follows the same action boundary. The
-self-hosted Sequence menu emits `ui.sequence.return_to_parent` and
-`ui.sequence.set_active_default`, and sequence management rows emit
-`ui.sequence.new`, `switch_active`, `duplicate`, or `delete`; only `AppState`
-reads the active sequence, updates the navigation stack, switches sequence
-collections, duplicates/deletes sequences, or writes the project default
-sequence. Menu availability is derived from the current `AppState` snapshot so
-the UI does not offer a parent-return command when no nested sequence is open or
-a destructive delete command when only one sequence exists.
+Sequence navigation follows the same action boundary, but it is not exposed as
+a top-level menu bucket. Nested-sequence return, active-default selection,
+sequence creation, switching, duplication, deletion, and settings belong in
+sequence-local surfaces such as the timeline context menu, sequence selector,
+or dedicated settings affordance. Those surfaces should still emit the
+`ui.sequence.*` app-shell actions and derive availability from the current
+`AppState` snapshot so the UI does not offer a parent-return command when no
+nested sequence is open or a destructive delete command when only one sequence
+exists.
 Timeline clipboard context-menu entries use
 `TimelineEditCommand::CutSelection`, `CopySelection`, `PasteAtPlayhead`, and
 `DuplicateSelection`, then map to the existing app-level `Action::Cut`,
@@ -1437,17 +1446,17 @@ to direct panels used by built-in workspace presets. If the active dock tree
 does not contain the requested panel, the shell switches to the panel's
 preferred built-in workspace and activates it there, so focus shortcuts never
 silently no-op.
-View-menu rows use `TogglePanel`. Direct dock-panel leaves, such as Viewer,
+Window-menu panel rows use `TogglePanel`. Direct dock-panel leaves, such as Viewer,
 Timeline, Inspector, Assets, Node Graph, and Export, hide by removing the panel
 leaf from `SelfHostedWorkspaceLayout`, collapsing now-empty split branches, and
 promoting the root to `WorkspacePreset::Custom`. If toggled again while absent,
 the shell restores the panel by switching to its preferred built-in workspace.
 Grouped tabs that are not independent layout leaves, currently Effects inside
-the Assets browser, participate in the same View-menu contract through
+the Assets browser, participate in the same Window-menu contract through
 panel-leaf `hidden_tabs` metadata. Hiding Effects keeps the Assets leaf and
 filters only the Effects tab; toggling it again detects that the grouped tab is
 absent and restores the preferred Editing workspace with Effects active.
-The View and Workspace menus expose that shell-local state through checked rows:
+The Window menu exposes that shell-local state through checked rows:
 panel rows are checked only when the current live layout contains the direct
 panel or grouped tab, while built-in workspace rows are checked only when that
 named preset is active. Custom layouts intentionally leave built-in workspace
