@@ -3436,6 +3436,7 @@ mod tests {
                 scroll_x: 96.0,
                 scroll_y: 24.0,
                 pixels_per_frame: 8.0,
+                snapping_enabled: false,
             });
         }));
         root.layout(Rect::new(0.0, 0.0, 1280.0, 480.0));
@@ -3448,6 +3449,7 @@ mod tests {
         assert!((after.pixels_per_frame - before.pixels_per_frame).abs() < f32::EPSILON);
         assert!((after.scroll_x - before.scroll_x).abs() < 0.01);
         assert!((after.scroll_y - before.scroll_y).abs() < 0.01);
+        assert_eq!(after.snapping_enabled, before.snapping_enabled);
     }
 
     #[test]

@@ -23,6 +23,7 @@ const TIMELINE_TOOLBAR_HEIGHT: f32 = 30.0;
 const TIMELINE_TOOLBAR_GROUP_GAP: f32 = 10.0;
 const TIMELINE_ZOOM_BUTTON_SIZE: f32 = 20.0;
 const TIMELINE_ZOOM_BUTTON_GAP: f32 = 4.0;
+const TIMELINE_SNAP_THRESHOLD_PX: f32 = 8.0;
 
 /// Action factory for clip selection.
 pub type TimelineClipAction = dyn Fn(TimelineClipRef, &TimelineClip) -> Action;
@@ -196,6 +197,7 @@ pub enum TimelineTool {
 pub enum TimelineToolbarIconSlot {
     SelectTool,
     BladeTool,
+    Snapping,
     MarkInAtPlayhead,
     MarkOutAtPlayhead,
 }
@@ -209,8 +211,32 @@ enum TimelineZoomButton {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TimelineToolbarButton {
     Tool(TimelineTool),
+    Snapping,
     Edit(TimelineEditCommand),
     Zoom(TimelineZoomButton),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimelineSnapKind {
+    TimelineStart,
+    Playhead,
+    ClipStart,
+    ClipEnd,
+    InPoint,
+    OutPoint,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TimelineSnapTarget {
+    frame: i64,
+    kind: TimelineSnapKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TimelineSnapResult {
+    frame: i64,
+    target: TimelineSnapTarget,
+    delta_frames: i64,
 }
 
 /// Local UI state preserved across [`TimelineView`] model rebuilds.
@@ -224,6 +250,8 @@ pub struct TimelineViewState {
     pub scroll_y: f32,
     /// Current zoom in pixels per frame.
     pub pixels_per_frame: f32,
+    /// Whether timeline snapping is enabled.
+    pub snapping_enabled: bool,
 }
 
 /// Clip view model rendered by [`TimelineView`].
@@ -380,6 +408,8 @@ pub struct TimelineView {
     playhead_frame: i64,
     in_point_frame: i64,
     out_point_frame: Option<i64>,
+    snapping_enabled: bool,
+    active_snap: Option<TimelineSnapResult>,
     pixels_per_frame: f32,
     scroll_x: f32,
     scroll_y: f32,
@@ -493,6 +523,8 @@ impl TimelineView {
             playhead_frame: 0,
             in_point_frame: 0,
             out_point_frame: None,
+            snapping_enabled: true,
+            active_snap: None,
             pixels_per_frame: 4.0,
             scroll_x: 0.0,
             scroll_y: 0.0,
@@ -584,6 +616,7 @@ impl TimelineView {
             self.active_tool = TimelineTool::Select;
             self.selected_track = None;
             self.playhead_dragging = false;
+            self.active_snap = None;
             self.in_out_drag = None;
             self.asset_drop_hover = None;
             self.track_drag = None;
@@ -782,6 +815,11 @@ impl TimelineView {
         self.active_tool
     }
 
+    /// Whether timeline snapping is enabled.
+    pub fn snapping_enabled(&self) -> bool {
+        self.snapping_enabled
+    }
+
     /// Snapshot local timeline UI state for rebuild preservation.
     pub fn state(&self) -> TimelineViewState {
         TimelineViewState {
@@ -789,6 +827,7 @@ impl TimelineView {
             scroll_x: self.scroll_x,
             scroll_y: self.scroll_y,
             pixels_per_frame: self.pixels_per_frame,
+            snapping_enabled: self.snapping_enabled,
         }
     }
 
@@ -796,6 +835,7 @@ impl TimelineView {
     pub fn restore_state(&mut self, state: &TimelineViewState) {
         self.active_tool = state.active_tool;
         self.pixels_per_frame = state.pixels_per_frame.clamp(0.25, 64.0);
+        self.snapping_enabled = state.snapping_enabled;
         self.scroll_x = state.scroll_x.max(0.0);
         self.scroll_y = state.scroll_y.max(0.0);
         if self.body_rect.width > 0.0 || self.body_rect.height > 0.0 {
@@ -954,6 +994,105 @@ impl TimelineView {
             .max(0.0) as i64
     }
 
+    fn snap_threshold_frames(&self) -> i64 {
+        (TIMELINE_SNAP_THRESHOLD_PX / self.pixels_per_frame).ceil().max(1.0) as i64
+    }
+
+    fn snap_targets(
+        &self,
+        excluded_clip: Option<TimelineClipRef>,
+        include_playhead: bool,
+    ) -> Vec<TimelineSnapTarget> {
+        let mut targets = Vec::new();
+        targets.push(TimelineSnapTarget { frame: 0, kind: TimelineSnapKind::TimelineStart });
+        if include_playhead {
+            targets.push(TimelineSnapTarget {
+                frame: self.playhead_frame.max(0),
+                kind: TimelineSnapKind::Playhead,
+            });
+        }
+        targets.push(TimelineSnapTarget {
+            frame: self.in_point_frame.max(0),
+            kind: TimelineSnapKind::InPoint,
+        });
+        if let Some(out) = self.out_point_frame {
+            targets.push(TimelineSnapTarget {
+                frame: out.saturating_add(1).max(0),
+                kind: TimelineSnapKind::OutPoint,
+            });
+        }
+        for (track_index, track) in self.tracks.iter().enumerate() {
+            for (clip_index, clip) in track.clips.iter().enumerate() {
+                let clip_ref = TimelineClipRef { track_index, clip_index };
+                if excluded_clip == Some(clip_ref) {
+                    continue;
+                }
+                targets.push(TimelineSnapTarget {
+                    frame: clip.start_frame.max(0),
+                    kind: TimelineSnapKind::ClipStart,
+                });
+                targets.push(TimelineSnapTarget {
+                    frame: clip.end_frame().max(0),
+                    kind: TimelineSnapKind::ClipEnd,
+                });
+            }
+        }
+        targets
+    }
+
+    fn snap_frame(
+        &self,
+        frame: i64,
+        excluded_clip: Option<TimelineClipRef>,
+        include_playhead: bool,
+    ) -> Option<TimelineSnapResult> {
+        if !self.snapping_enabled {
+            return None;
+        }
+        let threshold = self.snap_threshold_frames();
+        self.snap_targets(excluded_clip, include_playhead)
+            .into_iter()
+            .filter_map(|target| {
+                let delta_frames = target.frame - frame;
+                (delta_frames.abs() <= threshold).then_some(TimelineSnapResult {
+                    frame: target.frame,
+                    target,
+                    delta_frames,
+                })
+            })
+            .min_by_key(|result| (result.delta_frames.abs(), result.target.frame))
+    }
+
+    fn snap_clip_start(
+        &self,
+        clip_ref: TimelineClipRef,
+        start_frame: i64,
+        duration_frames: i64,
+    ) -> Option<TimelineSnapResult> {
+        if !self.snapping_enabled {
+            return None;
+        }
+        let start_snap = self.snap_frame(start_frame, Some(clip_ref), true);
+        let end_frame = start_frame.saturating_add(duration_frames.max(1));
+        let end_snap =
+            self.snap_frame(end_frame, Some(clip_ref), true).map(|snap| TimelineSnapResult {
+                frame: snap.frame.saturating_sub(duration_frames.max(1)).max(0),
+                target: snap.target,
+                delta_frames: snap.delta_frames,
+            });
+        [start_snap, end_snap]
+            .into_iter()
+            .flatten()
+            .min_by_key(|result| (result.delta_frames.abs(), result.target.frame))
+    }
+
+    fn set_active_snap(&mut self, snap: Option<TimelineSnapResult>, ctx: &mut EventContext) {
+        if self.active_snap != snap {
+            self.active_snap = snap;
+            ctx.request_repaint();
+        }
+    }
+
     fn track_y(&self, track_index: usize) -> f32 {
         self.body_rect.y + track_index as f32 * self.track_height - self.scroll_y
     }
@@ -1077,10 +1216,11 @@ impl TimelineView {
         }
     }
 
-    fn toolbar_left_buttons() -> [TimelineToolbarButton; 4] {
+    fn toolbar_left_buttons() -> [TimelineToolbarButton; 5] {
         [
             TimelineToolbarButton::Tool(TimelineTool::Select),
             TimelineToolbarButton::Tool(TimelineTool::Blade),
+            TimelineToolbarButton::Snapping,
             TimelineToolbarButton::Edit(TimelineEditCommand::MarkInAtPlayhead),
             TimelineToolbarButton::Edit(TimelineEditCommand::MarkOutAtPlayhead),
         ]
@@ -1104,7 +1244,7 @@ impl TimelineView {
         let limit = self.toolbar_left_limit();
         let mut x = self.toolbar_rect.x + 8.0;
         for (index, candidate) in Self::toolbar_left_buttons().into_iter().enumerate() {
-            if index == 2 {
+            if index == 3 {
                 x += TIMELINE_TOOLBAR_GROUP_GAP;
             }
             let rect = Rect::new(x, y, size, size);
@@ -1145,6 +1285,7 @@ impl TimelineView {
             TimelineToolbarButton::Tool(TimelineTool::Blade) => {
                 Some(TimelineToolbarIconSlot::BladeTool)
             }
+            TimelineToolbarButton::Snapping => Some(TimelineToolbarIconSlot::Snapping),
             TimelineToolbarButton::Edit(TimelineEditCommand::MarkInAtPlayhead) => {
                 Some(TimelineToolbarIconSlot::MarkInAtPlayhead)
             }
@@ -1160,6 +1301,7 @@ impl TimelineView {
         let label = match button {
             TimelineToolbarButton::Tool(TimelineTool::Select) => "Select Tool (V)",
             TimelineToolbarButton::Tool(TimelineTool::Blade) => "Blade Tool (B)",
+            TimelineToolbarButton::Snapping => "Snapping (S)",
             TimelineToolbarButton::Edit(TimelineEditCommand::MarkInAtPlayhead) => "Mark In",
             TimelineToolbarButton::Edit(TimelineEditCommand::MarkOutAtPlayhead) => "Mark Out",
             TimelineToolbarButton::Zoom(TimelineZoomButton::Out) => "Zoom Out",
@@ -1445,15 +1587,22 @@ impl TimelineView {
         let Some(mut drag) = self.clip_drag else {
             return false;
         };
-        let new_start_frame = (self.x_to_frame(position.x) - drag.pointer_offset_frames).max(0);
         if self.clip(drag.clip_ref).is_none() {
             self.clip_drag = None;
+            self.active_snap = None;
             return false;
         };
+        let clip_duration =
+            self.clip(drag.clip_ref).map(|clip| clip.duration_frames.max(1)).unwrap_or(1);
+        let proposed_start_frame =
+            (self.x_to_frame(position.x) - drag.pointer_offset_frames).max(0);
+        let snap = self.snap_clip_start(drag.clip_ref, proposed_start_frame, clip_duration);
+        let new_start_frame = snap.map_or(proposed_start_frame, |snap| snap.frame.max(0));
         let target_track_index = self
             .track_index_at(position)
             .map(|index| self.compatible_drag_track(drag.clip_ref.track_index, index))
             .unwrap_or(drag.current_track_index);
+        self.set_active_snap(snap, ctx);
         if drag.current_start_frame == new_start_frame
             && drag.current_track_index == target_track_index
         {
@@ -1473,9 +1622,12 @@ impl TimelineView {
         };
         let Some(_clip) = self.clip(drag.clip_ref) else {
             self.trim_drag = None;
+            self.active_snap = None;
             return false;
         };
         let pointer_frame = self.x_to_frame(position.x);
+        let snap = self.snap_frame(pointer_frame, Some(drag.clip_ref), true);
+        let pointer_frame = snap.map_or(pointer_frame, |snap| snap.frame);
         let old_end = drag.old_start_frame + drag.old_duration_frames.max(1);
         let (new_start, new_duration) = match drag.edge {
             TimelineTrimEdge::In => {
@@ -1487,6 +1639,7 @@ impl TimelineView {
                 (drag.old_start_frame, new_end - drag.old_start_frame)
             }
         };
+        self.set_active_snap(snap, ctx);
         if drag.current_start_frame == new_start && drag.current_duration_frames == new_duration {
             return true;
         }
@@ -1502,6 +1655,7 @@ impl TimelineView {
         let Some(drag) = self.clip_drag.take() else {
             return false;
         };
+        self.active_snap = None;
         if !drag.moved {
             return true;
         }
@@ -1529,6 +1683,7 @@ impl TimelineView {
         let Some(drag) = self.trim_drag.take() else {
             return false;
         };
+        self.active_snap = None;
         if !drag.moved {
             return true;
         }
@@ -1621,6 +1776,13 @@ impl TimelineView {
             }
             ctx.request_repaint();
         }
+    }
+
+    fn seek_from_drag_input(&mut self, frame: i64, ctx: &mut EventContext) {
+        let proposed = frame.max(0);
+        let snap = self.snap_frame(proposed, None, false);
+        self.set_active_snap(snap, ctx);
+        self.seek_from_input(snap.map_or(proposed, |snap| snap.frame), ctx);
     }
 
     fn asset_drop_target_at(&self, position: Point) -> Option<(usize, i64)> {
@@ -1919,7 +2081,9 @@ impl TimelineView {
             return false;
         }
         match button {
-            TimelineToolbarButton::Tool(_) | TimelineToolbarButton::Zoom(_) => true,
+            TimelineToolbarButton::Tool(_)
+            | TimelineToolbarButton::Snapping
+            | TimelineToolbarButton::Zoom(_) => true,
             TimelineToolbarButton::Edit(command) => self.edit_command_enabled(command),
         }
     }
@@ -1934,12 +2098,20 @@ impl TimelineView {
         }
         match button {
             TimelineToolbarButton::Tool(tool) => self.set_active_tool(tool, ctx),
+            TimelineToolbarButton::Snapping => self.toggle_snapping(ctx),
             TimelineToolbarButton::Edit(command) => {
                 let _ = self.dispatch_edit_command(command, ctx);
                 EventResult::Handled
             }
             TimelineToolbarButton::Zoom(button) => self.activate_zoom_button(button, ctx),
         }
+    }
+
+    fn toggle_snapping(&mut self, ctx: &mut EventContext) -> EventResult {
+        self.snapping_enabled = !self.snapping_enabled;
+        self.active_snap = None;
+        ctx.request_repaint();
+        EventResult::Handled
     }
 
     fn split_at_pointer_frame(&mut self, point: Point, ctx: &mut EventContext) -> EventResult {
@@ -2206,6 +2378,7 @@ impl TimelineView {
     fn paint_toolbar_button(&self, ctx: &mut PaintContext, button: TimelineToolbarButton) {
         match button {
             TimelineToolbarButton::Tool(tool) => self.paint_tool_button(ctx, tool),
+            TimelineToolbarButton::Snapping => self.paint_snapping_button(ctx),
             TimelineToolbarButton::Zoom(button) => self.paint_zoom_button(ctx, button),
             TimelineToolbarButton::Edit(_) => {
                 let Some(rect) = self.toolbar_button_rect(button) else {
@@ -2276,8 +2449,86 @@ impl TimelineView {
             TimelineToolbarButton::Edit(TimelineEditCommand::MarkOutAtPlayhead) => {
                 self.paint_toolbar_marker(ctx, rect, false, color);
             }
+            TimelineToolbarButton::Snapping => {
+                self.paint_toolbar_magnet(ctx, rect, color);
+            }
             _ => {}
         }
+    }
+
+    fn paint_snapping_button(&self, ctx: &mut PaintContext) {
+        let Some(rect) = self.toolbar_button_rect(TimelineToolbarButton::Snapping) else {
+            return;
+        };
+        let colors = &ctx.theme.colors;
+        let enabled = self.toolbar_button_enabled(TimelineToolbarButton::Snapping);
+        let active = enabled && self.snapping_enabled;
+        let hovered =
+            enabled && self.hovered_toolbar_button == Some(TimelineToolbarButton::Snapping);
+        let mut bg = if active {
+            mix_color(colors.accent, colors.primary, 0.18)
+        } else if hovered {
+            colors.secondary
+        } else {
+            colors.accent
+        };
+        bg.a = if enabled {
+            if active {
+                0.92
+            } else if hovered {
+                0.82
+            } else {
+                0.26
+            }
+        } else {
+            0.12
+        };
+        ctx.encoder.draw_rect(rect, bg, ctx.theme.spacing.radius_sm);
+
+        let icon = if !enabled {
+            color_with_alpha(colors.muted_foreground, 0.44)
+        } else if active {
+            colors.primary
+        } else {
+            colors.muted_foreground
+        };
+        if let Some(vector_icon) = self.toolbar_icon(TimelineToolbarIconSlot::Snapping) {
+            self.paint_toolbar_vector_icon(ctx, rect, vector_icon, icon);
+        } else {
+            self.paint_toolbar_magnet(ctx, rect, icon);
+        }
+    }
+
+    fn paint_toolbar_magnet(&self, ctx: &mut PaintContext, rect: Rect, color: Color) {
+        let left = rect.x + 5.0;
+        let right = rect.x + rect.width - 5.0;
+        let top = rect.y + 5.5;
+        let bottom = rect.y + rect.height - 5.0;
+        let mid_y = rect.y + rect.height * 0.54;
+        ctx.encoder
+            .draw_line(Point::new(left, top), Point::new(left, mid_y), 1.6, color);
+        ctx.encoder
+            .draw_line(Point::new(right, top), Point::new(right, mid_y), 1.6, color);
+        ctx.encoder.draw_line(
+            Point::new(left, mid_y),
+            Point::new(left + 2.5, bottom),
+            1.6,
+            color,
+        );
+        ctx.encoder.draw_line(
+            Point::new(right, mid_y),
+            Point::new(right - 2.5, bottom),
+            1.6,
+            color,
+        );
+        ctx.encoder.draw_line(
+            Point::new(left + 2.5, bottom),
+            Point::new(right - 2.5, bottom),
+            1.6,
+            color,
+        );
+        ctx.encoder.draw_rect(Rect::new(left - 1.5, top - 0.5, 3.0, 3.0), color, 0.8);
+        ctx.encoder.draw_rect(Rect::new(right - 1.5, top - 0.5, 3.0, 3.0), color, 0.8);
     }
 
     fn paint_toolbar_marker(
@@ -2941,6 +3192,24 @@ impl TimelineView {
         ctx.encoder.draw_triangles(&marker, colors.timeline_playhead);
     }
 
+    fn paint_snap_guide(&self, ctx: &mut PaintContext) {
+        let Some(snap) = self.active_snap else {
+            return;
+        };
+        let x = self.frame_to_x(snap.target.frame).round();
+        if x < self.body_rect.x - 1.0 || x > self.body_rect.x + self.body_rect.width + 1.0 {
+            return;
+        }
+        let mut color = ctx.theme.colors.ring;
+        color.a = 0.72;
+        ctx.encoder.draw_line(
+            Point::new(x, self.ruler_rect.y),
+            Point::new(x, self.body_rect.y + self.body_rect.height),
+            1.0,
+            color,
+        );
+    }
+
     fn paint_scrollbars(&self, ctx: &mut PaintContext) {
         let colors = &ctx.theme.colors;
         let radius = ctx.theme.spacing.radius_full;
@@ -3088,6 +3357,7 @@ impl Widget for TimelineView {
                 self.focused = true;
                 self.focus_visible = false;
                 self.playhead_dragging = false;
+                self.active_snap = None;
                 self.in_out_drag = None;
                 self.track_drag = None;
                 self.clip_drag = None;
@@ -3190,7 +3460,7 @@ impl Widget for TimelineView {
                     }
                     self.playhead_dragging = true;
                     self.request_timeline_pointer_capture(ctx);
-                    self.seek_from_input(self.x_to_frame(position.x), ctx);
+                    self.seek_from_drag_input(self.x_to_frame(position.x), ctx);
                     return EventResult::Handled;
                 }
                 if let Some((track_ref, control)) = self.track_control_at(*position) {
@@ -3242,7 +3512,7 @@ impl Widget for TimelineView {
                     return EventResult::Ignored;
                 }
                 if self.playhead_dragging {
-                    self.seek_from_input(self.x_to_frame(position.x), ctx);
+                    self.seek_from_drag_input(self.x_to_frame(position.x), ctx);
                     return EventResult::Handled;
                 }
                 if self.in_out_drag.is_some() {
@@ -3297,16 +3567,19 @@ impl Widget for TimelineView {
             }
             UiEvent::MouseUp { button: MouseButton::Left, .. } if self.playhead_dragging => {
                 self.playhead_dragging = false;
+                self.active_snap = None;
                 self.release_timeline_pointer_capture(ctx);
                 ctx.request_repaint();
                 return EventResult::Handled;
             }
             UiEvent::MouseUp { button: MouseButton::Left, .. } if self.in_out_drag.is_some() => {
+                self.active_snap = None;
                 self.finish_in_out_drag(ctx);
                 self.release_timeline_pointer_capture(ctx);
                 return EventResult::Handled;
             }
             UiEvent::MouseUp { button: MouseButton::Left, .. } if self.track_drag.is_some() => {
+                self.active_snap = None;
                 self.finish_track_drag(ctx);
                 self.release_timeline_pointer_capture(ctx);
                 return EventResult::Handled;
@@ -3336,6 +3609,7 @@ impl Widget for TimelineView {
                 self.focused = false;
                 self.focus_visible = false;
                 self.playhead_dragging = false;
+                self.active_snap = None;
                 self.in_out_drag = None;
                 self.asset_drop_hover = None;
                 self.track_drag = None;
@@ -3355,6 +3629,7 @@ impl Widget for TimelineView {
                     match key {
                         KeyCode::V => return self.set_active_tool(TimelineTool::Select, ctx),
                         KeyCode::B => return self.set_active_tool(TimelineTool::Blade, ctx),
+                        KeyCode::S => return self.toggle_snapping(ctx),
                         _ => {}
                     }
                 }
@@ -3418,6 +3693,7 @@ impl Widget for TimelineView {
             self.ruler_rect.width,
             self.ruler_rect.height + self.body_rect.height,
         ));
+        self.paint_snap_guide(ctx);
         self.paint_playhead(ctx);
         ctx.pop_clip();
 
@@ -3981,6 +4257,62 @@ mod tests {
     }
 
     #[test]
+    fn ruler_drag_snaps_playhead_to_clip_edge() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut view = timeline().on_seek(|frame| Action::Custom {
+            namespace: "timeline.seek".into(),
+            name: frame.to_string(),
+            payload: Default::default(),
+        });
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        view.event(
+            &UiEvent::MouseDown {
+                position: old_timeline_point(252.0, 12.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(view.playhead_frame(), 40);
+        assert!(view
+            .active_snap
+            .is_some_and(|snap| snap.target.kind == TimelineSnapKind::ClipStart));
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[Action::Custom {
+                namespace: "timeline.seek".into(),
+                name: "40".into(),
+                payload: Default::default(),
+            }]
+        );
+
+        view.event(
+            &UiEvent::MouseUp {
+                position: old_timeline_point(252.0, 12.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert!(view.active_snap.is_none());
+    }
+
+    #[test]
     fn focus_lost_without_active_drag_preserves_pointer_capture_owner() {
         let actions = RefCell::new(Vec::new());
         let dispatch = |action| actions.borrow_mut().push(action);
@@ -4278,6 +4610,134 @@ mod tests {
                 name: "0->0:0->10".into(),
                 payload: Default::default(),
             }]
+        );
+    }
+
+    #[test]
+    fn dragging_clip_snaps_to_neighbor_edge_when_enabled() {
+        let moves = RefCell::new(Vec::new());
+        let dispatch = |action| moves.borrow_mut().push(action);
+        let mut view = timeline().on_clip_move(|movement, _clip| Action::Custom {
+            namespace: "timeline.move".into(),
+            name: movement.new_start_frame.to_string(),
+            payload: Default::default(),
+        });
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        view.event(
+            &UiEvent::MouseDown {
+                position: old_timeline_point(108.0, 42.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        view.event(
+            &UiEvent::MouseMove {
+                position: old_timeline_point(264.0, 42.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert!(view.clip_drag.is_some_and(|drag| drag.current_start_frame == 40));
+        assert!(view
+            .active_snap
+            .is_some_and(|snap| snap.target.kind == TimelineSnapKind::ClipStart));
+
+        view.event(
+            &UiEvent::MouseUp {
+                position: old_timeline_point(264.0, 42.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(
+            moves.borrow().as_slice(),
+            &[
+                Action::SaveProject,
+                Action::Custom {
+                    namespace: "timeline.move".into(),
+                    name: "40".into(),
+                    payload: Default::default(),
+                },
+            ]
+        );
+        assert!(view.active_snap.is_none());
+    }
+
+    #[test]
+    fn dragging_clip_does_not_snap_when_snapping_is_disabled() {
+        let moves = RefCell::new(Vec::new());
+        let dispatch = |action| moves.borrow_mut().push(action);
+        let mut view = timeline().on_clip_move(|movement, _clip| Action::Custom {
+            namespace: "timeline.move".into(),
+            name: movement.new_start_frame.to_string(),
+            payload: Default::default(),
+        });
+        view.snapping_enabled = false;
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        view.event(
+            &UiEvent::MouseDown {
+                position: old_timeline_point(108.0, 42.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        view.event(
+            &UiEvent::MouseMove {
+                position: old_timeline_point(264.0, 42.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        view.event(
+            &UiEvent::MouseUp {
+                position: old_timeline_point(264.0, 42.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(
+            moves.borrow().as_slice(),
+            &[
+                Action::SaveProject,
+                Action::Custom {
+                    namespace: "timeline.move".into(),
+                    name: "39".into(),
+                    payload: Default::default(),
+                },
+            ]
         );
     }
 
@@ -4598,6 +5058,74 @@ mod tests {
                 name: "Out:40+30->40+35".into(),
                 payload: Default::default(),
             }]
+        );
+    }
+
+    #[test]
+    fn dragging_clip_edge_snaps_trim_to_neighbor_edge() {
+        let trims = RefCell::new(Vec::new());
+        let dispatch = |action| trims.borrow_mut().push(action);
+        let mut view = timeline().on_clip_trim(|trim, _clip| Action::Custom {
+            namespace: "timeline.trim".into(),
+            name: format!("{}+{}", trim.new_start_frame, trim.new_duration_frames),
+            payload: Default::default(),
+        });
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        view.event(
+            &UiEvent::MouseDown {
+                position: old_timeline_point(192.0, 42.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        view.event(
+            &UiEvent::MouseMove {
+                position: old_timeline_point(252.0, 42.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert!(view.trim_drag.is_some_and(|drag| {
+            drag.current_start_frame == 0 && drag.current_duration_frames == 40
+        }));
+        assert!(view
+            .active_snap
+            .is_some_and(|snap| snap.target.kind == TimelineSnapKind::ClipStart));
+
+        view.event(
+            &UiEvent::MouseUp {
+                position: old_timeline_point(252.0, 42.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(
+            trims.borrow().as_slice(),
+            &[
+                Action::SaveProject,
+                Action::Custom {
+                    namespace: "timeline.trim".into(),
+                    name: "0+40".into(),
+                    payload: Default::default(),
+                },
+            ]
         );
     }
 
@@ -5052,6 +5580,7 @@ mod tests {
             [
                 TimelineToolbarButton::Tool(TimelineTool::Select),
                 TimelineToolbarButton::Tool(TimelineTool::Blade),
+                TimelineToolbarButton::Snapping,
                 TimelineToolbarButton::Edit(TimelineEditCommand::MarkInAtPlayhead),
                 TimelineToolbarButton::Edit(TimelineEditCommand::MarkOutAtPlayhead),
             ]
@@ -6035,6 +6564,67 @@ mod tests {
     }
 
     #[test]
+    fn snapping_is_enabled_by_default_and_persisted_in_view_state() {
+        let mut view = timeline();
+        assert!(view.snapping_enabled());
+
+        view.snapping_enabled = false;
+        let state = view.state();
+        let mut rebuilt = timeline();
+        rebuilt.restore_state(&state);
+
+        assert!(!rebuilt.snapping_enabled());
+    }
+
+    #[test]
+    fn snapping_toolbar_button_and_s_shortcut_toggle_local_state() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut view = timeline();
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+        let snap_button = view
+            .toolbar_button_rect(TimelineToolbarButton::Snapping)
+            .expect("wide toolbar should show snap control")
+            .center();
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            view.event(
+                &UiEvent::MouseDown {
+                    position: snap_button,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert!(!view.snapping_enabled());
+
+        view.event(&UiEvent::FocusGained, &mut ctx);
+        assert_eq!(
+            view.event(
+                &UiEvent::KeyDown { key: KeyCode::S, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert!(view.snapping_enabled());
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
     fn blade_tool_click_seeks_and_dispatches_split_without_dragging_clip() {
         let actions = RefCell::new(Vec::new());
         let commands = Rc::new(RefCell::new(Vec::new()));
@@ -6528,6 +7118,30 @@ mod tests {
         assert!(encoder.clips >= 3);
         assert!(encoder.texts.iter().any(|text| text == "V1"));
         assert!(encoder.texts.iter().any(|text| text == "Intro"));
+    }
+
+    #[test]
+    fn paint_draws_snap_guide_for_active_snap() {
+        let mut view = timeline();
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+        view.active_snap = Some(TimelineSnapResult {
+            frame: 40,
+            target: TimelineSnapTarget { frame: 40, kind: TimelineSnapKind::ClipStart },
+            delta_frames: 1,
+        });
+
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 520.0, 180.0),
+        };
+        view.paint(&mut ctx);
+
+        let mut guide_color = theme.colors.ring;
+        guide_color.a = 0.72;
+        assert!(encoder.line_colors.contains(&guide_color));
     }
 
     #[test]

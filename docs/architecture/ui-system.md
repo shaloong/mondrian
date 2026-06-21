@@ -630,6 +630,14 @@ release they emit domain-light move/trim proposals (`TimelineClipMove`,
 `TimelineClipTrim`) instead of resolving clip overlaps, ripple behavior, linked
 media, source in/out offsets, or undo snapshots. Those semantics stay in
 `mondrian-app` / `mondrian-timeline` command handling. Timelines expose
+snapping as another widget-local preview layer: the explicit Snap toolbar
+toggle is stored in `TimelineViewState`, defaults on, and focused `S` toggles
+it without dispatching editor actions. When enabled, clip moves, edge trims,
+and ruler playhead drags may adjust their proposed frame to nearby timeline
+start, playhead, clip edge, or in/out candidates and paint a snap guide; the
+app layer receives only the adjusted frame proposal. Future marker, linked
+clip, or ripple-aware snapping should extend candidate generation without
+moving timeline mutation rules into the widget crate. Timelines expose
 overlay horizontal and vertical scrollbars when content overflows; scrollbar
 thumb drags and track paging must win hit testing over clip selection and
 seeking. Timeline surfaces are focusable: while focused they may handle
@@ -1451,12 +1459,13 @@ the app layer. This keeps the renderer-facing timeline primitive testable while
 preserving a clean path for progressively replacing the old egui timeline.
 The visual baseline is compact NLE density: 42px default tracks, 28px ruler,
 104px app-supplied track header column, subtle alternating lane fills, weak row
-separators, a one-pixel playhead, 8px overlay scrollbars, and clip blocks with
-kind-specific borders plus trim-handle affordances on hover/selection. Ruler
-ticks should use low-alpha foreground rather than full panel borders, so time
-markings read without turning the timeline into a table. Alternating timeline
-lane fills are semantic timeline tokens so compact editor density remains
-theme-owned rather than embedded in the drawing code.
+separators, a one-pixel playhead, 8px overlay scrollbars, an explicit magnet
+Snap toggle in the tool strip, and clip blocks with kind-specific borders plus
+trim-handle affordances on hover/selection. Ruler ticks and snap guides should
+use low-alpha semantic foreground/ring colors rather than full panel borders, so
+time markings and edit alignment cues read without turning the timeline into a
+table. Alternating timeline lane fills are semantic timeline tokens so compact
+editor density remains theme-owned rather than embedded in the drawing code.
 When no timeline model is available, app panels should disable the surface so
 empty shells do not steal focus, seek, or hold pointer capture. The app panel
 model owns the empty-state reason, such as no open sequence or an empty

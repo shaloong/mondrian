@@ -1703,6 +1703,7 @@ fn with_timeline_toolbar_icons(mut timeline: TimelineView) -> TimelineView {
     for (slot, icon) in [
         (TimelineToolbarIconSlot::SelectTool, AppIcon::CursorFilled),
         (TimelineToolbarIconSlot::BladeTool, AppIcon::Cut),
+        (TimelineToolbarIconSlot::Snapping, AppIcon::Magnet),
         (
             TimelineToolbarIconSlot::MarkInAtPlayhead,
             AppIcon::CaretRight,
