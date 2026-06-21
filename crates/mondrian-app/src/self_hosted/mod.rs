@@ -28,4 +28,5 @@ pub mod startup;
 pub(crate) mod test_utils;
 pub mod title_bar;
 pub mod window;
+pub mod window_controls;
 pub mod workspace_layout;

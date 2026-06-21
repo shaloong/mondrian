@@ -4,42 +4,22 @@
 //! layout, hit testing, and drawing for the custom title/menu row.
 
 use mondrian_editor_state::state::WorkspacePreset;
-use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
-use crate::app::ui_actions::{
-    app_shell_quit_action, app_shell_window_drag_action, app_shell_window_minimize_action,
-    app_shell_window_toggle_maximize_action,
-};
+use crate::app::ui_actions::app_shell_window_drag_action;
 use crate::self_hosted::menu_bar::{MenuBar, MENU_BAR_HEIGHT};
+#[cfg(test)]
+use crate::self_hosted::window_controls::PlatformWindowControlStyle;
+use crate::self_hosted::window_controls::{WindowControl, WindowControlEdge, WindowControls};
 use crate::self_hosted::workspace_layout::SelfHostedWorkspaceLayout;
 
 /// Height reserved for the self-hosted menu/title chrome.
 pub const TITLE_BAR_HEIGHT: f32 = 34.0;
 
-const WINDOW_BUTTON_WIDTH: f32 = 46.0;
-const WINDOW_BUTTON_COUNT: usize = 3;
 const BRAND_WIDTH: f32 = 96.0;
 const MENU_WIDTH: f32 = 500.0;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WindowControl {
-    Minimize,
-    ToggleMaximize,
-    Close,
-}
-
-impl WindowControl {
-    fn action(self) -> Action {
-        match self {
-            Self::Minimize => app_shell_window_minimize_action(),
-            Self::ToggleMaximize => app_shell_window_toggle_maximize_action(),
-            Self::Close => app_shell_quit_action(),
-        }
-    }
-}
 
 /// Custom top chrome for product windows.
 pub struct TitleBar {
@@ -49,7 +29,7 @@ pub struct TitleBar {
     bounds: Rect,
     menu_bounds: Rect,
     title_bounds: Rect,
-    control_bounds: [Rect; WINDOW_BUTTON_COUNT],
+    window_controls: WindowControls,
     hovered_control: Option<WindowControl>,
     pressed_control: Option<WindowControl>,
 }
@@ -64,10 +44,22 @@ impl TitleBar {
             bounds: Rect::ZERO,
             menu_bounds: Rect::ZERO,
             title_bounds: Rect::ZERO,
-            control_bounds: [Rect::ZERO; WINDOW_BUTTON_COUNT],
+            window_controls: WindowControls::default(),
             hovered_control: None,
             pressed_control: None,
         }
+    }
+
+    /// Build title chrome with an explicit platform-control style.
+    #[cfg(test)]
+    pub(crate) fn new_with_window_control_style(
+        title: impl Into<String>,
+        menu_bar: MenuBar,
+        style: PlatformWindowControlStyle,
+    ) -> Self {
+        let mut title_bar = Self::new(title, menu_bar);
+        title_bar.window_controls = WindowControls::new(style);
+        title_bar
     }
 
     /// Access the embedded product menu.
@@ -98,22 +90,12 @@ impl TitleBar {
     }
 
     fn control_at(&self, position: Point) -> Option<WindowControl> {
-        [
-            WindowControl::Minimize,
-            WindowControl::ToggleMaximize,
-            WindowControl::Close,
-        ]
-        .into_iter()
-        .zip(self.control_bounds)
-        .find_map(|(control, bounds)| bounds.contains(position).then_some(control))
+        self.window_controls.control_at(position)
     }
 
+    #[cfg(test)]
     fn control_bounds(&self, control: WindowControl) -> Rect {
-        match control {
-            WindowControl::Minimize => self.control_bounds[0],
-            WindowControl::ToggleMaximize => self.control_bounds[1],
-            WindowControl::Close => self.control_bounds[2],
-        }
+        self.window_controls.control_bounds(control)
     }
 
     fn is_drag_region(&self, position: Point) -> bool {
@@ -134,27 +116,26 @@ impl Widget for TitleBar {
 
     fn layout(&mut self, bounds: Rect) {
         self.bounds = Rect::new(bounds.x, bounds.y, bounds.width, TITLE_BAR_HEIGHT);
-        let controls_width = WINDOW_BUTTON_WIDTH * WINDOW_BUTTON_COUNT as f32;
-        let controls_left = (self.bounds.x + self.bounds.width - controls_width).max(self.bounds.x);
-        for index in 0..WINDOW_BUTTON_COUNT {
-            self.control_bounds[index] = Rect::new(
-                controls_left + index as f32 * WINDOW_BUTTON_WIDTH,
-                self.bounds.y,
-                WINDOW_BUTTON_WIDTH,
-                TITLE_BAR_HEIGHT,
-            );
-        }
+        self.window_controls.layout(self.bounds);
+        let controls_width = self.window_controls.total_width().min(self.bounds.width);
+        let content_left = match self.window_controls.edge() {
+            WindowControlEdge::Leading => self.bounds.x + controls_width + 8.0,
+            WindowControlEdge::Trailing => self.bounds.x + 12.0,
+        };
+        let content_right = match self.window_controls.edge() {
+            WindowControlEdge::Leading => self.bounds.x + self.bounds.width - 12.0,
+            WindowControlEdge::Trailing => self.window_controls.bounds().x,
+        };
 
-        let left_padding = self.bounds.x + 12.0;
-        let menu_x = left_padding + BRAND_WIDTH;
-        let available_before_controls = (controls_left - menu_x - 8.0).max(0.0);
+        let menu_x = content_left + BRAND_WIDTH;
+        let available_before_controls = (content_right - menu_x - 8.0).max(0.0);
         let menu_width = MENU_WIDTH.min(available_before_controls);
         let menu_y = self.bounds.y + (TITLE_BAR_HEIGHT - MENU_BAR_HEIGHT) * 0.5;
         self.menu_bounds = Rect::new(menu_x, menu_y, menu_width, MENU_BAR_HEIGHT);
         self.menu_bar.layout(self.menu_bounds);
 
-        let title_x = (menu_x + menu_width + 12.0).min(controls_left);
-        let title_width = (controls_left - title_x - 12.0).max(0.0);
+        let title_x = (menu_x + menu_width + 12.0).min(content_right);
+        let title_width = (content_right - title_x - 12.0).max(0.0);
         self.title_bounds = Rect::new(title_x, self.bounds.y, title_width, TITLE_BAR_HEIGHT);
     }
 
@@ -223,7 +204,7 @@ impl Widget for TitleBar {
         ctx.encoder.draw_text(
             "Mondrian",
             13.0,
-            Point::new(self.bounds.x + 12.0, self.bounds.y + 10.0),
+            Point::new(self.brand_x(), self.bounds.y + 10.0),
             colors.card_foreground,
         );
         self.menu_bar.paint(ctx);
@@ -240,13 +221,7 @@ impl Widget for TitleBar {
         ctx.pop_clip();
         ctx.clip_rect = previous_clip;
 
-        for control in [
-            WindowControl::Minimize,
-            WindowControl::ToggleMaximize,
-            WindowControl::Close,
-        ] {
-            paint_window_control(self, control, ctx);
-        }
+        self.window_controls.paint(ctx, self.hovered_control, self.pressed_control);
     }
 
     fn paint_overlay(&self, ctx: &mut PaintContext) {
@@ -274,71 +249,13 @@ impl Widget for TitleBar {
     }
 }
 
-fn paint_window_control(title_bar: &TitleBar, control: WindowControl, ctx: &mut PaintContext) {
-    let rect = title_bar.control_bounds(control);
-    let colors = &ctx.theme.colors;
-    let hovered = title_bar.hovered_control == Some(control);
-    let pressed = title_bar.pressed_control == Some(control);
-    let mut fill = if control == WindowControl::Close && hovered {
-        colors.error
-    } else if pressed {
-        colors.accent
-    } else if hovered {
-        colors.secondary
-    } else {
-        colors.background.lerp(colors.card, 0.42)
-    };
-    if !hovered && !pressed {
-        fill.a = 0.0;
-    }
-    ctx.encoder.draw_rect(rect, fill, 0.0);
-
-    let icon_color = if control == WindowControl::Close && hovered {
-        colors.primary_foreground
-    } else {
-        colors.card_foreground
-    };
-    let cx = rect.x + rect.width * 0.5;
-    let cy = rect.y + rect.height * 0.5;
-    match control {
-        WindowControl::Minimize => {
-            ctx.encoder.draw_line(
-                Point::new(cx - 5.0, cy + 1.0),
-                Point::new(cx + 5.0, cy + 1.0),
-                1.25,
-                icon_color,
-            );
-        }
-        WindowControl::ToggleMaximize => {
-            let r = Rect::new(cx - 5.0, cy - 5.0, 10.0, 10.0);
-            ctx.encoder.draw_line(r.min(), Point::new(r.x + r.width, r.y), 1.2, icon_color);
-            ctx.encoder.draw_line(r.min(), Point::new(r.x, r.y + r.height), 1.2, icon_color);
-            ctx.encoder.draw_line(
-                Point::new(r.x + r.width, r.y),
-                Point::new(r.x + r.width, r.y + r.height),
-                1.2,
-                icon_color,
-            );
-            ctx.encoder.draw_line(
-                Point::new(r.x, r.y + r.height),
-                Point::new(r.x + r.width, r.y + r.height),
-                1.2,
-                icon_color,
-            );
-        }
-        WindowControl::Close => {
-            ctx.encoder.draw_line(
-                Point::new(cx - 5.0, cy - 5.0),
-                Point::new(cx + 5.0, cy + 5.0),
-                1.35,
-                icon_color,
-            );
-            ctx.encoder.draw_line(
-                Point::new(cx + 5.0, cy - 5.0),
-                Point::new(cx - 5.0, cy + 5.0),
-                1.35,
-                icon_color,
-            );
+impl TitleBar {
+    fn brand_x(&self) -> f32 {
+        match self.window_controls.edge() {
+            WindowControlEdge::Leading => {
+                self.window_controls.bounds().x + self.window_controls.bounds().width + 8.0
+            }
+            WindowControlEdge::Trailing => self.bounds.x + 12.0,
         }
     }
 }
@@ -346,6 +263,7 @@ fn paint_window_control(title_bar: &TitleBar, control: WindowControl, ctx: &mut 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::ui_actions::app_shell_quit_action;
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_ui_core::widget::{DrawCommandEncoder, EventRequests, PointerCaptureRequest};
     use mondrian_ui_theme::ThemePreset;
@@ -394,6 +312,13 @@ mod tests {
         bar
     }
 
+    fn title_bar_with_style(style: PlatformWindowControlStyle) -> TitleBar {
+        let mut bar =
+            TitleBar::new_with_window_control_style("Demo Project", MenuBar::default(), style);
+        bar.layout(Rect::new(0.0, 0.0, 1000.0, TITLE_BAR_HEIGHT));
+        bar
+    }
+
     #[test]
     fn title_bar_lays_out_menu_and_window_controls_in_one_row() {
         let bar = title_bar();
@@ -403,9 +328,18 @@ mod tests {
         assert!(bar.menu_bar().bounds().x > 90.0);
         assert_eq!(
             bar.control_bounds(WindowControl::Close).width,
-            WINDOW_BUTTON_WIDTH
+            PlatformWindowControlStyle::current().total_width() / 3.0
         );
         assert!(bar.control_bounds(WindowControl::Close).x > bar.menu_bar().bounds().x);
+    }
+
+    #[test]
+    fn title_bar_offsets_content_for_macos_leading_window_controls() {
+        let bar = title_bar_with_style(PlatformWindowControlStyle::MacOs);
+
+        assert!(bar.control_bounds(WindowControl::Close).x < bar.menu_bar().bounds().x);
+        assert!(bar.menu_bar().bounds().x >= PlatformWindowControlStyle::MacOs.total_width());
+        assert!(bar.is_drag_region(Point::new(860.0, 14.0)));
     }
 
     #[test]
@@ -494,7 +428,7 @@ mod tests {
     }
 
     #[test]
-    fn title_bar_paints_geometric_window_controls() {
+    fn title_bar_paints_platform_window_controls() {
         let bar = title_bar();
         let mut recorder = Recorder::default();
         let theme = ThemePreset::Dark.build();
@@ -510,7 +444,7 @@ mod tests {
         assert!(recorder.texts.iter().any(|text| text == "Demo Project"));
         assert!(
             recorder.lines >= 7,
-            "window controls should be painted as geometry"
+            "window controls should be painted as platform geometry"
         );
     }
 }

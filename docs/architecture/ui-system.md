@@ -149,12 +149,18 @@ shortcut with default project settings.
 
 Product top chrome is `self_hosted::title_bar::TitleBar`: it combines the
 product menu bar, a read-only project/sequence title, draggable titlebar space,
-and geometric window controls in one row. Window controls emit app-shell custom
-actions only; `SelfHostedUiHost` converts them into `SelfHostedShellCommands`
-and `self_hosted::window` applies native minimize, maximize, drag, fullscreen,
-or quit side effects after widget and `AppState` borrows end. These commands
-must not be added to the editor-state core action enum unless they mutate
-portable editor data.
+and platform-aware custom window controls in one row. Native OS titlebar
+buttons are not embedded directly: winit does not expose a portable way to keep
+the self-hosted title/menu row while borrowing only the operating system's
+minimize, maximize, and close buttons. `self_hosted::window_controls` owns the
+client-side control order, edge, hit targets, hover treatment, and glyphs for
+Windows, macOS, and Linux styles; `TitleBar` only consumes its layout and
+event surface. Window controls emit app-shell custom actions only;
+`SelfHostedUiHost` converts them into `SelfHostedShellCommands` and
+`self_hosted::window` applies native minimize, maximize, drag, fullscreen, or
+quit side effects after widget and `AppState` borrows end. These commands must
+not be added to the editor-state core action enum unless they mutate portable
+editor data.
 
 Shell-local modals, such as New Project, Preferences, and About, live in their
 own `self_hosted::*_dialog` modules and are hosted by `self_hosted::modal`.
