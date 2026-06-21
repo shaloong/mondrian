@@ -45,12 +45,14 @@ use crate::self_hosted::new_project_dialog::{
     default_project_file_name, SelfHostedNewProjectDraft,
 };
 use crate::self_hosted::panels::{
-    build_dock_tree_for_preset, AssetThumbnailSource, SelfHostedPanelModels, ViewerPreviewSource,
+    build_dock_tree_for_preset, build_dock_tree_from_layout, AssetThumbnailSource,
+    SelfHostedPanelModels, ViewerPreviewSource,
 };
 use crate::self_hosted::preferences_dialog::{PreferencesDialogTab, SelfHostedPreferencesModel};
 use crate::self_hosted::preferences_store::SelfHostedPreferences;
 use crate::self_hosted::sequence_settings_dialog::SelfHostedSequenceSettingsDraft;
 use crate::self_hosted::title_bar::{TitleBar, TITLE_BAR_HEIGHT};
+use crate::self_hosted::workspace_layout::SelfHostedWorkspaceLayout;
 use mondrian_core::{MondrianError, Result};
 
 /// Default file extension for Mondrian project containers.
@@ -542,6 +544,7 @@ pub struct SelfHostedAppRoot {
     asset_folder_id: Option<String>,
     preferences_model: SelfHostedPreferencesModel,
     workspace_preset: WorkspacePreset,
+    custom_workspace_layout: Option<SelfHostedWorkspaceLayout>,
     viewer_zoom_mode: ViewerZoomMode,
     active_sequence: Option<Sequence>,
     modal: Option<ShellModal>,
@@ -608,6 +611,7 @@ impl SelfHostedAppRoot {
                 &preferences.shortcut_overrides,
             ),
             preferences.workspace_preset,
+            preferences.custom_workspace_layout.clone(),
             status_bar_model(state),
         );
         root.active_sequence = state.sequence.clone();
@@ -644,6 +648,7 @@ impl SelfHostedAppRoot {
             models,
             SelfHostedPreferencesModel::default(),
             workspace_preset,
+            None,
             status_bar_model(&AppState::new()),
         )
     }
@@ -653,12 +658,17 @@ impl SelfHostedAppRoot {
         mut models: SelfHostedPanelModels,
         preferences_model: SelfHostedPreferencesModel,
         workspace_preset: WorkspacePreset,
+        custom_workspace_layout: Option<SelfHostedWorkspaceLayout>,
         status_bar_model: StatusBarModel,
     ) -> Self {
         let viewer_zoom_mode = ViewerZoomMode::Fit;
         apply_viewer_zoom_mode(&mut models, viewer_zoom_mode);
-        let dock = build_dock_tree_for_preset(models.clone(), workspace_preset);
-        Self {
+        let dock = build_dock_tree_for_workspace(
+            models.clone(),
+            workspace_preset,
+            custom_workspace_layout.as_ref(),
+        );
+        let mut root = Self {
             id: WidgetId::new(),
             title_bar,
             dock,
@@ -671,16 +681,67 @@ impl SelfHostedAppRoot {
             asset_folder_id: None,
             preferences_model,
             workspace_preset,
+            custom_workspace_layout,
             viewer_zoom_mode,
             active_sequence: None,
             modal: None,
             bounds: Rect::ZERO,
-        }
+        };
+        root.refresh_shell_menu_checked_state();
+        root
     }
 
     /// Current built-in workspace preset used by the dock tree.
     pub fn workspace_preset(&self) -> WorkspacePreset {
         self.workspace_preset
+    }
+
+    /// Persistable custom layout currently associated with the root.
+    pub fn custom_workspace_layout(&self) -> Option<&SelfHostedWorkspaceLayout> {
+        self.custom_workspace_layout.as_ref()
+    }
+
+    /// Capture the live dock tree as a persistable workspace layout.
+    pub fn workspace_layout(&self) -> Option<SelfHostedWorkspaceLayout> {
+        let layout = SelfHostedWorkspaceLayout::from_dock(&self.dock)?;
+        if self.workspace_preset == WorkspacePreset::Custom {
+            if let Some(previous) = self.custom_workspace_layout.as_ref() {
+                return Some(layout.with_panel_metadata_from(previous));
+            }
+        }
+        Some(layout)
+    }
+
+    fn refresh_shell_menu_checked_state(&mut self) {
+        let layout = self.workspace_layout();
+        self.title_bar
+            .refresh_shell_menu_checked_state(self.workspace_preset, layout.as_ref());
+    }
+
+    /// Promote modified built-in layouts to Custom and refresh the custom
+    /// layout snapshot. Returns true when the shell preference snapshot changed.
+    pub fn sync_custom_workspace_layout_from_dock(&mut self) -> bool {
+        let Some(layout) = self.workspace_layout() else {
+            return false;
+        };
+        let promoted = self.workspace_preset != WorkspacePreset::Custom
+            && !self.current_split_layout_matches_builtin_preset();
+        if promoted {
+            self.workspace_preset = WorkspacePreset::Custom;
+            self.preferences_model.workspace = WorkspacePreset::Custom.display_name().to_owned();
+        }
+
+        if self.workspace_preset != WorkspacePreset::Custom {
+            return false;
+        }
+
+        let changed = promoted || self.custom_workspace_layout.as_ref() != Some(&layout);
+        if changed {
+            self.custom_workspace_layout = Some(layout);
+            self.refresh_shell_menu_checked_state();
+        }
+
+        changed
     }
 
     /// Currently shown asset-library folder, or root when absent.
@@ -714,7 +775,11 @@ impl SelfHostedAppRoot {
         let panel_scroll_state = collect_panel_scroll_state(&self.dock);
         self.models = models;
         apply_viewer_zoom_mode(&mut self.models, self.viewer_zoom_mode);
-        self.dock = build_dock_tree_for_preset(self.models.clone(), self.workspace_preset);
+        self.dock = build_dock_tree_for_workspace(
+            self.models.clone(),
+            self.workspace_preset,
+            self.custom_workspace_layout.as_ref(),
+        );
         self.dock.restore_layout(&layout);
         restore_dock_panel_state(&mut self.dock, &dock_panel_state);
         restore_asset_grid_state(&mut self.dock, &asset_grid_state);
@@ -739,6 +804,7 @@ impl SelfHostedAppRoot {
             workspace_preset: self.workspace_preset,
             recent_projects: Vec::new(),
             shortcut_overrides: Vec::new(),
+            custom_workspace_layout: self.custom_workspace_layout.clone(),
         };
         self.refresh_from_app_state_with_preferences(state, &preferences);
     }
@@ -803,6 +869,7 @@ impl SelfHostedAppRoot {
         if let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_preferences_mut) {
             dialog.set_model(preferences_model);
         }
+        self.refresh_shell_menu_checked_state();
     }
 
     /// Activate a dock panel or grouped tab in the default self-hosted layout.
@@ -826,12 +893,53 @@ impl SelfHostedAppRoot {
         self.activate_panel(panel);
     }
 
+    /// Toggle a direct dock panel leaf or a visible grouped tab.
+    pub fn toggle_panel(&mut self, panel: PanelKind) {
+        if self.hide_panel(panel) {
+            return;
+        }
+        self.focus_panel(panel);
+    }
+
+    fn hide_panel(&mut self, panel: PanelKind) -> bool {
+        let Some(layout) = self.workspace_layout() else {
+            return false;
+        };
+        if !layout.contains_panel(panel) {
+            return false;
+        }
+        let Some(next_layout) = layout.without_panel(panel) else {
+            return false;
+        };
+        if !next_layout.is_split_root() {
+            return false;
+        }
+        let Some(dock) = build_dock_tree_from_layout(self.models.clone(), &next_layout) else {
+            return false;
+        };
+
+        self.workspace_preset = WorkspacePreset::Custom;
+        self.preferences_model.workspace = WorkspacePreset::Custom.display_name().to_owned();
+        self.custom_workspace_layout = Some(next_layout);
+        self.dock = dock;
+        self.refresh_shell_menu_checked_state();
+        if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
+            self.layout(self.bounds);
+        }
+        true
+    }
+
     /// Switch to a built-in workspace preset and rebuild the dock tree from the
     /// current shell models.
     pub fn switch_workspace(&mut self, preset: WorkspacePreset) {
         self.workspace_preset = preset;
         self.preferences_model.workspace = preset.display_name().to_owned();
-        self.dock = build_dock_tree_for_preset(self.models.clone(), preset);
+        self.dock = build_dock_tree_for_workspace(
+            self.models.clone(),
+            preset,
+            self.custom_workspace_layout.as_ref(),
+        );
+        self.refresh_shell_menu_checked_state();
         if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
             self.layout(self.bounds);
         }
@@ -862,8 +970,12 @@ impl SelfHostedAppRoot {
         current_project_path: Option<&Path>,
     ) -> Result<Option<Action>> {
         match action {
-            Action::FocusPanel(panel) | Action::TogglePanel(panel) => {
+            Action::FocusPanel(panel) => {
                 self.focus_panel(panel);
+                Ok(None)
+            }
+            Action::TogglePanel(panel) => {
+                self.toggle_panel(panel);
                 Ok(None)
             }
             Action::SwitchWorkspace(preset) => {
@@ -1045,6 +1157,29 @@ impl SelfHostedAppRoot {
     fn preferences_model(&self) -> SelfHostedPreferencesModel {
         self.preferences_model.clone()
     }
+
+    fn current_split_layout_matches_builtin_preset(&self) -> bool {
+        if self.workspace_preset == WorkspacePreset::Custom {
+            return true;
+        }
+        let default = build_dock_tree_for_preset(self.models.clone(), self.workspace_preset);
+        self.dock.layout_snapshot() == default.layout_snapshot()
+    }
+}
+
+fn build_dock_tree_for_workspace(
+    models: SelfHostedPanelModels,
+    preset: WorkspacePreset,
+    custom_layout: Option<&SelfHostedWorkspaceLayout>,
+) -> DockSplitter {
+    if preset == WorkspacePreset::Custom {
+        if let Some(layout) = custom_layout {
+            if let Some(dock) = build_dock_tree_from_layout(models.clone(), layout) {
+                return dock;
+            }
+        }
+    }
+    build_dock_tree_for_preset(models, preset)
 }
 
 fn dock_panel_locations(panel: PanelKind) -> Vec<(PanelKind, usize)> {
@@ -1078,6 +1213,9 @@ fn activate_panel_in_widget(
 ) -> bool {
     if let Some(panel) = widget.as_any_mut().and_then(|any| any.downcast_mut::<DockPanel>()) {
         if panel.kind() == owner {
+            if active_index >= panel.tab_count() {
+                return false;
+            }
             panel.set_active_index(active_index);
             return true;
         }
@@ -1662,6 +1800,10 @@ mod tests {
         None
     }
 
+    fn menu_checked_for_action(root: &SelfHostedAppRoot, action: &Action) -> Option<bool> {
+        root.title_bar.menu_bar().checked_for_action(action)
+    }
+
     fn asset_grid_state_for_title(widget: &dyn Widget, title: &str) -> Option<AssetGridState> {
         if let Some(grid) = widget.as_any().and_then(|any| any.downcast_ref::<AssetGrid>()) {
             if grid.title() == title {
@@ -1846,15 +1988,107 @@ mod tests {
     }
 
     #[test]
-    fn app_root_toggle_panel_activates_grouped_effects_tab_without_editor_action() {
+    fn app_root_toggle_panel_hides_direct_leaf_as_custom_layout() {
         let platform = FakePlatform::default();
         let mut root = SelfHostedAppRoot::demo();
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        assert!(root.workspace_layout().expect("layout").contains_panel(PanelKind::Inspector));
+
+        let action =
+            root.handle_shell_action(Action::TogglePanel(PanelKind::Inspector), &platform, None);
+
+        assert_eq!(action, None);
+        assert_eq!(root.workspace_preset(), WorkspacePreset::Custom);
+        let layout = root.custom_workspace_layout().expect("custom layout");
+        assert!(!layout.contains_panel(PanelKind::Inspector));
+        assert!(layout.contains_panel(PanelKind::Viewer));
+        assert!(layout.is_split_root());
+        assert_eq!(
+            active_index_for_dock_panel(&root, PanelKind::Inspector),
+            None
+        );
+    }
+
+    #[test]
+    fn app_root_toggle_hidden_panel_restores_preferred_workspace() {
+        let platform = FakePlatform::default();
+        let mut root = SelfHostedAppRoot::demo();
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        root.handle_shell_action(Action::TogglePanel(PanelKind::Inspector), &platform, None);
+        assert_eq!(
+            active_index_for_dock_panel(&root, PanelKind::Inspector),
+            None
+        );
+
+        let action =
+            root.handle_shell_action(Action::TogglePanel(PanelKind::Inspector), &platform, None);
+
+        assert_eq!(action, None);
+        assert_eq!(root.workspace_preset(), WorkspacePreset::Editing);
+        assert_eq!(
+            active_index_for_dock_panel(&root, PanelKind::Inspector),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn app_root_toggle_panel_hides_grouped_effects_tab_as_custom_layout() {
+        let platform = FakePlatform::default();
+        let mut root = SelfHostedAppRoot::demo();
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        assert!(root.workspace_layout().expect("layout").contains_panel(PanelKind::Effects));
 
         let action =
             root.handle_shell_action(Action::TogglePanel(PanelKind::Effects), &platform, None);
 
         assert_eq!(action, None);
+        assert_eq!(root.workspace_preset(), WorkspacePreset::Custom);
+        let layout = root.custom_workspace_layout().expect("custom layout");
+        assert!(layout.contains_panel(PanelKind::Assets));
+        assert!(!layout.contains_panel(PanelKind::Effects));
+        assert_eq!(
+            menu_checked_for_action(&root, &Action::TogglePanel(PanelKind::Assets)),
+            Some(true)
+        );
+        assert_eq!(
+            menu_checked_for_action(&root, &Action::TogglePanel(PanelKind::Effects)),
+            Some(false)
+        );
+        assert_eq!(
+            menu_checked_for_action(&root, &Action::SwitchWorkspace(WorkspacePreset::Editing)),
+            Some(false)
+        );
+        assert_eq!(
+            active_index_for_dock_panel(&root, PanelKind::Assets),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn app_root_toggle_hidden_grouped_effects_tab_restores_preferred_workspace() {
+        let platform = FakePlatform::default();
+        let mut root = SelfHostedAppRoot::demo();
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        root.handle_shell_action(Action::TogglePanel(PanelKind::Effects), &platform, None);
+        assert_eq!(root.workspace_preset(), WorkspacePreset::Custom);
+        assert!(!root
+            .custom_workspace_layout()
+            .expect("custom layout")
+            .contains_panel(PanelKind::Effects));
+
+        let action =
+            root.handle_shell_action(Action::TogglePanel(PanelKind::Effects), &platform, None);
+
+        assert_eq!(action, None);
+        assert_eq!(root.workspace_preset(), WorkspacePreset::Editing);
+        assert_eq!(
+            menu_checked_for_action(&root, &Action::TogglePanel(PanelKind::Effects)),
+            Some(true)
+        );
+        assert_eq!(
+            menu_checked_for_action(&root, &Action::SwitchWorkspace(WorkspacePreset::Editing)),
+            Some(true)
+        );
         assert_eq!(
             active_index_for_dock_panel(&root, PanelKind::Assets),
             Some(1)
@@ -1875,6 +2109,22 @@ mod tests {
 
         assert_eq!(action, None);
         assert_eq!(root.workspace_preset(), WorkspacePreset::Export);
+        assert_eq!(
+            menu_checked_for_action(&root, &Action::SwitchWorkspace(WorkspacePreset::Export)),
+            Some(true)
+        );
+        assert_eq!(
+            menu_checked_for_action(&root, &Action::SwitchWorkspace(WorkspacePreset::Editing)),
+            Some(false)
+        );
+        assert_eq!(
+            menu_checked_for_action(&root, &Action::TogglePanel(PanelKind::Export)),
+            Some(true)
+        );
+        assert_eq!(
+            menu_checked_for_action(&root, &Action::TogglePanel(PanelKind::Timeline)),
+            Some(false)
+        );
         assert!((root.dock().ratio() - 0.42).abs() < f32::EPSILON);
         assert_eq!(
             active_index_for_dock_panel(&root, PanelKind::Export),

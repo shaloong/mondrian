@@ -359,19 +359,17 @@ impl Widget for PropertyPanel {
                     0.0,
                 );
             }
-            if section.bounds.height > 0.0 {
-                if section.selected {
-                    ctx.encoder.draw_rect(
-                        Rect::new(
-                            section.bounds.x,
-                            section.bounds.y,
-                            3.0,
-                            section.bounds.height,
-                        ),
-                        color_with_alpha(colors.primary, 0.72),
-                        spacing.radius_sm,
-                    );
-                }
+            if section.bounds.height > 0.0 && section.selected {
+                ctx.encoder.draw_rect(
+                    Rect::new(
+                        section.bounds.x,
+                        section.bounds.y,
+                        3.0,
+                        section.bounds.height,
+                    ),
+                    color_with_alpha(colors.primary, 0.72),
+                    spacing.radius_sm,
+                );
             }
             if !section.title().is_empty() {
                 section.title.paint(ctx);

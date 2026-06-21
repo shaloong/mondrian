@@ -762,9 +762,7 @@ impl ViewerSurface {
             colors.muted
         } else if control == ViewerControl::PlayPause && hovered {
             mix_color(colors.accent, colors.primary, 0.12)
-        } else if control == ViewerControl::PlayPause {
-            colors.accent
-        } else if hovered {
+        } else if control == ViewerControl::PlayPause || hovered {
             colors.accent
         } else {
             colors.secondary

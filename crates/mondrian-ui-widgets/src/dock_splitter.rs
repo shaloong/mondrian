@@ -71,6 +71,11 @@ impl DockSplitter {
         self.ratio
     }
 
+    /// Split direction used by this splitter.
+    pub fn direction(&self) -> SplitDirection {
+        self.direction
+    }
+
     /// 设置交互热区宽度（默认 6.0）
     pub fn with_grab_zone(mut self, width: f32) -> Self {
         self.grab_zone = width.max(2.0);

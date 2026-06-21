@@ -158,6 +158,7 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                                 &device,
                                 &mut session,
                             );
+                            host.sync_workspace_layout_from_root();
                         } else {
                             elwt.set_control_flow(ControlFlow::Poll);
                         }
@@ -363,6 +364,8 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     WindowEvent::MouseInput { state, button, .. } => {
+                        let sync_workspace_layout = state == ElementState::Released
+                            && button == winit::event::MouseButton::Left;
                         let evt = match state {
                             ElementState::Pressed => UiEvent::MouseDown {
                                 position: session.last_cursor,
@@ -404,6 +407,9 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                             &device,
                             &mut session,
                         );
+                        if sync_workspace_layout {
+                            host.sync_workspace_layout_from_root();
+                        }
                         update_window_cursor_icon(&host, &session);
                         session.window.request_redraw();
                     }

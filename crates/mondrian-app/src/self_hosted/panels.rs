@@ -36,9 +36,9 @@ use mondrian_ui_widgets::{
     Label, MenuItem, NodeGraphEdge, NodeGraphNode, NodeGraphView, PanelList, PanelListBadgeTone,
     PanelListItem, PropertyPanel, PropertyRow, PropertySection, RasterImage, ScrollView, Slider,
     TextInput, TimelineAssetDrop, TimelineClip, TimelineClipMove, TimelineClipRef,
-    TimelineClipTrim, TimelineEditCommand, TimelineInOutPoint, TimelineTrack, TimelineTrackControl,
-    TimelineTrackMove, TimelineTrackRef, TimelineTrimEdge, TimelineView, ViewerControl,
-    ViewerFrameImage, ViewerStatusTone, ViewerSurface,
+    TimelineClipTrim, TimelineEditCommand, TimelineInOutPoint, TimelineToolbarIconSlot,
+    TimelineTrack, TimelineTrackControl, TimelineTrackMove, TimelineTrackRef, TimelineTrimEdge,
+    TimelineView, ViewerControl, ViewerFrameImage, ViewerStatusTone, ViewerSurface,
 };
 
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
@@ -83,11 +83,13 @@ use crate::app::ui_actions::{
     TimelineTrimSelectedClipsToPlayheadPayload, ViewerSetPreviewResolutionScalePayload,
 };
 use crate::app::{AppState, SelectedClipRef};
+use crate::self_hosted::action_availability::app_state_action_enabled;
 use crate::self_hosted::icons::AppIcon;
 use crate::self_hosted::preview_scale::{
     normalize_preview_resolution_scale, preview_scale_percent_label,
 };
 use crate::self_hosted::shortcuts::shortcut_label_for_action;
+use crate::self_hosted::workspace_layout::SelfHostedWorkspaceLayout;
 
 /// Supplies already-decoded thumbnails for asset-grid cards.
 ///
@@ -180,18 +182,7 @@ impl SelfHostedPanelModels {
             ),
             effects: PanelListModel::from_app_effect_registry(state),
             viewer: ViewerPanelModel::from_app_state_with_preview(state, preview),
-            timeline: state
-                .sequence
-                .as_ref()
-                .map(|sequence| {
-                    TimelinePanelModel::from_sequence(
-                        sequence,
-                        state.selected_clips(),
-                        state.selected_tracks(),
-                    )
-                    .with_playhead_frame(state.current_frame())
-                })
-                .unwrap_or_default(),
+            timeline: TimelinePanelModel::from_app_state(state),
             inspector: InspectorPanelModel::from_app_state(state),
             export: ExportPanelModel::from_app_state(state),
             node_graph: NodeGraphPanelModel::from_app_state(state),
@@ -216,6 +207,7 @@ impl SelfHostedPanelModels {
                         state.selected_tracks(),
                     )
                     .with_playhead_frame(state.current_frame())
+                    .with_app_edit_availability(state)
                 })
                 .unwrap_or_else(demo_timeline_model),
             inspector: InspectorPanelModel::from_app_state(state),
@@ -458,37 +450,37 @@ impl PanelListModel {
 
     /// Build the visible effect browser from the current app state.
     ///
-    /// The widget rows stay domain-light, but the model records app-level
-    /// availability so locked tracks and non-video selections do not advertise
-    /// actions that the command layer will reject.
+    /// The widget rows stay domain-light. Browsing remains available even when
+    /// the current selection cannot receive an effect; only the apply action is
+    /// withheld in those states.
     pub fn from_app_effect_registry(state: &AppState) -> Self {
         let target = state.primary_selected_clip().filter(|selection| selection.is_video_track);
-        let disabled_reason = match target {
+        let apply_blocker = match target {
             Some(selection) if selected_clip_track_is_locked(state, selection) => {
                 Some("Selected clip track is locked")
             }
             Some(_) => None,
             None => Some("Select a video clip to apply effects"),
         };
-        let action_target = if disabled_reason.is_none() {
+        let action_target = if apply_blocker.is_none() {
             target
         } else {
             None
         };
-        Self::effect_registry_model(action_target, disabled_reason)
+        Self::effect_registry_model(action_target, apply_blocker)
     }
 
     /// Build the visible effect browser from the shared effect registry.
     pub fn from_effect_registry(selected_clip: Option<SelectedClipRef>) -> Self {
         let effect_target = selected_clip.filter(|selection| selection.is_video_track);
-        let disabled_reason =
+        let apply_blocker =
             effect_target.is_none().then_some("Select a video clip to apply effects");
-        Self::effect_registry_model(effect_target, disabled_reason)
+        Self::effect_registry_model(effect_target, apply_blocker)
     }
 
     fn effect_registry_model(
         effect_target: Option<SelectedClipRef>,
-        disabled_reason: Option<&'static str>,
+        apply_blocker: Option<&'static str>,
     ) -> Self {
         let effects = effect_library_types();
         let items = if effects.is_empty() {
@@ -504,15 +496,12 @@ impl PanelListModel {
                 .map(|effect_type| {
                     let name = effect_display_name(&effect_type);
                     let category = effect_type.category_path().join(" / ");
-                    let subtitle = disabled_reason.map(str::to_owned).unwrap_or(category);
                     let mut item =
-                        PanelListItem::new(name).with_subtitle(subtitle).with_badge_tone(
+                        PanelListItem::new(name).with_subtitle(category).with_badge_tone(
                             effect_badge(&effect_type),
                             effect_badge_tone(&effect_type),
                         );
-                    if disabled_reason.is_some() {
-                        item = item.disabled(true);
-                    } else if let Some(selection) = effect_target {
+                    if let Some(selection) = effect_target {
                         item = item.with_activate_action(effects_add_to_clip_action(
                             EffectsAddToClipPayload {
                                 clip: inspector_clip_payload(selection),
@@ -526,7 +515,7 @@ impl PanelListModel {
         };
 
         PanelListModel::new("Effects", items)
-            .with_subtitle("Effect browser")
+            .with_subtitle(apply_blocker.unwrap_or("Effect browser"))
             .with_filter_placeholder("Search effects")
     }
 }
@@ -665,9 +654,71 @@ pub struct TimelinePanelModel {
     pub playhead_frame: i64,
     pub in_point_frame: i64,
     pub out_point_frame: Option<i64>,
+    pub enabled: bool,
+    pub empty_message: Option<String>,
+    edit_availability: Option<TimelineEditAvailability>,
     track_refs: Vec<AppTimelineTrackRef>,
     clip_refs: Vec<Vec<ClipId>>,
     nested_sequence_refs: Vec<Vec<Option<SequenceId>>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TimelineEditAvailability {
+    cut: bool,
+    copy: bool,
+    paste: bool,
+    duplicate: bool,
+    delete: bool,
+    ripple_delete: bool,
+    split: bool,
+    trim_to_playhead: bool,
+    set_selected_enabled: bool,
+    mark_in: bool,
+    mark_out: bool,
+    clear_in_out: bool,
+    toggle_playback: bool,
+}
+
+impl TimelineEditAvailability {
+    fn from_app_state(state: &AppState) -> Self {
+        Self {
+            cut: app_state_action_enabled(&Action::Cut, state),
+            copy: app_state_action_enabled(&Action::Copy, state),
+            paste: app_state_action_enabled(&Action::Paste, state),
+            duplicate: app_state_action_enabled(&Action::Duplicate, state),
+            delete: app_state_action_enabled(&Action::DeleteSelection, state),
+            ripple_delete: app_state_action_enabled(&Action::RippleDeleteSelection, state),
+            split: app_state_action_enabled(&Action::SplitClipAtPlayhead, state),
+            trim_to_playhead: selected_clip_tracks_are_editable(state),
+            set_selected_enabled: selected_clip_tracks_are_editable(state),
+            mark_in: app_state_action_enabled(&Action::MarkInAtPlayhead, state),
+            mark_out: app_state_action_enabled(&Action::MarkOutAtPlayhead, state),
+            clear_in_out: app_state_action_enabled(&timeline_clear_in_out_points_action(), state),
+            toggle_playback: app_state_action_enabled(&Action::TogglePlay, state),
+        }
+    }
+
+    fn allows(self, command: TimelineEditCommand) -> bool {
+        match command {
+            TimelineEditCommand::CutSelection => self.cut,
+            TimelineEditCommand::CopySelection => self.copy,
+            TimelineEditCommand::PasteAtPlayhead => self.paste,
+            TimelineEditCommand::DuplicateSelection => self.duplicate,
+            TimelineEditCommand::DeleteSelection => self.delete,
+            TimelineEditCommand::RippleDeleteSelection => self.ripple_delete,
+            TimelineEditCommand::SplitAtPlayhead => self.split,
+            TimelineEditCommand::TrimSelectionInToPlayhead
+            | TimelineEditCommand::TrimSelectionOutToPlayhead => self.trim_to_playhead,
+            TimelineEditCommand::EnableSelection | TimelineEditCommand::DisableSelection => {
+                self.set_selected_enabled
+            }
+            TimelineEditCommand::OpenNestedSequence(_) => true,
+            TimelineEditCommand::MarkInAtPlayhead => self.mark_in,
+            TimelineEditCommand::MarkOutAtPlayhead => self.mark_out,
+            TimelineEditCommand::ClearInOutPoints => self.clear_in_out,
+            TimelineEditCommand::TogglePlayback => self.toggle_playback,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -677,6 +728,15 @@ struct AppTimelineTrackRef {
 }
 
 impl TimelinePanelModel {
+    /// Snapshot the app timeline with app-level command availability.
+    pub fn from_app_state(state: &AppState) -> Self {
+        state.sequence.as_ref().map_or_else(Self::empty, |sequence| {
+            Self::from_sequence(sequence, state.selected_clips(), state.selected_tracks())
+                .with_playhead_frame(state.current_frame())
+                .with_app_edit_availability(state)
+        })
+    }
+
     /// Map the current timeline sequence into self-hosted timeline view models.
     ///
     /// The widget layer stays index-based and domain-light; this adapter is the
@@ -714,14 +774,35 @@ impl TimelinePanelModel {
             nested_sequence_refs.push(nested_ids);
             tracks.push(track);
         }
+        let empty_message =
+            tracks.is_empty().then(|| "No tracks in the current sequence".to_owned());
         Self {
             tracks,
             playhead_frame: sequence.playhead.frame.max(0),
             in_point_frame: sequence.in_point_frame(),
             out_point_frame: sequence.out_point_frame(),
+            enabled: true,
+            empty_message,
+            edit_availability: None,
             track_refs,
             clip_refs,
             nested_sequence_refs,
+        }
+    }
+
+    /// Empty timeline shown before a sequence is open.
+    pub fn empty() -> Self {
+        Self {
+            tracks: Vec::new(),
+            playhead_frame: 0,
+            in_point_frame: 0,
+            out_point_frame: None,
+            enabled: false,
+            empty_message: Some("No sequence loaded".into()),
+            edit_availability: Some(TimelineEditAvailability::from_app_state(&AppState::new())),
+            track_refs: Vec::new(),
+            clip_refs: Vec::new(),
+            nested_sequence_refs: Vec::new(),
         }
     }
 
@@ -730,6 +811,15 @@ impl TimelinePanelModel {
     pub fn with_playhead_frame(mut self, frame: i64) -> Self {
         self.playhead_frame = frame.max(0);
         self
+    }
+
+    fn with_app_edit_availability(mut self, state: &AppState) -> Self {
+        self.edit_availability = Some(TimelineEditAvailability::from_app_state(state));
+        self
+    }
+
+    fn edit_command_available(&self, command: TimelineEditCommand) -> bool {
+        self.edit_availability.is_none_or(|availability| availability.allows(command))
     }
 
     fn clip_identity(&self, clip_ref: TimelineClipRef) -> Option<TimelineSelectClipPayload> {
@@ -847,6 +937,8 @@ impl TimelinePanelModel {
 pub struct InspectorPanelModel {
     /// Selected clip targeted by value edits, if the model is backed by app state.
     pub selected_clip: Option<SelectedClipRef>,
+    /// Empty-state message shown instead of clip controls when no target exists.
+    pub empty_message: Option<String>,
     /// Selected effect nested inside the selected clip.
     pub selected_effect_id: Option<EffectId>,
     /// Whether inspector controls may dispatch mutations for the selected clip.
@@ -930,6 +1022,7 @@ impl InspectorPanelModel {
         let is_editable = !selected_clip_track_is_locked(state, resolved_selection);
         Self {
             selected_clip: Some(resolved_selection),
+            empty_message: None,
             selected_effect_id: state.primary_selected_effect().and_then(|selection| {
                 (selection.clip.clip_id == resolved_selection.clip_id)
                     .then_some(selection.effect_id)
@@ -983,6 +1076,7 @@ impl InspectorPanelModel {
     pub fn empty() -> Self {
         Self {
             selected_clip: None,
+            empty_message: Some("Select a clip to inspect properties".into()),
             selected_effect_id: None,
             is_editable: false,
             edit_disabled_reason: None,
@@ -1006,6 +1100,7 @@ impl InspectorPanelModel {
     pub fn demo() -> Self {
         Self {
             selected_clip: None,
+            empty_message: None,
             selected_effect_id: None,
             is_editable: false,
             edit_disabled_reason: None,
@@ -1257,6 +1352,32 @@ impl ExportPanelModel {
             && !self.output_path.trim().is_empty()
     }
 
+    fn can_choose_output(&self) -> bool {
+        self.selected_preset().is_some() && self.selected_sequence_id.is_some()
+    }
+
+    fn can_select_range(&self) -> bool {
+        self.selected_sequence_id.is_some()
+    }
+
+    fn readiness_status(&self) -> String {
+        if let Some((message, is_error)) = &self.status {
+            if *is_error {
+                return format!("Error: {message}");
+            }
+            return message.clone();
+        }
+        if self.selected_sequence_id.is_none() {
+            "Open or select a sequence before exporting".to_owned()
+        } else if self.selected_preset().is_none() {
+            "No export preset available".to_owned()
+        } else if self.output_path.trim().is_empty() {
+            "Choose an output path to enable queueing".to_owned()
+        } else {
+            "Ready".to_owned()
+        }
+    }
+
     fn enqueue_payload(&self) -> Option<ExportEnqueuePayload> {
         let preset = self.selected_preset()?.clone();
         let sequence_id = self.selected_sequence_id?;
@@ -1295,6 +1416,49 @@ pub fn build_dock_tree_for_preset(
         WorkspacePreset::Audio => audio_workspace(models),
         WorkspacePreset::Compositing => compositing_workspace(models),
         WorkspacePreset::Export => export_workspace(models),
+    }
+}
+
+/// Build a self-hosted dock tree from a persisted custom workspace layout.
+pub fn build_dock_tree_from_layout(
+    models: SelfHostedPanelModels,
+    layout: &SelfHostedWorkspaceLayout,
+) -> Option<DockSplitter> {
+    match layout {
+        SelfHostedWorkspaceLayout::Split { direction, ratio, first, second } => {
+            Some(DockSplitter::new(
+                *direction,
+                *ratio,
+                dock_widget_from_layout(models.clone(), first),
+                dock_widget_from_layout(models, second),
+            ))
+        }
+        SelfHostedWorkspaceLayout::Panel { .. } => None,
+    }
+}
+
+fn dock_widget_from_layout(
+    models: SelfHostedPanelModels,
+    layout: &SelfHostedWorkspaceLayout,
+) -> Box<dyn Widget> {
+    match layout {
+        SelfHostedWorkspaceLayout::Split { direction, ratio, first, second } => {
+            Box::new(DockSplitter::new(
+                *direction,
+                *ratio,
+                dock_widget_from_layout(models.clone(), first),
+                dock_widget_from_layout(models, second),
+            ))
+        }
+        SelfHostedWorkspaceLayout::Panel { kind, active_index, hidden_tabs } => {
+            let mut panel = slot_with_hidden_tabs(*kind, models, hidden_tabs);
+            if let Some(panel) =
+                panel.as_mut().as_any_mut().and_then(|any| any.downcast_mut::<DockPanel>())
+            {
+                panel.set_active_index(*active_index);
+            }
+            panel
+        }
     }
 }
 
@@ -1398,6 +1562,14 @@ pub fn build_demo_dock_tree() -> DockSplitter {
 }
 
 fn slot(kind: PanelKind, models: SelfHostedPanelModels) -> Box<dyn Widget> {
+    slot_with_hidden_tabs(kind, models, &[])
+}
+
+fn slot_with_hidden_tabs(
+    kind: PanelKind,
+    models: SelfHostedPanelModels,
+    hidden_tabs: &[PanelKind],
+) -> Box<dyn Widget> {
     if kind == PanelKind::Inspector {
         let inspector = models.inspector.clone();
         return Box::new(DockPanel::new(
@@ -1410,18 +1582,18 @@ fn slot(kind: PanelKind, models: SelfHostedPanelModels) -> Box<dyn Widget> {
     }
 
     if kind == PanelKind::Assets {
-        return Box::new(DockPanel::new(
-            kind,
-            asset_browser_tabs(),
-            move |_kind, active| {
-                let active_kind = if active == 1 {
-                    PanelKind::Effects
-                } else {
-                    PanelKind::Assets
-                };
-                panel_content_for_slot(active_kind, &models)
-            },
-        ));
+        let tabs = asset_browser_tabs()
+            .into_iter()
+            .filter(|tab| tab.panel_kind.is_none_or(|panel| !hidden_tabs.contains(&panel)))
+            .collect();
+        return Box::new(DockPanel::new(kind, tabs, move |_kind, active| {
+            let active_kind = if active == 1 {
+                PanelKind::Effects
+            } else {
+                PanelKind::Assets
+            };
+            panel_content_for_slot(active_kind, &models)
+        }));
     }
 
     Box::new(DockPanel::new(
@@ -1435,13 +1607,22 @@ fn single_tab(kind: PanelKind) -> Vec<TabInfo> {
     vec![TabInfo {
         label: kind.display_name().to_string(),
         active: true,
+        panel_kind: Some(kind),
     }]
 }
 
 fn asset_browser_tabs() -> Vec<TabInfo> {
     vec![
-        TabInfo { label: "Assets".into(), active: true },
-        TabInfo { label: "Effects".into(), active: false },
+        TabInfo {
+            label: "Assets".into(),
+            active: true,
+            panel_kind: Some(PanelKind::Assets),
+        },
+        TabInfo {
+            label: "Effects".into(),
+            active: false,
+            panel_kind: Some(PanelKind::Effects),
+        },
     ]
 }
 
@@ -1512,6 +1693,30 @@ fn with_viewer_transport_icons(mut surface: ViewerSurface) -> ViewerSurface {
         }
     }
     surface
+}
+
+fn with_timeline_toolbar_icons(mut timeline: TimelineView) -> TimelineView {
+    for (slot, icon) in [
+        (TimelineToolbarIconSlot::SelectTool, AppIcon::CursorFilled),
+        (TimelineToolbarIconSlot::BladeTool, AppIcon::Cut),
+        (TimelineToolbarIconSlot::AddVideoTrack, AppIcon::Film),
+        (TimelineToolbarIconSlot::AddAudioTrack, AppIcon::Music),
+        (TimelineToolbarIconSlot::SplitAtPlayhead, AppIcon::Cut),
+        (TimelineToolbarIconSlot::DeleteSelection, AppIcon::Trash),
+        (
+            TimelineToolbarIconSlot::MarkInAtPlayhead,
+            AppIcon::CaretRight,
+        ),
+        (
+            TimelineToolbarIconSlot::MarkOutAtPlayhead,
+            AppIcon::CaretLeft,
+        ),
+    ] {
+        if let Ok(vector_icon) = icon.vector_icon() {
+            timeline = timeline.with_toolbar_icon(slot, vector_icon);
+        }
+    }
+    timeline
 }
 
 fn viewer_control_action(control: ViewerControl) -> Action {
@@ -2012,6 +2217,26 @@ fn selected_clip_track_is_locked(state: &AppState, selection: SelectedClipRef) -
     }
 }
 
+fn selected_clip_tracks_are_editable(state: &AppState) -> bool {
+    let Some(sequence) = state.sequence.as_ref() else {
+        return false;
+    };
+    if state.selected_clips().is_empty() {
+        return false;
+    }
+    state.selected_clips().iter().all(|selection| {
+        let tracks = if selection.is_video_track {
+            &sequence.video_tracks
+        } else {
+            &sequence.audio_tracks
+        };
+        tracks
+            .iter()
+            .find(|track| track.clips.iter().any(|clip| clip.id == selection.clip_id))
+            .is_some_and(|track| !track.is_locked)
+    })
+}
+
 fn panel_list(model: &PanelListModel) -> PanelList {
     let mut list = PanelList::new(model.title.clone(), model.items.clone())
         .with_subtitle(model.subtitle.clone());
@@ -2349,8 +2574,8 @@ fn demo_selection(sequence: &Sequence) -> Option<SelectedClipRef> {
 
 fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
     let action_model = model.clone();
-    TimelineView::new(model.tracks.clone())
-        .enabled(!model.tracks.is_empty())
+    let timeline = TimelineView::new(model.tracks.clone())
+        .enabled(model.enabled)
         .with_header_width(104.0)
         .with_playhead(model.playhead_frame)
         .with_in_out_points(model.in_point_frame, model.out_point_frame)
@@ -2414,6 +2639,10 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
             let action_model = action_model.clone();
             move |command| timeline_edit_command_action(&action_model, command)
         })
+        .on_edit_command_available({
+            let action_model = action_model.clone();
+            move |command| action_model.edit_command_available(command)
+        })
         .on_edit_command_shortcut(timeline_edit_command_shortcut_label)
         .on_clip_move({
             let action_model = action_model.clone();
@@ -2439,7 +2668,13 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
                 frame: frame.max(0),
             })
         })
-        .on_seek(timeline_seek_action)
+        .on_seek(timeline_seek_action);
+    let timeline = if let Some(message) = model.empty_message.clone() {
+        timeline.with_empty_message(message)
+    } else {
+        timeline
+    };
+    with_timeline_toolbar_icons(timeline)
 }
 
 fn timeline_in_out_point_payload_kind(point: TimelineInOutPoint) -> TimelineInOutPointPayloadKind {
@@ -2537,6 +2772,9 @@ fn node_graph_panel(model: &NodeGraphPanelModel) -> NodeGraphView {
         .with_title(model.title.clone())
         .with_subtitle(model.subtitle.clone())
         .on_select(move |node_id| node_graph_node_action(selected_clip, &node_targets, node_id));
+    if model.nodes.is_empty() {
+        graph = graph.with_empty_message(model.subtitle.clone()).disabled();
+    }
     if let Some(selected_node_id) = &model.selected_node_id {
         graph = graph.with_selected_node(selected_node_id.clone());
     }
@@ -2596,18 +2834,24 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
                 )),
             ),
         ],
-    );
+    )
+    .enabled(model.can_select_range());
 
     let selected_preset = model.selected_preset();
     let output_extension = selected_preset.map(export_preset_extension).unwrap_or("mp4").to_owned();
-    let output_browse = AppIcon::Folder.text_button_or_label("Browse...").on_click(
-        app_shell_export_output_dialog_action(ExportOutputDialogPayload {
-            default_file_name: export_default_file_name(selected_preset),
-            extension: output_extension,
-        }),
-    );
+    let can_choose_output = model.can_choose_output();
+    let output_browse = AppIcon::Folder
+        .text_button_or_label("Browse...")
+        .on_click(app_shell_export_output_dialog_action(
+            ExportOutputDialogPayload {
+                default_file_name: export_default_file_name(selected_preset),
+                extension: output_extension,
+            },
+        ))
+        .enabled(can_choose_output);
     let output_input = TextInput::new("Output path")
         .with_text(model.output_path.clone())
+        .enabled(can_choose_output)
         .on_change(|text| {
             export_set_draft_action(ExportDraftUpdatePayload::OutputPath(text.to_owned()))
         });
@@ -2634,17 +2878,7 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
             )
         })
         .unwrap_or_else(|| "No exportable sequence".to_owned());
-    let status_text = model
-        .status
-        .as_ref()
-        .map(|(message, is_error)| {
-            if *is_error {
-                format!("Error: {message}")
-            } else {
-                message.clone()
-            }
-        })
-        .unwrap_or_else(|| "Ready".to_owned());
+    let status_text = model.readiness_status();
 
     let mut queue_section = PropertySection::new("Queue");
     if model.jobs.is_empty() {
@@ -2814,6 +3048,14 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
     } else {
         "No clip selected"
     });
+    if let Some(message) = model.empty_message.as_deref().filter(|message| !message.is_empty()) {
+        return PropertyPanel::new("Inspector").with_subtitle(subtitle).with_section(
+            PropertySection::new("Status").with_row(
+                PropertyRow::new("Selection", Box::new(Label::new(message).muted().wrapped()))
+                    .with_height(48.0),
+            ),
+        );
+    }
     let mut tint = color_picker_trigger(model.tint).enabled(can_edit);
     tint.picker_mut().set_area_mode(model.tint_area_mode);
     let curve = CurveEditor::with_points(model.curve_points.clone())
@@ -3618,6 +3860,10 @@ mod tests {
     use std::cell::RefCell;
     use std::path::PathBuf;
 
+    fn timeline_content_point(x: f32, y: f32) -> Point {
+        Point::new(x, y + 30.0)
+    }
+
     fn badge_labels(item: &AssetGridItem) -> Vec<&str> {
         item.badges.iter().map(|badge| badge.label.as_str()).collect()
     }
@@ -3712,7 +3958,50 @@ mod tests {
         assert_eq!(tabs.len(), 2);
         assert_eq!(tabs[0].label, "Assets");
         assert!(tabs[0].active);
+        assert_eq!(tabs[0].panel_kind, Some(PanelKind::Assets));
         assert_eq!(tabs[1].label, "Effects");
+        assert_eq!(tabs[1].panel_kind, Some(PanelKind::Effects));
+    }
+
+    fn dock_panel_for_kind(widget: &dyn Widget, kind: PanelKind) -> Option<&DockPanel> {
+        if let Some(panel) = widget.as_any().and_then(|any| any.downcast_ref::<DockPanel>()) {
+            if panel.kind() == kind {
+                return Some(panel);
+            }
+        }
+        for index in 0..widget.child_count() {
+            if let Some(child) = widget.child(index) {
+                if let Some(panel) = dock_panel_for_kind(child, kind) {
+                    return Some(panel);
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn custom_layout_hidden_grouped_tabs_filter_asset_browser_tabs() {
+        let layout = SelfHostedWorkspaceLayout::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.37,
+            first: Box::new(SelfHostedWorkspaceLayout::Panel {
+                kind: PanelKind::Assets,
+                active_index: 1,
+                hidden_tabs: vec![PanelKind::Effects],
+            }),
+            second: Box::new(SelfHostedWorkspaceLayout::Panel {
+                kind: PanelKind::Viewer,
+                active_index: 0,
+                hidden_tabs: Vec::new(),
+            }),
+        };
+
+        let dock =
+            build_dock_tree_from_layout(SelfHostedPanelModels::demo(), &layout).expect("dock tree");
+        let assets = dock_panel_for_kind(&dock, PanelKind::Assets).expect("assets panel");
+
+        assert_eq!(assets.tab_count(), 1);
+        assert_eq!(assets.active_index(), 0);
     }
 
     fn panel_at_point(widget: &dyn Widget, point: Point) -> Option<PanelKind> {
@@ -3822,6 +4111,11 @@ mod tests {
 
         assert!(models.timeline.tracks.is_empty());
         assert_eq!(models.timeline.playhead_frame, 0);
+        assert!(!models.timeline.enabled);
+        assert_eq!(
+            models.timeline.empty_message.as_deref(),
+            Some("No sequence loaded")
+        );
         assert!(!timeline_panel(&models.timeline).can_focus());
         assert_eq!(models.assets.items[0].title, "No project library");
         assert!(models.assets.items[0].icon.is_some());
@@ -3839,6 +4133,10 @@ mod tests {
         assert_eq!(models.viewer.zoom_label, "Fit");
         assert_eq!(models.viewer.preview_quality_label, "Full");
         assert_eq!(models.inspector.selected_clip, None);
+        assert_eq!(
+            models.inspector.empty_message.as_deref(),
+            Some("Select a clip to inspect properties")
+        );
         assert!(!models.inspector.is_editable);
         assert_eq!(models.inspector.edit_disabled_reason, None);
         assert_eq!(models.inspector.opacity, 100.0);
@@ -3847,6 +4145,86 @@ mod tests {
         assert!(!models.export.can_enqueue());
         assert!(models.node_graph.nodes.is_empty());
         assert!(models.node_graph.edges.is_empty());
+        assert_eq!(
+            models.node_graph.subtitle,
+            "Select a clip to inspect its render chain"
+        );
+        let node_graph = node_graph_panel(&models.node_graph);
+        assert!(!node_graph.is_enabled());
+        assert!(!node_graph.can_focus());
+    }
+
+    #[test]
+    fn sequence_backed_empty_timeline_keeps_add_track_entrypoints_enabled() {
+        let mut sequence = Sequence::new("empty edit");
+        sequence.video_tracks.clear();
+        sequence.audio_tracks.clear();
+
+        let model = TimelinePanelModel::from_sequence(&sequence, &[], &[]);
+
+        assert!(model.enabled);
+        assert!(model.tracks.is_empty());
+        assert_eq!(
+            model.empty_message.as_deref(),
+            Some("No tracks in the current sequence")
+        );
+        assert!(timeline_panel(&model).can_focus());
+    }
+
+    #[test]
+    fn empty_inspector_panel_shows_status_only_and_does_not_dispatch_clip_controls() {
+        let model = InspectorPanelModel::empty();
+        let mut panel = inspector_panel(&model);
+        panel.layout(Rect::new(0.0, 0.0, 320.0, 220.0));
+
+        assert_eq!(
+            model.empty_message.as_deref(),
+            Some("Select a clip to inspect properties")
+        );
+        assert_eq!(panel.section_count(), 1);
+
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            panel.event(
+                &UiEvent::MouseDown {
+                    position: Point::new(132.0, 94.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn node_graph_without_clip_selection_uses_disabled_empty_state() {
+        let mut state = AppState::new();
+        state.sequence = Some(Sequence::new("edit"));
+
+        let model = NodeGraphPanelModel::from_app_state(&state);
+
+        assert!(model.nodes.is_empty());
+        assert!(model.edges.is_empty());
+        assert_eq!(model.selected_clip, None);
+        assert_eq!(model.subtitle, "Select a clip to inspect its render chain");
+        let panel = node_graph_panel(&model);
+        assert!(!panel.is_enabled());
+        assert!(!panel.can_focus());
     }
 
     #[test]
@@ -3976,7 +4354,10 @@ mod tests {
         assert_eq!(model.output_path, "E:/renders/deliverable.mp4");
         assert_eq!(model.sequences.len(), 1);
         assert_eq!(model.sequences[0].name, "Deliverable");
+        assert!(model.can_select_range());
+        assert!(model.can_choose_output());
         assert!(model.can_enqueue());
+        assert_eq!(model.readiness_status(), "Ready to export");
         let payload = model.enqueue_payload().expect("enqueue payload");
         assert_eq!(payload.sequence_id, Some(sequence_id));
         assert_eq!(payload.range, TimelineExportRange::EntireSequence);
@@ -3998,6 +4379,30 @@ mod tests {
         let model = ExportPanelModel::from_app_state(&state);
 
         assert!(!model.can_enqueue());
+        assert!(model.can_select_range());
+        assert!(model.can_choose_output());
+        assert_eq!(
+            model.readiness_status(),
+            "Choose an output path to enable queueing"
+        );
+        assert!(model.enqueue_payload().is_none());
+    }
+
+    #[test]
+    fn export_panel_model_disables_sequence_scoped_controls_without_sequences() {
+        let state = AppState::new();
+
+        let model = ExportPanelModel::from_app_state(&state);
+
+        assert!(model.sequences.is_empty());
+        assert_eq!(model.selected_sequence_id, None);
+        assert!(!model.can_select_range());
+        assert!(!model.can_choose_output());
+        assert!(!model.can_enqueue());
+        assert_eq!(
+            model.readiness_status(),
+            "Open or select a sequence before exporting"
+        );
         assert!(model.enqueue_payload().is_none());
     }
 
@@ -5087,7 +5492,7 @@ mod tests {
     }
 
     #[test]
-    fn timeline_panel_corner_add_buttons_emit_typed_timeline_actions() {
+    fn timeline_panel_context_menu_add_track_emits_typed_timeline_actions() {
         let model = demo_timeline_model();
         let actions = RefCell::new(Vec::<Action>::new());
         let dispatch = |action| actions.borrow_mut().push(action);
@@ -5108,7 +5513,59 @@ mod tests {
 
         let result = panel.event(
             &UiEvent::MouseDown {
-                position: Point::new(63.0, 15.0),
+                position: Point::new(500.0, 42.0),
+                button: MouseButton::Right,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert!(panel.overlay_hit_test(Point::new(900.0, 900.0)));
+        actions.borrow_mut().clear();
+        assert_eq!(
+            panel.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        let recorded = actions.borrow();
+        assert_eq!(recorded.len(), 1);
+        let Action::Custom { namespace, name, payload } = &recorded[0] else {
+            panic!("expected custom add-track action");
+        };
+        assert_eq!(namespace, TIMELINE_NAMESPACE);
+        assert_eq!(name, TIMELINE_ADD_TRACK);
+        let payload: TimelineAddTrackPayload =
+            serde_json::from_value(payload.clone()).expect("add track payload");
+        assert_eq!(payload.kind, TimelineAddTrackKind::Video);
+    }
+
+    #[test]
+    fn timeline_panel_toolbar_add_track_emits_typed_timeline_actions() {
+        let model = demo_timeline_model();
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut panel = timeline_panel(&model);
+        panel.layout(mondrian_ui_core::types::Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let result = panel.event(
+            &UiEvent::MouseDown {
+                position: Point::new(76.0, 15.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -5151,7 +5608,7 @@ mod tests {
 
         panel.event(
             &UiEvent::MouseDown {
-                position: Point::new(12.0, 105.0),
+                position: timeline_content_point(12.0, 105.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -5159,14 +5616,14 @@ mod tests {
         );
         panel.event(
             &UiEvent::MouseMove {
-                position: Point::new(12.0, 55.0),
+                position: timeline_content_point(12.0, 55.0),
                 modifiers: Modifiers::none(),
             },
             &mut ctx,
         );
         panel.event(
             &UiEvent::MouseUp {
-                position: Point::new(12.0, 55.0),
+                position: timeline_content_point(12.0, 55.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -5226,7 +5683,7 @@ mod tests {
         assert_eq!(
             panel.event(
                 &UiEvent::MouseDown {
-                    position: Point::new(140.0, 42.0),
+                    position: timeline_content_point(140.0, 42.0),
                     button: MouseButton::Left,
                     modifiers: Modifiers::none(),
                 },
@@ -5273,7 +5730,7 @@ mod tests {
         panel.event(
             &UiEvent::Drop {
                 payload: DragPayload::Asset(asset_id),
-                position: Point::new(144.0, 55.0),
+                position: timeline_content_point(144.0, 55.0),
             },
             &mut ctx,
         );
@@ -5354,7 +5811,7 @@ mod tests {
             let mut tree = WidgetTreeView::new(&mut root);
             router.route(
                 UiEvent::MouseMove {
-                    position: Point::new(444.0, 55.0),
+                    position: timeline_content_point(444.0, 55.0),
                     modifiers: Modifiers::default(),
                 },
                 &mut tree,
@@ -5365,7 +5822,7 @@ mod tests {
             let mut tree = WidgetTreeView::new(&mut root);
             router.route(
                 UiEvent::MouseUp {
-                    position: Point::new(444.0, 55.0),
+                    position: timeline_content_point(444.0, 55.0),
                     button: MouseButton::Left,
                     modifiers: Modifiers::default(),
                 },
@@ -5602,7 +6059,7 @@ mod tests {
         assert_eq!(
             panel.event(
                 &UiEvent::MouseDown {
-                    position: Point::new(144.0, 12.0),
+                    position: timeline_content_point(144.0, 12.0),
                     button: MouseButton::Left,
                     modifiers: Modifiers::none(),
                 },
@@ -5613,7 +6070,7 @@ mod tests {
         assert_eq!(
             panel.event(
                 &UiEvent::MouseMove {
-                    position: Point::new(184.0, 12.0),
+                    position: timeline_content_point(184.0, 12.0),
                     modifiers: Modifiers::none(),
                 },
                 &mut ctx,
@@ -5623,7 +6080,7 @@ mod tests {
         assert_eq!(
             panel.event(
                 &UiEvent::MouseUp {
-                    position: Point::new(184.0, 12.0),
+                    position: timeline_content_point(184.0, 12.0),
                     button: MouseButton::Left,
                     modifiers: Modifiers::none(),
                 },
@@ -6362,14 +6819,17 @@ mod tests {
     }
 
     #[test]
-    fn effect_panel_model_uses_stable_item_actions_without_dynamic_prefix() {
+    fn effect_panel_model_keeps_catalog_browsable_without_apply_target() {
         let model = PanelListModel::from_effect_registry(None);
 
+        assert_eq!(model.subtitle, "Select a video clip to apply effects");
         assert_eq!(model.filter_placeholder.as_deref(), Some("Search effects"));
         assert!(model.items.iter().all(|item| item.select_action.is_none()));
         assert!(model.items.iter().all(|item| item.activate_action.is_none()));
         assert!(model.items.iter().all(|item| item.icon.is_some()));
-        assert!(model.items.iter().all(|item| item.disabled));
+        assert!(model.items.iter().all(|item| !item.disabled));
+        assert!(model.items.iter().all(|item| item.badge.is_some()));
+        assert!(model.items.iter().all(|item| !item.subtitle.is_empty()));
     }
 
     #[test]
@@ -6384,6 +6844,7 @@ mod tests {
 
         let model = PanelListModel::from_effect_registry(Some(selection));
 
+        assert_eq!(model.subtitle, "Effect browser");
         assert!(model.items.iter().all(|item| item.icon.is_some()));
         assert!(model.items.iter().all(|item| !item.disabled));
         assert!(model.items.iter().all(|item| item.badge.is_some()));
@@ -6871,13 +7332,51 @@ mod tests {
 
         let models = SelfHostedPanelModels::from_app_state(&state);
 
-        assert!(models.effects.items.iter().all(|item| item.disabled));
+        assert_eq!(models.effects.subtitle, "Selected clip track is locked");
+        assert!(models.effects.items.iter().all(|item| !item.disabled));
         assert!(models.effects.items.iter().all(|item| item.activate_action.is_none()));
         assert!(models
             .effects
             .items
             .iter()
-            .all(|item| item.subtitle == "Selected clip track is locked"));
+            .all(|item| !item.subtitle.is_empty()
+                && item.subtitle != "Selected clip track is locked"));
+    }
+
+    #[test]
+    fn app_state_timeline_model_uses_app_command_availability_for_locked_tracks() {
+        let mut state = AppState::new();
+        let mut sequence = Sequence::new("edit");
+        let tb = sequence.time_base();
+        let clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(30, tb));
+        let clip_id = clip.id;
+        let track_id = sequence.video_tracks[0].id;
+        sequence.video_tracks[0].add_clip(clip).expect("add video clip");
+        sequence.video_tracks[0].is_locked = true;
+        state.sequence = Some(sequence);
+        state.selection.selected_clips.push(SelectedClipRef {
+            track_id,
+            is_video_track: true,
+            clip_id,
+        });
+        state.seek(15);
+
+        let model = TimelinePanelModel::from_app_state(&state);
+
+        assert!(model.edit_command_available(TimelineEditCommand::CopySelection));
+        for command in [
+            TimelineEditCommand::CutSelection,
+            TimelineEditCommand::DuplicateSelection,
+            TimelineEditCommand::DeleteSelection,
+            TimelineEditCommand::RippleDeleteSelection,
+            TimelineEditCommand::SplitAtPlayhead,
+            TimelineEditCommand::TrimSelectionInToPlayhead,
+            TimelineEditCommand::TrimSelectionOutToPlayhead,
+            TimelineEditCommand::EnableSelection,
+            TimelineEditCommand::DisableSelection,
+        ] {
+            assert!(!model.edit_command_available(command), "{command:?}");
+        }
     }
 
     #[test]
@@ -7116,6 +7615,7 @@ mod tests {
         };
         let model = InspectorPanelModel {
             selected_clip: Some(selection),
+            empty_message: None,
             selected_effect_id: None,
             is_editable: false,
             edit_disabled_reason: Some("Selected clip track is locked".to_owned()),
@@ -7183,6 +7683,7 @@ mod tests {
         let effect_id = EffectId::new();
         let model = InspectorPanelModel {
             selected_clip: Some(selection),
+            empty_message: None,
             selected_effect_id: None,
             is_editable: true,
             edit_disabled_reason: None,

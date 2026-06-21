@@ -299,6 +299,7 @@ pub struct MenuItem {
     pub kind: MenuItemKind,
     pub icon: Option<VectorIcon>,
     pub shortcut: Option<String>,
+    pub checked: bool,
 }
 
 impl MenuItem {
@@ -311,6 +312,7 @@ impl MenuItem {
             kind: MenuItemKind::Action,
             icon: None,
             shortcut: None,
+            checked: false,
         }
     }
 
@@ -325,6 +327,7 @@ impl MenuItem {
             kind: MenuItemKind::Action,
             icon: None,
             shortcut: None,
+            checked: false,
         }
     }
 
@@ -338,6 +341,7 @@ impl MenuItem {
             kind: MenuItemKind::Separator,
             icon: None,
             shortcut: None,
+            checked: false,
         }
     }
 
@@ -350,6 +354,12 @@ impl MenuItem {
     /// Paint a right-aligned keyboard shortcut hint for this item.
     pub fn with_shortcut(mut self, shortcut: impl Into<String>) -> Self {
         self.shortcut = Some(shortcut.into());
+        self
+    }
+
+    /// Mark this item as representing the current checked/selected state.
+    pub fn checked(mut self, checked: bool) -> Self {
+        self.checked = checked;
         self
     }
 
@@ -445,6 +455,23 @@ impl Dropdown {
     /// Whether the popup menu is currently open.
     pub fn is_open(&self) -> bool {
         self.open
+    }
+
+    /// Update checked state for all rows matching an app action.
+    pub fn set_checked_for_action(&mut self, action: &Action, checked: bool) {
+        for item in &mut self.items {
+            if !item.is_separator() && item.action == *action {
+                item.checked = checked;
+            }
+        }
+    }
+
+    /// Return checked state for the first row matching an app action.
+    pub fn checked_for_action(&self, action: &Action) -> Option<bool> {
+        self.items
+            .iter()
+            .find(|item| !item.is_separator() && item.action == *action)
+            .map(|item| item.checked)
     }
 
     /// Whether a point is inside the closed trigger chrome.
@@ -690,7 +717,7 @@ impl Dropdown {
                 reserve_icon_lane,
                 MenuRowPaint {
                     enabled: item.enabled,
-                    active: false,
+                    active: item.checked,
                     hovered: self.hovered_index == Some(i),
                 },
             );
@@ -885,6 +912,7 @@ mod tests {
     use super::*;
     use crate::paint::{shadow_color, shadow_rect};
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use mondrian_editor_state::state::PanelKind;
     use mondrian_platform::NoopPlatformService;
     use mondrian_ui_core::widget::{DrawCommandEncoder, EventRequests, PointerCaptureRequest};
     use std::cell::RefCell;
@@ -972,6 +1000,28 @@ mod tests {
             vec![MenuItem::new("Open", Action::OpenProject("".into()))],
         );
         assert!(!d.open);
+    }
+
+    #[test]
+    fn dropdown_updates_checked_state_for_matching_action() {
+        let mut d = Dropdown::new(
+            "View",
+            vec![
+                MenuItem::new("Viewer", Action::TogglePanel(PanelKind::Viewer)),
+                MenuItem::new("Timeline", Action::TogglePanel(PanelKind::Timeline)),
+            ],
+        );
+
+        d.set_checked_for_action(&Action::TogglePanel(PanelKind::Viewer), true);
+
+        assert_eq!(
+            d.checked_for_action(&Action::TogglePanel(PanelKind::Viewer)),
+            Some(true)
+        );
+        assert_eq!(
+            d.checked_for_action(&Action::TogglePanel(PanelKind::Timeline)),
+            Some(false)
+        );
     }
 
     #[test]

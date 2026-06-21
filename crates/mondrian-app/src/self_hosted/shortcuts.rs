@@ -673,10 +673,18 @@ pub fn shortcut_label_for_action_with_overrides(
     action: &Action,
     overrides: &[SelfHostedShortcutOverride],
 ) -> Option<String> {
+    let lookup_action = shortcut_hint_action(action);
     active_shortcuts(overrides)
         .into_iter()
-        .find(|shortcut| shortcut.action == *action)
+        .find(|shortcut| shortcut.action == lookup_action)
         .map(|shortcut| shortcut.label)
+}
+
+fn shortcut_hint_action(action: &Action) -> Action {
+    match action {
+        Action::TogglePanel(panel) => Action::FocusPanel(*panel),
+        action => action.clone(),
+    }
 }
 
 fn shortcut(id: &'static str, binding: ShortcutBinding, action: Action) -> SelfHostedShortcut {

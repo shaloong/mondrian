@@ -101,6 +101,7 @@ pub struct NodeGraphView {
     focused: bool,
     focus_visible: bool,
     enabled: bool,
+    empty_message: Option<String>,
     on_select: Option<Box<NodeGraphSelectAction>>,
 }
 
@@ -119,6 +120,7 @@ impl NodeGraphView {
             focused: false,
             focus_visible: false,
             enabled: true,
+            empty_message: None,
             on_select: None,
         }
     }
@@ -157,6 +159,12 @@ impl NodeGraphView {
     /// Set the graph subtitle.
     pub fn with_subtitle(mut self, subtitle: impl Into<String>) -> Self {
         self.subtitle = subtitle.into();
+        self
+    }
+
+    /// Set the message shown in the graph body when there are no nodes.
+    pub fn with_empty_message(mut self, message: impl Into<String>) -> Self {
+        self.empty_message = Some(message.into());
         self
     }
 
@@ -385,8 +393,14 @@ impl Widget for NodeGraphView {
         );
 
         if self.nodes.is_empty() {
+            let message = self
+                .empty_message
+                .as_deref()
+                .map(str::trim)
+                .filter(|message| !message.is_empty())
+                .unwrap_or("No graph nodes");
             ctx.encoder.draw_text_box(
-                "No graph nodes",
+                message,
                 typography.body.font_size,
                 Point::new(graph_rect.x + PADDING, graph_rect.y + PADDING),
                 (graph_rect.width - PADDING * 2.0).max(32.0),
@@ -550,8 +564,46 @@ fn layout_node_rects(bounds: Rect, count: usize) -> Vec<Rect> {
 mod tests {
     use super::*;
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use mondrian_ui_core::widget::DrawCommandEncoder;
+    use mondrian_ui_theme::ThemePreset;
     use std::cell::RefCell;
     use std::rc::Rc;
+
+    #[derive(Default)]
+    struct RecordingEncoder {
+        texts: Vec<String>,
+    }
+
+    impl DrawCommandEncoder for RecordingEncoder {
+        fn push_clip(&mut self, _bounds: Rect) {}
+
+        fn pop_clip(&mut self) {}
+
+        fn draw_rect(&mut self, _bounds: Rect, _color: Color, _corner_radius: f32) {}
+
+        fn draw_line(&mut self, _start: Point, _end: Point, _width: f32, _color: Color) {}
+
+        fn draw_triangles(&mut self, _vertices: &[Point], _color: Color) {}
+
+        fn draw_text(&mut self, text: &str, _font_size: f32, _position: Point, _color: Color) {
+            self.texts.push(text.into());
+        }
+
+        fn draw_text_box(
+            &mut self,
+            text: &str,
+            _font_size: f32,
+            _position: Point,
+            _max_width: f32,
+            _color: Color,
+        ) {
+            self.texts.push(text.into());
+        }
+
+        fn push_translate(&mut self, _offset: glam::Vec2) {}
+
+        fn pop_transform(&mut self) {}
+    }
 
     #[test]
     fn layout_node_rects_centers_single_row_nodes() {
@@ -914,5 +966,29 @@ mod tests {
 
         assert_eq!(graph.node_count(), 0);
         assert!(!graph.can_focus());
+    }
+
+    #[test]
+    fn empty_node_graph_paints_supplied_empty_message() {
+        let mut graph = NodeGraphView::new(Vec::new(), Vec::new())
+            .with_subtitle("Select a clip")
+            .with_empty_message("Select a clip to inspect its render chain")
+            .disabled();
+        graph.layout(Rect::new(0.0, 0.0, 420.0, 220.0));
+
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 420.0, 220.0),
+        };
+        graph.paint(&mut ctx);
+
+        assert!(encoder
+            .texts
+            .iter()
+            .any(|text| text == "Select a clip to inspect its render chain"));
+        assert!(!encoder.texts.iter().any(|text| text == "No graph nodes"));
     }
 }

@@ -26,9 +26,9 @@ use crate::app::ui_actions::{
     ASSETS_NAMESPACE, ASSETS_OPEN_FOLDER,
 };
 use crate::app::{discover_crash_recovery_candidates, AppState, CrashRecoveryCandidate};
+use crate::self_hosted::action_availability::app_state_action_enabled;
 use crate::self_hosted::action_queue::PendingUiActions;
 use crate::self_hosted::asset_thumbnails::AssetThumbnailCache;
-use crate::self_hosted::menu_bar::app_state_action_enabled;
 use crate::self_hosted::preferences_store::{
     load_self_hosted_preferences, persist_self_hosted_preferences_to, self_hosted_preferences_path,
     SelfHostedPreferences,
@@ -315,11 +315,35 @@ impl SelfHostedUiHost {
         app_state_action_enabled(action, &self.app_state.borrow())
     }
 
-    fn persist_workspace_preset(&mut self, preset: WorkspacePreset) {
-        if self.preferences.workspace_preset == preset {
+    pub fn sync_workspace_layout_from_root(&mut self) {
+        if self.mode != SelfHostedUiMode::Workspace {
+            return;
+        }
+        if self.root.sync_custom_workspace_layout_from_dock() {
+            self.persist_workspace_preferences_from_root();
+        }
+    }
+
+    fn persist_root_workspace_change(&mut self, previous: WorkspacePreset) {
+        let current = self.root.workspace_preset();
+        if current != previous
+            || self.preferences.custom_workspace_layout
+                != self.root.custom_workspace_layout().cloned()
+        {
+            self.persist_workspace_preferences_from_root();
+        }
+    }
+
+    fn persist_workspace_preferences_from_root(&mut self) {
+        let preset = self.root.workspace_preset();
+        let custom_workspace_layout = self.root.custom_workspace_layout().cloned();
+        if self.preferences.workspace_preset == preset
+            && self.preferences.custom_workspace_layout == custom_workspace_layout
+        {
             return;
         }
         self.preferences.workspace_preset = preset;
+        self.preferences.custom_workspace_layout = custom_workspace_layout;
         if let Err(err) =
             persist_self_hosted_preferences_to(&self.preferences_path, &self.preferences)
         {
@@ -329,13 +353,6 @@ impl SelfHostedUiHost {
                 true,
             );
             self.mark_dirty();
-        }
-    }
-
-    fn persist_root_workspace_change(&mut self, previous: WorkspacePreset) {
-        let current = self.root.workspace_preset();
-        if current != previous {
-            self.persist_workspace_preset(current);
         }
     }
 
@@ -801,6 +818,11 @@ mod tests {
     use mondrian_editor_state::state::PanelKind;
     use mondrian_editor_state::Action;
     use mondrian_platform::{FileFilter, NoopPlatformService};
+    use mondrian_timeline::Sequence;
+    use mondrian_ui_core::tree::TreeWalker;
+    use mondrian_ui_core::types::{Modifiers, MouseButton, Point, Rect, SplitDirection};
+    use mondrian_ui_core::widget::EventContext;
+    use mondrian_ui_core::{EventRequests, EventResult, UiEvent, Widget};
     use mondrian_ui_theme::{current_theme, ThemePreset};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -809,6 +831,8 @@ mod tests {
     use crate::self_hosted::preferences_store::{
         load_self_hosted_preferences_from, SelfHostedPreferences,
     };
+    use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use crate::self_hosted::workspace_layout::SelfHostedWorkspaceLayout;
 
     #[derive(Default)]
     struct CountingPlatform {
@@ -892,6 +916,66 @@ mod tests {
 
     fn temp_asset_library_dir(name: &str) -> PathBuf {
         temp_preferences_path(name).with_extension("assets")
+    }
+
+    fn workspace_app_state() -> AppState {
+        let mut state = AppState::new();
+        state.sequence = Some(Sequence::new("Edit"));
+        state.current_project_path = Some(PathBuf::from("E:/projects/edit.mdp"));
+        state
+    }
+
+    fn dispatch_ctx<'a>(
+        focus: &'a mut DummyFocus,
+        shortcut: &'a mut DummyShortcut,
+        tooltip: &'a mut DummyTooltip,
+        requests: &'a mut EventRequests,
+    ) -> EventContext<'a> {
+        event_ctx(focus, shortcut, tooltip, requests, &|_| {})
+    }
+
+    fn drag_first_splitter_to(root: &mut SelfHostedAppRoot, ratio: f32) {
+        let (zone, direction) = root.dock().collect_grab_zones()[0];
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 720.0);
+        let target = match direction {
+            SplitDirection::Horizontal => Point::new(bounds.width * ratio, zone.center().y),
+            SplitDirection::Vertical => Point::new(zone.center().x, bounds.height * ratio),
+        };
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatch_ctx(&mut focus, &mut shortcut, &mut tooltip, &mut requests);
+
+        assert_eq!(
+            root.dock_mut().event(
+                &UiEvent::MouseDown {
+                    position: zone.center(),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            root.dock_mut().event(
+                &UiEvent::MouseMove { position: target, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            root.dock_mut().event(
+                &UiEvent::MouseUp {
+                    position: target,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
     }
 
     fn project_runtime_root_for_test(project_file: &Path) -> PathBuf {
@@ -1017,6 +1101,7 @@ mod tests {
                 workspace_preset: WorkspacePreset::Compositing,
                 recent_projects: Vec::new(),
                 shortcut_overrides: Vec::new(),
+                custom_workspace_layout: None,
             },
             temp_preferences_path("initial-workspace"),
         );
@@ -1025,6 +1110,44 @@ mod tests {
 
         assert_eq!(host.root().workspace_preset(), WorkspacePreset::Compositing);
         assert!((host.root().dock().ratio() - 0.42).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn host_builds_root_from_persisted_custom_workspace_layout() {
+        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let layout = SelfHostedWorkspaceLayout::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.37,
+            first: Box::new(SelfHostedWorkspaceLayout::Panel {
+                kind: PanelKind::Assets,
+                active_index: 1,
+                hidden_tabs: Vec::new(),
+            }),
+            second: Box::new(SelfHostedWorkspaceLayout::Panel {
+                kind: PanelKind::Viewer,
+                active_index: 0,
+                hidden_tabs: Vec::new(),
+            }),
+        };
+        let mut host = SelfHostedUiHost::new_with_preferences_path(
+            workspace_app_state(),
+            SelfHostedPreferences {
+                version: 1,
+                theme_preset: ThemePreset::Dark,
+                workspace_preset: WorkspacePreset::Custom,
+                recent_projects: Vec::new(),
+                shortcut_overrides: Vec::new(),
+                custom_workspace_layout: Some(layout.clone()),
+            },
+            temp_preferences_path("initial-custom-workspace"),
+        );
+
+        TreeWalker::layout(host.root_mut(), Rect::new(0.0, 0.0, 1280.0, 720.0));
+
+        assert_eq!(host.mode(), SelfHostedUiMode::Workspace);
+        assert_eq!(host.root().workspace_preset(), WorkspacePreset::Custom);
+        assert!((host.root().dock().ratio() - 0.37).abs() < f32::EPSILON);
+        assert_eq!(host.root().workspace_layout(), Some(layout));
     }
 
     #[test]
@@ -1202,6 +1325,7 @@ mod tests {
                 workspace_preset: WorkspacePreset::Editing,
                 recent_projects: Vec::new(),
                 shortcut_overrides: Vec::new(),
+                custom_workspace_layout: None,
             },
             path.clone(),
         );
@@ -1225,6 +1349,70 @@ mod tests {
     }
 
     #[test]
+    fn host_promotes_dragged_builtin_workspace_to_persisted_custom_layout() {
+        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let path = temp_preferences_path("workspace-custom-layout");
+        let mut host = SelfHostedUiHost::new_with_preferences_path(
+            workspace_app_state(),
+            SelfHostedPreferences::default(),
+            path.clone(),
+        );
+        TreeWalker::layout(host.root_mut(), Rect::new(0.0, 0.0, 1280.0, 720.0));
+        assert_eq!(host.root().workspace_preset(), WorkspacePreset::Editing);
+
+        drag_first_splitter_to(host.root_mut(), 0.78);
+        let dragged_ratio = host.root().dock().ratio();
+        host.sync_workspace_layout_from_root();
+
+        assert_eq!(host.root().workspace_preset(), WorkspacePreset::Custom);
+        assert_eq!(host.preferences().workspace_preset, WorkspacePreset::Custom);
+        assert!(host.preferences().custom_workspace_layout.is_some());
+        assert!((host.root().dock().ratio() - dragged_ratio).abs() < f32::EPSILON);
+        let loaded = load_self_hosted_preferences_from(&path);
+        assert_eq!(loaded.workspace_preset, WorkspacePreset::Custom);
+        assert_eq!(
+            loaded.custom_workspace_layout,
+            host.preferences().custom_workspace_layout
+        );
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn host_persists_toggle_panel_hidden_custom_layout() {
+        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let path = temp_preferences_path("workspace-toggle-layout");
+        let mut host = SelfHostedUiHost::new_with_preferences_path(
+            workspace_app_state(),
+            SelfHostedPreferences::default(),
+            path.clone(),
+        );
+        TreeWalker::layout(host.root_mut(), Rect::new(0.0, 0.0, 1280.0, 720.0));
+        let pending = PendingUiActions::default();
+
+        pending.push(Action::TogglePanel(PanelKind::Inspector));
+        let commands = host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+
+        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert_eq!(host.root().workspace_preset(), WorkspacePreset::Custom);
+        let layout = host.preferences().custom_workspace_layout.as_ref().expect("layout");
+        assert!(!layout.contains_panel(PanelKind::Inspector));
+        assert!(layout.contains_panel(PanelKind::Viewer));
+        let loaded = load_self_hosted_preferences_from(&path);
+        assert_eq!(loaded.workspace_preset, WorkspacePreset::Custom);
+        assert_eq!(
+            loaded.custom_workspace_layout,
+            host.preferences().custom_workspace_layout
+        );
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn host_persists_workspace_changes_from_panel_focus_fallback() {
         let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
         let path = temp_preferences_path("workspace-focus-preferences");
@@ -1236,6 +1424,7 @@ mod tests {
                 workspace_preset: WorkspacePreset::Editing,
                 recent_projects: Vec::new(),
                 shortcut_overrides: Vec::new(),
+                custom_workspace_layout: None,
             },
             path.clone(),
         );

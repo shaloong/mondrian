@@ -2,6 +2,7 @@
 //!
 //! 水平排列的标签按钮，点击切换 active tab。
 
+use mondrian_editor_state::state::PanelKind;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
@@ -14,6 +15,7 @@ use crate::text_metrics::centered_text_x;
 pub struct TabInfo {
     pub label: String,
     pub active: bool,
+    pub panel_kind: Option<PanelKind>,
 }
 
 /// DockTabBar —— 水平标签栏
@@ -44,6 +46,10 @@ impl DockTabBar {
 
     pub fn active_index(&self) -> usize {
         self.tabs.iter().position(|t| t.active).unwrap_or(0)
+    }
+
+    pub fn tab_count(&self) -> usize {
+        self.tabs.len()
     }
 
     pub fn set_active(&mut self, index: usize) {
@@ -243,9 +249,21 @@ mod tests {
 
     fn make_tabs(active: usize) -> Vec<TabInfo> {
         vec![
-            TabInfo { label: "A".into(), active: active == 0 },
-            TabInfo { label: "B".into(), active: active == 1 },
-            TabInfo { label: "C".into(), active: active == 2 },
+            TabInfo {
+                label: "A".into(),
+                active: active == 0,
+                panel_kind: None,
+            },
+            TabInfo {
+                label: "B".into(),
+                active: active == 1,
+                panel_kind: None,
+            },
+            TabInfo {
+                label: "C".into(),
+                active: active == 2,
+                panel_kind: None,
+            },
         ]
     }
 
@@ -265,14 +283,22 @@ mod tests {
     #[test]
     fn tab_bar_set_tabs_updates_list() {
         let mut bar = DockTabBar::new(make_tabs(0));
-        bar.set_tabs(vec![TabInfo { label: "X".into(), active: true }]);
+        bar.set_tabs(vec![TabInfo {
+            label: "X".into(),
+            active: true,
+            panel_kind: None,
+        }]);
         assert_eq!(bar.tabs.len(), 1);
         assert_eq!(bar.active_index(), 0);
     }
 
     #[test]
     fn tab_bar_no_active_returns_zero() {
-        let bar = DockTabBar::new(vec![TabInfo { label: "X".into(), active: false }]);
+        let bar = DockTabBar::new(vec![TabInfo {
+            label: "X".into(),
+            active: false,
+            panel_kind: None,
+        }]);
         assert_eq!(bar.active_index(), 0);
     }
 
@@ -381,8 +407,13 @@ mod tests {
             TabInfo {
                 label: "A very long tab label".into(),
                 active: true,
+                panel_kind: None,
             },
-            TabInfo { label: "Second".into(), active: false },
+            TabInfo {
+                label: "Second".into(),
+                active: false,
+                panel_kind: None,
+            },
         ]);
         bar.layout(Rect::new(0.0, 0.0, 160.0, 32.0));
         let theme = ThemePreset::Dark.build();

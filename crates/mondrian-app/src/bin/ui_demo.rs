@@ -793,29 +793,81 @@ fn dock_panel(kind: PanelKind) -> Box<dyn Widget> {
 fn tab_infos(kind: PanelKind) -> Vec<TabInfo> {
     match kind {
         PanelKind::Viewer => vec![
-            TabInfo { label: "查看器".into(), active: true },
-            TabInfo { label: "节点图".into(), active: false },
+            TabInfo {
+                label: "查看器".into(),
+                active: true,
+                panel_kind: None,
+            },
+            TabInfo {
+                label: "节点图".into(),
+                active: false,
+                panel_kind: None,
+            },
         ],
         PanelKind::Timeline => vec![
-            TabInfo { label: "时间线".into(), active: true },
-            TabInfo { label: "音频".into(), active: false },
-            TabInfo { label: "效果".into(), active: false },
+            TabInfo {
+                label: "时间线".into(),
+                active: true,
+                panel_kind: None,
+            },
+            TabInfo {
+                label: "音频".into(),
+                active: false,
+                panel_kind: None,
+            },
+            TabInfo {
+                label: "效果".into(),
+                active: false,
+                panel_kind: None,
+            },
         ],
 
         PanelKind::Inspector => vec![
-            TabInfo { label: "检查器".into(), active: true },
-            TabInfo { label: "属性".into(), active: false },
+            TabInfo {
+                label: "检查器".into(),
+                active: true,
+                panel_kind: None,
+            },
+            TabInfo {
+                label: "属性".into(),
+                active: false,
+                panel_kind: None,
+            },
         ],
         PanelKind::Effects => vec![
-            TabInfo { label: "控件".into(), active: true },
-            TabInfo { label: "文本".into(), active: false },
-            TabInfo { label: "形状".into(), active: false },
+            TabInfo {
+                label: "控件".into(),
+                active: true,
+                panel_kind: None,
+            },
+            TabInfo {
+                label: "文本".into(),
+                active: false,
+                panel_kind: None,
+            },
+            TabInfo {
+                label: "形状".into(),
+                active: false,
+                panel_kind: None,
+            },
         ],
         PanelKind::Assets => vec![
-            TabInfo { label: "资源".into(), active: true },
-            TabInfo { label: "库".into(), active: false },
+            TabInfo {
+                label: "资源".into(),
+                active: true,
+                panel_kind: None,
+            },
+            TabInfo {
+                label: "库".into(),
+                active: false,
+                panel_kind: None,
+            },
         ],
-        _ => vec![TabInfo { label: kind.display_name().into(), active: true }],
+        _ => vec![TabInfo {
+            label: kind.display_name().into(),
+            active: true,
+            panel_kind: None,
+        }],
     }
 }
 

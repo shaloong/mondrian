@@ -55,6 +55,11 @@ impl DockPanel {
         self.tab_bar.active_index()
     }
 
+    /// Number of visible tabs currently owned by this dock panel.
+    pub fn tab_count(&self) -> usize {
+        self.tab_bar.tab_count()
+    }
+
     /// Activate one tab and rebuild content when the active tab changes.
     pub fn set_active_index(&mut self, index: usize) {
         self.tab_bar.set_active(index);
@@ -239,8 +244,8 @@ mod tests {
 
     fn tabs() -> Vec<TabInfo> {
         vec![
-            TabInfo { label: "A".into(), active: true },
-            TabInfo { label: "B".into(), active: false },
+            TabInfo { label: "A".into(), active: true, panel_kind: None },
+            TabInfo { label: "B".into(), active: false, panel_kind: None },
         ]
     }
 

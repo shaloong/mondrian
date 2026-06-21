@@ -59,10 +59,15 @@ application for reusable widgets. `self_hosted::rendering` owns the shared
 wgpu frame submission path for self-hosted windows, including cosmic-text glyph
 uploads, surface texture acquisition, present, and surface reconfigure on
 loss/outdating. `self_hosted::menu_bar` owns the product menu model, shortcut
-hints, state-aware item availability, and top menu widget. `self_hosted::shell`
-owns reusable root-widget composition such as the menu bar, dock tree, and modal
-layer; developer binaries should use `SelfHostedAppRoot` rather than defining
-shell widgets inline. `self_hosted::startup` owns the launch-time root surface
+hints, and top menu widget. `self_hosted::action_availability` owns the shared
+app-state gate used by menus, focused shortcuts, host dispatch, and panel
+adapters. `self_hosted::shell` owns reusable root-widget composition such as the
+menu bar, dock tree, and modal layer; developer binaries should use
+`SelfHostedAppRoot` rather than defining shell widgets inline.
+`self_hosted::workspace_layout` owns the persistable dock-tree schema for the
+Custom workspace and converts live dock widgets into a sanitized shell layout
+snapshot; reusable widgets expose state but do not serialize user preferences.
+`self_hosted::startup` owns the launch-time root surface
 shown before any project is open; it emits only app-shell lifecycle actions and
 does not own project creation, loading, recent-file persistence, or editor
 state. `self_hosted::icons` owns the app-layer registry for bundled designer SVG
@@ -74,7 +79,7 @@ Common editor operations should not be keyboard-only. When a self-hosted global
 shortcut is added for a visible NLE operation such as duplicate, delete, ripple
 delete, split, mark in/out, transport stepping, select all, or deselect all, the
 corresponding menu row should use the same action, shortcut descriptor table, and
-`app_state_action_enabled` gate.
+`self_hosted::action_availability::app_state_action_enabled` gate.
 `self_hosted::host::SelfHostedUiHost` owns the reusable product
 state bridge: it keeps the startup root, workspace root, current `AppState`,
 dirty refresh flag, visible shell mode, and queued-action draining together so
@@ -220,6 +225,10 @@ absent sequence id may use the active sequence fallback.
 Self-hosted export panel model payload builders must mirror their enabled-state
 validation and return no payload for missing sequences or blank output paths;
 disabled buttons are not the only guardrail against invalid enqueue actions.
+Sequence-scoped controls, such as range selection and output path picking, must
+also derive their enabled state from the same model readiness checks, and the
+status row should explain the first blocking reason instead of showing a generic
+ready state when no sequence or output path is available.
 Self-hosted export forms persist their editable draft in `AppState::export_draft`
 through `ui.export.set_draft`, so widget-tree refreshes and dock layout changes
 do not reset selected preset, selected sequence, range, or output path.
@@ -321,9 +330,11 @@ selected, effect rows carry a `ui.effects` add-to-clip payload with the selected
 clip id and serialized `EffectType`, and `AppState` routes it through
 `add_effect_to_clip`. The Effects panel model is derived from the current
 `AppState` snapshot, not only from raw selection metadata, so rows are disabled
-when no video clip can receive an effect or when the selected clip's track is
-locked. The command layer still performs the authoritative locked-track and
-effect-target validation.
+only when the effect registry itself has no browsable entries. No-target,
+non-video, and locked-track states keep the catalog searchable and show the
+apply blocker in the panel subtitle, but omit per-row activation actions. The
+command layer still performs the authoritative locked-track and effect-target
+validation.
 This keeps reusable widgets index/value-based and UI-agnostic while avoiding
 string parsing in business logic.
 
@@ -925,8 +936,8 @@ The app adapter rejects cross-kind moves, resolves the source `TrackId`, convert
 the target view index into a video/audio-local target index, and dispatches
 `ui.timeline.move_track` so `AppState::move_track` remains the only mutation
 path for track order.
-Timeline corner controls for adding video/audio tracks emit only a
-`TimelineTrackKind`; the app adapter translates that into
+Timeline toolbar buttons and context menu entries for adding video/audio tracks
+emit only a `TimelineTrackKind`; the app adapter translates that into
 `ui.timeline.add_track`, and `AppState` routes it through the existing undoable
 track creation commands.
 Timeline pointer tools are widget-local session state. `TimelineTool::Select`
@@ -937,16 +948,36 @@ Shortcut keys `V` and `B` switch these widget-local tools; undoable timeline
 mutation still starts only at the app command boundary. `TimelineViewState`
 captures the active tool, zoom, and scroll offsets so `SelfHostedAppRoot`
 preserves timeline working context across panel model rebuilds without storing
-that UI session data in `AppState`. Visible timeline zoom controls live on the
-ruler and mutate the same widget-local `pixels_per_frame` value as Ctrl+wheel
-zoom; they do not emit editor actions because display zoom is not project data.
+that UI session data in `AppState`. Timeline pointer, add-track, edit-command,
+and zoom controls live in a dedicated toolbar above the ruler. Add-track and
+edit-command buttons are visible daily editing affordances, not alternate
+mutation paths: add-track buttons use the same `TimelineTrackKind` adapter as
+the timeline context menu, while edit buttons use the same `TimelineEditCommand`
+availability checks and action factory as menus and focused keyboard input.
+Timeline command availability has two layers: the widget checks only local
+view facts such as selection and playhead intersection, while the self-hosted
+adapter injects app-state availability derived from the same locked-track,
+clipboard, in/out, and sequence gates used by the top menus. Toolbar buttons,
+timeline context menu rows, and focused timeline shortcuts must all consult
+that host availability before dispatching.
+Disabled toolbar commands consume their click without dispatching so they
+cannot accidentally seek or select timeline content underneath. Zoom controls
+mutate the same widget-local `pixels_per_frame` value as Ctrl+wheel zoom and do
+not emit editor actions because display zoom is not project data.
 Timeline wheel input follows the same consumption rule as scroll containers:
 vertical scroll, Shift+horizontal scroll, or Ctrl/Meta zoom handles the event
 only when the corresponding offset or zoom value changes, so boundary wheel
 input can bubble to an enclosing surface.
-Timeline chrome buttons, including pointer tools, add-track controls, and zoom
-controls, publish hover hints through the shared tooltip manager rather than
-painting local text labels inside the compact toolbar.
+Timeline chrome buttons, including pointer tools, add-track controls, edit
+commands, and zoom controls, publish hover hints through the shared tooltip
+manager rather than painting local text labels inside the compact toolbar.
+Edit-command toolbar hints append the same host-provided shortcut labels used by
+timeline context menus, so Split, Delete, and Mark In/Out remain discoverable
+without hardcoding platform shortcut text in the widget crate.
+Toolbar vector assets are injected through `TimelineToolbarIconSlot` only;
+pointer tools do not carry a second tool-specific icon path. This keeps the
+toolbar's hit testing, availability, tooltip, and icon contracts aligned around
+the same button model.
 Asset drops follow the same boundary. `TimelineView` accepts
 `DragPayload::Asset` only as a domain-light drop proposal with a view track ref
 and frame. The self-hosted adapter resolves that view ref to a stable
@@ -1340,15 +1371,28 @@ right-column width. Single-tab dock headers should paint as panel titles with a
 small active underline, not as full-width raised tabs; grouped browser tabs may
 keep larger hit areas but should use hover fills and underline selection rather
 than heavy active rectangles.
-Self-hosted `FocusPanel` and current View-menu `TogglePanel` actions activate
-the matching dock panel or grouped tab through shell-local dock traversal and do
-not continue into `AppState`. The traversal first understands grouped tabs in
-the default layout, then falls back to direct panels used by built-in workspace
-presets. If the active dock tree does not contain the requested panel, the shell
-switches to the panel's preferred built-in workspace and activates it there, so
-View-menu rows and focus shortcuts never silently no-op. True hide/show panel
-visibility should be added as a separate dock-tree policy so it can handle split
-collapse and restoration deliberately.
+Self-hosted `FocusPanel` actions activate the matching dock panel or grouped tab
+through shell-local dock traversal and do not continue into `AppState`. The
+traversal first understands grouped tabs in the default layout, then falls back
+to direct panels used by built-in workspace presets. If the active dock tree
+does not contain the requested panel, the shell switches to the panel's
+preferred built-in workspace and activates it there, so focus shortcuts never
+silently no-op.
+View-menu rows use `TogglePanel`. Direct dock-panel leaves, such as Viewer,
+Timeline, Inspector, Assets, Node Graph, and Export, hide by removing the panel
+leaf from `SelfHostedWorkspaceLayout`, collapsing now-empty split branches, and
+promoting the root to `WorkspacePreset::Custom`. If toggled again while absent,
+the shell restores the panel by switching to its preferred built-in workspace.
+Grouped tabs that are not independent layout leaves, currently Effects inside
+the Assets browser, participate in the same View-menu contract through
+panel-leaf `hidden_tabs` metadata. Hiding Effects keeps the Assets leaf and
+filters only the Effects tab; toggling it again detects that the grouped tab is
+absent and restores the preferred Editing workspace with Effects active.
+The View and Workspace menus expose that shell-local state through checked rows:
+panel rows are checked only when the current live layout contains the direct
+panel or grouped tab, while built-in workspace rows are checked only when that
+named preset is active. Custom layouts intentionally leave built-in workspace
+rows unchecked instead of pretending to be Editing.
 Self-hosted `SwitchWorkspace` is also shell-local: it rebuilds the dock tree
 from the current `SelfHostedPanelModels` using named built-in preset factories
 while keeping panel models read-only and app/domain mutation in `AppState`.
@@ -1358,6 +1402,21 @@ workspace, Compositing groups NodeGraph/Effects opposite Viewer/Inspector, and
 Export pairs export settings with the Viewer. Refreshing panel models must
 preserve the selected workspace preset so live app snapshots do not silently
 reset the user's shell layout.
+`WorkspacePreset::Custom` is a real persisted workspace, not an alias for
+Editing. Its layout is stored as `SelfHostedWorkspaceLayout`: a binary tree of
+split direction/ratio nodes and dock panel leaves with active tab indices plus
+grouped-tab visibility metadata that live widgets cannot infer on their own.
+`self_hosted::panels` is the only layer that materializes that schema back into
+`DockSplitter` / `DockPanel` widgets from current `SelfHostedPanelModels`.
+Loading preferences sanitizes custom ratios and active tabs before a root is
+built, including clamping active tabs after hidden grouped tabs are applied.
+Dragging a built-in workspace splitter promotes the root to Custom when
+the split layout diverges from the built-in preset snapshot; the winit window
+runner asks `SelfHostedUiHost` to persist that layout on left-button release or
+focus loss, not during every mouse-move frame. TogglePanel-driven leaf removal
+uses the same persistence path after the queued shell action drains. Built-in
+presets remain template factories and can always be selected again to reset the
+visible dock tree without deleting the saved Custom layout.
 The self-hosted Assets panel maps real library cards to `ui.assets.prepare_drag`;
 `AppState` resolves the asset record and reuses the existing `begin_drag_asset`
 path so later Timeline drop handling stays shared with the egui implementation.
@@ -1386,7 +1445,13 @@ markings read without turning the timeline into a table. Alternating timeline
 lane fills are semantic timeline tokens so compact editor density remains
 theme-owned rather than embedded in the drawing code.
 When no timeline model is available, app panels should disable the surface so
-empty shells do not steal focus, seek, or hold pointer capture.
+empty shells do not steal focus, seek, or hold pointer capture. The app panel
+model owns the empty-state reason, such as no open sequence or an empty
+sequence, while `TimelineView` only paints the supplied message in the timeline
+body and keeps add-track command routing available for sequence-backed empty
+timelines. Disabled timeline shells must also mute toolbar chrome and suppress
+the playhead so a no-sequence workspace does not present editing affordances as
+available.
 
 Value widgets stay editor-state agnostic. `Button`, `Checkbox`, `Slider`,
 `TextInput`, `Dropdown`, `ColorPicker`, `ColorPickerTrigger`, and `CurveEditor`
@@ -1438,6 +1503,11 @@ Inspector panel models still expose edit availability from the current
 Inspector remains readable but disables clip style, transform, timing, effect,
 property, and curve controls before they can dispatch actions. This is UI
 affordance only; `AppState` keeps the authoritative locked-track validation.
+When no clip is selected or no sequence is open, the app model must expose an
+empty-state message and the self-hosted Inspector should render only a compact
+status section rather than default clip-style, transform, timing, or animation
+controls. Empty inspectors must not imply a real editable target through
+placeholder parameter values.
 Inspector panel models derive the displayed curve from those opacity keyframes,
 falling back to a flat curve at the evaluated opacity when no animation exists.
 When existing keyframes do not land on clip boundaries, the panel model
@@ -1796,10 +1866,13 @@ The self-hosted `PanelKind::NodeGraph` panel maps the currently selected clip to
 a read-only render chain: Source -> each clip effect -> Output. The app adapter
 derives node titles, disabled state, and semantic accents from the same clip
 and effect data used by the Inspector, so the graph is another view of the same
-state rather than a separate editor model. Node selection is translated back to
-the existing timeline clip-selection action while the editor state has no
-effect-node selection target; future node editing should add typed app-layer
-actions before enabling rewiring or parameter mutation in the widget.
+state rather than a separate editor model. When no graph can be built, the app
+adapter owns the empty-state reason and passes it into `NodeGraphView` while
+disabling graph input, so empty projects and no-clip selections do not expose a
+focusable graph surface. Node selection is translated back to the existing
+timeline clip-selection action while the editor state has no effect-node
+selection target; future node editing should add typed app-layer actions before
+enabling rewiring or parameter mutation in the widget.
 
 ## Curve Editing
 
@@ -2041,13 +2114,15 @@ continues to use undoable editor actions.
 
 The self-hosted product shell persists user-facing shell preferences through
 `SelfHostedUiHost`, not reusable widgets or `SelfHostedAppRoot`. Theme preset
-and workspace preset are restored before the first root widget is built, so the
-initial dock tree matches the last product workspace. Shell-only actions such as
-`Action::SwitchWorkspace` or `FocusPanel` fallback update the root immediately;
-`SelfHostedUiHost` then compares the root workspace before/after handled shell
-actions and writes any changed workspace preset back through
-`self_hosted::preferences_store`. Editor-state actions and widget models remain
-disk-I/O free.
+workspace preset, and the optional Custom workspace layout are restored before
+the first root widget is built, so the initial dock tree matches the last
+product workspace. Shell-only actions such as `Action::SwitchWorkspace` or
+`FocusPanel` fallback update the root immediately; `SelfHostedUiHost` then
+compares the root workspace before/after handled shell actions and writes any
+changed workspace preset/layout back through `self_hosted::preferences_store`.
+Widget-local layout changes that do not dispatch an action, such as splitter
+drags, are synchronized explicitly by the window runner after the interaction
+settles. Editor-state actions and widget models remain disk-I/O free.
 
 Panel model refreshes must not erase local panel interaction state. Reusable
 widgets expose small explicit state snapshots for UI-local affordances such as
@@ -2061,5 +2136,7 @@ whether filter, selection, scroll, or active-tab state survives a model rebuild.
 It restores active tabs before list state so grouped panels such as
 Assets/Effects keep showing the surface the user was working in. Export is an
 independent panel/workspace. Splitter layout restoration remains owned by
-`DockSplitter`. This
-keeps app-state data replacement separate from ephemeral user navigation state.
+`DockSplitter`, while durable Custom layout persistence is owned by
+`SelfHostedWorkspaceLayout` and the preferences store. This keeps app-state data
+replacement separate from ephemeral user navigation state and from user-facing
+workspace customization.

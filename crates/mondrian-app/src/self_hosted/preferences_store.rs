@@ -13,13 +13,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::app::app_data_dir;
 use crate::self_hosted::shortcuts::{is_known_shortcut_id, SelfHostedShortcutOverride};
+use crate::self_hosted::workspace_layout::SelfHostedWorkspaceLayout;
 
 const SELF_HOSTED_PREFERENCES_FILE: &str = "self_hosted_preferences.json";
 /// Maximum number of recent projects kept by the self-hosted startup surface.
 pub const MAX_RECENT_PROJECTS: usize = 12;
 
 /// Versioned user preferences owned by the self-hosted shell.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SelfHostedPreferences {
     /// Schema version for future non-compatible alpha migrations.
     pub version: u32,
@@ -32,6 +33,9 @@ pub struct SelfHostedPreferences {
     /// User overrides for self-hosted shell shortcut descriptors.
     #[serde(default)]
     pub shortcut_overrides: Vec<SelfHostedShortcutOverride>,
+    /// Persisted custom dock layout for the self-hosted workspace.
+    #[serde(default)]
+    pub custom_workspace_layout: Option<SelfHostedWorkspaceLayout>,
 }
 
 impl Default for SelfHostedPreferences {
@@ -42,6 +46,7 @@ impl Default for SelfHostedPreferences {
             workspace_preset: WorkspacePreset::Editing,
             recent_projects: Vec::new(),
             shortcut_overrides: Vec::new(),
+            custom_workspace_layout: None,
         }
     }
 }
@@ -79,6 +84,9 @@ impl SelfHostedPreferences {
             shortcut_overrides.push(entry);
         }
         self.shortcut_overrides = shortcut_overrides;
+
+        self.custom_workspace_layout =
+            self.custom_workspace_layout.and_then(SelfHostedWorkspaceLayout::sanitized);
         self
     }
 }
@@ -124,6 +132,8 @@ pub fn persist_self_hosted_preferences_to(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::self_hosted::workspace_layout::SelfHostedWorkspaceLayout;
+    use mondrian_ui_core::types::SplitDirection;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_preferences_path(name: &str) -> PathBuf {
@@ -167,6 +177,20 @@ mod tests {
                 id: "panel.inspector".to_owned(),
                 binding: None,
             }],
+            custom_workspace_layout: Some(SelfHostedWorkspaceLayout::Split {
+                direction: SplitDirection::Horizontal,
+                ratio: 0.37,
+                first: Box::new(SelfHostedWorkspaceLayout::Panel {
+                    kind: mondrian_editor_state::state::PanelKind::Assets,
+                    active_index: 1,
+                    hidden_tabs: Vec::new(),
+                }),
+                second: Box::new(SelfHostedWorkspaceLayout::Panel {
+                    kind: mondrian_editor_state::state::PanelKind::Viewer,
+                    active_index: 0,
+                    hidden_tabs: Vec::new(),
+                }),
+            }),
         };
 
         fs::write(&project_path, b"project").expect("write recent project fixture");
@@ -176,6 +200,58 @@ mod tests {
         fs::remove_file(project_path).ok();
 
         assert_eq!(loaded, preferences);
+    }
+
+    #[test]
+    fn loading_preferences_sanitizes_custom_workspace_layout() {
+        let path = temp_preferences_path("custom-layout-filter");
+        fs::write(
+            &path,
+            serde_json::to_vec(&SelfHostedPreferences {
+                version: 1,
+                theme_preset: ThemePreset::Dark,
+                workspace_preset: WorkspacePreset::Custom,
+                recent_projects: Vec::new(),
+                shortcut_overrides: Vec::new(),
+                custom_workspace_layout: Some(SelfHostedWorkspaceLayout::Split {
+                    direction: SplitDirection::Vertical,
+                    ratio: 12.0,
+                    first: Box::new(SelfHostedWorkspaceLayout::Panel {
+                        kind: mondrian_editor_state::state::PanelKind::Assets,
+                        active_index: 99,
+                        hidden_tabs: Vec::new(),
+                    }),
+                    second: Box::new(SelfHostedWorkspaceLayout::Panel {
+                        kind: mondrian_editor_state::state::PanelKind::Timeline,
+                        active_index: 2,
+                        hidden_tabs: Vec::new(),
+                    }),
+                }),
+            })
+            .expect("serialize preferences"),
+        )
+        .expect("write preferences");
+
+        let preferences = load_self_hosted_preferences_from(&path);
+        fs::remove_file(path).ok();
+
+        assert_eq!(
+            preferences.custom_workspace_layout,
+            Some(SelfHostedWorkspaceLayout::Split {
+                direction: SplitDirection::Vertical,
+                ratio: 0.9,
+                first: Box::new(SelfHostedWorkspaceLayout::Panel {
+                    kind: mondrian_editor_state::state::PanelKind::Assets,
+                    active_index: 1,
+                    hidden_tabs: Vec::new(),
+                }),
+                second: Box::new(SelfHostedWorkspaceLayout::Panel {
+                    kind: mondrian_editor_state::state::PanelKind::Timeline,
+                    active_index: 0,
+                    hidden_tabs: Vec::new(),
+                }),
+            })
+        );
     }
 
     #[test]
@@ -222,6 +298,7 @@ mod tests {
                 workspace_preset: WorkspacePreset::Editing,
                 recent_projects: vec![missing, existing.clone(), existing.clone()],
                 shortcut_overrides: Vec::new(),
+                custom_workspace_layout: None,
             })
             .expect("serialize preferences"),
         )
@@ -249,6 +326,7 @@ mod tests {
                     SelfHostedShortcutOverride { id: "unknown.shortcut".to_owned(), binding: None },
                     SelfHostedShortcutOverride { id: "panel.inspector".to_owned(), binding: None },
                 ],
+                custom_workspace_layout: None,
             })
             .expect("serialize preferences"),
         )

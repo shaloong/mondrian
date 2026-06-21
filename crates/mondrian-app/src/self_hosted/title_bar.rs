@@ -3,6 +3,7 @@
 //! Native window effects stay behind app-shell actions. This widget only owns
 //! layout, hit testing, and drawing for the custom title/menu row.
 
+use mondrian_editor_state::state::WorkspacePreset;
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
@@ -13,6 +14,7 @@ use crate::app::ui_actions::{
     app_shell_window_toggle_maximize_action,
 };
 use crate::self_hosted::menu_bar::{MenuBar, MENU_BAR_HEIGHT};
+use crate::self_hosted::workspace_layout::SelfHostedWorkspaceLayout;
 
 /// Height reserved for the self-hosted menu/title chrome.
 pub const TITLE_BAR_HEIGHT: f32 = 34.0;
@@ -78,6 +80,15 @@ impl TitleBar {
     #[cfg(test)]
     pub(crate) fn menu_bar_mut(&mut self) -> &mut MenuBar {
         &mut self.menu_bar
+    }
+
+    /// Refresh checked menu rows that reflect shell-local workspace state.
+    pub(crate) fn refresh_shell_menu_checked_state(
+        &mut self,
+        workspace_preset: WorkspacePreset,
+        workspace_layout: Option<&SelfHostedWorkspaceLayout>,
+    ) {
+        self.menu_bar.refresh_shell_checked_state(workspace_preset, workspace_layout);
     }
 
     /// Current titlebar bounds.

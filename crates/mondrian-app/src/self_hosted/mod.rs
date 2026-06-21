@@ -5,6 +5,7 @@
 //! module instead of accumulating panel or runtime wiring.
 
 pub mod about_dialog;
+pub mod action_availability;
 pub mod action_queue;
 pub mod asset_thumbnails;
 pub mod host;
@@ -27,3 +28,4 @@ pub mod startup;
 pub(crate) mod test_utils;
 pub mod title_bar;
 pub mod window;
+pub mod workspace_layout;

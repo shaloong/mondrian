@@ -5,7 +5,6 @@
 //! shell. Root layout, modal state, and native dialog resolution stay in
 //! `self_hosted::shell`.
 
-use mondrian_core::types::TrackId;
 use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
@@ -20,16 +19,14 @@ use crate::app::ui_actions::{
     app_shell_sequence_settings_action, sequence_delete_action, sequence_duplicate_action,
     sequence_new_action, sequence_return_to_parent_action, sequence_set_active_default_action,
     sequence_switch_active_action, timeline_clear_in_out_points_action, SequenceTargetPayload,
-    APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
-    APP_SHELL_SEQUENCE_SETTINGS, SEQUENCE_DELETE, SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE,
-    SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT, SEQUENCE_SWITCH_ACTIVE,
-    TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_NAMESPACE,
 };
 use crate::app::AppState;
+use crate::self_hosted::action_availability::app_state_action_enabled;
 use crate::self_hosted::icons::AppIcon;
 use crate::self_hosted::shortcuts::{
     shortcut_label_for_action, shortcut_label_for_action_with_overrides, SelfHostedShortcutOverride,
 };
+use crate::self_hosted::workspace_layout::SelfHostedWorkspaceLayout;
 
 /// Height reserved for the self-hosted top menu bar.
 pub const MENU_BAR_HEIGHT: f32 = 28.0;
@@ -120,32 +117,32 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
             "View",
             vec![
                 menu_item_with_icon(
-                    MenuItem::new("Viewer", Action::FocusPanel(PanelKind::Viewer)),
+                    MenuItem::new("Viewer", Action::TogglePanel(PanelKind::Viewer)),
                     AppIcon::FullScreen,
                 ),
                 menu_item_with_icon(
-                    MenuItem::new("Timeline", Action::FocusPanel(PanelKind::Timeline)),
+                    MenuItem::new("Timeline", Action::TogglePanel(PanelKind::Timeline)),
                     AppIcon::Clock,
                 ),
                 menu_item_with_icon(
-                    MenuItem::new("Inspector", Action::FocusPanel(PanelKind::Inspector)),
+                    MenuItem::new("Inspector", Action::TogglePanel(PanelKind::Inspector)),
                     AppIcon::List,
                 ),
                 MenuItem::separator(),
                 menu_item_with_icon(
-                    MenuItem::new("Assets", Action::FocusPanel(PanelKind::Assets)),
+                    MenuItem::new("Assets", Action::TogglePanel(PanelKind::Assets)),
                     AppIcon::Folder,
                 ),
                 menu_item_with_icon(
-                    MenuItem::new("Effects", Action::FocusPanel(PanelKind::Effects)),
+                    MenuItem::new("Effects", Action::TogglePanel(PanelKind::Effects)),
                     AppIcon::Effect,
                 ),
                 menu_item_with_icon(
-                    MenuItem::new("Node Graph", Action::FocusPanel(PanelKind::NodeGraph)),
+                    MenuItem::new("Node Graph", Action::TogglePanel(PanelKind::NodeGraph)),
                     AppIcon::Grid,
                 ),
                 menu_item_with_icon(
-                    MenuItem::new("Export", Action::FocusPanel(PanelKind::Export)),
+                    MenuItem::new("Export", Action::TogglePanel(PanelKind::Export)),
                     AppIcon::Export,
                 ),
                 MenuItem::separator(),
@@ -284,6 +281,41 @@ pub fn default_menu_items_for_app_state_with_shortcut_overrides(
     apply_shortcut_overrides_to_menu_items(items, overrides)
 }
 
+/// Apply shell-local checked state for panel visibility and workspace preset.
+pub fn apply_shell_menu_checked_state(
+    items: Vec<(&'static str, Vec<MenuItem>)>,
+    workspace_preset: WorkspacePreset,
+    workspace_layout: Option<&SelfHostedWorkspaceLayout>,
+) -> Vec<(&'static str, Vec<MenuItem>)> {
+    items
+        .into_iter()
+        .map(|(label, rows)| {
+            let rows = rows
+                .into_iter()
+                .map(|item| {
+                    apply_shell_menu_item_checked_state(item, workspace_preset, workspace_layout)
+                })
+                .collect();
+            (label, rows)
+        })
+        .collect()
+}
+
+fn apply_shell_menu_item_checked_state(
+    item: MenuItem,
+    workspace_preset: WorkspacePreset,
+    workspace_layout: Option<&SelfHostedWorkspaceLayout>,
+) -> MenuItem {
+    let checked = match &item.action {
+        Action::TogglePanel(panel) => {
+            workspace_layout.is_some_and(|layout| layout.contains_panel(*panel))
+        }
+        Action::SwitchWorkspace(preset) => workspace_preset == *preset,
+        _ => return item,
+    };
+    item.checked(checked)
+}
+
 fn sequence_menu_items_for_app_state(state: &AppState) -> Vec<MenuItem> {
     let active_sequence_id = state.active_sequence_id;
     let mut items = vec![
@@ -379,175 +411,6 @@ fn apply_app_state_menu_availability(item: MenuItem, state: &AppState) -> MenuIt
     }
 }
 
-/// Whether a shell-dispatched action can produce a useful editor operation for
-/// the supplied application state snapshot.
-pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
-    match action {
-        Action::SaveProject => state.has_open_project(),
-        Action::SaveProjectAs(_) => state.sequence.is_some(),
-        Action::CloseProject => state.sequence.is_some() || state.current_project_path.is_some(),
-        Action::ImportMedia(_) => state.asset_library.is_some(),
-        Action::Undo => state.can_undo_action(),
-        Action::Redo => state.can_redo_action(),
-        Action::Cut => state.can_cut_to_app_clipboard(),
-        Action::Copy => state.can_copy_to_app_clipboard(),
-        Action::Paste => state.can_paste_from_app_clipboard(),
-        Action::DeleteSelection | Action::RippleDeleteSelection => {
-            has_deletable_timeline_selection(state)
-        }
-        Action::Duplicate => state.can_cut_to_app_clipboard(),
-        Action::SplitClipAtPlayhead => can_split_at_playhead(state),
-        Action::MarkInAtPlayhead
-        | Action::MarkOutAtPlayhead
-        | Action::TogglePlay
-        | Action::StepForward
-        | Action::StepBack
-        | Action::GoToStart
-        | Action::GoToEnd => state.sequence.is_some(),
-        Action::SelectAll => sequence_has_selectable_clips(state),
-        Action::DeselectAll => has_any_app_selection(state),
-        Action::Custom { namespace, name, .. }
-            if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_IMPORT_MEDIA_DIALOG =>
-        {
-            state.asset_library.is_some()
-        }
-        Action::Custom { namespace, name, .. }
-            if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_SEQUENCE_SETTINGS =>
-        {
-            state.sequence.is_some()
-        }
-        Action::Custom { namespace, name, .. }
-            if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_SAVE_PROJECT_AS_DIALOG =>
-        {
-            state.sequence.is_some()
-        }
-        Action::Custom { namespace, name, .. }
-            if namespace == TIMELINE_NAMESPACE && name == TIMELINE_CLEAR_IN_OUT_POINTS =>
-        {
-            sequence_has_in_out_points(state)
-        }
-        Action::Custom { namespace, name, .. }
-            if namespace == SEQUENCE_NAMESPACE && name == SEQUENCE_RETURN_TO_PARENT =>
-        {
-            !state.sequence_navigation_stack.is_empty()
-        }
-        Action::Custom { namespace, name, .. }
-            if namespace == SEQUENCE_NAMESPACE && name == SEQUENCE_SET_ACTIVE_DEFAULT =>
-        {
-            state.active_sequence_id.is_some()
-                && state.default_sequence_id != state.active_sequence_id
-        }
-        Action::Custom { namespace, name, .. }
-            if namespace == SEQUENCE_NAMESPACE && name == SEQUENCE_DUPLICATE =>
-        {
-            state.active_sequence_id.is_some()
-        }
-        Action::Custom { namespace, name, .. }
-            if namespace == SEQUENCE_NAMESPACE && name == SEQUENCE_DELETE =>
-        {
-            state.active_sequence_id.is_some() && state.export_sequences_snapshot().len() > 1
-        }
-        Action::Custom { namespace, name, .. }
-            if namespace == SEQUENCE_NAMESPACE && name == SEQUENCE_SWITCH_ACTIVE =>
-        {
-            state.active_sequence_id.is_some()
-        }
-        _ => true,
-    }
-}
-
-fn has_timeline_selection(state: &AppState) -> bool {
-    !state.selection.selected_clips.is_empty() || !state.selection.selected_track_ids.is_empty()
-}
-
-fn has_deletable_timeline_selection(state: &AppState) -> bool {
-    if !state.selection.selected_clips.is_empty() {
-        let Some(sequence) = state.sequence.as_ref() else {
-            return false;
-        };
-        return state.selection.selected_clips.iter().all(|selection| {
-            let tracks = if selection.is_video_track {
-                &sequence.video_tracks
-            } else {
-                &sequence.audio_tracks
-            };
-            tracks
-                .iter()
-                .find(|track| track.id == selection.track_id)
-                .is_some_and(|track| !track.is_locked)
-        });
-    }
-
-    selected_tracks_are_deletable(state)
-}
-
-fn selected_tracks_are_deletable(state: &AppState) -> bool {
-    if state.selection.selected_track_ids.is_empty() {
-        return false;
-    }
-    let Some(sequence) = state.sequence.as_ref() else {
-        return false;
-    };
-
-    let mut targets = Vec::<TrackId>::new();
-    let mut video_targets = 0usize;
-    let mut audio_targets = 0usize;
-    for track_id in &state.selection.selected_track_ids {
-        if targets.contains(track_id) {
-            continue;
-        }
-        targets.push(*track_id);
-
-        if sequence.video_tracks.iter().any(|track| track.id == *track_id) {
-            video_targets += 1;
-        } else if sequence.audio_tracks.iter().any(|track| track.id == *track_id) {
-            audio_targets += 1;
-        } else {
-            return false;
-        }
-    }
-
-    sequence.video_tracks.len().saturating_sub(video_targets) >= 1
-        && sequence.audio_tracks.len().saturating_sub(audio_targets) >= 1
-}
-
-fn has_any_app_selection(state: &AppState) -> bool {
-    has_timeline_selection(state)
-        || state.selection.selected_effect.is_some()
-        || state.selection.selected_mask.is_some()
-        || state.animation_selection.active_property.is_some()
-        || !state.animation_selection.selected_keyframes.is_empty()
-}
-
-fn sequence_has_in_out_points(state: &AppState) -> bool {
-    state.sequence.as_ref().is_some_and(|sequence| {
-        sequence.in_point_frame.is_some() || sequence.out_point_frame().is_some()
-    })
-}
-
-fn sequence_has_selectable_clips(state: &AppState) -> bool {
-    state.sequence.as_ref().is_some_and(|sequence| {
-        sequence
-            .video_tracks
-            .iter()
-            .chain(sequence.audio_tracks.iter())
-            .any(|track| !track.clips.is_empty())
-    })
-}
-
-fn can_split_at_playhead(state: &AppState) -> bool {
-    let frame = state.current_frame();
-    state.sequence.as_ref().is_some_and(|sequence| {
-        sequence
-            .video_tracks
-            .iter()
-            .filter(|track| !track.is_locked)
-            .chain(sequence.audio_tracks.iter().filter(|track| !track.is_locked))
-            .flat_map(|track| track.clips.iter())
-            .any(|clip| frame > clip.position.frame && frame < clip.end_position().frame)
-    })
-}
-
 fn menu_item_with_icon(item: MenuItem, icon: AppIcon) -> MenuItem {
     let item = menu_item_with_shortcut(item);
     match icon.vector_icon() {
@@ -619,13 +482,52 @@ impl MenuBar {
         ))
     }
 
+    /// Refresh shell-local checked state without rebuilding menu availability
+    /// or shortcut labels.
+    pub fn refresh_shell_checked_state(
+        &mut self,
+        workspace_preset: WorkspacePreset,
+        workspace_layout: Option<&SelfHostedWorkspaceLayout>,
+    ) {
+        for panel in PanelKind::ALL {
+            self.set_checked_for_action(
+                &Action::TogglePanel(panel),
+                workspace_layout.is_some_and(|layout| layout.contains_panel(panel)),
+            );
+        }
+        for preset in [
+            WorkspacePreset::Editing,
+            WorkspacePreset::Color,
+            WorkspacePreset::Audio,
+            WorkspacePreset::Compositing,
+            WorkspacePreset::Export,
+        ] {
+            self.set_checked_for_action(
+                &Action::SwitchWorkspace(preset),
+                workspace_preset == preset,
+            );
+        }
+    }
+
     /// Current laid-out menu bar bounds.
     pub fn bounds(&self) -> Rect {
         self.bounds
     }
 
+    /// Return checked state for the first row matching an action.
+    #[cfg(test)]
+    pub(crate) fn checked_for_action(&self, action: &Action) -> Option<bool> {
+        self.menus.iter().find_map(|menu| menu.checked_for_action(action))
+    }
+
     fn open_menu_index(&self) -> Option<usize> {
         self.menus.iter().position(Dropdown::is_open)
+    }
+
+    fn set_checked_for_action(&mut self, action: &Action, checked: bool) {
+        for menu in &mut self.menus {
+            menu.set_checked_for_action(action, checked);
+        }
     }
 
     fn trigger_index_at(&self, position: Point) -> Option<usize> {
@@ -746,11 +648,15 @@ impl Widget for MenuBar {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::ui_actions::{APP_SHELL_ABOUT, APP_SHELL_QUIT};
+    use crate::app::ui_actions::{
+        APP_SHELL_ABOUT, APP_SHELL_NAMESPACE, APP_SHELL_QUIT, SEQUENCE_DELETE, SEQUENCE_DUPLICATE,
+        SEQUENCE_NAMESPACE, SEQUENCE_SWITCH_ACTIVE, TIMELINE_CLEAR_IN_OUT_POINTS,
+        TIMELINE_NAMESPACE,
+    };
     use crate::app::SelectedClipRef;
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::automation::{timecode_to_ticks, Keyframe, PropertyMutation, PropertyValue};
-    use mondrian_core::types::{AssetId, TimeCode};
+    use mondrian_core::types::{AssetId, TimeCode, TrackId};
     use mondrian_timeline::clip::{Clip, Transform2D};
     use mondrian_timeline::sequence::Sequence;
     use mondrian_ui_core::EventRequests;
@@ -858,7 +764,7 @@ mod tests {
 
         for panel in PanelKind::ALL {
             assert!(
-                view_items.iter().any(|item| item.action == Action::FocusPanel(panel)),
+                view_items.iter().any(|item| item.action == Action::TogglePanel(panel)),
                 "missing panel menu item for {panel:?}"
             );
         }
@@ -876,6 +782,67 @@ mod tests {
                 "missing workspace menu item for {preset:?}"
             );
         }
+    }
+
+    #[test]
+    fn shell_menu_checked_state_marks_visible_panels_and_current_workspace() {
+        let layout = SelfHostedWorkspaceLayout::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(SelfHostedWorkspaceLayout::Panel {
+                kind: PanelKind::Assets,
+                active_index: 0,
+                hidden_tabs: Vec::new(),
+            }),
+            second: Box::new(SelfHostedWorkspaceLayout::Panel {
+                kind: PanelKind::Viewer,
+                active_index: 0,
+                hidden_tabs: Vec::new(),
+            }),
+        };
+
+        let menu_items = apply_shell_menu_checked_state(
+            default_menu_items(),
+            WorkspacePreset::Editing,
+            Some(&layout),
+        );
+
+        assert!(menu_item(&menu_items, "View", "Assets").checked);
+        assert!(menu_item(&menu_items, "View", "Effects").checked);
+        assert!(menu_item(&menu_items, "View", "Viewer").checked);
+        assert!(!menu_item(&menu_items, "View", "Timeline").checked);
+        assert!(menu_item(&menu_items, "Workspace", "Editing").checked);
+        assert!(!menu_item(&menu_items, "Workspace", "Color").checked);
+    }
+
+    #[test]
+    fn shell_menu_checked_state_reflects_hidden_grouped_tabs_in_custom_layout() {
+        let layout = SelfHostedWorkspaceLayout::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(SelfHostedWorkspaceLayout::Panel {
+                kind: PanelKind::Assets,
+                active_index: 0,
+                hidden_tabs: vec![PanelKind::Effects],
+            }),
+            second: Box::new(SelfHostedWorkspaceLayout::Panel {
+                kind: PanelKind::Viewer,
+                active_index: 0,
+                hidden_tabs: Vec::new(),
+            }),
+        };
+
+        let menu_items = apply_shell_menu_checked_state(
+            default_menu_items(),
+            WorkspacePreset::Custom,
+            Some(&layout),
+        );
+
+        assert!(menu_item(&menu_items, "View", "Assets").checked);
+        assert!(!menu_item(&menu_items, "View", "Effects").checked);
+        assert!(menu_item(&menu_items, "View", "Viewer").checked);
+        assert!(!menu_item(&menu_items, "Workspace", "Editing").checked);
+        assert!(!menu_item(&menu_items, "Workspace", "Export").checked);
     }
 
     #[test]
@@ -1082,79 +1049,6 @@ mod tests {
         assert!(!menu_item(&menu_items, "Sequence", "Set Active as Default").enabled);
         assert!(!menu_item(&menu_items, "Sequence", "Duplicate Active Sequence").enabled);
         assert!(!menu_item(&menu_items, "Sequence", "Delete Active Sequence").enabled);
-    }
-
-    #[test]
-    fn app_state_action_gate_disables_timeline_editing_without_targets() {
-        let state = AppState::new();
-        let clear_in_out_action = timeline_clear_in_out_points_action();
-
-        for action in [
-            Action::DeleteSelection,
-            Action::RippleDeleteSelection,
-            Action::Duplicate,
-            Action::SplitClipAtPlayhead,
-            Action::MarkInAtPlayhead,
-            Action::MarkOutAtPlayhead,
-            Action::TogglePlay,
-            Action::StepBack,
-            Action::StepForward,
-            Action::GoToStart,
-            Action::GoToEnd,
-            Action::SelectAll,
-            Action::DeselectAll,
-        ]
-        .iter()
-        .chain(std::iter::once(&clear_in_out_action))
-        {
-            assert!(!app_state_action_enabled(action, &state), "{action:?}");
-        }
-    }
-
-    #[test]
-    fn app_state_action_gate_enables_timeline_editing_with_valid_targets() {
-        let mut state = state_with_selected_clip();
-        state.seek(15);
-
-        for action in [
-            Action::DeleteSelection,
-            Action::RippleDeleteSelection,
-            Action::Duplicate,
-            Action::SplitClipAtPlayhead,
-            Action::MarkInAtPlayhead,
-            Action::MarkOutAtPlayhead,
-            Action::TogglePlay,
-            Action::StepBack,
-            Action::StepForward,
-            Action::GoToStart,
-            Action::GoToEnd,
-            Action::SelectAll,
-            Action::DeselectAll,
-        ] {
-            assert!(app_state_action_enabled(&action, &state), "{action:?}");
-        }
-    }
-
-    #[test]
-    fn app_state_action_gate_disables_split_outside_unlocked_clip_body() {
-        let mut state = state_with_selected_clip();
-        state.seek(10);
-        assert!(!app_state_action_enabled(
-            &Action::SplitClipAtPlayhead,
-            &state
-        ));
-
-        state.seek(15);
-        assert!(app_state_action_enabled(
-            &Action::SplitClipAtPlayhead,
-            &state
-        ));
-
-        state.sequence.as_mut().expect("sequence").video_tracks[0].is_locked = true;
-        assert!(!app_state_action_enabled(
-            &Action::SplitClipAtPlayhead,
-            &state
-        ));
     }
 
     #[test]

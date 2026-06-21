@@ -13,12 +13,14 @@ use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
 use crate::paint::{color_with_alpha, mix_color};
-use crate::{ContextMenu, MenuItem};
+use crate::{ContextMenu, MenuItem, VectorIcon};
 
 const SCROLLBAR_THICKNESS: f32 = 8.0;
 const SCROLLBAR_MIN_THUMB: f32 = 28.0;
 const TIMELINE_TOOL_BUTTON_SIZE: f32 = 20.0;
 const TIMELINE_TOOL_BUTTON_GAP: f32 = 4.0;
+const TIMELINE_TOOLBAR_HEIGHT: f32 = 30.0;
+const TIMELINE_TOOLBAR_GROUP_GAP: f32 = 10.0;
 const TIMELINE_ZOOM_BUTTON_SIZE: f32 = 20.0;
 const TIMELINE_ZOOM_BUTTON_GAP: f32 = 4.0;
 
@@ -35,11 +37,14 @@ pub type TimelineTrackMoveAction = dyn Fn(TimelineTrackMove, &TimelineTrack) -> 
 pub type TimelineTrackControlAction =
     dyn Fn(TimelineTrackControl, TimelineTrackRef, &TimelineTrack) -> Action;
 
-/// Action factory for adding a track from the timeline corner controls.
+/// Action factory for adding a track from timeline menu entries.
 pub type TimelineTrackAddAction = dyn Fn(TimelineTrackKind) -> Action;
 
 /// Action factory for timeline-scoped editing commands.
 pub type TimelineEditCommandAction = dyn Fn(TimelineEditCommand) -> Action;
+
+/// Availability factory for timeline-scoped editing commands.
+pub type TimelineEditCommandAvailability = dyn Fn(TimelineEditCommand) -> bool;
 
 /// Shortcut-label factory for timeline-scoped editing commands.
 pub type TimelineEditCommandShortcut = dyn Fn(TimelineEditCommand) -> Option<String>;
@@ -184,10 +189,31 @@ pub enum TimelineTool {
     Blade,
 }
 
+/// Icon slot for timeline toolbar controls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineToolbarIconSlot {
+    SelectTool,
+    BladeTool,
+    AddVideoTrack,
+    AddAudioTrack,
+    SplitAtPlayhead,
+    DeleteSelection,
+    MarkInAtPlayhead,
+    MarkOutAtPlayhead,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TimelineZoomButton {
     Out,
     In,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimelineToolbarButton {
+    Tool(TimelineTool),
+    AddTrack(TimelineTrackKind),
+    Edit(TimelineEditCommand),
+    Zoom(TimelineZoomButton),
 }
 
 /// Local UI state preserved across [`TimelineView`] model rebuilds.
@@ -344,6 +370,7 @@ pub struct TimelineView {
     id: WidgetId,
     tracks: Vec<TimelineTrack>,
     bounds: Rect,
+    toolbar_rect: Rect,
     ruler_rect: Rect,
     header_rect: Rect,
     body_rect: Rect,
@@ -351,9 +378,7 @@ pub struct TimelineView {
     selected_clip: Option<TimelineClipRef>,
     hovered_clip: Option<TimelineClipRef>,
     hovered_track_control: Option<(TimelineTrackRef, TimelineTrackControl)>,
-    hovered_tool: Option<TimelineTool>,
-    hovered_track_add: Option<TimelineTrackKind>,
-    hovered_zoom: Option<TimelineZoomButton>,
+    hovered_toolbar_button: Option<TimelineToolbarButton>,
     active_tool: TimelineTool,
     playhead_frame: i64,
     in_point_frame: i64,
@@ -384,12 +409,15 @@ pub struct TimelineView {
     on_track_control: Option<Box<TimelineTrackControlAction>>,
     on_track_add: Option<Box<TimelineTrackAddAction>>,
     on_edit_command: Option<Box<TimelineEditCommandAction>>,
+    on_edit_command_available: Option<Box<TimelineEditCommandAvailability>>,
     on_edit_command_shortcut: Option<Box<TimelineEditCommandShortcut>>,
     on_seek: Option<Box<TimelineSeekAction>>,
     on_asset_drop: Option<Box<TimelineAssetDropAction>>,
     on_clip_move: Option<Box<TimelineClipMoveAction>>,
     on_clip_trim: Option<Box<TimelineClipTrimAction>>,
     on_in_out_point: Option<Box<TimelineInOutPointAction>>,
+    toolbar_icons: Vec<(TimelineToolbarIconSlot, VectorIcon)>,
+    empty_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -455,6 +483,7 @@ impl TimelineView {
             id: WidgetId::new(),
             tracks,
             bounds: Rect::ZERO,
+            toolbar_rect: Rect::ZERO,
             ruler_rect: Rect::ZERO,
             header_rect: Rect::ZERO,
             body_rect: Rect::ZERO,
@@ -462,9 +491,7 @@ impl TimelineView {
             selected_clip: None,
             hovered_clip: None,
             hovered_track_control: None,
-            hovered_tool: None,
-            hovered_track_add: None,
-            hovered_zoom: None,
+            hovered_toolbar_button: None,
             active_tool: TimelineTool::Select,
             playhead_frame: 0,
             in_point_frame: 0,
@@ -495,12 +522,15 @@ impl TimelineView {
             on_track_control: None,
             on_track_add: None,
             on_edit_command: None,
+            on_edit_command_available: None,
             on_edit_command_shortcut: None,
             on_seek: None,
             on_asset_drop: None,
             on_clip_move: None,
             on_clip_trim: None,
             on_in_out_point: None,
+            toolbar_icons: Vec::new(),
+            empty_message: None,
         }
     }
 
@@ -553,9 +583,7 @@ impl TimelineView {
             self.focus_visible = false;
             self.hovered_clip = None;
             self.hovered_track_control = None;
-            self.hovered_tool = None;
-            self.hovered_track_add = None;
-            self.hovered_zoom = None;
+            self.hovered_toolbar_button = None;
             self.active_tool = TimelineTool::Select;
             self.selected_track = None;
             self.playhead_dragging = false;
@@ -619,9 +647,27 @@ impl TimelineView {
         self
     }
 
-    /// Set a dynamic add-track action factory for the timeline corner buttons.
+    /// Set a dynamic add-track action factory for timeline menu entries.
     pub fn on_track_add(mut self, action: impl Fn(TimelineTrackKind) -> Action + 'static) -> Self {
         self.on_track_add = Some(Box::new(action));
+        self
+    }
+
+    /// Set a vector icon used to paint one timeline toolbar button.
+    pub fn with_toolbar_icon(mut self, slot: TimelineToolbarIconSlot, icon: VectorIcon) -> Self {
+        if let Some((_, existing)) =
+            self.toolbar_icons.iter_mut().find(|(candidate, _)| *candidate == slot)
+        {
+            *existing = icon;
+        } else {
+            self.toolbar_icons.push((slot, icon));
+        }
+        self
+    }
+
+    /// Set the message shown in the timeline body when there are no tracks.
+    pub fn with_empty_message(mut self, message: impl Into<String>) -> Self {
+        self.empty_message = Some(message.into());
         self
     }
 
@@ -631,6 +677,15 @@ impl TimelineView {
         action: impl Fn(TimelineEditCommand) -> Action + 'static,
     ) -> Self {
         self.on_edit_command = Some(Box::new(action));
+        self
+    }
+
+    /// Set a dynamic edit-command availability factory.
+    pub fn on_edit_command_available(
+        mut self,
+        available: impl Fn(TimelineEditCommand) -> bool + 'static,
+    ) -> Self {
+        self.on_edit_command_available = Some(Box::new(available));
         self
     }
 
@@ -985,137 +1040,180 @@ impl TimelineView {
     fn timeline_corner_rect(&self) -> Rect {
         Rect::new(
             self.bounds.x,
-            self.bounds.y,
+            self.bounds.y + TIMELINE_TOOLBAR_HEIGHT,
             self.header_width,
             self.ruler_height,
         )
     }
 
-    fn track_add_button_rect(&self, kind: TimelineTrackKind) -> Rect {
-        let size = TIMELINE_TOOL_BUTTON_SIZE;
-        let gap = TIMELINE_TOOL_BUTTON_GAP;
-        let x = self.bounds.x
-            + match kind {
-                TimelineTrackKind::Video => 8.0 + (size + gap) * 2.0 + 2.0,
-                TimelineTrackKind::Audio => 8.0 + (size + gap) * 3.0 + 2.0,
-            };
-        Rect::new(
-            x,
-            self.bounds.y + (self.ruler_height - size) * 0.5,
-            size,
-            size,
-        )
-    }
-
-    fn track_add_at(&self, point: Point) -> Option<TimelineTrackKind> {
-        if !self.timeline_corner_rect().contains(point) {
-            return None;
-        }
-        [TimelineTrackKind::Video, TimelineTrackKind::Audio]
-            .into_iter()
-            .find(|kind| self.track_add_button_rect(*kind).contains(point))
-    }
-
     fn tool_button_rect(&self, tool: TimelineTool) -> Rect {
-        let size = TIMELINE_TOOL_BUTTON_SIZE;
-        let gap = TIMELINE_TOOL_BUTTON_GAP;
-        let x = self.bounds.x
-            + match tool {
-                TimelineTool::Select => 8.0,
-                TimelineTool::Blade => 8.0 + size + gap,
-            };
-        Rect::new(
-            x,
-            self.bounds.y + (self.ruler_height - size) * 0.5,
-            size,
-            size,
-        )
-    }
-
-    fn tool_at(&self, point: Point) -> Option<TimelineTool> {
-        if !self.timeline_corner_rect().contains(point) {
-            return None;
-        }
-        [TimelineTool::Select, TimelineTool::Blade]
-            .into_iter()
-            .find(|tool| self.tool_button_rect(*tool).contains(point))
+        self.toolbar_button_rect(TimelineToolbarButton::Tool(tool))
+            .unwrap_or(Rect::ZERO)
     }
 
     fn zoom_button_rect(&self, button: TimelineZoomButton) -> Option<Rect> {
         let size = TIMELINE_ZOOM_BUTTON_SIZE;
         let gap = TIMELINE_ZOOM_BUTTON_GAP;
-        let available_width = self.ruler_rect.width;
+        let available_width = (self.toolbar_rect.width - self.header_width).max(0.0);
         let group_width = size * 2.0 + gap;
         if available_width < group_width + 16.0 {
             return None;
         }
-        let right = self.ruler_rect.x + self.ruler_rect.width - 8.0;
+        let right = self.toolbar_rect.x + self.toolbar_rect.width - 8.0;
         let x = match button {
             TimelineZoomButton::Out => right - group_width,
             TimelineZoomButton::In => right - size,
         };
         Some(Rect::new(
             x,
-            self.ruler_rect.y + (self.ruler_rect.height - size) * 0.5,
+            self.toolbar_rect.y + (self.toolbar_rect.height - size) * 0.5,
             size,
             size,
         ))
     }
 
+    #[cfg(test)]
     fn zoom_button_at(&self, point: Point) -> Option<TimelineZoomButton> {
-        if !self.ruler_rect.contains(point) {
-            return None;
+        match self.toolbar_button_at(point) {
+            Some(TimelineToolbarButton::Zoom(button)) => Some(button),
+            _ => None,
         }
-        [TimelineZoomButton::Out, TimelineZoomButton::In]
-            .into_iter()
-            .find(|button| self.zoom_button_rect(*button).is_some_and(|rect| rect.contains(point)))
     }
 
-    fn chrome_tooltip(&self) -> Option<(&'static str, Rect)> {
-        if let Some(tool) = self.hovered_tool {
-            let label = match tool {
-                TimelineTool::Select => "Select Tool (V)",
-                TimelineTool::Blade => "Blade Tool (B)",
-            };
-            return Some((label, self.tool_button_rect(tool)));
+    fn toolbar_left_buttons() -> [TimelineToolbarButton; 8] {
+        [
+            TimelineToolbarButton::Tool(TimelineTool::Select),
+            TimelineToolbarButton::Tool(TimelineTool::Blade),
+            TimelineToolbarButton::AddTrack(TimelineTrackKind::Video),
+            TimelineToolbarButton::AddTrack(TimelineTrackKind::Audio),
+            TimelineToolbarButton::Edit(TimelineEditCommand::SplitAtPlayhead),
+            TimelineToolbarButton::Edit(TimelineEditCommand::DeleteSelection),
+            TimelineToolbarButton::Edit(TimelineEditCommand::MarkInAtPlayhead),
+            TimelineToolbarButton::Edit(TimelineEditCommand::MarkOutAtPlayhead),
+        ]
+    }
+
+    fn toolbar_left_limit(&self) -> f32 {
+        let right_padding = 8.0;
+        self.zoom_button_rect(TimelineZoomButton::Out).map_or(
+            self.toolbar_rect.x + self.toolbar_rect.width - right_padding,
+            |rect| rect.x - TIMELINE_TOOLBAR_GROUP_GAP,
+        )
+    }
+
+    fn toolbar_button_rect(&self, button: TimelineToolbarButton) -> Option<Rect> {
+        if let TimelineToolbarButton::Zoom(zoom) = button {
+            return self.zoom_button_rect(zoom);
         }
-        if let Some(kind) = self.hovered_track_add {
-            let label = match kind {
-                TimelineTrackKind::Video => "Add Video Track",
-                TimelineTrackKind::Audio => "Add Audio Track",
-            };
-            return Some((label, self.track_add_button_rect(kind)));
-        }
-        if let Some(button) = self.hovered_zoom {
-            let label = match button {
-                TimelineZoomButton::Out => "Zoom Out",
-                TimelineZoomButton::In => "Zoom In",
-            };
-            if let Some(rect) = self.zoom_button_rect(button) {
-                return Some((label, rect));
+
+        let size = TIMELINE_TOOL_BUTTON_SIZE;
+        let y = self.toolbar_rect.y + (self.toolbar_rect.height - size) * 0.5;
+        let limit = self.toolbar_left_limit();
+        let mut x = self.toolbar_rect.x + 8.0;
+        for (index, candidate) in Self::toolbar_left_buttons().into_iter().enumerate() {
+            if index == 2 || index == 4 {
+                x += TIMELINE_TOOLBAR_GROUP_GAP;
             }
+            let rect = Rect::new(x, y, size, size);
+            if candidate == button {
+                return (rect.x + rect.width <= limit).then_some(rect);
+            }
+            x += size + TIMELINE_TOOL_BUTTON_GAP;
         }
         None
     }
 
+    fn toolbar_button_at(&self, point: Point) -> Option<TimelineToolbarButton> {
+        if !self.toolbar_rect.contains(point) {
+            return None;
+        }
+        Self::toolbar_left_buttons()
+            .into_iter()
+            .chain([
+                TimelineToolbarButton::Zoom(TimelineZoomButton::Out),
+                TimelineToolbarButton::Zoom(TimelineZoomButton::In),
+            ])
+            .find(|button| {
+                self.toolbar_button_rect(*button).is_some_and(|rect| rect.contains(point))
+            })
+    }
+
+    fn toolbar_icon(&self, slot: TimelineToolbarIconSlot) -> Option<&VectorIcon> {
+        self.toolbar_icons
+            .iter()
+            .find_map(|(candidate, icon)| (*candidate == slot).then_some(icon))
+    }
+
+    fn toolbar_icon_slot(button: TimelineToolbarButton) -> Option<TimelineToolbarIconSlot> {
+        match button {
+            TimelineToolbarButton::Tool(TimelineTool::Select) => {
+                Some(TimelineToolbarIconSlot::SelectTool)
+            }
+            TimelineToolbarButton::Tool(TimelineTool::Blade) => {
+                Some(TimelineToolbarIconSlot::BladeTool)
+            }
+            TimelineToolbarButton::AddTrack(TimelineTrackKind::Video) => {
+                Some(TimelineToolbarIconSlot::AddVideoTrack)
+            }
+            TimelineToolbarButton::AddTrack(TimelineTrackKind::Audio) => {
+                Some(TimelineToolbarIconSlot::AddAudioTrack)
+            }
+            TimelineToolbarButton::Edit(TimelineEditCommand::SplitAtPlayhead) => {
+                Some(TimelineToolbarIconSlot::SplitAtPlayhead)
+            }
+            TimelineToolbarButton::Edit(TimelineEditCommand::DeleteSelection) => {
+                Some(TimelineToolbarIconSlot::DeleteSelection)
+            }
+            TimelineToolbarButton::Edit(TimelineEditCommand::MarkInAtPlayhead) => {
+                Some(TimelineToolbarIconSlot::MarkInAtPlayhead)
+            }
+            TimelineToolbarButton::Edit(TimelineEditCommand::MarkOutAtPlayhead) => {
+                Some(TimelineToolbarIconSlot::MarkOutAtPlayhead)
+            }
+            _ => None,
+        }
+    }
+
+    fn chrome_tooltip(&self) -> Option<(String, Rect)> {
+        let button = self.hovered_toolbar_button?;
+        let label = match button {
+            TimelineToolbarButton::Tool(TimelineTool::Select) => "Select Tool (V)",
+            TimelineToolbarButton::Tool(TimelineTool::Blade) => "Blade Tool (B)",
+            TimelineToolbarButton::AddTrack(TimelineTrackKind::Video) => "Add Video Track",
+            TimelineToolbarButton::AddTrack(TimelineTrackKind::Audio) => "Add Audio Track",
+            TimelineToolbarButton::Edit(TimelineEditCommand::SplitAtPlayhead) => {
+                "Split at Playhead"
+            }
+            TimelineToolbarButton::Edit(TimelineEditCommand::DeleteSelection) => "Delete Selection",
+            TimelineToolbarButton::Edit(TimelineEditCommand::MarkInAtPlayhead) => "Mark In",
+            TimelineToolbarButton::Edit(TimelineEditCommand::MarkOutAtPlayhead) => "Mark Out",
+            TimelineToolbarButton::Zoom(TimelineZoomButton::Out) => "Zoom Out",
+            TimelineToolbarButton::Zoom(TimelineZoomButton::In) => "Zoom In",
+            _ => return None,
+        };
+        let label = if let TimelineToolbarButton::Edit(command) = button {
+            self.edit_command_shortcut(command).map_or_else(
+                || label.to_owned(),
+                |shortcut| format!("{label} ({shortcut})"),
+            )
+        } else {
+            label.to_owned()
+        };
+        self.toolbar_button_rect(button).map(|rect| (label, rect))
+    }
+
     fn update_chrome_hover(&mut self, position: Point, ctx: &mut EventContext) -> bool {
-        let hovered_tool = self.tool_at(position);
-        let hovered_track_add = self.track_add_at(position);
-        let hovered_zoom = self.zoom_button_at(position);
-        let changed = hovered_tool != self.hovered_tool
-            || hovered_track_add != self.hovered_track_add
-            || hovered_zoom != self.hovered_zoom;
+        let hovered_toolbar_button = self.toolbar_button_at(position);
+        let changed = hovered_toolbar_button != self.hovered_toolbar_button;
         if !changed {
             return false;
         }
 
         let had_tooltip = self.chrome_tooltip().is_some();
-        self.hovered_tool = hovered_tool;
-        self.hovered_track_add = hovered_track_add;
-        self.hovered_zoom = hovered_zoom;
+        self.hovered_toolbar_button = hovered_toolbar_button;
 
         if let Some((text, rect)) = self.chrome_tooltip() {
-            ctx.tooltip.show(text.to_owned(), Point::new(rect.x, rect.y + rect.height));
+            ctx.tooltip.show(text, Point::new(rect.x, rect.y + rect.height));
         } else if had_tooltip {
             ctx.tooltip.hide();
         }
@@ -1270,18 +1368,6 @@ impl TimelineView {
             if let Some(factory) = &self.on_track_control {
                 (ctx.dispatch)(factory(control, track_ref, track));
             }
-        }
-        ctx.request_repaint();
-        EventResult::Handled
-    }
-
-    fn activate_track_add_from_input(
-        &mut self,
-        kind: TimelineTrackKind,
-        ctx: &mut EventContext,
-    ) -> EventResult {
-        if let Some(factory) = &self.on_track_add {
-            (ctx.dispatch)(factory(kind));
         }
         ctx.request_repaint();
         EventResult::Handled
@@ -1625,6 +1711,9 @@ impl TimelineView {
         command: TimelineEditCommand,
         ctx: &mut EventContext,
     ) -> bool {
+        if !self.enabled || !self.edit_command_available_from_host(command) {
+            return false;
+        }
         let Some(factory) = &self.on_edit_command else {
             return false;
         };
@@ -1639,6 +1728,17 @@ impl TimelineView {
 
     fn edit_command_shortcut(&self, command: TimelineEditCommand) -> Option<String> {
         self.on_edit_command_shortcut.as_ref().and_then(|factory| factory(command))
+    }
+
+    fn edit_command_enabled(&self, command: TimelineEditCommand) -> bool {
+        self.enabled
+            && self.on_edit_command.is_some()
+            && self.edit_command_has_local_target(command)
+            && self.edit_command_available_from_host(command)
+    }
+
+    fn edit_command_available_from_host(&self, command: TimelineEditCommand) -> bool {
+        self.on_edit_command_available.as_ref().is_none_or(|factory| factory(command))
     }
 
     fn track_add_action(&self, kind: TimelineTrackKind) -> Action {
@@ -1656,7 +1756,7 @@ impl TimelineView {
 
     fn edit_menu_item(&self, label: &str, command: TimelineEditCommand) -> MenuItem {
         let mut item = Self::menu_item(label, self.edit_command_action(command));
-        if !self.edit_command_has_local_target(command) {
+        if !self.edit_command_enabled(command) {
             item = item.disabled();
         }
         if let Some(shortcut) = self.edit_command_shortcut(command) {
@@ -1830,6 +1930,42 @@ impl TimelineView {
         (result == EventResult::Handled).then_some(result)
     }
 
+    fn toolbar_button_enabled(&self, button: TimelineToolbarButton) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        match button {
+            TimelineToolbarButton::Tool(_) | TimelineToolbarButton::Zoom(_) => true,
+            TimelineToolbarButton::AddTrack(_) => self.on_track_add.is_some(),
+            TimelineToolbarButton::Edit(command) => self.edit_command_enabled(command),
+        }
+    }
+
+    fn activate_toolbar_button(
+        &mut self,
+        button: TimelineToolbarButton,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        if !self.toolbar_button_enabled(button) {
+            return EventResult::Handled;
+        }
+        match button {
+            TimelineToolbarButton::Tool(tool) => self.set_active_tool(tool, ctx),
+            TimelineToolbarButton::AddTrack(kind) => {
+                if let Some(factory) = &self.on_track_add {
+                    (ctx.dispatch)(factory(kind));
+                    ctx.request_repaint();
+                }
+                EventResult::Handled
+            }
+            TimelineToolbarButton::Edit(command) => {
+                let _ = self.dispatch_edit_command(command, ctx);
+                EventResult::Handled
+            }
+            TimelineToolbarButton::Zoom(button) => self.activate_zoom_button(button, ctx),
+        }
+    }
+
     fn split_at_pointer_frame(&mut self, point: Point, ctx: &mut EventContext) -> EventResult {
         self.seek_from_input(self.x_to_frame(point.x), ctx);
         if self.dispatch_edit_command(TimelineEditCommand::SplitAtPlayhead, ctx) {
@@ -1994,6 +2130,30 @@ impl TimelineView {
             1.0,
             color_with_alpha(colors.border, 0.72),
         );
+    }
+
+    fn paint_timeline_toolbar(&self, ctx: &mut PaintContext) {
+        let colors = &ctx.theme.colors;
+        ctx.encoder.draw_rect(
+            self.toolbar_rect,
+            mix_color(colors.background, colors.card, 0.58),
+            0.0,
+        );
+        ctx.encoder.draw_line(
+            Point::new(
+                self.toolbar_rect.x,
+                self.toolbar_rect.y + self.toolbar_rect.height - 1.0,
+            ),
+            Point::new(
+                self.toolbar_rect.x + self.toolbar_rect.width,
+                self.toolbar_rect.y + self.toolbar_rect.height - 1.0,
+            ),
+            1.0,
+            color_with_alpha(colors.border, 0.72),
+        );
+        for button in Self::toolbar_left_buttons() {
+            self.paint_toolbar_button(ctx, button);
+        }
         self.paint_zoom_buttons(ctx);
     }
 
@@ -2014,10 +2174,6 @@ impl TimelineView {
             1.0,
             color_with_alpha(colors.border, 0.72),
         );
-        self.paint_tool_button(ctx, TimelineTool::Select);
-        self.paint_tool_button(ctx, TimelineTool::Blade);
-        self.paint_track_add_button(ctx, TimelineTrackKind::Video);
-        self.paint_track_add_button(ctx, TimelineTrackKind::Audio);
     }
 
     fn paint_zoom_buttons(&self, ctx: &mut PaintContext) {
@@ -2030,16 +2186,28 @@ impl TimelineView {
             return;
         };
         let colors = &ctx.theme.colors;
-        let hovered = self.hovered_zoom == Some(button);
+        let enabled = self.toolbar_button_enabled(TimelineToolbarButton::Zoom(button));
+        let hovered =
+            enabled && self.hovered_toolbar_button == Some(TimelineToolbarButton::Zoom(button));
         let mut bg = if hovered {
             colors.secondary
         } else {
             colors.accent
         };
-        bg.a = if hovered { 0.9 } else { 0.34 };
+        bg.a = if enabled {
+            if hovered {
+                0.9
+            } else {
+                0.34
+            }
+        } else {
+            0.12
+        };
         ctx.encoder.draw_rect(rect, bg, ctx.theme.spacing.radius_sm);
 
-        let icon = if hovered {
+        let icon = if !enabled {
+            color_with_alpha(colors.muted_foreground, 0.44)
+        } else if hovered {
             colors.foreground
         } else {
             colors.muted_foreground
@@ -2059,11 +2227,201 @@ impl TimelineView {
         }
     }
 
+    fn paint_toolbar_button(&self, ctx: &mut PaintContext, button: TimelineToolbarButton) {
+        match button {
+            TimelineToolbarButton::Tool(tool) => self.paint_tool_button(ctx, tool),
+            TimelineToolbarButton::Zoom(button) => self.paint_zoom_button(ctx, button),
+            TimelineToolbarButton::AddTrack(_) | TimelineToolbarButton::Edit(_) => {
+                let Some(rect) = self.toolbar_button_rect(button) else {
+                    return;
+                };
+                let colors = &ctx.theme.colors;
+                let enabled = self.toolbar_button_enabled(button);
+                let hovered = self.hovered_toolbar_button == Some(button);
+                let mut bg = if hovered && enabled {
+                    colors.secondary
+                } else {
+                    colors.accent
+                };
+                bg.a = if enabled {
+                    if hovered {
+                        0.82
+                    } else {
+                        0.26
+                    }
+                } else {
+                    0.12
+                };
+                ctx.encoder.draw_rect(rect, bg, ctx.theme.spacing.radius_sm);
+
+                let mut icon = colors.muted_foreground;
+                if !enabled {
+                    icon = color_with_alpha(icon, 0.44);
+                }
+                if let Some(slot) = Self::toolbar_icon_slot(button) {
+                    if let Some(vector_icon) = self.toolbar_icon(slot) {
+                        self.paint_toolbar_vector_icon(ctx, rect, vector_icon, icon);
+                        return;
+                    }
+                }
+                self.paint_toolbar_fallback_icon(ctx, rect, button, icon);
+            }
+        }
+    }
+
+    fn paint_toolbar_vector_icon(
+        &self,
+        ctx: &mut PaintContext,
+        rect: Rect,
+        vector_icon: &VectorIcon,
+        color: Color,
+    ) {
+        let icon_size = 14.0_f32.min(rect.width - 6.0).min(rect.height - 6.0).max(1.0);
+        let icon_rect = Rect::new(
+            rect.x + (rect.width - icon_size) * 0.5,
+            rect.y + (rect.height - icon_size) * 0.5,
+            icon_size,
+            icon_size,
+        );
+        vector_icon.paint(ctx, icon_rect, color);
+    }
+
+    fn paint_toolbar_fallback_icon(
+        &self,
+        ctx: &mut PaintContext,
+        rect: Rect,
+        button: TimelineToolbarButton,
+        color: Color,
+    ) {
+        match button {
+            TimelineToolbarButton::AddTrack(TimelineTrackKind::Video) => {
+                let frame = Rect::new(rect.x + 4.0, rect.y + 7.0, 7.0, 5.0);
+                ctx.encoder.draw_rect(frame, color, 1.2);
+                ctx.encoder.draw_triangles(
+                    &[
+                        Point::new(frame.x + frame.width, frame.y + 1.0),
+                        Point::new(frame.x + frame.width + 3.4, frame.y - 0.4),
+                        Point::new(frame.x + frame.width + 3.4, frame.y + frame.height + 0.4),
+                    ],
+                    color,
+                );
+                self.paint_toolbar_plus(ctx, rect, color);
+            }
+            TimelineToolbarButton::AddTrack(TimelineTrackKind::Audio) => {
+                let cy = rect.center().y + 1.0;
+                for (start, end) in [
+                    (
+                        Point::new(rect.x + 4.0, cy + 2.0),
+                        Point::new(rect.x + 6.4, cy - 2.5),
+                    ),
+                    (
+                        Point::new(rect.x + 6.4, cy - 2.5),
+                        Point::new(rect.x + 9.2, cy + 2.5),
+                    ),
+                    (
+                        Point::new(rect.x + 9.2, cy + 2.5),
+                        Point::new(rect.x + 12.0, cy - 1.5),
+                    ),
+                ] {
+                    ctx.encoder.draw_line(start, end, 1.3, color);
+                }
+                self.paint_toolbar_plus(ctx, rect, color);
+            }
+            TimelineToolbarButton::Edit(TimelineEditCommand::SplitAtPlayhead) => {
+                ctx.encoder.draw_line(
+                    Point::new(rect.x + 5.0, rect.y + 14.0),
+                    Point::new(rect.x + 14.0, rect.y + 5.0),
+                    1.8,
+                    color,
+                );
+                ctx.encoder.draw_line(
+                    Point::new(rect.x + 5.8, rect.y + 5.6),
+                    Point::new(rect.x + 13.8, rect.y + 13.8),
+                    1.1,
+                    color,
+                );
+            }
+            TimelineToolbarButton::Edit(TimelineEditCommand::DeleteSelection) => {
+                ctx.encoder
+                    .draw_rect(Rect::new(rect.x + 6.0, rect.y + 7.2, 8.0, 8.0), color, 1.4);
+                ctx.encoder.draw_line(
+                    Point::new(rect.x + 5.2, rect.y + 6.0),
+                    Point::new(rect.x + 14.8, rect.y + 6.0),
+                    1.3,
+                    color,
+                );
+                ctx.encoder.draw_line(
+                    Point::new(rect.x + 8.0, rect.y + 4.2),
+                    Point::new(rect.x + 12.0, rect.y + 4.2),
+                    1.3,
+                    color,
+                );
+            }
+            TimelineToolbarButton::Edit(TimelineEditCommand::MarkInAtPlayhead) => {
+                self.paint_toolbar_marker(ctx, rect, true, color);
+            }
+            TimelineToolbarButton::Edit(TimelineEditCommand::MarkOutAtPlayhead) => {
+                self.paint_toolbar_marker(ctx, rect, false, color);
+            }
+            _ => {}
+        }
+    }
+
+    fn paint_toolbar_plus(&self, ctx: &mut PaintContext, rect: Rect, color: Color) {
+        let center = Point::new(rect.x + rect.width - 5.0, rect.y + 5.0);
+        ctx.encoder.draw_line(
+            Point::new(center.x - 3.0, center.y),
+            Point::new(center.x + 3.0, center.y),
+            1.4,
+            color,
+        );
+        ctx.encoder.draw_line(
+            Point::new(center.x, center.y - 3.0),
+            Point::new(center.x, center.y + 3.0),
+            1.4,
+            color,
+        );
+    }
+
+    fn paint_toolbar_marker(
+        &self,
+        ctx: &mut PaintContext,
+        rect: Rect,
+        mark_in: bool,
+        color: Color,
+    ) {
+        let stem_x = if mark_in {
+            rect.x + 6.0
+        } else {
+            rect.x + rect.width - 6.0
+        };
+        ctx.encoder.draw_line(
+            Point::new(stem_x, rect.y + 4.5),
+            Point::new(stem_x, rect.y + rect.height - 4.5),
+            1.5,
+            color,
+        );
+        let direction = if mark_in { 1.0 } else { -1.0 };
+        ctx.encoder.draw_triangles(
+            &[
+                Point::new(stem_x, rect.center().y),
+                Point::new(stem_x + direction * 7.0, rect.y + 6.0),
+                Point::new(stem_x + direction * 7.0, rect.y + rect.height - 6.0),
+            ],
+            color,
+        );
+    }
+
     fn paint_tool_button(&self, ctx: &mut PaintContext, tool: TimelineTool) {
         let colors = &ctx.theme.colors;
         let rect = self.tool_button_rect(tool);
-        let active = self.active_tool == tool;
-        let hovered = self.hovered_tool == Some(tool);
+        if rect == Rect::ZERO {
+            return;
+        }
+        let enabled = self.toolbar_button_enabled(TimelineToolbarButton::Tool(tool));
+        let active = enabled && self.active_tool == tool;
+        let hovered =
+            enabled && self.hovered_toolbar_button == Some(TimelineToolbarButton::Tool(tool));
         let mut bg = if active {
             mix_color(colors.accent, colors.primary, 0.18)
         } else if hovered {
@@ -2071,20 +2429,32 @@ impl TimelineView {
         } else {
             colors.accent
         };
-        bg.a = if active {
-            0.92
-        } else if hovered {
-            0.82
+        bg.a = if enabled {
+            if active {
+                0.92
+            } else if hovered {
+                0.82
+            } else {
+                0.26
+            }
         } else {
-            0.26
+            0.12
         };
         ctx.encoder.draw_rect(rect, bg, ctx.theme.spacing.radius_sm);
 
-        let icon = if active {
+        let icon = if !enabled {
+            color_with_alpha(colors.muted_foreground, 0.44)
+        } else if active {
             colors.primary
         } else {
             colors.muted_foreground
         };
+        if let Some(slot) = Self::toolbar_icon_slot(TimelineToolbarButton::Tool(tool)) {
+            if let Some(vector_icon) = self.toolbar_icon(slot) {
+                self.paint_toolbar_vector_icon(ctx, rect, vector_icon, icon);
+                return;
+            }
+        }
         match tool {
             TimelineTool::Select => {
                 let p0 = Point::new(rect.x + 5.0, rect.y + 4.0);
@@ -2113,73 +2483,6 @@ impl TimelineView {
                 );
             }
         }
-    }
-
-    fn paint_track_add_button(&self, ctx: &mut PaintContext, kind: TimelineTrackKind) {
-        let colors = &ctx.theme.colors;
-        let rect = self.track_add_button_rect(kind);
-        let hovered = self.hovered_track_add == Some(kind);
-        let mut bg = if hovered {
-            colors.secondary
-        } else {
-            colors.accent
-        };
-        bg.a = if hovered { 0.84 } else { 0.26 };
-        ctx.encoder.draw_rect(rect, bg, ctx.theme.spacing.radius_sm);
-
-        let icon = if hovered {
-            colors.foreground
-        } else {
-            colors.muted_foreground
-        };
-        match kind {
-            TimelineTrackKind::Video => {
-                let frame = Rect::new(rect.x + 4.0, rect.y + 6.0, 8.0, 6.0);
-                ctx.encoder.draw_rect(frame, icon, 1.5);
-                ctx.encoder.draw_triangles(
-                    &[
-                        Point::new(frame.x + frame.width, frame.y + 1.2),
-                        Point::new(frame.x + frame.width + 4.0, frame.y - 0.6),
-                        Point::new(frame.x + frame.width + 4.0, frame.y + frame.height + 0.6),
-                    ],
-                    icon,
-                );
-            }
-            TimelineTrackKind::Audio => {
-                let cy = rect.center().y;
-                ctx.encoder.draw_line(
-                    Point::new(rect.x + 4.0, cy + 2.0),
-                    Point::new(rect.x + 7.0, cy - 3.0),
-                    1.4,
-                    icon,
-                );
-                ctx.encoder.draw_line(
-                    Point::new(rect.x + 7.0, cy - 3.0),
-                    Point::new(rect.x + 10.0, cy + 3.0),
-                    1.4,
-                    icon,
-                );
-                ctx.encoder.draw_line(
-                    Point::new(rect.x + 10.0, cy + 3.0),
-                    Point::new(rect.x + 13.0, cy - 2.0),
-                    1.4,
-                    icon,
-                );
-            }
-        }
-        let plus_center = Point::new(rect.x + rect.width - 5.0, rect.y + 5.0);
-        ctx.encoder.draw_line(
-            Point::new(plus_center.x - 3.0, plus_center.y),
-            Point::new(plus_center.x + 3.0, plus_center.y),
-            1.5,
-            icon,
-        );
-        ctx.encoder.draw_line(
-            Point::new(plus_center.x, plus_center.y - 3.0),
-            Point::new(plus_center.x, plus_center.y + 3.0),
-            1.5,
-            icon,
-        );
     }
 
     fn paint_tracks(&self, ctx: &mut PaintContext) {
@@ -2218,8 +2521,6 @@ impl TimelineView {
                 (control_group_x - header.x - 18.0).max(0.0),
                 if track_selected {
                     colors.foreground
-                } else if track.locked {
-                    colors.muted_foreground
                 } else {
                     colors.muted_foreground
                 },
@@ -2310,6 +2611,40 @@ impl TimelineView {
 
         self.paint_track_drag_indicator(ctx);
         self.paint_asset_drop_indicator(ctx);
+    }
+
+    fn paint_empty_state(&self, ctx: &mut PaintContext) {
+        if !self.tracks.is_empty() {
+            return;
+        }
+        let Some(message) = self
+            .empty_message
+            .as_deref()
+            .map(str::trim)
+            .filter(|message| !message.is_empty())
+        else {
+            return;
+        };
+        if self.body_rect.width <= 0.0 || self.body_rect.height <= 0.0 {
+            return;
+        }
+
+        let font_size = ctx.theme.typography.body.font_size;
+        let max_width = (self.body_rect.width - 32.0).max(0.0);
+        if max_width <= 0.0 {
+            return;
+        }
+        let x = center_text_x(self.body_rect, message, font_size)
+            .max(self.body_rect.x + 16.0)
+            .min(self.body_rect.x + self.body_rect.width - 16.0);
+        let y = self.body_rect.y + (self.body_rect.height * 0.5 - font_size * 0.5).max(16.0);
+        ctx.encoder.draw_text_box(
+            message,
+            font_size,
+            snap_point(Point::new(x, y)),
+            max_width,
+            ctx.theme.colors.muted_foreground,
+        );
     }
 
     fn paint_asset_drop_indicator(&self, ctx: &mut PaintContext) {
@@ -2687,6 +3022,9 @@ impl TimelineView {
     }
 
     fn paint_playhead(&self, ctx: &mut PaintContext) {
+        if !self.enabled {
+            return;
+        }
         let x = self.frame_to_x(self.playhead_frame);
         if x < self.body_rect.x - 1.0 || x > self.body_rect.x + self.body_rect.width + 1.0 {
             return;
@@ -2769,28 +3107,33 @@ impl Widget for TimelineView {
     }
 
     fn measure(&self, constraint: LayoutConstraint) -> Size {
-        constraint.constrain(Size::new(560.0, self.ruler_height + self.content_height()))
+        constraint.constrain(Size::new(
+            560.0,
+            TIMELINE_TOOLBAR_HEIGHT + self.ruler_height + self.content_height(),
+        ))
     }
 
     fn layout(&mut self, bounds: Rect) {
         self.bounds = bounds;
+        let top_chrome = TIMELINE_TOOLBAR_HEIGHT + self.ruler_height;
+        self.toolbar_rect = Rect::new(bounds.x, bounds.y, bounds.width, TIMELINE_TOOLBAR_HEIGHT);
         self.header_rect = Rect::new(
             bounds.x,
-            bounds.y + self.ruler_height,
+            bounds.y + top_chrome,
             self.header_width,
-            (bounds.height - self.ruler_height).max(0.0),
+            (bounds.height - top_chrome).max(0.0),
         );
         self.ruler_rect = Rect::new(
             bounds.x + self.header_width,
-            bounds.y,
+            bounds.y + TIMELINE_TOOLBAR_HEIGHT,
             (bounds.width - self.header_width).max(0.0),
             self.ruler_height,
         );
         self.body_rect = Rect::new(
             bounds.x + self.header_width,
-            bounds.y + self.ruler_height,
+            bounds.y + top_chrome,
             (bounds.width - self.header_width).max(0.0),
-            (bounds.height - self.ruler_height).max(0.0),
+            (bounds.height - top_chrome).max(0.0),
         );
         self.clamp_scroll();
     }
@@ -2812,9 +3155,7 @@ impl Widget for TimelineView {
             self.scrollbar_drag = None;
             self.hovered_clip = None;
             self.hovered_track_control = None;
-            self.hovered_tool = None;
-            self.hovered_track_add = None;
-            self.hovered_zoom = None;
+            self.hovered_toolbar_button = None;
             self.horizontal_scrollbar_hovered = false;
             self.vertical_scrollbar_hovered = false;
             return EventResult::Ignored;
@@ -2880,6 +3221,9 @@ impl Widget for TimelineView {
                 self.context_menu = None;
                 self.focused = true;
                 self.focus_visible = false;
+                if let Some(button) = self.toolbar_button_at(*position) {
+                    return self.activate_toolbar_button(button, ctx);
+                }
                 if let Some(thumb) = self.horizontal_scrollbar_thumb_rect() {
                     if thumb.contains(*position) {
                         self.scrollbar_drag = Some(TimelineScrollbarDrag {
@@ -2940,15 +3284,6 @@ impl Widget for TimelineView {
                         return EventResult::Handled;
                     }
                 }
-                if let Some(tool) = self.tool_at(*position) {
-                    return self.set_active_tool(tool, ctx);
-                }
-                if let Some(kind) = self.track_add_at(*position) {
-                    return self.activate_track_add_from_input(kind, ctx);
-                }
-                if let Some(button) = self.zoom_button_at(*position) {
-                    return self.activate_zoom_button(button, ctx);
-                }
                 if self.ruler_rect.contains(*position) {
                     if let Some(point) = self.in_out_marker_at(*position) {
                         self.start_in_out_drag(point);
@@ -2998,9 +3333,7 @@ impl Widget for TimelineView {
                     if self.chrome_tooltip().is_some() {
                         ctx.tooltip.hide();
                     }
-                    self.hovered_tool = None;
-                    self.hovered_track_add = None;
-                    self.hovered_zoom = None;
+                    self.hovered_toolbar_button = None;
                     self.hovered_track_control = None;
                     self.hovered_clip = None;
                     if self.horizontal_scrollbar_hovered || self.vertical_scrollbar_hovered {
@@ -3116,9 +3449,7 @@ impl Widget for TimelineView {
                 if self.chrome_tooltip().is_some() {
                     ctx.tooltip.hide();
                 }
-                self.hovered_tool = None;
-                self.hovered_track_add = None;
-                self.hovered_zoom = None;
+                self.hovered_toolbar_button = None;
                 self.release_timeline_pointer_capture(ctx);
                 return EventResult::Handled;
             }
@@ -3173,6 +3504,7 @@ impl Widget for TimelineView {
             );
         }
         self.paint_timeline_corner(ctx);
+        self.paint_timeline_toolbar(ctx);
 
         ctx.push_clip(self.ruler_rect);
         self.paint_ruler(ctx);
@@ -3180,6 +3512,7 @@ impl Widget for TimelineView {
 
         ctx.push_clip(self.body_rect);
         self.paint_tracks(ctx);
+        self.paint_empty_state(ctx);
         ctx.pop_clip();
 
         ctx.push_clip(Rect::new(
@@ -3251,6 +3584,10 @@ mod tests {
         .with_playhead(12)
     }
 
+    fn old_timeline_point(x: f32, y: f32) -> Point {
+        Point::new(x, y + TIMELINE_TOOLBAR_HEIGHT)
+    }
+
     fn dispatching_ctx<'a>(
         focus: &'a mut DummyFocus,
         shortcut: &'a mut DummyShortcut,
@@ -3295,6 +3632,7 @@ mod tests {
     struct RecordingEncoder {
         rects: usize,
         lines: usize,
+        line_colors: Vec<Color>,
         triangles: usize,
         texts: Vec<String>,
         clips: usize,
@@ -3311,8 +3649,9 @@ mod tests {
             self.rects += 1;
         }
 
-        fn draw_line(&mut self, _start: Point, _end: Point, _width: f32, _color: Color) {
+        fn draw_line(&mut self, _start: Point, _end: Point, _width: f32, color: Color) {
             self.lines += 1;
+            self.line_colors.push(color);
         }
 
         fn draw_triangles(&mut self, vertices: &[Point], _color: Color) {
@@ -3365,7 +3704,7 @@ mod tests {
 
         let result = view.event(
             &UiEvent::MouseDown {
-                position: Point::new(108.0, 42.0),
+                position: old_timeline_point(108.0, 42.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -3411,7 +3750,7 @@ mod tests {
 
         let result = view.event(
             &UiEvent::MouseDown {
-                position: Point::new(20.0, 42.0),
+                position: old_timeline_point(20.0, 42.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -3464,7 +3803,7 @@ mod tests {
 
         view.event(
             &UiEvent::MouseDown {
-                position: Point::new(12.0, 105.0),
+                position: old_timeline_point(12.0, 105.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -3472,14 +3811,14 @@ mod tests {
         );
         view.event(
             &UiEvent::MouseMove {
-                position: Point::new(12.0, 55.0),
+                position: old_timeline_point(12.0, 55.0),
                 modifiers: Modifiers::none(),
             },
             &mut ctx,
         );
         let result = view.event(
             &UiEvent::MouseUp {
-                position: Point::new(12.0, 55.0),
+                position: old_timeline_point(12.0, 55.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -3523,7 +3862,7 @@ mod tests {
 
         view.event(
             &UiEvent::MouseDown {
-                position: Point::new(12.0, 55.0),
+                position: old_timeline_point(12.0, 55.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -3531,14 +3870,14 @@ mod tests {
         );
         view.event(
             &UiEvent::MouseMove {
-                position: Point::new(12.0, 105.0),
+                position: old_timeline_point(12.0, 105.0),
                 modifiers: Modifiers::none(),
             },
             &mut ctx,
         );
         view.event(
             &UiEvent::MouseUp {
-                position: Point::new(12.0, 105.0),
+                position: old_timeline_point(12.0, 105.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -3582,7 +3921,7 @@ mod tests {
             view.event(
                 &UiEvent::DragEnter {
                     payload: DragPayload::Asset(asset_id),
-                    position: Point::new(168.0, 105.0),
+                    position: old_timeline_point(168.0, 105.0),
                 },
                 &mut ctx,
             ),
@@ -3593,7 +3932,7 @@ mod tests {
             view.event(
                 &UiEvent::Drop {
                     payload: DragPayload::Asset(asset_id),
-                    position: Point::new(168.0, 105.0),
+                    position: old_timeline_point(168.0, 105.0),
                 },
                 &mut ctx,
             ),
@@ -3637,7 +3976,7 @@ mod tests {
         view.event(
             &UiEvent::Drop {
                 payload: DragPayload::Asset(asset_id),
-                position: Point::new(64.0, 48.0),
+                position: old_timeline_point(64.0, 48.0),
             },
             &mut ctx,
         );
@@ -3675,7 +4014,7 @@ mod tests {
 
         let result = view.event(
             &UiEvent::MouseDown {
-                position: Point::new(88.0, 55.0),
+                position: old_timeline_point(88.0, 55.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -3686,60 +4025,6 @@ mod tests {
         assert_eq!(view.selected_track(), None);
         assert_eq!(view.selected_clip(), None);
         assert_eq!(actions.borrow().as_slice(), &[Action::Pause]);
-        assert!(ctx.requests.repaint);
-    }
-
-    #[test]
-    fn clicking_timeline_corner_add_buttons_dispatches_track_kind_without_seeking() {
-        let actions = RefCell::new(Vec::new());
-        let dispatch = |action| actions.borrow_mut().push(action);
-        let mut view = timeline().on_track_add(|kind| match kind {
-            TimelineTrackKind::Video => Action::Play,
-            TimelineTrackKind::Audio => Action::Pause,
-        });
-        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
-
-        let mut focus = DummyFocus;
-        let mut shortcut = DummyShortcut;
-        let mut tooltip = DummyTooltip;
-        let mut requests = EventRequests::default();
-        let mut ctx = dispatching_ctx(
-            &mut focus,
-            &mut shortcut,
-            &mut tooltip,
-            &mut requests,
-            &dispatch,
-        );
-
-        let result = view.event(
-            &UiEvent::MouseDown {
-                position: Point::new(63.0, 15.0),
-                button: MouseButton::Left,
-                modifiers: Modifiers::none(),
-            },
-            &mut ctx,
-        );
-
-        assert_eq!(result, EventResult::Handled);
-        assert_eq!(view.playhead_frame(), 12);
-        assert_eq!(actions.borrow().as_slice(), &[Action::Play]);
-        assert!(ctx.requests.pointer_capture.is_none());
-        assert!(ctx.requests.repaint);
-
-        ctx.requests.repaint = false;
-        let result = view.event(
-            &UiEvent::MouseDown {
-                position: Point::new(85.0, 15.0),
-                button: MouseButton::Left,
-                modifiers: Modifiers::none(),
-            },
-            &mut ctx,
-        );
-
-        assert_eq!(result, EventResult::Handled);
-        assert_eq!(view.playhead_frame(), 12);
-        assert_eq!(actions.borrow().as_slice(), &[Action::Play, Action::Pause]);
-        assert!(ctx.requests.pointer_capture.is_none());
         assert!(ctx.requests.repaint);
     }
 
@@ -3770,7 +4055,7 @@ mod tests {
 
         view.event(
             &UiEvent::MouseDown {
-                position: Point::new(192.0, 12.0),
+                position: old_timeline_point(192.0, 12.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -3786,7 +4071,7 @@ mod tests {
 
         view.event(
             &UiEvent::MouseUp {
-                position: Point::new(192.0, 12.0),
+                position: old_timeline_point(192.0, 12.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -3853,7 +4138,7 @@ mod tests {
 
         view.event(
             &UiEvent::MouseDown {
-                position: Point::new(192.0, 12.0),
+                position: old_timeline_point(192.0, 12.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -3902,7 +4187,7 @@ mod tests {
         assert_eq!(
             view.event(
                 &UiEvent::MouseDown {
-                    position: Point::new(192.0, 12.0),
+                    position: old_timeline_point(192.0, 12.0),
                     button: MouseButton::Left,
                     modifiers: Modifiers::none(),
                 },
@@ -3936,7 +4221,7 @@ mod tests {
         assert_eq!(
             view.event(
                 &UiEvent::MouseDown {
-                    position: Point::new(192.0, 12.0),
+                    position: old_timeline_point(192.0, 12.0),
                     button: MouseButton::Left,
                     modifiers: Modifiers::none(),
                 },
@@ -3948,7 +4233,7 @@ mod tests {
         assert_eq!(
             view.event(
                 &UiEvent::MouseMove {
-                    position: Point::new(216.0, 12.0),
+                    position: old_timeline_point(216.0, 12.0),
                     modifiers: Modifiers::none(),
                 },
                 &mut ctx,
@@ -3982,7 +4267,7 @@ mod tests {
         assert_eq!(
             view.event(
                 &UiEvent::MouseDown {
-                    position: Point::new(108.0, 42.0),
+                    position: old_timeline_point(108.0, 42.0),
                     button: MouseButton::Left,
                     modifiers: Modifiers::none(),
                 },
@@ -4002,7 +4287,7 @@ mod tests {
         assert_eq!(
             view.event(
                 &UiEvent::MouseMove {
-                    position: Point::new(148.0, 42.0),
+                    position: old_timeline_point(148.0, 42.0),
                     modifiers: Modifiers::none(),
                 },
                 &mut ctx,
@@ -4052,7 +4337,7 @@ mod tests {
 
         view.event(
             &UiEvent::MouseDown {
-                position: Point::new(108.0, 42.0),
+                position: old_timeline_point(108.0, 42.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -4065,7 +4350,7 @@ mod tests {
 
         view.event(
             &UiEvent::MouseMove {
-                position: Point::new(148.0, 42.0),
+                position: old_timeline_point(148.0, 42.0),
                 modifiers: Modifiers::none(),
             },
             &mut ctx,
@@ -4078,7 +4363,7 @@ mod tests {
 
         view.event(
             &UiEvent::MouseUp {
-                position: Point::new(148.0, 42.0),
+                position: old_timeline_point(148.0, 42.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -4134,7 +4419,7 @@ mod tests {
 
         view.event(
             &UiEvent::MouseDown {
-                position: Point::new(108.0, 42.0),
+                position: old_timeline_point(108.0, 42.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -4142,7 +4427,7 @@ mod tests {
         );
         view.event(
             &UiEvent::MouseMove {
-                position: Point::new(148.0, 92.0),
+                position: old_timeline_point(148.0, 92.0),
                 modifiers: Modifiers::none(),
             },
             &mut ctx,
@@ -4153,7 +4438,7 @@ mod tests {
 
         view.event(
             &UiEvent::MouseUp {
-                position: Point::new(148.0, 92.0),
+                position: old_timeline_point(148.0, 92.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -4205,7 +4490,7 @@ mod tests {
 
         view.event(
             &UiEvent::MouseDown {
-                position: Point::new(108.0, 42.0),
+                position: old_timeline_point(108.0, 42.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -4213,14 +4498,14 @@ mod tests {
         );
         view.event(
             &UiEvent::MouseMove {
-                position: Point::new(148.0, 92.0),
+                position: old_timeline_point(148.0, 92.0),
                 modifiers: Modifiers::none(),
             },
             &mut ctx,
         );
         view.event(
             &UiEvent::MouseUp {
-                position: Point::new(148.0, 92.0),
+                position: old_timeline_point(148.0, 92.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -4258,7 +4543,7 @@ mod tests {
 
         view.event(
             &UiEvent::MouseDown {
-                position: Point::new(108.0, 42.0),
+                position: old_timeline_point(108.0, 42.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -4266,7 +4551,7 @@ mod tests {
         );
         view.event(
             &UiEvent::MouseUp {
-                position: Point::new(108.0, 42.0),
+                position: old_timeline_point(108.0, 42.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -4312,7 +4597,7 @@ mod tests {
 
         view.event(
             &UiEvent::MouseDown {
-                position: Point::new(258.0, 42.0),
+                position: old_timeline_point(258.0, 42.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -4321,7 +4606,7 @@ mod tests {
         assert!(view.trim_drag.is_some());
         view.event(
             &UiEvent::MouseMove {
-                position: Point::new(278.0, 42.0),
+                position: old_timeline_point(278.0, 42.0),
                 modifiers: Modifiers::none(),
             },
             &mut ctx,
@@ -4334,7 +4619,7 @@ mod tests {
 
         view.event(
             &UiEvent::MouseUp {
-                position: Point::new(278.0, 42.0),
+                position: old_timeline_point(278.0, 42.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -4387,7 +4672,7 @@ mod tests {
 
         view.event(
             &UiEvent::MouseDown {
-                position: Point::new(374.0, 42.0),
+                position: old_timeline_point(374.0, 42.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -4395,14 +4680,14 @@ mod tests {
         );
         view.event(
             &UiEvent::MouseMove {
-                position: Point::new(394.0, 42.0),
+                position: old_timeline_point(394.0, 42.0),
                 modifiers: Modifiers::none(),
             },
             &mut ctx,
         );
         view.event(
             &UiEvent::MouseUp {
-                position: Point::new(394.0, 42.0),
+                position: old_timeline_point(394.0, 42.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -4444,7 +4729,7 @@ mod tests {
 
         view.event(
             &UiEvent::MouseDown {
-                position: Point::new(258.0, 42.0),
+                position: old_timeline_point(258.0, 42.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -4452,7 +4737,7 @@ mod tests {
         );
         view.event(
             &UiEvent::MouseUp {
-                position: Point::new(258.0, 42.0),
+                position: old_timeline_point(258.0, 42.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -4488,7 +4773,7 @@ mod tests {
 
         view.event(
             &UiEvent::MouseDown {
-                position: Point::new(108.0, 42.0),
+                position: old_timeline_point(108.0, 42.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -4496,7 +4781,7 @@ mod tests {
         );
         view.event(
             &UiEvent::MouseMove {
-                position: Point::new(148.0, 42.0),
+                position: old_timeline_point(148.0, 42.0),
                 modifiers: Modifiers::none(),
             },
             &mut ctx,
@@ -4537,7 +4822,7 @@ mod tests {
         assert_eq!(
             view.event(
                 &UiEvent::MouseDown {
-                    position: Point::new(108.0, 42.0),
+                    position: old_timeline_point(108.0, 42.0),
                     button: MouseButton::Left,
                     modifiers: Modifiers::none(),
                 },
@@ -4583,7 +4868,7 @@ mod tests {
         let vertical_result = view.event(
             &UiEvent::MouseWheel {
                 delta: 60.0,
-                position: Point::new(180.0, 90.0),
+                position: old_timeline_point(180.0, 90.0),
                 modifiers: Modifiers::none(),
             },
             &mut ctx,
@@ -4594,7 +4879,7 @@ mod tests {
         let horizontal_result = view.event(
             &UiEvent::MouseWheel {
                 delta: 80.0,
-                position: Point::new(180.0, 90.0),
+                position: old_timeline_point(180.0, 90.0),
                 modifiers: Modifiers::shift(),
             },
             &mut ctx,
@@ -4627,7 +4912,7 @@ mod tests {
         let result = view.event(
             &UiEvent::MouseWheel {
                 delta: -60.0,
-                position: Point::new(180.0, 90.0),
+                position: old_timeline_point(180.0, 90.0),
                 modifiers: Modifiers::none(),
             },
             &mut ctx,
@@ -4663,7 +4948,7 @@ mod tests {
         let result = view.event(
             &UiEvent::MouseWheel {
                 delta: -60.0,
-                position: Point::new(180.0, 90.0),
+                position: old_timeline_point(180.0, 90.0),
                 modifiers: Modifiers::ctrl(),
             },
             &mut ctx,
@@ -4859,6 +5144,206 @@ mod tests {
     }
 
     #[test]
+    fn timeline_toolbar_add_track_buttons_dispatch_kind_without_seeking() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut view = timeline().on_track_add(|kind| match kind {
+            TimelineTrackKind::Video => Action::Play,
+            TimelineTrackKind::Audio => Action::Pause,
+        });
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+        let initial_playhead = view.playhead_frame();
+        let add_video = view
+            .toolbar_button_rect(TimelineToolbarButton::AddTrack(TimelineTrackKind::Video))
+            .expect("wide toolbar should show add-video control")
+            .center();
+        let add_audio = view
+            .toolbar_button_rect(TimelineToolbarButton::AddTrack(TimelineTrackKind::Audio))
+            .expect("wide toolbar should show add-audio control")
+            .center();
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            view.event(
+                &UiEvent::MouseDown {
+                    position: add_video,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            view.event(
+                &UiEvent::MouseDown {
+                    position: add_audio,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(view.playhead_frame(), initial_playhead);
+        assert_eq!(actions.borrow().as_slice(), &[Action::Play, Action::Pause]);
+    }
+
+    #[test]
+    fn timeline_toolbar_edit_buttons_dispatch_commands_and_consume_disabled_clicks() {
+        let commands = Rc::new(RefCell::new(Vec::new()));
+        let recorded = Rc::clone(&commands);
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut view = timeline().on_edit_command(move |command| {
+            recorded.borrow_mut().push(command);
+            match command {
+                TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
+                TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
+                TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
+                _ => Action::NoOp,
+            }
+        });
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+        let initial_playhead = view.playhead_frame();
+        let split = view
+            .toolbar_button_rect(TimelineToolbarButton::Edit(
+                TimelineEditCommand::SplitAtPlayhead,
+            ))
+            .expect("wide toolbar should show split control")
+            .center();
+        let delete = view
+            .toolbar_button_rect(TimelineToolbarButton::Edit(
+                TimelineEditCommand::DeleteSelection,
+            ))
+            .expect("wide toolbar should show delete control")
+            .center();
+        let mark_in = view
+            .toolbar_button_rect(TimelineToolbarButton::Edit(
+                TimelineEditCommand::MarkInAtPlayhead,
+            ))
+            .expect("wide toolbar should show mark-in control")
+            .center();
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        for position in [split, delete, mark_in] {
+            assert_eq!(
+                view.event(
+                    &UiEvent::MouseDown {
+                        position,
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::none(),
+                    },
+                    &mut ctx,
+                ),
+                EventResult::Handled
+            );
+        }
+
+        assert_eq!(view.playhead_frame(), initial_playhead);
+        assert_eq!(
+            commands.borrow().as_slice(),
+            &[
+                TimelineEditCommand::SplitAtPlayhead,
+                TimelineEditCommand::MarkInAtPlayhead,
+            ]
+        );
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[Action::SplitClipAtPlayhead, Action::MarkInAtPlayhead]
+        );
+    }
+
+    #[test]
+    fn timeline_edit_command_availability_disables_toolbar_menu_and_keyboard() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut view = timeline()
+            .on_edit_command(|command| match command {
+                TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
+                TimelineEditCommand::DeleteSelection => Action::DeleteSelection,
+                _ => Action::NoOp,
+            })
+            .on_edit_command_available(|command| {
+                !matches!(
+                    command,
+                    TimelineEditCommand::SplitAtPlayhead | TimelineEditCommand::DeleteSelection
+                )
+            });
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let split = view
+            .toolbar_button_rect(TimelineToolbarButton::Edit(
+                TimelineEditCommand::SplitAtPlayhead,
+            ))
+            .expect("wide toolbar should show split control")
+            .center();
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            view.event(
+                &UiEvent::MouseDown {
+                    position: split,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            view.event(
+                &UiEvent::KeyDown { key: KeyCode::Delete, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+
+        let items = view.timeline_context_menu_items();
+        assert!(
+            !items
+                .iter()
+                .find(|item| item.label == "Split at Playhead")
+                .expect("split")
+                .enabled
+        );
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
     fn timeline_zoom_buttons_hide_when_ruler_is_too_narrow() {
         let mut view = timeline();
         view.layout(Rect::new(0.0, 0.0, 130.0, 180.0));
@@ -4870,14 +5355,26 @@ mod tests {
 
     #[test]
     fn timeline_chrome_buttons_update_and_hide_tooltips() {
-        let mut view = timeline();
+        let mut view = timeline().on_edit_command_shortcut(|command| match command {
+            TimelineEditCommand::DeleteSelection => Some("Delete".to_owned()),
+            _ => None,
+        });
         view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
 
         let select = view.tool_button_rect(TimelineTool::Select).center();
-        let add_audio = view.track_add_button_rect(TimelineTrackKind::Audio).center();
+        let add_audio = view
+            .toolbar_button_rect(TimelineToolbarButton::AddTrack(TimelineTrackKind::Audio))
+            .expect("wide toolbar should show add-audio control")
+            .center();
+        let delete = view
+            .toolbar_button_rect(TimelineToolbarButton::Edit(
+                TimelineEditCommand::DeleteSelection,
+            ))
+            .expect("wide toolbar should show delete control")
+            .center();
         let zoom_out = view
             .zoom_button_rect(TimelineZoomButton::Out)
-            .expect("wide ruler should show zoom controls")
+            .expect("wide toolbar should show zoom controls")
             .center();
 
         let mut focus = DummyFocus;
@@ -4915,6 +5412,18 @@ mod tests {
         assert_eq!(
             ctx.tooltip.current().map(|state| state.text.as_str()),
             Some("Add Audio Track")
+        );
+
+        assert_eq!(
+            view.event(
+                &UiEvent::MouseMove { position: delete, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            ctx.tooltip.current().map(|state| state.text.as_str()),
+            Some("Delete Selection (Delete)")
         );
 
         assert_eq!(
@@ -5002,7 +5511,7 @@ mod tests {
         view.event(
             &UiEvent::MouseWheel {
                 delta: -20.0,
-                position: Point::new(260.0, 90.0),
+                position: old_timeline_point(260.0, 90.0),
                 modifiers: Modifiers::ctrl(),
             },
             &mut ctx,
@@ -5242,7 +5751,7 @@ mod tests {
 
         let result = view.event(
             &UiEvent::MouseDown {
-                position: Point::new(108.0, 42.0),
+                position: old_timeline_point(108.0, 42.0),
                 button: MouseButton::Right,
                 modifiers: Modifiers::none(),
             },
@@ -5256,16 +5765,22 @@ mod tests {
         );
         assert!(view.overlay_hit_test(Point::new(900.0, 900.0)));
 
-        let result = view.event(
-            &UiEvent::MouseDown {
-                position: Point::new(120.0, 189.0),
-                button: MouseButton::Left,
-                modifiers: Modifiers::none(),
-            },
-            &mut ctx,
+        for _ in 0..5 {
+            assert_eq!(
+                view.event(
+                    &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
+                    &mut ctx,
+                ),
+                EventResult::Handled
+            );
+        }
+        assert_eq!(
+            view.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
         );
-
-        assert_eq!(result, EventResult::Handled);
         assert_eq!(
             actions.borrow().as_slice(),
             &[Action::SaveProject, Action::DeleteSelection]
@@ -5692,7 +6207,7 @@ mod tests {
         );
         let result = view.event(
             &UiEvent::MouseDown {
-                position: Point::new(104.0, 42.0),
+                position: old_timeline_point(104.0, 42.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -5856,7 +6371,7 @@ mod tests {
         assert_eq!(
             view.event(
                 &UiEvent::MouseDown {
-                    position: Point::new(136.0, 12.0),
+                    position: old_timeline_point(136.0, 12.0),
                     button: MouseButton::Left,
                     modifiers: Modifiers::none(),
                 },
@@ -5867,7 +6382,7 @@ mod tests {
         assert_eq!(
             view.event(
                 &UiEvent::MouseMove {
-                    position: Point::new(176.0, 12.0),
+                    position: old_timeline_point(176.0, 12.0),
                     modifiers: Modifiers::none(),
                 },
                 &mut ctx,
@@ -5878,7 +6393,7 @@ mod tests {
         assert_eq!(
             view.event(
                 &UiEvent::MouseUp {
-                    position: Point::new(176.0, 12.0),
+                    position: old_timeline_point(176.0, 12.0),
                     button: MouseButton::Left,
                     modifiers: Modifiers::none(),
                 },
@@ -5925,7 +6440,7 @@ mod tests {
         assert_eq!(
             view.event(
                 &UiEvent::MouseDown {
-                    position: Point::new(136.0, 12.0),
+                    position: old_timeline_point(136.0, 12.0),
                     button: MouseButton::Left,
                     modifiers: Modifiers::none(),
                 },
@@ -5942,7 +6457,7 @@ mod tests {
         assert_eq!(
             view.event(
                 &UiEvent::MouseUp {
-                    position: Point::new(176.0, 12.0),
+                    position: old_timeline_point(176.0, 12.0),
                     button: MouseButton::Left,
                     modifiers: Modifiers::none(),
                 },
@@ -5979,7 +6494,7 @@ mod tests {
         assert_eq!(
             view.event(
                 &UiEvent::MouseDown {
-                    position: Point::new(136.0, 12.0),
+                    position: old_timeline_point(136.0, 12.0),
                     button: MouseButton::Left,
                     modifiers: Modifiers::none(),
                 },
@@ -5997,7 +6512,7 @@ mod tests {
         assert_eq!(
             view.event(
                 &UiEvent::MouseMove {
-                    position: Point::new(176.0, 12.0),
+                    position: old_timeline_point(176.0, 12.0),
                     modifiers: Modifiers::none(),
                 },
                 &mut ctx,
@@ -6146,5 +6661,25 @@ mod tests {
         assert!(encoder.clips >= 3);
         assert!(encoder.texts.iter().any(|text| text == "V1"));
         assert!(encoder.texts.iter().any(|text| text == "Intro"));
+    }
+
+    #[test]
+    fn empty_timeline_paints_supplied_empty_message() {
+        let mut view = TimelineView::new(Vec::new())
+            .with_empty_message("No sequence loaded")
+            .disabled();
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 520.0, 180.0),
+        };
+        view.paint(&mut ctx);
+
+        assert!(encoder.texts.iter().any(|text| text == "No sequence loaded"));
+        assert!(!encoder.line_colors.contains(&theme.colors.timeline_playhead));
     }
 }
