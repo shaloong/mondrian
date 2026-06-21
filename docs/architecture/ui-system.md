@@ -1168,14 +1168,18 @@ instead of the row-list surface. `AssetGrid` keeps the same framework-owned
 interaction contract as `PanelList`: filter input is a real `TextInput`, local
 selection is preserved through `AssetGridState`, cards can activate typed
 actions, card drag payloads start through the router, and file drops map to
-app-layer import actions. State restoration uses stable card ids first; index
-fallbacks are allowed only for enabled cards that remain visible in the current
-filtered view, so model refreshes cannot select hidden assets. Inline rename is
-transient card-local state: filtering or model refresh that makes the target
-card hidden, disabled, or non-renamable closes the editor without dispatching a
-rename action. Focus loss cancels an active card drag candidate and releases the
-grid's pointer capture, while an idle grid must not release capture it does not
-own. It also owns domain-light right-click context menus:
+app-layer import actions. Browser widgets embedded inside a `DockPanel` should
+use embedded panel chrome so the dock header remains the only panel title; the
+embedded browser body keeps the search field and rows/cards but omits duplicate
+title text, explanatory subtitles, and the search-to-content divider. State
+restoration uses stable card ids first; index fallbacks are allowed only for
+enabled cards that remain visible in the current filtered view, so model
+refreshes cannot select hidden assets. Inline rename is transient card-local
+state: filtering or model refresh that makes the target card hidden, disabled,
+or non-renamable closes the editor without dispatching a rename action. Focus
+loss cancels an active card drag candidate and releases the grid's pointer
+capture, while an idle grid must not release capture it does not own. It also
+owns domain-light right-click context menus:
 the grid surface and individual cards receive plain `MenuItem`s, while the
 widget handles popup placement, overlay painting, dismissal, keyboard
 activation, and dispatch. Menus that contain only separators or disabled rows
@@ -1227,8 +1231,11 @@ folder context. The app adapter maps `AssetRecord` into `AssetGridItem` view
 data and semantic media color tokens; the widget crate does not depend on the
 asset library or editor domain. The root Assets view is not a flat dump of
 every database row: it shows top-level folders first, then root/unfiled assets.
-Folder subtitles count direct child assets plus direct child folders, without
-recursively flattening nested bins into the visible grid.
+Asset card body text is intentionally terse: the lower card strip shows only
+the asset or folder name, while media kind, folder item counts, offline state,
+and proxy state use compact badges. Folder item-count badges count direct child
+assets plus direct child folders, without recursively flattening nested bins
+into the visible grid.
 Asset cards may receive an optional `RasterImage` thumbnail. The thumbnail is
 an already-decoded RGBA payload with a stable atlas key; `AssetGrid` only
 validates dimensions, clips it to the card preview region, and forwards it to
@@ -1621,7 +1628,10 @@ Dialog and form copy should use reusable `mondrian-ui-widgets::Label`
 instances for semantic color, padding, and wrapping rather than direct
 per-dialog `draw_text` calls.
 Inspector/property-panel titles, section headers, and row labels follow the
-same rule through `PropertyPanel`'s internal `Label` instances.
+same rule through `PropertyPanel`'s internal `Label` instances. When the
+Inspector is hosted inside a dock panel, it uses embedded panel chrome so the
+dock header supplies the panel name and the property stack starts directly at
+its first meaningful section.
 Inspector sections should read as a professional parameter stack, not nested
 cards. `PropertyPanel` paints the panel body from the normal panel token, uses
 thin section dividers, and reserves stronger chrome only for the selected
@@ -2129,6 +2139,12 @@ widgets expose small explicit state snapshots for UI-local affordances such as
 `PanelList` filters, selection, and scroll offsets. Dock containers expose their
 active tab through widget APIs, and `SelfHostedAppRoot` captures that shell-local
 navigation state before rebuilding dock content from fresh `AppState` models.
+`SelfHostedUiHost` must also defer same-mode dirty refreshes while the active
+widget tree has transient interaction, such as an open context menu/dropdown or
+an active text input. Background thumbnail or preview completions may mark the
+UI dirty, but they must not rebuild the root tree until the transient surface is
+closed; otherwise search fields lose focus and context menus disappear during
+ordinary clicks.
 Refresh restoration must use stable ownership, such as `PanelKind` plus a
 per-panel ordinal, rather than visible titles or labels. Display text can change
 for localization, product naming, or dynamic folder context, and must not decide

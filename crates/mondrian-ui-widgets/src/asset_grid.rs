@@ -245,6 +245,7 @@ pub struct AssetGrid {
     id: WidgetId,
     title: String,
     subtitle: String,
+    show_header_text: bool,
     items: Vec<AssetGridItem>,
     filter_input: Option<Box<TextInput>>,
     filter_query: String,
@@ -301,6 +302,7 @@ impl AssetGrid {
             id: WidgetId::new(),
             title: title.into(),
             subtitle: String::new(),
+            show_header_text: true,
             items,
             filter_input: None,
             filter_query: String::new(),
@@ -353,6 +355,12 @@ impl AssetGrid {
     /// Set a small explanatory subtitle below the title.
     pub fn with_subtitle(mut self, subtitle: impl Into<String>) -> Self {
         self.subtitle = subtitle.into();
+        self
+    }
+
+    /// Use compact embedded chrome when the host panel already supplies title text.
+    pub fn with_embedded_panel_chrome(mut self) -> Self {
+        self.show_header_text = false;
         self
     }
 
@@ -526,17 +534,28 @@ impl AssetGrid {
     fn header_height(&self) -> f32 {
         let base = self.title_block_height();
         if self.filter_input.is_some() {
-            base + FILTER_INPUT_HEIGHT + HEADER_GAP
+            base + self.filter_top_padding() + FILTER_INPUT_HEIGHT + HEADER_GAP
         } else {
             base
         }
     }
 
     fn title_block_height(&self) -> f32 {
+        if !self.show_header_text {
+            return 0.0;
+        }
         if self.subtitle.is_empty() {
             42.0
         } else {
             60.0
+        }
+    }
+
+    fn filter_top_padding(&self) -> f32 {
+        if self.show_header_text {
+            0.0
+        } else {
+            CONTENT_PADDING
         }
     }
 
@@ -613,7 +632,11 @@ impl AssetGrid {
 
     fn filter_input_rect(&self) -> Option<Rect> {
         self.filter_input.as_ref()?;
-        let y = self.bounds.y + self.title_block_height() - 4.0;
+        let y = if self.show_header_text {
+            self.bounds.y + self.title_block_height() - 4.0
+        } else {
+            self.bounds.y + CONTENT_PADDING
+        };
         Some(Rect::new(
             self.bounds.x + HEADER_PADDING_X,
             y,
@@ -1668,37 +1691,41 @@ impl Widget for AssetGrid {
             0.0,
         );
 
-        ctx.encoder.draw_text(
-            &self.title,
-            ctx.theme.typography.body.font_size,
-            snap_point(Point::new(
-                self.bounds.x + HEADER_PADDING_X,
-                self.bounds.y + 12.0,
-            )),
-            colors.foreground,
-        );
-        if !self.subtitle.is_empty() {
-            ctx.encoder.draw_text_box(
-                &self.subtitle,
-                ctx.theme.typography.small.font_size,
+        if self.show_header_text {
+            ctx.encoder.draw_text(
+                &self.title,
+                ctx.theme.typography.body.font_size,
                 snap_point(Point::new(
                     self.bounds.x + HEADER_PADDING_X,
-                    self.bounds.y + 34.0,
+                    self.bounds.y + 12.0,
                 )),
-                (self.bounds.width - HEADER_PADDING_X * 2.0).max(1.0),
-                colors.muted_foreground,
+                colors.foreground,
             );
+            if !self.subtitle.is_empty() {
+                ctx.encoder.draw_text_box(
+                    &self.subtitle,
+                    ctx.theme.typography.small.font_size,
+                    snap_point(Point::new(
+                        self.bounds.x + HEADER_PADDING_X,
+                        self.bounds.y + 34.0,
+                    )),
+                    (self.bounds.width - HEADER_PADDING_X * 2.0).max(1.0),
+                    colors.muted_foreground,
+                );
+            }
         }
         if let Some(input) = &self.filter_input {
             input.paint(ctx);
         }
-        let divider_y = self.viewport.y - 1.0;
-        ctx.encoder.draw_line(
-            Point::new(self.bounds.x, divider_y),
-            Point::new(self.bounds.x + self.bounds.width, divider_y),
-            1.0,
-            color_with_alpha(colors.border, 0.72),
-        );
+        if self.show_header_text {
+            let divider_y = self.viewport.y - 1.0;
+            ctx.encoder.draw_line(
+                Point::new(self.bounds.x, divider_y),
+                Point::new(self.bounds.x + self.bounds.width, divider_y),
+                1.0,
+                color_with_alpha(colors.border, 0.72),
+            );
+        }
 
         ctx.push_clip(self.viewport);
         if self.visible_indices.is_empty() {
@@ -1890,6 +1917,7 @@ mod tests {
         raster_images: Vec<(String, Rect, u32, u32)>,
         texts: Vec<String>,
         triangles: usize,
+        lines: usize,
     }
 
     impl DrawCommandEncoder for RecordingEncoder {
@@ -1906,7 +1934,9 @@ mod tests {
             self.rect_colors.push(color);
         }
 
-        fn draw_line(&mut self, _start: Point, _end: Point, _width: f32, _color: Color) {}
+        fn draw_line(&mut self, _start: Point, _end: Point, _width: f32, _color: Color) {
+            self.lines += 1;
+        }
 
         fn draw_triangles(&mut self, vertices: &[Point], _color: Color) {
             self.triangles += vertices.len() / 3;
@@ -2441,6 +2471,32 @@ mod tests {
                 .iter()
                 .any(|color| *color == mix_color(theme.colors.canvas, theme.colors.card, 0.30)),
             "asset previews should read as a dark media well"
+        );
+    }
+
+    #[test]
+    fn embedded_panel_chrome_omits_duplicate_header_and_divider() {
+        let mut grid = AssetGrid::new("Assets", vec![item("clip-a", "Clip A")])
+            .with_subtitle("Project library")
+            .with_filter("Search assets")
+            .with_embedded_panel_chrome();
+        grid.layout(Rect::new(0.0, 0.0, 260.0, 180.0));
+
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 260.0, 180.0),
+        };
+        grid.paint(&mut ctx);
+
+        assert!(!encoder.texts.iter().any(|text| text == "Assets"));
+        assert!(!encoder.texts.iter().any(|text| text == "Project library"));
+        assert_eq!(encoder.lines, 0);
+        assert!(
+            grid.viewport.y < 56.0,
+            "embedded grid should not reserve the full title/subtitle header"
         );
     }
 

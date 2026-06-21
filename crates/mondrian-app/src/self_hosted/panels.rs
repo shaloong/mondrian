@@ -1863,13 +1863,11 @@ fn asset_grid_item_from_asset(
     let badge = asset_kind_badge(&asset.kind);
     let accent = asset_kind_accent(&asset.kind);
     let icon = asset_kind_icon(&asset.kind);
-    let subtitle = asset.path.display().to_string();
     let thumbnail_state = thumbnails.map(|source| source.thumbnail_for_asset(&asset));
     let context_menu_items = asset_grid_asset_context_menu_items(&asset, proxy_mode);
     let offline = asset_is_offline(&asset);
     let proxied = proxy_mode && matches!(asset.kind, AssetKind::Video);
     let mut item = AssetGridItem::new(asset.id.to_string(), asset.name, accent)
-        .with_subtitle(subtitle)
         .with_badge(badge)
         .with_drag_payload(DragPayload::Asset(asset.id))
         .with_activate_action(assets_prepare_drag_action(AssetsPrepareDragPayload {
@@ -1999,15 +1997,14 @@ fn asset_folder_direct_item_count(
 }
 
 fn asset_grid_parent_item(parent_id: Option<String>) -> AssetGridItem {
-    let (title, subtitle) = if parent_id.is_some() {
-        ("Back", "Parent folder")
+    let (title, badge) = if parent_id.is_some() {
+        ("Back", "UP")
     } else {
-        ("All assets", "Project library")
+        ("All assets", "ALL")
     };
     with_asset_icon(
         AssetGridItem::new("asset-folder-up", title, current_theme().colors.secondary)
-            .with_subtitle(subtitle)
-            .with_badge("UP")
+            .with_badge(badge)
             .with_activate_action(assets_open_folder_action(AssetsOpenFolderPayload {
                 folder_id: parent_id,
             })),
@@ -2016,10 +2013,10 @@ fn asset_grid_parent_item(parent_id: Option<String>) -> AssetGridItem {
 }
 
 fn asset_grid_item_from_folder(folder: &FolderRecord, item_count: usize) -> AssetGridItem {
-    let subtitle = if item_count == 1 {
-        "Folder · 1 item".to_owned()
+    let badge = if item_count == 1 {
+        "1 ITEM".to_owned()
     } else {
-        format!("Folder · {item_count} items")
+        format!("{item_count} ITEMS")
     };
     let folder_id = folder.id.clone();
     with_asset_icon(
@@ -2028,8 +2025,7 @@ fn asset_grid_item_from_folder(folder: &FolderRecord, item_count: usize) -> Asse
             folder.name.clone(),
             current_theme().colors.secondary,
         )
-        .with_subtitle(subtitle)
-        .with_badge("BIN")
+        .with_badge(badge)
         .with_drag_payload(DragPayload::AssetFolder(folder_id.clone()))
         .with_activate_action(assets_open_folder_action(AssetsOpenFolderPayload {
             folder_id: Some(folder_id.clone()),
@@ -2049,14 +2045,11 @@ fn asset_grid_item_from_folder(folder: &FolderRecord, item_count: usize) -> Asse
 fn asset_empty_item(
     id: impl Into<String>,
     title: impl Into<String>,
-    subtitle: impl Into<String>,
+    _subtitle: impl Into<String>,
     accent: Color,
     icon: AppIcon,
 ) -> AssetGridItem {
-    with_asset_icon(
-        AssetGridItem::new(id, title, accent).with_subtitle(subtitle).disabled(true),
-        icon,
-    )
+    with_asset_icon(AssetGridItem::new(id, title, accent).disabled(true), icon)
 }
 
 fn with_asset_icon(item: AssetGridItem, icon: AppIcon) -> AssetGridItem {
@@ -2239,7 +2232,8 @@ fn selected_clip_tracks_are_editable(state: &AppState) -> bool {
 
 fn panel_list(model: &PanelListModel) -> PanelList {
     let mut list = PanelList::new(model.title.clone(), model.items.clone())
-        .with_subtitle(model.subtitle.clone());
+        .with_subtitle(model.subtitle.clone())
+        .with_embedded_panel_chrome();
     if let Some(placeholder) = &model.filter_placeholder {
         list = list.with_filter(placeholder.clone());
     }
@@ -2249,6 +2243,7 @@ fn panel_list(model: &PanelListModel) -> PanelList {
 fn asset_grid(model: &AssetGridModel) -> AssetGrid {
     let mut grid = AssetGrid::new(model.title.clone(), model.items.clone())
         .with_subtitle(model.subtitle.clone())
+        .with_embedded_panel_chrome()
         .on_rename(asset_grid_rename_action);
     if let Some(placeholder) = &model.filter_placeholder {
         grid = grid.with_filter(placeholder.clone());
@@ -3049,45 +3044,53 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
         "No clip selected"
     });
     if let Some(message) = model.empty_message.as_deref().filter(|message| !message.is_empty()) {
-        return PropertyPanel::new("Inspector").with_subtitle(subtitle).with_section(
-            PropertySection::new("Status").with_row(
-                PropertyRow::new("Selection", Box::new(Label::new(message).muted().wrapped()))
-                    .with_height(48.0),
-            ),
-        );
+        return PropertyPanel::new("Inspector")
+            .with_subtitle(subtitle)
+            .with_embedded_panel_chrome()
+            .with_section(
+                PropertySection::new("Status").with_row(
+                    PropertyRow::new("Selection", Box::new(Label::new(message).muted().wrapped()))
+                        .with_height(48.0),
+                ),
+            );
     }
     let mut tint = color_picker_trigger(model.tint).enabled(can_edit);
     tint.picker_mut().set_area_mode(model.tint_area_mode);
     let curve = CurveEditor::with_points(model.curve_points.clone())
         .enabled(can_edit)
         .on_change(move |points| inspector_curve_action(selected_clip, points));
-    let mut panel = PropertyPanel::new("Inspector").with_subtitle(subtitle).with_section(
-        PropertySection::new("Clip Style")
-            .with_row(PropertyRow::new(
-                "Enabled",
-                Box::new(
-                    Checkbox::new("启用效果", model.enabled)
-                        .enabled(can_edit)
-                        .on_change(move |value| inspector_bool_action(selected_clip, value)),
-                ),
-            ))
-            .with_row(PropertyRow::new(
-                "Opacity",
-                numeric_slider_input_control(
-                    model.opacity,
-                    0.0,
-                    100.0,
-                    Some(1.0),
-                    0,
-                    can_edit,
-                    move |value| inspector_value_action(selected_clip, "opacity", value),
-                ),
-            ))
-            .with_row(PropertyRow::new(
-                "Tint",
-                Box::new(tint.on_change(move |color| inspector_color_action(selected_clip, color))),
-            )),
-    );
+    let mut panel = PropertyPanel::new("Inspector")
+        .with_subtitle(subtitle)
+        .with_embedded_panel_chrome()
+        .with_section(
+            PropertySection::new("Clip Style")
+                .with_row(PropertyRow::new(
+                    "Enabled",
+                    Box::new(
+                        Checkbox::new("启用效果", model.enabled)
+                            .enabled(can_edit)
+                            .on_change(move |value| inspector_bool_action(selected_clip, value)),
+                    ),
+                ))
+                .with_row(PropertyRow::new(
+                    "Opacity",
+                    numeric_slider_input_control(
+                        model.opacity,
+                        0.0,
+                        100.0,
+                        Some(1.0),
+                        0,
+                        can_edit,
+                        move |value| inspector_value_action(selected_clip, "opacity", value),
+                    ),
+                ))
+                .with_row(PropertyRow::new(
+                    "Tint",
+                    Box::new(
+                        tint.on_change(move |color| inspector_color_action(selected_clip, color)),
+                    ),
+                )),
+        );
 
     panel = panel.with_section(
         PropertySection::new("Transform")
@@ -6671,8 +6674,8 @@ mod tests {
         let folder = &models.assets.items[0];
         assert_eq!(folder.id, format!("folder:{folder_id}"));
         assert_eq!(folder.title, "Rushes");
-        assert_eq!(folder.subtitle, "Folder · 2 items");
-        assert_eq!(badge_labels(folder), ["BIN"]);
+        assert!(folder.subtitle.is_empty());
+        assert_eq!(badge_labels(folder), ["2 ITEMS"]);
         assert!(folder.icon.is_some());
         assert_eq!(
             folder.drag_payload,
@@ -6755,6 +6758,8 @@ mod tests {
         let parent = &models.assets.items[0];
         assert_eq!(parent.id, "asset-folder-up");
         assert_eq!(parent.title, "All assets");
+        assert!(parent.subtitle.is_empty());
+        assert_eq!(badge_labels(parent), ["ALL"]);
         let Action::Custom { namespace, name, payload } =
             parent.activate_action.as_ref().expect("parent activate action")
         else {
@@ -6770,7 +6775,8 @@ mod tests {
         let nested = &models.assets.items[1];
         assert_eq!(nested.id, format!("folder:{nested_id}"));
         assert_eq!(nested.title, "Selects");
-        assert_eq!(nested.subtitle, "Folder · 1 item");
+        assert!(nested.subtitle.is_empty());
+        assert_eq!(badge_labels(nested), ["1 ITEM"]);
         assert_eq!(
             nested.drag_payload,
             Some(DragPayload::AssetFolder(nested_id.clone()))

@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use mondrian_editor_state::state::WorkspacePreset;
 use mondrian_platform::PlatformService;
-use mondrian_ui_core::types::Rect;
+use mondrian_ui_core::types::{Point, Rect};
 use mondrian_ui_core::{TreeWalker, Widget};
 use mondrian_ui_theme::set_theme_preset;
 
@@ -187,6 +187,11 @@ impl SelfHostedUiHost {
             self.sync_mode_from_app_state(bounds);
             return;
         }
+        let next_mode = mode_for_app_state(&self.app_state.borrow());
+        if next_mode == self.mode && widget_tree_has_transient_interaction(self.active_root()) {
+            self.ui_dirty.set(true);
+            return;
+        }
         self.normalize_asset_folder_selection();
         self.root.refresh_from_app_state_with_preferences_thumbnails_and_preview(
             &self.app_state.borrow(),
@@ -294,11 +299,7 @@ impl SelfHostedUiHost {
     }
 
     fn sync_mode_from_app_state(&mut self, bounds: Rect) {
-        let next = if self.app_state.borrow().has_open_project() {
-            SelfHostedUiMode::Workspace
-        } else {
-            SelfHostedUiMode::Startup
-        };
+        let next = mode_for_app_state(&self.app_state.borrow());
         if self.mode != next {
             self.mode = next;
             self.root.refresh_from_app_state_with_preferences_thumbnails_and_preview(
@@ -592,6 +593,21 @@ impl SelfHostedUiHost {
             self.root.set_asset_folder_id(valid);
         }
     }
+}
+
+fn mode_for_app_state(state: &AppState) -> SelfHostedUiMode {
+    if state.has_open_project() {
+        SelfHostedUiMode::Workspace
+    } else {
+        SelfHostedUiMode::Startup
+    }
+}
+
+fn widget_tree_has_transient_interaction(widget: &dyn Widget) -> bool {
+    widget.accepts_text_input()
+        || widget.overlay_hit_test(Point::new(-1_000_000.0, -1_000_000.0))
+        || (0..widget.child_count())
+            .any(|index| widget.child(index).is_some_and(widget_tree_has_transient_interaction))
 }
 
 fn is_startup_project_action(action: &Action) -> bool {
@@ -978,6 +994,36 @@ mod tests {
         );
     }
 
+    fn click_root(root: &mut SelfHostedAppRoot, position: Point) {
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatch_ctx(&mut focus, &mut shortcut, &mut tooltip, &mut requests);
+        assert_eq!(
+            root.event(
+                &UiEvent::MouseDown {
+                    position,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            root.event(
+                &UiEvent::MouseUp {
+                    position,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+    }
+
     fn project_runtime_root_for_test(project_file: &Path) -> PathBuf {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
@@ -1165,6 +1211,28 @@ mod tests {
 
         assert_eq!(commands, SelfHostedShellCommands::default());
         assert!(host.root().dock().ratio() > 0.0);
+    }
+
+    #[test]
+    fn host_defers_dirty_refresh_while_shell_overlay_is_open() {
+        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 720.0);
+        let mut host = SelfHostedUiHost::new(workspace_app_state());
+        TreeWalker::layout(host.root_mut(), bounds);
+
+        click_root(host.root_mut(), Point::new(116.0, 17.0));
+        assert!(
+            widget_tree_has_transient_interaction(host.active_root()),
+            "test setup should leave the File menu overlay open"
+        );
+
+        host.mark_dirty();
+        host.refresh_if_dirty(bounds);
+
+        assert!(
+            widget_tree_has_transient_interaction(host.active_root()),
+            "dirty model refresh should not rebuild away an active menu/search overlay"
+        );
     }
 
     #[test]

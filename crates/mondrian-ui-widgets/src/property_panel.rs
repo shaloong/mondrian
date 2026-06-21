@@ -159,6 +159,7 @@ pub struct PropertyPanel {
     id: WidgetId,
     title: Label,
     subtitle: Option<Label>,
+    show_header_text: bool,
     sections: Vec<PropertySection>,
     options: PropertyPanelOptions,
     bounds: Rect,
@@ -176,6 +177,7 @@ impl PropertyPanel {
             id: WidgetId::new(),
             title: Label::new(title.into()).with_font_size(13.0).with_padding(0.0, 0.0),
             subtitle: None,
+            show_header_text: true,
             sections: Vec::new(),
             options,
             bounds: Rect::ZERO,
@@ -186,6 +188,12 @@ impl PropertyPanel {
     pub fn with_subtitle(mut self, subtitle: impl Into<String>) -> Self {
         self.subtitle =
             Some(Label::new(subtitle.into()).muted().with_font_size(11.0).with_padding(0.0, 0.0));
+        self
+    }
+
+    /// Use compact embedded chrome when the host panel already supplies title text.
+    pub fn with_embedded_panel_chrome(mut self) -> Self {
+        self.show_header_text = false;
         self
     }
 
@@ -210,6 +218,9 @@ impl PropertyPanel {
     }
 
     fn header_height(&self) -> f32 {
+        if !self.show_header_text {
+            return 0.0;
+        }
         if self.subtitle.is_some() {
             38.0
         } else {
@@ -314,9 +325,11 @@ impl Widget for PropertyPanel {
             );
             y += self.options.section_gap;
         }
-        self.title.layout(Rect::new(content.x, content.y + 12.0, content.width, 18.0));
-        if let Some(subtitle) = &mut self.subtitle {
-            subtitle.layout(Rect::new(content.x, content.y + 28.0, content.width, 16.0));
+        if self.show_header_text {
+            self.title.layout(Rect::new(content.x, content.y + 12.0, content.width, 18.0));
+            if let Some(subtitle) = &mut self.subtitle {
+                subtitle.layout(Rect::new(content.x, content.y + 28.0, content.width, 16.0));
+            }
         }
     }
 
@@ -345,9 +358,11 @@ impl Widget for PropertyPanel {
         let spacing = &ctx.theme.spacing;
         let panel_fill = colors.card;
         ctx.encoder.draw_rect(self.bounds, panel_fill, 0.0);
-        self.title.paint(ctx);
-        if let Some(subtitle) = &self.subtitle {
-            subtitle.paint(ctx);
+        if self.show_header_text {
+            self.title.paint(ctx);
+            if let Some(subtitle) = &self.subtitle {
+                subtitle.paint(ctx);
+            }
         }
 
         for section in &self.sections {
@@ -814,6 +829,33 @@ mod tests {
 
         assert!(encoder.rects >= 2);
         assert!(encoder.texts.contains(&"Inspector".to_string()));
+        assert!(encoder.texts.contains(&"Clip".to_string()));
+        assert!(encoder.texts.contains(&"Opacity".to_string()));
+    }
+
+    #[test]
+    fn embedded_panel_chrome_omits_duplicate_title_and_subtitle() {
+        let handled = Rc::new(Cell::new(false));
+        let mut panel = PropertyPanel::new("Inspector")
+            .with_subtitle("Selected clip")
+            .with_embedded_panel_chrome()
+            .with_section(PropertySection::new("Clip").with_row(PropertyRow::new(
+                "Opacity",
+                Box::new(ProbeWidget::new(handled)),
+            )));
+        panel.layout(Rect::new(0.0, 0.0, 300.0, 200.0));
+        let mut encoder = RecordingEncoder::default();
+        let theme = ThemePreset::Dark.build();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 300.0, 200.0),
+        };
+
+        panel.paint(&mut ctx);
+
+        assert!(!encoder.texts.contains(&"Inspector".to_string()));
+        assert!(!encoder.texts.contains(&"Selected clip".to_string()));
         assert!(encoder.texts.contains(&"Clip".to_string()));
         assert!(encoder.texts.contains(&"Opacity".to_string()));
     }
