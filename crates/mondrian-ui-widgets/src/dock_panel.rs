@@ -297,31 +297,6 @@ impl DockPanel {
         None
     }
 
-    fn drop_preview_rect(&self, area: DockPanelDropArea) -> Rect {
-        let content = self.content_bounds();
-        match area {
-            DockPanelDropArea::Center => content.inset(8.0, 8.0),
-            DockPanelDropArea::Left => {
-                Rect::new(content.x, content.y, content.width * 0.5, content.height)
-            }
-            DockPanelDropArea::Right => Rect::new(
-                content.x + content.width * 0.5,
-                content.y,
-                content.width * 0.5,
-                content.height,
-            ),
-            DockPanelDropArea::Top => {
-                Rect::new(content.x, content.y, content.width, content.height * 0.5)
-            }
-            DockPanelDropArea::Bottom => Rect::new(
-                content.x,
-                content.y + content.height * 0.5,
-                content.width,
-                content.height * 0.5,
-            ),
-        }
-    }
-
     fn target_panel_for_drop(
         &self,
         dragged: PanelKind,
@@ -470,23 +445,12 @@ impl Widget for DockPanel {
         if let Some(hover) = self.dock_hover {
             let tokens = &ctx.theme.colors;
             let geometry = self.dock_guide_geometry();
-            if let Some(area) = hover.area {
-                let preview = self.drop_preview_rect(area).inset(6.0, 6.0);
-                ctx.encoder.draw_rect(
-                    preview,
-                    color_with_alpha(tokens.primary, 0.10),
-                    if area == DockPanelDropArea::Center {
-                        10.0
-                    } else {
-                        0.0
-                    },
-                );
-            }
             if let Some(geometry) = geometry {
-                let neutral_fill = color_with_alpha(tokens.popover, 0.18);
-                let center_fill = color_with_alpha(tokens.popover, 0.24);
-                let active_fill = color_with_alpha(tokens.primary, 0.28);
-                let outline = color_with_alpha(tokens.border, 0.58);
+                let neutral_fill = color_with_alpha(tokens.popover, 0.14);
+                let center_fill = color_with_alpha(tokens.popover, 0.18);
+                let active_fill = color_with_alpha(tokens.primary, 0.24);
+                let outline = color_with_alpha(tokens.border, 0.42);
+                let active_outline = color_with_alpha(tokens.primary, 0.82);
 
                 for area in [
                     DockPanelDropArea::Top,
@@ -524,14 +488,28 @@ impl Widget for DockPanel {
                     DockPanelDropArea::Left,
                 ] {
                     if let Some(quad) = geometry.quad(area) {
-                        draw_quad_outline(ctx.encoder, quad, 1.0, outline);
+                        draw_quad_outline(
+                            ctx.encoder,
+                            quad,
+                            1.0,
+                            if hover.area == Some(area) {
+                                active_outline
+                            } else {
+                                outline
+                            },
+                        );
                     }
                 }
+                let center_outline = if hover.area == Some(DockPanelDropArea::Center) {
+                    active_outline
+                } else {
+                    outline
+                };
                 ctx.encoder.draw_line(
                     Point::new(geometry.center.x, geometry.center.y),
                     Point::new(geometry.center.x + geometry.center.width, geometry.center.y),
                     1.0,
-                    outline,
+                    center_outline,
                 );
                 ctx.encoder.draw_line(
                     Point::new(geometry.center.x + geometry.center.width, geometry.center.y),
@@ -540,7 +518,7 @@ impl Widget for DockPanel {
                         geometry.center.y + geometry.center.height,
                     ),
                     1.0,
-                    outline,
+                    center_outline,
                 );
                 ctx.encoder.draw_line(
                     Point::new(
@@ -552,7 +530,7 @@ impl Widget for DockPanel {
                         geometry.center.y + geometry.center.height,
                     ),
                     1.0,
-                    outline,
+                    center_outline,
                 );
                 ctx.encoder.draw_line(
                     Point::new(
@@ -561,7 +539,7 @@ impl Widget for DockPanel {
                     ),
                     Point::new(geometry.center.x, geometry.center.y),
                     1.0,
-                    outline,
+                    center_outline,
                 );
             }
         }
@@ -671,6 +649,36 @@ mod tests {
         fn draw_rect(&mut self, _bounds: Rect, _color: Color, _corner_radius: f32) {}
 
         fn draw_line(&mut self, _start: Point, _end: Point, _width: f32, _color: Color) {}
+
+        fn draw_text(&mut self, _text: &str, _font_size: f32, _position: Point, _color: Color) {}
+
+        fn push_translate(&mut self, _offset: glam::Vec2) {}
+
+        fn pop_transform(&mut self) {}
+    }
+
+    #[derive(Default)]
+    struct OverlayRecorder {
+        rects: Vec<Rect>,
+        triangle_batches: usize,
+    }
+
+    impl DrawCommandEncoder for OverlayRecorder {
+        fn push_clip(&mut self, _bounds: Rect) {}
+
+        fn pop_clip(&mut self) {}
+
+        fn draw_rect(&mut self, bounds: Rect, _color: Color, _corner_radius: f32) {
+            self.rects.push(bounds);
+        }
+
+        fn draw_line(&mut self, _start: Point, _end: Point, _width: f32, _color: Color) {}
+
+        fn draw_triangles(&mut self, vertices: &[Point], _color: Color) {
+            if !vertices.is_empty() {
+                self.triangle_batches += 1;
+            }
+        }
 
         fn draw_text(&mut self, _text: &str, _font_size: f32, _position: Point, _color: Color) {}
 
@@ -994,5 +1002,43 @@ mod tests {
                 area: Some(DockPanelDropArea::Left),
             })
         );
+    }
+
+    #[test]
+    fn dock_panel_overlay_only_draws_center_rect_once_when_edge_zone_is_hovered() {
+        let mut panel = DockPanel::new(PanelKind::Assets, panel_tabs(), |_kind, _active| {
+            Box::new(ProbeContent::new(
+                Rc::new(Cell::new(false)),
+                Rc::new(Cell::new(false)),
+            ))
+        });
+        panel.layout(Rect::new(0.0, 0.0, 240.0, 160.0));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut event_ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
+        let result = panel.event(
+            &UiEvent::DragEnter {
+                payload: DragPayload::PanelTab(PanelKind::Inspector),
+                position: Point::new(18.0, 96.0),
+            },
+            &mut event_ctx,
+        );
+        assert_eq!(result, EventResult::Handled);
+
+        let geometry = panel.dock_guide_geometry().expect("dock guide geometry");
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = OverlayRecorder::default();
+        let mut paint_ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 240.0, 160.0),
+        };
+
+        panel.paint_overlay(&mut paint_ctx);
+
+        assert_eq!(encoder.rects, vec![geometry.center]);
+        assert_eq!(encoder.triangle_batches, 4);
     }
 }

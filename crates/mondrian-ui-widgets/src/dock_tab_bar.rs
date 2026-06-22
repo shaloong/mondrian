@@ -314,11 +314,11 @@ impl Widget for DockTabBar {
             self.bounds.width,
             self.bar_height,
         );
-        let bar_fill = mix_color(tokens.background, tokens.card, 0.62);
+        let bar_fill = mix_color(tokens.background, tokens.card, 0.54);
         ctx.encoder.draw_rect(bg, bar_fill, 0.0);
         ctx.encoder.draw_rect(
             Rect::new(bg.x, bg.y + bg.height - 1.0, bg.width, 1.0),
-            color_with_alpha(tokens.border, 0.68),
+            color_with_alpha(tokens.border, 0.58),
             0.0,
         );
 
@@ -332,10 +332,17 @@ impl Widget for DockTabBar {
             let is_hovered = self.hovered_tab == Some(i);
 
             let inset = r.inset(2.0, 3.0);
+            if is_active {
+                ctx.encoder.draw_rect(
+                    inset,
+                    mix_color(tokens.card, tokens.background, 0.18),
+                    spacing.radius_sm,
+                );
+            }
             if is_hovered {
                 ctx.encoder.draw_rect(
                     inset,
-                    color_with_alpha(tokens.accent, if is_active { 0.76 } else { 0.46 }),
+                    color_with_alpha(tokens.accent, if is_active { 0.20 } else { 0.14 }),
                     spacing.radius_sm,
                 );
             }
@@ -356,7 +363,7 @@ impl Widget for DockTabBar {
             }
 
             if is_active {
-                let indicator_width = (inset.width * 0.42).clamp(26.0, 54.0);
+                let indicator_width = (inset.width * 0.38).clamp(24.0, 48.0);
                 let indicator = Rect::new(
                     inset.x + (inset.width - indicator_width) * 0.5,
                     bg.y + bg.height - 2.0,
@@ -369,16 +376,21 @@ impl Widget for DockTabBar {
 
         if let Some(hover) = self.drop_hover {
             let x = self.insert_indicator_x(hover.insert_index);
-            let indicator = Rect::new(x - 1.0, bg.y + 4.0, 2.0, (bg.height - 8.0).max(0.0));
-            ctx.encoder.draw_rect(indicator, color_with_alpha(tokens.primary, 0.92), 1.0);
             ctx.encoder.draw_rect(
-                Rect::new(x - 3.0, bg.y + 3.0, 6.0, 2.0),
-                color_with_alpha(tokens.primary, 0.92),
+                Rect::new(x - 2.0, bg.y + 4.0, 4.0, (bg.height - 8.0).max(0.0)),
+                color_with_alpha(tokens.primary, 0.18),
+                2.0,
+            );
+            let indicator = Rect::new(x - 1.0, bg.y + 5.0, 2.0, (bg.height - 10.0).max(0.0));
+            ctx.encoder.draw_rect(indicator, color_with_alpha(tokens.primary, 0.94), 1.0);
+            ctx.encoder.draw_rect(
+                Rect::new(x - 4.0, bg.y + 3.0, 8.0, 2.0),
+                color_with_alpha(tokens.primary, 0.94),
                 1.0,
             );
             ctx.encoder.draw_rect(
-                Rect::new(x - 3.0, bg.y + bg.height - 5.0, 6.0, 2.0),
-                color_with_alpha(tokens.primary, 0.92),
+                Rect::new(x - 4.0, bg.y + bg.height - 5.0, 8.0, 2.0),
+                color_with_alpha(tokens.primary, 0.94),
                 1.0,
             );
         }

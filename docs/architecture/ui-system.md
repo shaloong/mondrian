@@ -81,7 +81,10 @@ trapezoid edge regions) for both hover hit-testing and overlay painting, so the
 visual affordance matches the actual drop target across the whole content area.
 Guide-edge drops split around the target group, including dragging the active
 tab onto its own panel content edge when that group still has another visible
-tab to anchor the remaining leaf. The app shell owns persistence by promoting the workspace to Custom and
+tab to anchor the remaining leaf. `DockTabBar`, `DockPanel`, and
+`DockSplitter` should keep one shared interaction language: low-noise resting
+chrome, explicit active/hover emphasis, and no duplicate drag feedback layers
+that would make dense editing layouts feel visually busy. The app shell owns persistence by promoting the workspace to Custom and
 saving the resulting layout through `SelfHostedUiHost`, so reusable widget
 crates remain free of preference I/O.
 `self_hosted::startup` owns the launch-time root surface

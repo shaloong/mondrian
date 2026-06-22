@@ -302,13 +302,20 @@ impl Widget for DockSplitter {
     fn paint(&self, ctx: &mut PaintContext) {
         let tokens = &ctx.theme.colors;
 
-        let base_color = tokens.border;
+        let base_color = crate::paint::color_with_alpha(tokens.border, 0.62);
         let active_color = if self.dragging {
             tokens.primary
         } else if self.handle_hovered {
             tokens.accent
         } else {
             tokens.border
+        };
+        let lane_color = if self.dragging {
+            crate::paint::color_with_alpha(tokens.primary, 0.14)
+        } else if self.handle_hovered {
+            crate::paint::color_with_alpha(tokens.accent, 0.08)
+        } else {
+            mondrian_core::Color::TRANSPARENT
         };
         let base_width = 1.0;
         let active_width = if self.dragging {
@@ -325,11 +332,19 @@ impl Widget for DockSplitter {
             child.paint(ctx);
         }
 
-        // Draw a crisp full-span separator, then a slightly thicker active
-        // affordance on hover/drag. Both are geometry, not font glyphs.
+        // Draw a subtle interaction lane first, then a crisp separator and an
+        // emphasized active stroke. This keeps the chrome quiet at rest while
+        // still making drag affordances obvious in a dense editing layout.
         let (hx, hy) = (self.grab_rect.center().x, self.grab_rect.center().y);
         match self.direction {
             SplitDirection::Horizontal => {
+                if lane_color.a > 0.0 {
+                    ctx.encoder.draw_rect(
+                        vertical_stroke_rect(hx, self.bounds.y, self.bounds.height, self.grab_zone),
+                        lane_color,
+                        self.grab_zone * 0.5,
+                    );
+                }
                 ctx.encoder.draw_rect(
                     vertical_stroke_rect(hx, self.bounds.y, self.bounds.height, base_width),
                     base_color,
@@ -344,6 +359,18 @@ impl Widget for DockSplitter {
                 }
             }
             SplitDirection::Vertical => {
+                if lane_color.a > 0.0 {
+                    ctx.encoder.draw_rect(
+                        horizontal_stroke_rect(
+                            hy,
+                            self.bounds.x,
+                            self.bounds.width,
+                            self.grab_zone,
+                        ),
+                        lane_color,
+                        self.grab_zone * 0.5,
+                    );
+                }
                 ctx.encoder.draw_rect(
                     horizontal_stroke_rect(hy, self.bounds.x, self.bounds.width, base_width),
                     base_color,
