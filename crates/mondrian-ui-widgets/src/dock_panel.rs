@@ -14,6 +14,8 @@ use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use std::rc::Rc;
 
+type DockGuideQuad = [Point; 4];
+
 /// Function used by [`DockPanel`] to rebuild panel content for the active tab.
 pub type DockPanelContentFactory = dyn FnMut(PanelKind, usize) -> Box<dyn Widget>;
 
@@ -40,6 +42,119 @@ pub type DockPanelDropAction =
 struct DockPanelDockHover {
     dragged: PanelKind,
     area: Option<DockPanelDropArea>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DockGuideGeometry {
+    outer: Rect,
+    center: Rect,
+    top: DockGuideQuad,
+    right: DockGuideQuad,
+    bottom: DockGuideQuad,
+    left: DockGuideQuad,
+}
+
+impl DockGuideGeometry {
+    fn new(content: Rect) -> Option<Self> {
+        let outer = content.inset(6.0, 6.0);
+        if outer.width <= 48.0 || outer.height <= 48.0 {
+            return None;
+        }
+
+        let inset_x = guide_center_inset(outer.width, 0.24, 36.0);
+        let inset_y = guide_center_inset(outer.height, 0.24, 28.0);
+        let center = outer.inset(inset_x, inset_y);
+        if center.width <= 0.0 || center.height <= 0.0 {
+            return None;
+        }
+
+        let top_left = Point::new(outer.x, outer.y);
+        let top_right = Point::new(outer.x + outer.width, outer.y);
+        let bottom_right = Point::new(outer.x + outer.width, outer.y + outer.height);
+        let bottom_left = Point::new(outer.x, outer.y + outer.height);
+        let inner_top_left = Point::new(center.x, center.y);
+        let inner_top_right = Point::new(center.x + center.width, center.y);
+        let inner_bottom_right = Point::new(center.x + center.width, center.y + center.height);
+        let inner_bottom_left = Point::new(center.x, center.y + center.height);
+
+        Some(Self {
+            outer,
+            center,
+            top: [top_left, top_right, inner_top_right, inner_top_left],
+            right: [top_right, bottom_right, inner_bottom_right, inner_top_right],
+            bottom: [
+                bottom_right,
+                bottom_left,
+                inner_bottom_left,
+                inner_bottom_right,
+            ],
+            left: [bottom_left, top_left, inner_top_left, inner_bottom_left],
+        })
+    }
+
+    fn quad(&self, area: DockPanelDropArea) -> Option<&DockGuideQuad> {
+        match area {
+            DockPanelDropArea::Top => Some(&self.top),
+            DockPanelDropArea::Right => Some(&self.right),
+            DockPanelDropArea::Bottom => Some(&self.bottom),
+            DockPanelDropArea::Left => Some(&self.left),
+            DockPanelDropArea::Center => None,
+        }
+    }
+}
+
+fn guide_center_inset(length: f32, ratio: f32, min_inset: f32) -> f32 {
+    let max_inset = (length * 0.5 - 18.0).max(0.0);
+    if max_inset <= 0.0 {
+        return 0.0;
+    }
+    let lower = min_inset.min(max_inset);
+    (length * ratio).clamp(lower, max_inset)
+}
+
+fn quad_contains_point(quad: &DockGuideQuad, point: Point) -> bool {
+    const EPSILON: f32 = 0.001;
+    let mut has_positive = false;
+    let mut has_negative = false;
+
+    for index in 0..quad.len() {
+        let start = quad[index];
+        let end = quad[(index + 1) % quad.len()];
+        let cross =
+            (end.x - start.x) * (point.y - start.y) - (end.y - start.y) * (point.x - start.x);
+        if cross > EPSILON {
+            has_positive = true;
+        } else if cross < -EPSILON {
+            has_negative = true;
+        }
+        if has_positive && has_negative {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn draw_quad_fill(
+    encoder: &mut dyn mondrian_ui_core::widget::DrawCommandEncoder,
+    quad: &DockGuideQuad,
+    color: mondrian_core::Color,
+) {
+    encoder.draw_triangles(
+        &[quad[0], quad[1], quad[2], quad[0], quad[2], quad[3]],
+        color,
+    );
+}
+
+fn draw_quad_outline(
+    encoder: &mut dyn mondrian_ui_core::widget::DrawCommandEncoder,
+    quad: &DockGuideQuad,
+    width: f32,
+    color: mondrian_core::Color,
+) {
+    for index in 0..quad.len() {
+        encoder.draw_line(quad[index], quad[(index + 1) % quad.len()], width, color);
+    }
 }
 
 /// Docked panel chrome: tab bar plus one active content slot.
@@ -155,48 +270,31 @@ impl DockPanel {
         )
     }
 
-    fn dock_guide_rects(&self) -> Option<(Rect, Rect)> {
-        let content = self.content_bounds();
-        if content.width <= 0.0 || content.height <= 0.0 {
-            return None;
-        }
-        let outer_size = content.width.min(content.height).clamp(96.0, 148.0);
-        let inner_size = (outer_size * 0.44).clamp(46.0, 66.0);
-        let center = content.center();
-        let outer = Rect::new(
-            center.x - outer_size * 0.5,
-            center.y - outer_size * 0.5,
-            outer_size,
-            outer_size,
-        );
-        let inner = Rect::new(
-            center.x - inner_size * 0.5,
-            center.y - inner_size * 0.5,
-            inner_size,
-            inner_size,
-        );
-        Some((outer, inner))
+    fn dock_guide_geometry(&self) -> Option<DockGuideGeometry> {
+        DockGuideGeometry::new(self.content_bounds())
     }
 
     fn drop_area_at(&self, position: Point) -> Option<DockPanelDropArea> {
-        let (outer, inner) = self.dock_guide_rects()?;
-        if inner.contains(position) {
-            return Some(DockPanelDropArea::Center);
-        }
-        if !outer.contains(position) {
+        let geometry = self.dock_guide_geometry()?;
+        if !geometry.outer.contains(position) {
             return None;
         }
-        if position.y < inner.y {
-            Some(DockPanelDropArea::Top)
-        } else if position.y > inner.y + inner.height {
-            Some(DockPanelDropArea::Bottom)
-        } else if position.x < inner.x {
-            Some(DockPanelDropArea::Left)
-        } else if position.x > inner.x + inner.width {
-            Some(DockPanelDropArea::Right)
-        } else {
-            None
+        if geometry.center.contains(position) {
+            return Some(DockPanelDropArea::Center);
         }
+        for area in [
+            DockPanelDropArea::Top,
+            DockPanelDropArea::Right,
+            DockPanelDropArea::Bottom,
+            DockPanelDropArea::Left,
+        ] {
+            if let Some(quad) = geometry.quad(area) {
+                if quad_contains_point(quad, position) {
+                    return Some(area);
+                }
+            }
+        }
+        None
     }
 
     fn drop_preview_rect(&self, area: DockPanelDropArea) -> Rect {
@@ -239,6 +337,18 @@ impl DockPanel {
         None
     }
 
+    fn can_accept_panel_drop(&self, dragged: PanelKind) -> bool {
+        [
+            DockPanelDropArea::Center,
+            DockPanelDropArea::Top,
+            DockPanelDropArea::Right,
+            DockPanelDropArea::Bottom,
+            DockPanelDropArea::Left,
+        ]
+        .into_iter()
+        .any(|area| self.target_panel_for_drop(dragged, area).is_some())
+    }
+
     fn update_panel_drop_hover(
         &mut self,
         dragged: PanelKind,
@@ -246,6 +356,12 @@ impl DockPanel {
         ctx: &mut EventContext,
     ) -> EventResult {
         if !self.content_bounds().contains(position) {
+            return EventResult::Ignored;
+        }
+        if !self.can_accept_panel_drop(dragged) {
+            if self.dock_hover.take().is_some() {
+                ctx.request_repaint();
+            }
             return EventResult::Ignored;
         }
         let area = self
@@ -266,6 +382,10 @@ impl DockPanel {
         ctx: &mut EventContext,
     ) -> EventResult {
         self.dock_hover = None;
+        if !self.can_accept_panel_drop(dragged) {
+            ctx.request_repaint();
+            return EventResult::Ignored;
+        }
         let Some(area) = self.drop_area_at(position) else {
             ctx.request_repaint();
             return EventResult::Ignored;
@@ -349,64 +469,99 @@ impl Widget for DockPanel {
         self.content.paint_overlay(ctx);
         if let Some(hover) = self.dock_hover {
             let tokens = &ctx.theme.colors;
+            let geometry = self.dock_guide_geometry();
             if let Some(area) = hover.area {
-                let rect = self.drop_preview_rect(area).inset(4.0, 4.0);
-                ctx.encoder.draw_rect(rect, color_with_alpha(tokens.primary, 0.14), 6.0);
-            }
-            if let Some((outer, inner)) = self.dock_guide_rects() {
-                let base = color_with_alpha(tokens.popover, 0.88);
-                let line = color_with_alpha(tokens.border, 0.70);
-                let active = color_with_alpha(tokens.primary, 0.30);
-                let top = Rect::new(outer.x, outer.y, outer.width, inner.y - outer.y);
-                let bottom = Rect::new(
-                    outer.x,
-                    inner.y + inner.height,
-                    outer.width,
-                    outer.y + outer.height - (inner.y + inner.height),
-                );
-                let left = Rect::new(outer.x, inner.y, inner.x - outer.x, inner.height);
-                let right = Rect::new(
-                    inner.x + inner.width,
-                    inner.y,
-                    outer.x + outer.width - (inner.x + inner.width),
-                    inner.height,
-                );
-                for (area, rect) in [
-                    (DockPanelDropArea::Top, top),
-                    (DockPanelDropArea::Right, right),
-                    (DockPanelDropArea::Bottom, bottom),
-                    (DockPanelDropArea::Left, left),
-                ] {
-                    ctx.encoder.draw_rect(
-                        rect,
-                        if hover.area == Some(area) {
-                            active
-                        } else {
-                            base
-                        },
-                        4.0,
-                    );
-                }
+                let preview = self.drop_preview_rect(area).inset(6.0, 6.0);
                 ctx.encoder.draw_rect(
-                    inner,
-                    if hover.area == Some(DockPanelDropArea::Center) {
-                        active
+                    preview,
+                    color_with_alpha(tokens.primary, 0.10),
+                    if area == DockPanelDropArea::Center {
+                        10.0
                     } else {
-                        color_with_alpha(tokens.popover, 0.76)
+                        0.0
                     },
-                    5.0,
                 );
-                ctx.encoder.draw_rect(Rect::new(outer.x, outer.y, outer.width, 1.0), line, 0.0);
+            }
+            if let Some(geometry) = geometry {
+                let neutral_fill = color_with_alpha(tokens.popover, 0.18);
+                let center_fill = color_with_alpha(tokens.popover, 0.24);
+                let active_fill = color_with_alpha(tokens.primary, 0.28);
+                let outline = color_with_alpha(tokens.border, 0.58);
+
+                for area in [
+                    DockPanelDropArea::Top,
+                    DockPanelDropArea::Right,
+                    DockPanelDropArea::Bottom,
+                    DockPanelDropArea::Left,
+                ] {
+                    if let Some(quad) = geometry.quad(area) {
+                        draw_quad_fill(
+                            ctx.encoder,
+                            quad,
+                            if hover.area == Some(area) {
+                                active_fill
+                            } else {
+                                neutral_fill
+                            },
+                        );
+                    }
+                }
+
                 ctx.encoder.draw_rect(
-                    Rect::new(outer.x, outer.y + outer.height - 1.0, outer.width, 1.0),
-                    line,
-                    0.0,
+                    geometry.center,
+                    if hover.area == Some(DockPanelDropArea::Center) {
+                        active_fill
+                    } else {
+                        center_fill
+                    },
+                    8.0,
                 );
-                ctx.encoder.draw_rect(Rect::new(outer.x, outer.y, 1.0, outer.height), line, 0.0);
-                ctx.encoder.draw_rect(
-                    Rect::new(outer.x + outer.width - 1.0, outer.y, 1.0, outer.height),
-                    line,
-                    0.0,
+
+                for area in [
+                    DockPanelDropArea::Top,
+                    DockPanelDropArea::Right,
+                    DockPanelDropArea::Bottom,
+                    DockPanelDropArea::Left,
+                ] {
+                    if let Some(quad) = geometry.quad(area) {
+                        draw_quad_outline(ctx.encoder, quad, 1.0, outline);
+                    }
+                }
+                ctx.encoder.draw_line(
+                    Point::new(geometry.center.x, geometry.center.y),
+                    Point::new(geometry.center.x + geometry.center.width, geometry.center.y),
+                    1.0,
+                    outline,
+                );
+                ctx.encoder.draw_line(
+                    Point::new(geometry.center.x + geometry.center.width, geometry.center.y),
+                    Point::new(
+                        geometry.center.x + geometry.center.width,
+                        geometry.center.y + geometry.center.height,
+                    ),
+                    1.0,
+                    outline,
+                );
+                ctx.encoder.draw_line(
+                    Point::new(
+                        geometry.center.x + geometry.center.width,
+                        geometry.center.y + geometry.center.height,
+                    ),
+                    Point::new(
+                        geometry.center.x,
+                        geometry.center.y + geometry.center.height,
+                    ),
+                    1.0,
+                    outline,
+                );
+                ctx.encoder.draw_line(
+                    Point::new(
+                        geometry.center.x,
+                        geometry.center.y + geometry.center.height,
+                    ),
+                    Point::new(geometry.center.x, geometry.center.y),
+                    1.0,
+                    outline,
                 );
             }
         }
@@ -691,7 +846,7 @@ mod tests {
         let result = panel.event(
             &UiEvent::DragEnter {
                 payload: DragPayload::PanelTab(PanelKind::Inspector),
-                position: Point::new(62.0, 96.0),
+                position: Point::new(24.0, 96.0),
             },
             &mut ctx,
         );
@@ -725,7 +880,7 @@ mod tests {
         let result = panel.event(
             &UiEvent::DragEnter {
                 payload: DragPayload::PanelTab(PanelKind::Inspector),
-                position: Point::new(20.0, 150.0),
+                position: Point::new(120.0, 96.0),
             },
             &mut ctx,
         );
@@ -733,7 +888,10 @@ mod tests {
         assert_eq!(result, EventResult::Handled);
         assert_eq!(
             panel.dock_hover,
-            Some(DockPanelDockHover { dragged: PanelKind::Inspector, area: None })
+            Some(DockPanelDockHover {
+                dragged: PanelKind::Inspector,
+                area: Some(DockPanelDropArea::Center),
+            })
         );
     }
 
@@ -768,10 +926,73 @@ mod tests {
             &mut ctx,
         );
 
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(panel.dock_hover, None);
+    }
+
+    #[test]
+    fn dock_panel_drag_enter_uses_full_content_area_for_drop_regions() {
+        let mut panel = DockPanel::new(PanelKind::Assets, panel_tabs(), |_kind, _active| {
+            Box::new(ProbeContent::new(
+                Rc::new(Cell::new(false)),
+                Rc::new(Cell::new(false)),
+            ))
+        });
+        panel.layout(Rect::new(0.0, 0.0, 240.0, 160.0));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
+
+        let result = panel.event(
+            &UiEvent::DragEnter {
+                payload: DragPayload::PanelTab(PanelKind::Inspector),
+                position: Point::new(18.0, 96.0),
+            },
+            &mut ctx,
+        );
+
         assert_eq!(result, EventResult::Handled);
         assert_eq!(
             panel.dock_hover,
-            Some(DockPanelDockHover { dragged: PanelKind::Inspector, area: None })
+            Some(DockPanelDockHover {
+                dragged: PanelKind::Inspector,
+                area: Some(DockPanelDropArea::Left),
+            })
+        );
+    }
+
+    #[test]
+    fn dock_panel_active_tab_can_split_its_own_group_from_content_edges() {
+        let mut panel = DockPanel::new(PanelKind::Assets, panel_tabs(), |_kind, _active| {
+            Box::new(ProbeContent::new(
+                Rc::new(Cell::new(false)),
+                Rc::new(Cell::new(false)),
+            ))
+        });
+        panel.layout(Rect::new(0.0, 0.0, 240.0, 160.0));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
+
+        let result = panel.event(
+            &UiEvent::DragEnter {
+                payload: DragPayload::PanelTab(PanelKind::Assets),
+                position: Point::new(18.0, 96.0),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(
+            panel.dock_hover,
+            Some(DockPanelDockHover {
+                dragged: PanelKind::Assets,
+                area: Some(DockPanelDropArea::Left),
+            })
         );
     }
 }

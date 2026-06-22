@@ -144,6 +144,7 @@ impl SelfHostedWorkspaceLayout {
         target: PanelKind,
         area: DockDropArea,
     ) -> Option<Self> {
+        let target = self.resolve_drop_target(panel, target, area).unwrap_or(target);
         if panel == target {
             return self.sanitized();
         }
@@ -365,6 +366,24 @@ impl SelfHostedWorkspaceLayout {
                 panels.iter().all(|panel| tabs.contains(panel))
             }
         }
+    }
+
+    fn resolve_drop_target(
+        &self,
+        panel: PanelKind,
+        target: PanelKind,
+        area: DockDropArea,
+    ) -> Option<PanelKind> {
+        if panel != target {
+            return Some(target);
+        }
+        if area == DockDropArea::Center {
+            return Some(target);
+        }
+        self.tabs_for_panel_group(&[panel])?
+            .into_iter()
+            .find(|candidate| *candidate != panel)
+            .or(Some(target))
     }
 
     fn hidden_tabs_for_panel(&self, panel: PanelKind) -> Option<&[PanelKind]> {
@@ -775,6 +794,25 @@ mod tests {
                 ratio: 0.5,
                 first: Box::new(layout_tabs(vec![PanelKind::Assets, PanelKind::Effects], 0)),
                 second: Box::new(layout_panel(PanelKind::Inspector, 0)),
+            }
+        );
+    }
+
+    #[test]
+    fn relocate_panel_to_own_edge_splits_tab_out_of_same_group() {
+        let layout = layout_tabs(vec![PanelKind::Assets, PanelKind::Effects], 0);
+
+        let moved = layout
+            .relocate_panel(PanelKind::Assets, PanelKind::Assets, DockDropArea::Right)
+            .expect("relocated");
+
+        assert_eq!(
+            moved,
+            SelfHostedWorkspaceLayout::Split {
+                direction: SplitDirection::Horizontal,
+                ratio: 0.5,
+                first: Box::new(layout_panel(PanelKind::Effects, 0)),
+                second: Box::new(layout_panel(PanelKind::Assets, 0)),
             }
         );
     }

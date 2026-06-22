@@ -76,8 +76,12 @@ resolves `app.shell/relocate_panel` into `SelfHostedWorkspaceLayout`
 operations. Tab-bar drops use `relocate_panel_to_tab_index`; content guide
 center/edge drops use `relocate_panel`. Dropping on a tab bar creates browser-like
 tab insertion without showing the dock guide; dropping on the content guide
-center adds a tab; dropping on a guide edge creates a split around the target
-group. The app shell owns persistence by promoting the workspace to Custom and
+uses one shared full-panel five-zone geometry (center rectangle plus four
+trapezoid edge regions) for both hover hit-testing and overlay painting, so the
+visual affordance matches the actual drop target across the whole content area.
+Guide-edge drops split around the target group, including dragging the active
+tab onto its own panel content edge when that group still has another visible
+tab to anchor the remaining leaf. The app shell owns persistence by promoting the workspace to Custom and
 saving the resulting layout through `SelfHostedUiHost`, so reusable widget
 crates remain free of preference I/O.
 `self_hosted::startup` owns the launch-time root surface
