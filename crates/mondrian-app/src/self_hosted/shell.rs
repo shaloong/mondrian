@@ -23,8 +23,9 @@ use crate::app::ui_actions::{
     assets_import_files_action, assets_relink_asset_action, export_set_draft_action,
     project_create_with_settings_action, project_recover_from_autosave_action,
     sequence_update_settings_action, AppShellOpenRecentProjectPayload,
-    AppShellRelinkAssetDialogPayload, AppShellRevealInFileManagerPayload, AssetsImportFilesPayload,
-    AssetsRelinkAssetPayload, ExportDraftUpdatePayload, ExportOutputDialogPayload,
+    AppShellRelinkAssetDialogPayload, AppShellRelocatePanelPayload,
+    AppShellRevealInFileManagerPayload, AssetsImportFilesPayload, AssetsRelinkAssetPayload,
+    DockDropAreaPayload, ExportDraftUpdatePayload, ExportOutputDialogPayload,
     ImportMediaDialogPayload, NewProjectDraftUpdatePayload, PreferencesTabPayload,
     ProjectRecoverFromAutosavePayload, SequenceSettingsDraftUpdatePayload,
     SequenceSettingsTabPayload, APP_SHELL_ABOUT, APP_SHELL_CANCEL_NEW_PROJECT_DIALOG,
@@ -33,10 +34,10 @@ use crate::app::ui_actions::{
     APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
     APP_SHELL_NEW_PROJECT_DRAFT_CHANGED, APP_SHELL_OPEN_PROJECT_DIALOG,
     APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PREFERENCES, APP_SHELL_PREFERENCES_TAB_CHANGED,
-    APP_SHELL_RECOVER_PROJECT, APP_SHELL_RELINK_ASSET_DIALOG, APP_SHELL_REVEAL_IN_FILE_MANAGER,
-    APP_SHELL_SAVE_PROJECT_AS_DIALOG, APP_SHELL_SEQUENCE_SETTINGS,
-    APP_SHELL_SEQUENCE_SETTINGS_DRAFT_CHANGED, APP_SHELL_SEQUENCE_SETTINGS_TAB_CHANGED,
-    VIEWER_CYCLE_ZOOM, VIEWER_NAMESPACE,
+    APP_SHELL_RECOVER_PROJECT, APP_SHELL_RELINK_ASSET_DIALOG, APP_SHELL_RELOCATE_PANEL,
+    APP_SHELL_REVEAL_IN_FILE_MANAGER, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
+    APP_SHELL_SEQUENCE_SETTINGS, APP_SHELL_SEQUENCE_SETTINGS_DRAFT_CHANGED,
+    APP_SHELL_SEQUENCE_SETTINGS_TAB_CHANGED, VIEWER_CYCLE_ZOOM, VIEWER_NAMESPACE,
 };
 use crate::app::AppState;
 use crate::self_hosted::menu_bar::MenuBar;
@@ -52,7 +53,7 @@ use crate::self_hosted::preferences_dialog::{PreferencesDialogTab, SelfHostedPre
 use crate::self_hosted::preferences_store::SelfHostedPreferences;
 use crate::self_hosted::sequence_settings_dialog::SelfHostedSequenceSettingsDraft;
 use crate::self_hosted::title_bar::{TitleBar, TITLE_BAR_HEIGHT};
-use crate::self_hosted::workspace_layout::SelfHostedWorkspaceLayout;
+use crate::self_hosted::workspace_layout::{DockDropArea, SelfHostedWorkspaceLayout};
 use mondrian_core::{MondrianError, Result};
 
 /// Default file extension for Mondrian project containers.
@@ -903,6 +904,37 @@ impl SelfHostedAppRoot {
         self.focus_panel(panel);
     }
 
+    /// Relocate one docked panel tab relative to another visible panel group.
+    pub fn relocate_panel(
+        &mut self,
+        panel: PanelKind,
+        target: PanelKind,
+        area: DockDropArea,
+    ) -> bool {
+        let Some(layout) = self.workspace_layout() else {
+            return false;
+        };
+        let Some(next_layout) = layout.relocate_panel(panel, target, area) else {
+            return false;
+        };
+        if self.workspace_layout().as_ref() == Some(&next_layout) {
+            return false;
+        }
+        let Some(dock) = build_dock_tree_from_layout(self.models.clone(), &next_layout) else {
+            return false;
+        };
+
+        self.workspace_preset = WorkspacePreset::Custom;
+        self.preferences_model.workspace = WorkspacePreset::Custom.display_name().to_owned();
+        self.custom_workspace_layout = Some(next_layout);
+        self.dock = dock;
+        self.refresh_shell_menu_checked_state();
+        if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
+            self.layout(self.bounds);
+        }
+        true
+    }
+
     fn hide_panel(&mut self, panel: PanelKind) -> bool {
         let Some(layout) = self.workspace_layout() else {
             return false;
@@ -982,6 +1014,19 @@ impl SelfHostedAppRoot {
             }
             Action::SwitchWorkspace(preset) => {
                 self.switch_workspace(preset);
+                Ok(None)
+            }
+            Action::Custom { namespace, name, payload }
+                if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_RELOCATE_PANEL =>
+            {
+                if let Ok(payload) = serde_json::from_value::<AppShellRelocatePanelPayload>(payload)
+                {
+                    self.relocate_panel(
+                        payload.panel,
+                        payload.target,
+                        dock_drop_area(payload.area),
+                    );
+                }
                 Ok(None)
             }
             Action::Custom { namespace, name, .. }
@@ -1182,6 +1227,16 @@ fn build_dock_tree_for_workspace(
         }
     }
     build_dock_tree_for_preset(models, preset)
+}
+
+fn dock_drop_area(area: DockDropAreaPayload) -> DockDropArea {
+    match area {
+        DockDropAreaPayload::Center => DockDropArea::Center,
+        DockDropAreaPayload::Left => DockDropArea::Left,
+        DockDropAreaPayload::Right => DockDropArea::Right,
+        DockDropAreaPayload::Top => DockDropArea::Top,
+        DockDropAreaPayload::Bottom => DockDropArea::Bottom,
+    }
 }
 
 fn dock_panel_locations(panel: PanelKind) -> Vec<(PanelKind, usize)> {
@@ -1569,18 +1624,19 @@ mod tests {
         app_shell_open_project_dialog_action, app_shell_open_recent_project_action,
         app_shell_preferences_action, app_shell_preferences_tab_changed_action,
         app_shell_recover_project_action, app_shell_relink_asset_dialog_action,
-        app_shell_reveal_in_file_manager_action, app_shell_save_project_as_dialog_action,
-        app_shell_sequence_settings_action, app_shell_sequence_settings_draft_changed_action,
+        app_shell_relocate_panel_action, app_shell_reveal_in_file_manager_action,
+        app_shell_save_project_as_dialog_action, app_shell_sequence_settings_action,
+        app_shell_sequence_settings_draft_changed_action,
         app_shell_sequence_settings_tab_changed_action, viewer_cycle_zoom_action,
         AppShellOpenRecentProjectPayload, AppShellRelinkAssetDialogPayload,
-        AppShellRevealInFileManagerPayload, AssetsImportFilesPayload, AssetsRelinkAssetPayload,
-        ExportDraftUpdatePayload, ExportOutputDialogPayload, ImportMediaDialogPayload,
-        NewProjectDraftUpdatePayload, PreferencesTabPayload, ProjectCreateWithSettingsPayload,
-        ProjectRecoverFromAutosavePayload, SequenceSettingsDraftUpdatePayload,
-        SequenceSettingsTabPayload, SequenceUpdateSettingsPayload, ASSETS_IMPORT_FILES,
-        ASSETS_NAMESPACE, ASSETS_RELINK_ASSET, EXPORT_NAMESPACE, EXPORT_SET_DRAFT,
-        PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE, PROJECT_RECOVER_FROM_AUTOSAVE,
-        SEQUENCE_NAMESPACE, SEQUENCE_UPDATE_SETTINGS,
+        AppShellRelocatePanelPayload, AppShellRevealInFileManagerPayload, AssetsImportFilesPayload,
+        AssetsRelinkAssetPayload, DockDropAreaPayload, ExportDraftUpdatePayload,
+        ExportOutputDialogPayload, ImportMediaDialogPayload, NewProjectDraftUpdatePayload,
+        PreferencesTabPayload, ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload,
+        SequenceSettingsDraftUpdatePayload, SequenceSettingsTabPayload,
+        SequenceUpdateSettingsPayload, ASSETS_IMPORT_FILES, ASSETS_NAMESPACE, ASSETS_RELINK_ASSET,
+        EXPORT_NAMESPACE, EXPORT_SET_DRAFT, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
+        PROJECT_RECOVER_FROM_AUTOSAVE, SEQUENCE_NAMESPACE, SEQUENCE_UPDATE_SETTINGS,
     };
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use glam::Vec2;
@@ -2063,6 +2119,37 @@ mod tests {
         assert_eq!(
             active_index_for_dock_panel(&root, PanelKind::Assets),
             Some(0)
+        );
+    }
+
+    #[test]
+    fn app_root_relocate_panel_action_groups_panel_as_active_tab() {
+        let platform = FakePlatform::default();
+        let mut root = SelfHostedAppRoot::demo();
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+
+        let action = root.handle_shell_action(
+            app_shell_relocate_panel_action(AppShellRelocatePanelPayload {
+                panel: PanelKind::Inspector,
+                target: PanelKind::Assets,
+                area: DockDropAreaPayload::Center,
+            }),
+            &platform,
+            None,
+        );
+
+        assert_eq!(action, None);
+        assert_eq!(root.workspace_preset(), WorkspacePreset::Custom);
+        let layout = root.custom_workspace_layout().expect("custom layout");
+        assert!(layout.contains_panel(PanelKind::Assets));
+        assert!(layout.contains_panel(PanelKind::Inspector));
+        assert_eq!(
+            active_index_for_dock_panel(&root, PanelKind::Assets),
+            Some(1)
+        );
+        assert_eq!(
+            menu_checked_for_action(&root, &Action::SwitchWorkspace(WorkspacePreset::Editing)),
+            Some(false)
         );
     }
 

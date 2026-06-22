@@ -10,6 +10,8 @@ use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use crate::paint::{color_with_alpha, mix_color};
 use crate::text_metrics::{centered_text_x, measure_single_line};
 
+const DRAG_START_DISTANCE: f32 = 5.0;
+
 /// 单个 Tab 的信息
 #[derive(Debug, Clone)]
 pub struct TabInfo {
@@ -24,10 +26,17 @@ pub struct DockTabBar {
     tabs: Vec<TabInfo>,
     bounds: Rect,
     hovered_tab: Option<usize>,
+    drag_candidate: Option<TabDragCandidate>,
     bar_height: f32,
     tab_min_width: f32,
     tab_max_width: f32,
     tab_padding_x: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TabDragCandidate {
+    start: Point,
+    panel: PanelKind,
 }
 
 impl DockTabBar {
@@ -37,6 +46,7 @@ impl DockTabBar {
             tabs,
             bounds: Rect::ZERO,
             hovered_tab: None,
+            drag_candidate: None,
             bar_height: 26.0,
             tab_min_width: 40.0,
             tab_max_width: 148.0,
@@ -46,6 +56,7 @@ impl DockTabBar {
 
     pub fn set_tabs(&mut self, tabs: Vec<TabInfo>) {
         self.tabs = tabs;
+        self.drag_candidate = None;
     }
 
     pub fn active_index(&self) -> usize {
@@ -106,6 +117,26 @@ impl DockTabBar {
             })
             .collect()
     }
+
+    fn begin_drag_candidate_if_needed(
+        &mut self,
+        position: Point,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        let Some(candidate) = self.drag_candidate else {
+            return EventResult::Ignored;
+        };
+        let dx = position.x - candidate.start.x;
+        let dy = position.y - candidate.start.y;
+        if dx * dx + dy * dy < DRAG_START_DISTANCE * DRAG_START_DISTANCE {
+            return EventResult::Ignored;
+        }
+
+        self.drag_candidate = None;
+        ctx.begin_drag(DragPayload::PanelTab(candidate.panel));
+        ctx.request_repaint();
+        EventResult::Handled
+    }
 }
 
 impl Widget for DockTabBar {
@@ -121,20 +152,41 @@ impl Widget for DockTabBar {
         self.bounds = Rect::new(bounds.x, bounds.y, bounds.width, self.bar_height);
     }
 
-    fn event(&mut self, event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+    fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
         match event {
             UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
                 let rects = self.tab_rects();
                 for (i, r) in rects.iter().enumerate() {
                     if r.contains(*position) {
                         self.set_active(i);
+                        if let Some(panel) = self.tabs.get(i).and_then(|tab| tab.panel_kind) {
+                            self.drag_candidate =
+                                Some(TabDragCandidate { start: *position, panel });
+                            ctx.request_pointer_capture(self.id);
+                        }
+                        ctx.request_repaint();
                         return EventResult::Handled;
                     }
                 }
             }
+            UiEvent::MouseUp { button: MouseButton::Left, .. } if self.drag_candidate.is_some() => {
+                self.drag_candidate = None;
+                ctx.release_pointer_capture(self.id);
+                ctx.request_repaint();
+                return EventResult::Handled;
+            }
             UiEvent::MouseMove { position, .. } => {
+                if self.begin_drag_candidate_if_needed(*position, ctx) == EventResult::Handled {
+                    return EventResult::Handled;
+                }
                 let rects = self.tab_rects();
                 self.hovered_tab = rects.iter().position(|r| r.contains(*position));
+            }
+            UiEvent::FocusLost | UiEvent::DragLeave if self.drag_candidate.is_some() => {
+                self.drag_candidate = None;
+                ctx.release_pointer_capture(self.id);
+                ctx.request_repaint();
+                return EventResult::Handled;
             }
             _ => {}
         }
@@ -272,17 +324,17 @@ mod tests {
             TabInfo {
                 label: "A".into(),
                 active: active == 0,
-                panel_kind: None,
+                panel_kind: Some(PanelKind::Assets),
             },
             TabInfo {
                 label: "B".into(),
                 active: active == 1,
-                panel_kind: None,
+                panel_kind: Some(PanelKind::Effects),
             },
             TabInfo {
                 label: "C".into(),
                 active: active == 2,
-                panel_kind: None,
+                panel_kind: Some(PanelKind::Inspector),
             },
         ]
     }
@@ -350,6 +402,74 @@ mod tests {
         );
         assert_eq!(r, EventResult::Handled);
         assert_eq!(bar.active_index(), 1);
+    }
+
+    #[test]
+    fn tab_bar_drag_after_threshold_begins_panel_tab_drag() {
+        let mut bar = DockTabBar::new(make_tabs(0));
+        bar.layout(Rect::new(0.0, 0.0, 300.0, 30.0));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
+
+        let down = bar.event(
+            &UiEvent::MouseDown {
+                position: Point::new(10.0, 13.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(down, EventResult::Handled);
+
+        let moved = bar.event(
+            &UiEvent::MouseMove {
+                position: Point::new(30.0, 14.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(moved, EventResult::Handled);
+        assert_eq!(
+            ctx.requests.drag,
+            Some(mondrian_ui_core::widget::DragRequest::Begin(
+                DragPayload::PanelTab(PanelKind::Assets)
+            ))
+        );
+    }
+
+    #[test]
+    fn tab_bar_small_mouse_move_keeps_click_candidate() {
+        let mut bar = DockTabBar::new(make_tabs(0));
+        bar.layout(Rect::new(0.0, 0.0, 300.0, 30.0));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
+
+        bar.event(
+            &UiEvent::MouseDown {
+                position: Point::new(10.0, 13.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        let moved = bar.event(
+            &UiEvent::MouseMove {
+                position: Point::new(12.0, 14.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(moved, EventResult::Ignored);
+        assert_eq!(ctx.requests.drag, None);
+        assert!(bar.drag_candidate.is_some());
     }
 
     #[test]

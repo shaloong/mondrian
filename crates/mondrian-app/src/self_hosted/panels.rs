@@ -32,11 +32,11 @@ use mondrian_ui_widgets::dock_tab_bar::TabInfo;
 use mondrian_ui_widgets::NumberInput;
 use mondrian_ui_widgets::{
     AssetGrid, AssetGridBadgeTone, AssetGridItem, Button, Checkbox, ColorPickerAreaMode,
-    ColorPickerTrigger, CurveEditor, CurvePoint, DockPanel, Dropdown, FlexChild, FlexContainer,
-    Label, MenuItem, NodeGraphEdge, NodeGraphNode, NodeGraphView, PanelList, PanelListBadgeTone,
-    PanelListItem, PropertyPanel, PropertyPanelOptions, PropertyRow, PropertySection, RasterImage,
-    ScrollView, Slider, TextInput, TimelineAssetDrop, TimelineClip, TimelineClipMove,
-    TimelineClipRef, TimelineClipTrim, TimelineEditCommand, TimelineInOutPoint,
+    ColorPickerTrigger, CurveEditor, CurvePoint, DockPanel, DockPanelDropArea, Dropdown, FlexChild,
+    FlexContainer, Label, MenuItem, NodeGraphEdge, NodeGraphNode, NodeGraphView, PanelList,
+    PanelListBadgeTone, PanelListItem, PropertyPanel, PropertyPanelOptions, PropertyRow,
+    PropertySection, RasterImage, ScrollView, Slider, TextInput, TimelineAssetDrop, TimelineClip,
+    TimelineClipMove, TimelineClipRef, TimelineClipTrim, TimelineEditCommand, TimelineInOutPoint,
     TimelineToolbarIconSlot, TimelineTrack, TimelineTrackControl, TimelineTrackMove,
     TimelineTrackRef, TimelineTrimEdge, TimelineView, ViewerControl, ViewerFrameImage,
     ViewerStatusTone, ViewerSurface,
@@ -45,15 +45,15 @@ use mondrian_ui_widgets::{
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
 use crate::app::ui_actions::{
     app_shell_export_output_dialog_action, app_shell_import_media_dialog_action_with_target,
-    app_shell_relink_asset_dialog_action, app_shell_reveal_in_file_manager_action,
-    assets_create_adjustment_layer_action, assets_create_folder_action,
-    assets_create_solid_color_action, assets_delete_asset_action, assets_delete_folder_action,
-    assets_delete_selection_action, assets_import_files_action, assets_move_asset_action,
-    assets_move_folder_action, assets_move_selection_action, assets_open_folder_action,
-    assets_prepare_drag_action, assets_rename_asset_action, assets_rename_folder_action,
-    assets_set_proxy_mode_action, effects_add_to_clip_action, export_cancel_job_action,
-    export_clear_completed_action, export_enqueue_action, export_set_draft_action,
-    inspector_remove_effect_action, inspector_select_effect_action,
+    app_shell_relink_asset_dialog_action, app_shell_relocate_panel_action,
+    app_shell_reveal_in_file_manager_action, assets_create_adjustment_layer_action,
+    assets_create_folder_action, assets_create_solid_color_action, assets_delete_asset_action,
+    assets_delete_folder_action, assets_delete_selection_action, assets_import_files_action,
+    assets_move_asset_action, assets_move_folder_action, assets_move_selection_action,
+    assets_open_folder_action, assets_prepare_drag_action, assets_rename_asset_action,
+    assets_rename_folder_action, assets_set_proxy_mode_action, effects_add_to_clip_action,
+    export_cancel_job_action, export_clear_completed_action, export_enqueue_action,
+    export_set_draft_action, inspector_remove_effect_action, inspector_select_effect_action,
     inspector_set_clip_curve_action, inspector_set_clip_enabled_action,
     inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
     inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
@@ -65,24 +65,25 @@ use crate::app::ui_actions::{
     timeline_set_selected_clips_enabled_action, timeline_set_track_control_action,
     timeline_trim_clips_action, timeline_trim_selected_clips_to_playhead_action,
     viewer_cycle_zoom_action, viewer_set_preview_resolution_scale_action,
-    AppShellRelinkAssetDialogPayload, AppShellRevealInFileManagerPayload, AssetsCreateAssetPayload,
-    AssetsCreateFolderPayload, AssetsDeleteAssetPayload, AssetsDeleteFolderPayload,
-    AssetsDeleteSelectionPayload, AssetsImportFilesPayload, AssetsMoveAssetPayload,
-    AssetsMoveFolderPayload, AssetsMoveSelectionPayload, AssetsOpenFolderPayload,
-    AssetsPrepareDragPayload, AssetsRenameAssetPayload, AssetsRenameFolderPayload,
-    AssetsSetProxyModePayload, EffectsAddToClipPayload, ExportDraftUpdatePayload,
-    ExportEnqueuePayload, ExportJobTargetPayload, ExportOutputDialogPayload,
-    ImportMediaDialogPayload, InspectorClipRefPayload, InspectorClipTransformField,
-    InspectorCurvePointPayload, InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
-    InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
-    InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
-    InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload, TimelineAddTrackKind,
-    TimelineAddTrackPayload, TimelineDropAssetPayload, TimelineInOutPointPayloadKind,
-    TimelineMoveClipPayload, TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
-    TimelineSelectClipPayload, TimelineSetInOutPointPayload,
-    TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
-    TimelineTrackControlPayloadKind, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
-    TimelineTrimSelectedClipsToPlayheadPayload, ViewerSetPreviewResolutionScalePayload,
+    AppShellRelinkAssetDialogPayload, AppShellRelocatePanelPayload,
+    AppShellRevealInFileManagerPayload, AssetsCreateAssetPayload, AssetsCreateFolderPayload,
+    AssetsDeleteAssetPayload, AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload,
+    AssetsImportFilesPayload, AssetsMoveAssetPayload, AssetsMoveFolderPayload,
+    AssetsMoveSelectionPayload, AssetsOpenFolderPayload, AssetsPrepareDragPayload,
+    AssetsRenameAssetPayload, AssetsRenameFolderPayload, AssetsSetProxyModePayload,
+    DockDropAreaPayload, EffectsAddToClipPayload, ExportDraftUpdatePayload, ExportEnqueuePayload,
+    ExportJobTargetPayload, ExportOutputDialogPayload, ImportMediaDialogPayload,
+    InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
+    InspectorRemoveEffectPayload, InspectorSelectEffectPayload, InspectorSetClipCurvePayload,
+    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+    InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
+    InspectorSetEffectPropertyPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
+    TimelineDropAssetPayload, TimelineInOutPointPayloadKind, TimelineMoveClipPayload,
+    TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload, TimelineSelectClipPayload,
+    TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
+    TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipsPayload,
+    TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
+    ViewerSetPreviewResolutionScalePayload,
 };
 use crate::app::{AppState, SelectedClipRef};
 use crate::self_hosted::action_availability::app_state_action_enabled;
@@ -1563,9 +1564,28 @@ fn slot_with_tabs(mut tab_kinds: Vec<PanelKind>, models: SelfHostedPanelModels) 
             panel_kind: Some(*kind),
         })
         .collect();
-    Box::new(DockPanel::new(owner, tabs, move |kind, _active| {
-        panel_content_for_slot(kind, &models)
-    }))
+    Box::new(
+        DockPanel::new(owner, tabs, move |kind, _active| {
+            panel_content_for_slot(kind, &models)
+        })
+        .on_panel_drop(|panel, target, area| {
+            app_shell_relocate_panel_action(AppShellRelocatePanelPayload {
+                panel,
+                target,
+                area: dock_drop_area_payload(area),
+            })
+        }),
+    )
+}
+
+fn dock_drop_area_payload(area: DockPanelDropArea) -> DockDropAreaPayload {
+    match area {
+        DockPanelDropArea::Center => DockDropAreaPayload::Center,
+        DockPanelDropArea::Left => DockDropAreaPayload::Left,
+        DockPanelDropArea::Right => DockDropAreaPayload::Right,
+        DockPanelDropArea::Top => DockDropAreaPayload::Top,
+        DockPanelDropArea::Bottom => DockDropAreaPayload::Bottom,
+    }
 }
 
 fn visible_tabs_for_slot(kind: PanelKind, hidden_tabs: &[PanelKind]) -> Vec<PanelKind> {

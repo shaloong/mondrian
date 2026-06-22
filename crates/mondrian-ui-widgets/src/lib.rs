@@ -51,7 +51,7 @@ pub use color_picker::{
 pub use context_menu::ContextMenu;
 pub use curve_editor::{CurveEditor, CurvePoint};
 pub use dialog_surface::DialogSurface;
-pub use dock_panel::DockPanel;
+pub use dock_panel::{DockPanel, DockPanelDropArea};
 pub use dock_splitter::DockSplitter;
 pub use dock_tab_bar::{DockTabBar, TabInfo};
 pub use flex_container::{FlexChild, FlexContainer};

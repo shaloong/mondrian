@@ -5,14 +5,34 @@
 //! forwarding for popups owned by panel content.
 
 use crate::dock_tab_bar::{DockTabBar, TabInfo};
+use crate::paint::color_with_alpha;
 use crate::panel_slot::PanelSlot;
 use mondrian_editor_state::state::PanelKind;
+use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
 /// Function used by [`DockPanel`] to rebuild panel content for the active tab.
 pub type DockPanelContentFactory = dyn FnMut(PanelKind, usize) -> Box<dyn Widget>;
+
+/// Drop region selected when dragging one dock panel tab over another panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DockPanelDropArea {
+    /// Add the dragged panel as a tab in the target group.
+    Center,
+    /// Split to the left of the target group.
+    Left,
+    /// Split to the right of the target group.
+    Right,
+    /// Split above the target group.
+    Top,
+    /// Split below the target group.
+    Bottom,
+}
+
+/// Function used by [`DockPanel`] to map a panel-tab drop into an app action.
+pub type DockPanelDropAction = dyn Fn(PanelKind, PanelKind, DockPanelDropArea) -> Action + 'static;
 
 /// Docked panel chrome: tab bar plus one active content slot.
 pub struct DockPanel {
@@ -21,6 +41,8 @@ pub struct DockPanel {
     tab_bar: DockTabBar,
     content: Box<dyn Widget>,
     content_factory: Box<DockPanelContentFactory>,
+    on_panel_drop: Option<Box<DockPanelDropAction>>,
+    drop_hover: Option<(PanelKind, DockPanelDropArea)>,
     bounds: Rect,
     last_active: usize,
     tab_height: f32,
@@ -48,10 +70,21 @@ impl DockPanel {
             tab_bar: DockTabBar::new(tabs),
             content,
             content_factory: Box::new(content_factory),
+            on_panel_drop: None,
+            drop_hover: None,
             bounds: Rect::ZERO,
             last_active: initial_active,
             tab_height: 32.0,
         }
+    }
+
+    /// Attach an app action factory for panel-tab dock drops.
+    pub fn on_panel_drop(
+        mut self,
+        action: impl Fn(PanelKind, PanelKind, DockPanelDropArea) -> Action + 'static,
+    ) -> Self {
+        self.on_panel_drop = Some(Box::new(action));
+        self
     }
 
     /// Current active tab index.
@@ -96,6 +129,123 @@ impl DockPanel {
             self.layout(self.bounds);
         }
     }
+
+    fn drop_area_at(&self, position: Point) -> Option<DockPanelDropArea> {
+        if !self.bounds.contains(position) || self.bounds.width <= 0.0 || self.bounds.height <= 0.0
+        {
+            return None;
+        }
+
+        let left = (position.x - self.bounds.x) / self.bounds.width;
+        let top = (position.y - self.bounds.y) / self.bounds.height;
+        let right = 1.0 - left;
+        let bottom = 1.0 - top;
+        let edge_threshold = 0.24;
+
+        let mut closest = (DockPanelDropArea::Center, edge_threshold);
+        for (area, distance) in [
+            (DockPanelDropArea::Left, left),
+            (DockPanelDropArea::Right, right),
+            (DockPanelDropArea::Top, top),
+            (DockPanelDropArea::Bottom, bottom),
+        ] {
+            if distance < closest.1 {
+                closest = (area, distance);
+            }
+        }
+
+        Some(closest.0)
+    }
+
+    fn drop_preview_rect(&self, area: DockPanelDropArea) -> Rect {
+        match area {
+            DockPanelDropArea::Center => self.bounds.inset(10.0, 10.0),
+            DockPanelDropArea::Left => Rect::new(
+                self.bounds.x,
+                self.bounds.y,
+                self.bounds.width * 0.34,
+                self.bounds.height,
+            ),
+            DockPanelDropArea::Right => Rect::new(
+                self.bounds.x + self.bounds.width * 0.66,
+                self.bounds.y,
+                self.bounds.width * 0.34,
+                self.bounds.height,
+            ),
+            DockPanelDropArea::Top => Rect::new(
+                self.bounds.x,
+                self.bounds.y,
+                self.bounds.width,
+                self.bounds.height * 0.34,
+            ),
+            DockPanelDropArea::Bottom => Rect::new(
+                self.bounds.x,
+                self.bounds.y + self.bounds.height * 0.66,
+                self.bounds.width,
+                self.bounds.height * 0.34,
+            ),
+        }
+    }
+
+    fn target_panel_for_drop(
+        &self,
+        dragged: PanelKind,
+        area: DockPanelDropArea,
+    ) -> Option<PanelKind> {
+        let active = self.tab_bar.active_panel_kind().unwrap_or(self.kind);
+        if active != dragged {
+            return Some(active);
+        }
+        if area != DockPanelDropArea::Center {
+            return self.tab_bar.tab_panel_kinds().into_iter().find(|kind| *kind != dragged);
+        }
+        None
+    }
+
+    fn update_panel_drop_hover(
+        &mut self,
+        dragged: PanelKind,
+        position: Point,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        let next = self
+            .drop_area_at(position)
+            .and_then(|area| self.target_panel_for_drop(dragged, area).map(|_| (dragged, area)));
+        if self.drop_hover != next {
+            self.drop_hover = next;
+            ctx.request_repaint();
+        }
+        if self.drop_hover.is_some() {
+            EventResult::Handled
+        } else {
+            EventResult::Ignored
+        }
+    }
+
+    fn drop_panel_tab(
+        &mut self,
+        dragged: PanelKind,
+        position: Point,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        self.drop_hover = None;
+        let Some(area) = self.drop_area_at(position) else {
+            ctx.request_repaint();
+            return EventResult::Ignored;
+        };
+        let Some(target) = self.target_panel_for_drop(dragged, area) else {
+            ctx.request_repaint();
+            return EventResult::Ignored;
+        };
+        let Some(action) = &self.on_panel_drop else {
+            ctx.request_repaint();
+            return EventResult::Ignored;
+        };
+
+        (ctx.dispatch)(action(dragged, target, area));
+        ctx.request_repaint();
+        EventResult::Handled
+    }
 }
 
 impl Widget for DockPanel {
@@ -120,6 +270,26 @@ impl Widget for DockPanel {
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        match event {
+            UiEvent::DragEnter { payload: DragPayload::PanelTab(panel), position } => {
+                return self.update_panel_drop_hover(*panel, *position, ctx);
+            }
+            UiEvent::DragOver { position } => {
+                if let Some((panel, _)) = self.drop_hover {
+                    return self.update_panel_drop_hover(panel, *position, ctx);
+                }
+            }
+            UiEvent::DragLeave if self.drop_hover.is_some() => {
+                self.drop_hover = None;
+                ctx.request_repaint();
+                return EventResult::Handled;
+            }
+            UiEvent::Drop { payload: DragPayload::PanelTab(panel), position } => {
+                return self.drop_panel_tab(*panel, *position, ctx);
+            }
+            _ => {}
+        }
+
         let result = self.tab_bar.event(event, ctx);
         self.sync_active_tab();
         if result == EventResult::Handled {
@@ -140,6 +310,31 @@ impl Widget for DockPanel {
 
     fn paint_overlay(&self, ctx: &mut PaintContext) {
         self.content.paint_overlay(ctx);
+        if let Some((_, area)) = self.drop_hover {
+            let tokens = &ctx.theme.colors;
+            let rect = self.drop_preview_rect(area).inset(4.0, 4.0);
+            ctx.encoder.draw_rect(rect, color_with_alpha(tokens.primary, 0.18), 6.0);
+            ctx.encoder.draw_rect(
+                Rect::new(rect.x, rect.y, rect.width, 1.0),
+                color_with_alpha(tokens.primary, 0.70),
+                0.0,
+            );
+            ctx.encoder.draw_rect(
+                Rect::new(rect.x, rect.y + rect.height - 1.0, rect.width, 1.0),
+                color_with_alpha(tokens.primary, 0.70),
+                0.0,
+            );
+            ctx.encoder.draw_rect(
+                Rect::new(rect.x, rect.y, 1.0, rect.height),
+                color_with_alpha(tokens.primary, 0.70),
+                0.0,
+            );
+            ctx.encoder.draw_rect(
+                Rect::new(rect.x + rect.width - 1.0, rect.y, 1.0, rect.height),
+                color_with_alpha(tokens.primary, 0.70),
+                0.0,
+            );
+        }
     }
 
     fn hit_test(&self, point: Point) -> bool {
@@ -181,9 +376,11 @@ mod tests {
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::Color;
     use mondrian_editor_state::state::PanelKind;
+    use mondrian_editor_state::Action;
     use mondrian_ui_core::widget::DrawCommandEncoder;
     use mondrian_ui_theme::ThemePreset;
     use std::cell::Cell;
+    use std::cell::RefCell;
     use std::rc::Rc;
 
     struct ProbeContent {
@@ -256,6 +453,21 @@ mod tests {
         vec![
             TabInfo { label: "A".into(), active: true, panel_kind: None },
             TabInfo { label: "B".into(), active: false, panel_kind: None },
+        ]
+    }
+
+    fn panel_tabs() -> Vec<TabInfo> {
+        vec![
+            TabInfo {
+                label: "素材".into(),
+                active: true,
+                panel_kind: Some(PanelKind::Assets),
+            },
+            TabInfo {
+                label: "效果".into(),
+                active: false,
+                panel_kind: Some(PanelKind::Effects),
+            },
         ]
     }
 
@@ -344,5 +556,110 @@ mod tests {
         panel.paint_overlay(&mut ctx);
 
         assert!(overlay_painted.get());
+    }
+
+    #[test]
+    fn dock_panel_drop_panel_tab_dispatches_drop_action() {
+        let actions = Rc::new(RefCell::new(Vec::new()));
+        let mut panel = DockPanel::new(PanelKind::Assets, panel_tabs(), |_kind, _active| {
+            Box::new(ProbeContent::new(
+                Rc::new(Cell::new(false)),
+                Rc::new(Cell::new(false)),
+            ))
+        })
+        .on_panel_drop(|panel, target, area| {
+            assert_eq!(panel, PanelKind::Inspector);
+            assert_eq!(target, PanelKind::Assets);
+            assert_eq!(area, DockPanelDropArea::Center);
+            Action::FocusPanel(panel)
+        });
+        panel.layout(Rect::new(0.0, 0.0, 240.0, 160.0));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let dispatch_actions = Rc::clone(&actions);
+        let dispatch = move |action| dispatch_actions.borrow_mut().push(action);
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch);
+
+        let result = panel.event(
+            &UiEvent::Drop {
+                payload: DragPayload::PanelTab(PanelKind::Inspector),
+                position: Point::new(120.0, 80.0),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[Action::FocusPanel(PanelKind::Inspector)]
+        );
+    }
+
+    #[test]
+    fn dock_panel_drag_enter_tracks_edge_drop_preview() {
+        let mut panel = DockPanel::new(PanelKind::Assets, panel_tabs(), |_kind, _active| {
+            Box::new(ProbeContent::new(
+                Rc::new(Cell::new(false)),
+                Rc::new(Cell::new(false)),
+            ))
+        });
+        panel.layout(Rect::new(0.0, 0.0, 240.0, 160.0));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
+
+        let result = panel.event(
+            &UiEvent::DragEnter {
+                payload: DragPayload::PanelTab(PanelKind::Inspector),
+                position: Point::new(4.0, 80.0),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(
+            panel.drop_hover,
+            Some((PanelKind::Inspector, DockPanelDropArea::Left))
+        );
+        assert!(ctx.requests.repaint);
+    }
+
+    #[test]
+    fn dock_panel_ignores_center_drop_of_own_only_tab() {
+        let mut panel = DockPanel::new(
+            PanelKind::Inspector,
+            vec![TabInfo {
+                label: "检查器".into(),
+                active: true,
+                panel_kind: Some(PanelKind::Inspector),
+            }],
+            |_kind, _active| {
+                Box::new(ProbeContent::new(
+                    Rc::new(Cell::new(false)),
+                    Rc::new(Cell::new(false)),
+                ))
+            },
+        );
+        panel.layout(Rect::new(0.0, 0.0, 240.0, 160.0));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
+
+        let result = panel.event(
+            &UiEvent::DragEnter {
+                payload: DragPayload::PanelTab(PanelKind::Inspector),
+                position: Point::new(120.0, 80.0),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(panel.drop_hover, None);
     }
 }

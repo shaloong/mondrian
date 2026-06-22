@@ -4,6 +4,7 @@
 
 use glam::Vec2;
 use mondrian_core::{AssetId, ClipId, EffectId, TrackId};
+use mondrian_editor_state::state::PanelKind;
 use uuid::Uuid;
 
 // ═══════════════════════════════════════════════════════════════════════════════════
@@ -339,6 +340,7 @@ pub enum KeyCode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DragPayload {
     Clip(ClipId),
+    PanelTab(PanelKind),
     Asset(AssetId),
     AssetFolder(String),
     AssetSelection {

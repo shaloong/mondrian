@@ -6,6 +6,7 @@
 use mondrian_core::effect_data::EffectType;
 use mondrian_core::types::{AssetId, ClipId, EffectId, JobId, SequenceId, TrackId};
 use mondrian_core::{ColorSpace, ProjectSettings, Rational, Resolution};
+use mondrian_editor_state::state::PanelKind;
 use mondrian_editor_state::Action;
 use mondrian_export::preset::{ExportPreset, TimelineExportRange};
 use mondrian_timeline::{
@@ -221,6 +222,8 @@ pub const APP_SHELL_WINDOW_MINIMIZE: &str = "window_minimize";
 pub const APP_SHELL_WINDOW_TOGGLE_MAXIMIZE: &str = "window_toggle_maximize";
 /// App-shell request to begin native window dragging from custom chrome.
 pub const APP_SHELL_WINDOW_DRAG: &str = "window_drag";
+/// App-shell request to relocate one dock panel tab in the workspace layout.
+pub const APP_SHELL_RELOCATE_PANEL: &str = "relocate_panel";
 
 /// Self-hosted preferences section selected by the shell-local preferences UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -286,6 +289,32 @@ pub struct AppShellRevealInFileManagerPayload {
 pub struct AppShellRelinkAssetDialogPayload {
     /// Asset whose media path should be replaced.
     pub asset_id: AssetId,
+}
+
+/// Dock drop region selected by the self-hosted workspace shell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DockDropAreaPayload {
+    /// Add as a tab in the target panel group.
+    Center,
+    /// Split to the left of the target panel group.
+    Left,
+    /// Split to the right of the target panel group.
+    Right,
+    /// Split above the target panel group.
+    Top,
+    /// Split below the target panel group.
+    Bottom,
+}
+
+/// Move an existing dock panel relative to another panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppShellRelocatePanelPayload {
+    /// Panel tab being moved.
+    pub panel: PanelKind,
+    /// Existing panel whose group receives or anchors the drop.
+    pub target: PanelKind,
+    /// Region selected inside the target panel group.
+    pub area: DockDropAreaPayload,
 }
 
 /// Clip edge being trimmed by a timeline UI.
@@ -1307,6 +1336,11 @@ pub fn app_shell_window_toggle_maximize_action() -> Action {
 /// Build an app-shell request for beginning native window drag from custom chrome.
 pub fn app_shell_window_drag_action() -> Action {
     custom_app_shell_action(APP_SHELL_WINDOW_DRAG)
+}
+
+/// Build an app-shell request for relocating one dock panel tab.
+pub fn app_shell_relocate_panel_action(payload: AppShellRelocatePanelPayload) -> Action {
+    custom_app_shell_action_with_payload(APP_SHELL_RELOCATE_PANEL, payload)
 }
 
 fn custom_timeline_action<T: Serialize>(name: &'static str, payload: T) -> Action {
