@@ -709,12 +709,15 @@ labels, and platform font metrics use the same layout facts as final glyph
 rendering instead of approximate character-width math.
 Popup elevation goes through the widget crate's shared paint helper and theme
 shadow tokens rather than per-widget hardcoded black alpha values, so dark/light
-themes can tune perceived depth centrally. Dropdown popups use layered token
-shadows and token radius instead of one hard rectangular shadow; this keeps
-menus visually closer to modern shadcn/Codex-style floating surfaces while
-preserving deterministic draw commands. Common color composition helpers such
-as alpha scaling, color mixing, and softened borders also live behind that
-shared paint helper so widgets do not drift in their interpretation of tokens.
+themes can tune perceived depth centrally. Dropdown popups use the renderer's
+analytic soft-shadow primitive through the shared helper: widgets emit ambient
+and contact shadow requests from semantic shadow tokens, and the GPU evaluates a
+rounded-rectangle distance field falloff instead of stacking hard expanded
+rectangles. This keeps menus visually closer to modern shadcn/Codex-style
+floating surfaces while preserving deterministic, low-vertex draw commands.
+Common color composition helpers such as alpha scaling, color mixing, and
+softened borders also live behind that shared paint helper so widgets do not
+drift in their interpretation of tokens.
 Dropdowns, context menus, and embedded selectors such as the color-picker mode
 menu use the shared anchored-menu geometry for viewport edge clamping and
 above/below flipping, and their hit-testing is derived from the same rects used
@@ -2036,10 +2039,17 @@ focus borders, may keep local painting while preserving the same theme token
 vocabulary.
 
 `DrawEncoder` preserves subpixel geometry for rectangles, gradients, lines,
-images, raster icons, and arbitrary triangle meshes. Rectangles and circles use
-the GPU rounded-rect SDF path; a true circle is a square bounds whose corner
-radius clamps to half the side, while non-square bounds intentionally render as
-a rounded rectangle or capsule rather than an ellipse. Circle SDF tests should
+images, raster icons, analytic shadows, and arbitrary triangle meshes.
+Rectangles, circles, and soft shadows use GPU rounded-rect distance fields; a
+true circle is a square bounds whose corner radius clamps to half the side,
+while non-square bounds intentionally render as a rounded rectangle or capsule
+rather than an ellipse. Soft shadows are encoded as one blur-expanded quad with
+local pixel coordinates relative to the caster rect, plus blur radius, spread,
+offset, and color from theme shadow tokens. The fragment shader computes the
+rounded-rect signed distance and applies a smooth falloff, giving popovers
+modern ambient/contact elevation without a per-frame offscreen blur pass. A
+future backdrop blur or acrylic surface should be added as a separate renderer
+pass rather than overloading drop-shadow commands. Circle SDF tests should
 sample boundary points across angle families and tiny sizes so roundness and
 numeric stability do not depend on only the cardinal points. Batch-level circle
 tests should also reconstruct signed distance from the final generated

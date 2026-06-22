@@ -150,6 +150,15 @@ mod tests {
     }
 
     #[test]
+    fn soft_shadow_shader_contract_uses_blur_distance_field() {
+        let fragment = UI_FRAGMENT_SHADER.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(fragment.contains("const RENDER_MODE_SOFT_SHADOW: u32 = 4u;"));
+        assert!(fragment.contains("@location(5) @interpolate(flat) blur_radius_px: f32"));
+        assert!(fragment.contains("smoothstep(0.0, blur, outside)"));
+    }
+
+    #[test]
     fn ui_pipeline_2d_primitives_do_not_depend_on_backface_culling() {
         let primitive = ui_primitive_state();
 

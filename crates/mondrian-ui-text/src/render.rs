@@ -819,4 +819,43 @@ mod tests {
             result.commands
         );
     }
+
+    #[test]
+    fn resolve_text_commands_preserves_renderer_primitives() {
+        let mut r = TextRenderer::new();
+        let shadow = DrawCommand::SoftShadow {
+            bounds: Rect::new(12.0, 18.0, 96.0, 40.0),
+            color: Color::from_rgba8(0, 0, 0, 90),
+            corner_radius: 8.0,
+            blur_radius: 24.0,
+            spread: 2.0,
+            offset: Point::new(0.0, 8.0).to_vec2(),
+        };
+
+        let result = resolve_text_commands(vec![shadow.clone()], &mut r);
+
+        assert_eq!(result.commands.len(), 1);
+        assert!(
+            matches!(
+                &result.commands[0],
+                DrawCommand::SoftShadow {
+                    bounds,
+                    color,
+                    corner_radius,
+                    blur_radius,
+                    spread,
+                    offset,
+                } if *bounds == Rect::new(12.0, 18.0, 96.0, 40.0)
+                    && *color == Color::from_rgba8(0, 0, 0, 90)
+                    && (*corner_radius - 8.0).abs() < f32::EPSILON
+                    && (*blur_radius - 24.0).abs() < f32::EPSILON
+                    && (*spread - 2.0).abs() < f32::EPSILON
+                    && *offset == Point::new(0.0, 8.0).to_vec2()
+            ),
+            "renderer primitive should pass through unchanged: {:?}",
+            result.commands
+        );
+        assert_eq!(result.stats.text_commands, 0);
+        assert_eq!(result.stats.glyphs_requested, 0);
+    }
 }

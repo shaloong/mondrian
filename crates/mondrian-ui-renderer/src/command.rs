@@ -57,6 +57,18 @@ pub enum DrawCommand {
         corner_radius: f32, // px; 0 = sharp
     },
 
+    /// Analytic soft shadow cast by a rounded rectangle.
+    ///
+    /// `bounds` describes the caster before offset/spread expansion.
+    SoftShadow {
+        bounds: Rect,
+        color: Color,
+        corner_radius: f32,
+        blur_radius: f32,
+        spread: f32,
+        offset: Vec2,
+    },
+
     /// GPU-interpolated rectangle gradient.
     ///
     /// Color order is top-left, top-right, bottom-left, bottom-right.
@@ -181,6 +193,25 @@ impl DrawEncoder {
 
     pub fn draw_rect(&mut self, bounds: Rect, color: Color, corner_radius: f32) {
         self.commands.push(DrawCommand::Rect { bounds, color, corner_radius });
+    }
+
+    pub fn draw_soft_shadow(
+        &mut self,
+        bounds: Rect,
+        color: Color,
+        corner_radius: f32,
+        blur_radius: f32,
+        spread: f32,
+        offset: Vec2,
+    ) {
+        self.commands.push(DrawCommand::SoftShadow {
+            bounds,
+            color,
+            corner_radius,
+            blur_radius,
+            spread,
+            offset,
+        });
     }
 
     /// Record a GPU-interpolated gradient rectangle.
@@ -327,6 +358,18 @@ impl DrawCommandEncoder for DrawEncoder {
         self.draw_rect(bounds, color, corner_radius);
     }
 
+    fn draw_soft_shadow(
+        &mut self,
+        bounds: Rect,
+        color: Color,
+        corner_radius: f32,
+        blur_radius: f32,
+        spread: f32,
+        offset: Vec2,
+    ) {
+        self.draw_soft_shadow(bounds, color, corner_radius, blur_radius, spread, offset);
+    }
+
     fn draw_gradient_rect(&mut self, bounds: Rect, colors: [Color; 4], corner_radius: f32) {
         self.draw_gradient_rect(bounds, colors, corner_radius);
     }
@@ -456,6 +499,27 @@ mod tests {
                 assert_eq!(colors[2], Color::TRANSPARENT);
             }
             other => panic!("expected gradient rect command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn encoder_draw_soft_shadow_adds_command() {
+        let mut enc = DrawEncoder::new();
+        enc.draw_soft_shadow(rect(), color(), 8.0, 24.0, 2.0, Vec2::new(0.0, 6.0));
+
+        let commands = enc.finish();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            DrawCommand::SoftShadow {
+                bounds, corner_radius, blur_radius, spread, offset, ..
+            } => {
+                assert_eq!(*bounds, rect());
+                assert_eq!(*corner_radius, 8.0);
+                assert_eq!(*blur_radius, 24.0);
+                assert_eq!(*spread, 2.0);
+                assert_eq!(*offset, Vec2::new(0.0, 6.0));
+            }
+            other => panic!("expected soft shadow command, got {other:?}"),
         }
     }
 

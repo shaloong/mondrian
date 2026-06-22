@@ -1848,7 +1848,7 @@ impl Widget for ColorPickerTrigger {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::paint::{shadow_color, shadow_rect};
+    use crate::paint::shadow_color;
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_ui_core::focus::FocusManager;
     use mondrian_ui_core::widget::DrawCommandEncoder;
@@ -1860,6 +1860,7 @@ mod tests {
     struct RecordingEncoder {
         rects: Vec<Rect>,
         rect_colors: Vec<Color>,
+        soft_shadows: Vec<(Rect, Color, f32, f32, f32, glam::Vec2)>,
         gradient_rects: Vec<Rect>,
         line_segments: usize,
         triangle_vertices: usize,
@@ -1878,6 +1879,19 @@ mod tests {
         fn draw_rect(&mut self, bounds: Rect, color: Color, _corner_radius: f32) {
             self.rects.push(bounds);
             self.rect_colors.push(color);
+        }
+
+        fn draw_soft_shadow(
+            &mut self,
+            bounds: Rect,
+            color: Color,
+            corner_radius: f32,
+            blur_radius: f32,
+            spread: f32,
+            offset: glam::Vec2,
+        ) {
+            self.soft_shadows
+                .push((bounds, color, corner_radius, blur_radius, spread, offset));
         }
 
         fn draw_gradient_rect(&mut self, bounds: Rect, _colors: [Color; 4], _corner_radius: f32) {
@@ -3248,8 +3262,15 @@ mod tests {
         picker.paint(&mut ctx);
 
         let shadow = &theme.spacing.shadow_md;
-        assert_eq!(encoder.rects[0], shadow_rect(bounds, shadow));
-        assert_eq!(encoder.rect_colors[0], shadow_color(shadow));
+        assert_eq!(encoder.soft_shadows.len(), 1);
+        assert_eq!(encoder.soft_shadows[0].0, bounds);
+        assert_eq!(encoder.soft_shadows[0].1, shadow_color(shadow));
+        assert_eq!(encoder.soft_shadows[0].3, shadow.blur);
+        assert_eq!(encoder.soft_shadows[0].4, shadow.spread);
+        assert_eq!(
+            encoder.soft_shadows[0].5,
+            glam::Vec2::new(shadow.offset_x, shadow.offset_y)
+        );
     }
 
     #[test]

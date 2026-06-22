@@ -13,9 +13,10 @@ pub enum RenderMode {
     Glyph = 1,
     Line = 2,
     Image = 3,
+    SoftShadow = 4,
 }
 
-/// UI 渲染的顶点格式 (48 bytes, packed).
+/// UI 渲染的顶点格式 (52 bytes, packed).
 ///
 /// The shader clamps `corner_radius_px` automatically — callers do not need
 /// to pre-clamp to half-size.
@@ -26,7 +27,8 @@ pub enum RenderMode {
 ///   2: color
 ///   3: rect_size (pixels, for pixel-space rounded-rect SDF)
 ///   4: corner_radius_px (0 = sharp rect)
-///   5: render_mode (0 = shape, 1 = glyph, 2 = analytic line, 3 = full-color image)
+///   5: render_mode (0 = shape, 1 = glyph, 2 = analytic line, 3 = full-color image, 4 = analytic shadow)
+///   6: blur_radius_px (only used by analytic shadow)
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct RectVertex {
@@ -36,6 +38,7 @@ pub struct RectVertex {
     pub rect_size: [f32; 2],   // 8 bytes,  offset 32
     pub corner_radius_px: f32, // 4 bytes,  offset 40
     pub render_mode: u32,      // 4 bytes,  offset 44
+    pub blur_radius_px: f32,   // 4 bytes,  offset 48
 }
 
 impl RectVertex {
@@ -54,6 +57,39 @@ impl RectVertex {
         corner_radius_px: f32,
         render_mode: RenderMode,
     ) -> Self {
+        Self::new_with_blur(
+            x,
+            y,
+            u,
+            v,
+            r,
+            g,
+            b,
+            a,
+            rect_w,
+            rect_h,
+            corner_radius_px,
+            render_mode,
+            0.0,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_blur(
+        x: f32,
+        y: f32,
+        u: f32,
+        v: f32,
+        r: f32,
+        g: f32,
+        b: f32,
+        a: f32,
+        rect_w: f32,
+        rect_h: f32,
+        corner_radius_px: f32,
+        render_mode: RenderMode,
+        blur_radius_px: f32,
+    ) -> Self {
         Self {
             position: [x, y],
             tex_coord: [u, v],
@@ -61,6 +97,7 @@ impl RectVertex {
             rect_size: [rect_w, rect_h],
             corner_radius_px,
             render_mode: render_mode as u32,
+            blur_radius_px,
         }
     }
 
@@ -98,6 +135,11 @@ impl RectVertex {
                     format: wgpu::VertexFormat::Uint32,
                     offset: 44,
                     shader_location: 5,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32,
+                    offset: 48,
+                    shader_location: 6,
                 },
             ],
         }
@@ -146,6 +188,98 @@ pub fn generate_rect_vertices(
         v(x1, y0, 1.0, 0.0),
         v(x1, y1, 1.0, 1.0),
     ]
+}
+
+/// Generate a single-quad analytic soft shadow.
+///
+/// Vertex positions cover the blur-expanded shadow texture domain, while
+/// `tex_coord` carries pixel coordinates relative to the unblurred caster
+/// rectangle. The fragment shader evaluates the rounded-rectangle SDF and
+/// applies a smooth falloff over `blur_radius_px`.
+pub fn generate_soft_shadow_vertices(
+    caster: Rect,
+    color: mondrian_core::Color,
+    corner_radius_px: f32,
+    blur_radius_px: f32,
+    spread_px: f32,
+    offset: glam::Vec2,
+    to_ndc: impl Fn(Rect) -> Rect,
+) -> Option<[RectVertex; 6]> {
+    if caster.width <= 0.0
+        || caster.height <= 0.0
+        || !caster.x.is_finite()
+        || !caster.y.is_finite()
+        || !caster.width.is_finite()
+        || !caster.height.is_finite()
+        || !color.r.is_finite()
+        || !color.g.is_finite()
+        || !color.b.is_finite()
+        || !color.a.is_finite()
+        || !corner_radius_px.is_finite()
+        || !blur_radius_px.is_finite()
+        || !spread_px.is_finite()
+        || !offset.x.is_finite()
+        || !offset.y.is_finite()
+    {
+        return None;
+    }
+
+    let spread = spread_px.max(0.0);
+    let blur = blur_radius_px.max(0.0);
+    let shadow_rect = Rect::new(
+        caster.x + offset.x - spread,
+        caster.y + offset.y - spread,
+        caster.width + spread * 2.0,
+        caster.height + spread * 2.0,
+    );
+    let geometry_rect = Rect::new(
+        shadow_rect.x - blur,
+        shadow_rect.y - blur,
+        shadow_rect.width + blur * 2.0,
+        shadow_rect.height + blur * 2.0,
+    );
+    if geometry_rect.width <= 0.0 || geometry_rect.height <= 0.0 {
+        return None;
+    }
+
+    let screen_rect = to_ndc(geometry_rect);
+    let x0 = screen_rect.x;
+    let y0 = screen_rect.y;
+    let x1 = screen_rect.x + screen_rect.width;
+    let y1 = screen_rect.y + screen_rect.height;
+    let local_left = geometry_rect.x - shadow_rect.x;
+    let local_top = geometry_rect.y - shadow_rect.y;
+    let local_right = local_left + geometry_rect.width;
+    let local_bottom = local_top + geometry_rect.height;
+    let rect_w = shadow_rect.width.max(1.0);
+    let rect_h = shadow_rect.height.max(1.0);
+    let radius = (corner_radius_px + spread).max(0.0);
+    let v = |x: f32, y: f32, u: f32, v: f32| {
+        RectVertex::new_with_blur(
+            x,
+            y,
+            u,
+            v,
+            color.r,
+            color.g,
+            color.b,
+            color.a,
+            rect_w,
+            rect_h,
+            radius,
+            RenderMode::SoftShadow,
+            blur,
+        )
+    };
+
+    Some([
+        v(x0, y0, local_left, local_bottom),
+        v(x1, y0, local_right, local_bottom),
+        v(x0, y1, local_left, local_top),
+        v(x0, y1, local_left, local_top),
+        v(x1, y0, local_right, local_bottom),
+        v(x1, y1, local_right, local_top),
+    ])
 }
 
 /// Generate a rectangle whose color is interpolated by the GPU.
@@ -220,8 +354,8 @@ mod tests {
     // ═══════════════════════════════════════════════════════════════════════
 
     #[test]
-    fn vertex_size_is_48_bytes() {
-        assert_eq!(std::mem::size_of::<RectVertex>(), 48);
+    fn vertex_size_is_52_bytes() {
+        assert_eq!(std::mem::size_of::<RectVertex>(), 52);
     }
 
     #[test]
@@ -240,9 +374,9 @@ mod tests {
     }
 
     #[test]
-    fn vertex_layout_has_6_attributes() {
+    fn vertex_layout_has_7_attributes() {
         let layout = RectVertex::layout();
-        assert_eq!(layout.attributes.len(), 6);
+        assert_eq!(layout.attributes.len(), 7);
     }
 
     #[test]
@@ -267,6 +401,31 @@ mod tests {
         assert_eq!(v.rect_size, [100.0, 50.0]);
         assert_eq!(v.corner_radius_px, 8.0);
         assert_eq!(v.render_mode, RenderMode::Shape as u32);
+        assert_eq!(v.blur_radius_px, 0.0);
+    }
+
+    #[test]
+    fn soft_shadow_vertices_expand_geometry_and_carry_blur_radius() {
+        let caster = Rect::new(10.0, 20.0, 100.0, 40.0);
+        let color = mondrian_core::Color::from_rgba8(0, 0, 0, 80);
+        let vertices = generate_soft_shadow_vertices(
+            caster,
+            color,
+            8.0,
+            24.0,
+            2.0,
+            glam::Vec2::new(0.0, 8.0),
+            |rect| rect,
+        )
+        .expect("valid shadow geometry");
+
+        assert_eq!(vertices.len(), 6);
+        assert_eq!(vertices[0].render_mode, RenderMode::SoftShadow as u32);
+        assert_eq!(vertices[0].blur_radius_px, 24.0);
+        assert_eq!(vertices[0].rect_size, [104.0, 44.0]);
+        assert_eq!(vertices[0].corner_radius_px, 10.0);
+        assert_eq!(vertices[0].tex_coord, [-24.0, 68.0]);
+        assert_eq!(vertices[5].tex_coord, [128.0, -24.0]);
     }
 
     // ═══════════════════════════════════════════════════════════════════════

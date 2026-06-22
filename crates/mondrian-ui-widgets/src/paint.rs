@@ -12,26 +12,32 @@ const FOCUS_RING_ALPHA: f32 = 0.38;
 
 pub(crate) fn paint_shadow(ctx: &mut PaintContext, bounds: Rect, radius: f32) {
     let shadow = &ctx.theme.spacing.shadow_md;
-    ctx.encoder.draw_rect(shadow_rect(bounds, shadow), shadow_color(shadow), radius);
+    paint_shadow_token(ctx, bounds, shadow, 1.0, radius);
 }
 
 pub(crate) fn paint_popover_shadow(ctx: &mut PaintContext, bounds: Rect, radius: f32) {
     let spacing = &ctx.theme.spacing;
-    let layers = [
-        (&spacing.shadow_xl, 0.34, 0.38, radius + 4.0),
-        (&spacing.shadow_md, 0.52, 0.20, radius + 2.0),
-        (&spacing.shadow_sm, 0.82, 0.04, radius),
-    ];
+    paint_shadow_token(ctx, bounds, &spacing.shadow_xl, 0.50, radius);
+    paint_shadow_token(ctx, bounds, &spacing.shadow_md, 0.32, radius);
+}
 
-    for (shadow, alpha_scale, blur_scale, layer_radius) in layers {
-        let mut color = shadow_color(shadow);
-        color.a *= alpha_scale;
-        ctx.encoder.draw_rect(
-            soft_shadow_rect(bounds, shadow, blur_scale),
-            color,
-            layer_radius,
-        );
-    }
+fn paint_shadow_token(
+    ctx: &mut PaintContext,
+    bounds: Rect,
+    shadow: &ShadowToken,
+    alpha_scale: f32,
+    radius: f32,
+) {
+    let mut color = shadow_color(shadow);
+    color.a *= alpha_scale;
+    ctx.encoder.draw_soft_shadow(
+        bounds,
+        color,
+        radius,
+        shadow.blur,
+        shadow.spread,
+        glam::Vec2::new(shadow.offset_x, shadow.offset_y),
+    );
 }
 
 pub(crate) fn paint_focus_ring(ctx: &mut PaintContext, bounds: Rect, radius: f32) {
@@ -124,6 +130,7 @@ pub(crate) fn horizontal_stroke_rect(y: f32, x: f32, width: f32, stroke_width: f
     Rect::new(x, center - stroke_width * 0.5, width.max(0.0), stroke_width)
 }
 
+#[cfg(test)]
 pub(crate) fn shadow_rect(bounds: Rect, shadow: &ShadowToken) -> Rect {
     Rect::new(
         bounds.x + shadow.offset_x - shadow.spread,
@@ -142,6 +149,7 @@ pub(crate) fn shadow_color(shadow: &ShadowToken) -> Color {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn soft_shadow_rect(bounds: Rect, shadow: &ShadowToken, blur_scale: f32) -> Rect {
     let blur_spread = shadow.blur.max(0.0) * blur_scale.max(0.0);
     let spread = shadow.spread.max(0.0) + blur_spread;

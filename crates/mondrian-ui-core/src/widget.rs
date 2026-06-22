@@ -205,6 +205,32 @@ pub trait DrawCommandEncoder {
     fn push_clip(&mut self, bounds: Rect);
     fn pop_clip(&mut self);
     fn draw_rect(&mut self, bounds: Rect, color: mondrian_core::Color, corner_radius: f32);
+    /// Draw a soft rounded-rectangle shadow.
+    ///
+    /// Production renderers should implement this as an analytic or blurred
+    /// shadow primitive. The default fallback keeps tests and simple encoders
+    /// functional by drawing a conservative expanded rectangle.
+    fn draw_soft_shadow(
+        &mut self,
+        bounds: Rect,
+        color: mondrian_core::Color,
+        corner_radius: f32,
+        blur_radius: f32,
+        spread: f32,
+        offset: glam::Vec2,
+    ) {
+        let expansion = blur_radius.max(0.0) + spread.max(0.0);
+        self.draw_rect(
+            Rect::new(
+                bounds.x + offset.x - expansion,
+                bounds.y + offset.y - expansion,
+                bounds.width + expansion * 2.0,
+                bounds.height + expansion * 2.0,
+            ),
+            color,
+            corner_radius + expansion,
+        );
+    }
     /// Draw a GPU-interpolated rectangle gradient.
     ///
     /// Color order is top-left, top-right, bottom-left, bottom-right.

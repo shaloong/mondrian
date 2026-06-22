@@ -996,17 +996,27 @@ impl Widget for Dropdown {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::paint::soft_shadow_rect;
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_editor_state::state::PanelKind;
     use mondrian_platform::NoopPlatformService;
     use mondrian_ui_core::widget::{DrawCommandEncoder, EventRequests, PointerCaptureRequest};
     use std::cell::RefCell;
 
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    struct SoftShadowCommand {
+        bounds: Rect,
+        color: Color,
+        corner_radius: f32,
+        blur_radius: f32,
+        spread: f32,
+        offset: glam::Vec2,
+    }
+
     #[derive(Default)]
     struct RecordingEncoder {
         rects: Vec<Rect>,
         rect_colors: Vec<Color>,
+        soft_shadows: Vec<SoftShadowCommand>,
         clips: Vec<Rect>,
         clip_pops: usize,
         lines: usize,
@@ -1027,6 +1037,25 @@ mod tests {
         fn draw_rect(&mut self, bounds: Rect, color: mondrian_core::Color, _corner_radius: f32) {
             self.rects.push(bounds);
             self.rect_colors.push(color);
+        }
+
+        fn draw_soft_shadow(
+            &mut self,
+            bounds: Rect,
+            color: mondrian_core::Color,
+            corner_radius: f32,
+            blur_radius: f32,
+            spread: f32,
+            offset: glam::Vec2,
+        ) {
+            self.soft_shadows.push(SoftShadowCommand {
+                bounds,
+                color,
+                corner_radius,
+                blur_radius,
+                spread,
+                offset,
+            });
         }
 
         fn draw_line(
@@ -1847,7 +1876,7 @@ mod tests {
     }
 
     #[test]
-    fn menu_popup_shadow_uses_layered_theme_shadow_tokens() {
+    fn menu_popup_shadow_uses_analytic_theme_shadow_tokens() {
         let theme = mondrian_ui_theme::ThemePreset::Dark.build();
         let clip_rect = Rect::new(0.0, 0.0, 200.0, 120.0);
         let mut encoder = RecordingEncoder::default();
@@ -1856,16 +1885,26 @@ mod tests {
         let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
         paint_menu_popup_chrome(&mut ctx, popup);
 
+        assert_eq!(encoder.soft_shadows.len(), 2);
+        assert_eq!(encoder.soft_shadows[0].bounds, popup);
         assert_eq!(
-            encoder.rects[0],
-            soft_shadow_rect(popup, &theme.spacing.shadow_xl, 0.38)
+            encoder.soft_shadows[0].blur_radius,
+            theme.spacing.shadow_xl.blur
         );
         assert_eq!(
-            encoder.rect_colors[0].a,
-            theme.spacing.shadow_xl.color[3] * 0.34
+            encoder.soft_shadows[0].offset,
+            glam::Vec2::new(
+                theme.spacing.shadow_xl.offset_x,
+                theme.spacing.shadow_xl.offset_y
+            )
         );
-        assert_eq!(encoder.rects[3], popup);
-        assert_eq!(encoder.rect_colors[3], theme.colors.border);
+        assert_eq!(
+            encoder.soft_shadows[1].blur_radius,
+            theme.spacing.shadow_md.blur
+        );
+        assert!(encoder.soft_shadows[0].color.a > encoder.soft_shadows[1].color.a);
+        assert_eq!(encoder.rects[0], popup);
+        assert_eq!(encoder.rect_colors[0], theme.colors.border);
     }
 
     #[test]

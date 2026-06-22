@@ -6,7 +6,8 @@ use mondrian_ui_core::types::{Point, Rect};
 
 use crate::command::DrawCommand;
 use crate::shape::{
-    generate_gradient_rect_vertices, generate_rect_vertices, RectVertex, RenderMode,
+    generate_gradient_rect_vertices, generate_rect_vertices, generate_soft_shadow_vertices,
+    RectVertex, RenderMode,
 };
 
 const LINE_AA_PADDING_PX: f32 = 1.25;
@@ -123,6 +124,39 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                     RenderMode::Shape,
                 );
                 current_batch.vertices.extend(vertices);
+            }
+            DrawCommand::SoftShadow {
+                bounds,
+                color,
+                corner_radius,
+                blur_radius,
+                spread,
+                offset,
+            } => {
+                if !rect_is_visible(*bounds)
+                    || !color_is_finite(*color)
+                    || !corner_radius.is_finite()
+                    || !blur_radius.is_finite()
+                    || !spread.is_finite()
+                    || !offset.x.is_finite()
+                    || !offset.y.is_finite()
+                    || color.a <= 0.0
+                {
+                    continue;
+                }
+
+                let transformed = apply_transform(bounds, &transform_stack);
+                if let Some(vertices) = generate_soft_shadow_vertices(
+                    transformed,
+                    *color,
+                    *corner_radius,
+                    *blur_radius,
+                    *spread,
+                    *offset,
+                    |rect| pixel_to_ndc_rect(rect, sx, sy, tx, ty),
+                ) {
+                    current_batch.vertices.extend(vertices);
+                }
             }
             DrawCommand::GradientRect { bounds, colors, corner_radius } => {
                 if !rect_is_visible(*bounds)
@@ -1059,6 +1093,72 @@ mod tests {
             .vertices
             .iter()
             .all(|vertex| vertex.color.iter().all(|value| value.is_finite())));
+    }
+
+    #[test]
+    fn build_batches_soft_shadow_uses_single_analytic_quad() {
+        let cmds = [DrawCommand::SoftShadow {
+            bounds: Rect::new(20.0, 30.0, 80.0, 40.0),
+            color: Color::from_rgba8(0, 0, 0, 80),
+            corner_radius: 8.0,
+            blur_radius: 24.0,
+            spread: 2.0,
+            offset: glam::Vec2::new(0.0, 6.0),
+        }];
+
+        let batches = build_batches(&cmds, (200, 120));
+
+        assert_eq!(batches.len(), 1);
+        let vertices = &batches[0].vertices;
+        assert_eq!(vertices.len(), 6);
+        assert!(vertices.iter().all(|vertex| {
+            vertex.render_mode == RenderMode::SoftShadow as u32
+                && (vertex.blur_radius_px - 24.0).abs() < 0.001
+                && (vertex.corner_radius_px - 10.0).abs() < 0.001
+        }));
+    }
+
+    #[test]
+    fn build_batches_soft_shadow_skips_invalid_inputs() {
+        let cmds = [
+            DrawCommand::SoftShadow {
+                bounds: Rect::new(0.0, 0.0, 20.0, 20.0),
+                color: Color::from_rgba8(0, 0, 0, 80),
+                corner_radius: 4.0,
+                blur_radius: 12.0,
+                spread: 0.0,
+                offset: glam::Vec2::ZERO,
+            },
+            DrawCommand::SoftShadow {
+                bounds: Rect::new(0.0, 0.0, 0.0, 20.0),
+                color: Color::from_rgba8(0, 0, 0, 80),
+                corner_radius: 4.0,
+                blur_radius: 12.0,
+                spread: 0.0,
+                offset: glam::Vec2::ZERO,
+            },
+            DrawCommand::SoftShadow {
+                bounds: Rect::new(0.0, 0.0, 20.0, 20.0),
+                color: Color::from_rgba8(0, 0, 0, 0),
+                corner_radius: 4.0,
+                blur_radius: 12.0,
+                spread: 0.0,
+                offset: glam::Vec2::ZERO,
+            },
+            DrawCommand::SoftShadow {
+                bounds: Rect::new(0.0, 0.0, 20.0, 20.0),
+                color: Color::from_rgba8(0, 0, 0, 80),
+                corner_radius: 4.0,
+                blur_radius: f32::NAN,
+                spread: 0.0,
+                offset: glam::Vec2::ZERO,
+            },
+        ];
+
+        let batches = build_batches(&cmds, (100, 100));
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].vertices.len(), 6);
     }
 
     #[test]

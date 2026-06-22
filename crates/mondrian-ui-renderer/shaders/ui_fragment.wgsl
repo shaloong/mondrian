@@ -6,6 +6,7 @@ const RENDER_MODE_SHAPE: u32 = 0u;
 const RENDER_MODE_GLYPH: u32 = 1u;
 const RENDER_MODE_LINE: u32 = 2u;
 const RENDER_MODE_IMAGE: u32 = 3u;
+const RENDER_MODE_SOFT_SHADOW: u32 = 4u;
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -14,6 +15,7 @@ struct VertexOutput {
     @location(2) @interpolate(flat) rect_size: vec2<f32>,
     @location(3) @interpolate(flat) corner_radius_px: f32,
     @location(4) @interpolate(flat) render_mode: u32,
+    @location(5) @interpolate(flat) blur_radius_px: f32,
 };
 
 @group(1) @binding(0) var glyph_sampler: sampler;
@@ -55,6 +57,17 @@ fn main(in: VertexOutput) -> @location(0) vec4<f32> {
         let alpha = smoothstep(aa * 0.5, -aa * 0.5, d);
         if alpha <= 0.001 { discard; }
         return vec4<f32>(in.color.rgb, in.color.a * alpha);
+    }
+
+    if in.render_mode == RENDER_MODE_SOFT_SHADOW {
+        let r = clamp(in.corner_radius_px, 0.0, min(in.rect_size.x, in.rect_size.y) * 0.5);
+        let d = sd_rounded_box_px(in.tex_coord, in.rect_size, r);
+        let blur = max(in.blur_radius_px, 0.001);
+        let outside = max(d, 0.0);
+        let falloff = 1.0 - smoothstep(0.0, blur, outside);
+        let alpha = in.color.a * falloff * falloff;
+        if alpha <= 0.001 { discard; }
+        return vec4<f32>(in.color.rgb, alpha);
     }
 
     let r = clamp(in.corner_radius_px, 0.0, min(in.rect_size.x, in.rect_size.y) * 0.5);
