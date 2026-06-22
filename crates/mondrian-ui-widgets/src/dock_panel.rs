@@ -4,7 +4,7 @@
 //! [`DockTabBar`], a [`PanelSlot`], active-tab synchronization, and overlay
 //! forwarding for popups owned by panel content.
 
-use crate::dock_tab_bar::{DockTabBar, TabInfo};
+use crate::dock_tab_bar::{DockTabBar, DockTabDropAction, TabInfo};
 use crate::paint::color_with_alpha;
 use crate::panel_slot::PanelSlot;
 use mondrian_editor_state::state::PanelKind;
@@ -12,6 +12,7 @@ use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
+use std::rc::Rc;
 
 /// Function used by [`DockPanel`] to rebuild panel content for the active tab.
 pub type DockPanelContentFactory = dyn FnMut(PanelKind, usize) -> Box<dyn Widget>;
@@ -32,7 +33,14 @@ pub enum DockPanelDropArea {
 }
 
 /// Function used by [`DockPanel`] to map a panel-tab drop into an app action.
-pub type DockPanelDropAction = dyn Fn(PanelKind, PanelKind, DockPanelDropArea) -> Action + 'static;
+pub type DockPanelDropAction =
+    dyn Fn(PanelKind, PanelKind, DockPanelDropArea, Option<usize>) -> Action + 'static;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DockPanelDockHover {
+    dragged: PanelKind,
+    area: Option<DockPanelDropArea>,
+}
 
 /// Docked panel chrome: tab bar plus one active content slot.
 pub struct DockPanel {
@@ -41,8 +49,8 @@ pub struct DockPanel {
     tab_bar: DockTabBar,
     content: Box<dyn Widget>,
     content_factory: Box<DockPanelContentFactory>,
-    on_panel_drop: Option<Box<DockPanelDropAction>>,
-    drop_hover: Option<(PanelKind, DockPanelDropArea)>,
+    on_panel_drop: Option<Rc<DockPanelDropAction>>,
+    dock_hover: Option<DockPanelDockHover>,
     bounds: Rect,
     last_active: usize,
     tab_height: f32,
@@ -71,7 +79,7 @@ impl DockPanel {
             content,
             content_factory: Box::new(content_factory),
             on_panel_drop: None,
-            drop_hover: None,
+            dock_hover: None,
             bounds: Rect::ZERO,
             last_active: initial_active,
             tab_height: 32.0,
@@ -81,9 +89,17 @@ impl DockPanel {
     /// Attach an app action factory for panel-tab dock drops.
     pub fn on_panel_drop(
         mut self,
-        action: impl Fn(PanelKind, PanelKind, DockPanelDropArea) -> Action + 'static,
+        action: impl Fn(PanelKind, PanelKind, DockPanelDropArea, Option<usize>) -> Action + 'static,
     ) -> Self {
-        self.on_panel_drop = Some(Box::new(action));
+        let action: Rc<DockPanelDropAction> = Rc::new(action);
+        let tab_action: Rc<DockTabDropAction> = {
+            let action = Rc::clone(&action);
+            Rc::new(move |panel, target, insert_index| {
+                action(panel, target, DockPanelDropArea::Center, Some(insert_index))
+            })
+        };
+        self.tab_bar.set_tab_drop_action(Some(tab_action));
+        self.on_panel_drop = Some(action);
         self
     }
 
@@ -130,59 +146,80 @@ impl DockPanel {
         }
     }
 
-    fn drop_area_at(&self, position: Point) -> Option<DockPanelDropArea> {
-        if !self.bounds.contains(position) || self.bounds.width <= 0.0 || self.bounds.height <= 0.0
-        {
+    fn content_bounds(&self) -> Rect {
+        Rect::new(
+            self.bounds.x,
+            self.bounds.y + self.tab_height,
+            self.bounds.width,
+            (self.bounds.height - self.tab_height).max(0.0),
+        )
+    }
+
+    fn dock_guide_rects(&self) -> Option<(Rect, Rect)> {
+        let content = self.content_bounds();
+        if content.width <= 0.0 || content.height <= 0.0 {
             return None;
         }
+        let outer_size = content.width.min(content.height).clamp(96.0, 148.0);
+        let inner_size = (outer_size * 0.44).clamp(46.0, 66.0);
+        let center = content.center();
+        let outer = Rect::new(
+            center.x - outer_size * 0.5,
+            center.y - outer_size * 0.5,
+            outer_size,
+            outer_size,
+        );
+        let inner = Rect::new(
+            center.x - inner_size * 0.5,
+            center.y - inner_size * 0.5,
+            inner_size,
+            inner_size,
+        );
+        Some((outer, inner))
+    }
 
-        let left = (position.x - self.bounds.x) / self.bounds.width;
-        let top = (position.y - self.bounds.y) / self.bounds.height;
-        let right = 1.0 - left;
-        let bottom = 1.0 - top;
-        let edge_threshold = 0.24;
-
-        let mut closest = (DockPanelDropArea::Center, edge_threshold);
-        for (area, distance) in [
-            (DockPanelDropArea::Left, left),
-            (DockPanelDropArea::Right, right),
-            (DockPanelDropArea::Top, top),
-            (DockPanelDropArea::Bottom, bottom),
-        ] {
-            if distance < closest.1 {
-                closest = (area, distance);
-            }
+    fn drop_area_at(&self, position: Point) -> Option<DockPanelDropArea> {
+        let (outer, inner) = self.dock_guide_rects()?;
+        if inner.contains(position) {
+            return Some(DockPanelDropArea::Center);
         }
-
-        Some(closest.0)
+        if !outer.contains(position) {
+            return None;
+        }
+        if position.y < inner.y {
+            Some(DockPanelDropArea::Top)
+        } else if position.y > inner.y + inner.height {
+            Some(DockPanelDropArea::Bottom)
+        } else if position.x < inner.x {
+            Some(DockPanelDropArea::Left)
+        } else if position.x > inner.x + inner.width {
+            Some(DockPanelDropArea::Right)
+        } else {
+            None
+        }
     }
 
     fn drop_preview_rect(&self, area: DockPanelDropArea) -> Rect {
+        let content = self.content_bounds();
         match area {
-            DockPanelDropArea::Center => self.bounds.inset(10.0, 10.0),
-            DockPanelDropArea::Left => Rect::new(
-                self.bounds.x,
-                self.bounds.y,
-                self.bounds.width * 0.34,
-                self.bounds.height,
-            ),
+            DockPanelDropArea::Center => content.inset(8.0, 8.0),
+            DockPanelDropArea::Left => {
+                Rect::new(content.x, content.y, content.width * 0.5, content.height)
+            }
             DockPanelDropArea::Right => Rect::new(
-                self.bounds.x + self.bounds.width * 0.66,
-                self.bounds.y,
-                self.bounds.width * 0.34,
-                self.bounds.height,
+                content.x + content.width * 0.5,
+                content.y,
+                content.width * 0.5,
+                content.height,
             ),
-            DockPanelDropArea::Top => Rect::new(
-                self.bounds.x,
-                self.bounds.y,
-                self.bounds.width,
-                self.bounds.height * 0.34,
-            ),
+            DockPanelDropArea::Top => {
+                Rect::new(content.x, content.y, content.width, content.height * 0.5)
+            }
             DockPanelDropArea::Bottom => Rect::new(
-                self.bounds.x,
-                self.bounds.y + self.bounds.height * 0.66,
-                self.bounds.width,
-                self.bounds.height * 0.34,
+                content.x,
+                content.y + content.height * 0.5,
+                content.width,
+                content.height * 0.5,
             ),
         }
     }
@@ -208,18 +245,18 @@ impl DockPanel {
         position: Point,
         ctx: &mut EventContext,
     ) -> EventResult {
-        let next = self
+        if !self.content_bounds().contains(position) {
+            return EventResult::Ignored;
+        }
+        let area = self
             .drop_area_at(position)
-            .and_then(|area| self.target_panel_for_drop(dragged, area).map(|_| (dragged, area)));
-        if self.drop_hover != next {
-            self.drop_hover = next;
+            .filter(|area| self.target_panel_for_drop(dragged, *area).is_some());
+        let next = Some(DockPanelDockHover { dragged, area });
+        if self.dock_hover != next {
+            self.dock_hover = next;
             ctx.request_repaint();
         }
-        if self.drop_hover.is_some() {
-            EventResult::Handled
-        } else {
-            EventResult::Ignored
-        }
+        EventResult::Handled
     }
 
     fn drop_panel_tab(
@@ -228,7 +265,7 @@ impl DockPanel {
         position: Point,
         ctx: &mut EventContext,
     ) -> EventResult {
-        self.drop_hover = None;
+        self.dock_hover = None;
         let Some(area) = self.drop_area_at(position) else {
             ctx.request_repaint();
             return EventResult::Ignored;
@@ -242,7 +279,7 @@ impl DockPanel {
             return EventResult::Ignored;
         };
 
-        (ctx.dispatch)(action(dragged, target, area));
+        (ctx.dispatch)(action(dragged, target, area, None));
         ctx.request_repaint();
         EventResult::Handled
     }
@@ -275,12 +312,12 @@ impl Widget for DockPanel {
                 return self.update_panel_drop_hover(*panel, *position, ctx);
             }
             UiEvent::DragOver { position } => {
-                if let Some((panel, _)) = self.drop_hover {
-                    return self.update_panel_drop_hover(panel, *position, ctx);
+                if let Some(hover) = self.dock_hover {
+                    return self.update_panel_drop_hover(hover.dragged, *position, ctx);
                 }
             }
-            UiEvent::DragLeave if self.drop_hover.is_some() => {
-                self.drop_hover = None;
+            UiEvent::DragLeave if self.dock_hover.is_some() => {
+                self.dock_hover = None;
                 ctx.request_repaint();
                 return EventResult::Handled;
             }
@@ -310,30 +347,68 @@ impl Widget for DockPanel {
 
     fn paint_overlay(&self, ctx: &mut PaintContext) {
         self.content.paint_overlay(ctx);
-        if let Some((_, area)) = self.drop_hover {
+        if let Some(hover) = self.dock_hover {
             let tokens = &ctx.theme.colors;
-            let rect = self.drop_preview_rect(area).inset(4.0, 4.0);
-            ctx.encoder.draw_rect(rect, color_with_alpha(tokens.primary, 0.18), 6.0);
-            ctx.encoder.draw_rect(
-                Rect::new(rect.x, rect.y, rect.width, 1.0),
-                color_with_alpha(tokens.primary, 0.70),
-                0.0,
-            );
-            ctx.encoder.draw_rect(
-                Rect::new(rect.x, rect.y + rect.height - 1.0, rect.width, 1.0),
-                color_with_alpha(tokens.primary, 0.70),
-                0.0,
-            );
-            ctx.encoder.draw_rect(
-                Rect::new(rect.x, rect.y, 1.0, rect.height),
-                color_with_alpha(tokens.primary, 0.70),
-                0.0,
-            );
-            ctx.encoder.draw_rect(
-                Rect::new(rect.x + rect.width - 1.0, rect.y, 1.0, rect.height),
-                color_with_alpha(tokens.primary, 0.70),
-                0.0,
-            );
+            if let Some(area) = hover.area {
+                let rect = self.drop_preview_rect(area).inset(4.0, 4.0);
+                ctx.encoder.draw_rect(rect, color_with_alpha(tokens.primary, 0.14), 6.0);
+            }
+            if let Some((outer, inner)) = self.dock_guide_rects() {
+                let base = color_with_alpha(tokens.popover, 0.88);
+                let line = color_with_alpha(tokens.border, 0.70);
+                let active = color_with_alpha(tokens.primary, 0.30);
+                let top = Rect::new(outer.x, outer.y, outer.width, inner.y - outer.y);
+                let bottom = Rect::new(
+                    outer.x,
+                    inner.y + inner.height,
+                    outer.width,
+                    outer.y + outer.height - (inner.y + inner.height),
+                );
+                let left = Rect::new(outer.x, inner.y, inner.x - outer.x, inner.height);
+                let right = Rect::new(
+                    inner.x + inner.width,
+                    inner.y,
+                    outer.x + outer.width - (inner.x + inner.width),
+                    inner.height,
+                );
+                for (area, rect) in [
+                    (DockPanelDropArea::Top, top),
+                    (DockPanelDropArea::Right, right),
+                    (DockPanelDropArea::Bottom, bottom),
+                    (DockPanelDropArea::Left, left),
+                ] {
+                    ctx.encoder.draw_rect(
+                        rect,
+                        if hover.area == Some(area) {
+                            active
+                        } else {
+                            base
+                        },
+                        4.0,
+                    );
+                }
+                ctx.encoder.draw_rect(
+                    inner,
+                    if hover.area == Some(DockPanelDropArea::Center) {
+                        active
+                    } else {
+                        color_with_alpha(tokens.popover, 0.76)
+                    },
+                    5.0,
+                );
+                ctx.encoder.draw_rect(Rect::new(outer.x, outer.y, outer.width, 1.0), line, 0.0);
+                ctx.encoder.draw_rect(
+                    Rect::new(outer.x, outer.y + outer.height - 1.0, outer.width, 1.0),
+                    line,
+                    0.0,
+                );
+                ctx.encoder.draw_rect(Rect::new(outer.x, outer.y, 1.0, outer.height), line, 0.0);
+                ctx.encoder.draw_rect(
+                    Rect::new(outer.x + outer.width - 1.0, outer.y, 1.0, outer.height),
+                    line,
+                    0.0,
+                );
+            }
         }
     }
 
@@ -567,10 +642,11 @@ mod tests {
                 Rc::new(Cell::new(false)),
             ))
         })
-        .on_panel_drop(|panel, target, area| {
+        .on_panel_drop(|panel, target, area, tab_index| {
             assert_eq!(panel, PanelKind::Inspector);
             assert_eq!(target, PanelKind::Assets);
             assert_eq!(area, DockPanelDropArea::Center);
+            assert_eq!(tab_index, None);
             Action::FocusPanel(panel)
         });
         panel.layout(Rect::new(0.0, 0.0, 240.0, 160.0));
@@ -585,7 +661,7 @@ mod tests {
         let result = panel.event(
             &UiEvent::Drop {
                 payload: DragPayload::PanelTab(PanelKind::Inspector),
-                position: Point::new(120.0, 80.0),
+                position: Point::new(120.0, 96.0),
             },
             &mut ctx,
         );
@@ -615,17 +691,50 @@ mod tests {
         let result = panel.event(
             &UiEvent::DragEnter {
                 payload: DragPayload::PanelTab(PanelKind::Inspector),
-                position: Point::new(4.0, 80.0),
+                position: Point::new(62.0, 96.0),
             },
             &mut ctx,
         );
 
         assert_eq!(result, EventResult::Handled);
         assert_eq!(
-            panel.drop_hover,
-            Some((PanelKind::Inspector, DockPanelDropArea::Left))
+            panel.dock_hover,
+            Some(DockPanelDockHover {
+                dragged: PanelKind::Inspector,
+                area: Some(DockPanelDropArea::Left),
+            })
         );
         assert!(ctx.requests.repaint);
+    }
+
+    #[test]
+    fn dock_panel_content_hover_without_guide_zone_has_no_valid_drop_area() {
+        let mut panel = DockPanel::new(PanelKind::Assets, panel_tabs(), |_kind, _active| {
+            Box::new(ProbeContent::new(
+                Rc::new(Cell::new(false)),
+                Rc::new(Cell::new(false)),
+            ))
+        });
+        panel.layout(Rect::new(0.0, 0.0, 240.0, 160.0));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
+
+        let result = panel.event(
+            &UiEvent::DragEnter {
+                payload: DragPayload::PanelTab(PanelKind::Inspector),
+                position: Point::new(20.0, 150.0),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(
+            panel.dock_hover,
+            Some(DockPanelDockHover { dragged: PanelKind::Inspector, area: None })
+        );
     }
 
     #[test]
@@ -659,7 +768,10 @@ mod tests {
             &mut ctx,
         );
 
-        assert_eq!(result, EventResult::Ignored);
-        assert_eq!(panel.drop_hover, None);
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(
+            panel.dock_hover,
+            Some(DockPanelDockHover { dragged: PanelKind::Inspector, area: None })
+        );
     }
 }

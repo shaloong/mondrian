@@ -69,13 +69,17 @@ Custom workspace and converts live dock widgets into a sanitized shell layout
 snapshot; reusable widgets expose state but do not serialize user preferences.
 Dock panel tab dragging is split across the same boundary: `mondrian-ui-core`
 uses `DragPayload::PanelTab` for platform-neutral drag routing,
-`mondrian-ui-widgets::DockPanel` identifies center/edge drop regions and emits
-a caller-supplied action, and `self_hosted::shell` resolves
-`app.shell/relocate_panel` into `SelfHostedWorkspaceLayout::relocate_panel`.
-Dropping in the center creates or activates a tab group; dropping on an edge
-creates a split around the target group. The app shell owns persistence by
-promoting the workspace to Custom and saving the resulting layout through
-`SelfHostedUiHost`, so reusable widget crates remain free of preference I/O.
+`mondrian-ui-widgets::DockTabBar` gives tab-strip insertion/reordering priority
+and emits exact tab insertion indices, `mondrian-ui-widgets::DockPanel`
+handles only content-area dock-guide hover/drop, and `self_hosted::shell`
+resolves `app.shell/relocate_panel` into `SelfHostedWorkspaceLayout`
+operations. Tab-bar drops use `relocate_panel_to_tab_index`; content guide
+center/edge drops use `relocate_panel`. Dropping on a tab bar creates browser-like
+tab insertion without showing the dock guide; dropping on the content guide
+center adds a tab; dropping on a guide edge creates a split around the target
+group. The app shell owns persistence by promoting the workspace to Custom and
+saving the resulting layout through `SelfHostedUiHost`, so reusable widget
+crates remain free of preference I/O.
 `self_hosted::startup` owns the launch-time root surface
 shown before any project is open; it emits only app-shell lifecycle actions and
 does not own project creation, loading, recent-file persistence, or editor

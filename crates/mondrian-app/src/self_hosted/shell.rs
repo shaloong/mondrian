@@ -935,6 +935,38 @@ impl SelfHostedAppRoot {
         true
     }
 
+    /// Relocate one docked panel tab to an explicit target tab-bar insertion index.
+    pub fn relocate_panel_to_tab_index(
+        &mut self,
+        panel: PanelKind,
+        target: PanelKind,
+        insert_index: usize,
+    ) -> bool {
+        let Some(layout) = self.workspace_layout() else {
+            return false;
+        };
+        let Some(next_layout) = layout.relocate_panel_to_tab_index(panel, target, insert_index)
+        else {
+            return false;
+        };
+        if self.workspace_layout().as_ref() == Some(&next_layout) {
+            return false;
+        }
+        let Some(dock) = build_dock_tree_from_layout(self.models.clone(), &next_layout) else {
+            return false;
+        };
+
+        self.workspace_preset = WorkspacePreset::Custom;
+        self.preferences_model.workspace = WorkspacePreset::Custom.display_name().to_owned();
+        self.custom_workspace_layout = Some(next_layout);
+        self.dock = dock;
+        self.refresh_shell_menu_checked_state();
+        if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
+            self.layout(self.bounds);
+        }
+        true
+    }
+
     fn hide_panel(&mut self, panel: PanelKind) -> bool {
         let Some(layout) = self.workspace_layout() else {
             return false;
@@ -1021,11 +1053,15 @@ impl SelfHostedAppRoot {
             {
                 if let Ok(payload) = serde_json::from_value::<AppShellRelocatePanelPayload>(payload)
                 {
-                    self.relocate_panel(
-                        payload.panel,
-                        payload.target,
-                        dock_drop_area(payload.area),
-                    );
+                    if let Some(tab_index) = payload.tab_index {
+                        self.relocate_panel_to_tab_index(payload.panel, payload.target, tab_index);
+                    } else {
+                        self.relocate_panel(
+                            payload.panel,
+                            payload.target,
+                            dock_drop_area(payload.area),
+                        );
+                    }
                 }
                 Ok(None)
             }
@@ -2133,6 +2169,7 @@ mod tests {
                 panel: PanelKind::Inspector,
                 target: PanelKind::Assets,
                 area: DockDropAreaPayload::Center,
+                tab_index: None,
             }),
             &platform,
             None,
@@ -2150,6 +2187,61 @@ mod tests {
         assert_eq!(
             menu_checked_for_action(&root, &Action::SwitchWorkspace(WorkspacePreset::Editing)),
             Some(false)
+        );
+    }
+
+    #[test]
+    fn app_root_relocate_panel_action_honors_tab_bar_insert_index() {
+        let platform = FakePlatform::default();
+        let mut root = SelfHostedAppRoot::demo();
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+
+        let action = root.handle_shell_action(
+            app_shell_relocate_panel_action(AppShellRelocatePanelPayload {
+                panel: PanelKind::Inspector,
+                target: PanelKind::Assets,
+                area: DockDropAreaPayload::Center,
+                tab_index: Some(0),
+            }),
+            &platform,
+            None,
+        );
+
+        assert_eq!(action, None);
+        assert_eq!(root.workspace_preset(), WorkspacePreset::Custom);
+        let layout = root.custom_workspace_layout().expect("custom layout");
+        assert_eq!(
+            layout,
+            &SelfHostedWorkspaceLayout::Split {
+                direction: SplitDirection::Vertical,
+                ratio: 0.66,
+                first: Box::new(SelfHostedWorkspaceLayout::Split {
+                    direction: SplitDirection::Horizontal,
+                    ratio: 0.22,
+                    first: Box::new(SelfHostedWorkspaceLayout::Panel {
+                        kind: PanelKind::Inspector,
+                        active_index: 0,
+                        hidden_tabs: Vec::new(),
+                        tabs: vec![PanelKind::Inspector, PanelKind::Assets, PanelKind::Effects,],
+                    }),
+                    second: Box::new(SelfHostedWorkspaceLayout::Panel {
+                        kind: PanelKind::Viewer,
+                        active_index: 0,
+                        hidden_tabs: Vec::new(),
+                        tabs: vec![PanelKind::Viewer],
+                    }),
+                }),
+                second: Box::new(SelfHostedWorkspaceLayout::Panel {
+                    kind: PanelKind::Timeline,
+                    active_index: 0,
+                    hidden_tabs: Vec::new(),
+                    tabs: vec![PanelKind::Timeline],
+                }),
+            }
+        );
+        assert_eq!(
+            active_index_for_dock_panel(&root, PanelKind::Inspector),
+            Some(0)
         );
     }
 

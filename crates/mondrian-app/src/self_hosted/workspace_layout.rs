@@ -151,6 +151,29 @@ impl SelfHostedWorkspaceLayout {
         without_panel.insert_panel(panel, target, area)?.sanitized()
     }
 
+    /// Move an existing panel tab into a target tab group at an explicit tab index.
+    ///
+    /// This is used by tab-bar drag/drop. It keeps same-group reordering as a
+    /// pure tab order mutation and only removes/collapses source leaves when
+    /// the target group is different.
+    pub fn relocate_panel_to_tab_index(
+        self,
+        panel: PanelKind,
+        target: PanelKind,
+        insert_index: usize,
+    ) -> Option<Self> {
+        if !self.contains_panel(panel) || !self.contains_panel(target) {
+            return None;
+        }
+        if self.panel_group_contains_all(&[panel, target]) {
+            return self.reorder_panel_in_tab_group(panel, insert_index)?.sanitized();
+        }
+        let without_panel = self.without_panel(panel)?;
+        without_panel
+            .insert_panel_at_tab_index(panel, target, insert_index)?
+            .sanitized()
+    }
+
     /// Whether this layout can be materialized as the root dock splitter.
     pub fn is_split_root(&self) -> bool {
         matches!(self, Self::Split { .. })
@@ -266,6 +289,84 @@ impl SelfHostedWorkspaceLayout {
         }
     }
 
+    fn insert_panel_at_tab_index(
+        self,
+        panel: PanelKind,
+        target: PanelKind,
+        insert_index: usize,
+    ) -> Option<Self> {
+        match self {
+            Self::Panel { kind, hidden_tabs, tabs, .. } => {
+                let mut tabs = panel_tabs_for_leaf(kind, &hidden_tabs, &tabs);
+                if !tabs.contains(&target) {
+                    return None;
+                }
+                if !tabs.contains(&panel) {
+                    let index = insert_index.min(tabs.len());
+                    tabs.insert(index, panel);
+                }
+                let active_index = tabs.iter().position(|tab| *tab == panel).unwrap_or(0);
+                Some(Self::Panel {
+                    kind: tabs[0],
+                    active_index,
+                    hidden_tabs: Vec::new(),
+                    tabs,
+                })
+            }
+            Self::Split { direction, ratio, first, second } => {
+                match first.clone().insert_panel_at_tab_index(panel, target, insert_index) {
+                    Some(first) => {
+                        Some(Self::Split { direction, ratio, first: Box::new(first), second })
+                    }
+                    None => second.insert_panel_at_tab_index(panel, target, insert_index).map(
+                        |second| Self::Split { direction, ratio, first, second: Box::new(second) },
+                    ),
+                }
+            }
+        }
+    }
+
+    fn reorder_panel_in_tab_group(self, panel: PanelKind, insert_index: usize) -> Option<Self> {
+        match self {
+            Self::Panel { kind, active_index: _, hidden_tabs, tabs } => {
+                let tabs = panel_tabs_for_leaf(kind, &hidden_tabs, &tabs);
+                if !tabs.contains(&panel) {
+                    return None;
+                }
+                let tabs = reorder_panel_tabs(tabs, panel, insert_index);
+                let active_index = tabs.iter().position(|tab| *tab == panel).unwrap_or(0);
+                Some(Self::Panel {
+                    kind: tabs[0],
+                    active_index,
+                    hidden_tabs: Vec::new(),
+                    tabs,
+                })
+            }
+            Self::Split { direction, ratio, first, second } => {
+                if first.contains_panel(panel) {
+                    return first.reorder_panel_in_tab_group(panel, insert_index).map(|first| {
+                        Self::Split { direction, ratio, first: Box::new(first), second }
+                    });
+                }
+                second
+                    .reorder_panel_in_tab_group(panel, insert_index)
+                    .map(|second| Self::Split { direction, ratio, first, second: Box::new(second) })
+            }
+        }
+    }
+
+    fn panel_group_contains_all(&self, panels: &[PanelKind]) -> bool {
+        match self {
+            Self::Split { first, second, .. } => {
+                first.panel_group_contains_all(panels) || second.panel_group_contains_all(panels)
+            }
+            Self::Panel { kind, hidden_tabs, tabs, .. } => {
+                let tabs = panel_tabs_for_leaf(*kind, hidden_tabs, tabs);
+                panels.iter().all(|panel| tabs.contains(panel))
+            }
+        }
+    }
+
     fn hidden_tabs_for_panel(&self, panel: PanelKind) -> Option<&[PanelKind]> {
         match self {
             Self::Split { first, second, .. } => first
@@ -347,6 +448,23 @@ fn sanitize_panel_tabs(
         sanitized.push(kind);
     }
     sanitized
+}
+
+fn reorder_panel_tabs(
+    mut tabs: Vec<PanelKind>,
+    panel: PanelKind,
+    insert_index: usize,
+) -> Vec<PanelKind> {
+    let Some(old_index) = tabs.iter().position(|tab| *tab == panel) else {
+        return tabs;
+    };
+    tabs.remove(old_index);
+    let mut adjusted = insert_index;
+    if old_index < insert_index {
+        adjusted = adjusted.saturating_sub(1);
+    }
+    tabs.insert(adjusted.min(tabs.len()), panel);
+    tabs
 }
 
 fn split_for_drop_area(
@@ -584,6 +702,55 @@ mod tests {
                 active_index: 1,
                 hidden_tabs: Vec::new(),
                 tabs: vec![PanelKind::Assets, PanelKind::Inspector],
+            }
+        );
+    }
+
+    #[test]
+    fn relocate_panel_to_tab_index_reorders_tabs_inside_existing_group() {
+        let layout = layout_tabs(
+            vec![PanelKind::Assets, PanelKind::Effects, PanelKind::Inspector],
+            2,
+        );
+
+        let moved = layout
+            .relocate_panel_to_tab_index(PanelKind::Inspector, PanelKind::Assets, 0)
+            .expect("reordered");
+
+        assert_eq!(
+            moved,
+            SelfHostedWorkspaceLayout::Panel {
+                kind: PanelKind::Inspector,
+                active_index: 0,
+                hidden_tabs: Vec::new(),
+                tabs: vec![PanelKind::Inspector, PanelKind::Assets, PanelKind::Effects],
+            }
+        );
+    }
+
+    #[test]
+    fn relocate_panel_to_tab_index_inserts_into_target_group_and_collapses_source() {
+        let layout = SelfHostedWorkspaceLayout::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(layout_panel(PanelKind::Assets, 0)),
+            second: Box::new(layout_tabs(
+                vec![PanelKind::Viewer, PanelKind::Inspector],
+                0,
+            )),
+        };
+
+        let moved = layout
+            .relocate_panel_to_tab_index(PanelKind::Assets, PanelKind::Viewer, 1)
+            .expect("inserted");
+
+        assert_eq!(
+            moved,
+            SelfHostedWorkspaceLayout::Panel {
+                kind: PanelKind::Viewer,
+                active_index: 1,
+                hidden_tabs: Vec::new(),
+                tabs: vec![PanelKind::Viewer, PanelKind::Assets, PanelKind::Inspector],
             }
         );
     }

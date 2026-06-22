@@ -315,6 +315,11 @@ pub struct AppShellRelocatePanelPayload {
     pub target: PanelKind,
     /// Region selected inside the target panel group.
     pub area: DockDropAreaPayload,
+    /// Optional tab insertion index when the drop target is a tab bar.
+    ///
+    /// `None` keeps the target-panel default, usually after the active tab.
+    #[serde(default)]
+    pub tab_index: Option<usize>,
 }
 
 /// Clip edge being trimmed by a timeline UI.

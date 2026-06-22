@@ -3,14 +3,19 @@
 //! 水平排列的标签按钮，点击切换 active tab。
 
 use mondrian_editor_state::state::PanelKind;
+use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
+use std::rc::Rc;
 
 use crate::paint::{color_with_alpha, mix_color};
 use crate::text_metrics::{centered_text_x, measure_single_line};
 
 const DRAG_START_DISTANCE: f32 = 5.0;
+
+/// Function used by [`DockTabBar`] to map a tab-bar drop into an app action.
+pub type DockTabDropAction = dyn Fn(PanelKind, PanelKind, usize) -> Action + 'static;
 
 /// 单个 Tab 的信息
 #[derive(Debug, Clone)]
@@ -27,6 +32,8 @@ pub struct DockTabBar {
     bounds: Rect,
     hovered_tab: Option<usize>,
     drag_candidate: Option<TabDragCandidate>,
+    drop_hover: Option<TabDropHover>,
+    on_tab_drop: Option<Rc<DockTabDropAction>>,
     bar_height: f32,
     tab_min_width: f32,
     tab_max_width: f32,
@@ -39,6 +46,12 @@ struct TabDragCandidate {
     panel: PanelKind,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TabDropHover {
+    dragged: PanelKind,
+    insert_index: usize,
+}
+
 impl DockTabBar {
     pub fn new(tabs: Vec<TabInfo>) -> Self {
         Self {
@@ -47,6 +60,8 @@ impl DockTabBar {
             bounds: Rect::ZERO,
             hovered_tab: None,
             drag_candidate: None,
+            drop_hover: None,
+            on_tab_drop: None,
             bar_height: 26.0,
             tab_min_width: 40.0,
             tab_max_width: 148.0,
@@ -57,6 +72,11 @@ impl DockTabBar {
     pub fn set_tabs(&mut self, tabs: Vec<TabInfo>) {
         self.tabs = tabs;
         self.drag_candidate = None;
+        self.drop_hover = None;
+    }
+
+    pub fn set_tab_drop_action(&mut self, action: Option<Rc<DockTabDropAction>>) {
+        self.on_tab_drop = action;
     }
 
     pub fn active_index(&self) -> usize {
@@ -118,6 +138,37 @@ impl DockTabBar {
             .collect()
     }
 
+    fn tab_insert_index_at(&self, position: Point) -> usize {
+        let rects = self.tab_rects();
+        for (index, rect) in rects.iter().enumerate() {
+            if position.x < rect.center().x {
+                return index;
+            }
+        }
+        rects.len()
+    }
+
+    fn insert_indicator_x(&self, insert_index: usize) -> f32 {
+        let rects = self.tab_rects();
+        if rects.is_empty() {
+            return self.bounds.x;
+        }
+        if insert_index == 0 {
+            rects[0].x
+        } else if insert_index >= rects.len() {
+            rects.last().map(|rect| rect.x + rect.width).unwrap_or(self.bounds.x)
+        } else {
+            rects[insert_index].x
+        }
+    }
+
+    fn tab_drop_target_panel(&self, dragged: PanelKind) -> Option<PanelKind> {
+        self.tab_panel_kinds().into_iter().find(|kind| *kind != dragged).or_else(|| {
+            let active = self.active_panel_kind()?;
+            (active != dragged).then_some(active)
+        })
+    }
+
     fn begin_drag_candidate_if_needed(
         &mut self,
         position: Point,
@@ -134,6 +185,50 @@ impl DockTabBar {
 
         self.drag_candidate = None;
         ctx.begin_drag(DragPayload::PanelTab(candidate.panel));
+        ctx.request_repaint();
+        EventResult::Handled
+    }
+
+    fn update_tab_drop_hover(
+        &mut self,
+        dragged: PanelKind,
+        position: Point,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        if self.on_tab_drop.is_none() || !self.bounds.contains(position) {
+            return EventResult::Ignored;
+        }
+        let Some(_) = self.tab_drop_target_panel(dragged) else {
+            return EventResult::Ignored;
+        };
+        let next = Some(TabDropHover {
+            dragged,
+            insert_index: self.tab_insert_index_at(position),
+        });
+        if self.drop_hover != next {
+            self.drop_hover = next;
+            ctx.request_repaint();
+        }
+        EventResult::Handled
+    }
+
+    fn drop_panel_tab(
+        &mut self,
+        dragged: PanelKind,
+        position: Point,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        let insert_index = self.tab_insert_index_at(position);
+        self.drop_hover = None;
+        let Some(action) = &self.on_tab_drop else {
+            ctx.request_repaint();
+            return EventResult::Ignored;
+        };
+        let Some(target) = self.tab_drop_target_panel(dragged) else {
+            ctx.request_repaint();
+            return EventResult::Ignored;
+        };
+        (ctx.dispatch)(action(dragged, target, insert_index));
         ctx.request_repaint();
         EventResult::Handled
     }
@@ -154,6 +249,22 @@ impl Widget for DockTabBar {
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
         match event {
+            UiEvent::DragEnter { payload: DragPayload::PanelTab(panel), position } => {
+                return self.update_tab_drop_hover(*panel, *position, ctx);
+            }
+            UiEvent::DragOver { position } => {
+                if let Some(hover) = self.drop_hover {
+                    return self.update_tab_drop_hover(hover.dragged, *position, ctx);
+                }
+            }
+            UiEvent::DragLeave if self.drop_hover.is_some() => {
+                self.drop_hover = None;
+                ctx.request_repaint();
+                return EventResult::Handled;
+            }
+            UiEvent::Drop { payload: DragPayload::PanelTab(panel), position } => {
+                return self.drop_panel_tab(*panel, *position, ctx);
+            }
             UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
                 let rects = self.tab_rects();
                 for (i, r) in rects.iter().enumerate() {
@@ -255,6 +366,22 @@ impl Widget for DockTabBar {
                 ctx.encoder.draw_rect(indicator, tokens.primary, 1.0);
             }
         }
+
+        if let Some(hover) = self.drop_hover {
+            let x = self.insert_indicator_x(hover.insert_index);
+            let indicator = Rect::new(x - 1.0, bg.y + 4.0, 2.0, (bg.height - 8.0).max(0.0));
+            ctx.encoder.draw_rect(indicator, color_with_alpha(tokens.primary, 0.92), 1.0);
+            ctx.encoder.draw_rect(
+                Rect::new(x - 3.0, bg.y + 3.0, 6.0, 2.0),
+                color_with_alpha(tokens.primary, 0.92),
+                1.0,
+            );
+            ctx.encoder.draw_rect(
+                Rect::new(x - 3.0, bg.y + bg.height - 5.0, 6.0, 2.0),
+                color_with_alpha(tokens.primary, 0.92),
+                1.0,
+            );
+        }
     }
 
     fn hit_test(&self, point: Point) -> bool {
@@ -274,13 +401,17 @@ impl Widget for DockTabBar {
 mod tests {
     use super::*;
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use mondrian_editor_state::Action;
     use mondrian_ui_core::widget::DrawCommandEncoder;
     use mondrian_ui_theme::ThemePreset;
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     #[derive(Default)]
     struct PaintRecorder {
         clips: Vec<Rect>,
         clip_pops: usize,
+        rects: Vec<Rect>,
         texts: Vec<String>,
     }
 
@@ -293,7 +424,9 @@ mod tests {
             self.clip_pops += 1;
         }
 
-        fn draw_rect(&mut self, _bounds: Rect, _color: mondrian_core::Color, _corner_radius: f32) {}
+        fn draw_rect(&mut self, bounds: Rect, _color: mondrian_core::Color, _corner_radius: f32) {
+            self.rects.push(bounds);
+        }
 
         fn draw_line(
             &mut self,
@@ -470,6 +603,105 @@ mod tests {
         assert_eq!(moved, EventResult::Ignored);
         assert_eq!(ctx.requests.drag, None);
         assert!(bar.drag_candidate.is_some());
+    }
+
+    #[test]
+    fn tab_bar_drop_panel_tab_dispatches_insert_index_action() {
+        let actions = Rc::new(RefCell::new(Vec::new()));
+        let mut bar = DockTabBar::new(make_tabs(0));
+        bar.layout(Rect::new(0.0, 0.0, 300.0, 30.0));
+        bar.set_tab_drop_action(Some(Rc::new(|panel, target, insert_index| {
+            assert_eq!(panel, PanelKind::Inspector);
+            assert_eq!(target, PanelKind::Assets);
+            assert_eq!(insert_index, 1);
+            Action::FocusPanel(panel)
+        })));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let dispatch_actions = Rc::clone(&actions);
+        let dispatch = move |action| dispatch_actions.borrow_mut().push(action);
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch);
+
+        let result = bar.event(
+            &UiEvent::Drop {
+                payload: DragPayload::PanelTab(PanelKind::Inspector),
+                position: Point::new(55.0, 13.0),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[Action::FocusPanel(PanelKind::Inspector)]
+        );
+    }
+
+    #[test]
+    fn tab_bar_drag_hover_paints_insert_indicator_without_dock_preview() {
+        let mut bar = DockTabBar::new(make_tabs(0));
+        bar.layout(Rect::new(0.0, 0.0, 300.0, 30.0));
+        bar.set_tab_drop_action(Some(Rc::new(|panel, _target, _insert_index| {
+            Action::FocusPanel(panel)
+        })));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
+        let result = bar.event(
+            &UiEvent::DragEnter {
+                payload: DragPayload::PanelTab(PanelKind::Inspector),
+                position: Point::new(55.0, 13.0),
+            },
+            &mut ctx,
+        );
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(
+            bar.drop_hover,
+            Some(TabDropHover { dragged: PanelKind::Inspector, insert_index: 1 })
+        );
+
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = PaintRecorder::default();
+        let mut paint_ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 320.0, 80.0),
+        };
+        bar.paint(&mut paint_ctx);
+
+        assert!(encoder.rects.iter().any(|rect| rect.width == 2.0 && rect.height > 10.0));
+    }
+
+    #[test]
+    fn tab_bar_rejects_drop_when_only_target_is_dragged_tab() {
+        let mut bar = DockTabBar::new(vec![TabInfo {
+            label: "检查器".into(),
+            active: true,
+            panel_kind: Some(PanelKind::Inspector),
+        }]);
+        bar.layout(Rect::new(0.0, 0.0, 160.0, 30.0));
+        bar.set_tab_drop_action(Some(Rc::new(|panel, _target, _insert_index| {
+            Action::FocusPanel(panel)
+        })));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
+        let result = bar.event(
+            &UiEvent::DragEnter {
+                payload: DragPayload::PanelTab(PanelKind::Inspector),
+                position: Point::new(20.0, 13.0),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(bar.drop_hover, None);
     }
 
     #[test]

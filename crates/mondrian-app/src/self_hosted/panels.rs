@@ -1568,11 +1568,12 @@ fn slot_with_tabs(mut tab_kinds: Vec<PanelKind>, models: SelfHostedPanelModels) 
         DockPanel::new(owner, tabs, move |kind, _active| {
             panel_content_for_slot(kind, &models)
         })
-        .on_panel_drop(|panel, target, area| {
+        .on_panel_drop(|panel, target, area, tab_index| {
             app_shell_relocate_panel_action(AppShellRelocatePanelPayload {
                 panel,
                 target,
                 area: dock_drop_area_payload(area),
+                tab_index,
             })
         }),
     )
