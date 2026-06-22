@@ -678,8 +678,11 @@ app layer receives only the adjusted frame proposal. Future marker, linked
 clip, or ripple-aware snapping should extend candidate generation without
 moving timeline mutation rules into the widget crate. Timelines expose
 overlay horizontal and vertical scrollbars when content overflows; scrollbar
-thumb drags and track paging must win hit testing over clip selection and
-seeking. Timeline surfaces are focusable: while focused they may handle
+thumb drags, endpoint-handle drags, and track paging must win hit testing over
+clip selection and seeking. Horizontal scrollbar endpoint handles adjust the
+visible frame span by mutating widget-local `pixels_per_frame`; vertical
+scrollbar endpoint handles adjust widget-local track height. Timeline surfaces
+are focusable: while focused they may handle
 timeline-local navigation such as playhead nudging, but global editor commands
 remain outside the widget layer. Timeline pointer capture ownership is tracked
 explicitly and is separate from keyboard focus: `FocusLost` or disabled-event
@@ -995,10 +998,11 @@ matches the egui-era workflow without adding a separate app command by seeking
 to the clicked frame and dispatching `TimelineEditCommand::SplitAtPlayhead`.
 Shortcut keys `V` and `B` switch these widget-local tools; undoable timeline
 mutation still starts only at the app command boundary. `TimelineViewState`
-captures the active tool, zoom, and scroll offsets so `SelfHostedAppRoot`
-preserves timeline working context across panel model rebuilds without storing
-that UI session data in `AppState`. The toolbar above the ruler is reserved for
-mode and navigation-scale controls: Select, Blade, Mark In, Mark Out, and zoom.
+captures the active tool, zoom, scroll offsets, snapping flag, and track height
+so `SelfHostedAppRoot` preserves timeline working context across panel model
+rebuilds without storing that UI session data in `AppState`. The toolbar above
+the ruler is reserved for compact mode and mark controls: Select, Blade,
+Snapping, Mark In, and Mark Out.
 Structural or destructive operations such as Add Video Track, Add Audio Track,
 Split at Playhead, Delete, and Ripple Delete belong in the timeline context menu
 and focused keyboard shortcuts rather than compact icon buttons. Context menu
@@ -1011,15 +1015,16 @@ clipboard, in/out, and sequence gates used by the top menus. Timeline context
 menu rows and focused timeline shortcuts must consult that host availability
 before dispatching.
 Disabled toolbar controls consume their click without dispatching so they
-cannot accidentally seek or select timeline content underneath. Zoom controls
-mutate the same widget-local `pixels_per_frame` value as Ctrl+wheel zoom and do
-not emit editor actions because display zoom is not project data.
+cannot accidentally seek or select timeline content underneath. Display zoom
+mutates widget-local `pixels_per_frame` through Ctrl/Meta wheel or the
+horizontal scrollbar endpoint handles and does not emit editor actions because
+display zoom is not project data.
 Timeline wheel input follows the same consumption rule as scroll containers:
 vertical scroll, Shift+horizontal scroll, or Ctrl/Meta zoom handles the event
 only when the corresponding offset or zoom value changes, so boundary wheel
 input can bubble to an enclosing surface.
-Timeline chrome buttons, including pointer tools, mark controls, and zoom
-controls, publish hover hints through the shared tooltip manager rather than
+Timeline chrome buttons, including pointer tools, snapping, and mark controls,
+publish hover hints through the shared tooltip manager rather than
 painting local text labels inside the compact toolbar. Mark-command toolbar
 hints append the same host-provided shortcut labels used by timeline context
 menus without hardcoding platform shortcut text in the widget crate. Toolbar
@@ -1506,10 +1511,13 @@ the app layer. This keeps the renderer-facing timeline primitive testable while
 preserving a clean path for progressively replacing the old egui timeline.
 The visual baseline is compact NLE density: 42px default tracks, 28px ruler,
 104px app-supplied track header column, subtle alternating lane fills, weak row
-separators, a one-pixel playhead, 8px overlay scrollbars, an explicit magnet
-Snap toggle in the tool strip, and clip blocks with kind-specific borders plus
-trim-handle affordances on hover/selection. Ruler ticks and snap guides should
-use low-alpha semantic foreground/ring colors rather than full panel borders, so
+separators, a one-pixel playhead, 8px overlay scrollbars with circular endpoint
+handles, an explicit magnet Snap toggle in the tool strip, V/A track badges,
+and clip blocks with kind-specific borders plus trim-handle affordances on
+hover/selection. Audio clip view models may carry normalized waveform peaks;
+`TimelineView` paints them as compact vertical peak columns without decoding
+media or owning a waveform cache. Ruler ticks and snap guides should use
+low-alpha semantic foreground/ring colors rather than full panel borders, so
 time markings and edit alignment cues read without turning the timeline into a
 table. Alternating timeline lane fills are semantic timeline tokens so compact
 editor density remains theme-owned rather than embedded in the drawing code.

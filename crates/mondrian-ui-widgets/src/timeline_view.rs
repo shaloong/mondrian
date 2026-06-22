@@ -17,13 +17,18 @@ use crate::{ContextMenu, MenuItem, VectorIcon};
 
 const SCROLLBAR_THICKNESS: f32 = 8.0;
 const SCROLLBAR_MIN_THUMB: f32 = 28.0;
+const SCROLLBAR_HANDLE_SIZE: f32 = 10.0;
 const TIMELINE_TOOL_BUTTON_SIZE: f32 = 20.0;
 const TIMELINE_TOOL_BUTTON_GAP: f32 = 4.0;
 const TIMELINE_TOOLBAR_HEIGHT: f32 = 30.0;
 const TIMELINE_TOOLBAR_GROUP_GAP: f32 = 10.0;
-const TIMELINE_ZOOM_BUTTON_SIZE: f32 = 20.0;
-const TIMELINE_ZOOM_BUTTON_GAP: f32 = 4.0;
 const TIMELINE_SNAP_THRESHOLD_PX: f32 = 8.0;
+const TIMELINE_MIN_PIXELS_PER_FRAME: f32 = 0.25;
+const TIMELINE_MAX_PIXELS_PER_FRAME: f32 = 64.0;
+const TIMELINE_MIN_TRACK_HEIGHT: f32 = 30.0;
+const TIMELINE_MAX_TRACK_HEIGHT: f32 = 96.0;
+const TIMELINE_TRACK_HEADER_MIN_WIDTH: f32 = 96.0;
+const TIMELINE_TRACK_HEADER_STACKED_MIN_HEIGHT: f32 = 40.0;
 
 /// Action factory for clip selection.
 pub type TimelineClipAction = dyn Fn(TimelineClipRef, &TimelineClip) -> Action;
@@ -203,17 +208,10 @@ pub enum TimelineToolbarIconSlot {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TimelineZoomButton {
-    Out,
-    In,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TimelineToolbarButton {
     Tool(TimelineTool),
     Snapping,
     Edit(TimelineEditCommand),
-    Zoom(TimelineZoomButton),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -252,6 +250,8 @@ pub struct TimelineViewState {
     pub pixels_per_frame: f32,
     /// Whether timeline snapping is enabled.
     pub snapping_enabled: bool,
+    /// Track row height in logical pixels.
+    pub track_height: f32,
 }
 
 /// Clip view model rendered by [`TimelineView`].
@@ -264,6 +264,7 @@ pub struct TimelineClip {
     pub selected: bool,
     pub disabled: bool,
     pub nested: bool,
+    pub waveform_peaks: Vec<f32>,
     pub select_action: Option<Action>,
 }
 
@@ -278,6 +279,7 @@ impl TimelineClip {
             selected: false,
             disabled: false,
             nested: false,
+            waveform_peaks: Vec::new(),
             select_action: None,
         }
     }
@@ -303,6 +305,12 @@ impl TimelineClip {
     /// Mark this clip as a nested sequence.
     pub fn nested(mut self, nested: bool) -> Self {
         self.nested = nested;
+        self
+    }
+
+    /// Attach precomputed normalized audio waveform peaks to this clip.
+    pub fn with_waveform_peaks(mut self, peaks: impl Into<Vec<f32>>) -> Self {
+        self.waveform_peaks = peaks.into().into_iter().map(|peak| peak.clamp(0.0, 1.0)).collect();
         self
     }
 
@@ -496,11 +504,21 @@ enum TimelineScrollbarAxis {
     Vertical,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimelineScrollbarDragKind {
+    Thumb,
+    LeadingHandle,
+    TrailingHandle,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct TimelineScrollbarDrag {
     axis: TimelineScrollbarAxis,
+    kind: TimelineScrollbarDragKind,
     start_pointer: f32,
     start_scroll: f32,
+    start_pixels_per_frame: f32,
+    start_track_height: f32,
 }
 
 impl TimelineView {
@@ -532,7 +550,7 @@ impl TimelineView {
             focus_visible: false,
             enabled: true,
             track_height: 42.0,
-            header_width: 96.0,
+            header_width: TIMELINE_TRACK_HEADER_MIN_WIDTH,
             ruler_height: 28.0,
             playhead_dragging: false,
             in_out_drag: None,
@@ -578,13 +596,21 @@ impl TimelineView {
 
     /// Set initial zoom in pixels per frame.
     pub fn with_pixels_per_frame(mut self, pixels_per_frame: f32) -> Self {
-        self.pixels_per_frame = pixels_per_frame.clamp(0.25, 64.0);
+        self.pixels_per_frame =
+            pixels_per_frame.clamp(TIMELINE_MIN_PIXELS_PER_FRAME, TIMELINE_MAX_PIXELS_PER_FRAME);
+        self
+    }
+
+    /// Set initial track height in logical pixels.
+    pub fn with_track_height(mut self, track_height: f32) -> Self {
+        self.track_height =
+            track_height.clamp(TIMELINE_MIN_TRACK_HEIGHT, TIMELINE_MAX_TRACK_HEIGHT);
         self
     }
 
     /// Set the track header width.
     pub fn with_header_width(mut self, width: f32) -> Self {
-        self.header_width = width.max(96.0);
+        self.header_width = width.max(TIMELINE_TRACK_HEADER_MIN_WIDTH);
         self
     }
 
@@ -810,6 +836,11 @@ impl TimelineView {
         self.pixels_per_frame
     }
 
+    /// Current track row height in logical pixels.
+    pub fn track_height(&self) -> f32 {
+        self.track_height
+    }
+
     /// Active pointer tool for the timeline surface.
     pub fn active_tool(&self) -> TimelineTool {
         self.active_tool
@@ -828,14 +859,19 @@ impl TimelineView {
             scroll_y: self.scroll_y,
             pixels_per_frame: self.pixels_per_frame,
             snapping_enabled: self.snapping_enabled,
+            track_height: self.track_height,
         }
     }
 
     /// Restore local timeline UI state after rebuilding from fresh models.
     pub fn restore_state(&mut self, state: &TimelineViewState) {
         self.active_tool = state.active_tool;
-        self.pixels_per_frame = state.pixels_per_frame.clamp(0.25, 64.0);
+        self.pixels_per_frame = state
+            .pixels_per_frame
+            .clamp(TIMELINE_MIN_PIXELS_PER_FRAME, TIMELINE_MAX_PIXELS_PER_FRAME);
         self.snapping_enabled = state.snapping_enabled;
+        self.track_height =
+            state.track_height.clamp(TIMELINE_MIN_TRACK_HEIGHT, TIMELINE_MAX_TRACK_HEIGHT);
         self.scroll_x = state.scroll_x.max(0.0);
         self.scroll_y = state.scroll_y.max(0.0);
         if self.body_rect.width > 0.0 || self.body_rect.height > 0.0 {
@@ -929,6 +965,21 @@ impl TimelineView {
         ))
     }
 
+    fn horizontal_scrollbar_handle_rect(&self, kind: TimelineScrollbarDragKind) -> Option<Rect> {
+        let thumb = self.horizontal_scrollbar_thumb_rect()?;
+        let center_x = match kind {
+            TimelineScrollbarDragKind::LeadingHandle => thumb.x,
+            TimelineScrollbarDragKind::TrailingHandle => thumb.x + thumb.width,
+            TimelineScrollbarDragKind::Thumb => return None,
+        };
+        Some(Rect::new(
+            center_x - SCROLLBAR_HANDLE_SIZE * 0.5,
+            thumb.center().y - SCROLLBAR_HANDLE_SIZE * 0.5,
+            SCROLLBAR_HANDLE_SIZE,
+            SCROLLBAR_HANDLE_SIZE,
+        ))
+    }
+
     fn vertical_scrollbar_thumb_rect(&self) -> Option<Rect> {
         let track = self.vertical_scrollbar_track_rect()?;
         let content_height = self.content_height();
@@ -946,6 +997,21 @@ impl TimelineView {
             track.y + travel * offset_ratio,
             track.width,
             thumb_height.min(track.height),
+        ))
+    }
+
+    fn vertical_scrollbar_handle_rect(&self, kind: TimelineScrollbarDragKind) -> Option<Rect> {
+        let thumb = self.vertical_scrollbar_thumb_rect()?;
+        let center_y = match kind {
+            TimelineScrollbarDragKind::LeadingHandle => thumb.y,
+            TimelineScrollbarDragKind::TrailingHandle => thumb.y + thumb.height,
+            TimelineScrollbarDragKind::Thumb => return None,
+        };
+        Some(Rect::new(
+            thumb.center().x - SCROLLBAR_HANDLE_SIZE * 0.5,
+            center_y - SCROLLBAR_HANDLE_SIZE * 0.5,
+            SCROLLBAR_HANDLE_SIZE,
+            SCROLLBAR_HANDLE_SIZE,
         ))
     }
 
@@ -971,12 +1037,103 @@ impl TimelineView {
         drag.start_scroll + (delta_y / travel) * self.max_scroll_y()
     }
 
+    fn zoom_x_for_handle_delta(&mut self, delta_x: f32, drag: TimelineScrollbarDrag) -> bool {
+        if self.body_rect.width <= 1.0 {
+            return false;
+        }
+        let start_pixels = drag
+            .start_pixels_per_frame
+            .clamp(TIMELINE_MIN_PIXELS_PER_FRAME, TIMELINE_MAX_PIXELS_PER_FRAME);
+        let start_visible_frames = (self.body_rect.width / start_pixels).max(1.0);
+        let delta_frames = delta_x / start_pixels;
+        let proposed_visible_frames = match drag.kind {
+            TimelineScrollbarDragKind::LeadingHandle => start_visible_frames - delta_frames,
+            TimelineScrollbarDragKind::TrailingHandle => start_visible_frames + delta_frames,
+            TimelineScrollbarDragKind::Thumb => return false,
+        };
+        let min_visible_frames = self.body_rect.width / TIMELINE_MAX_PIXELS_PER_FRAME;
+        let max_visible_frames = self.body_rect.width / TIMELINE_MIN_PIXELS_PER_FRAME;
+        let visible_frames =
+            proposed_visible_frames.clamp(min_visible_frames.max(1.0), max_visible_frames.max(1.0));
+        let old_pixels = self.pixels_per_frame;
+        let old_scroll = self.scroll_x;
+        self.pixels_per_frame = (self.body_rect.width / visible_frames)
+            .clamp(TIMELINE_MIN_PIXELS_PER_FRAME, TIMELINE_MAX_PIXELS_PER_FRAME);
+        match drag.kind {
+            TimelineScrollbarDragKind::LeadingHandle => {
+                let right_frame = (drag.start_scroll + self.body_rect.width) / start_pixels;
+                self.scroll_x = (right_frame - visible_frames).max(0.0) * self.pixels_per_frame;
+            }
+            TimelineScrollbarDragKind::TrailingHandle => {
+                let left_frame = drag.start_scroll / start_pixels;
+                self.scroll_x = left_frame * self.pixels_per_frame;
+            }
+            TimelineScrollbarDragKind::Thumb => {}
+        }
+        self.clamp_scroll();
+        (self.pixels_per_frame - old_pixels).abs() > 0.001
+            || (self.scroll_x - old_scroll).abs() > 0.01
+    }
+
+    fn resize_tracks_for_handle_delta(
+        &mut self,
+        delta_y: f32,
+        drag: TimelineScrollbarDrag,
+    ) -> bool {
+        if self.body_rect.height <= 1.0 {
+            return false;
+        }
+        let start_height = drag
+            .start_track_height
+            .clamp(TIMELINE_MIN_TRACK_HEIGHT, TIMELINE_MAX_TRACK_HEIGHT);
+        let start_visible_rows = (self.body_rect.height / start_height).max(1.0);
+        let delta_rows = delta_y / start_height;
+        let proposed_visible_rows = match drag.kind {
+            TimelineScrollbarDragKind::LeadingHandle => start_visible_rows - delta_rows,
+            TimelineScrollbarDragKind::TrailingHandle => start_visible_rows + delta_rows,
+            TimelineScrollbarDragKind::Thumb => return false,
+        };
+        let min_visible_rows = self.body_rect.height / TIMELINE_MAX_TRACK_HEIGHT;
+        let max_visible_rows = self.body_rect.height / TIMELINE_MIN_TRACK_HEIGHT;
+        let visible_rows =
+            proposed_visible_rows.clamp(min_visible_rows.max(1.0), max_visible_rows.max(1.0));
+        let old_height = self.track_height;
+        let old_scroll = self.scroll_y;
+        self.track_height = (self.body_rect.height / visible_rows)
+            .clamp(TIMELINE_MIN_TRACK_HEIGHT, TIMELINE_MAX_TRACK_HEIGHT);
+        match drag.kind {
+            TimelineScrollbarDragKind::LeadingHandle => {
+                let bottom_row = (drag.start_scroll + self.body_rect.height) / start_height;
+                self.scroll_y = (bottom_row - visible_rows).max(0.0) * self.track_height;
+            }
+            TimelineScrollbarDragKind::TrailingHandle => {
+                let top_row = drag.start_scroll / start_height;
+                self.scroll_y = top_row * self.track_height;
+            }
+            TimelineScrollbarDragKind::Thumb => {}
+        }
+        self.clamp_scroll();
+        (self.track_height - old_height).abs() > 0.01 || (self.scroll_y - old_scroll).abs() > 0.01
+    }
+
     fn set_scrollbar_hovered(&mut self, point: Point) -> bool {
         let horizontal = self
             .horizontal_scrollbar_thumb_rect()
-            .is_some_and(|thumb| thumb.contains(point));
+            .is_some_and(|thumb| thumb.contains(point))
+            || self
+                .horizontal_scrollbar_handle_rect(TimelineScrollbarDragKind::LeadingHandle)
+                .is_some_and(|handle| handle.contains(point))
+            || self
+                .horizontal_scrollbar_handle_rect(TimelineScrollbarDragKind::TrailingHandle)
+                .is_some_and(|handle| handle.contains(point));
         let vertical =
-            self.vertical_scrollbar_thumb_rect().is_some_and(|thumb| thumb.contains(point));
+            self.vertical_scrollbar_thumb_rect().is_some_and(|thumb| thumb.contains(point))
+                || self
+                    .vertical_scrollbar_handle_rect(TimelineScrollbarDragKind::LeadingHandle)
+                    .is_some_and(|handle| handle.contains(point))
+                || self
+                    .vertical_scrollbar_handle_rect(TimelineScrollbarDragKind::TrailingHandle)
+                    .is_some_and(|handle| handle.contains(point));
         let changed = horizontal != self.horizontal_scrollbar_hovered
             || vertical != self.vertical_scrollbar_hovered;
         self.horizontal_scrollbar_hovered = horizontal;
@@ -1127,17 +1284,17 @@ impl TimelineView {
         let right_padding = 6.0;
         let group_width = size * 3.0 + gap * 2.0;
         let start_x = header.x + header.width - right_padding - group_width;
+        let y = if header.height >= TIMELINE_TRACK_HEADER_STACKED_MIN_HEIGHT {
+            header.y + header.height - size - 6.0
+        } else {
+            header.y + (header.height - size) * 0.5
+        };
         let index = match control {
             TimelineTrackControl::Visibility => 0.0,
             TimelineTrackControl::Mute => 1.0,
             TimelineTrackControl::Lock => 2.0,
         };
-        Rect::new(
-            start_x + index * (size + gap),
-            header.y + (header.height - size) * 0.5,
-            size,
-            size,
-        )
+        Rect::new(start_x + index * (size + gap), y, size, size)
     }
 
     fn track_control_at(&self, point: Point) -> Option<(TimelineTrackRef, TimelineTrackControl)> {
@@ -1187,35 +1344,6 @@ impl TimelineView {
             .unwrap_or(Rect::ZERO)
     }
 
-    fn zoom_button_rect(&self, button: TimelineZoomButton) -> Option<Rect> {
-        let size = TIMELINE_ZOOM_BUTTON_SIZE;
-        let gap = TIMELINE_ZOOM_BUTTON_GAP;
-        let available_width = (self.toolbar_rect.width - self.header_width).max(0.0);
-        let group_width = size * 2.0 + gap;
-        if available_width < group_width + 16.0 {
-            return None;
-        }
-        let right = self.toolbar_rect.x + self.toolbar_rect.width - 8.0;
-        let x = match button {
-            TimelineZoomButton::Out => right - group_width,
-            TimelineZoomButton::In => right - size,
-        };
-        Some(Rect::new(
-            x,
-            self.toolbar_rect.y + (self.toolbar_rect.height - size) * 0.5,
-            size,
-            size,
-        ))
-    }
-
-    #[cfg(test)]
-    fn zoom_button_at(&self, point: Point) -> Option<TimelineZoomButton> {
-        match self.toolbar_button_at(point) {
-            Some(TimelineToolbarButton::Zoom(button)) => Some(button),
-            _ => None,
-        }
-    }
-
     fn toolbar_left_buttons() -> [TimelineToolbarButton; 5] {
         [
             TimelineToolbarButton::Tool(TimelineTool::Select),
@@ -1228,17 +1356,10 @@ impl TimelineView {
 
     fn toolbar_left_limit(&self) -> f32 {
         let right_padding = 8.0;
-        self.zoom_button_rect(TimelineZoomButton::Out).map_or(
-            self.toolbar_rect.x + self.toolbar_rect.width - right_padding,
-            |rect| rect.x - TIMELINE_TOOLBAR_GROUP_GAP,
-        )
+        self.toolbar_rect.x + self.toolbar_rect.width - right_padding
     }
 
     fn toolbar_button_rect(&self, button: TimelineToolbarButton) -> Option<Rect> {
-        if let TimelineToolbarButton::Zoom(zoom) = button {
-            return self.zoom_button_rect(zoom);
-        }
-
         let size = TIMELINE_TOOL_BUTTON_SIZE;
         let y = self.toolbar_rect.y + (self.toolbar_rect.height - size) * 0.5;
         let limit = self.toolbar_left_limit();
@@ -1260,15 +1381,9 @@ impl TimelineView {
         if !self.toolbar_rect.contains(point) {
             return None;
         }
-        Self::toolbar_left_buttons()
-            .into_iter()
-            .chain([
-                TimelineToolbarButton::Zoom(TimelineZoomButton::Out),
-                TimelineToolbarButton::Zoom(TimelineZoomButton::In),
-            ])
-            .find(|button| {
-                self.toolbar_button_rect(*button).is_some_and(|rect| rect.contains(point))
-            })
+        Self::toolbar_left_buttons().into_iter().find(|button| {
+            self.toolbar_button_rect(*button).is_some_and(|rect| rect.contains(point))
+        })
     }
 
     fn toolbar_icon(&self, slot: TimelineToolbarIconSlot) -> Option<&VectorIcon> {
@@ -1304,8 +1419,6 @@ impl TimelineView {
             TimelineToolbarButton::Snapping => "Snapping (S)",
             TimelineToolbarButton::Edit(TimelineEditCommand::MarkInAtPlayhead) => "Mark In",
             TimelineToolbarButton::Edit(TimelineEditCommand::MarkOutAtPlayhead) => "Mark Out",
-            TimelineToolbarButton::Zoom(TimelineZoomButton::Out) => "Zoom Out",
-            TimelineToolbarButton::Zoom(TimelineZoomButton::In) => "Zoom In",
             _ => return None,
         };
         let label = if let TimelineToolbarButton::Edit(command) = button {
@@ -2081,9 +2194,7 @@ impl TimelineView {
             return false;
         }
         match button {
-            TimelineToolbarButton::Tool(_)
-            | TimelineToolbarButton::Snapping
-            | TimelineToolbarButton::Zoom(_) => true,
+            TimelineToolbarButton::Tool(_) | TimelineToolbarButton::Snapping => true,
             TimelineToolbarButton::Edit(command) => self.edit_command_enabled(command),
         }
     }
@@ -2103,7 +2214,6 @@ impl TimelineView {
                 let _ = self.dispatch_edit_command(command, ctx);
                 EventResult::Handled
             }
-            TimelineToolbarButton::Zoom(button) => self.activate_zoom_button(button, ctx),
         }
     }
 
@@ -2193,25 +2303,11 @@ impl TimelineView {
         self.dispatch_edit_command(command, ctx)
     }
 
-    fn activate_zoom_button(
-        &mut self,
-        button: TimelineZoomButton,
-        ctx: &mut EventContext,
-    ) -> EventResult {
-        let factor = match button {
-            TimelineZoomButton::Out => 1.0 / 1.25,
-            TimelineZoomButton::In => 1.25,
-        };
-        if self.zoom_at(self.body_rect.center().x, factor) {
-            ctx.request_repaint();
-        }
-        EventResult::Handled
-    }
-
     fn zoom_at(&mut self, anchor_x: f32, factor: f32) -> bool {
         let frame_at_anchor = self.x_to_frame(anchor_x) as f32;
         let old = self.pixels_per_frame;
-        self.pixels_per_frame = (self.pixels_per_frame * factor).clamp(0.25, 64.0);
+        self.pixels_per_frame = (self.pixels_per_frame * factor)
+            .clamp(TIMELINE_MIN_PIXELS_PER_FRAME, TIMELINE_MAX_PIXELS_PER_FRAME);
         if (old - self.pixels_per_frame).abs() > f32::EPSILON {
             self.scroll_x = frame_at_anchor * self.pixels_per_frame - (anchor_x - self.body_rect.x);
             self.clamp_scroll();
@@ -2302,7 +2398,6 @@ impl TimelineView {
         for button in Self::toolbar_left_buttons() {
             self.paint_toolbar_button(ctx, button);
         }
-        self.paint_zoom_buttons(ctx);
     }
 
     fn paint_timeline_corner(&self, ctx: &mut PaintContext) {
@@ -2324,62 +2419,10 @@ impl TimelineView {
         );
     }
 
-    fn paint_zoom_buttons(&self, ctx: &mut PaintContext) {
-        self.paint_zoom_button(ctx, TimelineZoomButton::Out);
-        self.paint_zoom_button(ctx, TimelineZoomButton::In);
-    }
-
-    fn paint_zoom_button(&self, ctx: &mut PaintContext, button: TimelineZoomButton) {
-        let Some(rect) = self.zoom_button_rect(button) else {
-            return;
-        };
-        let colors = &ctx.theme.colors;
-        let enabled = self.toolbar_button_enabled(TimelineToolbarButton::Zoom(button));
-        let hovered =
-            enabled && self.hovered_toolbar_button == Some(TimelineToolbarButton::Zoom(button));
-        let mut bg = if hovered {
-            colors.secondary
-        } else {
-            colors.accent
-        };
-        bg.a = if enabled {
-            if hovered {
-                0.9
-            } else {
-                0.34
-            }
-        } else {
-            0.12
-        };
-        ctx.encoder.draw_rect(rect, bg, ctx.theme.spacing.radius_sm);
-
-        let icon = if !enabled {
-            color_with_alpha(colors.muted_foreground, 0.44)
-        } else if hovered {
-            colors.foreground
-        } else {
-            colors.muted_foreground
-        };
-        let cy = rect.y + rect.height * 0.5;
-        let left = rect.x + 5.0;
-        let right = rect.x + rect.width - 5.0;
-        ctx.encoder.draw_line(Point::new(left, cy), Point::new(right, cy), 1.6, icon);
-        if button == TimelineZoomButton::In {
-            let cx = rect.x + rect.width * 0.5;
-            ctx.encoder.draw_line(
-                Point::new(cx, rect.y + 5.0),
-                Point::new(cx, rect.y + rect.height - 5.0),
-                1.6,
-                icon,
-            );
-        }
-    }
-
     fn paint_toolbar_button(&self, ctx: &mut PaintContext, button: TimelineToolbarButton) {
         match button {
             TimelineToolbarButton::Tool(tool) => self.paint_tool_button(ctx, tool),
             TimelineToolbarButton::Snapping => self.paint_snapping_button(ctx),
-            TimelineToolbarButton::Zoom(button) => self.paint_zoom_button(ctx, button),
             TimelineToolbarButton::Edit(_) => {
                 let Some(rect) = self.toolbar_button_rect(button) else {
                     return;
@@ -2662,17 +2705,30 @@ impl TimelineView {
             );
             let control_group_x =
                 self.track_control_rect(header, TimelineTrackControl::Visibility).x;
-            ctx.encoder.draw_text_box(
-                &track.label,
-                ctx.theme.typography.tab_label.font_size,
-                snap_point(Point::new(header.x + 10.0, header.y + 16.0)),
-                (control_group_x - header.x - 18.0).max(0.0),
-                if track_selected {
-                    colors.foreground
-                } else {
-                    colors.muted_foreground
-                },
-            );
+            self.paint_track_kind_badge(ctx, header, track.kind, track_selected);
+            let label_width = if header.height >= TIMELINE_TRACK_HEADER_STACKED_MIN_HEIGHT {
+                header.width - 38.0
+            } else {
+                control_group_x - header.x - 38.0
+            };
+            let label_y = if header.height >= TIMELINE_TRACK_HEADER_STACKED_MIN_HEIGHT {
+                header.y + 8.0
+            } else {
+                header.y + (header.height - ctx.theme.typography.tab_label.font_size) * 0.5
+            };
+            if label_width > 1.0 {
+                ctx.encoder.draw_text_box(
+                    &track.label,
+                    ctx.theme.typography.tab_label.font_size,
+                    snap_point(Point::new(header.x + 30.0, label_y)),
+                    label_width,
+                    if track_selected {
+                        colors.foreground
+                    } else {
+                        colors.muted_foreground
+                    },
+                );
+            }
             self.paint_track_control(
                 ctx,
                 header,
@@ -2962,6 +3018,34 @@ impl TimelineView {
         }
     }
 
+    fn paint_track_kind_badge(
+        &self,
+        ctx: &mut PaintContext,
+        header: Rect,
+        kind: TimelineTrackKind,
+        selected: bool,
+    ) {
+        let colors = &ctx.theme.colors;
+        let rect = Rect::new(header.x + 8.0, header.y + 12.0, 16.0, 16.0);
+        let base = match kind {
+            TimelineTrackKind::Video => colors.media_video,
+            TimelineTrackKind::Audio => colors.media_audio,
+        };
+        let mut fill = base;
+        fill.a = if selected { 0.72 } else { 0.42 };
+        ctx.encoder.draw_rect(rect, fill, ctx.theme.spacing.radius_sm);
+        let label = match kind {
+            TimelineTrackKind::Video => "V",
+            TimelineTrackKind::Audio => "A",
+        };
+        ctx.encoder.draw_text(
+            label,
+            ctx.theme.typography.metadata.font_size,
+            snap_point(Point::new(rect.x + 4.6, rect.y + 3.0)),
+            colors.foreground,
+        );
+    }
+
     fn paint_visibility_icon(
         &self,
         ctx: &mut PaintContext,
@@ -3135,6 +3219,9 @@ impl TimelineView {
             );
         }
         ctx.encoder.draw_rect(rect, fill, spacing.radius_sm);
+        if track_kind == TimelineTrackKind::Audio && !clip.waveform_peaks.is_empty() {
+            self.paint_audio_waveform(ctx, rect, clip, selected || hovered || dragging);
+        }
         if selected || hovered {
             let handle = color_with_alpha(colors.foreground, if hovered { 0.35 } else { 0.22 });
             ctx.encoder.draw_rect(
@@ -3158,15 +3245,51 @@ impl TimelineView {
                 1.0,
             );
         }
-        ctx.push_clip(rect.inset(6.0, 2.0));
-        ctx.encoder.draw_text_box(
-            &clip.label,
-            ctx.theme.typography.small.font_size,
-            snap_point(Point::new(rect.x + 8.0, rect.y + 9.0)),
-            (rect.width - 16.0).max(0.0),
-            colors.foreground,
-        );
-        ctx.pop_clip();
+        let text_width = rect.width - 16.0;
+        let text_clip = rect.inset(6.0, 2.0);
+        if text_width > 1.0 && text_clip.width > 1.0 && text_clip.height > 1.0 {
+            ctx.push_clip(text_clip);
+            ctx.encoder.draw_text_box(
+                &clip.label,
+                ctx.theme.typography.small.font_size,
+                snap_point(Point::new(rect.x + 8.0, rect.y + 9.0)),
+                text_width,
+                colors.foreground,
+            );
+            ctx.pop_clip();
+        }
+    }
+
+    fn paint_audio_waveform(
+        &self,
+        ctx: &mut PaintContext,
+        rect: Rect,
+        clip: &TimelineClip,
+        emphasized: bool,
+    ) {
+        let inner = rect.inset(6.0, (rect.height * 0.24).min(10.0));
+        if inner.width <= 2.0 || inner.height <= 4.0 {
+            return;
+        }
+        let mut color = ctx.theme.colors.foreground;
+        color.a = if emphasized { 0.46 } else { 0.30 };
+        let mid_y = inner.y + inner.height * 0.5;
+        let column_count = inner.width.floor().max(1.0) as usize;
+        for column in 0..column_count {
+            let sample_index =
+                ((column as f32 / column_count as f32) * clip.waveform_peaks.len() as f32)
+                    .floor()
+                    .min((clip.waveform_peaks.len() - 1) as f32) as usize;
+            let peak = clip.waveform_peaks[sample_index].clamp(0.0, 1.0);
+            let half_height = (peak * inner.height * 0.5).max(1.0);
+            let x = inner.x + column as f32 + 0.5;
+            ctx.encoder.draw_line(
+                Point::new(x, mid_y - half_height),
+                Point::new(x, mid_y + half_height),
+                1.0,
+                color,
+            );
+        }
     }
 
     fn paint_playhead(&self, ctx: &mut PaintContext) {
@@ -3237,6 +3360,18 @@ impl TimelineView {
                 0.22
             };
             ctx.encoder.draw_rect(thumb, thumb_color, radius);
+            self.paint_scrollbar_handle(
+                ctx,
+                TimelineScrollbarAxis::Horizontal,
+                TimelineScrollbarDragKind::LeadingHandle,
+                active,
+            );
+            self.paint_scrollbar_handle(
+                ctx,
+                TimelineScrollbarAxis::Horizontal,
+                TimelineScrollbarDragKind::TrailingHandle,
+                active,
+            );
         }
 
         if let (Some(track), Some(mut thumb)) = (
@@ -3263,7 +3398,46 @@ impl TimelineView {
                 0.22
             };
             ctx.encoder.draw_rect(thumb, thumb_color, radius);
+            self.paint_scrollbar_handle(
+                ctx,
+                TimelineScrollbarAxis::Vertical,
+                TimelineScrollbarDragKind::LeadingHandle,
+                active,
+            );
+            self.paint_scrollbar_handle(
+                ctx,
+                TimelineScrollbarAxis::Vertical,
+                TimelineScrollbarDragKind::TrailingHandle,
+                active,
+            );
         }
+    }
+
+    fn paint_scrollbar_handle(
+        &self,
+        ctx: &mut PaintContext,
+        axis: TimelineScrollbarAxis,
+        kind: TimelineScrollbarDragKind,
+        active: bool,
+    ) {
+        let rect = match axis {
+            TimelineScrollbarAxis::Horizontal => self.horizontal_scrollbar_handle_rect(kind),
+            TimelineScrollbarAxis::Vertical => self.vertical_scrollbar_handle_rect(kind),
+        };
+        let Some(rect) = rect else {
+            return;
+        };
+        let dragging =
+            self.scrollbar_drag.is_some_and(|drag| drag.axis == axis && drag.kind == kind);
+        let mut color = ctx.theme.colors.scrollbar_thumb;
+        color.a *= if dragging {
+            0.62
+        } else if active {
+            0.48
+        } else {
+            0.30
+        };
+        ctx.encoder.draw_rect(rect, color, ctx.theme.spacing.radius_full);
     }
 }
 
@@ -3391,12 +3565,54 @@ impl Widget for TimelineView {
                 if let Some(button) = self.toolbar_button_at(*position) {
                     return self.activate_toolbar_button(button, ctx);
                 }
+                for kind in [
+                    TimelineScrollbarDragKind::LeadingHandle,
+                    TimelineScrollbarDragKind::TrailingHandle,
+                ] {
+                    if self
+                        .horizontal_scrollbar_handle_rect(kind)
+                        .is_some_and(|handle| handle.contains(*position))
+                    {
+                        self.scrollbar_drag = Some(TimelineScrollbarDrag {
+                            axis: TimelineScrollbarAxis::Horizontal,
+                            kind,
+                            start_pointer: position.x,
+                            start_scroll: self.scroll_x,
+                            start_pixels_per_frame: self.pixels_per_frame,
+                            start_track_height: self.track_height,
+                        });
+                        self.horizontal_scrollbar_hovered = true;
+                        self.request_timeline_pointer_capture(ctx);
+                        ctx.request_repaint();
+                        return EventResult::Handled;
+                    }
+                    if self
+                        .vertical_scrollbar_handle_rect(kind)
+                        .is_some_and(|handle| handle.contains(*position))
+                    {
+                        self.scrollbar_drag = Some(TimelineScrollbarDrag {
+                            axis: TimelineScrollbarAxis::Vertical,
+                            kind,
+                            start_pointer: position.y,
+                            start_scroll: self.scroll_y,
+                            start_pixels_per_frame: self.pixels_per_frame,
+                            start_track_height: self.track_height,
+                        });
+                        self.vertical_scrollbar_hovered = true;
+                        self.request_timeline_pointer_capture(ctx);
+                        ctx.request_repaint();
+                        return EventResult::Handled;
+                    }
+                }
                 if let Some(thumb) = self.horizontal_scrollbar_thumb_rect() {
                     if thumb.contains(*position) {
                         self.scrollbar_drag = Some(TimelineScrollbarDrag {
                             axis: TimelineScrollbarAxis::Horizontal,
+                            kind: TimelineScrollbarDragKind::Thumb,
                             start_pointer: position.x,
                             start_scroll: self.scroll_x,
+                            start_pixels_per_frame: self.pixels_per_frame,
+                            start_track_height: self.track_height,
                         });
                         self.horizontal_scrollbar_hovered = true;
                         self.request_timeline_pointer_capture(ctx);
@@ -3408,8 +3624,11 @@ impl Widget for TimelineView {
                     if thumb.contains(*position) {
                         self.scrollbar_drag = Some(TimelineScrollbarDrag {
                             axis: TimelineScrollbarAxis::Vertical,
+                            kind: TimelineScrollbarDragKind::Thumb,
                             start_pointer: position.y,
                             start_scroll: self.scroll_y,
+                            start_pixels_per_frame: self.pixels_per_frame,
+                            start_track_height: self.track_height,
                         });
                         self.vertical_scrollbar_hovered = true;
                         self.request_timeline_pointer_capture(ctx);
@@ -3532,13 +3751,27 @@ impl Widget for TimelineView {
                     return EventResult::Handled;
                 }
                 if let Some(drag) = self.scrollbar_drag {
-                    let changed = match drag.axis {
-                        TimelineScrollbarAxis::Horizontal => self.set_scroll_x(
-                            self.scroll_x_for_thumb_delta(position.x - drag.start_pointer, drag),
-                        ),
-                        TimelineScrollbarAxis::Vertical => self.set_scroll_y(
-                            self.scroll_y_for_thumb_delta(position.y - drag.start_pointer, drag),
-                        ),
+                    let changed = match (drag.axis, drag.kind) {
+                        (TimelineScrollbarAxis::Horizontal, TimelineScrollbarDragKind::Thumb) => {
+                            self.set_scroll_x(
+                                self.scroll_x_for_thumb_delta(
+                                    position.x - drag.start_pointer,
+                                    drag,
+                                ),
+                            )
+                        }
+                        (TimelineScrollbarAxis::Vertical, TimelineScrollbarDragKind::Thumb) => self
+                            .set_scroll_y(
+                                self.scroll_y_for_thumb_delta(
+                                    position.y - drag.start_pointer,
+                                    drag,
+                                ),
+                            ),
+                        (TimelineScrollbarAxis::Horizontal, _) => {
+                            self.zoom_x_for_handle_delta(position.x - drag.start_pointer, drag)
+                        }
+                        (TimelineScrollbarAxis::Vertical, _) => self
+                            .resize_tracks_for_handle_delta(position.y - drag.start_pointer, drag),
                     };
                     if changed {
                         ctx.request_repaint();
@@ -5530,15 +5763,19 @@ mod tests {
     }
 
     #[test]
-    fn timeline_zoom_buttons_adjust_zoom_without_seeking() {
-        let mut view = timeline();
-        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+    fn horizontal_scrollbar_handles_adjust_zoom_without_seeking() {
+        let mut view = TimelineView::new(vec![TimelineTrack::video(
+            "V1",
+            vec![TimelineClip::new("Long", 0, 1000)],
+        )])
+        .with_playhead(12);
+        view.layout(Rect::new(0.0, 0.0, 420.0, 160.0));
+        let handle = view
+            .horizontal_scrollbar_handle_rect(TimelineScrollbarDragKind::TrailingHandle)
+            .expect("wide timeline should show trailing zoom handle")
+            .center();
         let initial_zoom = view.pixels_per_frame();
         let initial_playhead = view.playhead_frame();
-        let zoom_in = view
-            .zoom_button_rect(TimelineZoomButton::In)
-            .expect("wide ruler should show zoom controls")
-            .center();
 
         let mut focus = DummyFocus;
         let mut shortcut = DummyShortcut;
@@ -5553,18 +5790,79 @@ mod tests {
             &dispatch,
         );
 
-        let result = view.event(
+        assert_eq!(
+            view.event(
+                &UiEvent::MouseDown {
+                    position: handle,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Capture(view.id()))
+        );
+        assert_eq!(
+            view.event(
+                &UiEvent::MouseMove {
+                    position: Point::new(handle.x - 40.0, handle.y),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert!(view.pixels_per_frame() > initial_zoom);
+        assert_eq!(view.playhead_frame(), initial_playhead);
+        assert!(ctx.requests.repaint);
+    }
+
+    #[test]
+    fn vertical_scrollbar_handles_adjust_track_height() {
+        let mut view = TimelineView::new(
+            (0..12).map(|track| TimelineTrack::video(format!("V{track}"), vec![])).collect(),
+        );
+        view.layout(Rect::new(0.0, 0.0, 360.0, 180.0));
+        let handle = view
+            .vertical_scrollbar_handle_rect(TimelineScrollbarDragKind::TrailingHandle)
+            .expect("many tracks should show trailing height handle")
+            .center();
+        let initial_height = view.track_height();
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let dispatch = |_| {};
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        view.event(
             &UiEvent::MouseDown {
-                position: zoom_in,
+                position: handle,
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
             &mut ctx,
         );
+        view.event(
+            &UiEvent::MouseMove {
+                position: Point::new(handle.x, handle.y - 24.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
 
-        assert_eq!(result, EventResult::Handled);
-        assert!(view.pixels_per_frame() > initial_zoom);
-        assert_eq!(view.playhead_frame(), initial_playhead);
+        assert!(view.track_height() > initial_height);
         assert!(ctx.requests.repaint);
     }
 
@@ -5749,16 +6047,6 @@ mod tests {
     }
 
     #[test]
-    fn timeline_zoom_buttons_hide_when_ruler_is_too_narrow() {
-        let mut view = timeline();
-        view.layout(Rect::new(0.0, 0.0, 130.0, 180.0));
-
-        assert!(view.zoom_button_rect(TimelineZoomButton::Out).is_none());
-        assert!(view.zoom_button_rect(TimelineZoomButton::In).is_none());
-        assert_eq!(view.zoom_button_at(Point::new(120.0, 12.0)), None);
-    }
-
-    #[test]
     fn timeline_chrome_buttons_update_and_hide_tooltips() {
         let mut view = timeline().on_edit_command_shortcut(|command| match command {
             TimelineEditCommand::MarkInAtPlayhead => Some("I".to_owned()),
@@ -5773,11 +6061,6 @@ mod tests {
             ))
             .expect("wide toolbar should show mark-in control")
             .center();
-        let zoom_out = view
-            .zoom_button_rect(TimelineZoomButton::Out)
-            .expect("wide toolbar should show zoom controls")
-            .center();
-
         let mut focus = DummyFocus;
         let mut shortcut = DummyShortcut;
         let mut tooltip = TooltipRecorder::default();
@@ -5817,18 +6100,6 @@ mod tests {
 
         assert_eq!(
             view.event(
-                &UiEvent::MouseMove { position: zoom_out, modifiers: Modifiers::none() },
-                &mut ctx,
-            ),
-            EventResult::Handled
-        );
-        assert_eq!(
-            ctx.tooltip.current().map(|state| state.text.as_str()),
-            Some("Zoom Out")
-        );
-
-        assert_eq!(
-            view.event(
                 &UiEvent::MouseMove {
                     position: Point::new(-10.0, -10.0),
                     modifiers: Modifiers::none(),
@@ -5838,43 +6109,6 @@ mod tests {
             EventResult::Ignored
         );
         assert!(ctx.tooltip.current().is_none());
-    }
-
-    #[test]
-    fn disabled_timeline_ignores_zoom_button_input() {
-        let mut view = timeline().disabled();
-        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
-        let initial_zoom = view.pixels_per_frame();
-        let zoom_in = view
-            .zoom_button_rect(TimelineZoomButton::In)
-            .expect("wide ruler should show zoom controls")
-            .center();
-
-        let mut focus = DummyFocus;
-        let mut shortcut = DummyShortcut;
-        let mut tooltip = DummyTooltip;
-        let mut requests = EventRequests::default();
-        let dispatch = |_| {};
-        let mut ctx = dispatching_ctx(
-            &mut focus,
-            &mut shortcut,
-            &mut tooltip,
-            &mut requests,
-            &dispatch,
-        );
-
-        let result = view.event(
-            &UiEvent::MouseDown {
-                position: zoom_in,
-                button: MouseButton::Left,
-                modifiers: Modifiers::none(),
-            },
-            &mut ctx,
-        );
-
-        assert_eq!(result, EventResult::Ignored);
-        assert_eq!(view.pixels_per_frame(), initial_zoom);
-        assert!(!ctx.requests.repaint);
     }
 
     #[test]
@@ -7118,6 +7352,40 @@ mod tests {
         assert!(encoder.clips >= 3);
         assert!(encoder.texts.iter().any(|text| text == "V1"));
         assert!(encoder.texts.iter().any(|text| text == "Intro"));
+    }
+
+    #[test]
+    fn audio_clip_waveform_peaks_paint_as_clip_lines() {
+        let mut without_waveform = TimelineView::new(vec![TimelineTrack::audio(
+            "A1",
+            vec![TimelineClip::new("Music", 0, 120)],
+        )]);
+        without_waveform.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+        let mut with_waveform = TimelineView::new(vec![TimelineTrack::audio(
+            "A1",
+            vec![TimelineClip::new("Music", 0, 120)
+                .with_waveform_peaks(vec![0.1, 0.7, 0.3, 1.0, 0.45, 0.8])],
+        )]);
+        with_waveform.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let theme = ThemePreset::Dark.build();
+        let mut base_encoder = RecordingEncoder::default();
+        let mut base_ctx = PaintContext {
+            encoder: &mut base_encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 520.0, 180.0),
+        };
+        without_waveform.paint(&mut base_ctx);
+
+        let mut waveform_encoder = RecordingEncoder::default();
+        let mut waveform_ctx = PaintContext {
+            encoder: &mut waveform_encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 520.0, 180.0),
+        };
+        with_waveform.paint(&mut waveform_ctx);
+
+        assert!(waveform_encoder.lines > base_encoder.lines);
     }
 
     #[test]

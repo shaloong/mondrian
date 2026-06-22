@@ -3443,6 +3443,7 @@ mod tests {
                 scroll_y: 24.0,
                 pixels_per_frame: 8.0,
                 snapping_enabled: false,
+                track_height: 64.0,
             });
         }));
         root.layout(Rect::new(0.0, 0.0, 1280.0, 480.0));
@@ -3456,6 +3457,7 @@ mod tests {
         assert!((after.scroll_x - before.scroll_x).abs() < 0.01);
         assert!((after.scroll_y - before.scroll_y).abs() < 0.01);
         assert_eq!(after.snapping_enabled, before.snapping_enabled);
+        assert!((after.track_height - before.track_height).abs() < f32::EPSILON);
     }
 
     #[test]
