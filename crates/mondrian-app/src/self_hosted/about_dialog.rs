@@ -55,23 +55,21 @@ impl AboutDialog {
                 .popover_foreground()
                 .with_font_size(TITLE_FONT_SIZE)
                 .with_padding(0.0, 0.0),
-            version_label: Label::new(format!("Version {}", env!("CARGO_PKG_VERSION")))
+            version_label: Label::new(format!("版本 {}", env!("CARGO_PKG_VERSION")))
                 .muted()
                 .with_font_size(META_FONT_SIZE)
                 .with_padding(0.0, 0.0),
-            body_label: Label::new(
-                "A self-hosted video editing interface built on Mondrian's native UI stack.",
-            )
-            .popover_foreground()
-            .with_font_size(BODY_FONT_SIZE)
-            .with_padding(0.0, 0.0)
-            .wrapped(),
-            meta_label: Label::new("Custom UI runtime, dock panels, text, and GPU renderer.")
+            body_label: Label::new("基于 Mondrian 原生 UI 栈构建的视频编辑界面。")
+                .popover_foreground()
+                .with_font_size(BODY_FONT_SIZE)
+                .with_padding(0.0, 0.0)
+                .wrapped(),
+            meta_label: Label::new("自研 UI 运行时、停靠面板、文本与 GPU 渲染器。")
                 .muted()
                 .with_font_size(META_FONT_SIZE)
                 .with_padding(0.0, 0.0)
                 .wrapped(),
-            close_button: Button::new("Done").on_click(app_shell_close_modal_action()),
+            close_button: Button::new("完成").on_click(app_shell_close_modal_action()),
         }
     }
 }

@@ -173,9 +173,11 @@ editor data.
 Top menu triggers use the lightweight `DropdownTriggerStyle::MenuBar` treatment
 and content-width layout: closed triggers should read like native menu text, not
 filled toolbar buttons, and should not reserve a persistent arrow affordance.
-The product menu bar has exactly five stable top-level groups: File, Edit,
-View, Window, and Help. Do not add top-level buckets for workflow-specific
-domains such as Playback, Sequence, Workspace, Assets, Effects, or Timeline.
+The product menu bar has exactly five stable top-level groups, displayed in the
+Chinese-first shell as 文件, 编辑, 视图, 窗口, and 帮助. Their stable product
+roles remain File, Edit, View, Window, and Help for action naming and tests. Do
+not add top-level buckets for workflow-specific domains such as Playback,
+Sequence, Workspace, Assets, Effects, or Timeline.
 Route commands to the narrowest useful surface instead: timeline or asset
 context menus, focused keyboard shortcuts, panel toolbars, inspector controls,
 sequence selectors, or existing rows inside the five groups. `View` owns view
@@ -1447,6 +1449,13 @@ right-column width. Single-tab dock headers should paint as panel titles with a
 small active underline, not as full-width raised tabs; grouped browser tabs may
 keep larger hit areas but should use hover fills and underline selection rather
 than heavy active rectangles.
+Dock tab labels are content-measured from the current display text with tokenized
+padding, min/max widths, and the small tab-label typography token. Assets,
+Effects, Inspector, Timeline, and future panels must not reserve equal-width
+tabs just because they share a dock group; tab width follows the label while
+hit targets stay large enough for normal pointer use. Panel chrome text is
+secondary editor chrome and should stay visually quieter than panel content,
+viewer controls, or timeline editing affordances.
 Self-hosted `FocusPanel` actions activate the matching dock panel or grouped tab
 through shell-local dock traversal and do not continue into `AppState`. The
 traversal first understands grouped tabs in the default layout, then falls back
@@ -1480,12 +1489,19 @@ preserve the selected workspace preset so live app snapshots do not silently
 reset the user's shell layout.
 `WorkspacePreset::Custom` is a real persisted workspace, not an alias for
 Editing. Its layout is stored as `SelfHostedWorkspaceLayout`: a binary tree of
-split direction/ratio nodes and dock panel leaves with active tab indices plus
-grouped-tab visibility metadata that live widgets cannot infer on their own.
+split direction/ratio nodes and dock panel leaves with explicit `tabs:
+Vec<PanelKind>`, active tab indices, and legacy grouped-tab visibility metadata
+that live widgets cannot infer on their own.
 `self_hosted::panels` is the only layer that materializes that schema back into
 `DockSplitter` / `DockPanel` widgets from current `SelfHostedPanelModels`.
 Loading preferences sanitizes custom ratios and active tabs before a root is
 built, including clamping active tabs after hidden grouped tabs are applied.
+The layout schema already models Premiere-style panel relocation through
+`DockDropArea`: dropping onto the center inserts the dragged panel as the active
+tab of the target group, while edge drops create a split around that target
+group. Drag preview, hit testing, and persistence belong at the shell/widget
+boundary; panel contents must remain ordinary `PanelKind`-addressed widgets
+instead of inventing per-panel docking APIs.
 Dragging a built-in workspace splitter promotes the root to Custom when
 the split layout diverges from the built-in preset snapshot; the winit window
 runner asks `SelfHostedUiHost` to persist that layout on left-button release or
@@ -2250,3 +2266,11 @@ independent panel/workspace. Splitter layout restoration remains owned by
 `SelfHostedWorkspaceLayout` and the preferences store. This keeps app-state data
 replacement separate from ephemeral user navigation state and from user-facing
 workspace customization.
+
+Until the i18n layer exists, self-hosted product surfaces are Chinese-first:
+menu triggers, dock tab display names, empty states, context-menu rows, dialog
+titles, file-dialog labels, and inspector/export field labels should be Chinese
+unless the text is a file extension, codec, color-space standard, shortcut, or
+other industry term normally shown in Latin script. Tests and state restoration
+must assert stable actions or `PanelKind` ownership rather than English visible
+labels.

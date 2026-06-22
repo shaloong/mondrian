@@ -158,8 +158,8 @@ impl SelfHostedSequenceSettingsDraft {
 }
 
 const RESOLUTION_PRESETS: [(&str, Resolution); 4] = [
-    ("HD 720p", Resolution::HD),
-    ("Full HD 1080p", Resolution::FHD),
+    ("高清 720p", Resolution::HD),
+    ("全高清 1080p", Resolution::FHD),
     ("UHD 4K", Resolution::UHD4K),
     ("DCI 4K", Resolution::DCI4K),
 ];
@@ -278,16 +278,16 @@ impl SequenceSettingsTabPayload {
 
     fn label(self) -> &'static str {
         match self {
-            Self::Format => "Format",
-            Self::Color => "Color",
-            Self::Preview => "Preview",
+            Self::Format => "格式",
+            Self::Color => "色彩",
+            Self::Preview => "预览",
         }
     }
 }
 
 fn editing_mode_label(value: EditingMode) -> &'static str {
     match value {
-        EditingMode::Custom => "Custom",
+        EditingMode::Custom => "自定义",
         EditingMode::Dslr1080p => "DSLR 1080p",
         EditingMode::Dslr720p => "DSLR 720p",
         EditingMode::Avchd1080p => "AVCHD 1080p",
@@ -319,7 +319,7 @@ fn audio_sample_rate_label(sample_rate: u32) -> String {
 
 fn pixel_aspect_ratio_label(value: PixelAspectRatio) -> &'static str {
     match value {
-        PixelAspectRatio::Square => "Square (1.0)",
+        PixelAspectRatio::Square => "方形像素 (1.0)",
         PixelAspectRatio::D1DvNtsc => "D1/DV NTSC",
         PixelAspectRatio::D1DvNtscWidescreen => "D1/DV NTSC 16:9",
         PixelAspectRatio::D1DvPal => "D1/DV PAL",
@@ -327,15 +327,15 @@ fn pixel_aspect_ratio_label(value: PixelAspectRatio) -> &'static str {
         PixelAspectRatio::Anamorphic2x => "Anamorphic 2:1",
         PixelAspectRatio::HdAnamorphic1080 => "HD Anamorphic 1080",
         PixelAspectRatio::DvcproHd => "DVCPRO HD",
-        PixelAspectRatio::Unknown => "Unknown PAR",
+        PixelAspectRatio::Unknown => "未知像素长宽比",
     }
 }
 
 fn field_order_label(value: FieldOrder) -> &'static str {
     match value {
-        FieldOrder::Progressive => "Progressive",
-        FieldOrder::UpperFirst => "Upper field first",
-        FieldOrder::LowerFirst => "Lower field first",
+        FieldOrder::Progressive => "逐行",
+        FieldOrder::UpperFirst => "上场优先",
+        FieldOrder::LowerFirst => "下场优先",
     }
 }
 
@@ -345,22 +345,22 @@ fn video_display_format_label(value: VideoDisplayFormat) -> &'static str {
         VideoDisplayFormat::Timecode2997NonDropFrame => "29.97 non-drop",
         VideoDisplayFormat::FeetAndFrames16mm => "Feet + Frames 16mm",
         VideoDisplayFormat::FeetAndFrames35mm => "Feet + Frames 35mm",
-        VideoDisplayFormat::Frames => "Frames",
+        VideoDisplayFormat::Frames => "帧",
     }
 }
 
 fn audio_channel_layout_label(value: AudioChannelLayout) -> &'static str {
     match value {
-        AudioChannelLayout::Mono => "Mono",
-        AudioChannelLayout::Stereo => "Stereo",
+        AudioChannelLayout::Mono => "单声道",
+        AudioChannelLayout::Stereo => "立体声",
         AudioChannelLayout::Surround51 => "5.1 Surround",
     }
 }
 
 fn audio_display_format_label(value: AudioDisplayFormat) -> &'static str {
     match value {
-        AudioDisplayFormat::AudioSamples => "Audio samples",
-        AudioDisplayFormat::Milliseconds => "Milliseconds",
+        AudioDisplayFormat::AudioSamples => "音频采样",
+        AudioDisplayFormat::Milliseconds => "毫秒",
     }
 }
 
@@ -389,32 +389,32 @@ fn color_space_label(value: ColorSpace) -> &'static str {
 
 fn color_workflow_label(value: ColorWorkflow) -> &'static str {
     match value {
-        ColorWorkflow::DisplayReferred => "Display referred",
-        ColorWorkflow::SceneReferred => "Scene referred",
+        ColorWorkflow::DisplayReferred => "显示参考",
+        ColorWorkflow::SceneReferred => "场景参考",
         ColorWorkflow::Aces => "ACES",
     }
 }
 
 fn missing_color_metadata_policy_label(value: MissingColorMetadataPolicy) -> &'static str {
     match value {
-        MissingColorMetadataPolicy::AssumeRec709 => "Assume Rec. 709",
-        MissingColorMetadataPolicy::AssumeSequenceWorkingSpace => "Assume sequence space",
-        MissingColorMetadataPolicy::RejectMedia => "Reject media",
+        MissingColorMetadataPolicy::AssumeRec709 => "假定 Rec. 709",
+        MissingColorMetadataPolicy::AssumeSequenceWorkingSpace => "假定序列工作空间",
+        MissingColorMetadataPolicy::RejectMedia => "拒绝媒体",
     }
 }
 
 fn nested_color_processing_label(value: NestedColorProcessing) -> &'static str {
     match value {
-        NestedColorProcessing::PreserveChildWorkingSpace => "Preserve child space",
-        NestedColorProcessing::ForceParentWorkingSpace => "Force parent space",
-        NestedColorProcessing::BakeChildOutputTransform => "Bake child output",
+        NestedColorProcessing::PreserveChildWorkingSpace => "保留子序列工作空间",
+        NestedColorProcessing::ForceParentWorkingSpace => "强制使用父级工作空间",
+        NestedColorProcessing::BakeChildOutputTransform => "烘焙子序列输出变换",
     }
 }
 
 fn video_range_label(value: VideoRange) -> &'static str {
     match value {
-        VideoRange::Full => "Full range",
-        VideoRange::Legal => "Legal range",
+        VideoRange::Full => "全范围",
+        VideoRange::Legal => "合法范围",
     }
 }
 
@@ -422,7 +422,7 @@ fn export_bit_depth_label(value: ExportBitDepth) -> &'static str {
     match value {
         ExportBitDepth::Eight => "8-bit",
         ExportBitDepth::Ten => "10-bit",
-        ExportBitDepth::SixteenFloat => "16-bit float",
+        ExportBitDepth::SixteenFloat => "16-bit 浮点",
     }
 }
 
@@ -676,7 +676,7 @@ fn resolution_width_input_for(draft: &SelfHostedSequenceSettingsDraft) -> Number
         SequenceSettings::MIN_WIDTH as f64,
         SequenceSettings::MAX_WIDTH as f64,
     )
-    .with_placeholder("Width")
+    .with_placeholder("宽度")
     .with_step(1.0)
     .on_change(|value| {
         app_shell_sequence_settings_draft_changed_action(
@@ -691,7 +691,7 @@ fn resolution_height_input_for(draft: &SelfHostedSequenceSettingsDraft) -> Numbe
         SequenceSettings::MIN_HEIGHT as f64,
         SequenceSettings::MAX_HEIGHT as f64,
     )
-    .with_placeholder("Height")
+    .with_placeholder("高度")
     .with_step(1.0)
     .on_change(|value| {
         app_shell_sequence_settings_draft_changed_action(
@@ -714,7 +714,7 @@ fn start_timecode_input_for(draft: &SelfHostedSequenceSettingsDraft) -> NumberIn
         0.0,
         (24 * 60 * 60 * 240) as f64,
     )
-    .with_placeholder("Start frame")
+    .with_placeholder("起始帧")
     .with_step(1.0)
     .on_change(|value| {
         app_shell_sequence_settings_draft_changed_action(
@@ -848,7 +848,7 @@ fn preview_scale_slider_for(draft: &SelfHostedSequenceSettingsDraft) -> Slider {
 }
 
 fn preview_cache_checkbox_for(draft: &SelfHostedSequenceSettingsDraft) -> Checkbox {
-    Checkbox::new("Preview cache", draft.settings.preview.cache_enabled).on_change(|enabled| {
+    Checkbox::new("预览缓存", draft.settings.preview.cache_enabled).on_change(|enabled| {
         app_shell_sequence_settings_draft_changed_action(
             SequenceSettingsDraftUpdatePayload::PreviewCacheEnabled(enabled),
         )
@@ -856,7 +856,7 @@ fn preview_cache_checkbox_for(draft: &SelfHostedSequenceSettingsDraft) -> Checkb
 }
 
 fn auto_tone_map_checkbox_for(draft: &SelfHostedSequenceSettingsDraft) -> Checkbox {
-    Checkbox::new("Auto tone map media", draft.settings.auto_tone_map_media).on_change(|enabled| {
+    Checkbox::new("自动色调映射媒体", draft.settings.auto_tone_map_media).on_change(|enabled| {
         app_shell_sequence_settings_draft_changed_action(
             SequenceSettingsDraftUpdatePayload::AutoToneMapMedia(enabled),
         )
@@ -865,7 +865,7 @@ fn auto_tone_map_checkbox_for(draft: &SelfHostedSequenceSettingsDraft) -> Checkb
 
 fn preserve_hdr_metadata_checkbox_for(draft: &SelfHostedSequenceSettingsDraft) -> Checkbox {
     Checkbox::new(
-        "Preserve HDR metadata",
+        "保留 HDR 元数据",
         draft.settings.color_management.preserve_hdr_metadata,
     )
     .on_change(|enabled| {
@@ -960,16 +960,15 @@ pub struct SequenceSettingsDialog {
 impl SequenceSettingsDialog {
     /// Build the sequence settings dialog from an explicit draft.
     pub fn new(draft: SelfHostedSequenceSettingsDraft) -> Self {
-        let title_label = Label::new("Sequence Settings")
+        let title_label = Label::new("序列设置")
             .popover_foreground()
             .with_font_size(TITLE_FONT_SIZE)
             .with_padding(0.0, 0.0);
-        let description_label =
-            Label::new("Adjust timeline format and preview settings for the active sequence.")
-                .muted()
-                .with_font_size(LABEL_FONT_SIZE)
-                .with_padding(0.0, 0.0)
-                .wrapped();
+        let description_label = Label::new("调整活动序列的时间线格式和预览设置。")
+            .muted()
+            .with_font_size(LABEL_FONT_SIZE)
+            .with_padding(0.0, 0.0)
+            .wrapped();
         let tab_buttons = SequenceSettingsTabPayload::ALL
             .into_iter()
             .map(|tab| {
@@ -977,42 +976,42 @@ impl SequenceSettingsDialog {
                     .on_click(app_shell_sequence_settings_tab_changed_action(tab))
             })
             .collect();
-        let name_label = Label::new("Name")
+        let name_label = Label::new("名称")
             .muted()
             .with_font_size(LABEL_FONT_SIZE)
             .with_padding(0.0, 0.0);
-        let format_label = Label::new("Format")
+        let format_label = Label::new("格式")
             .muted()
             .with_font_size(LABEL_FONT_SIZE)
             .with_padding(0.0, 0.0);
-        let frame_size_label = Label::new("Custom frame size")
+        let frame_size_label = Label::new("自定义画面尺寸")
             .muted()
             .with_font_size(LABEL_FONT_SIZE)
             .with_padding(0.0, 0.0);
-        let start_timecode_label = Label::new("Start timecode frame")
+        let start_timecode_label = Label::new("起始时间码帧")
             .muted()
             .with_font_size(LABEL_FONT_SIZE)
             .with_padding(0.0, 0.0);
-        let audio_label = Label::new("Audio")
+        let audio_label = Label::new("音频")
             .muted()
             .with_font_size(LABEL_FONT_SIZE)
             .with_padding(0.0, 0.0);
-        let preview_label = Label::new("Preview")
+        let preview_label = Label::new("预览")
             .muted()
             .with_font_size(LABEL_FONT_SIZE)
             .with_padding(0.0, 0.0);
-        let color_label = Label::new("Color management")
+        let color_label = Label::new("色彩管理")
             .muted()
             .with_font_size(LABEL_FONT_SIZE)
             .with_padding(0.0, 0.0);
         let preview_scale_label = Label::new(format!(
-            "Preview resolution {}",
+            "预览分辨率 {}",
             preview_scale_label(draft.settings.preview.resolution_scale)
         ))
         .muted()
         .with_font_size(LABEL_FONT_SIZE)
         .with_padding(0.0, 0.0);
-        let name_input = TextInput::new("Sequence name").with_text(&draft.name).on_change(|name| {
+        let name_input = TextInput::new("序列名称").with_text(&draft.name).on_change(|name| {
             app_shell_sequence_settings_draft_changed_action(
                 SequenceSettingsDraftUpdatePayload::Name(name.into()),
             )
@@ -1088,9 +1087,9 @@ impl SequenceSettingsDialog {
             preview_render_format_dropdown,
             preview_scale_slider,
             preview_cache_checkbox,
-            cancel_button: Button::new("Cancel").on_click(app_shell_close_modal_action()),
+            cancel_button: Button::new("取消").on_click(app_shell_close_modal_action()),
             apply_button: AppIcon::Save
-                .text_button_or_label("Apply")
+                .text_button_or_label("应用")
                 .on_click(app_shell_confirm_sequence_settings_action()),
         }
     }
@@ -1125,7 +1124,7 @@ impl SequenceSettingsDialog {
             self.preview_render_format_dropdown = preview_render_format_dropdown_for(&self.draft);
             self.preview_scale_slider = preview_scale_slider_for(&self.draft);
             self.preview_scale_label = Label::new(format!(
-                "Preview resolution {}",
+                "预览分辨率 {}",
                 preview_scale_label(self.draft.settings.preview.resolution_scale)
             ))
             .muted()

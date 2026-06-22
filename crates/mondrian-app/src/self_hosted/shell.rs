@@ -89,7 +89,7 @@ struct PanelScrollState {
 /// File dialog filters for project file commands.
 pub fn project_file_filters() -> Vec<FileFilter> {
     vec![FileFilter::new(
-        "Mondrian Project",
+        "Mondrian 项目",
         vec![PROJECT_FILE_EXTENSION],
     )]
 }
@@ -97,8 +97,8 @@ pub fn project_file_filters() -> Vec<FileFilter> {
 /// File dialog filters for media import commands.
 pub fn media_import_filters() -> Vec<FileFilter> {
     vec![
-        FileFilter::new("Video", vec!["mp4", "mov", "mkv", "webm", "avi"]),
-        FileFilter::new("Audio", vec!["mp3", "wav", "aac", "flac", "m4a"]),
+        FileFilter::new("视频", vec!["mp4", "mov", "mkv", "webm", "avi"]),
+        FileFilter::new("音频", vec!["mp3", "wav", "aac", "flac", "m4a"]),
     ]
 }
 
@@ -245,23 +245,23 @@ fn status_bar_model(state: &AppState) -> StatusBarModel {
 
     let (message, is_error, is_busy) = if let Some(job) = active_jobs.first() {
         let message = match &job.status {
-            JobStatus::Pending => format!("Export queue processing ({})", active_jobs.len()),
+            JobStatus::Pending => format!("导出队列处理中（{}）", active_jobs.len()),
             JobStatus::Rendering { frame, total_frames } => format!(
-                "Exporting frame {}/{} (queue {})",
+                "正在导出帧 {}/{}（队列 {}）",
                 frame,
                 total_frames,
                 active_jobs.len()
             ),
-            JobStatus::Encoding => format!("Encoding (queue {})", active_jobs.len()),
-            _ => "Export processing".to_owned(),
+            JobStatus::Encoding => format!("正在编码（队列 {}）", active_jobs.len()),
+            _ => "导出处理中".to_owned(),
         };
         (message, false, true)
     } else if state.is_playing() && state.is_playback_buffering() {
-        ("Preview buffering...".to_owned(), false, true)
+        ("预览缓冲中...".to_owned(), false, true)
     } else if let Some((message, is_error)) = &state.status_hint {
         (message.clone(), *is_error, false)
     } else {
-        ("Ready".to_owned(), false, false)
+        ("就绪".to_owned(), false, false)
     };
 
     let context = state
@@ -275,7 +275,7 @@ fn status_bar_model(state: &AppState) -> StatusBarModel {
                 .and_then(|path| path.file_stem())
                 .map(|stem| stem.to_string_lossy().into_owned())
         })
-        .unwrap_or_else(|| "No project".to_owned());
+        .unwrap_or_else(|| "没有项目".to_owned());
 
     StatusBarModel { message, is_error, is_busy, context }
 }
@@ -285,11 +285,11 @@ pub fn export_output_filters(extension: &str) -> Vec<FileFilter> {
     let extension = normalized_export_extension(extension);
     if extension.is_empty() {
         vec![FileFilter::new(
-            "Media",
+            "媒体",
             vec!["mp4", "mov", "mkv", "gif", "mxf", "webm"],
         )]
     } else {
-        vec![FileFilter::new("Export", vec![extension])]
+        vec![FileFilter::new("导出", vec![extension])]
     }
 }
 
@@ -327,8 +327,8 @@ pub fn try_resolve_app_shell_action(
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_NEW_PROJECT_DIALOG =>
         {
             let path = platform.save_file_dialog(
-                "Create Mondrian Project",
-                &format!("Untitled.{PROJECT_FILE_EXTENSION}"),
+                "创建 Mondrian 项目",
+                &format!("未命名.{PROJECT_FILE_EXTENSION}"),
                 &project_file_filters(),
             );
             let Some(path) = path else {
@@ -343,7 +343,7 @@ pub fn try_resolve_app_shell_action(
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_OPEN_PROJECT_DIALOG =>
         {
             let Some(paths) =
-                platform.open_file_dialog("Open Mondrian Project", &project_file_filters())
+                platform.open_file_dialog("打开 Mondrian 项目", &project_file_filters())
             else {
                 return Ok(None);
             };
@@ -371,7 +371,7 @@ pub fn try_resolve_app_shell_action(
             } else {
                 serde_json::from_value(payload).map_err(|err| app_shell_action_error(&name, err))?
             };
-            let Some(paths) = platform.open_file_dialog("Import Media", &media_import_filters())
+            let Some(paths) = platform.open_file_dialog("导入媒体", &media_import_filters())
             else {
                 return Ok(None);
             };
@@ -399,7 +399,7 @@ pub fn try_resolve_app_shell_action(
         {
             let payload: AppShellRelinkAssetDialogPayload = serde_json::from_value(payload)
                 .map_err(|err| app_shell_action_error(&name, err))?;
-            let Some(paths) = platform.open_file_dialog("Relink Media", &media_import_filters())
+            let Some(paths) = platform.open_file_dialog("重新链接媒体", &media_import_filters())
             else {
                 return Ok(None);
             };
@@ -417,13 +417,9 @@ pub fn try_resolve_app_shell_action(
                 .and_then(|path| path.file_name())
                 .and_then(|name| name.to_str())
                 .map(str::to_string)
-                .unwrap_or_else(|| format!("untitled.{PROJECT_FILE_EXTENSION}"));
+                .unwrap_or_else(|| format!("未命名.{PROJECT_FILE_EXTENSION}"));
             Ok(platform
-                .save_file_dialog(
-                    "Save Mondrian Project As",
-                    &default_name,
-                    &project_file_filters(),
-                )
+                .save_file_dialog("另存 Mondrian 项目", &default_name, &project_file_filters())
                 .map(Action::SaveProjectAs))
         }
         Action::Custom { namespace, name, payload }
@@ -436,7 +432,7 @@ pub fn try_resolve_app_shell_action(
                 normalized_export_default_file_name(&payload.default_file_name, &extension);
             Ok(platform
                 .save_file_dialog(
-                    "Choose Export Output",
+                    "选择导出输出",
                     &default_name,
                     &export_output_filters(&extension),
                 )
@@ -487,7 +483,7 @@ fn window_title_for_app_state(state: &AppState) -> String {
         .and_then(|path| path.file_stem())
         .and_then(|name| name.to_str())
         .filter(|name| !name.trim().is_empty())
-        .unwrap_or("Untitled");
+        .unwrap_or("未命名");
     let sequence = state.sequence.as_ref().map(|sequence| sequence.name.as_str());
     match sequence {
         Some(sequence) if !sequence.trim().is_empty() => {
@@ -516,7 +512,7 @@ impl ViewerZoomMode {
 
     fn label(self) -> String {
         match self {
-            Self::Fit => "Fit".to_owned(),
+            Self::Fit => "适合".to_owned(),
             Self::Fixed(percent) => format!("{percent}%"),
         }
     }
@@ -1040,7 +1036,7 @@ impl SelfHostedAppRoot {
                     return Ok(None);
                 }
                 let Some(path) = platform.save_file_dialog(
-                    "Create Mondrian Project",
+                    "创建 Mondrian 项目",
                     &default_project_file_name(&draft.name),
                     &project_file_filters(),
                 ) else {
@@ -2179,10 +2175,10 @@ mod tests {
         let filters = media_import_filters();
 
         assert!(filters.iter().any(
-            |filter| filter.name == "Video" && filter.extensions.iter().any(|ext| ext == "mp4")
+            |filter| filter.name == "视频" && filter.extensions.iter().any(|ext| ext == "mp4")
         ));
         assert!(filters.iter().any(
-            |filter| filter.name == "Audio" && filter.extensions.iter().any(|ext| ext == "wav")
+            |filter| filter.name == "音频" && filter.extensions.iter().any(|ext| ext == "wav")
         ));
     }
 
@@ -2191,7 +2187,7 @@ mod tests {
         let filters = project_file_filters();
 
         assert_eq!(filters.len(), 1);
-        assert_eq!(filters[0].name, "Mondrian Project");
+        assert_eq!(filters[0].name, "Mondrian 项目");
         assert!(filters[0]
             .extensions
             .iter()
@@ -2203,7 +2199,7 @@ mod tests {
         let filters = export_output_filters(".MP4 ");
 
         assert_eq!(filters.len(), 1);
-        assert_eq!(filters[0].name, "Export");
+        assert_eq!(filters[0].name, "导出");
         assert_eq!(filters[0].extensions, vec!["mp4"]);
     }
 
@@ -2212,7 +2208,7 @@ mod tests {
         let filters = export_output_filters(" . ");
 
         assert_eq!(filters.len(), 1);
-        assert_eq!(filters[0].name, "Media");
+        assert_eq!(filters[0].name, "媒体");
         assert!(filters[0].extensions.iter().any(|extension| extension == "mp4"));
         assert!(filters[0].extensions.iter().any(|extension| extension == "gif"));
     }
@@ -2846,7 +2842,7 @@ mod tests {
             .expect("preferences dialog");
         assert!(dialog.model().project_status.contains("live.mdp"));
         assert!(dialog.model().sequence_summary.contains("Live"));
-        assert_eq!(dialog.model().proxy_mode, "Enabled");
+        assert_eq!(dialog.model().proxy_mode, "已启用");
     }
 
     #[test]
@@ -2873,7 +2869,7 @@ mod tests {
 
         let model = status_bar_model(&state);
 
-        assert_eq!(model.message, "Preview buffering...");
+        assert_eq!(model.message, "预览缓冲中...");
         assert!(!model.is_error);
         assert!(model.is_busy);
     }
@@ -3206,12 +3202,12 @@ mod tests {
         let first_menu_text = encoder
             .texts
             .iter()
-            .position(|text| text == "File")
+            .position(|text| text == "文件")
             .expect("menu bar should paint");
         let status_text = encoder
             .texts
             .iter()
-            .position(|text| text == "Ready")
+            .position(|text| text == "就绪")
             .expect("status bar should paint");
         assert!(
             first_menu_text > 0,
@@ -3239,7 +3235,7 @@ mod tests {
         let menu_text = encoder
             .texts
             .iter()
-            .position(|text| text == "File")
+            .position(|text| text == "文件")
             .expect("menu bar should paint");
         let modal_text = encoder
             .texts
@@ -3503,7 +3499,7 @@ mod tests {
         let mut root = SelfHostedAppRoot::from_app_state(&state);
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
 
-        assert_eq!(root.models.viewer.zoom_label, "Fit");
+        assert_eq!(root.models.viewer.zoom_label, "适合");
         let resolved = root
             .try_handle_shell_action(viewer_cycle_zoom_action(), &platform, None)
             .expect("cycle zoom");

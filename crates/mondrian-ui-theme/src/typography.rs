@@ -113,9 +113,9 @@ impl Default for TypographyTokens {
                 letter_spacing: 0.0,
             },
             tab_label: TextStyle {
-                font_size: 13.0,
-                line_height: 18.0,
-                font_weight: FontWeight::Medium,
+                font_size: 12.0,
+                line_height: 16.0,
+                font_weight: FontWeight::Regular,
                 letter_spacing: 0.0,
             },
         }

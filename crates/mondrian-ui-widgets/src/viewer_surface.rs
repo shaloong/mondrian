@@ -113,15 +113,15 @@ impl ViewerSurface {
         Self {
             id: WidgetId::new(),
             bounds: Rect::ZERO,
-            status: "No signal".into(),
+            status: "无信号".into(),
             status_tone: ViewerStatusTone::Neutral,
             resolution_label: String::new(),
             timecode_label: "00:00:00:00".into(),
             frame_label: "F0".into(),
             duration_label: String::new(),
-            zoom_label: "Fit".into(),
+            zoom_label: "适合".into(),
             zoom_scale: None,
-            preview_quality_label: "Full".into(),
+            preview_quality_label: "完整".into(),
             source_width: source_width.max(1),
             source_height: source_height.max(1),
             playing: false,
@@ -1181,8 +1181,8 @@ mod tests {
             .with_timecode_label("00:00:01:18")
             .with_frame_label("F42")
             .with_duration_label("240 frames")
-            .with_zoom_label("Fit")
-            .with_preview_quality_label("Full")
+            .with_zoom_label("适合")
+            .with_preview_quality_label("完整")
             .playing(true);
         viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
         let theme = ThemePreset::Dark.build();
@@ -1201,8 +1201,8 @@ mod tests {
         assert!(!encoder.texts.iter().any(|text| text.contains("1920x1080")));
         assert!(!encoder.texts.iter().any(|text| text.contains("F42")));
         assert!(!encoder.texts.iter().any(|text| text.contains("240 frames")));
-        assert!(encoder.texts.iter().any(|text| text.contains("Fit")));
-        assert!(encoder.texts.iter().any(|text| text.contains("Full")));
+        assert!(encoder.texts.iter().any(|text| text.contains("适合")));
+        assert!(encoder.texts.iter().any(|text| text.contains("完整")));
         assert!(!encoder
             .rect_colors
             .iter()
@@ -1234,7 +1234,7 @@ mod tests {
     fn disabled_empty_viewer_paints_empty_message_without_frame() {
         let mut viewer = ViewerSurface::new("Viewer", 16, 9)
             .with_status("No sequence")
-            .with_empty_message("No sequence loaded")
+            .with_empty_message("未载入序列")
             .disabled();
         viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
         let theme = ThemePreset::Dark.build();
@@ -1249,7 +1249,7 @@ mod tests {
 
         assert!(encoder.raster_images.is_empty());
         assert!(!encoder.texts.iter().any(|text| text == "No sequence"));
-        assert!(encoder.texts.iter().any(|text| text == "No sequence loaded"));
+        assert!(encoder.texts.iter().any(|text| text == "未载入序列"));
         assert_eq!(encoder.clip_pops, encoder.clips.len());
     }
 
@@ -1400,7 +1400,7 @@ mod tests {
     #[test]
     fn zoom_chip_dispatches_custom_action() {
         let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080)
-            .with_zoom_label("Fit")
+            .with_zoom_label("适合")
             .on_zoom(|| Action::SaveProject);
         viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
         let position = viewer.zoom_rect().center();
@@ -1440,7 +1440,7 @@ mod tests {
     #[test]
     fn optional_viewer_chips_without_actions_do_not_dispatch_noop() {
         let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080)
-            .with_zoom_label("Fit")
+            .with_zoom_label("适合")
             .with_preview_quality_label("50%");
         viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
         let actions = RefCell::new(Vec::<Action>::new());

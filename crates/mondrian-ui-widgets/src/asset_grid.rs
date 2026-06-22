@@ -1174,9 +1174,9 @@ impl AssetGrid {
     fn paint_empty_state(&self, ctx: &mut PaintContext) {
         let colors = &ctx.theme.colors;
         let message = if self.items.is_empty() {
-            "Drop media here or import files"
+            "将媒体拖到这里，或导入文件"
         } else {
-            "No matching assets"
+            "没有匹配的素材"
         };
         ctx.encoder.draw_text_box(
             message,

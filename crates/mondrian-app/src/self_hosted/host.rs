@@ -1168,11 +1168,13 @@ mod tests {
                 kind: PanelKind::Assets,
                 active_index: 1,
                 hidden_tabs: Vec::new(),
+                tabs: vec![PanelKind::Assets, PanelKind::Effects],
             }),
             second: Box::new(SelfHostedWorkspaceLayout::Panel {
                 kind: PanelKind::Viewer,
                 active_index: 0,
                 hidden_tabs: Vec::new(),
+                tabs: vec![PanelKind::Viewer],
             }),
         };
         let mut host = SelfHostedUiHost::new_with_preferences_path(

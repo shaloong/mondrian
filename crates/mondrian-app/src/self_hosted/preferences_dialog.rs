@@ -99,7 +99,7 @@ impl SelfHostedPreferencesModel {
             .current_project_path
             .as_ref()
             .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "No project open".to_owned());
+            .unwrap_or_else(|| "未打开项目".to_owned());
         let sequence_summary = state
             .sequence
             .as_ref()
@@ -112,7 +112,7 @@ impl SelfHostedPreferencesModel {
                     sequence.settings.frame_rate
                 )
             })
-            .unwrap_or_else(|| "No active sequence".to_owned());
+            .unwrap_or_else(|| "没有活动序列".to_owned());
         Self {
             theme_preset,
             theme_label: theme_preset.display_name().to_owned(),
@@ -124,11 +124,11 @@ impl SelfHostedPreferencesModel {
             audio_sample_rate: format!("{} Hz", state.audio_sample_rate),
             export_range: export_range_label(state.export_draft.range).to_owned(),
             export_output: if state.export_draft.output_path.trim().is_empty() {
-                "Not selected".to_owned()
+                "未选择".to_owned()
             } else {
                 state.export_draft.output_path.clone()
             },
-            runtime_diagnostics: "Tracing enabled".to_owned(),
+            runtime_diagnostics: "跟踪已启用".to_owned(),
             log_filter: format!("RUST_LOG / {DEFAULT_SELF_HOSTED_LOG_FILTER}"),
             background_workers: SELF_HOSTED_BACKGROUND_WORKERS.to_string(),
             shortcut_rows: shortcut_preference_rows(shortcut_overrides),
@@ -141,15 +141,15 @@ impl Default for SelfHostedPreferencesModel {
         Self {
             theme_preset: ThemePreset::Dark,
             theme_label: ThemePreset::Dark.display_name().to_owned(),
-            project_status: "No project open".to_owned(),
+            project_status: "未打开项目".to_owned(),
             workspace: WorkspacePreset::Editing.display_name().to_owned(),
-            sequence_summary: "No active sequence".to_owned(),
+            sequence_summary: "没有活动序列".to_owned(),
             proxy_mode: enabled_label(false),
             audio_clock: "AudioMaster".to_owned(),
             audio_sample_rate: "48000 Hz".to_owned(),
             export_range: export_range_label(TimelineExportRange::SequenceInOut).to_owned(),
-            export_output: "Not selected".to_owned(),
-            runtime_diagnostics: "Tracing enabled".to_owned(),
+            export_output: "未选择".to_owned(),
+            runtime_diagnostics: "跟踪已启用".to_owned(),
             log_filter: format!("RUST_LOG / {DEFAULT_SELF_HOSTED_LOG_FILTER}"),
             background_workers: SELF_HOSTED_BACKGROUND_WORKERS.to_string(),
             shortcut_rows: shortcut_preference_rows(&[]),
@@ -171,10 +171,10 @@ impl PreferencesDialogTab {
 
     fn label(self) -> &'static str {
         match self {
-            Self::General => "General",
-            Self::Media => "Media",
-            Self::Shortcuts => "Shortcuts",
-            Self::Developer => "Developer",
+            Self::General => "常规",
+            Self::Media => "媒体",
+            Self::Shortcuts => "快捷键",
+            Self::Developer => "开发者",
         }
     }
 
@@ -271,22 +271,20 @@ impl PreferencesDialog {
             shortcut_viewport: Rect::ZERO,
             shortcut_scroll_offset: 0.0,
             capturing_shortcut: None,
-            title_label: Label::new("Preferences")
+            title_label: Label::new("偏好设置")
                 .popover_foreground()
                 .with_font_size(TITLE_FONT_SIZE)
                 .with_padding(0.0, 0.0),
-            description_label: Label::new(
-                "Custom UI settings are grouped by editing surface and runtime behavior.",
-            )
-            .muted()
-            .with_font_size(BODY_FONT_SIZE)
-            .with_padding(0.0, 0.0)
-            .wrapped(),
+            description_label: Label::new("自研 UI 设置按编辑界面和运行时行为归类。")
+                .muted()
+                .with_font_size(BODY_FONT_SIZE)
+                .with_padding(0.0, 0.0)
+                .wrapped(),
             nav_buttons,
             theme_buttons,
             content_labels: Vec::new(),
             shortcut_buttons: Vec::new(),
-            close_button: Button::new("Done").on_click(app_shell_close_modal_action()),
+            close_button: Button::new("完成").on_click(app_shell_close_modal_action()),
         };
         dialog.rebuild_content();
         dialog
@@ -363,17 +361,17 @@ impl PreferencesDialog {
                 .map(|row| ShortcutPreferenceButtons {
                     id: row.id.clone(),
                     rebind: Button::new(if self.capturing_shortcut.as_deref() == Some(&row.id) {
-                        "Press key"
+                        "按下按键"
                     } else {
-                        "Rebind"
+                        "重设"
                     }),
                     rebind_bounds: Rect::ZERO,
-                    disable: Button::new("Disable")
+                    disable: Button::new("禁用")
                         .on_click(app_shell_preferences_shortcut_disabled_action(
                             row.id.clone(),
                         ))
                         .enabled(!row.disabled),
-                    reset: Button::new("Default")
+                    reset: Button::new("默认")
                         .on_click(app_shell_preferences_shortcut_reset_action(row.id.clone()))
                         .enabled(row.overridden),
                 })
@@ -873,7 +871,7 @@ fn shortcut_preference_rows(
                 || active_entry.is_none();
             let label = active_entry
                 .map(|shortcut| shortcut.label.clone())
-                .unwrap_or_else(|| "Disabled".to_owned());
+                .unwrap_or_else(|| "已禁用".to_owned());
             ShortcutPreferenceRow {
                 id: default.id.to_owned(),
                 label,
@@ -943,61 +941,55 @@ fn content_rows_for_tab(
 ) -> Vec<ContentRow> {
     match tab {
         PreferencesDialogTab::General => vec![
-            heading("Appearance"),
-            detail(format!("Theme: {}", model.theme_label)),
-            heading("Workspace"),
-            detail(format!("Active workspace: {}", model.workspace)),
-            heading("Project"),
-            detail(format!("Project: {}", model.project_status)),
-            detail(format!("Sequence: {}", model.sequence_summary)),
+            heading("外观"),
+            detail(format!("主题：{}", model.theme_label)),
+            heading("工作区"),
+            detail(format!("当前工作区：{}", model.workspace)),
+            heading("项目"),
+            detail(format!("项目：{}", model.project_status)),
+            detail(format!("序列：{}", model.sequence_summary)),
         ],
         PreferencesDialogTab::Media => vec![
-            heading("Preview"),
-            detail(format!("Auto proxy: {}", model.proxy_mode)),
-            heading("Audio"),
-            detail(format!("Clock: {}", model.audio_clock)),
-            detail(format!("Sample rate: {}", model.audio_sample_rate)),
-            heading("Export draft"),
-            detail(format!("Range: {}", model.export_range)),
-            detail(format!("Output: {}", model.export_output)),
+            heading("预览"),
+            detail(format!("自动代理：{}", model.proxy_mode)),
+            heading("音频"),
+            detail(format!("时钟：{}", model.audio_clock)),
+            detail(format!("采样率：{}", model.audio_sample_rate)),
+            heading("导出草稿"),
+            detail(format!("范围：{}", model.export_range)),
+            detail(format!("输出：{}", model.export_output)),
         ],
         PreferencesDialogTab::Shortcuts => {
-            let mut rows = vec![
-                heading("Self-hosted shortcuts"),
-                detail("Active command bindings"),
-            ];
+            let mut rows = vec![heading("自研 UI 快捷键"), detail("当前命令绑定")];
             rows.extend(model.shortcut_rows.iter().map(|row| {
                 let suffix = if row.disabled || row.overridden {
-                    format!("default {}", row.default_label)
+                    format!("默认 {}", row.default_label)
                 } else {
-                    "default".to_owned()
+                    "默认".to_owned()
                 };
                 detail(format!("{}  ·  {}  ·  {}", row.label, row.action, suffix))
             }));
             rows
         }
         PreferencesDialogTab::Developer => vec![
-            heading("Diagnostics"),
-            detail(format!(
-                "Runtime diagnostics: {}",
-                model.runtime_diagnostics
-            )),
-            detail(format!("Log filter: {}", model.log_filter)),
-            heading("Runtime"),
-            detail(format!("Background workers: {}", model.background_workers)),
+            heading("诊断"),
+            detail(format!("运行时诊断：{}", model.runtime_diagnostics)),
+            detail(format!("日志过滤：{}", model.log_filter)),
+            heading("运行时"),
+            detail(format!("后台工作线程：{}", model.background_workers)),
         ],
     }
 }
 
 fn enabled_label(enabled: bool) -> String {
-    if enabled { "Enabled" } else { "Disabled" }.to_owned()
+    if enabled { "已启用" } else { "已禁用" }.to_owned()
 }
 
 fn export_range_label(range: TimelineExportRange) -> &'static str {
     match range {
-        TimelineExportRange::EntireSequence => "Entire sequence",
-        TimelineExportRange::SequenceInOut => "Sequence in/out",
-        TimelineExportRange::WorkArea { .. } => "Work area",
+        TimelineExportRange::EntireSequence => "整个序列",
+        TimelineExportRange::SequenceInOut => "序列入点/出点",
+        TimelineExportRange::WorkArea { .. } => "工作区域",
     }
 }
 
@@ -1084,7 +1076,7 @@ mod tests {
             .iter()
             .find(|row| row.id == "panel.inspector")
             .expect("inspector shortcut row");
-        assert_eq!(inspector.label, "Disabled");
+        assert_eq!(inspector.label, "已禁用");
         assert!(inspector.disabled);
         assert!(inspector.overridden);
         assert!(model
@@ -1126,7 +1118,7 @@ mod tests {
         assert_eq!(save.label, "Ctrl+O");
         assert!(!save.disabled);
         assert!(save.overridden);
-        assert_eq!(open.label, "Disabled");
+        assert_eq!(open.label, "已禁用");
         assert!(open.disabled);
         assert!(!open.overridden);
     }
@@ -1381,8 +1373,8 @@ mod tests {
         assert_eq!(model.theme_label, ThemePreset::Light.display_name());
         assert!(model.project_status.contains("edit.mdp"));
         assert!(model.sequence_summary.contains("Cut"));
-        assert_eq!(model.proxy_mode, "Enabled");
-        assert_eq!(model.export_range, "Entire sequence");
+        assert_eq!(model.proxy_mode, "已启用");
+        assert_eq!(model.export_range, "整个序列");
         assert_eq!(model.export_output, "E:/renders/cut.mp4");
     }
 

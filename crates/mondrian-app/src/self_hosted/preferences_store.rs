@@ -184,11 +184,16 @@ mod tests {
                     kind: mondrian_editor_state::state::PanelKind::Assets,
                     active_index: 1,
                     hidden_tabs: Vec::new(),
+                    tabs: vec![
+                        mondrian_editor_state::state::PanelKind::Assets,
+                        mondrian_editor_state::state::PanelKind::Effects,
+                    ],
                 }),
                 second: Box::new(SelfHostedWorkspaceLayout::Panel {
                     kind: mondrian_editor_state::state::PanelKind::Viewer,
                     active_index: 0,
                     hidden_tabs: Vec::new(),
+                    tabs: vec![mondrian_editor_state::state::PanelKind::Viewer],
                 }),
             }),
         };
@@ -220,11 +225,13 @@ mod tests {
                         kind: mondrian_editor_state::state::PanelKind::Assets,
                         active_index: 99,
                         hidden_tabs: Vec::new(),
+                        tabs: Vec::new(),
                     }),
                     second: Box::new(SelfHostedWorkspaceLayout::Panel {
                         kind: mondrian_editor_state::state::PanelKind::Timeline,
                         active_index: 2,
                         hidden_tabs: Vec::new(),
+                        tabs: Vec::new(),
                     }),
                 }),
             })
@@ -244,11 +251,16 @@ mod tests {
                     kind: mondrian_editor_state::state::PanelKind::Assets,
                     active_index: 1,
                     hidden_tabs: Vec::new(),
+                    tabs: vec![
+                        mondrian_editor_state::state::PanelKind::Assets,
+                        mondrian_editor_state::state::PanelKind::Effects,
+                    ],
                 }),
                 second: Box::new(SelfHostedWorkspaceLayout::Panel {
                     kind: mondrian_editor_state::state::PanelKind::Timeline,
                     active_index: 0,
                     hidden_tabs: Vec::new(),
+                    tabs: vec![mondrian_editor_state::state::PanelKind::Timeline],
                 }),
             })
         );

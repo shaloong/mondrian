@@ -8,7 +8,7 @@ use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
 use crate::paint::{color_with_alpha, mix_color};
-use crate::text_metrics::centered_text_x;
+use crate::text_metrics::{centered_text_x, measure_single_line};
 
 /// 单个 Tab 的信息
 #[derive(Debug, Clone)]
@@ -26,6 +26,8 @@ pub struct DockTabBar {
     hovered_tab: Option<usize>,
     bar_height: f32,
     tab_min_width: f32,
+    tab_max_width: f32,
+    tab_padding_x: f32,
 }
 
 impl DockTabBar {
@@ -35,8 +37,10 @@ impl DockTabBar {
             tabs,
             bounds: Rect::ZERO,
             hovered_tab: None,
-            bar_height: 32.0,
-            tab_min_width: 80.0,
+            bar_height: 26.0,
+            tab_min_width: 40.0,
+            tab_max_width: 148.0,
+            tab_padding_x: 18.0,
         }
     }
 
@@ -52,6 +56,14 @@ impl DockTabBar {
         self.tabs.len()
     }
 
+    pub fn active_panel_kind(&self) -> Option<PanelKind> {
+        self.tabs.get(self.active_index()).and_then(|tab| tab.panel_kind)
+    }
+
+    pub fn tab_panel_kinds(&self) -> Vec<PanelKind> {
+        self.tabs.iter().filter_map(|tab| tab.panel_kind).collect()
+    }
+
     pub fn set_active(&mut self, index: usize) {
         for (i, tab) in self.tabs.iter_mut().enumerate() {
             tab.active = i == index;
@@ -59,30 +71,38 @@ impl DockTabBar {
     }
 
     fn tab_rects(&self) -> Vec<Rect> {
-        if self.tabs.len() == 1 {
-            let tab = &self.tabs[0];
-            let label_width = tab.label.chars().count() as f32 * 7.0;
-            let tab_w = (label_width + 28.0).clamp(72.0, self.bounds.width.max(0.0));
-            return vec![Rect::new(
-                self.bounds.x + 6.0,
-                self.bounds.y,
-                tab_w,
-                self.bar_height,
-            )];
+        if self.tabs.is_empty() {
+            return Vec::new();
         }
 
-        let n = self.tabs.len().max(1);
-        let tab_w = (self.bounds.width / n as f32).max(self.tab_min_width);
+        let font_size = 12.0;
+        let available = self.bounds.width.max(0.0);
+        let desired = self
+            .tabs
+            .iter()
+            .map(|tab| {
+                let label_width = measure_single_line(&tab.label, font_size).0;
+                (label_width + self.tab_padding_x * 2.0)
+                    .clamp(self.tab_min_width, self.tab_max_width)
+            })
+            .collect::<Vec<_>>();
+        let desired_total: f32 = desired.iter().sum();
+        let scale = if desired_total > available && desired_total > 0.0 {
+            (available / desired_total).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+
+        let mut x = self.bounds.x;
         self.tabs
             .iter()
             .enumerate()
             .map(|(i, _)| {
-                Rect::new(
-                    self.bounds.x + i as f32 * tab_w,
-                    self.bounds.y,
-                    tab_w,
-                    self.bar_height,
-                )
+                let remaining = (self.bounds.x + available - x).max(0.0);
+                let width = (desired[i] * scale).min(remaining);
+                let rect = Rect::new(x, self.bounds.y, width, self.bar_height);
+                x += width;
+                rect
             })
             .collect()
     }
@@ -148,7 +168,7 @@ impl Widget for DockTabBar {
             let is_active = tab.active;
             let is_hovered = self.hovered_tab == Some(i);
 
-            let inset = r.inset(3.0, 3.0);
+            let inset = r.inset(2.0, 3.0);
             if is_hovered {
                 ctx.encoder.draw_rect(
                     inset,
@@ -319,10 +339,10 @@ mod tests {
         let mut t = DummyTooltip;
         let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
 
-        // Click at x=140 which should be in the second tab (each tab ~100px)
+        // Click inside the second content-sized tab.
         let r = bar.event(
             &UiEvent::MouseDown {
-                position: Point::new(140.0, 15.0),
+                position: Point::new(60.0, 13.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -368,7 +388,7 @@ mod tests {
 
         bar.event(
             &UiEvent::MouseMove {
-                position: Point::new(50.0, 15.0),
+                position: Point::new(10.0, 13.0),
                 modifiers: Modifiers::none(),
             },
             &mut ctx,
@@ -433,8 +453,8 @@ mod tests {
         assert_eq!(
             encoder.clips,
             vec![
-                Rect::new(3.0, 3.0, 74.0, 26.0),
-                Rect::new(83.0, 3.0, 74.0, 26.0)
+                Rect::new(2.0, 3.0, 101.24535, 20.0),
+                Rect::new(107.24535, 3.0, 50.754646, 20.0)
             ]
         );
         assert_eq!(encoder.clip_pops, 2);

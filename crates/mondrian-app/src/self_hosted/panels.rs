@@ -320,14 +320,14 @@ impl AssetGridModel {
                 "Assets",
                 vec![asset_empty_item(
                     "asset-library-disconnected",
-                    "No project library",
-                    "Open or create a project to browse assets",
+                    "没有项目素材库",
+                    "打开或创建项目后浏览素材",
                     colors.muted_foreground,
                     AppIcon::Folder,
                 )],
             )
-            .with_subtitle("Project library")
-            .with_filter_placeholder("Search assets");
+            .with_subtitle("项目素材库")
+            .with_filter_placeholder("搜索素材");
         };
 
         let folders = match library.list_folders() {
@@ -337,14 +337,14 @@ impl AssetGridModel {
                     "Assets",
                     vec![asset_empty_item(
                         "asset-library-error",
-                        "Asset library unavailable",
+                        "素材库不可用",
                         err.to_string(),
                         colors.error,
                         AppIcon::Warning,
                     )],
                 )
-                .with_subtitle("Project library")
-                .with_filter_placeholder("Search assets");
+                .with_subtitle("项目素材库")
+                .with_filter_placeholder("搜索素材");
             }
         };
         let assets = match library.list_assets() {
@@ -354,22 +354,22 @@ impl AssetGridModel {
                     "Assets",
                     vec![asset_empty_item(
                         "asset-library-error",
-                        "Asset library unavailable",
+                        "素材库不可用",
                         err.to_string(),
                         colors.error,
                         AppIcon::Warning,
                     )],
                 )
-                .with_subtitle("Project library")
-                .with_filter_placeholder("Search assets");
+                .with_subtitle("项目素材库")
+                .with_filter_placeholder("搜索素材");
             }
         };
 
         let current_folder =
             current_folder_id.and_then(|id| folders.iter().find(|folder| folder.id == id));
         let subtitle = current_folder
-            .map(|folder| format!("Project library / {}", folder.name))
-            .unwrap_or_else(|| "Project library".to_owned());
+            .map(|folder| format!("项目素材库 / {}", folder.name))
+            .unwrap_or_else(|| "项目素材库".to_owned());
         let current_folder_id = current_folder.map(|folder| folder.id.clone());
         let items = asset_grid_items_from_library_records(
             &folders,
@@ -381,14 +381,14 @@ impl AssetGridModel {
         if items.is_empty() {
             return AssetGridModel::new("Assets", Vec::new())
                 .with_subtitle(subtitle)
-                .with_filter_placeholder("Search assets")
+                .with_filter_placeholder("搜索素材")
                 .accepts_file_drop(true)
                 .with_current_folder_id(current_folder_id);
         }
 
         AssetGridModel::new("Assets", items)
             .with_subtitle(subtitle)
-            .with_filter_placeholder("Search assets")
+            .with_filter_placeholder("搜索素材")
             .accepts_file_drop(true)
             .with_current_folder_id(current_folder_id)
     }
@@ -428,10 +428,10 @@ impl PanelListModel {
         let target = state.primary_selected_clip().filter(|selection| selection.is_video_track);
         let apply_blocker = match target {
             Some(selection) if selected_clip_track_is_locked(state, selection) => {
-                Some("Selected clip track is locked")
+                Some("所选剪辑所在轨道已锁定")
             }
             Some(_) => None,
-            None => Some("Select a video clip to apply effects"),
+            None => Some("选择视频剪辑后应用效果"),
         };
         let action_target = if apply_blocker.is_none() {
             target
@@ -444,8 +444,7 @@ impl PanelListModel {
     /// Build the visible effect browser from the shared effect registry.
     pub fn from_effect_registry(selected_clip: Option<SelectedClipRef>) -> Self {
         let effect_target = selected_clip.filter(|selection| selection.is_video_track);
-        let apply_blocker =
-            effect_target.is_none().then_some("Select a video clip to apply effects");
+        let apply_blocker = effect_target.is_none().then_some("选择视频剪辑后应用效果");
         Self::effect_registry_model(effect_target, apply_blocker)
     }
 
@@ -456,8 +455,8 @@ impl PanelListModel {
         let effects = effect_library_types();
         let items = if effects.is_empty() {
             vec![with_app_icon(
-                PanelListItem::new("No effects available")
-                    .with_subtitle("Effect registry is empty")
+                PanelListItem::new("没有可用效果")
+                    .with_subtitle("效果注册表为空")
                     .disabled(true),
                 AppIcon::Effect,
             )]
@@ -486,8 +485,8 @@ impl PanelListModel {
         };
 
         PanelListModel::new("Effects", items)
-            .with_subtitle(apply_blocker.unwrap_or("Effect browser"))
-            .with_filter_placeholder("Search effects")
+            .with_subtitle(apply_blocker.unwrap_or("效果浏览器"))
+            .with_filter_placeholder("搜索效果")
     }
 }
 
@@ -543,9 +542,9 @@ impl ViewerPanelModel {
         Self {
             title: sequence.name.clone(),
             status: if state.is_playing() {
-                "Playing".into()
+                "播放中".into()
             } else {
-                "Ready".into()
+                "就绪".into()
             },
             status_tone: if state.is_playing() {
                 ViewerStatusTone::Accent
@@ -558,8 +557,8 @@ impl ViewerPanelModel {
             ),
             timecode_label,
             frame_label: format!("F{current_frame}"),
-            duration_label: format!("{duration_frame} frames"),
-            zoom_label: "Fit".into(),
+            duration_label: format!("{duration_frame} 帧"),
+            zoom_label: "适合".into(),
             zoom_scale: None,
             preview_quality_label,
             preview_resolution_scale,
@@ -575,23 +574,23 @@ impl ViewerPanelModel {
     /// Empty viewer shown before a sequence is open.
     pub fn empty() -> Self {
         Self {
-            title: "Viewer".into(),
-            status: "No sequence".into(),
+            title: "预览".into(),
+            status: "没有序列".into(),
             status_tone: ViewerStatusTone::Neutral,
-            resolution_label: "No signal".into(),
+            resolution_label: "无信号".into(),
             timecode_label: "00:00:00:00".into(),
             frame_label: "F0".into(),
             duration_label: String::new(),
-            zoom_label: "Fit".into(),
+            zoom_label: "适合".into(),
             zoom_scale: None,
-            preview_quality_label: "Full".into(),
+            preview_quality_label: "完整".into(),
             preview_resolution_scale: 1.0,
             width: 16,
             height: 9,
             playing: false,
             enabled: false,
             frame_image: None,
-            empty_message: Some("No sequence loaded".into()),
+            empty_message: Some("未载入序列".into()),
         }
     }
 }
@@ -599,7 +598,7 @@ impl ViewerPanelModel {
 fn viewer_preview_quality_label(scale: f32) -> String {
     let scale = normalize_preview_resolution_scale(scale);
     if (scale - 1.0).abs() <= f32::EPSILON {
-        "Full".into()
+        "完整".into()
     } else {
         preview_scale_percent_label(scale)
     }
@@ -748,8 +747,7 @@ impl TimelinePanelModel {
             nested_sequence_refs.push(nested_ids);
             tracks.push(track);
         }
-        let empty_message =
-            tracks.is_empty().then(|| "No tracks in the current sequence".to_owned());
+        let empty_message = tracks.is_empty().then(|| "当前序列没有轨道".to_owned());
         Self {
             tracks,
             playhead_frame: sequence.playhead.frame.max(0),
@@ -772,7 +770,7 @@ impl TimelinePanelModel {
             in_point_frame: 0,
             out_point_frame: None,
             enabled: false,
-            empty_message: Some("No sequence loaded".into()),
+            empty_message: Some("未载入序列".into()),
             edit_availability: Some(TimelineEditAvailability::from_app_state(&AppState::new())),
             track_refs: Vec::new(),
             clip_refs: Vec::new(),
@@ -1002,8 +1000,7 @@ impl InspectorPanelModel {
                     .then_some(selection.effect_id)
             }),
             is_editable,
-            edit_disabled_reason: (!is_editable)
-                .then(|| "Selected clip track is locked".to_owned()),
+            edit_disabled_reason: (!is_editable).then(|| "所选剪辑所在轨道已锁定".to_owned()),
             enabled: !clip.is_disabled,
             opacity,
             tint: clip
@@ -1050,7 +1047,7 @@ impl InspectorPanelModel {
     pub fn empty() -> Self {
         Self {
             selected_clip: None,
-            empty_message: Some("Select a clip to inspect properties".into()),
+            empty_message: Some("选择剪辑以检查属性".into()),
             selected_effect_id: None,
             is_editable: false,
             edit_disabled_reason: None,
@@ -1100,7 +1097,7 @@ impl InspectorPanelModel {
     }
 }
 
-/// Export panel data independent from a concrete widget tree.
+/// 导出 panel data independent from a concrete widget tree.
 #[derive(Debug, Clone)]
 pub struct ExportPanelModel {
     pub queue_count: usize,
@@ -1182,7 +1179,7 @@ impl NodeGraphPanelModel {
         let selected_effect_id = state.primary_selected_effect().and_then(|selection| {
             (selection.clip.clip_id == selected_clip.clip_id).then_some(selection.effect_id)
         });
-        let mut nodes = vec![NodeGraphNode::new("source", "Source")
+        let mut nodes = vec![NodeGraphNode::new("source", "源")
             .with_subtitle(clip_source_subtitle(clip))
             .with_accent(current_theme().colors.node_source)
             .disabled(clip.is_disabled)];
@@ -1214,8 +1211,8 @@ impl NodeGraphPanelModel {
         }
 
         nodes.push(
-            NodeGraphNode::new("output", "Output")
-                .with_subtitle("Composite")
+            NodeGraphNode::new("output", "输出")
+                .with_subtitle("合成")
                 .with_accent(current_theme().colors.node_output),
         );
         node_targets.push(NodeGraphNodeTarget {
@@ -1225,8 +1222,8 @@ impl NodeGraphPanelModel {
         edges.push(NodeGraphEdge::new(previous_id, "output"));
 
         Self {
-            title: "Node Graph".to_owned(),
-            subtitle: format!("{clip_label} / {} effect(s)", clip.effects.len()),
+            title: "节点图".to_owned(),
+            subtitle: format!("{clip_label} / {} 个效果", clip.effects.len()),
             selected_clip: Some(selected_clip),
             nodes,
             edges,
@@ -1239,8 +1236,8 @@ impl NodeGraphPanelModel {
 
     pub fn empty() -> Self {
         Self {
-            title: "Node Graph".to_owned(),
-            subtitle: "Select a clip to inspect its render chain".to_owned(),
+            title: "节点图".to_owned(),
+            subtitle: "选择剪辑以检查渲染链".to_owned(),
             selected_clip: None,
             nodes: Vec::new(),
             edges: Vec::new(),
@@ -1337,18 +1334,18 @@ impl ExportPanelModel {
     fn readiness_status(&self) -> String {
         if let Some((message, is_error)) = &self.status {
             if *is_error {
-                return format!("Error: {message}");
+                return format!("错误：{message}");
             }
             return message.clone();
         }
         if self.selected_sequence_id.is_none() {
-            "Open or select a sequence before exporting".to_owned()
+            "导出前请打开或选择序列".to_owned()
         } else if self.selected_preset().is_none() {
-            "No export preset available".to_owned()
+            "没有可用导出预设".to_owned()
         } else if self.output_path.trim().is_empty() {
-            "Choose an output path to enable queueing".to_owned()
+            "选择输出路径后即可加入队列".to_owned()
         } else {
-            "Ready".to_owned()
+            "就绪".to_owned()
         }
     }
 
@@ -1424,8 +1421,13 @@ fn dock_widget_from_layout(
                 dock_widget_from_layout(models, second),
             ))
         }
-        SelfHostedWorkspaceLayout::Panel { kind, active_index, hidden_tabs } => {
-            let mut panel = slot_with_hidden_tabs(*kind, models, hidden_tabs);
+        SelfHostedWorkspaceLayout::Panel { kind, active_index, hidden_tabs, tabs } => {
+            let tab_kinds = if tabs.is_empty() {
+                visible_tabs_for_slot(*kind, hidden_tabs)
+            } else {
+                tabs.clone()
+            };
+            let mut panel = slot_with_tabs(tab_kinds, models);
             if let Some(panel) =
                 panel.as_mut().as_any_mut().and_then(|any| any.downcast_mut::<DockPanel>())
             {
@@ -1544,60 +1546,46 @@ fn slot_with_hidden_tabs(
     models: SelfHostedPanelModels,
     hidden_tabs: &[PanelKind],
 ) -> Box<dyn Widget> {
-    if kind == PanelKind::Inspector {
-        let inspector = models.inspector.clone();
-        return Box::new(DockPanel::new(
-            kind,
-            single_tab(kind),
-            move |_kind, _active| {
-                Box::new(ScrollView::new(Some(Box::new(inspector_panel(&inspector)))))
-            },
-        ));
-    }
-
-    if kind == PanelKind::Assets {
-        let tabs = asset_browser_tabs()
-            .into_iter()
-            .filter(|tab| tab.panel_kind.is_none_or(|panel| !hidden_tabs.contains(&panel)))
-            .collect();
-        return Box::new(DockPanel::new(kind, tabs, move |_kind, active| {
-            let active_kind = if active == 1 {
-                PanelKind::Effects
-            } else {
-                PanelKind::Assets
-            };
-            panel_content_for_slot(active_kind, &models)
-        }));
-    }
-
-    Box::new(DockPanel::new(
-        kind,
-        single_tab(kind),
-        move |kind, _active| panel_content_for_slot(kind, &models),
-    ))
+    slot_with_tabs(visible_tabs_for_slot(kind, hidden_tabs), models)
 }
 
-fn single_tab(kind: PanelKind) -> Vec<TabInfo> {
-    vec![TabInfo {
-        label: kind.display_name().to_string(),
-        active: true,
-        panel_kind: Some(kind),
-    }]
+fn slot_with_tabs(mut tab_kinds: Vec<PanelKind>, models: SelfHostedPanelModels) -> Box<dyn Widget> {
+    if tab_kinds.is_empty() {
+        tab_kinds.push(PanelKind::Viewer);
+    }
+    let owner = tab_kinds[0];
+    let tabs = tab_kinds
+        .iter()
+        .enumerate()
+        .map(|(index, kind)| TabInfo {
+            label: kind.display_name().to_string(),
+            active: index == 0,
+            panel_kind: Some(*kind),
+        })
+        .collect();
+    Box::new(DockPanel::new(owner, tabs, move |kind, _active| {
+        panel_content_for_slot(kind, &models)
+    }))
 }
 
-fn asset_browser_tabs() -> Vec<TabInfo> {
-    vec![
-        TabInfo {
-            label: "Assets".into(),
-            active: true,
-            panel_kind: Some(PanelKind::Assets),
-        },
-        TabInfo {
-            label: "Effects".into(),
-            active: false,
-            panel_kind: Some(PanelKind::Effects),
-        },
-    ]
+fn visible_tabs_for_slot(kind: PanelKind, hidden_tabs: &[PanelKind]) -> Vec<PanelKind> {
+    default_tabs_for_slot(kind)
+        .iter()
+        .copied()
+        .filter(|tab| *tab == kind || !hidden_tabs.contains(tab))
+        .collect()
+}
+
+fn default_tabs_for_slot(kind: PanelKind) -> &'static [PanelKind] {
+    match kind {
+        PanelKind::Assets => &[PanelKind::Assets, PanelKind::Effects],
+        PanelKind::Viewer => &[PanelKind::Viewer],
+        PanelKind::Timeline => &[PanelKind::Timeline],
+        PanelKind::Inspector => &[PanelKind::Inspector],
+        PanelKind::Effects => &[PanelKind::Effects],
+        PanelKind::NodeGraph => &[PanelKind::NodeGraph],
+        PanelKind::Export => &[PanelKind::Export],
+    }
 }
 
 fn panel_content_for_slot(kind: PanelKind, models: &SelfHostedPanelModels) -> Box<dyn Widget> {
@@ -1867,7 +1855,7 @@ fn asset_grid_asset_context_menu_items(asset: &AssetRecord, proxy_mode: bool) ->
     if asset_has_file_manager_target(asset) {
         items.push(asset_menu_item(
             MenuItem::new(
-                "Reveal in File Manager",
+                "在文件管理器中显示",
                 app_shell_reveal_in_file_manager_action(AppShellRevealInFileManagerPayload {
                     path: asset.path.clone(),
                 }),
@@ -1877,7 +1865,7 @@ fn asset_grid_asset_context_menu_items(asset: &AssetRecord, proxy_mode: bool) ->
         if asset_is_offline(asset) {
             items.push(asset_menu_item(
                 MenuItem::new(
-                    "Relink Media...",
+                    "重新链接媒体...",
                     app_shell_relink_asset_dialog_action(AppShellRelinkAssetDialogPayload {
                         asset_id: asset.id,
                     }),
@@ -1886,9 +1874,9 @@ fn asset_grid_asset_context_menu_items(asset: &AssetRecord, proxy_mode: bool) ->
             ));
         } else if matches!(asset.kind, AssetKind::Video) {
             let (label, enabled) = if proxy_mode {
-                ("Disable Proxy Mode", false)
+                ("关闭代理模式", false)
             } else {
-                ("Enable Proxy Mode", true)
+                ("启用代理模式", true)
             };
             items.push(asset_menu_item(
                 MenuItem::new(
@@ -1905,7 +1893,7 @@ fn asset_grid_asset_context_menu_items(asset: &AssetRecord, proxy_mode: bool) ->
     }
     items.push(asset_menu_item(
         MenuItem::new(
-            "Delete asset",
+            "删除素材",
             assets_delete_asset_action(AssetsDeleteAssetPayload { asset_id: asset.id }),
         ),
         AppIcon::Trash,
@@ -2003,7 +1991,7 @@ fn asset_grid_item_from_folder(folder: &FolderRecord, item_count: usize) -> Asse
         }))
         .with_context_menu(vec![asset_menu_item(
             MenuItem::new(
-                "Delete folder",
+                "删除文件夹",
                 assets_delete_folder_action(AssetsDeleteFolderPayload { folder_id }),
             ),
             AppIcon::Trash,
@@ -2350,7 +2338,7 @@ fn asset_grid_context_menu_items(current_folder_id: Option<&str>) -> Vec<MenuIte
     vec![
         asset_menu_item(
             MenuItem::new(
-                "Import media...",
+                "导入媒体...",
                 app_shell_import_media_dialog_action_with_target(ImportMediaDialogPayload {
                     folder_id: current_folder_id.map(str::to_owned),
                 }),
@@ -2360,7 +2348,7 @@ fn asset_grid_context_menu_items(current_folder_id: Option<&str>) -> Vec<MenuIte
         MenuItem::separator(),
         asset_menu_item(
             MenuItem::new(
-                "New adjustment layer",
+                "新建调整图层",
                 assets_create_adjustment_layer_action(AssetsCreateAssetPayload {
                     folder_id: current_folder_id.map(str::to_owned),
                 }),
@@ -2369,7 +2357,7 @@ fn asset_grid_context_menu_items(current_folder_id: Option<&str>) -> Vec<MenuIte
         ),
         asset_menu_item(
             MenuItem::new(
-                "New solid color",
+                "新建纯色",
                 assets_create_solid_color_action(AssetsCreateAssetPayload {
                     folder_id: current_folder_id.map(str::to_owned),
                 }),
@@ -2378,7 +2366,7 @@ fn asset_grid_context_menu_items(current_folder_id: Option<&str>) -> Vec<MenuIte
         ),
         asset_menu_item(
             MenuItem::new(
-                "New folder",
+                "新建文件夹",
                 assets_create_folder_action(AssetsCreateFolderPayload {
                     parent_folder_id: current_folder_id.map(str::to_owned),
                 }),
@@ -2436,7 +2424,7 @@ fn demo_asset_model() -> AssetGridModel {
         ],
     )
     .with_subtitle("Project library")
-    .with_filter_placeholder("Search assets")
+    .with_filter_placeholder("搜索素材")
     .accepts_file_drop(true)
 }
 
@@ -2780,7 +2768,7 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
     let selected_sequence = model.selected_sequence();
     let sequence_label = selected_sequence
         .map(|sequence| sequence.name.clone())
-        .unwrap_or_else(|| "No sequence".to_owned());
+        .unwrap_or_else(|| "没有序列".to_owned());
     let sequence_items = model
         .sequences
         .iter()
@@ -2825,7 +2813,7 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
             },
         ))
         .enabled(can_choose_output);
-    let output_input = TextInput::new("Output path")
+    let output_input = TextInput::new("输出路径")
         .with_text(model.output_path.clone())
         .enabled(can_choose_output)
         .on_change(|text| {
@@ -2849,18 +2837,18 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
     let sequence_summary = selected_sequence
         .map(|sequence| {
             format!(
-                "Timeline render (V{} / A{})",
+                "时间线渲染（V{} / A{}）",
                 sequence.video_clips, sequence.audio_clips
             )
         })
         .unwrap_or_else(|| "No exportable sequence".to_owned());
     let status_text = model.readiness_status();
 
-    let mut queue_section = PropertySection::new("Queue");
+    let mut queue_section = PropertySection::new("队列");
     if model.jobs.is_empty() {
         queue_section = queue_section.with_row(PropertyRow::new(
             "Jobs",
-            Box::new(Label::new("No jobs queued").muted()),
+            Box::new(Label::new("没有排队任务").muted()),
         ));
     } else {
         for job in &model.jobs {
@@ -2870,11 +2858,11 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
             queue_section.with_row(PropertyRow::new("", Box::new(clear_completed_button)));
     }
 
-    PropertyPanel::new("Export")
+    PropertyPanel::new("导出")
         .with_subtitle(format!("{} queued job(s)", model.queue_count))
         .with_section(
-            PropertySection::new("Preset")
-                .with_row(PropertyRow::new("Preset", Box::new(preset_dropdown)))
+            PropertySection::new("预设")
+                .with_row(PropertyRow::new("预设", Box::new(preset_dropdown)))
                 .with_row(
                     PropertyRow::new(
                         "Details",
@@ -2886,17 +2874,17 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
                 ),
         )
         .with_section(
-            PropertySection::new("Input")
-                .with_row(PropertyRow::new("Sequence", Box::new(sequence_dropdown)))
+            PropertySection::new("输入")
+                .with_row(PropertyRow::new("序列", Box::new(sequence_dropdown)))
                 .with_row(PropertyRow::new(
                     "Summary",
                     Box::new(Label::new(sequence_summary).muted()),
                 ))
-                .with_row(PropertyRow::new("Range", Box::new(range_dropdown))),
+                .with_row(PropertyRow::new("范围", Box::new(range_dropdown))),
         )
         .with_section(
-            PropertySection::new("Output")
-                .with_row(PropertyRow::new("Path", Box::new(output_row)))
+            PropertySection::new("输出")
+                .with_row(PropertyRow::new("路径", Box::new(output_row)))
                 .with_row(PropertyRow::new(
                     "Status",
                     Box::new(Label::new(status_text).muted()),
@@ -2921,7 +2909,7 @@ fn export_job_row(job: &ExportJobModel) -> PropertyRow {
     .with_gap(4.0);
 
     let content: Box<dyn Widget> = if job.can_cancel {
-        let cancel = AppIcon::Trash.text_button_or_label("Cancel").on_click(
+        let cancel = AppIcon::Trash.text_button_or_label("取消").on_click(
             export_cancel_job_action(ExportJobTargetPayload { job_id: job.id }),
         );
         Box::new(
@@ -2935,7 +2923,7 @@ fn export_job_row(job: &ExportJobModel) -> PropertyRow {
         Box::new(summary)
     };
 
-    PropertyRow::new("Job", content).with_height(if job.can_cancel { 48.0 } else { 42.0 })
+    PropertyRow::new("任务", content).with_height(if job.can_cancel { 48.0 } else { 42.0 })
 }
 
 fn export_default_file_name(preset: Option<&ExportPreset>) -> String {
@@ -2979,9 +2967,9 @@ fn export_preset_summary(preset: Option<&ExportPreset>) -> String {
 
 fn export_range_label(range: TimelineExportRange) -> &'static str {
     match range {
-        TimelineExportRange::SequenceInOut => "Sequence In/Out",
-        TimelineExportRange::EntireSequence => "Entire sequence",
-        TimelineExportRange::WorkArea { .. } => "Work area",
+        TimelineExportRange::SequenceInOut => "序列入点/出点",
+        TimelineExportRange::EntireSequence => "整个序列",
+        TimelineExportRange::WorkArea { .. } => "工作区域",
     }
 }
 
@@ -3026,7 +3014,7 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
     });
     if let Some(message) = model.empty_message.as_deref().filter(|message| !message.is_empty()) {
         return PropertyPanel::with_options(
-            "Inspector",
+            "检查器",
             PropertyPanelOptions {
                 label_width: 0.0,
                 control_gap: 0.0,
@@ -3046,13 +3034,13 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
     let curve = CurveEditor::with_points(model.curve_points.clone())
         .enabled(can_edit)
         .on_change(move |points| inspector_curve_action(selected_clip, points));
-    let mut panel = PropertyPanel::new("Inspector")
+    let mut panel = PropertyPanel::new("检查器")
         .with_subtitle(subtitle)
         .with_embedded_panel_chrome()
         .with_section(
-            PropertySection::new("Clip Style")
+            PropertySection::new("剪辑样式")
                 .with_row(PropertyRow::new(
-                    "Enabled",
+                    "启用",
                     Box::new(
                         Checkbox::new("启用效果", model.enabled)
                             .enabled(can_edit)
@@ -3060,7 +3048,7 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                     ),
                 ))
                 .with_row(PropertyRow::new(
-                    "Opacity",
+                    "不透明度",
                     numeric_slider_input_control(
                         model.opacity,
                         0.0,
@@ -3080,7 +3068,7 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
         );
 
     panel = panel.with_section(
-        PropertySection::new("Transform")
+        PropertySection::new("变换")
             .with_row(PropertyRow::new(
                 "Position X",
                 numeric_slider_input_control(
@@ -3156,7 +3144,7 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
     );
 
     panel = panel.with_section(
-        PropertySection::new("Timing")
+        PropertySection::new("时间")
             .with_row(PropertyRow::new(
                 "In",
                 numeric_slider_input_control(
@@ -3196,12 +3184,12 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                 .selected(model.selected_effect_id == Some(effect_id))
                 .on_select(inspector_effect_select_action(selected_clip, effect_id))
                 .with_row(PropertyRow::new(
-                    "Controls",
+                    "控制",
                     Box::new(
                         FlexContainer::row(vec![
                             FlexChild::flex(
                                 Box::new(
-                                    Checkbox::new("Enabled", effect.enabled)
+                                    Checkbox::new("启用", effect.enabled)
                                         .enabled(can_edit)
                                         .on_change(move |enabled| {
                                             inspector_effect_enabled_action(
@@ -3259,8 +3247,8 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
     }
 
     panel.with_section(
-        PropertySection::new("Animation")
-            .with_row(PropertyRow::new("Curve", Box::new(curve)).with_height(118.0)),
+        PropertySection::new("动画")
+            .with_row(PropertyRow::new("曲线", Box::new(curve)).with_height(118.0)),
     )
 }
 
@@ -3933,7 +3921,7 @@ mod tests {
         assert!(models.viewer.enabled);
         assert_eq!(models.viewer.status_tone, ViewerStatusTone::Neutral);
         assert_eq!(models.viewer.empty_message, None);
-        assert_eq!(models.viewer.zoom_label, "Fit");
+        assert_eq!(models.viewer.zoom_label, "适合");
         assert_eq!(models.viewer.preview_quality_label, "50%");
         assert_eq!(models.viewer.preview_resolution_scale, 0.5);
         assert!(!models.timeline.tracks.is_empty());
@@ -3943,14 +3931,11 @@ mod tests {
 
     #[test]
     fn asset_browser_tabs_expose_effect_browser() {
-        let tabs = asset_browser_tabs();
+        let tabs = visible_tabs_for_slot(PanelKind::Assets, &[]);
 
         assert_eq!(tabs.len(), 2);
-        assert_eq!(tabs[0].label, "Assets");
-        assert!(tabs[0].active);
-        assert_eq!(tabs[0].panel_kind, Some(PanelKind::Assets));
-        assert_eq!(tabs[1].label, "Effects");
-        assert_eq!(tabs[1].panel_kind, Some(PanelKind::Effects));
+        assert_eq!(tabs[0], PanelKind::Assets);
+        assert_eq!(tabs[1], PanelKind::Effects);
     }
 
     fn dock_panel_for_kind(widget: &dyn Widget, kind: PanelKind) -> Option<&DockPanel> {
@@ -3978,11 +3963,13 @@ mod tests {
                 kind: PanelKind::Assets,
                 active_index: 1,
                 hidden_tabs: vec![PanelKind::Effects],
+                tabs: Vec::new(),
             }),
             second: Box::new(SelfHostedWorkspaceLayout::Panel {
                 kind: PanelKind::Viewer,
                 active_index: 0,
                 hidden_tabs: Vec::new(),
+                tabs: vec![PanelKind::Viewer],
             }),
         };
 
@@ -4102,30 +4089,24 @@ mod tests {
         assert!(models.timeline.tracks.is_empty());
         assert_eq!(models.timeline.playhead_frame, 0);
         assert!(!models.timeline.enabled);
-        assert_eq!(
-            models.timeline.empty_message.as_deref(),
-            Some("No sequence loaded")
-        );
+        assert_eq!(models.timeline.empty_message.as_deref(), Some("未载入序列"));
         assert!(!timeline_panel(&models.timeline).can_focus());
-        assert_eq!(models.assets.items[0].title, "No project library");
+        assert_eq!(models.assets.items[0].title, "没有项目素材库");
         assert!(models.assets.items[0].icon.is_some());
         assert!(models.assets.items[0].disabled);
         assert!(!models.effects.items.is_empty());
-        assert_eq!(models.viewer.title, "Viewer");
+        assert_eq!(models.viewer.title, "预览");
         assert!(!models.viewer.enabled);
         assert_eq!(models.viewer.status_tone, ViewerStatusTone::Neutral);
-        assert_eq!(
-            models.viewer.empty_message.as_deref(),
-            Some("No sequence loaded")
-        );
-        assert_eq!(models.viewer.resolution_label, "No signal");
+        assert_eq!(models.viewer.empty_message.as_deref(), Some("未载入序列"));
+        assert_eq!(models.viewer.resolution_label, "无信号");
         assert_eq!(models.viewer.timecode_label, "00:00:00:00");
-        assert_eq!(models.viewer.zoom_label, "Fit");
-        assert_eq!(models.viewer.preview_quality_label, "Full");
+        assert_eq!(models.viewer.zoom_label, "适合");
+        assert_eq!(models.viewer.preview_quality_label, "完整");
         assert_eq!(models.inspector.selected_clip, None);
         assert_eq!(
             models.inspector.empty_message.as_deref(),
-            Some("Select a clip to inspect properties")
+            Some("选择剪辑以检查属性")
         );
         assert!(!models.inspector.is_editable);
         assert_eq!(models.inspector.edit_disabled_reason, None);
@@ -4135,10 +4116,7 @@ mod tests {
         assert!(!models.export.can_enqueue());
         assert!(models.node_graph.nodes.is_empty());
         assert!(models.node_graph.edges.is_empty());
-        assert_eq!(
-            models.node_graph.subtitle,
-            "Select a clip to inspect its render chain"
-        );
+        assert_eq!(models.node_graph.subtitle, "选择剪辑以检查渲染链");
         let node_graph = node_graph_panel(&models.node_graph);
         assert!(!node_graph.is_enabled());
         assert!(!node_graph.can_focus());
@@ -4154,10 +4132,7 @@ mod tests {
 
         assert!(model.enabled);
         assert!(model.tracks.is_empty());
-        assert_eq!(
-            model.empty_message.as_deref(),
-            Some("No tracks in the current sequence")
-        );
+        assert_eq!(model.empty_message.as_deref(), Some("当前序列没有轨道"));
         assert!(timeline_panel(&model).can_focus());
     }
 
@@ -4167,10 +4142,7 @@ mod tests {
         let mut panel = inspector_panel(&model);
         panel.layout(Rect::new(0.0, 0.0, 320.0, 220.0));
 
-        assert_eq!(
-            model.empty_message.as_deref(),
-            Some("Select a clip to inspect properties")
-        );
+        assert_eq!(model.empty_message.as_deref(), Some("选择剪辑以检查属性"));
         assert_eq!(panel.section_count(), 1);
 
         let actions = RefCell::new(Vec::<Action>::new());
@@ -4211,7 +4183,7 @@ mod tests {
         assert!(model.nodes.is_empty());
         assert!(model.edges.is_empty());
         assert_eq!(model.selected_clip, None);
-        assert_eq!(model.subtitle, "Select a clip to inspect its render chain");
+        assert_eq!(model.subtitle, "选择剪辑以检查渲染链");
         let panel = node_graph_panel(&model);
         assert!(!panel.is_enabled());
         assert!(!panel.can_focus());
@@ -4371,10 +4343,7 @@ mod tests {
         assert!(!model.can_enqueue());
         assert!(model.can_select_range());
         assert!(model.can_choose_output());
-        assert_eq!(
-            model.readiness_status(),
-            "Choose an output path to enable queueing"
-        );
+        assert_eq!(model.readiness_status(), "选择输出路径后即可加入队列");
         assert!(model.enqueue_payload().is_none());
     }
 
@@ -4389,10 +4358,7 @@ mod tests {
         assert!(!model.can_select_range());
         assert!(!model.can_choose_output());
         assert!(!model.can_enqueue());
-        assert_eq!(
-            model.readiness_status(),
-            "Open or select a sequence before exporting"
-        );
+        assert_eq!(model.readiness_status(), "导出前请打开或选择序列");
         assert!(model.enqueue_payload().is_none());
     }
 
@@ -4996,10 +4962,10 @@ mod tests {
         assert_eq!(badge_labels(&item), ["VID", "OFFLINE"]);
         assert_eq!(item.badges[1].tone, AssetGridBadgeTone::Warning);
         assert_eq!(item.context_menu_items.len(), 4);
-        assert_eq!(item.context_menu_items[0].label, "Reveal in File Manager");
-        assert_eq!(item.context_menu_items[1].label, "Relink Media...");
+        assert_eq!(item.context_menu_items[0].label, "在文件管理器中显示");
+        assert_eq!(item.context_menu_items[1].label, "重新链接媒体...");
         assert!(item.context_menu_items[2].is_separator());
-        assert_eq!(item.context_menu_items[3].label, "Delete asset");
+        assert_eq!(item.context_menu_items[3].label, "删除素材");
         let Action::Custom { namespace, name, payload } = &item.context_menu_items[1].action else {
             panic!("expected relink shell action");
         };
@@ -5022,8 +4988,8 @@ mod tests {
 
         assert_eq!(badge_labels(&item), ["VID"]);
         assert_eq!(item.context_menu_items.len(), 4);
-        assert_eq!(item.context_menu_items[0].label, "Reveal in File Manager");
-        assert_eq!(item.context_menu_items[1].label, "Enable Proxy Mode");
+        assert_eq!(item.context_menu_items[0].label, "在文件管理器中显示");
+        assert_eq!(item.context_menu_items[1].label, "启用代理模式");
         assert!(item.context_menu_items[2].is_separator());
         let Action::Custom { namespace, name, payload } = &item.context_menu_items[1].action else {
             panic!("expected proxy mode custom action");
@@ -5039,7 +5005,7 @@ mod tests {
             asset_grid_item_from_asset(test_video_asset(asset_id, media_path), None, true);
         assert_eq!(badge_labels(&proxied), ["VID", "PROXY"]);
         assert_eq!(proxied.badges[1].tone, AssetGridBadgeTone::Success);
-        assert_eq!(proxied.context_menu_items[1].label, "Disable Proxy Mode");
+        assert_eq!(proxied.context_menu_items[1].label, "关闭代理模式");
         let Action::Custom { payload, .. } = &proxied.context_menu_items[1].action else {
             panic!("expected proxy mode custom action");
         };
@@ -6247,7 +6213,7 @@ mod tests {
         assert_eq!(models.viewer.status_tone, ViewerStatusTone::Neutral);
         assert_eq!(models.viewer.empty_message, None);
         assert!(models.viewer.resolution_label.contains("1920x1080"));
-        assert_eq!(models.viewer.zoom_label, "Fit");
+        assert_eq!(models.viewer.zoom_label, "适合");
         assert_eq!(models.viewer.preview_quality_label, "50%");
         assert_eq!(models.timeline.playhead_frame, 7);
         assert!(models.timeline.tracks[0].clips[0].selected);
@@ -6263,7 +6229,7 @@ mod tests {
 
         state.play();
         let playing_models = SelfHostedPanelModels::from_app_state(&state);
-        assert_eq!(playing_models.viewer.status, "Playing");
+        assert_eq!(playing_models.viewer.status, "播放中");
         assert_eq!(playing_models.viewer.status_tone, ViewerStatusTone::Accent);
         assert!(playing_models.viewer.playing);
         assert_eq!(models.inspector.tint.to_rgba8(), color.to_rgba8());
@@ -6370,7 +6336,7 @@ mod tests {
 
         let models = SelfHostedPanelModels::from_app_state(&state);
 
-        assert_eq!(models.viewer.preview_quality_label, "Full");
+        assert_eq!(models.viewer.preview_quality_label, "完整");
         assert_eq!(models.viewer.preview_resolution_scale, 1.0);
     }
 
@@ -6494,7 +6460,7 @@ mod tests {
         assert_eq!(models.assets.items.len(), 1);
         assert_eq!(
             models.assets.filter_placeholder.as_deref(),
-            Some("Search assets")
+            Some("搜索素材")
         );
         let item = &models.assets.items[0];
         assert_eq!(item.title, "Brand Purple");
@@ -6512,7 +6478,7 @@ mod tests {
             serde_json::from_value(payload.clone()).expect("asset drag payload");
         assert_eq!(payload.asset_id, asset_id);
         assert_eq!(item.context_menu_items.len(), 1);
-        assert_eq!(item.context_menu_items[0].label, "Delete asset");
+        assert_eq!(item.context_menu_items[0].label, "删除素材");
         assert!(item.context_menu_items[0].icon.is_some());
         let Action::Custom { namespace, name, payload } = &item.context_menu_items[0].action else {
             panic!("expected asset delete custom action");
@@ -6639,7 +6605,7 @@ mod tests {
             Some(DragPayload::AssetFolder(folder_id.clone()))
         );
         assert_eq!(folder.context_menu_items.len(), 1);
-        assert_eq!(folder.context_menu_items[0].label, "Delete folder");
+        assert_eq!(folder.context_menu_items[0].label, "删除文件夹");
         assert!(folder.context_menu_items[0].icon.is_some());
         let Action::Custom { namespace, name, payload } = &folder.context_menu_items[0].action
         else {
@@ -6705,7 +6671,7 @@ mod tests {
         let models =
             SelfHostedPanelModels::from_app_state_with_asset_folder(&state, Some(&folder_id));
 
-        assert_eq!(models.assets.subtitle, "Project library / Rushes");
+        assert_eq!(models.assets.subtitle, "项目素材库 / Rushes");
         assert_eq!(
             models.assets.current_folder_id.as_deref(),
             Some(folder_id.as_str())
@@ -6783,8 +6749,8 @@ mod tests {
     fn effect_panel_model_keeps_catalog_browsable_without_apply_target() {
         let model = PanelListModel::from_effect_registry(None);
 
-        assert_eq!(model.subtitle, "Select a video clip to apply effects");
-        assert_eq!(model.filter_placeholder.as_deref(), Some("Search effects"));
+        assert_eq!(model.subtitle, "选择视频剪辑后应用效果");
+        assert_eq!(model.filter_placeholder.as_deref(), Some("搜索效果"));
         assert!(model.items.iter().all(|item| item.select_action.is_none()));
         assert!(model.items.iter().all(|item| item.activate_action.is_none()));
         assert!(model.items.iter().all(|item| item.icon.is_some()));
@@ -6805,7 +6771,7 @@ mod tests {
 
         let model = PanelListModel::from_effect_registry(Some(selection));
 
-        assert_eq!(model.subtitle, "Effect browser");
+        assert_eq!(model.subtitle, "效果浏览器");
         assert!(model.items.iter().all(|item| item.icon.is_some()));
         assert!(model.items.iter().all(|item| !item.disabled));
         assert!(model.items.iter().all(|item| item.badge.is_some()));
@@ -7293,15 +7259,14 @@ mod tests {
 
         let models = SelfHostedPanelModels::from_app_state(&state);
 
-        assert_eq!(models.effects.subtitle, "Selected clip track is locked");
+        assert_eq!(models.effects.subtitle, "所选剪辑所在轨道已锁定");
         assert!(models.effects.items.iter().all(|item| !item.disabled));
         assert!(models.effects.items.iter().all(|item| item.activate_action.is_none()));
         assert!(models
             .effects
             .items
             .iter()
-            .all(|item| !item.subtitle.is_empty()
-                && item.subtitle != "Selected clip track is locked"));
+            .all(|item| !item.subtitle.is_empty() && item.subtitle != "所选剪辑所在轨道已锁定"));
     }
 
     #[test]
@@ -7367,7 +7332,7 @@ mod tests {
         assert!(!models.inspector.is_editable);
         assert_eq!(
             models.inspector.edit_disabled_reason.as_deref(),
-            Some("Selected clip track is locked")
+            Some("所选剪辑所在轨道已锁定")
         );
     }
 
@@ -7580,7 +7545,7 @@ mod tests {
             empty_message: None,
             selected_effect_id: None,
             is_editable: false,
-            edit_disabled_reason: Some("Selected clip track is locked".to_owned()),
+            edit_disabled_reason: Some("所选剪辑所在轨道已锁定".to_owned()),
             enabled: true,
             opacity: 100.0,
             tint: Color::from_rgba8(64, 128, 192, 255),

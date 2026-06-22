@@ -37,7 +37,7 @@ pub struct SelfHostedNewProjectDraft {
 impl Default for SelfHostedNewProjectDraft {
     fn default() -> Self {
         Self {
-            name: "Untitled".into(),
+            name: "未命名".into(),
             sequence_settings: SequenceSettings::default(),
             project_settings: ProjectSettings::default(),
         }
@@ -89,7 +89,7 @@ impl SelfHostedNewProjectDraft {
     fn display_name(&self) -> String {
         let name = self.name.trim();
         if name.is_empty() {
-            "Untitled".into()
+            "未命名".into()
         } else {
             name.into()
         }
@@ -123,15 +123,15 @@ pub fn default_project_file_name(name: &str) -> String {
         .collect();
     let stem = stem.trim_matches(['.', ' ']).trim();
     if stem.is_empty() {
-        format!("Untitled.{PROJECT_FILE_EXTENSION}")
+        format!("未命名.{PROJECT_FILE_EXTENSION}")
     } else {
         format!("{stem}.{PROJECT_FILE_EXTENSION}")
     }
 }
 
 const RESOLUTION_PRESETS: [(&str, Resolution); 4] = [
-    ("HD 720p", Resolution::HD),
-    ("Full HD 1080p", Resolution::FHD),
+    ("高清 720p", Resolution::HD),
+    ("全高清 1080p", Resolution::FHD),
     ("UHD 4K", Resolution::UHD4K),
     ("DCI 4K", Resolution::DCI4K),
 ];
@@ -154,7 +154,7 @@ fn project_name_from_path(path: &Path) -> String {
         .and_then(|stem| stem.to_str())
         .filter(|stem| !stem.trim().is_empty())
         .map(|stem| stem.trim().to_string())
-        .unwrap_or_else(|| "Untitled".to_string())
+        .unwrap_or_else(|| "未命名".to_string())
 }
 
 fn resolution_label(resolution: Resolution) -> String {
@@ -245,7 +245,7 @@ fn audio_sample_rate_dropdown_for(draft: &SelfHostedNewProjectDraft) -> Dropdown
 }
 
 fn proxy_checkbox_for(draft: &SelfHostedNewProjectDraft) -> Checkbox {
-    Checkbox::new("Create proxies", draft.project_settings.proxy_enabled).on_change(|enabled| {
+    Checkbox::new("创建代理", draft.project_settings.proxy_enabled).on_change(|enabled| {
         app_shell_new_project_draft_changed_action(NewProjectDraftUpdatePayload::ProxyEnabled(
             enabled,
         ))
@@ -253,11 +253,7 @@ fn proxy_checkbox_for(draft: &SelfHostedNewProjectDraft) -> Checkbox {
 }
 
 fn preview_cache_checkbox_for(draft: &SelfHostedNewProjectDraft) -> Checkbox {
-    Checkbox::new(
-        "Preview cache",
-        draft.sequence_settings.preview.cache_enabled,
-    )
-    .on_change(|enabled| {
+    Checkbox::new("预览缓存", draft.sequence_settings.preview.cache_enabled).on_change(|enabled| {
         app_shell_new_project_draft_changed_action(
             NewProjectDraftUpdatePayload::PreviewCacheEnabled(enabled),
         )
@@ -312,34 +308,32 @@ pub struct NewProjectDialog {
 
 impl NewProjectDialog {
     pub fn new(draft: SelfHostedNewProjectDraft) -> Self {
-        let title_label = Label::new("New Project")
+        let title_label = Label::new("新建项目")
             .popover_foreground()
             .with_font_size(TITLE_FONT_SIZE)
             .with_padding(0.0, 0.0);
-        let description_label = Label::new(
-            "Create a project file and initialize the timeline with default production settings.",
-        )
-        .muted()
-        .with_font_size(LABEL_FONT_SIZE)
-        .with_padding(0.0, 0.0)
-        .wrapped();
-        let name_label = Label::new("Name")
+        let description_label = Label::new("创建项目文件，并用默认制作设置初始化时间线。")
+            .muted()
+            .with_font_size(LABEL_FONT_SIZE)
+            .with_padding(0.0, 0.0)
+            .wrapped();
+        let name_label = Label::new("名称")
             .muted()
             .with_font_size(LABEL_FONT_SIZE)
             .with_padding(0.0, 0.0);
-        let frame_size_label = Label::new("Frame size")
+        let frame_size_label = Label::new("画面尺寸")
             .muted()
             .with_font_size(LABEL_FONT_SIZE)
             .with_padding(0.0, 0.0);
-        let frame_rate_label_widget = Label::new("Frame rate")
+        let frame_rate_label_widget = Label::new("帧率")
             .muted()
             .with_font_size(LABEL_FONT_SIZE)
             .with_padding(0.0, 0.0);
-        let audio_label = Label::new("Audio")
+        let audio_label = Label::new("音频")
             .muted()
             .with_font_size(LABEL_FONT_SIZE)
             .with_padding(0.0, 0.0);
-        let name_input = TextInput::new("Project name").with_text(&draft.name).on_change(|name| {
+        let name_input = TextInput::new("项目名称").with_text(&draft.name).on_change(|name| {
             app_shell_new_project_draft_changed_action(NewProjectDraftUpdatePayload::Name(
                 name.into(),
             ))
@@ -371,10 +365,10 @@ impl NewProjectDialog {
             audio_sample_rate_dropdown,
             proxy_checkbox,
             preview_cache_checkbox,
-            cancel_button: Button::new("Cancel")
+            cancel_button: Button::new("取消")
                 .on_click(app_shell_cancel_new_project_dialog_action()),
             create_button: AppIcon::PlusFilled
-                .text_button_or_label("Create...")
+                .text_button_or_label("创建...")
                 .on_click(app_shell_confirm_new_project_dialog_action()),
         }
     }

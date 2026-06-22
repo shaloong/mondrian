@@ -37,7 +37,11 @@ impl DockPanel {
         mut content_factory: impl FnMut(PanelKind, usize) -> Box<dyn Widget> + 'static,
     ) -> Self {
         let initial_active = tabs.iter().position(|tab| tab.active).unwrap_or(0);
-        let content = Box::new(PanelSlot::new(kind, content_factory(kind, initial_active)));
+        let active_kind = tabs.get(initial_active).and_then(|tab| tab.panel_kind).unwrap_or(kind);
+        let content = Box::new(PanelSlot::new(
+            active_kind,
+            content_factory(active_kind, initial_active),
+        ));
         Self {
             id: WidgetId::new(),
             kind,
@@ -60,6 +64,11 @@ impl DockPanel {
         self.tab_bar.tab_count()
     }
 
+    /// Panel kinds represented by visible tabs in this dock panel.
+    pub fn tab_kinds(&self) -> Vec<PanelKind> {
+        self.tab_bar.tab_panel_kinds()
+    }
+
     /// Activate one tab and rebuild content when the active tab changes.
     pub fn set_active_index(&mut self, index: usize) {
         self.tab_bar.set_active(index);
@@ -78,9 +87,10 @@ impl DockPanel {
         }
 
         self.last_active = active;
+        let active_kind = self.tab_bar.active_panel_kind().unwrap_or(self.kind);
         self.content = Box::new(PanelSlot::new(
-            self.kind,
-            (self.content_factory)(self.kind, active),
+            active_kind,
+            (self.content_factory)(active_kind, active),
         ));
         if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
             self.layout(self.bounds);
@@ -274,7 +284,7 @@ mod tests {
 
         let result = panel.event(
             &UiEvent::MouseDown {
-                position: Point::new(120.0, 12.0),
+                position: Point::new(60.0, 12.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },

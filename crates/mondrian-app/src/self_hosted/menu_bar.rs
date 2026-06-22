@@ -35,155 +35,170 @@ const MENU_BAR_TRIGGER_GAP: f32 = 2.0;
 pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
     vec![
         (
-            "File",
+            "文件",
             vec![
                 menu_item_with_icon(
-                    MenuItem::new("New Project...", app_shell_new_project_dialog_action()),
+                    MenuItem::new("新建项目...", app_shell_new_project_dialog_action()),
                     AppIcon::PlusFilled,
                 ),
                 menu_item_with_icon(
-                    MenuItem::new("Open Project...", app_shell_open_project_dialog_action()),
+                    MenuItem::new("打开项目...", app_shell_open_project_dialog_action()),
                     AppIcon::FolderOpenFilled,
                 ),
                 menu_item_with_icon(
-                    MenuItem::new("Import Media...", app_shell_import_media_dialog_action()),
+                    MenuItem::new("导入媒体...", app_shell_import_media_dialog_action()),
                     AppIcon::Import,
                 ),
-                menu_item_with_icon(MenuItem::new("Save", Action::SaveProject), AppIcon::Save),
+                menu_item_with_icon(MenuItem::new("保存", Action::SaveProject), AppIcon::Save),
                 menu_item_with_icon(
-                    MenuItem::new("Save As...", app_shell_save_project_as_dialog_action()),
+                    MenuItem::new("另存为...", app_shell_save_project_as_dialog_action()),
                     AppIcon::Save,
                 ),
                 MenuItem::separator(),
-                menu_item_with_shortcut(MenuItem::new("Close Project", Action::CloseProject)),
-                menu_item_with_shortcut(MenuItem::new("Quit", app_shell_quit_action())),
+                menu_item_with_shortcut(MenuItem::new("关闭项目", Action::CloseProject)),
+                menu_item_with_shortcut(MenuItem::new("退出", app_shell_quit_action())),
             ],
         ),
         (
-            "Edit",
+            "编辑",
             vec![
-                menu_item_with_icon(MenuItem::new("Undo", Action::Undo), AppIcon::Undo),
-                menu_item_with_icon(MenuItem::new("Redo", Action::Redo), AppIcon::Redo),
-                menu_item_with_icon(MenuItem::new("Cut", Action::Cut), AppIcon::Cut),
-                menu_item_with_icon(MenuItem::new("Copy", Action::Copy), AppIcon::Copy),
-                menu_item_with_icon(
-                    MenuItem::new("Paste", Action::Paste),
-                    AppIcon::ClipboardText,
-                ),
-                menu_item_with_icon(MenuItem::new("Duplicate", Action::Duplicate), AppIcon::Copy),
+                menu_item_with_icon(MenuItem::new("撤销", Action::Undo), AppIcon::Undo),
+                menu_item_with_icon(MenuItem::new("重做", Action::Redo), AppIcon::Redo),
+                menu_item_with_icon(MenuItem::new("剪切", Action::Cut), AppIcon::Cut),
+                menu_item_with_icon(MenuItem::new("复制", Action::Copy), AppIcon::Copy),
+                menu_item_with_icon(MenuItem::new("粘贴", Action::Paste), AppIcon::ClipboardText),
+                menu_item_with_icon(MenuItem::new("创建副本", Action::Duplicate), AppIcon::Copy),
                 MenuItem::separator(),
+                menu_item_with_icon(MenuItem::new("全选", Action::SelectAll), AppIcon::Cursor),
                 menu_item_with_icon(
-                    MenuItem::new("Select All", Action::SelectAll),
-                    AppIcon::Cursor,
-                ),
-                menu_item_with_icon(
-                    MenuItem::new("Deselect All", Action::DeselectAll),
+                    MenuItem::new("取消选择", Action::DeselectAll),
                     AppIcon::CursorFilled,
                 ),
                 MenuItem::separator(),
                 menu_item_with_icon(
-                    MenuItem::new("Delete Selection", Action::DeleteSelection),
+                    MenuItem::new("删除所选", Action::DeleteSelection),
                     AppIcon::Trash,
                 ),
                 menu_item_with_icon(
-                    MenuItem::new("Ripple Delete", Action::RippleDeleteSelection),
+                    MenuItem::new("波纹删除", Action::RippleDeleteSelection),
                     AppIcon::Trash,
                 ),
                 menu_item_with_icon(
-                    MenuItem::new("Split Clip at Playhead", Action::SplitClipAtPlayhead),
+                    MenuItem::new("在播放头处分割", Action::SplitClipAtPlayhead),
                     AppIcon::Cut,
                 ),
                 MenuItem::separator(),
                 menu_item_with_icon(
-                    MenuItem::new("Mark In", Action::MarkInAtPlayhead),
+                    MenuItem::new("标记入点", Action::MarkInAtPlayhead),
                     AppIcon::BracketsLeft,
                 ),
                 menu_item_with_icon(
-                    MenuItem::new("Mark Out", Action::MarkOutAtPlayhead),
+                    MenuItem::new("标记出点", Action::MarkOutAtPlayhead),
                     AppIcon::BracketsRight,
                 ),
                 menu_item_with_icon(
-                    MenuItem::new("Clear In/Out", timeline_clear_in_out_points_action()),
+                    MenuItem::new("清除入点/出点", timeline_clear_in_out_points_action()),
                     AppIcon::Stopwatch,
                 ),
                 MenuItem::separator(),
                 menu_item_with_icon(
-                    MenuItem::new("Preferences...", app_shell_preferences_action()),
+                    MenuItem::new("偏好设置...", app_shell_preferences_action()),
                     AppIcon::List,
                 ),
             ],
         ),
         (
-            "View",
+            "视图",
             vec![menu_item_with_icon(
-                MenuItem::new("Toggle Fullscreen", Action::ToggleFullscreen),
+                MenuItem::new("切换全屏", Action::ToggleFullscreen),
                 AppIcon::FullScreen,
             )],
         ),
         (
-            "Window",
+            "窗口",
             vec![
                 menu_item_with_icon(
-                    MenuItem::new("Viewer", Action::TogglePanel(PanelKind::Viewer)),
+                    MenuItem::new(
+                        PanelKind::Viewer.display_name(),
+                        Action::TogglePanel(PanelKind::Viewer),
+                    ),
                     AppIcon::FullScreen,
                 ),
                 menu_item_with_icon(
-                    MenuItem::new("Timeline", Action::TogglePanel(PanelKind::Timeline)),
+                    MenuItem::new(
+                        PanelKind::Timeline.display_name(),
+                        Action::TogglePanel(PanelKind::Timeline),
+                    ),
                     AppIcon::Clock,
                 ),
                 menu_item_with_icon(
-                    MenuItem::new("Inspector", Action::TogglePanel(PanelKind::Inspector)),
+                    MenuItem::new(
+                        PanelKind::Inspector.display_name(),
+                        Action::TogglePanel(PanelKind::Inspector),
+                    ),
                     AppIcon::List,
                 ),
                 MenuItem::separator(),
                 menu_item_with_icon(
-                    MenuItem::new("Assets", Action::TogglePanel(PanelKind::Assets)),
+                    MenuItem::new(
+                        PanelKind::Assets.display_name(),
+                        Action::TogglePanel(PanelKind::Assets),
+                    ),
                     AppIcon::Folder,
                 ),
                 menu_item_with_icon(
-                    MenuItem::new("Effects", Action::TogglePanel(PanelKind::Effects)),
+                    MenuItem::new(
+                        PanelKind::Effects.display_name(),
+                        Action::TogglePanel(PanelKind::Effects),
+                    ),
                     AppIcon::Effect,
                 ),
                 menu_item_with_icon(
-                    MenuItem::new("Node Graph", Action::TogglePanel(PanelKind::NodeGraph)),
+                    MenuItem::new(
+                        PanelKind::NodeGraph.display_name(),
+                        Action::TogglePanel(PanelKind::NodeGraph),
+                    ),
                     AppIcon::Grid,
                 ),
                 menu_item_with_icon(
-                    MenuItem::new("Export", Action::TogglePanel(PanelKind::Export)),
+                    MenuItem::new(
+                        PanelKind::Export.display_name(),
+                        Action::TogglePanel(PanelKind::Export),
+                    ),
                     AppIcon::Export,
                 ),
                 MenuItem::separator(),
                 menu_item_with_icon(
                     MenuItem::new(
-                        "Editing Workspace",
+                        "编辑工作区",
                         Action::SwitchWorkspace(WorkspacePreset::Editing),
                     ),
                     AppIcon::Cursor,
                 ),
                 menu_item_with_icon(
                     MenuItem::new(
-                        "Color Workspace",
+                        "调色工作区",
                         Action::SwitchWorkspace(WorkspacePreset::Color),
                     ),
                     AppIcon::Circle,
                 ),
                 menu_item_with_icon(
                     MenuItem::new(
-                        "Audio Workspace",
+                        "音频工作区",
                         Action::SwitchWorkspace(WorkspacePreset::Audio),
                     ),
                     AppIcon::Music,
                 ),
                 menu_item_with_icon(
                     MenuItem::new(
-                        "Compositing Workspace",
+                        "合成工作区",
                         Action::SwitchWorkspace(WorkspacePreset::Compositing),
                     ),
                     AppIcon::Grid,
                 ),
                 menu_item_with_icon(
                     MenuItem::new(
-                        "Export Workspace",
+                        "导出工作区",
                         Action::SwitchWorkspace(WorkspacePreset::Export),
                     ),
                     AppIcon::Export,
@@ -191,9 +206,9 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
             ],
         ),
         (
-            "Help",
+            "帮助",
             vec![menu_item_with_icon(
-                MenuItem::new("About Mondrian", app_shell_about_action()),
+                MenuItem::new("关于 Mondrian", app_shell_about_action()),
                 AppIcon::Info,
             )],
         ),
@@ -614,7 +629,7 @@ mod tests {
 
     fn state_with_selected_clip() -> AppState {
         let mut state = AppState::new();
-        let mut sequence = Sequence::new("Edit");
+        let mut sequence = Sequence::new("编辑");
         let tb = sequence.time_base();
         let track_id = sequence.video_tracks[0].id;
         let clip = Clip::new(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(20, tb));
@@ -638,7 +653,7 @@ mod tests {
         let menu_items = default_menu_items();
         let window_items = menu_items
             .iter()
-            .find_map(|(label, items)| (*label == "Window").then_some(items))
+            .find_map(|(label, items)| (*label == "窗口").then_some(items))
             .expect("window menu");
 
         for panel in PanelKind::ALL {
@@ -670,11 +685,13 @@ mod tests {
                 kind: PanelKind::Assets,
                 active_index: 0,
                 hidden_tabs: Vec::new(),
+                tabs: vec![PanelKind::Assets, PanelKind::Effects],
             }),
             second: Box::new(SelfHostedWorkspaceLayout::Panel {
                 kind: PanelKind::Viewer,
                 active_index: 0,
                 hidden_tabs: Vec::new(),
+                tabs: vec![PanelKind::Viewer],
             }),
         };
 
@@ -684,12 +701,12 @@ mod tests {
             Some(&layout),
         );
 
-        assert!(menu_item(&menu_items, "Window", "Assets").checked);
-        assert!(menu_item(&menu_items, "Window", "Effects").checked);
-        assert!(menu_item(&menu_items, "Window", "Viewer").checked);
-        assert!(!menu_item(&menu_items, "Window", "Timeline").checked);
-        assert!(menu_item(&menu_items, "Window", "Editing Workspace").checked);
-        assert!(!menu_item(&menu_items, "Window", "Color Workspace").checked);
+        assert!(menu_item(&menu_items, "窗口", "素材").checked);
+        assert!(menu_item(&menu_items, "窗口", "效果").checked);
+        assert!(menu_item(&menu_items, "窗口", "预览").checked);
+        assert!(!menu_item(&menu_items, "窗口", "时间线").checked);
+        assert!(menu_item(&menu_items, "窗口", "编辑工作区").checked);
+        assert!(!menu_item(&menu_items, "窗口", "调色工作区").checked);
     }
 
     #[test]
@@ -701,11 +718,13 @@ mod tests {
                 kind: PanelKind::Assets,
                 active_index: 0,
                 hidden_tabs: vec![PanelKind::Effects],
+                tabs: Vec::new(),
             }),
             second: Box::new(SelfHostedWorkspaceLayout::Panel {
                 kind: PanelKind::Viewer,
                 active_index: 0,
                 hidden_tabs: Vec::new(),
+                tabs: vec![PanelKind::Viewer],
             }),
         };
 
@@ -715,11 +734,11 @@ mod tests {
             Some(&layout),
         );
 
-        assert!(menu_item(&menu_items, "Window", "Assets").checked);
-        assert!(!menu_item(&menu_items, "Window", "Effects").checked);
-        assert!(menu_item(&menu_items, "Window", "Viewer").checked);
-        assert!(!menu_item(&menu_items, "Window", "Editing Workspace").checked);
-        assert!(!menu_item(&menu_items, "Window", "Export Workspace").checked);
+        assert!(menu_item(&menu_items, "窗口", "素材").checked);
+        assert!(!menu_item(&menu_items, "窗口", "效果").checked);
+        assert!(menu_item(&menu_items, "窗口", "预览").checked);
+        assert!(!menu_item(&menu_items, "窗口", "编辑工作区").checked);
+        assert!(!menu_item(&menu_items, "窗口", "导出工作区").checked);
     }
 
     #[test]
@@ -727,7 +746,7 @@ mod tests {
         let menu_items = default_menu_items();
         let window_items = menu_items
             .iter()
-            .find_map(|(label, items)| (*label == "Window").then_some(items))
+            .find_map(|(label, items)| (*label == "窗口").then_some(items))
             .expect("window menu");
 
         let labels = window_items
@@ -741,7 +760,7 @@ mod tests {
             "self-hosted product panels should not reintroduce project-browser or console entries"
         );
         assert!(
-            labels.contains(&"Assets"),
+            labels.contains(&"素材"),
             "project media belongs in the Assets panel"
         );
     }
@@ -751,28 +770,28 @@ mod tests {
         let menu_items = default_menu_items();
 
         for (menu_label, item_label) in [
-            ("File", "New Project..."),
-            ("File", "Save"),
-            ("Edit", "Undo"),
-            ("Edit", "Redo"),
-            ("Edit", "Cut"),
-            ("Edit", "Copy"),
-            ("Edit", "Paste"),
-            ("Edit", "Duplicate"),
-            ("Edit", "Select All"),
-            ("Edit", "Deselect All"),
-            ("Edit", "Delete Selection"),
-            ("Edit", "Ripple Delete"),
-            ("Edit", "Split Clip at Playhead"),
-            ("Edit", "Mark In"),
-            ("Edit", "Mark Out"),
-            ("Edit", "Clear In/Out"),
-            ("Edit", "Preferences..."),
-            ("View", "Toggle Fullscreen"),
-            ("Window", "Timeline"),
-            ("Window", "Effects"),
-            ("Window", "Audio Workspace"),
-            ("Help", "About Mondrian"),
+            ("文件", "新建项目..."),
+            ("文件", "保存"),
+            ("编辑", "撤销"),
+            ("编辑", "重做"),
+            ("编辑", "剪切"),
+            ("编辑", "复制"),
+            ("编辑", "粘贴"),
+            ("编辑", "创建副本"),
+            ("编辑", "全选"),
+            ("编辑", "取消选择"),
+            ("编辑", "删除所选"),
+            ("编辑", "波纹删除"),
+            ("编辑", "在播放头处分割"),
+            ("编辑", "标记入点"),
+            ("编辑", "标记出点"),
+            ("编辑", "清除入点/出点"),
+            ("编辑", "偏好设置..."),
+            ("视图", "切换全屏"),
+            ("窗口", "时间线"),
+            ("窗口", "效果"),
+            ("窗口", "音频工作区"),
+            ("帮助", "关于 Mondrian"),
         ] {
             assert!(
                 menu_item(&menu_items, menu_label, item_label).icon.is_some(),
@@ -786,24 +805,24 @@ mod tests {
         let menu_items = default_menu_items();
 
         for (menu_label, item_label, shortcut) in [
-            ("File", "New Project...", "Ctrl+N"),
-            ("File", "Open Project...", "Ctrl+O"),
-            ("File", "Save", "Ctrl+S"),
-            ("File", "Close Project", "Ctrl+W"),
-            ("Edit", "Undo", "Ctrl+Z"),
-            ("Edit", "Redo", "Ctrl+Shift+Z"),
-            ("Edit", "Cut", "Ctrl+X"),
-            ("Edit", "Copy", "Ctrl+C"),
-            ("Edit", "Paste", "Ctrl+V"),
-            ("Edit", "Duplicate", "Ctrl+D"),
-            ("Edit", "Select All", "Ctrl+A"),
-            ("Edit", "Deselect All", "Esc"),
-            ("Edit", "Delete Selection", "Delete"),
-            ("Edit", "Ripple Delete", "Shift+Delete"),
-            ("Edit", "Split Clip at Playhead", "Ctrl+K"),
-            ("Edit", "Mark In", "I"),
-            ("Edit", "Mark Out", "O"),
-            ("View", "Toggle Fullscreen", "F11"),
+            ("文件", "新建项目...", "Ctrl+N"),
+            ("文件", "打开项目...", "Ctrl+O"),
+            ("文件", "保存", "Ctrl+S"),
+            ("文件", "关闭项目", "Ctrl+W"),
+            ("编辑", "撤销", "Ctrl+Z"),
+            ("编辑", "重做", "Ctrl+Shift+Z"),
+            ("编辑", "剪切", "Ctrl+X"),
+            ("编辑", "复制", "Ctrl+C"),
+            ("编辑", "粘贴", "Ctrl+V"),
+            ("编辑", "创建副本", "Ctrl+D"),
+            ("编辑", "全选", "Ctrl+A"),
+            ("编辑", "取消选择", "Esc"),
+            ("编辑", "删除所选", "Delete"),
+            ("编辑", "波纹删除", "Shift+Delete"),
+            ("编辑", "在播放头处分割", "Ctrl+K"),
+            ("编辑", "标记入点", "I"),
+            ("编辑", "标记出点", "O"),
+            ("视图", "切换全屏", "F11"),
         ] {
             assert_eq!(
                 menu_item(&menu_items, menu_label, item_label).shortcut.as_deref(),
@@ -813,32 +832,32 @@ mod tests {
         }
 
         for (panel_label, shortcut) in [
-            ("Viewer", "Ctrl+Alt+V"),
-            ("Timeline", "Ctrl+Alt+T"),
-            ("Inspector", "Ctrl+Alt+I"),
-            ("Assets", "Ctrl+Alt+A"),
-            ("Effects", "Ctrl+Alt+E"),
-            ("Node Graph", "Ctrl+Alt+G"),
-            ("Export", "Ctrl+Alt+X"),
+            ("预览", "Ctrl+Alt+V"),
+            ("时间线", "Ctrl+Alt+T"),
+            ("检查器", "Ctrl+Alt+I"),
+            ("素材", "Ctrl+Alt+A"),
+            ("效果", "Ctrl+Alt+E"),
+            ("节点图", "Ctrl+Alt+G"),
+            ("导出", "Ctrl+Alt+X"),
         ] {
             assert_eq!(
-                menu_item(&menu_items, "Window", panel_label).shortcut.as_deref(),
+                menu_item(&menu_items, "窗口", panel_label).shortcut.as_deref(),
                 Some(shortcut),
-                "Window/{panel_label} should show {shortcut}"
+                "窗口/{panel_label} should show {shortcut}"
             );
         }
 
         for (workspace_label, shortcut) in [
-            ("Editing Workspace", "Ctrl+Alt+1"),
-            ("Color Workspace", "Ctrl+Alt+2"),
-            ("Audio Workspace", "Ctrl+Alt+3"),
-            ("Compositing Workspace", "Ctrl+Alt+4"),
-            ("Export Workspace", "Ctrl+Alt+5"),
+            ("编辑工作区", "Ctrl+Alt+1"),
+            ("调色工作区", "Ctrl+Alt+2"),
+            ("音频工作区", "Ctrl+Alt+3"),
+            ("合成工作区", "Ctrl+Alt+4"),
+            ("导出工作区", "Ctrl+Alt+5"),
         ] {
             assert_eq!(
-                menu_item(&menu_items, "Window", workspace_label).shortcut.as_deref(),
+                menu_item(&menu_items, "窗口", workspace_label).shortcut.as_deref(),
                 Some(shortcut),
-                "Window/{workspace_label} should show {shortcut}"
+                "窗口/{workspace_label} should show {shortcut}"
             );
         }
     }
@@ -861,11 +880,11 @@ mod tests {
         let menu_items = default_menu_items_with_shortcut_overrides(&overrides);
 
         assert_eq!(
-            menu_item(&menu_items, "File", "Save").shortcut.as_deref(),
+            menu_item(&menu_items, "文件", "保存").shortcut.as_deref(),
             Some("Ctrl+Alt+S")
         );
         assert_eq!(
-            menu_item(&menu_items, "Window", "Inspector").shortcut.as_deref(),
+            menu_item(&menu_items, "窗口", "检查器").shortcut.as_deref(),
             None
         );
     }
@@ -898,27 +917,27 @@ mod tests {
         let state = AppState::new();
         let menu_items = default_menu_items_for_app_state(&state);
 
-        assert!(menu_item(&menu_items, "File", "New Project...").enabled);
-        assert!(menu_item(&menu_items, "File", "Open Project...").enabled);
-        assert!(!menu_item(&menu_items, "File", "Import Media...").enabled);
-        assert!(!menu_item(&menu_items, "File", "Save").enabled);
-        assert!(!menu_item(&menu_items, "File", "Save As...").enabled);
-        assert!(!menu_item(&menu_items, "File", "Close Project").enabled);
-        assert!(menu_item(&menu_items, "File", "Quit").enabled);
-        assert!(!menu_item(&menu_items, "Edit", "Undo").enabled);
-        assert!(!menu_item(&menu_items, "Edit", "Redo").enabled);
-        assert!(!menu_item(&menu_items, "Edit", "Cut").enabled);
-        assert!(!menu_item(&menu_items, "Edit", "Copy").enabled);
-        assert!(!menu_item(&menu_items, "Edit", "Paste").enabled);
-        assert!(!menu_item(&menu_items, "Edit", "Duplicate").enabled);
-        assert!(!menu_item(&menu_items, "Edit", "Select All").enabled);
-        assert!(!menu_item(&menu_items, "Edit", "Deselect All").enabled);
-        assert!(!menu_item(&menu_items, "Edit", "Delete Selection").enabled);
-        assert!(!menu_item(&menu_items, "Edit", "Ripple Delete").enabled);
-        assert!(!menu_item(&menu_items, "Edit", "Split Clip at Playhead").enabled);
-        assert!(!menu_item(&menu_items, "Edit", "Mark In").enabled);
-        assert!(!menu_item(&menu_items, "Edit", "Mark Out").enabled);
-        assert!(!menu_item(&menu_items, "Edit", "Clear In/Out").enabled);
+        assert!(menu_item(&menu_items, "文件", "新建项目...").enabled);
+        assert!(menu_item(&menu_items, "文件", "打开项目...").enabled);
+        assert!(!menu_item(&menu_items, "文件", "导入媒体...").enabled);
+        assert!(!menu_item(&menu_items, "文件", "保存").enabled);
+        assert!(!menu_item(&menu_items, "文件", "另存为...").enabled);
+        assert!(!menu_item(&menu_items, "文件", "关闭项目").enabled);
+        assert!(menu_item(&menu_items, "文件", "退出").enabled);
+        assert!(!menu_item(&menu_items, "编辑", "撤销").enabled);
+        assert!(!menu_item(&menu_items, "编辑", "重做").enabled);
+        assert!(!menu_item(&menu_items, "编辑", "剪切").enabled);
+        assert!(!menu_item(&menu_items, "编辑", "复制").enabled);
+        assert!(!menu_item(&menu_items, "编辑", "粘贴").enabled);
+        assert!(!menu_item(&menu_items, "编辑", "创建副本").enabled);
+        assert!(!menu_item(&menu_items, "编辑", "全选").enabled);
+        assert!(!menu_item(&menu_items, "编辑", "取消选择").enabled);
+        assert!(!menu_item(&menu_items, "编辑", "删除所选").enabled);
+        assert!(!menu_item(&menu_items, "编辑", "波纹删除").enabled);
+        assert!(!menu_item(&menu_items, "编辑", "在播放头处分割").enabled);
+        assert!(!menu_item(&menu_items, "编辑", "标记入点").enabled);
+        assert!(!menu_item(&menu_items, "编辑", "标记出点").enabled);
+        assert!(!menu_item(&menu_items, "编辑", "清除入点/出点").enabled);
     }
 
     #[test]
@@ -928,29 +947,29 @@ mod tests {
 
         let menu_items = default_menu_items_for_app_state(&state);
 
-        assert!(!menu_item(&menu_items, "File", "Import Media...").enabled);
-        assert!(!menu_item(&menu_items, "File", "Save").enabled);
-        assert!(menu_item(&menu_items, "File", "Save As...").enabled);
-        assert!(menu_item(&menu_items, "File", "Close Project").enabled);
+        assert!(!menu_item(&menu_items, "文件", "导入媒体...").enabled);
+        assert!(!menu_item(&menu_items, "文件", "保存").enabled);
+        assert!(menu_item(&menu_items, "文件", "另存为...").enabled);
+        assert!(menu_item(&menu_items, "文件", "关闭项目").enabled);
     }
 
     #[test]
     fn app_state_menu_items_enable_project_file_actions_for_open_project() {
         let mut state = AppState::new();
-        state.sequence = Some(mondrian_timeline::sequence::Sequence::new("Edit"));
+        state.sequence = Some(mondrian_timeline::sequence::Sequence::new("编辑"));
         state.current_project_path = Some(PathBuf::from("E:/projects/edit.mdp"));
 
         let menu_items = default_menu_items_for_app_state(&state);
 
-        assert!(menu_item(&menu_items, "File", "Save").enabled);
-        assert!(menu_item(&menu_items, "File", "Save As...").enabled);
-        assert!(menu_item(&menu_items, "File", "Close Project").enabled);
+        assert!(menu_item(&menu_items, "文件", "保存").enabled);
+        assert!(menu_item(&menu_items, "文件", "另存为...").enabled);
+        assert!(menu_item(&menu_items, "文件", "关闭项目").enabled);
     }
 
     #[test]
     fn app_state_menu_items_track_undo_redo_history() {
         let mut state = AppState::new();
-        let before = mondrian_timeline::sequence::Sequence::new("Edit");
+        let before = mondrian_timeline::sequence::Sequence::new("编辑");
         let mut after = before.clone();
         after.name = "Edit renamed".to_owned();
         state.sequence = Some(after.clone());
@@ -963,16 +982,16 @@ mod tests {
         ));
 
         let menu_items = default_menu_items_for_app_state(&state);
-        assert!(menu_item(&menu_items, "Edit", "Undo").enabled);
-        assert!(!menu_item(&menu_items, "Edit", "Redo").enabled);
+        assert!(menu_item(&menu_items, "编辑", "撤销").enabled);
+        assert!(!menu_item(&menu_items, "编辑", "重做").enabled);
 
         state
             .cmd_history
             .undo(state.sequence.as_mut().expect("sequence"))
             .expect("undo should succeed");
         let menu_items = default_menu_items_for_app_state(&state);
-        assert!(!menu_item(&menu_items, "Edit", "Undo").enabled);
-        assert!(menu_item(&menu_items, "Edit", "Redo").enabled);
+        assert!(!menu_item(&menu_items, "编辑", "撤销").enabled);
+        assert!(menu_item(&menu_items, "编辑", "重做").enabled);
     }
 
     #[test]
@@ -982,18 +1001,18 @@ mod tests {
 
         let menu_items = default_menu_items_for_app_state(&state);
 
-        assert!(menu_item(&menu_items, "Edit", "Cut").enabled);
-        assert!(menu_item(&menu_items, "Edit", "Copy").enabled);
-        assert!(!menu_item(&menu_items, "Edit", "Paste").enabled);
-        assert!(menu_item(&menu_items, "Edit", "Duplicate").enabled);
-        assert!(menu_item(&menu_items, "Edit", "Select All").enabled);
-        assert!(menu_item(&menu_items, "Edit", "Deselect All").enabled);
-        assert!(menu_item(&menu_items, "Edit", "Delete Selection").enabled);
-        assert!(menu_item(&menu_items, "Edit", "Ripple Delete").enabled);
-        assert!(menu_item(&menu_items, "Edit", "Split Clip at Playhead").enabled);
-        assert!(menu_item(&menu_items, "Edit", "Mark In").enabled);
-        assert!(menu_item(&menu_items, "Edit", "Mark Out").enabled);
-        assert!(!menu_item(&menu_items, "Edit", "Clear In/Out").enabled);
+        assert!(menu_item(&menu_items, "编辑", "剪切").enabled);
+        assert!(menu_item(&menu_items, "编辑", "复制").enabled);
+        assert!(!menu_item(&menu_items, "编辑", "粘贴").enabled);
+        assert!(menu_item(&menu_items, "编辑", "创建副本").enabled);
+        assert!(menu_item(&menu_items, "编辑", "全选").enabled);
+        assert!(menu_item(&menu_items, "编辑", "取消选择").enabled);
+        assert!(menu_item(&menu_items, "编辑", "删除所选").enabled);
+        assert!(menu_item(&menu_items, "编辑", "波纹删除").enabled);
+        assert!(menu_item(&menu_items, "编辑", "在播放头处分割").enabled);
+        assert!(menu_item(&menu_items, "编辑", "标记入点").enabled);
+        assert!(menu_item(&menu_items, "编辑", "标记出点").enabled);
+        assert!(!menu_item(&menu_items, "编辑", "清除入点/出点").enabled);
     }
 
     #[test]
@@ -1001,11 +1020,11 @@ mod tests {
         let mut state = state_with_selected_clip();
 
         let menu_items = default_menu_items_for_app_state(&state);
-        assert!(!menu_item(&menu_items, "Edit", "Clear In/Out").enabled);
+        assert!(!menu_item(&menu_items, "编辑", "清除入点/出点").enabled);
 
         state.sequence.as_mut().expect("sequence").mark_in(12);
         let menu_items = default_menu_items_for_app_state(&state);
-        let clear = menu_item(&menu_items, "Edit", "Clear In/Out");
+        let clear = menu_item(&menu_items, "编辑", "清除入点/出点");
         assert!(clear.enabled);
         match &clear.action {
             Action::Custom { namespace, name, .. } => {
@@ -1018,7 +1037,7 @@ mod tests {
         state.sequence.as_mut().expect("sequence").clear_in_out();
         state.sequence.as_mut().expect("sequence").mark_out(18);
         let menu_items = default_menu_items_for_app_state(&state);
-        assert!(menu_item(&menu_items, "Edit", "Clear In/Out").enabled);
+        assert!(menu_item(&menu_items, "编辑", "清除入点/出点").enabled);
     }
 
     #[test]
@@ -1028,11 +1047,11 @@ mod tests {
 
         let menu_items = default_menu_items_for_app_state(&state);
 
-        assert!(!menu_item(&menu_items, "Edit", "Cut").enabled);
-        assert!(menu_item(&menu_items, "Edit", "Copy").enabled);
-        assert!(!menu_item(&menu_items, "Edit", "Duplicate").enabled);
-        assert!(!menu_item(&menu_items, "Edit", "Delete Selection").enabled);
-        assert!(!menu_item(&menu_items, "Edit", "Ripple Delete").enabled);
+        assert!(!menu_item(&menu_items, "编辑", "剪切").enabled);
+        assert!(menu_item(&menu_items, "编辑", "复制").enabled);
+        assert!(!menu_item(&menu_items, "编辑", "创建副本").enabled);
+        assert!(!menu_item(&menu_items, "编辑", "删除所选").enabled);
+        assert!(!menu_item(&menu_items, "编辑", "波纹删除").enabled);
     }
 
     #[test]
@@ -1048,8 +1067,8 @@ mod tests {
             &Action::RippleDeleteSelection,
             &state
         ));
-        assert!(!menu_item(&menu_items, "Edit", "Delete Selection").enabled);
-        assert!(!menu_item(&menu_items, "Edit", "Ripple Delete").enabled);
+        assert!(!menu_item(&menu_items, "编辑", "删除所选").enabled);
+        assert!(!menu_item(&menu_items, "编辑", "波纹删除").enabled);
     }
 
     #[test]
@@ -1068,8 +1087,8 @@ mod tests {
             &Action::RippleDeleteSelection,
             &state
         ));
-        assert!(!menu_item(&menu_items, "Edit", "Delete Selection").enabled);
-        assert!(!menu_item(&menu_items, "Edit", "Ripple Delete").enabled);
+        assert!(!menu_item(&menu_items, "编辑", "删除所选").enabled);
+        assert!(!menu_item(&menu_items, "编辑", "波纹删除").enabled);
     }
 
     #[test]
@@ -1087,8 +1106,8 @@ mod tests {
             &Action::RippleDeleteSelection,
             &state
         ));
-        assert!(menu_item(&menu_items, "Edit", "Delete Selection").enabled);
-        assert!(menu_item(&menu_items, "Edit", "Ripple Delete").enabled);
+        assert!(menu_item(&menu_items, "编辑", "删除所选").enabled);
+        assert!(menu_item(&menu_items, "编辑", "波纹删除").enabled);
     }
 
     #[test]
@@ -1099,13 +1118,13 @@ mod tests {
         let menu_items = default_menu_items_for_app_state(&state);
 
         assert!(state.can_paste_from_app_clipboard());
-        assert!(menu_item(&menu_items, "Edit", "Paste").enabled);
+        assert!(menu_item(&menu_items, "编辑", "粘贴").enabled);
 
         state.sequence.as_mut().expect("sequence").video_tracks[0].is_locked = true;
         let menu_items = default_menu_items_for_app_state(&state);
 
         assert!(!state.can_paste_from_app_clipboard());
-        assert!(!menu_item(&menu_items, "Edit", "Paste").enabled);
+        assert!(!menu_item(&menu_items, "编辑", "粘贴").enabled);
     }
 
     #[test]
@@ -1133,13 +1152,13 @@ mod tests {
 
         let menu_items = default_menu_items_for_app_state(&state);
         assert!(state.can_paste_from_app_clipboard());
-        assert!(menu_item(&menu_items, "Edit", "Paste").enabled);
+        assert!(menu_item(&menu_items, "编辑", "粘贴").enabled);
 
         state.sequence.as_mut().expect("sequence").video_tracks[0].is_locked = true;
         let menu_items = default_menu_items_for_app_state(&state);
 
         assert!(!state.can_paste_from_app_clipboard());
-        assert!(!menu_item(&menu_items, "Edit", "Paste").enabled);
+        assert!(!menu_item(&menu_items, "编辑", "粘贴").enabled);
     }
 
     #[test]
@@ -1271,11 +1290,11 @@ mod tests {
         let menu_items = default_menu_items();
         let help_items = menu_items
             .iter()
-            .find_map(|(label, items)| (*label == "Help").then_some(items))
+            .find_map(|(label, items)| (*label == "帮助").then_some(items))
             .expect("help menu");
         let about = help_items
             .iter()
-            .find(|item| item.label == "About Mondrian")
+            .find(|item| item.label == "关于 Mondrian")
             .expect("about item");
 
         match &about.action {
@@ -1291,7 +1310,7 @@ mod tests {
     #[test]
     fn default_menu_items_use_stable_app_shell_preferences_action() {
         let menu_items = default_menu_items();
-        let preferences = menu_item(&menu_items, "Edit", "Preferences...");
+        let preferences = menu_item(&menu_items, "编辑", "偏好设置...");
 
         match &preferences.action {
             Action::Custom { namespace, name, payload } => {
@@ -1308,13 +1327,13 @@ mod tests {
         let menu_items = default_menu_items();
         let file_items = menu_items
             .iter()
-            .find_map(|(label, items)| (*label == "File").then_some(items))
+            .find_map(|(label, items)| (*label == "文件").then_some(items))
             .expect("file menu");
         let close_project = file_items
             .iter()
-            .find(|item| item.label == "Close Project")
+            .find(|item| item.label == "关闭项目")
             .expect("close project item");
-        let quit = file_items.iter().find(|item| item.label == "Quit").expect("quit item");
+        let quit = file_items.iter().find(|item| item.label == "退出").expect("quit item");
 
         assert_eq!(close_project.action, Action::CloseProject);
         match &quit.action {
@@ -1332,11 +1351,11 @@ mod tests {
         let menu_items = default_menu_items();
         let view_items = menu_items
             .iter()
-            .find_map(|(label, items)| (*label == "View").then_some(items))
+            .find_map(|(label, items)| (*label == "视图").then_some(items))
             .expect("view menu");
         let fullscreen = view_items
             .iter()
-            .find(|item| item.label == "Toggle Fullscreen")
+            .find(|item| item.label == "切换全屏")
             .expect("fullscreen item");
 
         assert_eq!(fullscreen.action, Action::ToggleFullscreen);

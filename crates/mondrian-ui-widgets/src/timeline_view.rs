@@ -1414,11 +1414,11 @@ impl TimelineView {
     fn chrome_tooltip(&self) -> Option<(String, Rect)> {
         let button = self.hovered_toolbar_button?;
         let label = match button {
-            TimelineToolbarButton::Tool(TimelineTool::Select) => "Select Tool (V)",
-            TimelineToolbarButton::Tool(TimelineTool::Blade) => "Blade Tool (B)",
-            TimelineToolbarButton::Snapping => "Snapping (S)",
-            TimelineToolbarButton::Edit(TimelineEditCommand::MarkInAtPlayhead) => "Mark In",
-            TimelineToolbarButton::Edit(TimelineEditCommand::MarkOutAtPlayhead) => "Mark Out",
+            TimelineToolbarButton::Tool(TimelineTool::Select) => "选择工具 (V)",
+            TimelineToolbarButton::Tool(TimelineTool::Blade) => "剃刀工具 (B)",
+            TimelineToolbarButton::Snapping => "吸附 (S)",
+            TimelineToolbarButton::Edit(TimelineEditCommand::MarkInAtPlayhead) => "标记入点",
+            TimelineToolbarButton::Edit(TimelineEditCommand::MarkOutAtPlayhead) => "标记出点",
             _ => return None,
         };
         let label = if let TimelineToolbarButton::Edit(command) = button {
@@ -2056,33 +2056,30 @@ impl TimelineView {
 
     fn clip_context_menu_items(&self) -> Vec<MenuItem> {
         let mut items = vec![
-            self.edit_menu_item("Cut Clip", TimelineEditCommand::CutSelection),
-            self.edit_menu_item("Copy Clip", TimelineEditCommand::CopySelection),
-            self.edit_menu_item("Paste", TimelineEditCommand::PasteAtPlayhead),
-            self.edit_menu_item("Duplicate Clip", TimelineEditCommand::DuplicateSelection),
+            self.edit_menu_item("剪切剪辑", TimelineEditCommand::CutSelection),
+            self.edit_menu_item("复制剪辑", TimelineEditCommand::CopySelection),
+            self.edit_menu_item("粘贴", TimelineEditCommand::PasteAtPlayhead),
+            self.edit_menu_item("创建剪辑副本", TimelineEditCommand::DuplicateSelection),
             MenuItem::separator(),
-            self.edit_menu_item("Delete Clip", TimelineEditCommand::DeleteSelection),
-            self.edit_menu_item(
-                "Ripple Delete Clip",
-                TimelineEditCommand::RippleDeleteSelection,
-            ),
-            self.edit_menu_item("Split at Playhead", TimelineEditCommand::SplitAtPlayhead),
+            self.edit_menu_item("删除剪辑", TimelineEditCommand::DeleteSelection),
+            self.edit_menu_item("波纹删除剪辑", TimelineEditCommand::RippleDeleteSelection),
+            self.edit_menu_item("在播放头处分割", TimelineEditCommand::SplitAtPlayhead),
             MenuItem::separator(),
             self.edit_menu_item(
-                "Trim In to Playhead",
+                "修剪入点到播放头",
                 TimelineEditCommand::TrimSelectionInToPlayhead,
             ),
             self.edit_menu_item(
-                "Trim Out to Playhead",
+                "修剪出点到播放头",
                 TimelineEditCommand::TrimSelectionOutToPlayhead,
             ),
             self.edit_menu_item(
-                "Roll Cut to Playhead",
+                "滚动剪辑点到播放头",
                 TimelineEditCommand::RollSelectedCutToPlayhead,
             ),
             MenuItem::separator(),
-            self.edit_menu_item("Enable Clip", TimelineEditCommand::EnableSelection),
-            self.edit_menu_item("Disable Clip", TimelineEditCommand::DisableSelection),
+            self.edit_menu_item("启用剪辑", TimelineEditCommand::EnableSelection),
+            self.edit_menu_item("禁用剪辑", TimelineEditCommand::DisableSelection),
         ];
         if let Some(clip_ref) = self
             .selected_clip
@@ -2090,15 +2087,15 @@ impl TimelineView {
         {
             items.push(MenuItem::separator());
             items.push(self.edit_menu_item(
-                "Open Nested Sequence",
+                "打开嵌套序列",
                 TimelineEditCommand::OpenNestedSequence(clip_ref),
             ));
         }
         items.extend([
             MenuItem::separator(),
-            self.edit_menu_item("Mark In", TimelineEditCommand::MarkInAtPlayhead),
-            self.edit_menu_item("Mark Out", TimelineEditCommand::MarkOutAtPlayhead),
-            self.edit_menu_item("Clear In/Out", TimelineEditCommand::ClearInOutPoints),
+            self.edit_menu_item("标记入点", TimelineEditCommand::MarkInAtPlayhead),
+            self.edit_menu_item("标记出点", TimelineEditCommand::MarkOutAtPlayhead),
+            self.edit_menu_item("清除入点/出点", TimelineEditCommand::ClearInOutPoints),
         ]);
         items
     }
@@ -2106,43 +2103,40 @@ impl TimelineView {
     fn timeline_context_menu_items(&self) -> Vec<MenuItem> {
         vec![
             Self::menu_item(
-                "Add Video Track",
+                "添加视频轨道",
                 self.track_add_action(TimelineTrackKind::Video),
             ),
             Self::menu_item(
-                "Add Audio Track",
+                "添加音频轨道",
                 self.track_add_action(TimelineTrackKind::Audio),
             ),
             MenuItem::separator(),
-            self.edit_menu_item("Paste at Playhead", TimelineEditCommand::PasteAtPlayhead),
+            self.edit_menu_item("粘贴到播放头", TimelineEditCommand::PasteAtPlayhead),
             MenuItem::separator(),
-            self.edit_menu_item("Cut Selection", TimelineEditCommand::CutSelection),
-            self.edit_menu_item("Copy Selection", TimelineEditCommand::CopySelection),
-            self.edit_menu_item(
-                "Duplicate Selection",
-                TimelineEditCommand::DuplicateSelection,
-            ),
+            self.edit_menu_item("剪切所选", TimelineEditCommand::CutSelection),
+            self.edit_menu_item("复制所选", TimelineEditCommand::CopySelection),
+            self.edit_menu_item("创建所选副本", TimelineEditCommand::DuplicateSelection),
             MenuItem::separator(),
-            self.edit_menu_item("Split at Playhead", TimelineEditCommand::SplitAtPlayhead),
+            self.edit_menu_item("在播放头处分割", TimelineEditCommand::SplitAtPlayhead),
             self.edit_menu_item(
-                "Trim Selection In to Playhead",
+                "修剪所选入点到播放头",
                 TimelineEditCommand::TrimSelectionInToPlayhead,
             ),
             self.edit_menu_item(
-                "Trim Selection Out to Playhead",
+                "修剪所选出点到播放头",
                 TimelineEditCommand::TrimSelectionOutToPlayhead,
             ),
             self.edit_menu_item(
-                "Roll Selected Cut to Playhead",
+                "滚动所选剪辑点到播放头",
                 TimelineEditCommand::RollSelectedCutToPlayhead,
             ),
             MenuItem::separator(),
-            self.edit_menu_item("Enable Selection", TimelineEditCommand::EnableSelection),
-            self.edit_menu_item("Disable Selection", TimelineEditCommand::DisableSelection),
+            self.edit_menu_item("启用所选", TimelineEditCommand::EnableSelection),
+            self.edit_menu_item("禁用所选", TimelineEditCommand::DisableSelection),
             MenuItem::separator(),
-            self.edit_menu_item("Mark In", TimelineEditCommand::MarkInAtPlayhead),
-            self.edit_menu_item("Mark Out", TimelineEditCommand::MarkOutAtPlayhead),
-            self.edit_menu_item("Clear In/Out", TimelineEditCommand::ClearInOutPoints),
+            self.edit_menu_item("标记入点", TimelineEditCommand::MarkInAtPlayhead),
+            self.edit_menu_item("标记出点", TimelineEditCommand::MarkOutAtPlayhead),
+            self.edit_menu_item("清除入点/出点", TimelineEditCommand::ClearInOutPoints),
         ]
     }
 
@@ -5889,7 +5883,7 @@ mod tests {
             .filter(|item| !item.is_separator())
             .map(|item| item.label.as_str())
             .collect();
-        for label in ["Add Video Track", "Add Audio Track", "Split at Playhead"] {
+        for label in ["添加视频轨道", "添加音频轨道", "在播放头处分割"] {
             assert!(
                 timeline_labels.contains(&label),
                 "{label} should remain available from the timeline context menu"
@@ -5902,7 +5896,7 @@ mod tests {
             .map(|item| item.label.as_str())
             .collect();
         assert!(
-            clip_labels.contains(&"Delete Clip"),
+            clip_labels.contains(&"删除剪辑"),
             "delete should remain available from the clip context menu"
         );
     }
@@ -6036,13 +6030,7 @@ mod tests {
         );
 
         let items = view.timeline_context_menu_items();
-        assert!(
-            !items
-                .iter()
-                .find(|item| item.label == "Split at Playhead")
-                .expect("split")
-                .enabled
-        );
+        assert!(!items.iter().find(|item| item.label == "在播放头处分割").expect("split").enabled);
         assert!(actions.borrow().is_empty());
     }
 
@@ -6083,7 +6071,7 @@ mod tests {
         );
         assert_eq!(
             ctx.tooltip.current().map(|state| state.text.as_str()),
-            Some("Select Tool (V)")
+            Some("选择工具 (V)")
         );
 
         assert_eq!(
@@ -6095,7 +6083,7 @@ mod tests {
         );
         assert_eq!(
             ctx.tooltip.current().map(|state| state.text.as_str()),
-            Some("Mark In (I)")
+            Some("标记入点 (I)")
         );
 
         assert_eq!(
@@ -6455,35 +6443,23 @@ mod tests {
         let items = view.timeline_context_menu_items();
 
         for label in [
-            "Cut Selection",
-            "Copy Selection",
-            "Duplicate Selection",
-            "Trim Selection In to Playhead",
-            "Trim Selection Out to Playhead",
-            "Roll Selected Cut to Playhead",
-            "Enable Selection",
-            "Disable Selection",
-            "Clear In/Out",
+            "剪切所选",
+            "复制所选",
+            "创建所选副本",
+            "修剪所选入点到播放头",
+            "修剪所选出点到播放头",
+            "滚动所选剪辑点到播放头",
+            "启用所选",
+            "禁用所选",
+            "清除入点/出点",
         ] {
             let item = items.iter().find(|item| item.label == label).expect(label);
             assert!(!item.enabled, "{label} should require a local target");
         }
-        assert!(
-            items
-                .iter()
-                .find(|item| item.label == "Paste at Playhead")
-                .expect("paste")
-                .enabled
-        );
-        assert!(
-            items
-                .iter()
-                .find(|item| item.label == "Split at Playhead")
-                .expect("split")
-                .enabled
-        );
-        assert!(items.iter().find(|item| item.label == "Mark In").expect("mark in").enabled);
-        assert!(items.iter().find(|item| item.label == "Mark Out").expect("mark out").enabled);
+        assert!(items.iter().find(|item| item.label == "粘贴到播放头").expect("paste").enabled);
+        assert!(items.iter().find(|item| item.label == "在播放头处分割").expect("split").enabled);
+        assert!(items.iter().find(|item| item.label == "标记入点").expect("mark in").enabled);
+        assert!(items.iter().find(|item| item.label == "标记出点").expect("mark out").enabled);
     }
 
     #[test]
@@ -6495,7 +6471,7 @@ mod tests {
 
         let items = view.timeline_context_menu_items();
 
-        let split = items.iter().find(|item| item.label == "Split at Playhead").expect("split");
+        let split = items.iter().find(|item| item.label == "在播放头处分割").expect("split");
         assert!(!split.enabled);
     }
 
@@ -6519,16 +6495,16 @@ mod tests {
         let items = view.clip_context_menu_items();
 
         for label in [
-            "Cut Clip",
-            "Copy Clip",
-            "Duplicate Clip",
-            "Delete Clip",
-            "Ripple Delete Clip",
-            "Trim In to Playhead",
-            "Trim Out to Playhead",
-            "Roll Cut to Playhead",
-            "Enable Clip",
-            "Disable Clip",
+            "剪切剪辑",
+            "复制剪辑",
+            "创建剪辑副本",
+            "删除剪辑",
+            "波纹删除剪辑",
+            "修剪入点到播放头",
+            "修剪出点到播放头",
+            "滚动剪辑点到播放头",
+            "启用剪辑",
+            "禁用剪辑",
         ] {
             let item = items.iter().find(|item| item.label == label).expect(label);
             assert!(
@@ -6554,7 +6530,7 @@ mod tests {
         let items = view.timeline_context_menu_items();
         let clear = items
             .iter()
-            .find(|item| item.label == "Clear In/Out")
+            .find(|item| item.label == "清除入点/出点")
             .expect("clear in/out item");
 
         assert_eq!(clear.action, Action::SaveProject);
@@ -6577,7 +6553,7 @@ mod tests {
 
         let open = items
             .iter()
-            .find(|item| item.label == "Open Nested Sequence")
+            .find(|item| item.label == "打开嵌套序列")
             .expect("open nested menu item");
         assert!(open.enabled);
     }
@@ -6593,7 +6569,7 @@ mod tests {
         let items = view.clip_context_menu_items();
 
         assert!(
-            items.iter().all(|item| item.label != "Open Nested Sequence"),
+            items.iter().all(|item| item.label != "打开嵌套序列"),
             "normal clips must not expose nested navigation"
         );
     }
@@ -7414,9 +7390,7 @@ mod tests {
 
     #[test]
     fn empty_timeline_paints_supplied_empty_message() {
-        let mut view = TimelineView::new(Vec::new())
-            .with_empty_message("No sequence loaded")
-            .disabled();
+        let mut view = TimelineView::new(Vec::new()).with_empty_message("未载入序列").disabled();
         view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
 
         let theme = ThemePreset::Dark.build();
@@ -7428,7 +7402,7 @@ mod tests {
         };
         view.paint(&mut ctx);
 
-        assert!(encoder.texts.iter().any(|text| text == "No sequence loaded"));
+        assert!(encoder.texts.iter().any(|text| text == "未载入序列"));
         assert!(!encoder.line_colors.contains(&theme.colors.timeline_playhead));
     }
 }
