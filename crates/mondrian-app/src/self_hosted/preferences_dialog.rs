@@ -75,6 +75,7 @@ pub struct ShortcutPreferenceRow {
     pub default_label: String,
     pub overridden: bool,
     pub disabled: bool,
+    pub conflict_owner: Option<String>,
 }
 
 impl SelfHostedPreferencesModel {
@@ -867,11 +868,24 @@ fn shortcut_preference_rows(
         .map(|default| {
             let override_entry = overrides.iter().find(|entry| entry.id == default.id);
             let active_entry = active.iter().find(|shortcut| shortcut.id == default.id);
+            let conflict_owner = active_entry
+                .is_none()
+                .then(|| {
+                    active
+                        .iter()
+                        .find(|shortcut| {
+                            shortcut.id != default.id && shortcut.binding == default.binding
+                        })
+                        .map(|shortcut| shortcut.id.to_owned())
+                })
+                .flatten();
             let disabled = override_entry.is_some_and(|entry| entry.binding.is_none())
                 || active_entry.is_none();
-            let label = active_entry
-                .map(|shortcut| shortcut.label.clone())
-                .unwrap_or_else(|| "已禁用".to_owned());
+            let label = active_entry.map(|shortcut| shortcut.label.clone()).unwrap_or_else(|| {
+                conflict_owner
+                    .as_ref()
+                    .map_or_else(|| "已禁用".to_owned(), |owner| format!("与 {owner} 冲突"))
+            });
             ShortcutPreferenceRow {
                 id: default.id.to_owned(),
                 label,
@@ -879,6 +893,7 @@ fn shortcut_preference_rows(
                 default_label: default.label,
                 overridden: override_entry.is_some(),
                 disabled,
+                conflict_owner,
             }
         })
         .collect()
@@ -1078,6 +1093,7 @@ mod tests {
             .expect("inspector shortcut row");
         assert_eq!(inspector.label, "已禁用");
         assert!(inspector.disabled);
+        assert_eq!(inspector.conflict_owner, None);
         assert!(inspector.overridden);
         assert!(model
             .shortcut_rows
@@ -1118,9 +1134,10 @@ mod tests {
         assert_eq!(save.label, "Ctrl+O");
         assert!(!save.disabled);
         assert!(save.overridden);
-        assert_eq!(open.label, "已禁用");
+        assert_eq!(open.label, "与 file.save_project 冲突");
         assert!(open.disabled);
         assert!(!open.overridden);
+        assert_eq!(open.conflict_owner.as_deref(), Some("file.save_project"));
     }
 
     #[test]

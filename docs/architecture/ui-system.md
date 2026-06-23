@@ -650,7 +650,10 @@ that would collide is omitted from the active table and shown as disabled in
 Preferences, so visible shortcut hints never advertise a binding that dispatches
 a different command. Same-priority default/default or override/override
 collisions remain deterministic by descriptor order, matching router
-replacement semantics.
+replacement semantics. Preferences rows for collision-disabled descriptors must
+also expose the owning descriptor id, for example "与 file.save_project 冲突",
+instead of showing the same generic disabled state used by an explicit user
+disable.
 If no widget handles a `KeyDown` and no registered shortcut matches it,
 `EventRouter` returns `EventResult::Ignored`; unmatched keys must not be
 converted into `Action::NoOp`, because that would consume user-level tool,
@@ -673,7 +676,8 @@ Escape as cancel, and serializes only the shortcut key plus modifier booleans in
 the shell action payload. `SelfHostedUiHost` persists those updates, makes the
 new binding win through the conflict-free active descriptor table, and the
 native window session immediately rebuilds the router's global shortcut scope
-from that table. These preference updates are shell-local navigation/preferences
+from that table by clearing `ShortcutScope::Global` and re-registering active
+shortcuts. These preference updates are shell-local navigation/preferences
 state, not editor actions, and must not create undo history.
 Because the descriptor table is longer than the compact Preferences modal, the
 Shortcuts tab keeps its heading fixed and scrolls the shortcut rows inside a

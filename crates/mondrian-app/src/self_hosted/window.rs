@@ -636,10 +636,17 @@ fn drain_actions_and_sync_window_session(
 ) {
     let commands =
         host.drain_pending_actions(pending_actions, session.current_bounds.get(), platform);
-    session.router.shortcut_manager_mut().clear_scope(ShortcutScope::Global);
-    register_shortcuts(&mut session.router, &host.preferences().shortcut_overrides);
+    rebuild_global_shortcuts(&mut session.router, &host.preferences().shortcut_overrides);
     apply_shell_commands(commands, &session.window, elwt);
     sync_window_session_role(host, elwt, instance, adapter, device, session);
+}
+
+fn rebuild_global_shortcuts(
+    router: &mut EventRouter,
+    shortcut_overrides: &[SelfHostedShortcutOverride],
+) {
+    router.shortcut_manager_mut().clear_scope(ShortcutScope::Global);
+    register_shortcuts(router, shortcut_overrides);
 }
 
 fn sync_window_session_role(
@@ -1043,6 +1050,53 @@ mod tests {
             &root,
             Some(WidgetId::new())
         ));
+    }
+
+    #[test]
+    fn rebuilding_global_shortcuts_applies_overrides_immediately() {
+        use crate::self_hosted::shortcuts::{SelfHostedShortcutBinding, SelfHostedShortcutKey};
+        use mondrian_editor_state::Action;
+        use mondrian_ui_core::shortcut::{ShortcutContext, ShortcutManager};
+
+        let mut router = build_event_router(WidgetId::new(), &[]);
+        assert_eq!(
+            router.shortcut_manager().resolve(
+                KeyCode::S,
+                Modifiers::ctrl(),
+                ShortcutContext::default(),
+            ),
+            Some(Action::SaveProject)
+        );
+
+        let overrides = vec![SelfHostedShortcutOverride {
+            id: "file.save_project".to_owned(),
+            binding: Some(SelfHostedShortcutBinding {
+                key: SelfHostedShortcutKey::I,
+                ctrl: true,
+                alt: true,
+                shift: false,
+                meta: false,
+            }),
+        }];
+
+        rebuild_global_shortcuts(&mut router, &overrides);
+
+        assert_eq!(
+            router.shortcut_manager().resolve(
+                KeyCode::S,
+                Modifiers::ctrl(),
+                ShortcutContext::default(),
+            ),
+            None
+        );
+        assert_eq!(
+            router.shortcut_manager().resolve(
+                KeyCode::I,
+                Modifiers { ctrl: true, alt: true, shift: false, meta: false },
+                ShortcutContext::default(),
+            ),
+            Some(Action::SaveProject)
+        );
     }
 
     #[test]

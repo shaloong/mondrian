@@ -167,9 +167,16 @@ workflow.
   fallback after workspace switches, inline asset rename commit/cancel focus
   restoration, ColorPicker inner-field focus translation, timeline/viewer/node
   graph focused keyboard handling, and disabled widgets opting out of focus.
-- P3-SHORTCUTS-001: Complete shortcut customization UX: conflict ownership,
-  disabled bindings, labels, capture mode, reset, persistence, and immediate
-  router rebuild.
+- [done] P3-SHORTCUTS-001: Complete shortcut customization UX: conflict
+  ownership, disabled bindings, labels, capture mode, reset, persistence, and
+  immediate router rebuild. Coverage now spans stable descriptor ids, default
+  file/workspace/panel/timeline shortcut coverage, no plain Space binding for
+  text-input safety, active conflict-free shortcut tables, user override
+  ownership of conflicting defaults, Preferences rows that distinguish explicit
+  disables from conflict-owned disables, Disable/Default/Rebind actions,
+  modal key capture with Escape cancel, scrolled shortcut rows, persisted host
+  overrides, shortcut hint lookup from the active table, and immediate window
+  router global-scope rebuild after preference updates.
 
 ## Phase 4: Reliability And Platform Hardening
 
